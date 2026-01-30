@@ -381,50 +381,45 @@ fn build_destinations_batched(
 
         let expand_start = if timers.is_some() { Some(Instant::now()) } else { None };
         let mut expanded: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
-        timeit!("acyclic_det::build_destinations_batched::expand", {
-            for (v, w_v) in dest_map {
-                if v >= eps_reach.len() {
+        for (v, w_v) in dest_map {
+            if v >= eps_reach.len() {
+                continue;
+            }
+            for (v_reach, w_reach) in &eps_reach[v] {
+                let combined = if let Some(timers) = timers {
+                    let start = Instant::now();
+                    let combined = &w_v & w_reach;
+                    timers
+                        .and_ns
+                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                    timers
+                        .and_ops
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    combined
+                } else {
+                    &w_v & w_reach
+                };
+                if combined.is_empty() {
                     continue;
                 }
-                for (v_reach, w_reach) in &eps_reach[v] {
-                    let combined = if let Some(timers) = timers {
+                let entry = expanded.entry(*v_reach).or_insert_with(Weight::zeros);
+                if !combined.is_subset_of(entry) {
+                    if let Some(timers) = timers {
                         let start = Instant::now();
-                        let combined = &w_v & w_reach;
+                        *entry |= &combined;
                         timers
-                            .and_ns
+                            .or_ns
                             .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                        timers.or_ops.fetch_add(1, AtomicOrdering::Relaxed);
                         timers
-                            .and_ops
+                            .expand_or_ops
                             .fetch_add(1, AtomicOrdering::Relaxed);
-                        combined
                     } else {
-                        &w_v & w_reach
-                    };
-                    if combined.is_empty() {
-                        continue;
-                    }
-                    let entry = expanded.entry(*v_reach).or_insert_with(Weight::zeros);
-                    if !combined.is_subset_of(entry) {
-                        if let Some(timers) = timers {
-                            let start = Instant::now();
-                            *entry |= &combined;
-                            timers
-                                .or_ns
-                                .fetch_add(
-                                    start.elapsed().as_nanos() as u64,
-                                    AtomicOrdering::Relaxed,
-                                );
-                            timers.or_ops.fetch_add(1, AtomicOrdering::Relaxed);
-                            timers
-                                .expand_or_ops
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                        } else {
-                            *entry |= &combined;
-                        }
+                        *entry |= &combined;
                     }
                 }
             }
-        });
+        }
         if let (Some(timers), Some(start)) = (timers, expand_start) {
             timers
                 .expand_ns
@@ -450,25 +445,23 @@ fn build_destinations_batched(
         let normalize_start = if timers.is_some() { Some(Instant::now()) } else { None };
         let w_edge_inv = !&w_edge;
         let mut subset: WeightedSubset = Vec::with_capacity(expanded.len());
-        timeit!("acyclic_det::build_destinations_batched::normalize", {
-            for (sid, w) in expanded {
-                let combined = if let Some(timers) = timers {
-                    let start = Instant::now();
-                    let combined = w | &w_edge_inv;
-                    timers
-                        .or_ns
-                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                    timers.or_ops.fetch_add(1, AtomicOrdering::Relaxed);
-                    timers
-                        .normalize_or_ops
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    combined
-                } else {
-                    w | &w_edge_inv
-                };
-                subset.push((sid, combined));
-            }
-        });
+        for (sid, w) in expanded {
+            let combined = if let Some(timers) = timers {
+                let start = Instant::now();
+                let combined = w | &w_edge_inv;
+                timers
+                    .or_ns
+                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                timers.or_ops.fetch_add(1, AtomicOrdering::Relaxed);
+                timers
+                    .normalize_or_ops
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                combined
+            } else {
+                w | &w_edge_inv
+            };
+            subset.push((sid, combined));
+        }
         if let (Some(timers), Some(start)) = (timers, normalize_start) {
             timers
                 .normalize_ns
@@ -618,15 +611,13 @@ pub(crate) fn determinize_acyclic_with_progress(
             start_set.extend(eps_reach_unweighted[s].iter().copied());
         }
     }
-    let start_id = timeit!("acyclic_det::register_closure_unweighted", {
-        register_closure_unweighted(
-            start_set,
-            &mut seen_unweighted,
-            &mut unweighted_closures,
-            &mut transition_cache,
-            &mut queue,
-        )
-    });
+    let start_id = register_closure_unweighted(
+        start_set,
+        &mut seen_unweighted,
+        &mut unweighted_closures,
+        &mut transition_cache,
+        &mut queue,
+    );
 
     let precompute_start = Instant::now();
     let mut precompute_last_log = Instant::now();
@@ -638,22 +629,20 @@ pub(crate) fn determinize_acyclic_with_progress(
         while let Some(sid) = queue.pop_front() {
             let closure = unweighted_closures[sid].clone();
             let mut transitions_for_state: Vec<(Label, usize)> = Vec::new();
-            for (_lbl, subset) in timeit!("acyclic_det::precompute_build_destinations_unweighted", {
+            for (_lbl, subset) in
                 build_destinations_unweighted(&closure, nwa, &eps_reach_unweighted)
-            }) {
+            {
                 if subset.is_empty() {
                     continue;
                 }
-                timeit!("acyclic_det::register_closure_unweighted", {
-                    let dest_id = register_closure_unweighted(
-                        subset,
-                        &mut seen_unweighted,
-                        &mut unweighted_closures,
-                        &mut transition_cache,
-                        &mut queue,
-                    );
-                    transitions_for_state.push((_lbl, dest_id));
-                });
+                let dest_id = register_closure_unweighted(
+                    subset,
+                    &mut seen_unweighted,
+                    &mut unweighted_closures,
+                    &mut transition_cache,
+                    &mut queue,
+                );
+                transitions_for_state.push((_lbl, dest_id));
             }
             transition_cache[sid] = transitions_for_state;
 
@@ -667,8 +656,6 @@ pub(crate) fn determinize_acyclic_with_progress(
                     queue.len(),
                     precompute_start.elapsed(),
                 );
-                crate::profiler::print_summary();
-                crate::profiler::reset();
                 precompute_last_log = Instant::now();
             }
         }
@@ -683,8 +670,6 @@ pub(crate) fn determinize_acyclic_with_progress(
             unweighted_closures.len(),
             precompute_start.elapsed(),
         );
-        crate::profiler::print_summary();
-        crate::profiler::reset();
     }
 
     let total_dwa_states = unweighted_closures.len();
@@ -1006,9 +991,7 @@ pub(crate) fn determinize_acyclic_with_progress(
 
                 let destinations = &dest_cache[idx];
                 for (lbl, dest_id, w_edge) in destinations.iter() {
-                    let mapped = timeit!("acyclic_det::state_seen_lookup", {
-                        seen.get(&closures[*dest_id]).copied()
-                    });
+                    let mapped = seen.get(&closures[*dest_id]).copied();
                     if let Some(dest_id) = mapped {
                         state.transitions.insert(*lbl, dest_id);
                         state.trans_weights.insert(*lbl, w_edge.clone());
@@ -1043,8 +1026,6 @@ pub(crate) fn determinize_acyclic_with_progress(
             total_states,
             start_time.elapsed(),
         );
-        crate::profiler::print_summary();
-        crate::profiler::reset();
     }
 
     if profile_enabled {

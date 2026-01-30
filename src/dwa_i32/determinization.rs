@@ -265,14 +265,6 @@ impl NWA {
                     det.progress_transitions,
                     progress_start.elapsed(),
                 );
-                crate::debug!(
-                    4,
-                    "Determinize profiler summary (subsets_processed={}, elapsed={:?})",
-                    processed_subsets,
-                    progress_start.elapsed(),
-                );
-                crate::profiler::print_summary();
-                crate::profiler::reset();
                 progress_last_log = Instant::now();
             }
         }
