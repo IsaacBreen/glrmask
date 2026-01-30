@@ -7,6 +7,7 @@ use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_exact_graph_coloring, solve_greedy_coloring};
 use crate::datastructures::RangeMapWeight;
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -22,6 +23,15 @@ static BUILD_GRAPH_CALLS: AtomicU64 = AtomicU64::new(0);
 static BUILD_GRAPH_NANOS: AtomicU64 = AtomicU64::new(0);
 static HEIGHT_COLOR_CALLS: AtomicU64 = AtomicU64::new(0);
 static HEIGHT_COLOR_NANOS: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static TARGET_EQ_CACHE: RefCell<FxHashMap<(StateID, StateID, u64), bool>> =
+        RefCell::new(FxHashMap::default());
+}
+
+fn clear_target_eq_cache() {
+    TARGET_EQ_CACHE.with(|cache| cache.borrow_mut().clear());
+}
 
 struct TimingGuard {
     start: std::time::Instant,
@@ -226,19 +236,6 @@ enum ColoringMode {
 /// typical automata where "incompatibility density" is low.
 #[time_it("minimize_acyclic_exact")]
 pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
-    let use_two_pass = std::env::var("DWA_TWO_PASS_MINIMIZE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if use_two_pass {
-        crate::debug!(5, "Acyclic minimize: two-pass enabled (fast -> exact)");
-        let fast = timeit!("minimize_acyclic_two_pass_fast", {
-            partition_minimize::minimize_partition_based(dwa)
-        })?;
-        crate::debug!(5, "Acyclic minimize: fast pass states={}", fast.states.len());
-        return timeit!("minimize_acyclic_two_pass_exact", {
-            minimize_acyclic_with_mode(&fast, ColoringMode::Exact)
-        });
-    }
     minimize_acyclic_with_mode(dwa, ColoringMode::Exact)
 }
 
@@ -262,6 +259,8 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     BUILD_GRAPH_NANOS.store(0, Ordering::Relaxed);
     HEIGHT_COLOR_CALLS.store(0, Ordering::Relaxed);
     HEIGHT_COLOR_NANOS.store(0, Ordering::Relaxed);
+
+    clear_target_eq_cache();
     
     // Step 0: Preprocess - tighten weights by removing unreachable tokens
     crate::debug!(5, "Acyclic minimize step 0 start (tighten_weights)");
@@ -1256,19 +1255,23 @@ fn are_compatible(
 ) -> bool {
     ARE_COMPAT_CALLS.fetch_add(1, Ordering::Relaxed);
     let _compat_timer = TimingGuard::new(&ARE_COMPAT_NANOS);
-    let domain_overlap = &needed[u] & &needed[v];
+    let needed_u = &needed[u];
+    let needed_v = &needed[v];
+    let domain_overlap = needed_u & needed_v;
     let domain_overlap_empty = domain_overlap.is_empty();
-    
-    // Helper: get weight restricted to overlap (or zeros if no final/trans weight)
-    let final_on_overlap = |s: StateID| -> Weight {
-        dwa.states[s].final_weight.as_ref()
+
+    let fw_u = dwa.states[u].final_weight.as_ref();
+    let fw_v = dwa.states[v].final_weight.as_ref();
+    if !domain_overlap_empty && fw_u != fw_v {
+        let fw_u_overlap = fw_u
             .map(|w| w & &domain_overlap)
-            .unwrap_or_else(Weight::zeros)
-    };
-    
-    // Check final weights match on overlap
-    if !domain_overlap_empty && final_on_overlap(u) != final_on_overlap(v) {
-        return false;
+            .unwrap_or_else(Weight::zeros);
+        let fw_v_overlap = fw_v
+            .map(|w| w & &domain_overlap)
+            .unwrap_or_else(Weight::zeros);
+        if fw_u_overlap != fw_v_overlap {
+            return false;
+        }
     }
     
     // Check each label (merge sorted transition keys without allocation)
@@ -1312,22 +1315,33 @@ fn are_compatible(
         let w_u_empty = w_u_opt.map_or(true, |w| w.is_empty());
         let w_v_empty = w_v_opt.map_or(true, |w| w.is_empty());
 
-        // On overlap domain, weights must match
         if !domain_overlap_empty {
-            let w_u_overlap = w_u_opt
-                .map(|w| w & &domain_overlap)
-                .unwrap_or_else(Weight::zeros);
-            let w_v_overlap = w_v_opt
-                .map(|w| w & &domain_overlap)
-                .unwrap_or_else(Weight::zeros);
-            if w_u_overlap != w_v_overlap {
-                return false;
-            }
-            // One has transition on overlap, other doesn't = incompatible
-            let w_u_overlap_empty = w_u_overlap.is_empty();
-            let w_v_overlap_empty = w_v_overlap.is_empty();
-            if w_u_overlap_empty != w_v_overlap_empty {
-                return false;
+            if w_u_empty && w_v_empty {
+                // No weights for this label on either state
+            } else if w_u_empty {
+                let w_v_overlap = w_v_opt
+                    .map(|w| w & &domain_overlap)
+                    .unwrap_or_else(Weight::zeros);
+                if !w_v_overlap.is_empty() {
+                    return false;
+                }
+            } else if w_v_empty {
+                let w_u_overlap = w_u_opt
+                    .map(|w| w & &domain_overlap)
+                    .unwrap_or_else(Weight::zeros);
+                if !w_u_overlap.is_empty() {
+                    return false;
+                }
+            } else {
+                let w_u = w_u_opt.unwrap();
+                let w_v = w_v_opt.unwrap();
+                if w_u != w_v {
+                    let w_u_overlap = w_u & &domain_overlap;
+                    let w_v_overlap = w_v & &domain_overlap;
+                    if w_u_overlap != w_v_overlap {
+                        return false;
+                    }
+                }
             }
         }
 
@@ -1362,7 +1376,18 @@ fn targets_compatible(
         (Some(u_new), Some(v_new)) if u_new != v_new => {
             // Different targets: must be equivalent on combined domain
             let w_combined = w_u | w_v;
-            targets_equivalent_on_domain(u_new, v_new, &w_combined, new_states)
+            let domain_fp = w_combined.fingerprint();
+            let (a, b) = if u_new < v_new { (u_new, v_new) } else { (v_new, u_new) };
+            if let Some(cached) = TARGET_EQ_CACHE.with(|cache| {
+                cache.borrow().get(&(a, b, domain_fp)).copied()
+            }) {
+                return cached;
+            }
+            let result = targets_equivalent_on_domain(u_new, v_new, &w_combined, new_states);
+            TARGET_EQ_CACHE.with(|cache| {
+                cache.borrow_mut().insert((a, b, domain_fp), result);
+            });
+            result
         }
         (Some(_), None) | (None, Some(_)) => false,
         (None, None) => tu == tv, // Same-level: must be same original

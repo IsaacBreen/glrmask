@@ -254,6 +254,7 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     
     let start = std::time::Instant::now();
     let before_stats = dwa.stats();
+    let before_states = dwa.states.len();
     
     // Step 1: Compute partition and signatures
     let (num_elements, fp_to_elem) = compute_partition(dwa);
@@ -335,6 +336,12 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     };
     crate::debug!(5, "Partition minimize: {} -> {} in {:?}", 
         before_stats, new_dwa.stats(), start.elapsed());
+    eprintln!(
+        "TIMING: partition_minimize {} -> {} in {:?}",
+        before_states,
+        new_dwa.states.len(),
+        start.elapsed()
+    );
     
     Ok(new_dwa)
 }
