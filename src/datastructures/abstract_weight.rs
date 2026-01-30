@@ -859,7 +859,7 @@ impl AbstractWeight {
     }
 
     /// Union multiple weights in a single operation.
-    #[time_it]
+    // #[time_it]
     pub fn bulk_union(weights: &[&AbstractWeight]) -> AbstractWeight {
         match weights.len() {
             0 => AbstractWeight::zeros(),
