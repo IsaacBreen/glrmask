@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
 from reference_prefix_checker.prefix_checker import (
     build_from_grammar_definition_json,
     build_from_json_schema,
+    BruteForcePrefixConstraint,
     ReferencePrefixChecker,
 )
 
@@ -114,6 +115,91 @@ class TestReferencePrefixChecker(unittest.TestCase):
         self.assertTrue(checker.is_valid_prefix("a b"))
         self.assertTrue(checker.is_valid_prefix("a  b"))
         self.assertFalse(checker.is_valid_prefix("a c"))
+
+    def test_bruteforce_mask_sequence(self):
+        grammar = {
+            "productions": [
+                {"lhs": "S", "rhs": [_sym_term_literal(b"a"), _sym_term_literal(b"b")]}
+            ],
+            "start_production_id": 0,
+            "ignore_terminal_ids": [],
+            "external_name_to_group_id": {},
+            "regex_terminals": [],
+            "literal_terminals": [
+                _terminal_literal(b"a", 0),
+                _terminal_literal(b"b", 1),
+            ],
+        }
+        checker = ReferencePrefixChecker.from_grammar_definition_json(_to_json(grammar))
+        vocab = [b"a", b"b", b"ab", b"c"]
+        constraint = BruteForcePrefixConstraint(checker, vocab)
+
+        mask = constraint.get_mask()
+        self.assertEqual(mask, [True, False, True, False])
+
+        constraint.commit_bytes(b"a")
+        mask2 = constraint.get_mask()
+        self.assertEqual(mask2, [False, True, False, False])
+
+    def test_bruteforce_mask_choice(self):
+        grammar = {
+            "productions": [
+                {"lhs": "S", "rhs": [_sym_term_literal(b"a")]},
+                {"lhs": "S", "rhs": [_sym_term_literal(b"b")]},
+            ],
+            "start_production_id": 0,
+            "ignore_terminal_ids": [],
+            "external_name_to_group_id": {},
+            "regex_terminals": [],
+            "literal_terminals": [
+                _terminal_literal(b"a", 0),
+                _terminal_literal(b"b", 1),
+            ],
+        }
+        checker = ReferencePrefixChecker.from_grammar_definition_json(_to_json(grammar))
+        vocab = [b"a", b"b", b"c"]
+        constraint = BruteForcePrefixConstraint(checker, vocab)
+        self.assertEqual(constraint.get_mask(), [True, True, False])
+
+    def test_bruteforce_mask_partial(self):
+        grammar = {
+            "productions": [
+                {"lhs": "S", "rhs": [_sym_term_literal(b"abc")]}
+            ],
+            "start_production_id": 0,
+            "ignore_terminal_ids": [],
+            "external_name_to_group_id": {},
+            "regex_terminals": [],
+            "literal_terminals": [
+                _terminal_literal(b"abc", 0),
+            ],
+        }
+        checker = ReferencePrefixChecker.from_grammar_definition_json(_to_json(grammar))
+        vocab = [b"a", b"ab", b"abc", b"abd"]
+        constraint = BruteForcePrefixConstraint(checker, vocab)
+        self.assertEqual(constraint.get_mask(), [True, True, True, False])
+
+    def test_bruteforce_mask_with_ignore(self):
+        ws_expr = {"variant": "U8Seq", "bytes": [0x20]}
+        grammar = {
+            "productions": [
+                {"lhs": "S", "rhs": [_sym_term_literal(b"a"), _sym_term_literal(b"b")]}
+            ],
+            "start_production_id": 0,
+            "ignore_terminal_ids": [2],
+            "external_name_to_group_id": {},
+            "regex_terminals": [
+                _terminal_regex("WS", 2, ws_expr),
+            ],
+            "literal_terminals": [
+                _terminal_literal(b"a", 0),
+                _terminal_literal(b"b", 1),
+            ],
+        }
+        checker = ReferencePrefixChecker.from_grammar_definition_json(_to_json(grammar))
+        vocab = [b" ", b"a", b"b"]
+        constraint = BruteForcePrefixConstraint(checker, vocab)
+        self.assertEqual(constraint.get_mask(), [True, True, False])
 
     def test_from_ebnf_string_optional(self):
         try:

@@ -468,6 +468,37 @@ class ReferencePrefixChecker:
         return self._checker.is_valid_prefix(text)
 
 
+class BruteForcePrefixConstraint:
+    """Brute-force constraint wrapper using the prefix checker.
+
+    Stores the full prefix; `get_mask()` checks every vocab token by concatenation.
+    """
+
+    def __init__(self, checker: ReferencePrefixChecker, vocab: Sequence[bytes]) -> None:
+        self._checker = checker
+        self._vocab = list(vocab)
+        self._prefix = b""
+
+    def clone(self) -> "BruteForcePrefixConstraint":
+        cloned = BruteForcePrefixConstraint(self._checker, self._vocab)
+        cloned._prefix = self._prefix
+        return cloned
+
+    def commit_bytes(self, data: Union[str, bytes]) -> None:
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        self._prefix += data
+
+    def is_valid_prefix(self) -> bool:
+        return self._checker.is_valid_prefix(self._prefix)
+
+    def get_mask(self) -> List[bool]:
+        return [self._checker.is_valid_prefix(self._prefix + tok) for tok in self._vocab]
+
+    def vocab(self) -> List[bytes]:
+        return list(self._vocab)
+
+
 # -----------------------------
 # Optional sep1 bindings helpers
 # -----------------------------
