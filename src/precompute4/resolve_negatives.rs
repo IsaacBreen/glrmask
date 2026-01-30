@@ -468,8 +468,9 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
     let n = states.len();
     let profile = cancellations_range_profile_enabled();
     let mut seed_count: u64 = 0;
-    
-    let mut queries: FxHashMap<NWAStateID, FxHashMap<QueryKey, Weight>> = FxHashMap::default();
+
+    let mut queries: Vec<FxHashMap<QueryKey, Weight>> = Vec::with_capacity(n);
+    queries.resize_with(n, FxHashMap::default);
     let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code)> = VecDeque::new();
     let mut in_queue: FxHashSet<(NWAStateID, NWAStateID, Code)> = FxHashSet::default();
     let mut new_eps_from: FxHashMap<NWAStateID, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
@@ -496,7 +497,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                     continue;
                 }
                 let query_key: QueryKey = (a, c);
-                let query_weight = queries.entry(*b).or_default().entry(query_key).or_default();
+                let query_weight = queries[*b].entry(query_key).or_default();
                 let old_w = query_weight.clone();
                 *query_weight |= w_ab;
                 if *query_weight != old_w {
@@ -506,7 +507,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             }
         }
     }
-    
+
     // Early exit if no negative transitions were found
     if worklist.is_empty() {
         if profile {
@@ -529,7 +530,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             break;
         }
         steps += 1;
-        let w_as = match queries.get(&s).and_then(|m| m.get(&(a, c))) {
+        let w_as = match queries.get(s).and_then(|m| m.get(&(a, c))) {
             Some(w) => w.clone(),
             None => continue,
         };
@@ -540,7 +541,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                     continue;
                 }
                 let query_key: QueryKey = (a, c);
-                let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                let query_weight = queries[target].entry(query_key).or_default();
                 let old_qw = query_weight.clone();
                 *query_weight |= &prop_w;
                 if *query_weight != old_qw {
@@ -565,14 +566,14 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             *eps_weight |= &new_eps_w;
 
             if *eps_weight != old_eps_w {
-                if let Some(queries_at_a) = queries.get(&a) {
+                if let Some(queries_at_a) = queries.get(a) {
                     for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a.clone() {
                         let prop_w = w_a_prime_a & &*eps_weight;
                         if prop_w.is_empty() {
                             continue;
                         }
                         let query_key: QueryKey = (a_prime, c_prime);
-                        let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                        let query_weight = queries[target].entry(query_key).or_default();
                         let old_qw = query_weight.clone();
                         *query_weight |= &prop_w;
                         if *query_weight != old_qw {
@@ -605,7 +606,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 continue;
             }
             let query_key: QueryKey = (a, c);
-            let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
+            let query_weight = queries[*t].entry(query_key).or_default();
             let old_qw = query_weight.clone();
             *query_weight |= &prop_w;
             if *query_weight != old_qw {
