@@ -121,6 +121,19 @@ impl DWA {
         }
     }
 
+    #[time_it("DWA::minimize_states_fast")]
+    pub fn minimize_states_fast(&mut self) -> bool {
+        let is_cyc = self.is_cyclic();
+        let before = self.states.len();
+        crate::debug!(4, "minimize_states_fast: is_cyclic={}, {} states before", is_cyc, before);
+        if is_cyc {
+            self.minimize_states_cyclic()
+        } else {
+            self.minimize_acyclic_fast();
+            self.states.len() != before
+        }
+    }
+
     pub fn loosen_weights_for_minimize(&mut self) -> bool {
         if self.is_cyclic() {
             self.loosen_weights_for_minimize_cyclic()

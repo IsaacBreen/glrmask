@@ -69,6 +69,7 @@ impl DWA {
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial_cyclic(),
                     DwaPass::ResidualPush => self.residuated_push_cyclic(),
                     DwaPass::ExactMinimize => false,
+                    DwaPass::FastMinimize => false,
                     DwaPass::RustfstMinimize => false,
                     DwaPass::ConsolidateRanges => self.consolidate_ranges(),
                     DwaPass::TrimWeights => self.trim_weights(),
@@ -170,6 +171,14 @@ impl DWA {
                         let changed = self.minimize_states_cyclic();
                         if changed && initial_num_states > 1000 {
                             crate::debug!(6, "[DWA::minimize_cyclic] After minimize (iter {}): {}", iter_num, self.stats());
+                        }
+                        changed
+                    },
+                    DwaPass::FastMinimize => {
+                        self.loosen_weights_for_minimize_cyclic();
+                        let changed = self.minimize_states_cyclic();
+                        if changed && initial_num_states > 1000 {
+                            crate::debug!(6, "[DWA::minimize_cyclic] After fast minimize (iter {}): {}", iter_num, self.stats());
                         }
                         changed
                     },

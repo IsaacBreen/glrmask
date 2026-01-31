@@ -95,6 +95,41 @@ impl DWA {
         // NOTE: ConsolidateRanges is NOT called here - it's a separate pass in the config
         // to avoid running it twice when configs include both Minimize and ConsolidateRanges.
     }
+
+    #[time_it("DWA::minimize_acyclic_fast")]
+    pub fn minimize_acyclic_fast(&mut self) {
+        // Skip expensive validation in non-debug builds
+        #[cfg(debug_assertions)]
+        let x = self.clone();
+
+        // Weight pushing enables the diamond case optimization:
+        // States with different final_weights but same transition structure can be merged
+        // because the different outputs are encoded in the incoming transition weights.
+        let pushed = push_weights_acyclic(self);
+
+        // Verify weight pushing is semantics-preserving (only in debug mode)
+        #[cfg(debug_assertions)]
+        if pushed {
+            crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
+        }
+
+        #[cfg(debug_assertions)]
+        let after_push = self.clone();
+
+        match minimize_acyclic_fast(self) {
+            Ok(min_dwa) => *self = min_dwa,
+            Err(e) => {
+                eprintln!("DWA fast minimization failed: {:?}", e);
+            }
+        }
+
+        // Verify minimization is semantics-preserving (only in debug mode)
+        #[cfg(debug_assertions)]
+        crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
+
+        // NOTE: ConsolidateRanges is NOT called here - it's a separate pass in the config
+        // to avoid running it twice when configs include both Minimize and ConsolidateRanges.
+    }
 }
 
 /// Push weights forward for acyclic DWAs.

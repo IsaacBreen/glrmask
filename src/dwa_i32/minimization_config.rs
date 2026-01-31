@@ -92,6 +92,7 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::PushWeightsToInitial => current_dwa.push_weights_to_initial(),
                     DwaPass::ResidualPush => current_dwa.residuated_push(),
                     DwaPass::ExactMinimize => current_dwa.minimize_states(),
+                    DwaPass::FastMinimize => current_dwa.minimize_states_fast(),
                     DwaPass::RustfstMinimize => current_dwa.minimize_with_rustfst_full(),
                     DwaPass::ConsolidateRanges => current_dwa.consolidate_ranges(),
                     DwaPass::TrimWeights => current_dwa.trim_weights(),
@@ -225,7 +226,8 @@ impl DWA {
             DwaOptimizeConfig::SpecializedSuper => vec![
                 DwaPass::PruneDeadEnds,
                 DwaPass::PruneUnreachable,
-                DwaPass::ExactMinimize,
+                DwaPass::RustfstMinimize,
+                DwaPass::FastMinimize,
             ],
         };
 
@@ -241,6 +243,7 @@ impl DWA {
                 DwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
                 DwaPass::ResidualPush => { self.residuated_push(); },
                 DwaPass::ExactMinimize => { self.minimize_states(); },
+                DwaPass::FastMinimize => { self.minimize_states_fast(); },
                 DwaPass::RustfstMinimize => { self.minimize_with_rustfst_full(); },
                 DwaPass::ConsolidateRanges => { self.consolidate_ranges(); },
                 DwaPass::TrimWeights => { self.trim_weights(); },
@@ -312,7 +315,7 @@ impl NWA {
                 // These are instantiated many times in the combined NWA, so minimization pays off.
                 // Using full minimize but no NWA passes since these are already DWAs.
                 nwa_passes: vec![],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::ExactMinimize],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::FastMinimize],
                 use_rustfst_determinize: false,
             },
             DeterminizeAndMinimizeProfile::Parser => {
@@ -419,6 +422,7 @@ impl NWA {
                     DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                     DwaPass::ResidualPush => { dwa.residuated_push(); },
                     DwaPass::ExactMinimize => { dwa.minimize_states(); },
+                    DwaPass::FastMinimize => { dwa.minimize_states_fast(); },
                     DwaPass::RustfstMinimize => { dwa.minimize_with_rustfst_full(); },
                     DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
                     DwaPass::TrimWeights => { dwa.trim_weights(); },
