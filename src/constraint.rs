@@ -2330,6 +2330,27 @@ impl GrammarConstraint {
         eprintln!("TIMING: build_parser_dwa {:?}", parser_dwa_start.elapsed());
         crate::debug!(5, "build_parser_dwa: end");
 
+        if std::env::var("VERIFY_PARSER_DWA_MINIMIZE").is_ok() {
+            let before_states = parser_dwa.states.len();
+            let before_transitions = parser_dwa.states.num_transitions();
+            let mut check = parser_dwa.clone();
+            check.minimize();
+            let after_states = check.states.len();
+            let after_transitions = check.states.num_transitions();
+            eprintln!(
+                "VERIFY_PARSER_DWA_MINIMIZE: states {} -> {}, transitions {} -> {}",
+                before_states,
+                after_states,
+                before_transitions,
+                after_transitions
+            );
+            if before_states != after_states || before_transitions != after_transitions {
+                eprintln!(
+                    "VERIFY_PARSER_DWA_MINIMIZE: WARNING - minimize not idempotent"
+                );
+            }
+        }
+
         // EPSILON EXPLOSION EXPERIMENT - Parser DWA from epsilon terminal NWA
         // Test: Build Parser DWA from the epsilon-modified terminal NWA
         // to see if Parser DWA build time is faster/slower

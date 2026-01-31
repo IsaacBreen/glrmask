@@ -244,6 +244,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Save the GrammarConstraint to a file.
     // Optimized: serialize to memory first, then compress/write in one pass.
     // This is ~6x faster than streaming JSON through the gzip encoder.
+    if std::env::var("SKIP_SERIALIZATION").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+        if show_output {
+            println!("\n{DIM}─────────────────────────────────────────{RESET}");
+            println!("{BOLD_GREEN}{CHECK} Complete in {}{RESET}\n", format_duration(total_start.elapsed()));
+        }
+        eprintln!("TIMING: total {:?}", total_start.elapsed());
+        return Ok(());
+    }
+
     if let Some(output_path) = args.output {
         let save_start = std::time::Instant::now();
         let step = std::time::Instant::now();

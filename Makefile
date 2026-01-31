@@ -15,6 +15,9 @@
 # Default timeout for test-js (override with TEST_TIMEOUT=...)
 TEST_TIMEOUT ?= 300
 
+# Skip serialization by default to speed up test targets (override with SKIP_SERIALIZATION=0)
+SKIP_SERIALIZATION ?= 1
+
 # === Build All ===
 
 all: ffi viz paper ## Build all components: FFI, visualizations, and paper
@@ -84,7 +87,7 @@ test-release: ## Run all crate tests in release profile + test_nwa_minimize_dete
 	RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 cargo test --color=always --package sep1 --lib --release -- test_nwa_minimize_determinize_minimize --nocapture --include-ignored
 
 test-js: ## Compile the JavaScript grammar (verifies it compiles)
-	timeout $(TEST_TIMEOUT) python scripts/compile.py \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) timeout $(TEST_TIMEOUT) python scripts/compile.py \
 		--grammar src/js.ebnf \
 		--format ebnf \
 		--output .cache/test_vocabs/constraint_js.json.gz \
@@ -92,14 +95,17 @@ test-js: ## Compile the JavaScript grammar (verifies it compiles)
 		$(if $(SKIP_MATURIN),--no-recompile,)
 
 test-json-schema: ## Compile a JSON schema grammar (verifies schema-to-EBNF works)
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
 		python3 scripts/test_json_schema.py
 
 test-json-schema-o1051: ## Compile o1051 (Github Hard) schema
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o1051.json" \
 		python3 scripts/test_json_schema.py
 
 test-tsconfig: ## Compile TSConfig schema
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
 		python3 scripts/test_json_schema.py
 
@@ -107,19 +113,19 @@ PYTHON ?= python
 
 test-schema-id: ffi ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
-	SCHEMA_ID="$(ID)" $(PYTHON) scripts/test_json_schema.py
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" $(PYTHON) scripts/test_json_schema.py
 
 show-schema-id: ffi ## Print EBNF for a schema by ID to stdout (usage: make show-schema-id ID=...)
 	@if [ -z "$(ID)" ]; then echo "Usage: make show-schema-id ID=<schema_id>"; exit 1; fi
-	SCHEMA_ID="$(ID)" PRINT_EBNF=1 $(PYTHON) scripts/test_json_schema.py
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" PRINT_EBNF=1 $(PYTHON) scripts/test_json_schema.py
 
 schema-id: ffi ## Write EBNF for a schema by ID to a file (usage: make schema-id ID=... OUT=file.ebnf)
 	@if [ -z "$(ID)" ] || [ -z "$(OUT)" ]; then echo "Usage: make schema-id ID=<schema_id> OUT=<file.ebnf>"; exit 1; fi
-	SCHEMA_ID="$(ID)" PRINT_EBNF=1 OUT_FILE="$(OUT)" $(PYTHON) scripts/test_json_schema.py
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" PRINT_EBNF=1 OUT_FILE="$(OUT)" $(PYTHON) scripts/test_json_schema.py
 
 show-json-schema: ffi ## Print the original JSON schema to stdout (usage: make show-json-schema ID=...)
 	@if [ -z "$(ID)" ]; then echo "Usage: make show-json-schema ID=<schema_id>"; exit 1; fi
-	SCHEMA_ID="$(ID)" PRINT_JSON_SCHEMA=1 $(PYTHON) scripts/test_json_schema.py
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" PRINT_JSON_SCHEMA=1 $(PYTHON) scripts/test_json_schema.py
 
 test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FILE=path/to/file.txt)
 	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff FILE=<path_to_text_file>"; exit 1; fi
@@ -138,7 +144,7 @@ show-diff-grammar: ffi ## Print EBNF grammar for a file to stdout (usage: make s
 
 compile-ebnf: ## Compile an EBNF grammar (usage: make compile-ebnf FILE=src/js.ebnf [OUT=out.json.gz])
 	@if [ -z "$(FILE)" ]; then echo "Usage: make compile-ebnf FILE=<ebnf_file> [OUT=<output_file>]"; exit 1; fi
-	python scripts/compile.py \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) python scripts/compile.py \
 		--grammar "$(FILE)" \
 		--format ebnf \
 		--output "$${OUT:-.cache/test_vocabs/constraint_$$(basename "$(FILE)" .ebnf).json.gz}" \
@@ -163,37 +169,37 @@ repro-washingtonpost: ffi ## Reproduce WashingtonPost failure (property key at s
 # These use the Rust grammar_compiler binary directly with --json-schema
 
 test-schema-packagejson: build ## Compile PackageJson schema
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/PackageJson---package.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_packagejson.json.gz
 
 test-schema-github: build ## Compile GithubWorkflow schema
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/GithubWorkflow---github-workflow.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_github.json.gz
 
 test-schema-sarif: build ## Compile SARIF schema
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/SARIF---sarif-2.1.0-rtm.1.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_sarif.json.gz
 
 test-schema-meta: build ## Compile JSON Schema meta-schema (draft v4)
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/JsonSchemaMeta---schema-draft-v4.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_meta.json.gz
 
 test-schema-extra: build ## Compile bamboo-spec from SchemaStore_Extra
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/SchemaStore_Extra---bamboo-spec.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_bamboo.json.gz
 
 test-schema-kestra: build ## Compile Kestra schema (WARNING: ~8MB, very slow)
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/Kestra---kestra-0.19.0.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_kestra.json.gz
