@@ -37,28 +37,28 @@ pub enum DeterminizeAndMinimizeProfile {
 }
 
 const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
-    &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::ExactMinimize],
-    &[DwaPass::ExactMinimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
-    &[DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::ExactMinimize],
-    &[DwaPass::PushWeights, DwaPass::ExactMinimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
-    &[DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::ExactMinimize, DwaPass::PruneDeadEnds],
-    &[DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::ExactMinimize, DwaPass::PruneUnreachable],
-    &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::ExactMinimize, DwaPass::PushWeights],
-    &[DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::ExactMinimize],
-    &[DwaPass::PruneUnreachable, DwaPass::ExactMinimize, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
-    &[DwaPass::PruneUnreachable, DwaPass::ExactMinimize, DwaPass::PushWeights, DwaPass::PruneDeadEnds],
-    &[DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::ExactMinimize],
-    &[DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::ExactMinimize, DwaPass::PushWeights],
-    &[DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::ExactMinimize],
-    &[DwaPass::PruneDeadEnds, DwaPass::ExactMinimize, DwaPass::PruneUnreachable, DwaPass::PushWeights],
-    &[DwaPass::PruneDeadEnds, DwaPass::ExactMinimize, DwaPass::PushWeights, DwaPass::PruneUnreachable],
-    &[DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::ExactMinimize],
-    &[DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::ExactMinimize, DwaPass::PruneUnreachable],
-    &[DwaPass::PushWeights, DwaPass::ExactMinimize, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
-    &[DwaPass::ExactMinimize, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeights],
-    &[DwaPass::ExactMinimize, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::PruneUnreachable],
-    &[DwaPass::ExactMinimize, DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
-    &[DwaPass::ExactMinimize, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeightsToInitial],
+    &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::SatMinimize],
+    &[DwaPass::SatMinimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
+    &[DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::SatMinimize],
+    &[DwaPass::PushWeights, DwaPass::SatMinimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
+    &[DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::SatMinimize, DwaPass::PruneDeadEnds],
+    &[DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::SatMinimize, DwaPass::PruneUnreachable],
+    &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::SatMinimize, DwaPass::PushWeights],
+    &[DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::SatMinimize],
+    &[DwaPass::PruneUnreachable, DwaPass::SatMinimize, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
+    &[DwaPass::PruneUnreachable, DwaPass::SatMinimize, DwaPass::PushWeights, DwaPass::PruneDeadEnds],
+    &[DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::SatMinimize],
+    &[DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::SatMinimize, DwaPass::PushWeights],
+    &[DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::SatMinimize],
+    &[DwaPass::PruneDeadEnds, DwaPass::SatMinimize, DwaPass::PruneUnreachable, DwaPass::PushWeights],
+    &[DwaPass::PruneDeadEnds, DwaPass::SatMinimize, DwaPass::PushWeights, DwaPass::PruneUnreachable],
+    &[DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::SatMinimize],
+    &[DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::SatMinimize, DwaPass::PruneUnreachable],
+    &[DwaPass::PushWeights, DwaPass::SatMinimize, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
+    &[DwaPass::SatMinimize, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeights],
+    &[DwaPass::SatMinimize, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::PruneUnreachable],
+    &[DwaPass::SatMinimize, DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
+    &[DwaPass::SatMinimize, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeightsToInitial],
 ];
 
 pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
@@ -91,7 +91,9 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::PushWeights => current_dwa.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => current_dwa.push_weights_to_initial(),
                     DwaPass::ResidualPush => current_dwa.residuated_push(),
-                    DwaPass::ExactMinimize => current_dwa.minimize_states(),
+                    DwaPass::SatMinimize => current_dwa.minimize_states_sat(),
+                    DwaPass::DsaturMinimize => current_dwa.minimize_states_dsatur(),
+                    DwaPass::ColPackMinimize => current_dwa.minimize_states_colpack(),
                     DwaPass::FastMinimize => current_dwa.minimize_states_fast(),
                     DwaPass::RustfstMinimize => current_dwa.minimize_with_rustfst_full(),
                     DwaPass::ConsolidateRanges => current_dwa.consolidate_ranges(),
@@ -240,7 +242,9 @@ impl DWA {
                 DwaPass::PushWeights => { self.push_weights_into_transitions_and_finals(); },
                 DwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
                 DwaPass::ResidualPush => { self.residuated_push(); },
-                DwaPass::ExactMinimize => { self.minimize_states(); },
+                DwaPass::SatMinimize => { self.minimize_states_sat(); },
+                DwaPass::DsaturMinimize => { self.minimize_states_dsatur(); },
+                DwaPass::ColPackMinimize => { self.minimize_states_colpack(); },
                 DwaPass::FastMinimize => { self.minimize_states_fast(); },
                 DwaPass::RustfstMinimize => { self.minimize_with_rustfst_full(); },
                 DwaPass::ConsolidateRanges => { self.consolidate_ranges(); },
@@ -286,10 +290,10 @@ impl NWA {
 
                 DeterminizeAndMinimizeConfig {
                     nwa_passes,
-                    // NOTE: ExactMinimize is intentionally disabled by default due to
+                    // NOTE: SatMinimize is intentionally disabled by default due to
                     // flakiness/performance (SAT UNSAT timeouts on some graphs).
                     dwa_passes: vec![
-                        DwaPass::FastMinimize,
+                        DwaPass::ColPackMinimize,
                         DwaPass::ConsolidateRanges,
                         DwaPass::TrimWeights,
                     ],
@@ -311,9 +315,9 @@ impl NWA {
                 // Full minimization here pays off because the smaller Super means
                 // smaller specialized DWAs and smaller combined NWA.
                 nwa_passes: vec![NwaPass::CompressTransitions, NwaPass::Minimize],
-                // NOTE: ExactMinimize is intentionally disabled by default due to
+                // NOTE: SatMinimize is intentionally disabled by default due to
                 // flakiness/performance (SAT UNSAT timeouts on some graphs).
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::FastMinimize],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::ColPackMinimize],
                 use_rustfst_determinize: false,
             },
             DeterminizeAndMinimizeProfile::SpecializedSuper => DeterminizeAndMinimizeConfig {
@@ -321,7 +325,7 @@ impl NWA {
                 // These are instantiated many times in the combined NWA, so minimization pays off.
                 // Using full minimize but no NWA passes since these are already DWAs.
                 nwa_passes: vec![],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::FastMinimize],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::ColPackMinimize],
                 use_rustfst_determinize: false,
             },
             DeterminizeAndMinimizeProfile::Parser => {
@@ -427,7 +431,9 @@ impl NWA {
                     DwaPass::PushWeights => { dwa.push_weights_into_transitions_and_finals(); },
                     DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                     DwaPass::ResidualPush => { dwa.residuated_push(); },
-                    DwaPass::ExactMinimize => { dwa.minimize_states(); },
+                    DwaPass::SatMinimize => { dwa.minimize_states_sat(); },
+                    DwaPass::DsaturMinimize => { dwa.minimize_states_dsatur(); },
+                    DwaPass::ColPackMinimize => { dwa.minimize_states_colpack(); },
                     DwaPass::FastMinimize => { dwa.minimize_states_fast(); },
                     DwaPass::RustfstMinimize => { dwa.minimize_with_rustfst_full(); },
                     DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
@@ -467,12 +473,12 @@ impl NWA {
 
         // Define interesting DWA sequences
         let dwa_configs: Vec<Vec<DwaPass>> = vec![
-            vec![DwaPass::PruneDeadEnds, DwaPass::ExactMinimize, DwaPass::PushWeights, DwaPass::PushWeightsToInitial, DwaPass::PruneUnreachable], // Standard
-            vec![DwaPass::ExactMinimize],
-            vec![DwaPass::PruneDeadEnds, DwaPass::ExactMinimize],
-            vec![DwaPass::PushWeights, DwaPass::ExactMinimize],
-            vec![DwaPass::ExactMinimize, DwaPass::PushWeights],
-            vec![DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::ExactMinimize],
+            vec![DwaPass::PruneDeadEnds, DwaPass::SatMinimize, DwaPass::PushWeights, DwaPass::PushWeightsToInitial, DwaPass::PruneUnreachable], // Standard
+            vec![DwaPass::SatMinimize],
+            vec![DwaPass::PruneDeadEnds, DwaPass::SatMinimize],
+            vec![DwaPass::PushWeights, DwaPass::SatMinimize],
+            vec![DwaPass::SatMinimize, DwaPass::PushWeights],
+            vec![DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::SatMinimize],
         ];
 
         let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;

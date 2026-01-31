@@ -6,12 +6,24 @@
 //! and the goal is to find the minimum number of colors (merged states).
 
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::os::raw::c_int;
 
 use varisat::{ExtendFormula, Solver, Var};
 
 thread_local! {
     static CURRENT_HEIGHT: Cell<Option<usize>> = Cell::new(None);
+}
+
+extern "C" {
+    fn colpack_color_graph(
+        row_offsets: *const c_int,
+        col_indices: *const c_int,
+        num_vertices: c_int,
+        num_edges: c_int,
+        out_colors: *mut c_int,
+        out_color_count: *mut c_int,
+    ) -> c_int;
 }
 
 pub fn set_exact_coloring_height(height: Option<usize>) {
@@ -63,19 +75,90 @@ pub fn solve_greedy_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     colors
 }
 
-/// Exact graph coloring solver - finds the OPTIMAL (minimum) number of colors.
+fn normalize_colors(colors: Vec<usize>) -> Vec<usize> {
+    let mut mapping: HashMap<usize, usize> = HashMap::new();
+    let mut next = 0usize;
+    colors
+        .into_iter()
+        .map(|c| {
+            *mapping.entry(c).or_insert_with(|| {
+                let id = next;
+                next += 1;
+                id
+            })
+        })
+        .collect()
+}
+
+fn is_valid_coloring(adj: &Vec<Vec<usize>>, colors: &[usize]) -> bool {
+    for (u, neighbors) in adj.iter().enumerate() {
+        let c_u = colors[u];
+        for &v in neighbors {
+            if c_u == colors[v] {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// ColPack-based graph coloring (greedy heuristic via ColPack).
+pub fn solve_colpack_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
+    let n = adj.len();
+    if n == 0 {
+        return vec![];
+    }
+
+    let mut row_offsets: Vec<c_int> = Vec::with_capacity(n + 1);
+    let mut col_indices: Vec<c_int> = Vec::new();
+    row_offsets.push(0);
+    for neighbors in adj {
+        for &v in neighbors {
+            col_indices.push(v as c_int);
+        }
+        row_offsets.push(col_indices.len() as c_int);
+    }
+
+    let mut colors_out = vec![0 as c_int; n];
+    let mut color_count: c_int = 0;
+    let rc = unsafe {
+        colpack_color_graph(
+            row_offsets.as_ptr(),
+            col_indices.as_ptr(),
+            n as c_int,
+            col_indices.len() as c_int,
+            colors_out.as_mut_ptr(),
+            &mut color_count as *mut c_int,
+        )
+    };
+
+    if rc != 0 {
+        eprintln!("ColPack coloring failed (rc={}), falling back to greedy", rc);
+        return solve_greedy_coloring(adj);
+    }
+
+    let colors: Vec<usize> = colors_out.into_iter().map(|c| c as usize).collect();
+    let colors = normalize_colors(colors);
+    if !is_valid_coloring(adj, &colors) {
+        eprintln!("ColPack produced invalid coloring, falling back to greedy");
+        return solve_greedy_coloring(adj);
+    }
+    colors
+}
+
+/// Exact graph coloring solver (SAT) - finds the OPTIMAL (minimum) number of colors.
 pub fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     solve_exact_graph_coloring_with_stats(adj).0
 }
 
-/// Exact graph coloring solver with stats (greedy upper bound + DSATUR search).
+/// Exact graph coloring solver with stats (greedy upper bound + SAT search).
 ///
 /// **CRITICAL**: This function MUST be exact. Do NOT add fallbacks to greedy
 /// algorithms or heuristics. If performance is a concern, use solve_greedy_coloring()
 /// instead, but NEVER compromise the exactness of this function.
 ///
 /// For performance-sensitive contexts, use FastMinimize which intentionally
-/// uses greedy methods. ExactMinimize is for when optimality is required.
+/// uses greedy methods. SatMinimize/DsaturMinimize are for when optimality is required.
 ///
 /// Uses backtracking with pruning. The algorithm explores colorings in order,
 /// pruning branches that can't improve on the current best solution.
@@ -528,6 +611,257 @@ pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usiz
     }
 
     (best_coloring, best_num)
+}
+
+/// Exact graph coloring solver using DSATUR branch-and-bound.
+pub fn solve_exact_graph_coloring_dsatur(adj: &Vec<Vec<usize>>) -> Vec<usize> {
+    let n = adj.len();
+    if n == 0 {
+        return vec![];
+    }
+
+    let degrees: Vec<usize> = adj.iter().map(|v| v.len()).collect();
+
+    fn select_vertex(colors: &[usize], saturation: &[usize], degrees: &[usize]) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for i in 0..colors.len() {
+            if colors[i] != usize::MAX {
+                continue;
+            }
+            match best {
+                None => best = Some(i),
+                Some(b) => {
+                    let sat_i = saturation[i];
+                    let sat_b = saturation[b];
+                    if sat_i > sat_b || (sat_i == sat_b && degrees[i] > degrees[b]) {
+                        best = Some(i);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    fn solve_dsatur_greedy(adj: &Vec<Vec<usize>>, degrees: &[usize]) -> Vec<usize> {
+        let n = adj.len();
+        let mut colors = vec![usize::MAX; n];
+        let mut saturation = vec![0usize; n];
+        let mut neighbor_color_flags: Vec<Vec<bool>> = vec![Vec::new(); n];
+        let mut max_colors = 0usize;
+
+        for _ in 0..n {
+            let Some(u) = select_vertex(&colors, &saturation, degrees) else { break; };
+
+            let mut c = 0usize;
+            while c < max_colors {
+                if !neighbor_color_flags[u][c] {
+                    break;
+                }
+                c += 1;
+            }
+
+            if c == max_colors {
+                max_colors += 1;
+                for flags in neighbor_color_flags.iter_mut() {
+                    flags.push(false);
+                }
+            }
+
+            colors[u] = c;
+            for &v in &adj[u] {
+                if !neighbor_color_flags[v][c] {
+                    neighbor_color_flags[v][c] = true;
+                    saturation[v] += 1;
+                }
+            }
+        }
+
+        colors
+    }
+
+    fn solve_smallest_last_greedy(adj: &Vec<Vec<usize>>) -> Vec<usize> {
+        let n = adj.len();
+        let mut degrees: Vec<usize> = adj.iter().map(|v| v.len()).collect();
+        let mut remaining = vec![true; n];
+        let mut order = Vec::with_capacity(n);
+
+        for _ in 0..n {
+            let mut min_deg = usize::MAX;
+            let mut min_v = None;
+            for i in 0..n {
+                if remaining[i] && degrees[i] < min_deg {
+                    min_deg = degrees[i];
+                    min_v = Some(i);
+                }
+            }
+            let v = min_v.unwrap();
+            remaining[v] = false;
+            order.push(v);
+            for &u in &adj[v] {
+                if remaining[u] {
+                    degrees[u] -= 1;
+                }
+            }
+        }
+
+        order.reverse();
+        let mut colors = vec![usize::MAX; n];
+        let mut used = vec![false; n];
+        for &v in &order {
+            used.fill(false);
+            for &u in &adj[v] {
+                let c = colors[u];
+                if c != usize::MAX {
+                    used[c] = true;
+                }
+            }
+            let mut c = 0usize;
+            while c < n && used[c] {
+                c += 1;
+            }
+            colors[v] = c;
+        }
+
+        colors
+    }
+
+    let greedy_colors = solve_greedy_coloring(adj);
+    let dsatur_colors = solve_dsatur_greedy(adj, &degrees);
+    let smallest_last_colors = solve_smallest_last_greedy(adj);
+    let greedy_num = greedy_colors.iter().max().map(|&c| c + 1).unwrap_or(0);
+    let dsatur_num = dsatur_colors.iter().max().map(|&c| c + 1).unwrap_or(0);
+    let smallest_last_num = smallest_last_colors.iter().max().map(|&c| c + 1).unwrap_or(0);
+    let mut best_colors = if dsatur_num <= greedy_num && dsatur_num <= smallest_last_num {
+        dsatur_colors
+    } else if smallest_last_num <= greedy_num {
+        smallest_last_colors
+    } else {
+        greedy_colors
+    };
+    let mut best_num = greedy_num.min(dsatur_num).min(smallest_last_num);
+
+    if best_num <= 1 {
+        return best_colors;
+    }
+
+    let mut colors = vec![usize::MAX; n];
+    let mut saturation = vec![0usize; n];
+    let mut neighbor_color_counts = vec![vec![0u16; best_num]; n];
+
+    fn dfs(
+        adj: &Vec<Vec<usize>>,
+        degrees: &[usize],
+        colors: &mut Vec<usize>,
+        saturation: &mut Vec<usize>,
+        neighbor_color_counts: &mut Vec<Vec<u16>>,
+        num_used_colors: usize,
+        colored_count: usize,
+        best_num: &mut usize,
+        best_colors: &mut Vec<usize>,
+    ) {
+        if colored_count == colors.len() {
+            if num_used_colors < *best_num {
+                *best_num = num_used_colors;
+                best_colors.clone_from(colors);
+            }
+            return;
+        }
+
+        if num_used_colors >= *best_num {
+            return;
+        }
+
+        let Some(u) = select_vertex(colors, saturation, degrees) else { return; };
+
+        for c in 0..num_used_colors {
+            if neighbor_color_counts[u][c] > 0 {
+                continue;
+            }
+
+            colors[u] = c;
+            let mut changed_neighbors: Vec<usize> = Vec::new();
+            for &v in &adj[u] {
+                if colors[v] != usize::MAX {
+                    continue;
+                }
+                if neighbor_color_counts[v][c] == 0 {
+                    saturation[v] += 1;
+                }
+                neighbor_color_counts[v][c] = neighbor_color_counts[v][c].saturating_add(1);
+                changed_neighbors.push(v);
+            }
+
+            dfs(
+                adj,
+                degrees,
+                colors,
+                saturation,
+                neighbor_color_counts,
+                num_used_colors,
+                colored_count + 1,
+                best_num,
+                best_colors,
+            );
+
+            for v in changed_neighbors {
+                neighbor_color_counts[v][c] = neighbor_color_counts[v][c].saturating_sub(1);
+                if neighbor_color_counts[v][c] == 0 {
+                    saturation[v] -= 1;
+                }
+            }
+            colors[u] = usize::MAX;
+        }
+
+        if num_used_colors + 1 < *best_num {
+            let c = num_used_colors;
+            colors[u] = c;
+            let mut changed_neighbors: Vec<usize> = Vec::new();
+            for &v in &adj[u] {
+                if colors[v] != usize::MAX {
+                    continue;
+                }
+                if neighbor_color_counts[v][c] == 0 {
+                    saturation[v] += 1;
+                }
+                neighbor_color_counts[v][c] = neighbor_color_counts[v][c].saturating_add(1);
+                changed_neighbors.push(v);
+            }
+
+            dfs(
+                adj,
+                degrees,
+                colors,
+                saturation,
+                neighbor_color_counts,
+                num_used_colors + 1,
+                colored_count + 1,
+                best_num,
+                best_colors,
+            );
+
+            for v in changed_neighbors {
+                neighbor_color_counts[v][c] = neighbor_color_counts[v][c].saturating_sub(1);
+                if neighbor_color_counts[v][c] == 0 {
+                    saturation[v] -= 1;
+                }
+            }
+            colors[u] = usize::MAX;
+        }
+    }
+
+    dfs(
+        adj,
+        &degrees,
+        &mut colors,
+        &mut saturation,
+        &mut neighbor_color_counts,
+        0,
+        0,
+        &mut best_num,
+        &mut best_colors,
+    );
+
+    best_colors
 }
 
 #[cfg(test)]

@@ -7,6 +7,8 @@ use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{
     set_exact_coloring_height,
     solve_exact_graph_coloring,
+    solve_exact_graph_coloring_dsatur,
+    solve_colpack_coloring,
     solve_greedy_coloring,
 };
 use crate::datastructures::RangeMapWeight;
@@ -85,7 +87,7 @@ impl DWA {
         #[cfg(debug_assertions)]
         let after_push = self.clone();
         
-        match minimize_acyclic_exact(self) {
+        match minimize_acyclic_exact_sat(self) {
             Ok(min_dwa) => *self = min_dwa,
             Err(e) => {
                 eprintln!("DWA minimization failed: {:?}", e);
@@ -133,6 +135,84 @@ impl DWA {
 
         // NOTE: ConsolidateRanges is NOT called here - it's a separate pass in the config
         // to avoid running it twice when configs include both Minimize and ConsolidateRanges.
+    }
+
+    #[time_it("DWA::minimize_acyclic_sat")]
+    pub fn minimize_acyclic_sat(&mut self) {
+        #[cfg(debug_assertions)]
+        let x = self.clone();
+
+        let pushed = push_weights_acyclic(self);
+
+        #[cfg(debug_assertions)]
+        if pushed {
+            crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
+        }
+
+        #[cfg(debug_assertions)]
+        let after_push = self.clone();
+
+        match minimize_acyclic_exact_sat(self) {
+            Ok(min_dwa) => *self = min_dwa,
+            Err(e) => {
+                eprintln!("DWA SAT minimization failed: {:?}", e);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
+    }
+
+    #[time_it("DWA::minimize_acyclic_dsatur")]
+    pub fn minimize_acyclic_dsatur(&mut self) {
+        #[cfg(debug_assertions)]
+        let x = self.clone();
+
+        let pushed = push_weights_acyclic(self);
+
+        #[cfg(debug_assertions)]
+        if pushed {
+            crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
+        }
+
+        #[cfg(debug_assertions)]
+        let after_push = self.clone();
+
+        match minimize_acyclic_exact_dsatur(self) {
+            Ok(min_dwa) => *self = min_dwa,
+            Err(e) => {
+                eprintln!("DWA DSATUR minimization failed: {:?}", e);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
+    }
+
+    #[time_it("DWA::minimize_acyclic_colpack")]
+    pub fn minimize_acyclic_colpack(&mut self) {
+        #[cfg(debug_assertions)]
+        let x = self.clone();
+
+        let pushed = push_weights_acyclic(self);
+
+        #[cfg(debug_assertions)]
+        if pushed {
+            crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
+        }
+
+        #[cfg(debug_assertions)]
+        let after_push = self.clone();
+
+        match minimize_acyclic_colpack(self) {
+            Ok(min_dwa) => *self = min_dwa,
+            Err(e) => {
+                eprintln!("DWA ColPack minimization failed: {:?}", e);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
     }
 }
 
@@ -257,7 +337,9 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ColoringMode {
-    Exact,
+    ExactSat,
+    ExactDsatur,
+    ExactColPack,
     Fast,
 }
 
@@ -279,7 +361,22 @@ enum ColoringMode {
 /// typical automata where "incompatibility density" is low.
 #[time_it("minimize_acyclic_exact")]
 pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
-    minimize_acyclic_with_mode(dwa, ColoringMode::Exact)
+    minimize_acyclic_exact_sat(dwa)
+}
+
+#[time_it("minimize_acyclic_exact_sat")]
+pub fn minimize_acyclic_exact_sat(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    minimize_acyclic_with_mode(dwa, ColoringMode::ExactSat)
+}
+
+#[time_it("minimize_acyclic_exact_dsatur")]
+pub fn minimize_acyclic_exact_dsatur(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    minimize_acyclic_with_mode(dwa, ColoringMode::ExactDsatur)
+}
+
+#[time_it("minimize_acyclic_colpack")]
+pub fn minimize_acyclic_colpack(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    minimize_acyclic_with_mode(dwa, ColoringMode::ExactColPack)
 }
 
 #[time_it("minimize_acyclic_fast")]
@@ -685,10 +782,14 @@ fn compute_height_coloring(
         std::process::exit(1);
     }
     
-    // Solve coloring: exact graph coloring
+    // Solve coloring: exact/heuristic graph coloring based on mode
     let color_start = std::time::Instant::now();
     set_exact_coloring_height(Some(height));
-    let colors = solve_exact_graph_coloring(&adj);
+    let colors = match coloring_mode {
+        ColoringMode::ExactSat | ColoringMode::Fast => solve_exact_graph_coloring(&adj),
+        ColoringMode::ExactDsatur => solve_exact_graph_coloring_dsatur(&adj),
+        ColoringMode::ExactColPack => solve_colpack_coloring(&adj),
+    };
     set_exact_coloring_height(None);
     if trace_heights {
         eprintln!("TRACE: height {} coloring done", height);

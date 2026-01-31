@@ -29,7 +29,10 @@ pub enum DwaPass {
     PushWeights,
     PushWeightsToInitial,
     ResidualPush,
-    ExactMinimize,
+    #[serde(alias = "ExactMinimize")]
+    SatMinimize,
+    DsaturMinimize,
+    ColPackMinimize,
     FastMinimize,
     RustfstMinimize,
     ConsolidateRanges,
@@ -44,7 +47,27 @@ impl DwaPass {
             DwaPass::PushWeights => std::env::var("DWA_DISABLE_PUSH_WEIGHTS").map(|v| v != "1").unwrap_or(true),
             DwaPass::PushWeightsToInitial => std::env::var("DWA_DISABLE_PUSH_WEIGHTS_TO_INITIAL").map(|v| v != "1").unwrap_or(true),
             DwaPass::ResidualPush => std::env::var("DWA_DISABLE_RESIDUAL_PUSH").map(|v| v != "1").unwrap_or(true),
-            DwaPass::ExactMinimize => std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v != "1").unwrap_or(true),
+            DwaPass::SatMinimize => {
+                if std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v == "1").unwrap_or(false) {
+                    false
+                } else {
+                    std::env::var("DWA_DISABLE_SAT_MINIMIZE").map(|v| v != "1").unwrap_or(true)
+                }
+            }
+            DwaPass::DsaturMinimize => {
+                if std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v == "1").unwrap_or(false) {
+                    false
+                } else {
+                    std::env::var("DWA_DISABLE_DSATUR_MINIMIZE").map(|v| v != "1").unwrap_or(true)
+                }
+            }
+            DwaPass::ColPackMinimize => {
+                if std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v == "1").unwrap_or(false) {
+                    false
+                } else {
+                    std::env::var("DWA_DISABLE_COLPACK_MINIMIZE").map(|v| v != "1").unwrap_or(true)
+                }
+            }
             DwaPass::FastMinimize => std::env::var("DWA_DISABLE_FAST_MINIMIZE").map(|v| v != "1").unwrap_or(true),
             DwaPass::RustfstMinimize => std::env::var("DWA_DISABLE_RUSTFST_MINIMIZE").map(|v| v != "1").unwrap_or(true),
             // ConsolidateRanges is slow in weight-heavy mode due to large weight domain

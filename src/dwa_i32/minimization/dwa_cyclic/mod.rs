@@ -68,7 +68,9 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals_cyclic(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial_cyclic(),
                     DwaPass::ResidualPush => self.residuated_push_cyclic(),
-                    DwaPass::ExactMinimize => false,
+                    DwaPass::SatMinimize => false,
+                    DwaPass::DsaturMinimize => false,
+                    DwaPass::ColPackMinimize => false,
                     DwaPass::FastMinimize => false,
                     DwaPass::RustfstMinimize => false,
                     DwaPass::ConsolidateRanges => self.consolidate_ranges(),
@@ -136,7 +138,7 @@ impl DWA {
             DwaPass::PushWeightsToInitial,
             DwaPass::ResidualPush,
             DwaPass::PruneDeadEnds,
-            DwaPass::ExactMinimize,
+            DwaPass::SatMinimize,
             DwaPass::ConsolidateRanges,
         ];
 
@@ -166,11 +168,27 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals_cyclic(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial_cyclic(),
                     DwaPass::ResidualPush => self.residuated_push_cyclic(),
-                    DwaPass::ExactMinimize => {
+                    DwaPass::SatMinimize => {
                         self.loosen_weights_for_minimize_cyclic();
                         let changed = self.minimize_states_cyclic();
                         if changed && initial_num_states > 1000 {
                             crate::debug!(6, "[DWA::minimize_cyclic] After minimize (iter {}): {}", iter_num, self.stats());
+                        }
+                        changed
+                    },
+                    DwaPass::DsaturMinimize => {
+                        self.loosen_weights_for_minimize_cyclic();
+                        let changed = self.minimize_states_cyclic();
+                        if changed && initial_num_states > 1000 {
+                            crate::debug!(6, "[DWA::minimize_cyclic] After dsatur minimize (iter {}): {}", iter_num, self.stats());
+                        }
+                        changed
+                    },
+                    DwaPass::ColPackMinimize => {
+                        self.loosen_weights_for_minimize_cyclic();
+                        let changed = self.minimize_states_cyclic();
+                        if changed && initial_num_states > 1000 {
+                            crate::debug!(6, "[DWA::minimize_cyclic] After colpack minimize (iter {}): {}", iter_num, self.stats());
                         }
                         changed
                     },
