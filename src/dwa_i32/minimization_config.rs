@@ -92,8 +92,10 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::PushWeightsToInitial => current_dwa.push_weights_to_initial(),
                     DwaPass::ResidualPush => current_dwa.residuated_push(),
                     DwaPass::SatMinimize => current_dwa.minimize_states_sat(),
+                    DwaPass::CadicalMinimize => current_dwa.minimize_states_cadical(),
                     DwaPass::DsaturMinimize => current_dwa.minimize_states_dsatur(),
                     DwaPass::ColPackMinimize => current_dwa.minimize_states_colpack(),
+                    DwaPass::ColPackVerifiedMinimize => current_dwa.minimize_states_colpack_verified(),
                     DwaPass::FastMinimize => current_dwa.minimize_states_fast(),
                     DwaPass::RustfstMinimize => current_dwa.minimize_with_rustfst_full(),
                     DwaPass::ConsolidateRanges => current_dwa.consolidate_ranges(),
@@ -243,8 +245,10 @@ impl DWA {
                 DwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
                 DwaPass::ResidualPush => { self.residuated_push(); },
                 DwaPass::SatMinimize => { self.minimize_states_sat(); },
+                DwaPass::CadicalMinimize => { self.minimize_states_cadical(); },
                 DwaPass::DsaturMinimize => { self.minimize_states_dsatur(); },
                 DwaPass::ColPackMinimize => { self.minimize_states_colpack(); },
+                DwaPass::ColPackVerifiedMinimize => { self.minimize_states_colpack_verified(); },
                 DwaPass::FastMinimize => { self.minimize_states_fast(); },
                 DwaPass::RustfstMinimize => { self.minimize_with_rustfst_full(); },
                 DwaPass::ConsolidateRanges => { self.consolidate_ranges(); },
@@ -288,15 +292,49 @@ impl NWA {
                     passes
                 };
 
-                DeterminizeAndMinimizeConfig {
-                    nwa_passes,
-                    // NOTE: SatMinimize is intentionally disabled by default due to
-                    // flakiness/performance (SAT UNSAT timeouts on some graphs).
-                    dwa_passes: vec![
+                let dwa_passes = match std::env::var("TERMINAL_DWA_PASS")
+                    .ok()
+                    .map(|v| v.to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("fast") => vec![
+                        DwaPass::FastMinimize,
+                        DwaPass::ConsolidateRanges,
+                        DwaPass::TrimWeights,
+                    ],
+                    Some("colpack") => vec![
                         DwaPass::ColPackMinimize,
                         DwaPass::ConsolidateRanges,
                         DwaPass::TrimWeights,
                     ],
+                    Some("colpack_verified") | Some("colpack-verified") => vec![
+                        DwaPass::ColPackVerifiedMinimize,
+                        DwaPass::ConsolidateRanges,
+                        DwaPass::TrimWeights,
+                    ],
+                    Some(other) => {
+                        eprintln!(
+                            "WARN: unknown TERMINAL_DWA_PASS='{}', using ColPackMinimize",
+                            other
+                        );
+                        vec![
+                            DwaPass::ColPackMinimize,
+                            DwaPass::ConsolidateRanges,
+                            DwaPass::TrimWeights,
+                        ]
+                    }
+                    None => vec![
+                        DwaPass::ColPackMinimize,
+                        DwaPass::ConsolidateRanges,
+                        DwaPass::TrimWeights,
+                    ],
+                };
+
+                DeterminizeAndMinimizeConfig {
+                    nwa_passes,
+                    // NOTE: SatMinimize is intentionally disabled by default due to
+                    // flakiness/performance (SAT UNSAT timeouts on some graphs).
+                    dwa_passes,
                     use_rustfst_determinize: false,
                 }
             },
@@ -432,8 +470,10 @@ impl NWA {
                     DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                     DwaPass::ResidualPush => { dwa.residuated_push(); },
                     DwaPass::SatMinimize => { dwa.minimize_states_sat(); },
+                    DwaPass::CadicalMinimize => { dwa.minimize_states_cadical(); },
                     DwaPass::DsaturMinimize => { dwa.minimize_states_dsatur(); },
                     DwaPass::ColPackMinimize => { dwa.minimize_states_colpack(); },
+                    DwaPass::ColPackVerifiedMinimize => { dwa.minimize_states_colpack_verified(); },
                     DwaPass::FastMinimize => { dwa.minimize_states_fast(); },
                     DwaPass::RustfstMinimize => { dwa.minimize_with_rustfst_full(); },
                     DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
