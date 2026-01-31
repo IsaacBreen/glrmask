@@ -225,8 +225,6 @@ impl DWA {
             // Full minimize - good quality but slow for large DWAs
             DwaOptimizeConfig::SpecializedSuper => vec![
                 DwaPass::PruneDeadEnds,
-                DwaPass::PruneUnreachable,
-                DwaPass::RustfstMinimize,
                 DwaPass::FastMinimize,
             ],
         };
@@ -288,7 +286,7 @@ impl NWA {
 
                 DeterminizeAndMinimizeConfig {
                     nwa_passes,
-                    dwa_passes: vec![DwaPass::ExactMinimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                    dwa_passes: vec![DwaPass::FastMinimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
                     use_rustfst_determinize: false,
                 }
             },
@@ -297,9 +295,9 @@ impl NWA {
                 // Each terminal has a characterization NWA that encodes how it interacts with
                 // the parse stack (shifts, reduces, reduction cascades). These are determinized
                 // into DWAs and then instantiated in the Parser NWA during precompute4.
-                // Full minimization is worthwhile since templates are reused many times.
+                // Minimize is worthwhile since templates are reused many times.
                 nwa_passes: vec![],  // NWA already processed before determinization
-                dwa_passes: vec![DwaPass::ExactMinimize],
+                dwa_passes: vec![DwaPass::FastMinimize],
                 use_rustfst_determinize: false,
             },
             DeterminizeAndMinimizeProfile::Super => DeterminizeAndMinimizeConfig {
@@ -307,7 +305,7 @@ impl NWA {
                 // Full minimization here pays off because the smaller Super means
                 // smaller specialized DWAs and smaller combined NWA.
                 nwa_passes: vec![NwaPass::CompressTransitions, NwaPass::Minimize],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::ExactMinimize],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::FastMinimize],
                 use_rustfst_determinize: false,
             },
             DeterminizeAndMinimizeProfile::SpecializedSuper => DeterminizeAndMinimizeConfig {
@@ -320,7 +318,7 @@ impl NWA {
             },
             DeterminizeAndMinimizeProfile::Parser => {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
-                // Includes minimize to get optimal state count
+                // Includes minimize to reduce state count
                 // NOTE: NWA MinimizeRustfst can be memory-intensive for large NWAs (2M+ states)
                 // but is enabled by default for Parser.
                 DeterminizeAndMinimizeConfig {
@@ -334,7 +332,7 @@ impl NWA {
                         NwaPass::MinimizeRustfst,
                         NwaPass::Minimize,
                     ],
-                    dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::ExactMinimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                    dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::FastMinimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
                     use_rustfst_determinize: false,
                 }
             },

@@ -52,33 +52,29 @@ pub fn solve_greedy_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     colors
 }
 
-/// Exact graph coloring solver - finds the optimal (minimum) number of colors.
-/// 
+/// Exact graph coloring solver - finds the OPTIMAL (minimum) number of colors.
+///
+/// **CRITICAL**: This function MUST be exact. Do NOT add fallbacks to greedy
+/// algorithms or heuristics. If performance is a concern, use solve_greedy_coloring()
+/// instead, but NEVER compromise the exactness of this function.
+///
+/// For performance-sensitive contexts, use FastMinimize which intentionally
+/// uses greedy methods. ExactMinimize is for when optimality is required.
+///
 /// Uses backtracking with pruning. The algorithm explores colorings in order,
 /// pruning branches that can't improve on the current best solution.
-/// 
+///
 /// **WARNING**: This has worst-case exponential time complexity O(k^n) where k is
-/// the chromatic number and n is the number of nodes. Should only be used for
-/// small graphs (< 30 nodes typically).
-/// 
+/// the chromatic number and n is the number of nodes.
+///
 /// # Arguments
 /// * `adj` - Adjacency list representation of the incompatibility graph.
-/// 
+///
 /// # Returns
 /// A vector of colors, one for each node, using the minimum possible number of colors.
 pub fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     let n = adj.len();
     if n == 0 { return vec![]; }
-    
-    // For graphs with more than 30 nodes, fall back to greedy coloring
-    // The exact solver has worst-case exponential time complexity
-    // Reduced from 50 to 30 because even 45 nodes can cause 4+ second blowup on dense graphs
-    if n > 30 {
-        if n >= 100 {
-            crate::debug!(5, "Exact coloring fallback to greedy: {} nodes exceeds threshold", n);
-        }
-        return solve_greedy_coloring(adj);
-    }
 
     let start = std::time::Instant::now();
     let mut colors = vec![usize::MAX; n];

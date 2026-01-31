@@ -259,6 +259,10 @@ enum ColoringMode {
 
 /// Minimizes an Acyclic DWA to its globally optimal state count.
 ///
+/// **CRITICAL**: This function guarantees globally optimal minimization.
+/// Do NOT add any heuristics, fast paths, or approximations here.
+/// If you need speed over optimality, use minimize_acyclic_fast() instead.
+///
 /// # Theoretical Guarantees
 /// 1. **Semantic Equivalence**: The output DWA produces the exact same `Weight` result
 ///    for any input word as the input DWA, relative to the start state.
@@ -603,7 +607,10 @@ fn compute_height_coloring(
     // Fast path: if signature groups cover > 70% of candidates, cross-group merging is unlikely
     // to help much. Just use signature-based coloring.
     let signature_coverage = num_groups as f64 / candidates.len() as f64;
-    if candidates.len() > 200 && signature_coverage > 0.70 {
+    if matches!(coloring_mode, ColoringMode::Fast)
+        && candidates.len() > 200
+        && signature_coverage > 0.70
+    {
         crate::debug!(5, "  Fast path: {} sig groups / {} candidates ({:.1}% coverage) -> using signatures as colors",
             num_groups, candidates.len(), signature_coverage * 100.0);
 
