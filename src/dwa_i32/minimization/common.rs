@@ -31,8 +31,10 @@ pub enum DwaPass {
     ResidualPush,
     #[serde(alias = "ExactMinimize")]
     SatMinimize,
+    CadicalMinimize,
     DsaturMinimize,
     ColPackMinimize,
+    ColPackVerifiedMinimize,
     FastMinimize,
     RustfstMinimize,
     ConsolidateRanges,
@@ -54,6 +56,13 @@ impl DwaPass {
                     std::env::var("DWA_DISABLE_SAT_MINIMIZE").map(|v| v != "1").unwrap_or(true)
                 }
             }
+            DwaPass::CadicalMinimize => {
+                if std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v == "1").unwrap_or(false) {
+                    false
+                } else {
+                    std::env::var("DWA_DISABLE_CADICAL_MINIMIZE").map(|v| v != "1").unwrap_or(true)
+                }
+            }
             DwaPass::DsaturMinimize => {
                 if std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v == "1").unwrap_or(false) {
                     false
@@ -66,6 +75,13 @@ impl DwaPass {
                     false
                 } else {
                     std::env::var("DWA_DISABLE_COLPACK_MINIMIZE").map(|v| v != "1").unwrap_or(true)
+                }
+            }
+            DwaPass::ColPackVerifiedMinimize => {
+                if std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v == "1").unwrap_or(false) {
+                    false
+                } else {
+                    std::env::var("DWA_DISABLE_COLPACK_VERIFIED_MINIMIZE").map(|v| v != "1").unwrap_or(true)
                 }
             }
             DwaPass::FastMinimize => std::env::var("DWA_DISABLE_FAST_MINIMIZE").map(|v| v != "1").unwrap_or(true),

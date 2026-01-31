@@ -7,8 +7,10 @@ use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{
     set_exact_coloring_height,
     solve_exact_graph_coloring,
+    solve_exact_graph_coloring_cadical,
     solve_exact_graph_coloring_dsatur,
     solve_colpack_coloring,
+    solve_colpack_with_verification,
     solve_greedy_coloring,
 };
 use crate::datastructures::RangeMapWeight;
@@ -163,6 +165,32 @@ impl DWA {
         crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
     }
 
+    #[time_it("DWA::minimize_acyclic_cadical")]
+    pub fn minimize_acyclic_cadical(&mut self) {
+        #[cfg(debug_assertions)]
+        let x = self.clone();
+
+        let pushed = push_weights_acyclic(self);
+
+        #[cfg(debug_assertions)]
+        if pushed {
+            crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
+        }
+
+        #[cfg(debug_assertions)]
+        let after_push = self.clone();
+
+        match minimize_acyclic_exact_cadical(self) {
+            Ok(min_dwa) => *self = min_dwa,
+            Err(e) => {
+                eprintln!("DWA CaDiCaL minimization failed: {:?}", e);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
+    }
+
     #[time_it("DWA::minimize_acyclic_dsatur")]
     pub fn minimize_acyclic_dsatur(&mut self) {
         #[cfg(debug_assertions)]
@@ -208,6 +236,32 @@ impl DWA {
             Ok(min_dwa) => *self = min_dwa,
             Err(e) => {
                 eprintln!("DWA ColPack minimization failed: {:?}", e);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
+    }
+
+    #[time_it("DWA::minimize_acyclic_colpack_verified")]
+    pub fn minimize_acyclic_colpack_verified(&mut self) {
+        #[cfg(debug_assertions)]
+        let x = self.clone();
+
+        let pushed = push_weights_acyclic(self);
+
+        #[cfg(debug_assertions)]
+        if pushed {
+            crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
+        }
+
+        #[cfg(debug_assertions)]
+        let after_push = self.clone();
+
+        match minimize_acyclic_colpack_verified(self) {
+            Ok(min_dwa) => *self = min_dwa,
+            Err(e) => {
+                eprintln!("DWA ColPack verified minimization failed: {:?}", e);
             }
         }
 
@@ -338,8 +392,10 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ColoringMode {
     ExactSat,
+    ExactCadical,
     ExactDsatur,
     ExactColPack,
+    ColPackVerified,
     Fast,
 }
 
@@ -369,6 +425,11 @@ pub fn minimize_acyclic_exact_sat(dwa: &DWA) -> Result<DWA, DWABuildError> {
     minimize_acyclic_with_mode(dwa, ColoringMode::ExactSat)
 }
 
+#[time_it("minimize_acyclic_exact_cadical")]
+pub fn minimize_acyclic_exact_cadical(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    minimize_acyclic_with_mode(dwa, ColoringMode::ExactCadical)
+}
+
 #[time_it("minimize_acyclic_exact_dsatur")]
 pub fn minimize_acyclic_exact_dsatur(dwa: &DWA) -> Result<DWA, DWABuildError> {
     minimize_acyclic_with_mode(dwa, ColoringMode::ExactDsatur)
@@ -377,6 +438,11 @@ pub fn minimize_acyclic_exact_dsatur(dwa: &DWA) -> Result<DWA, DWABuildError> {
 #[time_it("minimize_acyclic_colpack")]
 pub fn minimize_acyclic_colpack(dwa: &DWA) -> Result<DWA, DWABuildError> {
     minimize_acyclic_with_mode(dwa, ColoringMode::ExactColPack)
+}
+
+#[time_it("minimize_acyclic_colpack_verified")]
+pub fn minimize_acyclic_colpack_verified(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    minimize_acyclic_with_mode(dwa, ColoringMode::ColPackVerified)
 }
 
 #[time_it("minimize_acyclic_fast")]
@@ -677,6 +743,9 @@ fn compute_height_coloring(
         crate::debug!(6, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
         let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
         crate::debug!(5, "height {} coloring: candidates={}, path=greedy_no_graph, colors={}", height, candidates.len(), num_colors);
+        if trace_heights {
+            eprintln!("TRACE: height {} colors={}", height, num_colors);
+        }
         return colors;
     }
 
@@ -688,6 +757,9 @@ fn compute_height_coloring(
         crate::debug!(6, "Height 0 coloring total: {:?}", start.elapsed());
         let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
         crate::debug!(5, "height {} coloring: candidates={}, path=height0_direct, colors={}", height, candidates.len(), num_colors);
+        if trace_heights {
+            eprintln!("TRACE: height {} colors={}", height, num_colors);
+        }
         return colors;
     }
     // Compute signatures first to check if we can use a fast path
@@ -744,6 +816,10 @@ fn compute_height_coloring(
         let unaccounted = total_time.saturating_sub(accounted);
         crate::debug!(5, "Coloring fast path breakdown: signature={:?}, assign={:?}, unaccounted={:?}",
             sig_time, assign_time, unaccounted);
+        if trace_heights {
+            let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
+            eprintln!("TRACE: height {} colors={}", height, num_colors);
+        }
         return colors;
     }
 
@@ -787,8 +863,10 @@ fn compute_height_coloring(
     set_exact_coloring_height(Some(height));
     let colors = match coloring_mode {
         ColoringMode::ExactSat | ColoringMode::Fast => solve_exact_graph_coloring(&adj),
+        ColoringMode::ExactCadical => solve_exact_graph_coloring_cadical(&adj),
         ColoringMode::ExactDsatur => solve_exact_graph_coloring_dsatur(&adj),
         ColoringMode::ExactColPack => solve_colpack_coloring(&adj),
+        ColoringMode::ColPackVerified => solve_colpack_with_verification(&adj),
     };
     set_exact_coloring_height(None);
     if trace_heights {
@@ -809,6 +887,9 @@ fn compute_height_coloring(
     
     let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
     crate::debug!(5, "height {} coloring: candidates={}, path=graph_exact, colors={}", height, candidates.len(), num_colors);
+    if trace_heights {
+        eprintln!("TRACE: height {} colors={}", height, num_colors);
+    }
     colors
 }
 

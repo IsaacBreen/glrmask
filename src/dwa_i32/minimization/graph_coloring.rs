@@ -9,6 +9,7 @@ use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::os::raw::c_int;
 
+use cadical::{Solver as CadicalSolver, Timeout as CadicalTimeout};
 use varisat::{ExtendFormula, Solver, Var};
 
 thread_local! {
@@ -146,9 +147,102 @@ pub fn solve_colpack_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     colors
 }
 
+enum ColpackVerification {
+    VerifiedOptimal,
+    FoundBetter(Vec<usize>),
+    TimedOut,
+}
+
+fn verify_colpack_optimality(
+    adj: &Vec<Vec<usize>>,
+    k: usize,
+) -> ColpackVerification {
+    if k <= 1 {
+        return ColpackVerification::VerifiedOptimal;
+    }
+
+    let (mut solver, vars) = build_cadical_coloring_solver(adj, k - 1);
+    solver.set_callbacks(Some(CadicalTimeout::new(1.0)));
+    let result = solver.solve();
+    match result {
+        Some(true) => ColpackVerification::FoundBetter(extract_cadical_coloring(&solver, &vars, k - 1)),
+        Some(false) => ColpackVerification::VerifiedOptimal,
+        None => ColpackVerification::TimedOut,
+    }
+}
+
+/// ColPack coloring with bounded SAT verification (1s per height).
+pub fn solve_colpack_with_verification(adj: &Vec<Vec<usize>>) -> Vec<usize> {
+    let mut colors = solve_colpack_coloring(adj);
+    let k = colors.iter().max().map(|&c| c + 1).unwrap_or(0);
+    if k <= 1 {
+        return colors;
+    }
+
+    let height_opt = CURRENT_HEIGHT.with(|h| h.get());
+    let verify_start = std::time::Instant::now();
+    let verification = verify_colpack_optimality(adj, k);
+    let verify_time = verify_start.elapsed();
+
+    match verification {
+        ColpackVerification::VerifiedOptimal => {
+            if let Some(height) = height_opt {
+                eprintln!(
+                    "Height {}: ColPack verified optimal (k={}) in {:?}",
+                    height,
+                    k,
+                    verify_time,
+                );
+            } else {
+                eprintln!("ColPack verified optimal (k={}) in {:?}", k, verify_time);
+            }
+        }
+        ColpackVerification::FoundBetter(better) => {
+            if let Some(height) = height_opt {
+                eprintln!(
+                    "Height {}: ColPack not optimal; SAT found k={} in {:?}",
+                    height,
+                    k - 1,
+                    verify_time,
+                );
+            } else {
+                eprintln!("ColPack not optimal; SAT found k={} in {:?}", k - 1, verify_time);
+            }
+            colors = better;
+        }
+        ColpackVerification::TimedOut => {
+            if let Some(height) = height_opt {
+                eprintln!(
+                    "Height {}: ColPack verification timed out (k={}) after {:?}",
+                    height,
+                    k - 1,
+                    verify_time,
+                );
+            } else {
+                eprintln!("ColPack verification timed out (k={}) after {:?}", k - 1, verify_time);
+            }
+        }
+    }
+
+    colors
+}
+
 /// Exact graph coloring solver (SAT) - finds the OPTIMAL (minimum) number of colors.
 pub fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     solve_exact_graph_coloring_with_stats(adj).0
+}
+
+/// Exact graph coloring solver (SAT) using CaDiCaL.
+pub fn solve_exact_graph_coloring_cadical(adj: &Vec<Vec<usize>>) -> Vec<usize> {
+    solve_exact_graph_coloring_with_stats_cadical(adj).0
+}
+
+pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usize>, usize) {
+    solve_exact_graph_coloring_with_stats_impl(adj, solve_sat_exact_varisat)
+}
+
+pub fn solve_exact_graph_coloring_with_stats_cadical(adj: &Vec<Vec<usize>>) -> (Vec<usize>, usize) {
+    solve_exact_graph_coloring_with_stats_impl(adj, solve_sat_exact_cadical)
 }
 
 /// Exact graph coloring solver with stats (greedy upper bound + SAT search).
@@ -171,7 +265,13 @@ pub fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
 ///
 /// # Returns
 /// Returns (colors, greedy_upper_bound).
-pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usize>, usize) {
+fn solve_exact_graph_coloring_with_stats_impl<F>(
+    adj: &Vec<Vec<usize>>,
+    solve_sat_exact: F,
+) -> (Vec<usize>, usize)
+where
+    F: FnOnce(&Vec<Vec<usize>>, usize, Option<usize>) -> (Vec<usize>, usize),
+{
     let n = adj.len();
     if n == 0 { return (vec![], 0); }
 
@@ -454,136 +554,6 @@ pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usiz
         return (best_coloring, best_num);
     }
 
-    fn solve_sat_exact(
-        adj: &Vec<Vec<usize>>,
-        max_colors: usize,
-        height_opt: Option<usize>,
-    ) -> (Vec<usize>, usize) {
-        let n = adj.len();
-        let mut solver = Solver::new();
-        let mut vars: Vec<Vec<Var>> = Vec::with_capacity(n);
-        for _ in 0..n {
-            vars.push(Vec::with_capacity(max_colors));
-        }
-        for v in 0..n {
-            for _ in 0..max_colors {
-                vars[v].push(solver.new_var());
-            }
-        }
-
-        for v in 0..n {
-            for c in (v + 1)..max_colors {
-                solver.add_clause(&[vars[v][c].negative()]);
-            }
-        }
-
-        for v in 0..n {
-            let clause: Vec<_> = vars[v].iter().map(|&var| var.positive()).collect();
-            solver.add_clause(&clause);
-        }
-
-        for v in 0..n {
-            for c1 in 0..max_colors {
-                for c2 in (c1 + 1)..max_colors {
-                    solver.add_clause(&[vars[v][c1].negative(), vars[v][c2].negative()]);
-                }
-            }
-        }
-
-        for u in 0..n {
-            for &v in &adj[u] {
-                if v > u {
-                    for c in 0..max_colors {
-                        solver.add_clause(&[vars[u][c].negative(), vars[v][c].negative()]);
-                    }
-                }
-            }
-        }
-
-        if n > 0 && max_colors > 0 {
-            solver.add_clause(&[vars[0][0].positive()]);
-        }
-
-        fn solve_k(solver: &mut Solver, vars: &Vec<Vec<Var>>, k: usize) -> Option<Vec<usize>> {
-            let n = vars.len();
-            if n == 0 {
-                return Some(vec![]);
-            }
-            let max_colors = vars[0].len();
-            let mut assumptions = Vec::with_capacity(n * (max_colors - k));
-            for v in 0..n {
-                for c in k..max_colors {
-                    assumptions.push(vars[v][c].negative());
-                }
-            }
-            solver.assume(&assumptions);
-            let sat = solver.solve().expect("SAT solver failed");
-            if !sat {
-                return None;
-            }
-            let model = solver.model().expect("SAT model missing");
-            let mut assignment = vec![false; n * max_colors];
-            for lit in model {
-                assignment[lit.index()] = lit.is_positive();
-            }
-            let mut colors = vec![0usize; n];
-            for v in 0..n {
-                let mut assigned = None;
-                for c in 0..k {
-                    let var = vars[v][c];
-                    if assignment[var.index()] {
-                        assigned = Some(c);
-                        break;
-                    }
-                }
-                let color = assigned.expect("SAT model missing vertex color");
-                colors[v] = color;
-            }
-            Some(colors)
-        }
-
-        let mut k = max_colors;
-        let start_k = std::time::Instant::now();
-        let mut best_coloring = solve_k(&mut solver, &vars, k)
-            .expect("SAT solver returned UNSAT at upper bound");
-        if let Some(height) = height_opt {
-            eprintln!(
-                "Height {}: SAT check k={} SAT in {:?}",
-                height,
-                k,
-                start_k.elapsed(),
-            );
-        }
-
-        while k > 1 {
-            let candidate = k - 1;
-            let step_start = std::time::Instant::now();
-            let sat_colors = solve_k(&mut solver, &vars, candidate);
-            let step_time = step_start.elapsed();
-            if let Some(height) = height_opt {
-                eprintln!(
-                    "Height {}: SAT check k={} {} in {:?}",
-                    height,
-                    candidate,
-                    if sat_colors.is_some() { "SAT" } else { "UNSAT" },
-                    step_time,
-                );
-            }
-            if let Some(colors) = sat_colors {
-                k = candidate;
-                best_coloring = colors;
-            } else {
-                break;
-            }
-        }
-
-        if let Some(height) = height_opt {
-            eprintln!("Height {}: SAT final k={}", height, k);
-        }
-
-        (best_coloring, k)
-    }
-
     let sat_start = std::time::Instant::now();
     if let Some(height) = height_opt {
         eprintln!(
@@ -613,12 +583,313 @@ pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usiz
     (best_coloring, best_num)
 }
 
+fn solve_sat_exact_varisat(
+    adj: &Vec<Vec<usize>>,
+    max_colors: usize,
+    height_opt: Option<usize>,
+) -> (Vec<usize>, usize) {
+    let n = adj.len();
+    let mut solver = Solver::new();
+    let mut vars: Vec<Vec<Var>> = Vec::with_capacity(n);
+    for _ in 0..n {
+        vars.push(Vec::with_capacity(max_colors));
+    }
+    for v in 0..n {
+        for _ in 0..max_colors {
+            vars[v].push(solver.new_var());
+        }
+    }
+
+    for v in 0..n {
+        for c in (v + 1)..max_colors {
+            solver.add_clause(&[vars[v][c].negative()]);
+        }
+    }
+
+    for v in 0..n {
+        let clause: Vec<_> = vars[v].iter().map(|&var| var.positive()).collect();
+        solver.add_clause(&clause);
+    }
+
+    for v in 0..n {
+        for c1 in 0..max_colors {
+            for c2 in (c1 + 1)..max_colors {
+                solver.add_clause(&[vars[v][c1].negative(), vars[v][c2].negative()]);
+            }
+        }
+    }
+
+    for u in 0..n {
+        for &v in &adj[u] {
+            if v > u {
+                for c in 0..max_colors {
+                    solver.add_clause(&[vars[u][c].negative(), vars[v][c].negative()]);
+                }
+            }
+        }
+    }
+
+    if n > 0 && max_colors > 0 {
+        solver.add_clause(&[vars[0][0].positive()]);
+    }
+
+    fn solve_k(solver: &mut Solver, vars: &Vec<Vec<Var>>, k: usize) -> Option<Vec<usize>> {
+        let n = vars.len();
+        if n == 0 {
+            return Some(vec![]);
+        }
+        let max_colors = vars[0].len();
+        let mut assumptions = Vec::with_capacity(n * (max_colors - k));
+        for v in 0..n {
+            for c in k..max_colors {
+                assumptions.push(vars[v][c].negative());
+            }
+        }
+        solver.assume(&assumptions);
+        let sat = solver.solve().expect("SAT solver failed");
+        if !sat {
+            return None;
+        }
+        let model = solver.model().expect("SAT model missing");
+        let mut assignment = vec![false; n * max_colors];
+        for lit in model {
+            assignment[lit.index()] = lit.is_positive();
+        }
+        let mut colors = vec![0usize; n];
+        for v in 0..n {
+            let mut assigned = None;
+            for c in 0..k {
+                let var = vars[v][c];
+                if assignment[var.index()] {
+                    assigned = Some(c);
+                    break;
+                }
+            }
+            let color = assigned.expect("SAT model missing vertex color");
+            colors[v] = color;
+        }
+        Some(colors)
+    }
+
+    let mut k = max_colors;
+    let start_k = std::time::Instant::now();
+    if let Some(height) = height_opt {
+        eprintln!("Height {}: SAT attempting k={}", height, k);
+    } else {
+        eprintln!("SAT attempting k={}", k);
+    }
+    let mut best_coloring = solve_k(&mut solver, &vars, k)
+        .expect("SAT solver returned UNSAT at upper bound");
+    let start_k_ms = start_k.elapsed().as_millis();
+    if let Some(height) = height_opt {
+        eprintln!("Height {}: SAT k={}: SAT in {} ms", height, k, start_k_ms);
+    } else {
+        eprintln!("SAT k={}: SAT in {} ms", k, start_k_ms);
+    }
+
+    while k > 1 {
+        let candidate = k - 1;
+        let step_start = std::time::Instant::now();
+        if let Some(height) = height_opt {
+            eprintln!("Height {}: SAT attempting k={}", height, candidate);
+        } else {
+            eprintln!("SAT attempting k={}", candidate);
+        }
+        let sat_colors = solve_k(&mut solver, &vars, candidate);
+        let step_time_ms = step_start.elapsed().as_millis();
+        let step_status = if sat_colors.is_some() { "SAT" } else { "UNSAT" };
+        if let Some(height) = height_opt {
+            eprintln!(
+                "Height {}: SAT k={}: {} in {} ms",
+                height,
+                candidate,
+                step_status,
+                step_time_ms,
+            );
+        } else {
+            eprintln!("SAT k={}: {} in {} ms", candidate, step_status, step_time_ms);
+        }
+        if let Some(colors) = sat_colors {
+            k = candidate;
+            best_coloring = colors;
+        } else {
+            break;
+        }
+    }
+
+    if let Some(height) = height_opt {
+        eprintln!("Height {}: SAT final k={}", height, k);
+    }
+
+    (best_coloring, k)
+}
+
+fn build_cadical_coloring_solver(
+    adj: &Vec<Vec<usize>>,
+    max_colors: usize,
+) -> (CadicalSolver, Vec<Vec<i32>>) {
+    let n = adj.len();
+    let mut solver = CadicalSolver::new();
+    let mut vars: Vec<Vec<i32>> = Vec::with_capacity(n);
+    let mut next_var: i32 = 1;
+    for _ in 0..n {
+        let mut row = Vec::with_capacity(max_colors);
+        for _ in 0..max_colors {
+            row.push(next_var);
+            next_var += 1;
+        }
+        vars.push(row);
+    }
+
+    for v in 0..n {
+        for c in (v + 1)..max_colors {
+            solver.add_clause([-vars[v][c]]);
+        }
+    }
+
+    for v in 0..n {
+        solver.add_clause(vars[v].iter().copied());
+    }
+
+    for v in 0..n {
+        for c1 in 0..max_colors {
+            for c2 in (c1 + 1)..max_colors {
+                solver.add_clause([-vars[v][c1], -vars[v][c2]]);
+            }
+        }
+    }
+
+    for u in 0..n {
+        for &v in &adj[u] {
+            if v > u {
+                for c in 0..max_colors {
+                    solver.add_clause([-vars[u][c], -vars[v][c]]);
+                }
+            }
+        }
+    }
+
+    if n > 0 && max_colors > 0 {
+        solver.add_clause([vars[0][0]]);
+    }
+
+    (solver, vars)
+}
+
+fn extract_cadical_coloring(
+    solver: &CadicalSolver,
+    vars: &Vec<Vec<i32>>,
+    k: usize,
+) -> Vec<usize> {
+    let n = vars.len();
+    let mut colors = vec![0usize; n];
+    for v in 0..n {
+        let mut assigned = None;
+        for c in 0..k {
+            if solver.value(vars[v][c]).unwrap_or(false) {
+                assigned = Some(c);
+                break;
+            }
+        }
+        let color = assigned.expect("CaDiCaL model missing vertex color");
+        colors[v] = color;
+    }
+    colors
+}
+
+fn sat_color_cadical(
+    solver: &mut CadicalSolver,
+    vars: &Vec<Vec<i32>>,
+    k: usize,
+) -> Option<Vec<usize>> {
+    let n = vars.len();
+    if n == 0 {
+        return Some(vec![]);
+    }
+    let max_colors = vars[0].len();
+    let mut assumptions = Vec::with_capacity(n * (max_colors - k));
+    for v in 0..n {
+        for c in k..max_colors {
+            assumptions.push(-vars[v][c]);
+        }
+    }
+    let sat = solver
+        .solve_with(assumptions.iter().copied())
+        .expect("CaDiCaL solver failed");
+    if !sat {
+        return None;
+    }
+    Some(extract_cadical_coloring(solver, vars, k))
+}
+
+fn solve_sat_exact_cadical(
+    adj: &Vec<Vec<usize>>,
+    max_colors: usize,
+    height_opt: Option<usize>,
+) -> (Vec<usize>, usize) {
+    let (mut solver, vars) = build_cadical_coloring_solver(adj, max_colors);
+
+    let mut k = max_colors;
+    let start_k = std::time::Instant::now();
+    if let Some(height) = height_opt {
+        eprintln!("Height {}: SAT attempting k={}", height, k);
+    } else {
+        eprintln!("SAT attempting k={}", k);
+    }
+    let mut best_coloring = sat_color_cadical(&mut solver, &vars, k)
+        .expect("CaDiCaL solver returned UNSAT at upper bound");
+    let start_k_ms = start_k.elapsed().as_millis();
+    if let Some(height) = height_opt {
+        eprintln!("Height {}: SAT k={}: SAT in {} ms", height, k, start_k_ms);
+    } else {
+        eprintln!("SAT k={}: SAT in {} ms", k, start_k_ms);
+    }
+
+    while k > 1 {
+        let candidate = k - 1;
+        let step_start = std::time::Instant::now();
+        if let Some(height) = height_opt {
+            eprintln!("Height {}: SAT attempting k={}", height, candidate);
+        } else {
+            eprintln!("SAT attempting k={}", candidate);
+        }
+        let sat_colors = sat_color_cadical(&mut solver, &vars, candidate);
+        let step_time_ms = step_start.elapsed().as_millis();
+        let step_status = if sat_colors.is_some() { "SAT" } else { "UNSAT" };
+        if let Some(height) = height_opt {
+            eprintln!(
+                "Height {}: SAT k={}: {} in {} ms",
+                height,
+                candidate,
+                step_status,
+                step_time_ms,
+            );
+        } else {
+            eprintln!("SAT k={}: {} in {} ms", candidate, step_status, step_time_ms);
+        }
+        if let Some(colors) = sat_colors {
+            k = candidate;
+            best_coloring = colors;
+        } else {
+            break;
+        }
+    }
+
+    if let Some(height) = height_opt {
+        eprintln!("Height {}: SAT final k={}", height, k);
+    }
+
+    (best_coloring, k)
+}
+
 /// Exact graph coloring solver using DSATUR branch-and-bound.
 pub fn solve_exact_graph_coloring_dsatur(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     let n = adj.len();
     if n == 0 {
         return vec![];
     }
+
+    eprintln!("DSATUR exact: graph nodes={}", n);
 
     let degrees: Vec<usize> = adj.iter().map(|v| v.len()).collect();
 
@@ -758,7 +1029,22 @@ pub fn solve_exact_graph_coloring_dsatur(adj: &Vec<Vec<usize>>) -> Vec<usize> {
         colored_count: usize,
         best_num: &mut usize,
         best_colors: &mut Vec<usize>,
+        visit_count: &mut u64,
     ) {
+        *visit_count += 1;
+        if *visit_count % 10_000 == 0 {
+            let lb = num_used_colors;
+            let ub = *best_num;
+            eprintln!(
+                "DSATUR exact: visits={} colored={}/{} lb={} ub={}",
+                *visit_count,
+                colored_count,
+                colors.len(),
+                lb,
+                ub,
+            );
+        }
+
         if colored_count == colors.len() {
             if num_used_colors < *best_num {
                 *best_num = num_used_colors;
@@ -801,6 +1087,7 @@ pub fn solve_exact_graph_coloring_dsatur(adj: &Vec<Vec<usize>>) -> Vec<usize> {
                 colored_count + 1,
                 best_num,
                 best_colors,
+                visit_count,
             );
 
             for v in changed_neighbors {
@@ -837,6 +1124,7 @@ pub fn solve_exact_graph_coloring_dsatur(adj: &Vec<Vec<usize>>) -> Vec<usize> {
                 colored_count + 1,
                 best_num,
                 best_colors,
+                visit_count,
             );
 
             for v in changed_neighbors {
@@ -849,6 +1137,7 @@ pub fn solve_exact_graph_coloring_dsatur(adj: &Vec<Vec<usize>>) -> Vec<usize> {
         }
     }
 
+    let mut visit_count: u64 = 0;
     dfs(
         adj,
         &degrees,
@@ -859,6 +1148,7 @@ pub fn solve_exact_graph_coloring_dsatur(adj: &Vec<Vec<usize>>) -> Vec<usize> {
         0,
         &mut best_num,
         &mut best_colors,
+        &mut visit_count,
     );
 
     best_colors

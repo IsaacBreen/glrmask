@@ -134,6 +134,19 @@ impl DWA {
         }
     }
 
+    #[time_it("DWA::minimize_states_cadical")]
+    pub fn minimize_states_cadical(&mut self) -> bool {
+        let is_cyc = self.is_cyclic();
+        let before = self.states.len();
+        crate::debug!(4, "minimize_states_cadical: is_cyclic={}, {} states before", is_cyc, before);
+        if is_cyc {
+            self.minimize_states_cyclic()
+        } else {
+            self.minimize_acyclic_cadical();
+            self.states.len() != before
+        }
+    }
+
     #[time_it("DWA::minimize_states_dsatur")]
     pub fn minimize_states_dsatur(&mut self) -> bool {
         let is_cyc = self.is_cyclic();
@@ -156,6 +169,19 @@ impl DWA {
             self.minimize_states_cyclic()
         } else {
             self.minimize_acyclic_colpack();
+            self.states.len() != before
+        }
+    }
+
+    #[time_it("DWA::minimize_states_colpack_verified")]
+    pub fn minimize_states_colpack_verified(&mut self) -> bool {
+        let is_cyc = self.is_cyclic();
+        let before = self.states.len();
+        crate::debug!(4, "minimize_states_colpack_verified: is_cyclic={}, {} states before", is_cyc, before);
+        if is_cyc {
+            self.minimize_states_cyclic()
+        } else {
+            self.minimize_acyclic_colpack_verified();
             self.states.len() != before
         }
     }
