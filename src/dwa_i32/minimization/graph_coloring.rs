@@ -5,8 +5,10 @@
 //! viewed as a graph coloring problem: states are nodes, incompatible states have edges,
 //! and the goal is to find the minimum number of colors (merged states).
 
-use std::collections::BTreeSet;
 use std::cell::Cell;
+use std::collections::BTreeSet;
+
+use varisat::{ExtendFormula, Solver, Var};
 
 thread_local! {
     static CURRENT_HEIGHT: Cell<Option<usize>> = Cell::new(None);
@@ -61,116 +63,12 @@ pub fn solve_greedy_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     colors
 }
 
-fn has_clique_of_size(adj: &Vec<Vec<usize>>, target: usize) -> bool {
-    let n = adj.len();
-    if target <= 1 {
-        return n > 0;
-    }
-    if n == 0 {
-        return false;
-    }
-
-    let words = (n + 63) / 64;
-    let mut adj_bits = vec![vec![0u64; words]; n];
-    for u in 0..n {
-        for &v in &adj[u] {
-            let word = v / 64;
-            let bit = v % 64;
-            adj_bits[u][word] |= 1u64 << bit;
-        }
-    }
-
-    fn popcount(set: &[u64]) -> usize {
-        set.iter().map(|w| w.count_ones() as usize).sum()
-    }
-
-    fn intersect(a: &[u64], b: &[u64]) -> Vec<u64> {
-        a.iter().zip(b.iter()).map(|(x, y)| x & y).collect()
-    }
-
-    fn difference(a: &[u64], b: &[u64]) -> Vec<u64> {
-        a.iter().zip(b.iter()).map(|(x, y)| x & !y).collect()
-    }
-
-    fn clear_bit(set: &mut [u64], idx: usize) {
-        let word = idx / 64;
-        let bit = idx % 64;
-        set[word] &= !(1u64 << bit);
-    }
-
-    fn iter_bits(set: &[u64]) -> Vec<usize> {
-        let mut indices = Vec::new();
-        for (word_idx, &word) in set.iter().enumerate() {
-            let mut w = word;
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                indices.push(word_idx * 64 + bit);
-                w &= w - 1;
-            }
-        }
-        indices
-    }
-
-    fn intersection_count(a: &[u64], b: &[u64]) -> usize {
-        a.iter().zip(b.iter()).map(|(x, y)| (x & y).count_ones() as usize).sum()
-    }
-
-    fn search(
-        size: usize,
-        mut p: Vec<u64>,
-        adj_bits: &Vec<Vec<u64>>,
-        target: usize,
-    ) -> bool {
-        if size >= target {
-            return true;
-        }
-
-        if size + popcount(&p) < target {
-            return false;
-        }
-
-        let mut pivot = None;
-        let mut pivot_deg = 0usize;
-        for v in iter_bits(&p) {
-            let deg = intersection_count(&adj_bits[v], &p);
-            if deg > pivot_deg {
-                pivot_deg = deg;
-                pivot = Some(v);
-            }
-        }
-        let pivot = pivot.unwrap_or_else(|| iter_bits(&p).first().copied().unwrap_or(0));
-        let mut candidates = difference(&p, &adj_bits[pivot]);
-
-        for v in iter_bits(&candidates) {
-            let new_p = intersect(&p, &adj_bits[v]);
-            if search(size + 1, new_p, adj_bits, target) {
-                return true;
-            }
-            clear_bit(&mut p, v);
-            clear_bit(&mut candidates, v);
-
-            if size + popcount(&p) < target {
-                return false;
-            }
-        }
-        false
-    }
-
-    let mut all = vec![!0u64; words];
-    let extra_bits = n % 64;
-    if extra_bits != 0 {
-        all[words - 1] &= (1u64 << extra_bits) - 1;
-    }
-
-    search(0, all, &adj_bits, target)
-}
-
 /// Exact graph coloring solver - finds the OPTIMAL (minimum) number of colors.
 pub fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     solve_exact_graph_coloring_with_stats(adj).0
 }
 
-/// Exact graph coloring solver with stats (greedy upper bound + clique check).
+/// Exact graph coloring solver with stats (greedy upper bound + DSATUR search).
 ///
 /// **CRITICAL**: This function MUST be exact. Do NOT add fallbacks to greedy
 /// algorithms or heuristics. If performance is a concern, use solve_greedy_coloring()
@@ -189,10 +87,10 @@ pub fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
 /// * `adj` - Adjacency list representation of the incompatibility graph.
 ///
 /// # Returns
-/// Returns (colors, greedy_upper_bound, clique_found).
-pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usize>, usize, bool) {
+/// Returns (colors, greedy_upper_bound).
+pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usize>, usize) {
     let n = adj.len();
-    if n == 0 { return (vec![], 0, true); }
+    if n == 0 { return (vec![], 0); }
 
     let height_opt = CURRENT_HEIGHT.with(|h| h.get());
     if let Some(height) = height_opt {
@@ -311,6 +209,79 @@ pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usiz
         colors
     }
 
+    fn has_clique_of_size_bounded(
+        adj: &Vec<Vec<usize>>,
+        target: usize,
+        time_limit: std::time::Duration,
+    ) -> bool {
+        let n = adj.len();
+        if target <= 1 {
+            return n >= target;
+        }
+        if target > n {
+            return false;
+        }
+
+        let start = std::time::Instant::now();
+        let mut adj_matrix = vec![vec![false; n]; n];
+        for u in 0..n {
+            for &v in &adj[u] {
+                adj_matrix[u][v] = true;
+            }
+        }
+
+        let mut vertices: Vec<usize> = (0..n).collect();
+        vertices.sort_by_key(|&v| std::cmp::Reverse(adj[v].len()));
+
+        fn dfs(
+            clique: &mut Vec<usize>,
+            candidates: &[usize],
+            target: usize,
+            adj: &Vec<Vec<bool>>,
+            start: std::time::Instant,
+            time_limit: std::time::Duration,
+        ) -> bool {
+            if start.elapsed() >= time_limit {
+                return false;
+            }
+            if clique.len() == target {
+                return true;
+            }
+            if clique.len() + candidates.len() < target {
+                return false;
+            }
+
+            for (idx, &v) in candidates.iter().enumerate() {
+                if start.elapsed() >= time_limit {
+                    return false;
+                }
+                let mut next_candidates = Vec::new();
+                for &u in candidates.iter().skip(idx + 1) {
+                    if adj[v][u] {
+                        next_candidates.push(u);
+                    }
+                }
+                clique.push(v);
+                if dfs(clique, &next_candidates, target, adj, start, time_limit) {
+                    return true;
+                }
+                clique.pop();
+            }
+
+            false
+        }
+
+        let mut clique = Vec::with_capacity(target);
+        dfs(
+            &mut clique,
+            &vertices,
+            target,
+            &adj_matrix,
+            start,
+            time_limit,
+        )
+    }
+
     // Upper bound from greedy colorings (degree-ordered and DSATUR-ordered)
     let greedy_start = std::time::Instant::now();
     if let Some(height) = height_opt {
@@ -343,47 +314,13 @@ pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usiz
         );
     }
 
-    // Exact lower bound from maximum clique size
-        // Exact early-exit: if a clique of size == upper bound exists, greedy is optimal
-        let max_clique_ub = std::env::var("DWA_MAX_CLIQUE_UB")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(25);
-        let mut clique_checked = false;
-        let mut clique_found = false;
-        let mut clique_time = std::time::Duration::ZERO;
-        if best_num <= max_clique_ub {
-            clique_checked = true;
-            if let Some(height) = height_opt {
-                eprintln!("Height {}: starting clique check", height);
-            }
-            let clique_start = std::time::Instant::now();
-            clique_found = has_clique_of_size(adj, best_num);
-            clique_time = clique_start.elapsed();
-            if let Some(height) = height_opt {
-                eprintln!(
-                    "Height {}: clique check done in {:?}, found={}",
-                    height,
-                    clique_time,
-                    clique_found,
-                );
-            }
-        } else if let Some(height) = height_opt {
-            eprintln!(
-                "Height {}: skipping clique check (greedy_ub {} > max_clique_ub {})",
-                height,
-                best_num,
-                max_clique_ub,
-            );
-        }
     if std::env::var("DWA_TRACE_HEIGHTS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
     {
         eprintln!(
-                "TRACE: exact bounds nodes={} clique_found={} greedy_ub={} dsatur_ub={} smallest_last_ub={}",
+            "TRACE: exact bounds nodes={} greedy_ub={} dsatur_ub={} smallest_last_ub={}",
             n,
-                clique_found,
             greedy_num,
             dsatur_num,
             smallest_last_num,
@@ -392,157 +329,194 @@ pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usiz
     if let Some(height) = height_opt {
         let edge_count = adj.iter().map(|v| v.len()).sum::<usize>() / 2;
         eprintln!(
-            "Height {}: nodes={}, edges={}, greedy_ub={}, clique_found={}",
+            "Height {}: nodes={}, edges={}, greedy_ub={}",
             height,
             n,
             edge_count,
             best_num,
-            clique_found,
         );
-        if clique_checked {
-            eprintln!(
-                "Height {}: clique check took {:?}, found={}",
-                height,
-                clique_time,
-                clique_found,
-            );
-        }
-    }
-        if clique_found {
-        let elapsed = start.elapsed();
-        if elapsed.as_millis() > 10 {
-            crate::debug!(5, "Exact graph coloring: {} nodes → {} colors in {:?} (clique-bound)",
-                n, best_num, elapsed);
-        }
-            return (best_coloring, best_num, true);
     }
 
-        let dsatur_start = std::time::Instant::now();
-        if let Some(height) = height_opt {
-            eprintln!("Height {}: entering DSATUR solver", height);
-        }
-
-    let mut colors = vec![usize::MAX; n];
-    let mut saturation = vec![0usize; n];
-    let mut neighbor_color_counts = vec![vec![0u32; best_num.max(1)]; n];
-
-    fn assign_color(
-        u: usize,
-        color: usize,
-        adj: &Vec<Vec<usize>>,
-        colors: &mut Vec<usize>,
-        saturation: &mut Vec<usize>,
-        neighbor_color_counts: &mut Vec<Vec<u32>>,
-    ) {
-        colors[u] = color;
-        for &v in &adj[u] {
-            let counts = &mut neighbor_color_counts[v][color];
-            *counts += 1;
-            if *counts == 1 {
-                saturation[v] += 1;
-            }
-        }
+    if best_num <= 1 {
+        return (best_coloring, best_num);
     }
 
-    fn unassign_color(
-        u: usize,
-        color: usize,
-        adj: &Vec<Vec<usize>>,
-        colors: &mut Vec<usize>,
-        saturation: &mut Vec<usize>,
-        neighbor_color_counts: &mut Vec<Vec<u32>>,
-    ) {
-        for &v in &adj[u] {
-            let counts = &mut neighbor_color_counts[v][color];
-            *counts -= 1;
-            if *counts == 0 {
-                saturation[v] -= 1;
-            }
-        }
-        colors[u] = usize::MAX;
-    }
-
-    fn dsatur_search(
-        colored_count: usize,
-        num_colors_used: usize,
-        adj: &Vec<Vec<usize>>,
-        degrees: &[usize],
-        colors: &mut Vec<usize>,
-        saturation: &mut Vec<usize>,
-        neighbor_color_counts: &mut Vec<Vec<u32>>,
-        best_num: &mut usize,
-        best_coloring: &mut Vec<usize>,
-    ) {
-        if colored_count == colors.len() {
-            if num_colors_used < *best_num {
-                *best_num = num_colors_used;
-                *best_coloring = colors.clone();
-            }
-            return;
-        }
-
-        if num_colors_used >= *best_num {
-            return;
-        }
-
-        let Some(u) = select_vertex(colors, saturation, degrees) else { return; };
-
-        // Try existing colors first
-        for c in 0..num_colors_used {
-            if neighbor_color_counts[u][c] == 0 {
-                assign_color(u, c, adj, colors, saturation, neighbor_color_counts);
-                dsatur_search(
-                    colored_count + 1,
-                    num_colors_used,
-                    adj,
-                    degrees,
-                    colors,
-                    saturation,
-                    neighbor_color_counts,
-                    best_num,
-                    best_coloring,
-                );
-                unassign_color(u, c, adj, colors, saturation, neighbor_color_counts);
-            }
-        }
-
-        // Try a new color if it could still beat the best
-        if num_colors_used + 1 < *best_num {
-            let new_color = num_colors_used;
-            assign_color(u, new_color, adj, colors, saturation, neighbor_color_counts);
-            dsatur_search(
-                colored_count + 1,
-                num_colors_used + 1,
-                adj,
-                degrees,
-                colors,
-                saturation,
-                neighbor_color_counts,
-                best_num,
-                best_coloring,
-            );
-            unassign_color(u, new_color, adj, colors, saturation, neighbor_color_counts);
-        }
-    }
-
-    dsatur_search(
-        0,
-        0,
-        adj,
-        &degrees,
-        &mut colors,
-        &mut saturation,
-        &mut neighbor_color_counts,
-        &mut best_num,
-        &mut best_coloring,
-    );
-
-    let dsatur_time = dsatur_start.elapsed();
+    let clique_timeout_ms = std::env::var("DWA_CLIQUE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5000);
+    let clique_start = std::time::Instant::now();
     if let Some(height) = height_opt {
         eprintln!(
-            "Height {}: DSATUR done in {:?}, colors={}",
+            "Height {}: clique check start target={} budget={}ms",
             height,
-            dsatur_time,
+            best_num,
+            clique_timeout_ms,
+        );
+    }
+    let found_clique = has_clique_of_size_bounded(
+        adj,
+        best_num,
+        std::time::Duration::from_millis(clique_timeout_ms),
+    );
+    if let Some(height) = height_opt {
+        eprintln!(
+            "Height {}: clique check {} in {:?}",
+            height,
+            if found_clique { "found" } else { "not found" },
+            clique_start.elapsed(),
+        );
+    }
+    if found_clique {
+        return (best_coloring, best_num);
+    }
+
+    fn solve_sat_exact(
+        adj: &Vec<Vec<usize>>,
+        max_colors: usize,
+        height_opt: Option<usize>,
+    ) -> (Vec<usize>, usize) {
+        let n = adj.len();
+        let mut solver = Solver::new();
+        let mut vars: Vec<Vec<Var>> = Vec::with_capacity(n);
+        for _ in 0..n {
+            vars.push(Vec::with_capacity(max_colors));
+        }
+        for v in 0..n {
+            for _ in 0..max_colors {
+                vars[v].push(solver.new_var());
+            }
+        }
+
+        for v in 0..n {
+            for c in (v + 1)..max_colors {
+                solver.add_clause(&[vars[v][c].negative()]);
+            }
+        }
+
+        for v in 0..n {
+            let clause: Vec<_> = vars[v].iter().map(|&var| var.positive()).collect();
+            solver.add_clause(&clause);
+        }
+
+        for v in 0..n {
+            for c1 in 0..max_colors {
+                for c2 in (c1 + 1)..max_colors {
+                    solver.add_clause(&[vars[v][c1].negative(), vars[v][c2].negative()]);
+                }
+            }
+        }
+
+        for u in 0..n {
+            for &v in &adj[u] {
+                if v > u {
+                    for c in 0..max_colors {
+                        solver.add_clause(&[vars[u][c].negative(), vars[v][c].negative()]);
+                    }
+                }
+            }
+        }
+
+        if n > 0 && max_colors > 0 {
+            solver.add_clause(&[vars[0][0].positive()]);
+        }
+
+        fn solve_k(solver: &mut Solver, vars: &Vec<Vec<Var>>, k: usize) -> Option<Vec<usize>> {
+            let n = vars.len();
+            if n == 0 {
+                return Some(vec![]);
+            }
+            let max_colors = vars[0].len();
+            let mut assumptions = Vec::with_capacity(n * (max_colors - k));
+            for v in 0..n {
+                for c in k..max_colors {
+                    assumptions.push(vars[v][c].negative());
+                }
+            }
+            solver.assume(&assumptions);
+            let sat = solver.solve().expect("SAT solver failed");
+            if !sat {
+                return None;
+            }
+            let model = solver.model().expect("SAT model missing");
+            let mut assignment = vec![false; n * max_colors];
+            for lit in model {
+                assignment[lit.index()] = lit.is_positive();
+            }
+            let mut colors = vec![0usize; n];
+            for v in 0..n {
+                let mut assigned = None;
+                for c in 0..k {
+                    let var = vars[v][c];
+                    if assignment[var.index()] {
+                        assigned = Some(c);
+                        break;
+                    }
+                }
+                let color = assigned.expect("SAT model missing vertex color");
+                colors[v] = color;
+            }
+            Some(colors)
+        }
+
+        let mut k = max_colors;
+        let start_k = std::time::Instant::now();
+        let mut best_coloring = solve_k(&mut solver, &vars, k)
+            .expect("SAT solver returned UNSAT at upper bound");
+        if let Some(height) = height_opt {
+            eprintln!(
+                "Height {}: SAT check k={} SAT in {:?}",
+                height,
+                k,
+                start_k.elapsed(),
+            );
+        }
+
+        while k > 1 {
+            let candidate = k - 1;
+            let step_start = std::time::Instant::now();
+            let sat_colors = solve_k(&mut solver, &vars, candidate);
+            let step_time = step_start.elapsed();
+            if let Some(height) = height_opt {
+                eprintln!(
+                    "Height {}: SAT check k={} {} in {:?}",
+                    height,
+                    candidate,
+                    if sat_colors.is_some() { "SAT" } else { "UNSAT" },
+                    step_time,
+                );
+            }
+            if let Some(colors) = sat_colors {
+                k = candidate;
+                best_coloring = colors;
+            } else {
+                break;
+            }
+        }
+
+        if let Some(height) = height_opt {
+            eprintln!("Height {}: SAT final k={}", height, k);
+        }
+
+        (best_coloring, k)
+    }
+
+    let sat_start = std::time::Instant::now();
+    if let Some(height) = height_opt {
+        eprintln!(
+            "Height {}: entering SAT solver (upper_bound={})",
+            height,
+            best_num,
+        );
+    }
+
+    let (best_coloring, best_num) = solve_sat_exact(adj, best_num, height_opt);
+
+    if let Some(height) = height_opt {
+        eprintln!(
+            "Height {}: SAT solver done in {:?}, colors={}",
+            height,
+            sat_start.elapsed(),
             best_num,
         );
     }
@@ -553,7 +527,7 @@ pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usiz
             n, best_num, elapsed);
     }
 
-    (best_coloring, best_num, false)
+    (best_coloring, best_num)
 }
 
 #[cfg(test)]
