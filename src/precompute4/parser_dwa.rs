@@ -1047,22 +1047,31 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
         // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
         let specialize_start = Instant::now();
-        let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = timeit!(
+        let results: Vec<(Signature, NWA, DWAStats, DWAStats, std::time::Duration, std::time::Duration, std::time::Duration, std::time::Duration)> = timeit!(
             "parser_dwa::specialize_dw_as",
             {
                 let start_specialize = std::time::Instant::now();
-                let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = all_mappings
+                let results: Vec<(Signature, NWA, DWAStats, DWAStats, std::time::Duration, std::time::Duration, std::time::Duration, std::time::Duration)> = all_mappings
                     .par_iter()
                     .map_init(
                         move || {
                             tls_snapshot.apply();
                         },
                         |_, (target_sig, _mapping, weight_map)| {
+                    let specialize_dwa_start = Instant::now();
+                    let remap_start = Instant::now();
                     let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
+                    let remap_elapsed = remap_start.elapsed();
                     let before_stats = derived_dwa.stats();
+                    let optimize_start = Instant::now();
                     derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
+                    let optimize_elapsed = optimize_start.elapsed();
                     let after_stats = derived_dwa.stats();
-                    (target_sig.clone(), NWA::from_dwa(&derived_dwa), before_stats, after_stats)
+                    let nwa_start = Instant::now();
+                    let nwa = NWA::from_dwa(&derived_dwa);
+                    let nwa_elapsed = nwa_start.elapsed();
+                    let specialize_dwa_elapsed = specialize_dwa_start.elapsed();
+                    (target_sig.clone(), nwa, before_stats, after_stats, specialize_dwa_elapsed, remap_elapsed, optimize_elapsed, nwa_elapsed)
                 })
                     .collect();
                 let mut before_total_stats = DWAStats {
@@ -1094,7 +1103,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         *total.transition_multiplicity_hist.entry(*k).or_insert(0) += v;
                     }
                 };
-                for (_, _, before_stats, after_stats) in &results {
+                for (_, _, before_stats, after_stats, _, _, _, _) in &results {
                     accumulate_stats(&mut before_total_stats, before_stats);
                     accumulate_stats(&mut after_total_stats, after_stats);
                     let state_delta = before_stats.states.saturating_sub(after_stats.states);
@@ -1126,15 +1135,15 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     max_state_delta,
                     max_transition_delta,
                 );
-                for (idx, (_, _, before_stats, after_stats)) in results.iter().enumerate() {
-                    crate::debug!(6, "  Specialized DWA #{}: before={}, after={}", idx, before_stats, after_stats);
+                for (idx, (_, _, before_stats, after_stats, specialize_dwa_elapsed, remap_elapsed, optimize_elapsed, nwa_elapsed)) in results.iter().enumerate() {
+                    crate::debug!(6, "  Specialized DWA #{}: time={:?} (remap={:?}, optimize={:?}, nwa={:?}), before={}, after={}", idx, specialize_dwa_elapsed, remap_elapsed, optimize_elapsed, nwa_elapsed, before_stats, after_stats);
                 }
                 results
             }
         );
         eprintln!("TIMING: parser_dwa::specialize_dw_as {:?}", specialize_start.elapsed());
 
-        for (sig, nwa, _, _) in results {
+        for (sig, nwa, _, _, _, _, _, _) in results {
             template_cache.borrow_mut().insert(sig, Arc::new(nwa));
         }
 
