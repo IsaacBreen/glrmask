@@ -344,7 +344,7 @@ pub fn solve_exact_graph_coloring_with_stats(adj: &Vec<Vec<usize>>) -> (Vec<usiz
     let clique_timeout_ms = std::env::var("DWA_CLIQUE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(5000);
+        .unwrap_or(30000);
     let clique_start = std::time::Instant::now();
     if let Some(height) = height_opt {
         eprintln!(

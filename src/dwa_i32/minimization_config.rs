@@ -286,9 +286,10 @@ impl NWA {
 
                 DeterminizeAndMinimizeConfig {
                     nwa_passes,
+                    // NOTE: ExactMinimize is intentionally disabled by default due to
+                    // flakiness/performance (SAT UNSAT timeouts on some graphs).
                     dwa_passes: vec![
                         DwaPass::FastMinimize,
-                        DwaPass::ExactMinimize,
                         DwaPass::ConsolidateRanges,
                         DwaPass::TrimWeights,
                     ],
@@ -310,6 +311,8 @@ impl NWA {
                 // Full minimization here pays off because the smaller Super means
                 // smaller specialized DWAs and smaller combined NWA.
                 nwa_passes: vec![NwaPass::CompressTransitions, NwaPass::Minimize],
+                // NOTE: ExactMinimize is intentionally disabled by default due to
+                // flakiness/performance (SAT UNSAT timeouts on some graphs).
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::FastMinimize],
                 use_rustfst_determinize: false,
             },
