@@ -4,7 +4,11 @@ mod partition_minimize;
 use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use crate::dwa_i32::minimization::common::DwaPass;
-use crate::dwa_i32::minimization::graph_coloring::{solve_exact_graph_coloring, solve_greedy_coloring};
+use crate::dwa_i32::minimization::graph_coloring::{
+    set_exact_coloring_height,
+    solve_exact_graph_coloring,
+    solve_greedy_coloring,
+};
 use crate::datastructures::RangeMapWeight;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
@@ -549,6 +553,13 @@ fn compute_height_coloring(
     let force_graph_coloring = std::env::var("DWA_FORCE_GRAPH_COLORING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let trace_heights = std::env::var("DWA_TRACE_HEIGHTS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if trace_heights {
+        eprintln!("TRACE: height {} start candidates={}", height, candidates.len());
+    }
 
     // Log diagnostic info for large candidate sets
     if candidates.len() >= 100 {
@@ -641,10 +652,29 @@ fn compute_height_coloring(
 
     // Build full incompatibility graph
     let graph_start = std::time::Instant::now();
+    eprintln!(
+        "Height {}: graph construction start candidates={}",
+        height,
+        candidates.len()
+    );
+    if trace_heights {
+        eprintln!("TRACE: height {} building incompatibility graph", height);
+    }
     let adj = timeit!("coloring::build_incompatibility_graph", {
         build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states)
     });
     let graph_time = graph_start.elapsed();
+    let edge_count = adj.iter().map(|v| v.len()).sum::<usize>() / 2;
+    eprintln!(
+        "Height {}: graph constructed in {:?} (nodes={}, edges={})",
+        height,
+        graph_time,
+        adj.len(),
+        edge_count
+    );
+    if trace_heights {
+        eprintln!("TRACE: height {} graph nodes={} edges={}", height, adj.len(), edge_count);
+    }
     
     let graph_total = start.elapsed();
     
@@ -657,7 +687,12 @@ fn compute_height_coloring(
     
     // Solve coloring: exact graph coloring
     let color_start = std::time::Instant::now();
+    set_exact_coloring_height(Some(height));
     let colors = solve_exact_graph_coloring(&adj);
+    set_exact_coloring_height(None);
+    if trace_heights {
+        eprintln!("TRACE: height {} coloring done", height);
+    }
     let color_time = color_start.elapsed();
     
     let total_time = start.elapsed();
@@ -1826,6 +1861,22 @@ fn build_incompatibility_graph_general(
     });
 
     let num_groups = groups.len();
+
+    let needed_bounds: Vec<Option<(usize, usize)>> = timeit!(
+        "coloring::build_incompatibility_graph::needed_bounds",
+        {
+            candidates
+                .iter()
+                .map(|&id| {
+                    let w = &needed[id];
+                    match (w.min_item(), w.max_item()) {
+                        (Some(min), Some(max)) => Some((min, max)),
+                        _ => None,
+                    }
+                })
+                .collect()
+        }
+    );
     
     // Build incompatibility graph
     let mut adj = vec![vec![]; n];
@@ -1839,6 +1890,17 @@ fn build_incompatibility_graph_general(
             for j in (i + 1)..groups.len() {
                 for &idx_i in &groups[i] {
                     for &idx_j in &groups[j] {
+                        match (needed_bounds[idx_i], needed_bounds[idx_j]) {
+                            (Some((min_i, max_i)), Some((min_j, max_j))) => {
+                                if max_i < min_j || max_j < min_i {
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                // At least one domain is empty -> disjoint overlap
+                                continue;
+                            }
+                        }
                         compare_count += 1;
                         let cmp_start = std::time::Instant::now();
                         let compatible = are_compatible(

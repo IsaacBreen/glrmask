@@ -286,7 +286,12 @@ impl NWA {
 
                 DeterminizeAndMinimizeConfig {
                     nwa_passes,
-                    dwa_passes: vec![DwaPass::FastMinimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                    dwa_passes: vec![
+                        DwaPass::FastMinimize,
+                        DwaPass::ExactMinimize,
+                        DwaPass::ConsolidateRanges,
+                        DwaPass::TrimWeights,
+                    ],
                     use_rustfst_determinize: false,
                 }
             },
