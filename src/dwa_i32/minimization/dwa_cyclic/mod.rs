@@ -68,7 +68,8 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals_cyclic(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial_cyclic(),
                     DwaPass::ResidualPush => self.residuated_push_cyclic(),
-                    DwaPass::Minimize => false,
+                    DwaPass::ExactMinimize => false,
+                    DwaPass::RustfstMinimize => false,
                     DwaPass::ConsolidateRanges => self.consolidate_ranges(),
                     DwaPass::TrimWeights => self.trim_weights(),
                 };
@@ -134,7 +135,7 @@ impl DWA {
             DwaPass::PushWeightsToInitial,
             DwaPass::ResidualPush,
             DwaPass::PruneDeadEnds,
-            DwaPass::Minimize,
+            DwaPass::ExactMinimize,
             DwaPass::ConsolidateRanges,
         ];
 
@@ -164,7 +165,7 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals_cyclic(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial_cyclic(),
                     DwaPass::ResidualPush => self.residuated_push_cyclic(),
-                    DwaPass::Minimize => {
+                    DwaPass::ExactMinimize => {
                         self.loosen_weights_for_minimize_cyclic();
                         let changed = self.minimize_states_cyclic();
                         if changed && initial_num_states > 1000 {
@@ -172,6 +173,7 @@ impl DWA {
                         }
                         changed
                     },
+                    DwaPass::RustfstMinimize => self.minimize_with_rustfst_full_cyclic(),
                     DwaPass::ConsolidateRanges => self.consolidate_ranges(),
                     DwaPass::TrimWeights => self.trim_weights(),
                 };

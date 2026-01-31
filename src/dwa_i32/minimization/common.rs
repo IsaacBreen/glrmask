@@ -29,7 +29,8 @@ pub enum DwaPass {
     PushWeights,
     PushWeightsToInitial,
     ResidualPush,
-    Minimize,
+    ExactMinimize,
+    RustfstMinimize,
     ConsolidateRanges,
     TrimWeights,
 }
@@ -42,7 +43,8 @@ impl DwaPass {
             DwaPass::PushWeights => std::env::var("DWA_DISABLE_PUSH_WEIGHTS").map(|v| v != "1").unwrap_or(true),
             DwaPass::PushWeightsToInitial => std::env::var("DWA_DISABLE_PUSH_WEIGHTS_TO_INITIAL").map(|v| v != "1").unwrap_or(true),
             DwaPass::ResidualPush => std::env::var("DWA_DISABLE_RESIDUAL_PUSH").map(|v| v != "1").unwrap_or(true),
-            DwaPass::Minimize => std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v != "1").unwrap_or(true),
+            DwaPass::ExactMinimize => std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v != "1").unwrap_or(true),
+            DwaPass::RustfstMinimize => std::env::var("DWA_DISABLE_RUSTFST_MINIMIZE").map(|v| v != "1").unwrap_or(true),
             // ConsolidateRanges is slow in weight-heavy mode due to large weight domain
             // Disabled by default in weight-heavy mode (num_tsids > 1)
             DwaPass::ConsolidateRanges => {
