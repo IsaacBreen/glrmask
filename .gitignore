@@ -465,3 +465,15 @@ special_stuff/
 
 # Profiling outputs
 profiling_outputs/
+
+# === Benchmark/debug outputs ===
+coloring_graphs/
+*.tsv
+*_test_output.txt
+profiling_*.txt
+benchmark_*.txt
+colors_*.txt
+compare_*.txt
+dwa_*.txt
+third_party/
+temp/

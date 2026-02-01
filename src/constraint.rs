@@ -1231,7 +1231,7 @@ impl GrammarConstraint {
             let before_stats = terminal_dwa.stats();
             let rem_start = std::time::Instant::now();
             let _dwa_type_guard = crate::dwa_i32::minimization::graph_coloring::set_current_dwa_type(
-                Some("terminal"),
+                Some("terminal_post_prune"),
             );
             terminal_dwa.minimize();
             crate::debug!(5, "Terminal DWA re-minimize in {:?}", rem_start.elapsed());

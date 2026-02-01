@@ -1694,6 +1694,9 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     // Use unified determinize_and_minimize with "Parser" profile
     // Pipeline: determinize → prune_dead_ends → minimize
     let det_min_start = std::time::Instant::now();
+    let _dwa_type_guard = crate::dwa_i32::minimization::graph_coloring::set_current_dwa_type(
+        Some("parser"),
+    );
     let dwa = combined_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Parser);
     let det_min_elapsed = det_min_start.elapsed();
     crate::debug!(5, "determinize_and_minimize(Parser) in {:?}", det_min_elapsed);
