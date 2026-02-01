@@ -626,6 +626,252 @@ pub fn prune_dwa_with_suffix_grammar(
     (kept_count, pruned_count)
 }
 
+/// Prune a terminal NWA using the suffix grammar.
+///
+/// This walks the NWA and removes transitions that would lead to invalid
+/// suffix parser states. A transition on terminal T is pruned if, after
+/// feeding T to the suffix parser, the parser has no valid states.
+///
+/// The NWA labels are:
+/// - 0..(terminals_count-1): terminal IDs
+/// - terminals_count..: TSID labels (tokenizer state IDs)
+///
+/// TSID transitions are not pruned (they represent tokenizer state changes,
+/// not grammar terminals). Ignored terminals are also not pruned.
+pub fn prune_nwa_with_suffix_grammar(
+    nwa: &mut crate::dwa_i32::NWA,
+    grammar: &GrammarDefinition,
+    terminal_map: &bimap::BiBTreeMap<Terminal, crate::glr::table::TerminalID>,
+    terminals_count: usize,
+) -> (usize, usize) {
+    use crate::interface::CompiledGrammar;
+    use crate::glr::table::TerminalID;
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::sync::Arc;
+
+    crate::debug!(4, "Starting suffix grammar NWA pruning");
+
+    // Collect ignored terminal IDs - these should not be pruned
+    let ignored_tids: BTreeSet<usize> = grammar
+        .ignore_terminal_ids
+        .iter()
+        .map(|tid| tid.0)
+        .collect();
+    crate::debug!(4, "  Ignored terminal IDs: {:?}", ignored_tids);
+
+    // Build suffix grammar
+    crate::debug!(4, "  Building suffix grammar...");
+    let suffix_grammar = grammar_to_suffix_grammar(grammar);
+    crate::debug!(4, "  Suffix grammar: {} productions", suffix_grammar.productions.len());
+
+    for (i, prod) in suffix_grammar.productions.iter().enumerate() {
+        crate::debug!(6, "    Suffix prod {}: {} -> {:?}", i, prod.lhs.0, prod.rhs);
+    }
+
+    crate::debug!(4, "  Compiling suffix grammar...");
+    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
+    crate::debug!(4, "  Suffix grammar compiled");
+
+    let suffix_parser = suffix_compiled.glr_parser();
+
+    // Build mapping from original terminal IDs to suffix parser terminal IDs
+    let mut orig_to_suffix_tid: BTreeMap<usize, TerminalID> = BTreeMap::new();
+    for (term, orig_tid) in terminal_map.iter() {
+        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
+            orig_to_suffix_tid.insert(orig_tid.0, *suffix_tid);
+        }
+    }
+    crate::debug!(4, "    Terminal mapping: {} of {} terminals mapped", orig_to_suffix_tid.len(), terminal_map.len());
+
+    type ParserStateSet = BTreeSet<crate::glr::table::StateID>;
+    let mut nwa_to_parser_states: BTreeMap<usize, ParserStateSet> = BTreeMap::new();
+
+    let initial_parser_state_id = suffix_parser.start_state_id;
+
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    let mut visited: BTreeSet<usize> = BTreeSet::new();
+    for &start_state in &nwa.body.start_states {
+        nwa_to_parser_states
+            .entry(start_state)
+            .or_default()
+            .insert(initial_parser_state_id);
+        if visited.insert(start_state) {
+            queue.push_back(start_state);
+        }
+    }
+
+    let mut transitions_to_remove: Vec<(usize, crate::dwa_i32::Label)> = Vec::new();
+    let mut pruned_count = 0usize;
+    let mut kept_count = 0usize;
+
+    while let Some(nwa_state) = queue.pop_front() {
+        let parser_states = nwa_to_parser_states
+            .get(&nwa_state)
+            .cloned()
+            .unwrap_or_default();
+        crate::debug!(6, "  BFS: NWA state {} with parser_states {:?}", nwa_state, parser_states);
+
+        let epsilon_dests: Vec<usize> = nwa.states[nwa_state]
+            .epsilons
+            .iter()
+            .map(|(dst, _)| *dst)
+            .collect();
+        for dest_state in epsilon_dests {
+            let dest_states = nwa_to_parser_states.entry(dest_state).or_default();
+            for &ps in &parser_states {
+                dest_states.insert(ps);
+            }
+            if visited.insert(dest_state) {
+                queue.push_back(dest_state);
+            }
+        }
+
+        let transitions: Vec<(crate::dwa_i32::Label, Vec<usize>)> = nwa.states[nwa_state]
+            .transitions
+            .iter()
+            .map(|(&label, targets)| (label, targets.iter().map(|(dst, _)| *dst).collect()))
+            .collect();
+
+        for (label, dest_states_list) in transitions {
+            let label_usize = label as usize;
+            crate::debug!(6, "    Transition: {} --{}--> {:?}", nwa_state, label, dest_states_list);
+
+            if label_usize >= terminals_count {
+                for dest_state in dest_states_list {
+                    let dest_states = nwa_to_parser_states.entry(dest_state).or_default();
+                    for &ps in &parser_states {
+                        dest_states.insert(ps);
+                    }
+                    if visited.insert(dest_state) {
+                        queue.push_back(dest_state);
+                    }
+                    kept_count += 1;
+                }
+                continue;
+            }
+
+            if ignored_tids.contains(&label_usize) {
+                for dest_state in dest_states_list {
+                    let dest_states = nwa_to_parser_states.entry(dest_state).or_default();
+                    for &ps in &parser_states {
+                        dest_states.insert(ps);
+                    }
+                    if visited.insert(dest_state) {
+                        queue.push_back(dest_state);
+                    }
+                    kept_count += 1;
+                }
+                continue;
+            }
+
+            if let Some(&suffix_tid) = orig_to_suffix_tid.get(&label_usize) {
+                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut has_reduce_with_len_gt_0 = false;
+
+                let mut states_to_process: VecDeque<crate::glr::table::StateID> = parser_states.iter().copied().collect();
+                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+
+                while let Some(parser_state_id) = states_to_process.pop_front() {
+                    if !processed_states.insert(parser_state_id) {
+                        continue;
+                    }
+
+                    if let Some(row) = crate::glr::table::get_row(&suffix_parser.table, parser_state_id) {
+                        crate::debug!(6, "        Checking parser state {} for terminal {}", parser_state_id.0, suffix_tid.0);
+                        if let Some(action) = row.get_shifts_and_reduces_for_terminal(&suffix_tid) {
+                            crate::debug!(6, "          Action: {:?}", action);
+                            use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+                            match action {
+                                Stage7ShiftsAndReducesLookaheadValue::Shift(target_state) => {
+                                    successor_states.insert(target_state);
+                                }
+                                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                                    if len == 0 {
+                                        if let Some(goto) = row.get_gotos().get(&nonterminal_id) {
+                                            if let Some(goto_state) = goto.state_id {
+                                                states_to_process.push_back(goto_state);
+                                            }
+                                        }
+                                    } else {
+                                        has_reduce_with_len_gt_0 = true;
+                                        crate::debug!(6, "          -> Reduce len>0, marking as valid");
+                                    }
+                                }
+                                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                    if let Some(target_state) = shift {
+                                        successor_states.insert(target_state);
+                                    }
+                                    for (&reduce_len, nonterminals) in reduces.iter() {
+                                        if reduce_len == 0 {
+                                            for nt_id in nonterminals.keys() {
+                                                if let Some(goto) = row.get_gotos().get(nt_id) {
+                                                    if let Some(goto_state) = goto.state_id {
+                                                        states_to_process.push_back(goto_state);
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            has_reduce_with_len_gt_0 = true;
+                                            crate::debug!(6, "          -> Split reduce len>0, marking as valid");
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            crate::debug!(6, "          No action for terminal {} from state {}", suffix_tid.0, parser_state_id.0);
+                        }
+                    }
+                }
+
+                if !successor_states.is_empty() {
+                    crate::debug!(6, "      KEEP: successor_states = {:?}", successor_states);
+                    for dest_state in dest_states_list {
+                        let dest_states = nwa_to_parser_states.entry(dest_state).or_default();
+                        dest_states.extend(successor_states.iter().copied());
+                        if visited.insert(dest_state) {
+                            queue.push_back(dest_state);
+                        }
+                        kept_count += 1;
+                    }
+                } else if has_reduce_with_len_gt_0 {
+                    crate::debug!(6, "      KEEP (reduce lookahead): terminal {} valid from parser_states {:?}", label_usize, parser_states);
+                    for dest_state in dest_states_list {
+                        if visited.insert(dest_state) {
+                            queue.push_back(dest_state);
+                        }
+                        let dest_states = nwa_to_parser_states.entry(dest_state).or_default();
+                        dest_states.insert(initial_parser_state_id);
+                        kept_count += 1;
+                    }
+                } else {
+                    crate::debug!(6, "      PRUNE: no successor states for terminal {} from parser_states {:?}", label_usize, parser_states);
+                    transitions_to_remove.push((nwa_state, label));
+                    pruned_count += dest_states_list.len();
+                }
+            } else {
+                for dest_state in dest_states_list {
+                    let dest_states = nwa_to_parser_states.entry(dest_state).or_default();
+                    for &ps in &parser_states {
+                        dest_states.insert(ps);
+                    }
+                    if visited.insert(dest_state) {
+                        queue.push_back(dest_state);
+                    }
+                    kept_count += 1;
+                }
+            }
+        }
+    }
+
+    for (from_state, label) in &transitions_to_remove {
+        nwa.states[*from_state].transitions.remove(label);
+    }
+
+    crate::debug!(4, "Suffix grammar NWA pruning: kept={}, pruned={}", kept_count, pruned_count);
+
+    (kept_count, pruned_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1180,6 +1180,20 @@ impl GrammarConstraint {
         } else {
             None
         };
+
+        let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let suffix_prune_grammar = if do_nwa_suffix_prune {
+            grammar_definition.clone()
+        } else {
+            None
+        };
+        let suffix_prune_terminal_map = if do_nwa_suffix_prune && grammar_definition.is_some() {
+            Some(parser.terminal_map.clone())
+        } else {
+            None
+        };
         
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         crate::debug!(5, "run_precompute1: start");
@@ -1193,6 +1207,8 @@ impl GrammarConstraint {
                 state_to_rep.clone(),
                 tsid_offset_map.clone(),
                 approx_dfa,
+                suffix_prune_grammar,
+                suffix_prune_terminal_map,
             )
         });
         eprintln!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());

@@ -111,6 +111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
         None,
+        None,
+        None,
     );
     if is_debug_level_enabled(5) {
         println!("Terminal DWA (before minimize):");

@@ -307,7 +307,11 @@ impl NWA {
                     passes
                 };
 
-                let dwa_passes = match std::env::var("TERMINAL_DWA_PASS")
+                let skip_minimize_before_suffix = std::env::var("SKIP_TERMINAL_DWA_MINIMIZE_BEFORE_SUFFIX")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+
+                let mut dwa_passes = match std::env::var("TERMINAL_DWA_PASS")
                     .ok()
                     .map(|v| v.to_ascii_lowercase())
                     .as_deref()
@@ -344,6 +348,10 @@ impl NWA {
                         DwaPass::TrimWeights,
                     ],
                 };
+
+                if skip_minimize_before_suffix {
+                    dwa_passes = vec![DwaPass::TrimWeights];
+                }
 
                 DeterminizeAndMinimizeConfig {
                     nwa_passes,
