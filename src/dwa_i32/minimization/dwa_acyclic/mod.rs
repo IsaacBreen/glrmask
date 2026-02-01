@@ -890,7 +890,52 @@ fn compute_height_coloring(
     if trace_heights {
         eprintln!("TRACE: height {} colors={}", height, num_colors);
     }
+    if matches!(coloring_mode, ColoringMode::ExactColPack | ColoringMode::ColPackVerified)
+        && !coloring_is_compatible(candidates, &colors, dwa, needed, old_to_new, new_states)
+    {
+        crate::debug!(
+            2,
+            "ColPack coloring invalid at height {} ({} candidates); falling back to greedy",
+            height,
+            candidates.len()
+        );
+        return greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start);
+    }
     colors
+}
+
+fn coloring_is_compatible(
+    candidates: &[StateID],
+    colors: &[usize],
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &[StateID],
+    new_states: &[MergedStateBuilder],
+) -> bool {
+    if candidates.len() <= 1 {
+        return true;
+    }
+    let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); num_colors];
+    for (idx, &color) in colors.iter().enumerate() {
+        if color >= num_colors {
+            return false;
+        }
+        buckets[color].push(idx);
+    }
+
+    for bucket in buckets {
+        for i in 0..bucket.len() {
+            for j in (i + 1)..bucket.len() {
+                let a = candidates[bucket[i]];
+                let b = candidates[bucket[j]];
+                if !are_compatible(a, b, dwa, needed, old_to_new, new_states) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Direct coloring for large height-0 candidate sets.
