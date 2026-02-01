@@ -53,6 +53,62 @@ def dsatur_coloring(adj: List[List[int]]) -> List[int]:
     return colors
 
 
+def rlf_coloring(adj: List[List[int]]) -> List[int]:
+    """
+    Recursive Largest First graph coloring.
+    1. Select uncolored vertex with max degree as seed
+    2. Greedily add vertices to current color class that:
+       - Are not adjacent to any in current class
+       - Among candidates, prefer those with most colored neighbors
+    3. Repeat until all colored
+    """
+    n = len(adj)
+    colors = [-1] * n
+    neighbors = [set(adj[i]) for i in range(n)]
+    remaining_degree = [len(adj[i]) for i in range(n)]
+    colored_neighbor_count = [0] * n
+    current_color = 0
+    remaining = set(range(n))
+
+    while remaining:
+        # Start new color class with highest-degree uncolored vertex
+        seed = max(remaining, key=lambda v: remaining_degree[v])
+        color_class = {seed}
+        colors[seed] = current_color
+        remaining.remove(seed)
+        for u in adj[seed]:
+            if colors[u] == -1:
+                colored_neighbor_count[u] += 1
+                remaining_degree[u] -= 1
+
+        # Greedily add compatible vertices
+        candidates = remaining - neighbors[seed]
+        while candidates:
+            # Pick candidate with most already-colored neighbors (max saturation)
+            best = max(candidates, key=lambda v: colored_neighbor_count[v])
+            color_class.add(best)
+            colors[best] = current_color
+            remaining.remove(best)
+            for u in adj[best]:
+                if colors[u] == -1:
+                    colored_neighbor_count[u] += 1
+                    remaining_degree[u] -= 1
+            candidates -= neighbors[best]
+            candidates.discard(best)
+
+        current_color += 1
+
+    return colors
+
+
+def validate_coloring(adj: List[List[int]], colors: List[int]) -> bool:
+    for u, neighbors in enumerate(adj):
+        for v in neighbors:
+            if colors[u] == colors[v]:
+                raise ValueError(f"Invalid: {u} and {v} adjacent with same color {colors[u]}")
+    return True
+
+
 def _sat_coloring_impl(adj: List[List[int]], k: int) -> Optional[List[int]]:
     try:
         from pysat.formula import CNF
@@ -139,7 +195,7 @@ def main() -> int:
         print(f"Input directory not found: {input_dir}")
         return 1
 
-    files = sorted(input_dir.glob("*.json"))
+    files = sorted(input_dir.rglob("*.json"))
     if args.limit is not None:
         files = files[: args.limit]
 
@@ -155,7 +211,14 @@ def main() -> int:
 
         greedy_colors, greedy_time = measure(greedy_coloring, adj)
         dsatur_colors, dsatur_time = measure(dsatur_coloring, adj)
+        rlf_colors, rlf_time = measure(rlf_coloring, adj)
         sat_colors, sat_time = measure(sat_coloring, adj, None, args.sat_max_vertices)
+
+        validate_coloring(adj, greedy_colors)
+        validate_coloring(adj, dsatur_colors)
+        validate_coloring(adj, rlf_colors)
+        if sat_colors is not None:
+            validate_coloring(adj, sat_colors)
 
         rows.append(
             {
@@ -167,6 +230,8 @@ def main() -> int:
                 "greedy_ms": greedy_time * 1000,
                 "dsatur_k": color_count(dsatur_colors),
                 "dsatur_ms": dsatur_time * 1000,
+                "rlf_k": color_count(rlf_colors),
+                "rlf_ms": rlf_time * 1000,
                 "sat_k": color_count(sat_colors),
                 "sat_ms": sat_time * 1000 if sat_colors is not None else None,
             }
@@ -176,6 +241,7 @@ def main() -> int:
         "id", "dwa_type", "height", "n",
         "greedy_k", "greedy_ms",
         "dsatur_k", "dsatur_ms",
+        "rlf_k", "rlf_ms",
         "sat_k", "sat_ms",
     )
     print("\t".join(header))
@@ -191,10 +257,32 @@ def main() -> int:
                     f"{row['greedy_ms']:.3f}",
                     str(row["dsatur_k"]),
                     f"{row['dsatur_ms']:.3f}",
+                    str(row["rlf_k"]),
+                    f"{row['rlf_ms']:.3f}",
                     str(row["sat_k"]) if row["sat_k"] is not None else "-",
                     f"{row['sat_ms']:.3f}" if row["sat_ms"] is not None else "-",
                 ]
             )
+        )
+
+    # Summary by DWA type
+    from collections import defaultdict
+
+    by_type = defaultdict(list)
+    for row in rows:
+        by_type[row["dwa_type"]].append(row)
+
+    print("\n# Summary by DWA type")
+    print("dwa_type\tcount\tavg_n\tavg_greedy_ms\tavg_dsatur_ms\tavg_rlf_ms")
+    for dtype in sorted(by_type.keys()):
+        group = by_type[dtype]
+        count = len(group)
+        avg_n = sum(r["n"] for r in group) / count
+        avg_greedy = sum(r["greedy_ms"] for r in group) / count
+        avg_dsatur = sum(r["dsatur_ms"] for r in group) / count
+        avg_rlf = sum(r["rlf_ms"] for r in group) / count
+        print(
+            f"{dtype}\t{count}\t{avg_n:.1f}\t{avg_greedy:.3f}\t{avg_dsatur:.3f}\t{avg_rlf:.3f}"
         )
 
     return 0

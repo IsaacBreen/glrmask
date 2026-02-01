@@ -498,6 +498,16 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     crate::datastructures::rangemap_weight::reset_profiling();
     crate::datastructures::abstract_weight::reset_weight_op_profiling();
     let needed = compute_needed_sets(&dwa, &topo_order);
+    let use_range_in_compat = std::env::var("USE_RANGE_IN_COMPAT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let range = if use_range_in_compat {
+        compute_ranges(&dwa, &topo_order)
+    } else {
+        crate::debug!(5, "USE_RANGE_IN_COMPAT=0: compatibility uses full weights");
+        vec![Weight::all(); dwa.states.len()]
+    };
+    let productive_transitions = compute_productive_transitions(&dwa, &range);
     crate::debug!(5, "Acyclic minimize step 2 end (needed_sets): {:?}", step2_start.elapsed());
     crate::debug!(5, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
 
@@ -553,8 +563,10 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
                     &dwa,
                     candidates,
                     &needed,
+                    &range,
                     &old_to_new,
                     &new_states,
+                    &productive_transitions,
                     coloring_mode,
                 );
                 let color_elapsed = color_start.elapsed();
@@ -707,8 +719,81 @@ fn compute_height_coloring(
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
+    range: &[Weight],
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
+    productive_transitions: &[Vec<ProductiveTransition>],
+    coloring_mode: ColoringMode,
+) -> Vec<usize> {
+    let compare_range = std::env::var("COMPARE_RANGE_IN_COMPAT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if compare_range {
+        let full_range = vec![Weight::all(); range.len()];
+        let full_productive_transitions = compute_productive_transitions(dwa, &full_range);
+        let colors_no_range = compute_height_coloring_with_range(
+            height,
+            dwa,
+            candidates,
+            needed,
+            &full_range,
+            old_to_new,
+            new_states,
+            &full_productive_transitions,
+            coloring_mode,
+        );
+        let colors_with_range = compute_height_coloring_with_range(
+            height,
+            dwa,
+            candidates,
+            needed,
+            range,
+            old_to_new,
+            new_states,
+            productive_transitions,
+            coloring_mode,
+        );
+        let colors_no_range_count = colors_no_range.iter().max().map(|&c| c + 1).unwrap_or(0);
+        let colors_with_range_count = colors_with_range.iter().max().map(|&c| c + 1).unwrap_or(0);
+        eprintln!(
+            "COMPARE_RANGE: height {} colors_with_range={} colors_no_range={}",
+            height,
+            colors_with_range_count,
+            colors_no_range_count
+        );
+        assert!(
+            colors_with_range_count <= colors_no_range_count,
+            "Range produced more colors at height {}: with_range={} > no_range={}",
+            height,
+            colors_with_range_count,
+            colors_no_range_count
+        );
+        return colors_with_range;
+    }
+
+    compute_height_coloring_with_range(
+        height,
+        dwa,
+        candidates,
+        needed,
+        range,
+        old_to_new,
+        new_states,
+        productive_transitions,
+        coloring_mode,
+    )
+}
+
+fn compute_height_coloring_with_range(
+    height: usize,
+    dwa: &DWA,
+    candidates: &[StateID],
+    needed: &[Weight],
+    range: &[Weight],
+    old_to_new: &[StateID],
+    new_states: &[MergedStateBuilder],
+    productive_transitions: &[Vec<ProductiveTransition>],
     coloring_mode: ColoringMode,
 ) -> Vec<usize> {
     HEIGHT_COLOR_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -742,7 +827,16 @@ fn compute_height_coloring(
     {
         let greedy_start = std::time::Instant::now();
         let colors = timeit!("coloring::greedy_without_graph", {
-            greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start)
+            greedy_color_without_graph(
+                dwa,
+                candidates,
+                needed,
+                range,
+                old_to_new,
+                new_states,
+                productive_transitions,
+                start,
+            )
         });
         crate::debug!(6, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
         let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
@@ -838,7 +932,15 @@ fn compute_height_coloring(
         eprintln!("TRACE: height {} building incompatibility graph", height);
     }
     let adj = timeit!("coloring::build_incompatibility_graph", {
-        build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states)
+        build_incompatibility_graph(
+            dwa,
+            candidates,
+            needed,
+            range,
+            old_to_new,
+            new_states,
+            productive_transitions,
+        )
     });
     let graph_time = graph_start.elapsed();
     let edge_count = adj.iter().map(|v| v.len()).sum::<usize>() / 2;
@@ -868,7 +970,14 @@ fn compute_height_coloring(
     let color_start = std::time::Instant::now();
     set_exact_coloring_height(Some(height));
     let colors = match coloring_mode {
-        ColoringMode::ExactSat | ColoringMode::Fast => solve_exact_graph_coloring(&adj),
+        ColoringMode::ExactSat => solve_exact_graph_coloring(&adj),
+        ColoringMode::Fast => {
+            if force_graph_coloring {
+                solve_greedy_coloring(&adj)
+            } else {
+                solve_exact_graph_coloring(&adj)
+            }
+        }
         ColoringMode::ExactCadical => solve_exact_graph_coloring_cadical(&adj),
         ColoringMode::ExactDsatur => solve_exact_graph_coloring_dsatur(&adj),
         ColoringMode::ExactColPack => solve_colpack_coloring(&adj),
@@ -903,8 +1012,10 @@ fn compute_height_coloring(
             &colors,
             dwa,
             needed,
+            range,
             old_to_new,
             new_states,
+            productive_transitions,
         );
     }
     colors
@@ -916,8 +1027,10 @@ fn assert_coloring_compatible(
     colors: &[usize],
     dwa: &DWA,
     needed: &[Weight],
+    range: &[Weight],
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
+    productive_transitions: &[Vec<ProductiveTransition>],
 ) {
     if candidates.len() <= 1 {
         return;
@@ -934,7 +1047,16 @@ fn assert_coloring_compatible(
             for j in (i + 1)..bucket.len() {
                 let a = candidates[bucket[i]];
                 let b = candidates[bucket[j]];
-                if !are_compatible(a, b, dwa, needed, old_to_new, new_states) {
+                if !are_compatible(
+                    a,
+                    b,
+                    dwa,
+                    needed,
+                    range,
+                    old_to_new,
+                    new_states,
+                    productive_transitions,
+                ) {
                     let sig_a = compute_state_signature(a, dwa, needed, old_to_new);
                     let sig_b = compute_state_signature(b, dwa, needed, old_to_new);
                     panic!(
@@ -973,31 +1095,33 @@ fn export_coloring_graph(
     adj: &Vec<Vec<usize>>,
     signature_groups: usize,
 ) {
+    let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type()
+        .unwrap_or("unknown");
     let export_enabled = std::env::var("EXPORT_COLORING_GRAPHS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    eprintln!("EXPORT CHECK: height={} dwa_type={} enabled={}", height, dwa_type, export_enabled);
     if !export_enabled {
         return;
     }
 
-    let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type()
-        .unwrap_or("unknown");
+    eprintln!("EXPORT DEBUG: height={} dwa_type={}", height, dwa_type);
     let dir = std::env::var("EXPORT_COLORING_GRAPHS_DIR")
         .unwrap_or_else(|_| "coloring_graphs".to_string());
+    let grammar = std::env::var("EXPORT_COLORING_GRAMMAR")
+        .unwrap_or_else(|_| "unknown".to_string());
     let mut path = PathBuf::from(dir);
+    path.push(grammar);
     if let Err(err) = fs::create_dir_all(&path) {
         eprintln!("EXPORT_COLORING_GRAPHS: failed to create dir: {}", err);
         return;
     }
 
-    let seq = GRAPH_EXPORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let id = format!(
-        "{}_height_{}_{}_{}",
-        dwa_type,
-        height,
-        std::process::id(),
-        seq,
-    );
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or_else(|_| GRAPH_EXPORT_COUNTER.fetch_add(1, Ordering::Relaxed) as u128);
+    let id = format!("{}_height_{}_{}", dwa_type, height, timestamp);
     path.push(format!("{}.json", id));
 
     let payload = ColoringGraphExport {
@@ -1631,6 +1755,58 @@ fn compute_heights(dwa: &DWA, topo_order: &[StateID]) -> Vec<usize> {
 
 // --- Phase 3: Compatibility & Coloring ---
 
+#[time_it("compute_ranges")]
+fn compute_ranges(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
+    let mut range = vec![Weight::zeros(); dwa.states.len()];
+    for &u in topo_order {
+        let mut acc = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
+        for (&lbl, &v) in &dwa.states[u].transitions {
+            if v >= dwa.states.len() {
+                continue;
+            }
+            if let Some(w) = dwa.states[u].trans_weights.get(&lbl) {
+                let tmp = w & &range[v];
+                acc |= &tmp;
+            }
+        }
+        range[u] = acc;
+    }
+    range
+}
+
+#[derive(Clone)]
+struct ProductiveTransition {
+    label: Label,
+    target: StateID,
+    weight: Weight,
+}
+
+fn compute_productive_transitions(dwa: &DWA, range: &[Weight]) -> Vec<Vec<ProductiveTransition>> {
+    let mut result = Vec::with_capacity(dwa.states.len());
+    for state in &dwa.states {
+        let mut transitions = Vec::with_capacity(state.transitions.len());
+        for (&label, &target) in &state.transitions {
+            if target >= dwa.states.len() {
+                continue;
+            }
+            let Some(weight) = state.trans_weights.get(&label) else {
+                continue;
+            };
+            let productive = weight & &range[target];
+            if productive.is_empty() {
+                continue;
+            }
+            transitions.push(ProductiveTransition {
+                label,
+                target,
+                weight: productive,
+            });
+        }
+        result.push(transitions);
+    }
+    result
+}
+
 /// Check if two states can be merged.
 /// 
 /// States can be merged if their behavior is identical on overlapping tokens,
@@ -1641,8 +1817,10 @@ fn are_compatible(
     v: StateID,
     dwa: &DWA,
     needed: &[Weight],
+    range: &[Weight],
     old_to_new: &[StateID],
-    new_states: &[MergedStateBuilder]
+    new_states: &[MergedStateBuilder],
+    productive_transitions: &[Vec<ProductiveTransition>],
 ) -> bool {
     ARE_COMPAT_CALLS.fetch_add(1, Ordering::Relaxed);
     let _compat_timer = TimingGuard::new(&ARE_COMPAT_NANOS);
@@ -1665,86 +1843,69 @@ fn are_compatible(
         }
     }
     
-    // Check each label (merge sorted transition keys without allocation)
-    let mut iter_u = dwa.states[u].transitions.keys().copied().peekable();
-    let mut iter_v = dwa.states[v].transitions.keys().copied().peekable();
+    // Check each productive label (merge sorted transitions without allocation)
+    let trans_u = &productive_transitions[u];
+    let trans_v = &productive_transitions[v];
+    let mut idx_u = 0usize;
+    let mut idx_v = 0usize;
 
-    loop {
-        let lbl = match (iter_u.peek(), iter_v.peek()) {
-            (Some(&lu), Some(&lv)) => {
-                if lu == lv {
-                    iter_u.next();
-                    iter_v.next();
-                    lu
-                } else if lu < lv {
-                    iter_u.next();
-                    lu
+    while idx_u < trans_u.len() || idx_v < trans_v.len() {
+        let (entry_u, entry_v) = match (trans_u.get(idx_u), trans_v.get(idx_v)) {
+            (Some(u_entry), Some(v_entry)) => {
+                if u_entry.label == v_entry.label {
+                    idx_u += 1;
+                    idx_v += 1;
+                    (Some(u_entry), Some(v_entry))
+                } else if u_entry.label < v_entry.label {
+                    idx_u += 1;
+                    (Some(u_entry), None)
                 } else {
-                    iter_v.next();
-                    lv
+                    idx_v += 1;
+                    (None, Some(v_entry))
                 }
             }
-            (Some(&lu), None) => {
-                iter_u.next();
-                lu
+            (Some(u_entry), None) => {
+                idx_u += 1;
+                (Some(u_entry), None)
             }
-            (None, Some(&lv)) => {
-                iter_v.next();
-                lv
+            (None, Some(v_entry)) => {
+                idx_v += 1;
+                (None, Some(v_entry))
             }
             (None, None) => break,
         };
-        // Get effective transition weights (None if no transition or no weight)
-        let (tu, w_u_opt) = match dwa.states[u].transitions.get(&lbl) {
-            Some(&tu) => (Some(tu), dwa.states[u].trans_weights.get(&lbl)),
-            None => (None, None),
-        };
-        let (tv, w_v_opt) = match dwa.states[v].transitions.get(&lbl) {
-            Some(&tv) => (Some(tv), dwa.states[v].trans_weights.get(&lbl)),
-            None => (None, None),
-        };
-        let w_u_empty = w_u_opt.map_or(true, |w| w.is_empty());
-        let w_v_empty = w_v_opt.map_or(true, |w| w.is_empty());
+
+        let w_u_productive = entry_u.map(|t| (t.target, &t.weight));
+        let w_v_productive = entry_v.map(|t| (t.target, &t.weight));
 
         if !domain_overlap_empty {
-            if w_u_empty && w_v_empty {
-                // No weights for this label on either state
-            } else if w_u_empty {
-                let w_v_overlap = w_v_opt
-                    .map(|w| w & &domain_overlap)
-                    .unwrap_or_else(Weight::zeros);
-                if !w_v_overlap.is_empty() {
-                    return false;
-                }
-            } else if w_v_empty {
-                let w_u_overlap = w_u_opt
-                    .map(|w| w & &domain_overlap)
-                    .unwrap_or_else(Weight::zeros);
-                if !w_u_overlap.is_empty() {
-                    return false;
-                }
-            } else {
-                let w_u = w_u_opt.unwrap();
-                let w_v = w_v_opt.unwrap();
-                if w_u != w_v {
-                    let w_u_overlap = w_u & &domain_overlap;
-                    let w_v_overlap = w_v & &domain_overlap;
-                    if w_u_overlap != w_v_overlap {
-                        return false;
-                    }
-                }
+            let w_u_overlap = w_u_productive
+                .map(|(_, w)| w & &domain_overlap)
+                .unwrap_or_else(Weight::zeros);
+            let w_v_overlap = w_v_productive
+                .map(|(_, w)| w & &domain_overlap)
+                .unwrap_or_else(Weight::zeros);
+
+            if w_u_overlap.is_empty() && w_v_overlap.is_empty() {
+                // No overlap on productive weights
+            } else if w_u_overlap.is_empty() || w_v_overlap.is_empty() {
+                return false;
+            } else if w_u_overlap != w_v_overlap {
+                return false;
             }
         }
 
-        // If both have live transitions, check targets are compatible
-        if !w_u_empty && !w_v_empty {
-            match (tu, tv) {
-                (Some(tu), Some(tv)) => {
-                    if !targets_compatible(tu, tv, w_u_opt.unwrap(), w_v_opt.unwrap(), old_to_new, new_states) {
-                        return false;
-                    }
+        match (w_u_productive, w_v_productive) {
+            (None, None) => {
+                // No productive weights on either side
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                // One side has productive weights; only incompatible if overlap check failed
+            }
+            (Some((tu, w_u)), Some((tv, w_v))) => {
+                if !targets_compatible(tu, tv, w_u, w_v, old_to_new, new_states) {
+                    return false;
                 }
-                _ => return false, // Both have weights but one lacks target
             }
         }
     }
@@ -1841,8 +2002,10 @@ fn build_incompatibility_graph(
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
+    range: &[Weight],
     old_to_new: &[StateID],
-    new_states: &[MergedStateBuilder]
+    new_states: &[MergedStateBuilder],
+    productive_transitions: &[Vec<ProductiveTransition>],
 ) -> Vec<Vec<usize>> {
     BUILD_GRAPH_CALLS.fetch_add(1, Ordering::Relaxed);
     let _graph_timer = TimingGuard::new(&BUILD_GRAPH_NANOS);
@@ -1859,7 +2022,16 @@ fn build_incompatibility_graph(
     }
     
     // For non-height-0: use signature-based approach with needed-set overlap optimization
-    build_incompatibility_graph_general(dwa, candidates, needed, old_to_new, new_states, start)
+    build_incompatibility_graph_general(
+        dwa,
+        candidates,
+        needed,
+        range,
+        old_to_new,
+        new_states,
+        productive_transitions,
+        start,
+    )
 }
 
 /// Optimized incompatibility graph construction for height-0 states (no transitions).
@@ -1992,8 +2164,10 @@ fn greedy_color_without_graph(
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
+    range: &[Weight],
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
+    productive_transitions: &[Vec<ProductiveTransition>],
     _start: std::time::Instant,
 ) -> Vec<usize> {
     let n = candidates.len();
@@ -2089,7 +2263,16 @@ fn greedy_color_without_graph(
                                 compare_count += 1;
                                 let cmp_start = std::time::Instant::now();
                                 let compatible =
-                                    are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states);
+                                    are_compatible(
+                                        cand,
+                                        candidates[rep_idx],
+                                        dwa,
+                                        needed,
+                                        range,
+                                        old_to_new,
+                                        new_states,
+                                        productive_transitions,
+                                    );
                                 compare_time += cmp_start.elapsed();
                                 if !compatible {
                                     compatible_with_all = false;
@@ -2150,8 +2333,10 @@ fn build_incompatibility_graph_general(
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
+    range: &[Weight],
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
+    productive_transitions: &[Vec<ProductiveTransition>],
     start: std::time::Instant,
 ) -> Vec<Vec<usize>> {
     let n = candidates.len();
@@ -2195,8 +2380,10 @@ fn build_incompatibility_graph_general(
                             candidates[idx_j],
                             dwa,
                             needed,
+                            range,
                             old_to_new,
                             new_states,
+                            productive_transitions,
                         );
                         compare_time += cmp_start.elapsed();
                         if !compatible {
@@ -2216,7 +2403,16 @@ fn build_incompatibility_graph_general(
         for (i, &idx_i) in group.iter().enumerate() {
             for &idx_j in &group[i+1..] {
                 debug_assert!(
-                    are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states),
+                    are_compatible(
+                        candidates[idx_i],
+                        candidates[idx_j],
+                        dwa,
+                        needed,
+                        range,
+                        old_to_new,
+                        new_states,
+                        productive_transitions,
+                    ),
                     "Signature collision: states {} and {} have same signature but are incompatible!",
                     candidates[idx_i], candidates[idx_j]
                 );
