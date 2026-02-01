@@ -134,15 +134,13 @@ pub fn solve_colpack_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     };
 
     if rc != 0 {
-        eprintln!("ColPack coloring failed (rc={}), falling back to greedy", rc);
-        return solve_greedy_coloring(adj);
+        panic!("ColPack coloring failed (rc={})", rc);
     }
 
     let colors: Vec<usize> = colors_out.into_iter().map(|c| c as usize).collect();
     let colors = normalize_colors(colors);
     if !is_valid_coloring(adj, &colors) {
-        eprintln!("ColPack produced invalid coloring, falling back to greedy");
-        return solve_greedy_coloring(adj);
+        panic!("ColPack produced invalid coloring");
     }
     colors
 }

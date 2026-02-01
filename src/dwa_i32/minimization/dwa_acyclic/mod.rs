@@ -890,37 +890,36 @@ fn compute_height_coloring(
     if trace_heights {
         eprintln!("TRACE: height {} colors={}", height, num_colors);
     }
-    if matches!(coloring_mode, ColoringMode::ExactColPack | ColoringMode::ColPackVerified)
-        && !coloring_is_compatible(candidates, &colors, dwa, needed, old_to_new, new_states)
-    {
-        crate::debug!(
-            2,
-            "ColPack coloring invalid at height {} ({} candidates); falling back to greedy",
+    if matches!(coloring_mode, ColoringMode::ExactColPack | ColoringMode::ColPackVerified) {
+        assert_coloring_compatible(
             height,
-            candidates.len()
+            candidates,
+            &colors,
+            dwa,
+            needed,
+            old_to_new,
+            new_states,
         );
-        return greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start);
     }
     colors
 }
 
-fn coloring_is_compatible(
+fn assert_coloring_compatible(
+    height: usize,
     candidates: &[StateID],
     colors: &[usize],
     dwa: &DWA,
     needed: &[Weight],
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
-) -> bool {
+) {
     if candidates.len() <= 1 {
-        return true;
+        return;
     }
     let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); num_colors];
     for (idx, &color) in colors.iter().enumerate() {
-        if color >= num_colors {
-            return false;
-        }
+        assert!(color < num_colors, "Invalid color {} at height {}", color, height);
         buckets[color].push(idx);
     }
 
@@ -930,12 +929,20 @@ fn coloring_is_compatible(
                 let a = candidates[bucket[i]];
                 let b = candidates[bucket[j]];
                 if !are_compatible(a, b, dwa, needed, old_to_new, new_states) {
-                    return false;
+                    let sig_a = compute_state_signature(a, dwa, needed, old_to_new);
+                    let sig_b = compute_state_signature(b, dwa, needed, old_to_new);
+                    panic!(
+                        "Invalid ColPack coloring at height {}: states {} (sig={:x?}) and {} (sig={:x?}) share a color",
+                        height,
+                        a,
+                        sig_a,
+                        b,
+                        sig_b,
+                    );
                 }
             }
         }
     }
-    true
 }
 
 /// Direct coloring for large height-0 candidate sets.
@@ -2089,22 +2096,6 @@ fn build_incompatibility_graph_general(
 
     let num_groups = groups.len();
 
-    let needed_bounds: Vec<Option<(usize, usize)>> = timeit!(
-        "coloring::build_incompatibility_graph::needed_bounds",
-        {
-            candidates
-                .iter()
-                .map(|&id| {
-                    let w = &needed[id];
-                    match (w.min_item(), w.max_item()) {
-                        (Some(min), Some(max)) => Some((min, max)),
-                        _ => None,
-                    }
-                })
-                .collect()
-        }
-    );
-    
     // Build incompatibility graph
     let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
@@ -2117,17 +2108,6 @@ fn build_incompatibility_graph_general(
             for j in (i + 1)..groups.len() {
                 for &idx_i in &groups[i] {
                     for &idx_j in &groups[j] {
-                        match (needed_bounds[idx_i], needed_bounds[idx_j]) {
-                            (Some((min_i, max_i)), Some((min_j, max_j))) => {
-                                if max_i < min_j || max_j < min_i {
-                                    continue;
-                                }
-                            }
-                            _ => {
-                                // At least one domain is empty -> disjoint overlap
-                                continue;
-                            }
-                        }
                         compare_count += 1;
                         let cmp_start = std::time::Instant::now();
                         let compatible = are_compatible(
