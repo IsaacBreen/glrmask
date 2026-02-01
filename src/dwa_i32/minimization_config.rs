@@ -36,6 +36,18 @@ pub enum DeterminizeAndMinimizeProfile {
     Parser,
 }
 
+impl DeterminizeAndMinimizeProfile {
+    pub fn as_dwa_type(self) -> &'static str {
+        match self {
+            DeterminizeAndMinimizeProfile::Terminal => "terminal",
+            DeterminizeAndMinimizeProfile::Template => "template",
+            DeterminizeAndMinimizeProfile::Super => "super",
+            DeterminizeAndMinimizeProfile::SpecializedSuper => "specialized_super",
+            DeterminizeAndMinimizeProfile::Parser => "parser",
+        }
+    }
+}
+
 const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
     &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::SatMinimize],
     &[DwaPass::SatMinimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
@@ -268,6 +280,9 @@ pub struct DeterminizeAndMinimizeConfig {
 impl NWA {
     #[time_it("NWA::determinize_and_minimize")]
     pub fn determinize_and_minimize(mut self, profile: DeterminizeAndMinimizeProfile) -> DWA {
+        let _dwa_type_guard = crate::dwa_i32::minimization::graph_coloring::set_current_dwa_type(
+            Some(profile.as_dwa_type()),
+        );
         if self.states.len() > 1000 && optimize_debug() {
             return Self::run_determinize_and_minimize_experiment(self, profile);
         }

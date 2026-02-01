@@ -17,8 +17,11 @@ use crate::datastructures::RangeMapWeight;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use serde::Serialize;
 use profiler_macro::{time_it, timeit};
 
 const UNMAPPED_STATE: StateID = StateID::MAX;
@@ -31,6 +34,7 @@ static BUILD_GRAPH_CALLS: AtomicU64 = AtomicU64::new(0);
 static BUILD_GRAPH_NANOS: AtomicU64 = AtomicU64::new(0);
 static HEIGHT_COLOR_CALLS: AtomicU64 = AtomicU64::new(0);
 static HEIGHT_COLOR_NANOS: AtomicU64 = AtomicU64::new(0);
+static GRAPH_EXPORT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static TARGET_EQ_CACHE: RefCell<FxHashMap<(StateID, StateID, u64), bool>> =
@@ -848,6 +852,8 @@ fn compute_height_coloring(
     if trace_heights {
         eprintln!("TRACE: height {} graph nodes={} edges={}", height, adj.len(), edge_count);
     }
+
+    export_coloring_graph(height, candidates, &adj, num_groups);
     
     let graph_total = start.elapsed();
     
@@ -941,6 +947,80 @@ fn assert_coloring_compatible(
                     );
                 }
             }
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ColoringGraphMetadata {
+    candidates: Vec<StateID>,
+    signature_groups: usize,
+}
+
+#[derive(Serialize)]
+struct ColoringGraphExport {
+    id: String,
+    height: usize,
+    dwa_type: String,
+    num_vertices: usize,
+    adjacency_list: Vec<Vec<usize>>,
+    metadata: ColoringGraphMetadata,
+}
+
+fn export_coloring_graph(
+    height: usize,
+    candidates: &[StateID],
+    adj: &Vec<Vec<usize>>,
+    signature_groups: usize,
+) {
+    let export_enabled = std::env::var("EXPORT_COLORING_GRAPHS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !export_enabled {
+        return;
+    }
+
+    let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type()
+        .unwrap_or("unknown");
+    let dir = std::env::var("EXPORT_COLORING_GRAPHS_DIR")
+        .unwrap_or_else(|_| "coloring_graphs".to_string());
+    let mut path = PathBuf::from(dir);
+    if let Err(err) = fs::create_dir_all(&path) {
+        eprintln!("EXPORT_COLORING_GRAPHS: failed to create dir: {}", err);
+        return;
+    }
+
+    let seq = GRAPH_EXPORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let id = format!(
+        "{}_height_{}_{}_{}",
+        dwa_type,
+        height,
+        std::process::id(),
+        seq,
+    );
+    path.push(format!("{}.json", id));
+
+    let payload = ColoringGraphExport {
+        id: id.clone(),
+        height,
+        dwa_type: dwa_type.to_string(),
+        num_vertices: adj.len(),
+        adjacency_list: adj.clone(),
+        metadata: ColoringGraphMetadata {
+            candidates: candidates.to_vec(),
+            signature_groups,
+        },
+    };
+
+    match fs::File::create(&path) {
+        Ok(file) => {
+            let writer = std::io::BufWriter::new(file);
+            if let Err(err) = serde_json::to_writer(writer, &payload) {
+                eprintln!("EXPORT_COLORING_GRAPHS: failed to write {}: {}", id, err);
+            }
+        }
+        Err(err) => {
+            eprintln!("EXPORT_COLORING_GRAPHS: failed to create file {}: {}", path.display(), err);
         }
     }
 }

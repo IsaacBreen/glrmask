@@ -14,6 +14,30 @@ use varisat::{ExtendFormula, Solver, Var};
 
 thread_local! {
     static CURRENT_HEIGHT: Cell<Option<usize>> = Cell::new(None);
+    static CURRENT_DWA_TYPE: Cell<Option<&'static str>> = Cell::new(None);
+}
+
+pub struct DwaTypeGuard {
+    previous: Option<&'static str>,
+}
+
+pub fn set_current_dwa_type(dwa_type: Option<&'static str>) -> DwaTypeGuard {
+    let previous = CURRENT_DWA_TYPE.with(|slot| {
+        let prev = slot.get();
+        slot.set(dwa_type);
+        prev
+    });
+    DwaTypeGuard { previous }
+}
+
+pub fn current_dwa_type() -> Option<&'static str> {
+    CURRENT_DWA_TYPE.with(|slot| slot.get())
+}
+
+impl Drop for DwaTypeGuard {
+    fn drop(&mut self) {
+        CURRENT_DWA_TYPE.with(|slot| slot.set(self.previous));
+    }
 }
 
 extern "C" {
