@@ -340,9 +340,40 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
 
 fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
     let n = states.len();
+    let profile = cancellations_range_profile_enabled();
+    let mut seed_count: u64 = 0;
+    let mut steps: u64 = 0;
+    let mut prop_eps_us: u64 = 0;
+    let mut pos_us: u64 = 0;
+    let mut default_us: u64 = 0;
+    let mut eps_us: u64 = 0;
+    let mut prop_eps_edges: u64 = 0;
+    let mut pos_edges: u64 = 0;
+    let mut default_edges: u64 = 0;
+    let mut eps_edges: u64 = 0;
+    let mut eps_create_events: u64 = 0;
+    let mut queries_at_source_total: u64 = 0;
+    let mut queries_at_source_max: u64 = 0;
+    let mut eps_created: u64 = 0;
+    let mut eps_grown: u64 = 0;
+
+    let mut neg_source_states: FxHashSet<NWAStateID> = FxHashSet::default();
+    if profile {
+        for &a in source_states_filter {
+            if states[a]
+                .transitions
+                .iter()
+                .any(|(label, _)| is_negative_symbol(*label))
+            {
+                neg_source_states.insert(a);
+            }
+        }
+    }
 
     let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
-    let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
+    let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code)> = VecDeque::new();
+    let mut in_queue: Vec<FxHashSet<QueryKey>> = Vec::with_capacity(n);
+    in_queue.resize_with(n, FxHashSet::default);
 
     // new_eps_from[from][to] = weight of the cancellation epsilon from `from` to `to`.
     let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
@@ -363,16 +394,34 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
                 let old_w = query_weight.clone();
                 *query_weight |= w_ab;
                 if *query_weight != old_w {
-                    worklist.push_back((*b, a, c, query_weight.clone()));
+                    let key: QueryKey = (a, c);
+                    if in_queue[*b].insert(key) {
+                        worklist.push_back((*b, a, c));
+                        if profile {
+                            seed_count = seed_count.saturating_add(1);
+                        }
+                    }
                 }
             }
         }
     }
 
-    while let Some((s, a, c, w_as)) = worklist.pop_front() {
+    while let Some((s, a, c)) = worklist.pop_front() {
+        in_queue[s].remove(&(a, c));
+        if profile {
+            steps = steps.saturating_add(1);
+        }
+        let w_as = match queries.get(&s).and_then(|m| m.get(&(a, c))) {
+            Some(w) => w.clone(),
+            None => continue,
+        };
         // First, propagate this query through any already-known cancellation epsilons
         // originating from the current location `s`.
+        let prop_start = if profile { Some(Instant::now()) } else { None };
         if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+            if profile {
+                prop_eps_edges = prop_eps_edges.saturating_add(epsilons_from_s.len() as u64);
+            }
             for (&target, eps_w) in epsilons_from_s {
                 let prop_w = &w_as & eps_w;
                 if prop_w.is_empty() {
@@ -383,14 +432,21 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
                 let old_qw = query_weight.clone();
                 *query_weight |= &prop_w;
                 if *query_weight != old_qw {
-                    worklist.push_back((target, a, c, query_weight.clone()));
+                    let key: QueryKey = (a, c);
+                    if in_queue[target].insert(key) {
+                        worklist.push_back((target, a, c));
+                    }
                 }
             }
+        }
+        if let Some(start) = prop_start {
+            prop_eps_us = prop_eps_us.saturating_add(start.elapsed().as_micros() as u64);
         }
 
         let mut check_cancellations = |target: NWAStateID,
                                        w_st: &Weight,
-                                       worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code, Weight)>| {
+                                       worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code)>,
+                                       in_queue: &mut Vec<FxHashSet<QueryKey>>| {
             let new_eps_w = &w_as & w_st;
             if new_eps_w.is_empty() {
                 return;
@@ -403,6 +459,19 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
             *eps_weight |= &new_eps_w;
 
             if *eps_weight != old_eps_w {
+                if profile {
+                    eps_create_events = eps_create_events.saturating_add(1);
+                    if old_eps_w.is_empty() {
+                        eps_created = eps_created.saturating_add(1);
+                    } else {
+                        eps_grown = eps_grown.saturating_add(1);
+                    }
+                    let queries_at_a = queries.get(&a).map_or(0, |m| m.len()) as u64;
+                    queries_at_source_total = queries_at_source_total.saturating_add(queries_at_a);
+                    if queries_at_a > queries_at_source_max {
+                        queries_at_source_max = queries_at_a;
+                    }
+                }
                 // When this epsilon grows, any existing queries that are currently at `a`
                 // can also traverse it.
                 if let Some(queries_at_a) = queries.get(&a) {
@@ -416,26 +485,45 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
                         let old_qw = query_weight.clone();
                         *query_weight |= &prop_w;
                         if *query_weight != old_qw {
-                            worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+                            let key: QueryKey = (a_prime, c_prime);
+                            if in_queue[target].insert(key) {
+                                worklist.push_back((target, a_prime, c_prime));
+                            }
                         }
                     }
                 }
             }
         };
 
+        let pos_start = if profile { Some(Instant::now()) } else { None };
         if let Some(pos_targets) = states[s].transitions.get(&c) {
             for (t, w_st) in pos_targets {
                 if *t < n {
-                    check_cancellations(*t, w_st, &mut worklist);
+                    if profile {
+                        pos_edges = pos_edges.saturating_add(1);
+                    }
+                    check_cancellations(*t, w_st, &mut worklist, &mut in_queue);
                 }
             }
         }
-        if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-            for (target, weight) in default_targets {
-                check_cancellations(*target, weight, &mut worklist);
-            }
+        if let Some(start) = pos_start {
+            pos_us = pos_us.saturating_add(start.elapsed().as_micros() as u64);
         }
 
+        let default_start = if profile { Some(Instant::now()) } else { None };
+        if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            for (target, weight) in default_targets {
+                if profile {
+                    default_edges = default_edges.saturating_add(1);
+                }
+                check_cancellations(*target, weight, &mut worklist, &mut in_queue);
+            }
+        }
+        if let Some(start) = default_start {
+            default_us = default_us.saturating_add(start.elapsed().as_micros() as u64);
+        }
+
+        let eps_start = if profile { Some(Instant::now()) } else { None };
         for (t, w_st) in &states[s].epsilons {
             if *t >= n {
                 continue;
@@ -444,21 +532,94 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
             if prop_w.is_empty() {
                 continue;
             }
+            if profile {
+                eps_edges = eps_edges.saturating_add(1);
+            }
             let query_key: QueryKey = (a, c);
             let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
             let old_qw = query_weight.clone();
             *query_weight |= &prop_w;
             if *query_weight != old_qw {
-                worklist.push_back((*t, a, c, query_weight.clone()));
+                let key: QueryKey = (a, c);
+                if in_queue[*t].insert(key) {
+                    worklist.push_back((*t, a, c));
+                }
             }
+        }
+        if let Some(start) = eps_start {
+            eps_us = eps_us.saturating_add(start.elapsed().as_micros() as u64);
         }
     }
 
     let mut result = Vec::new();
+    let mut eps_added: u64 = 0;
+    let mut eps_fanout_sources: u64 = 0;
+    let mut eps_fanout_total: u64 = 0;
+    let mut eps_fanout_max: u64 = 0;
     for (from, targets) in new_eps_from {
+        eps_added = eps_added.saturating_add(targets.len() as u64);
+        if profile {
+            let fanout = targets.len() as u64;
+            if fanout > 0 {
+                eps_fanout_sources = eps_fanout_sources.saturating_add(1);
+                eps_fanout_total = eps_fanout_total.saturating_add(fanout);
+                if fanout > eps_fanout_max {
+                    eps_fanout_max = fanout;
+                }
+            }
+        }
         for (to, w) in targets {
             result.push((from, to, w));
         }
+    }
+    if profile {
+        eprintln!(
+            "PASS2 cancellations profile (hashset): seeds={}, steps={}, eps_added={}",
+            seed_count,
+            steps,
+            eps_added,
+        );
+        eprintln!(
+            "PASS2 cancellations breakdown: prop_eps_us={} pos_us={} default_us={} eps_us={} prop_eps_edges={} pos_edges={} default_edges={} eps_edges={}",
+            prop_eps_us,
+            pos_us,
+            default_us,
+            eps_us,
+            prop_eps_edges,
+            pos_edges,
+            default_edges,
+            eps_edges,
+        );
+        eprintln!("PASS2 cancellations neg_source_states={}", neg_source_states.len());
+        let queries_at_source_avg = if eps_create_events > 0 {
+            queries_at_source_total / eps_create_events
+        } else {
+            0
+        };
+        eprintln!(
+            "PASS2 cancellations queries_at_source: events={} total={} max={} avg={}",
+            eps_create_events,
+            queries_at_source_total,
+            queries_at_source_max,
+            queries_at_source_avg,
+        );
+        let eps_fanout_avg = if eps_fanout_sources > 0 {
+            eps_fanout_total / eps_fanout_sources
+        } else {
+            0
+        };
+        eprintln!(
+            "PASS2 cancellations eps_fanout: sources={} total={} max={} avg={}",
+            eps_fanout_sources,
+            eps_fanout_total,
+            eps_fanout_max,
+            eps_fanout_avg,
+        );
+        eprintln!(
+            "PASS2 cancellations eps_updates: created={} grown={}",
+            eps_created,
+            eps_grown,
+        );
     }
     result
 }
@@ -473,7 +634,8 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
     queries.resize_with(n, FxHashMap::default);
     let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code)> = VecDeque::new();
     let mut in_queue: FxHashSet<(NWAStateID, NWAStateID, Code)> = FxHashSet::default();
-    let mut new_eps_from: FxHashMap<NWAStateID, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
+    let mut new_eps_from: Vec<FxHashMap<NWAStateID, Weight>> = Vec::with_capacity(n);
+    new_eps_from.resize_with(n, FxHashMap::default);
     let mut enqueue = |worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code)>,
                        in_queue: &mut FxHashSet<(NWAStateID, NWAStateID, Code)>,
                        s: NWAStateID,
@@ -498,9 +660,8 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 }
                 let query_key: QueryKey = (a, c);
                 let query_weight = queries[*b].entry(query_key).or_default();
-                let old_w = query_weight.clone();
-                *query_weight |= w_ab;
-                if *query_weight != old_w {
+                if !w_ab.is_subset_of(query_weight) {
+                    *query_weight |= w_ab;
                     enqueue(&mut worklist, &mut in_queue, *b, a, c);
                     seed_count = seed_count.saturating_add(1);
                 }
@@ -534,7 +695,8 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             Some(w) => w.clone(),
             None => continue,
         };
-        if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+        let epsilons_from_s = &new_eps_from[s];
+        if !epsilons_from_s.is_empty() {
             for (&target, eps_w) in epsilons_from_s {
                 let prop_w = &w_as & eps_w;
                 if prop_w.is_empty() {
@@ -542,9 +704,8 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 }
                 let query_key: QueryKey = (a, c);
                 let query_weight = queries[target].entry(query_key).or_default();
-                let old_qw = query_weight.clone();
-                *query_weight |= &prop_w;
-                if *query_weight != old_qw {
+                if !prop_w.is_subset_of(query_weight) {
+                    *query_weight |= &prop_w;
                     enqueue(&mut worklist, &mut in_queue, target, a, c);
                 }
             }
@@ -560,24 +721,49 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 return;
             }
 
-            let eps_from_a = new_eps_from.entry(a).or_default();
+            let eps_from_a = &mut new_eps_from[a];
             let eps_weight = eps_from_a.entry(target).or_default();
-            let old_eps_w = eps_weight.clone();
-            *eps_weight |= &new_eps_w;
+            if !new_eps_w.is_subset_of(eps_weight) {
+                *eps_weight |= &new_eps_w;
 
-            if *eps_weight != old_eps_w {
-                if let Some(queries_at_a) = queries.get(a) {
-                    for (&(a_prime, c_prime), w_a_prime_a) in &queries_at_a.clone() {
-                        let prop_w = w_a_prime_a & &*eps_weight;
-                        if prop_w.is_empty() {
-                            continue;
+                if !queries[a].is_empty() {
+                    if a == target {
+                        let entries: Vec<(QueryKey, Weight)> = queries[a]
+                            .iter()
+                            .map(|(k, v)| (*k, v.clone()))
+                            .collect();
+                        let queries_target = &mut queries[target];
+                        for (query_key, w_a_prime_a) in entries {
+                            let prop_w = w_a_prime_a & &*eps_weight;
+                            if prop_w.is_empty() {
+                                continue;
+                            }
+                            let query_weight = queries_target.entry(query_key).or_default();
+                            if !prop_w.is_subset_of(query_weight) {
+                                *query_weight |= &prop_w;
+                                let (a_prime, c_prime) = query_key;
+                                enqueue(worklist, in_queue, target, a_prime, c_prime);
+                            }
                         }
-                        let query_key: QueryKey = (a_prime, c_prime);
-                        let query_weight = queries[target].entry(query_key).or_default();
-                        let old_qw = query_weight.clone();
-                        *query_weight |= &prop_w;
-                        if *query_weight != old_qw {
-                            enqueue(worklist, in_queue, target, a_prime, c_prime);
+                    } else {
+                        let (queries_a, queries_target) = if a < target {
+                            let (left, right) = queries.split_at_mut(target);
+                            (&left[a], &mut right[0])
+                        } else {
+                            let (left, right) = queries.split_at_mut(a);
+                            (&right[0], &mut left[target])
+                        };
+                        for (&(a_prime, c_prime), w_a_prime_a) in queries_a.iter() {
+                            let prop_w = w_a_prime_a & &*eps_weight;
+                            if prop_w.is_empty() {
+                                continue;
+                            }
+                            let query_key: QueryKey = (a_prime, c_prime);
+                            let query_weight = queries_target.entry(query_key).or_default();
+                            if !prop_w.is_subset_of(query_weight) {
+                                *query_weight |= &prop_w;
+                                enqueue(worklist, in_queue, target, a_prime, c_prime);
+                            }
                         }
                     }
                 }
@@ -607,9 +793,8 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             }
             let query_key: QueryKey = (a, c);
             let query_weight = queries[*t].entry(query_key).or_default();
-            let old_qw = query_weight.clone();
-            *query_weight |= &prop_w;
-            if *query_weight != old_qw {
+            if !prop_w.is_subset_of(query_weight) {
+                *query_weight |= &prop_w;
                 enqueue(&mut worklist, &mut in_queue, *t, a, c);
             }
         }
@@ -621,7 +806,11 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
     }
 
     let mut result = Vec::new();
-    for (from, targets) in new_eps_from {
+    for (from, targets) in new_eps_from.into_iter().enumerate() {
+        if targets.is_empty() {
+            continue;
+        }
+        let from = from as NWAStateID;
         for (to, w) in targets {
             result.push((from, to, w));
         }
@@ -743,18 +932,23 @@ fn compute_finality_fixpoint(
     // when `s` itself is final).
     let mut future_final_all: HashMap<NWAStateID, Weight> = HashMap::new();
     let mut worklist: VecDeque<NWAStateID> = VecDeque::new();
+    let mut in_queue = vec![false; n];
 
     // Initialize from final states in the reachable subgraph.
     for &s in &reachable_states {
         if let Some(ref fw) = states[s].final_weight {
             if !fw.is_empty() {
                 future_final_all.insert(s, fw.clone());
-                worklist.push_back(s);
+                if !in_queue[s] {
+                    in_queue[s] = true;
+                    worklist.push_back(s);
+                }
             }
         }
     }
 
     while let Some(s) = worklist.pop_front() {
+        in_queue[s] = false;
         let f_s = match future_final_all.get(&s) {
             Some(w) if !w.is_empty() => w.clone(),
             _ => continue,
@@ -803,7 +997,10 @@ fn compute_finality_fixpoint(
                 let old = entry.clone();
                 *entry |= &add;
                 if *entry != old {
-                    worklist.push_back(pred_state);
+                    if !in_queue[pred_state] {
+                        in_queue[pred_state] = true;
+                        worklist.push_back(pred_state);
+                    }
                 }
             }
         }

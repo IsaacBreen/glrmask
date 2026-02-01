@@ -12,8 +12,7 @@ use profiler_macro::{time_it, timeit};
 
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::resolve_negatives::{
-    apply_cancellations_range, apply_finality_fixpoint_range, log_cancellations_range_profile,
-    remove_negative_transitions_range,
+    apply_cancellations, apply_finality_fixpoint, remove_negative_transitions,
     // Note: remove_redundant_default_transitions is only run in a global pass,
     // not per-range here, since it requires a global pass over all states.
 };
@@ -65,35 +64,6 @@ fn validate_nwa_weight_dims(nwa: &NWA, expected_num_tsids: usize) {
 
     let mut check_weight = |w: &Weight| {
         total += 1;
-        match w {
-            crate::datastructures::abstract_weight::AbstractWeight::RangeMap(rm) => {
-                let nt = rm.num_tsids();
-                if nt != expected_num_tsids {
-                    mismatches += 1;
-                    if examples.len() < 5 {
-                        examples.push(format!("RangeMap num_tsids={} (expected {})", nt, expected_num_tsids));
-                    }
-                }
-            }
-            crate::datastructures::abstract_weight::AbstractWeight::Factorized(fw) => {
-                let nt = fw.num_tsids();
-                if nt != expected_num_tsids {
-                    mismatches += 1;
-                    if examples.len() < 5 {
-                        examples.push(format!("Factorized num_tsids={} (expected {})", nt, expected_num_tsids));
-                    }
-                }
-            }
-            crate::datastructures::abstract_weight::AbstractWeight::RangeSet(_) => {
-                rangeset_weights += 1;
-                if expected_num_tsids > 1 {
-                    mismatches += 1;
-                    if examples.len() < 5 {
-                        examples.push("RangeSet weight in weight-heavy mode".to_string());
-                    }
-                }
-            }
-        }
     };
 
     for state in &nwa.states.0 {
@@ -1371,7 +1341,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     }
                     
                     let mut states = states_arena.borrow_mut();
-                    let new_states_offset = states.len();
                     let instantiate_start = Instant::now();
                     let composed_body = instantiate_nwa_template_into(cached_nwa, &concrete_weights, &mut states, right_body);
                     let instantiate_us = instantiate_start.elapsed().as_micros() as u64;
@@ -1380,35 +1349,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         Ordering::Relaxed,
                     );
                     accounted_us = accounted_us.saturating_add(instantiate_us);
-                    let range = new_states_offset..states.len();
-                    if !range.is_empty() {
-                        let cancel_start = Instant::now();
-                        apply_cancellations_range(&mut states, range.clone());
-                        let cancel_us = cancel_start.elapsed().as_micros() as u64;
-                        pass2_profile_for_process.apply_cancellations_us.fetch_add(
-                            cancel_us,
-                            Ordering::Relaxed,
-                        );
-                        accounted_us = accounted_us.saturating_add(cancel_us);
-                        let finality_start = Instant::now();
-                        apply_finality_fixpoint_range(&mut states, range.clone());
-                        let finality_us = finality_start.elapsed().as_micros() as u64;
-                        pass2_profile_for_process.apply_finality_us.fetch_add(
-                            finality_us,
-                            Ordering::Relaxed,
-                        );
-                        accounted_us = accounted_us.saturating_add(finality_us);
-                        let remove_start = Instant::now();
-                        remove_negative_transitions_range(&mut states, range);
-                        let remove_us = remove_start.elapsed().as_micros() as u64;
-                        pass2_profile_for_process.remove_negative_us.fetch_add(
-                            remove_us,
-                            Ordering::Relaxed,
-                        );
-                        accounted_us = accounted_us.saturating_add(remove_us);
-                        // Note: remove_redundant_default_transitions is NOT called here because it
-                        // requires a global pass over all states.
-                    }
+                    // Negative resolution deferred to a batch pass after Pass 2.
                     let union_start = Instant::now();
                     nwa_body = NWABody::union(&nwa_body, &composed_body);
                     let union_us = union_start.elapsed().as_micros() as u64;
@@ -1495,11 +1436,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 },
                 pass2_traversal_profile_ref,
             );
+        // Incremental cancellations/finality/negative removal disabled.
+        // Batch resolution runs after pass 2 completes.
         pass2_profile.log();
         if let Some(profile) = pass2_traversal_profile_ref {
             profile.log("pass2_traversal");
         }
-        log_cancellations_range_profile();
         eprintln!(
             "TIMING: parser_dwa::pass2_profile process_total={:?}, canonicalize={:?}, cache_lookup={:?}, cache_insert={:?}, dynamic_derive={:?}, instantiate={:?}, cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}, union={:?}, tsid_collect={:?}, final_collect={:?}, other={:?}, templates={}",
             std::time::Duration::from_micros(pass2_profile.process_total_us.load(Ordering::Relaxed)),
@@ -1523,6 +1465,26 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
         crate::debug!(4, "Finished Pass 2");
     });
+    // Batch negative resolution across all accumulated states (after pass 2).
+    {
+        let mut states = states_arena.borrow_mut();
+        if states.len() > 0 {
+            let all_states: HashSet<NWAStateID> = (0..states.len()).collect();
+            let cancel_start = Instant::now();
+            apply_cancellations(&mut states, &all_states);
+            let cancel_elapsed = cancel_start.elapsed();
+            let finality_start = Instant::now();
+            apply_finality_fixpoint(&mut states, &all_states);
+            let finality_elapsed = finality_start.elapsed();
+            let remove_start = Instant::now();
+            remove_negative_transitions(&mut states, &all_states);
+            let remove_elapsed = remove_start.elapsed();
+            eprintln!(
+                "TIMING: parser_dwa::batch_negatives cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}",
+                cancel_elapsed, finality_elapsed, remove_elapsed,
+            );
+        }
+    }
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let tsid_bodies = Arc::try_unwrap(tsid_bodies_arc).unwrap().into_inner().unwrap();
     let avg_template_size = states_arena.borrow().len() as f64 / (final_bodies.len() + tsid_bodies.len()).max(1) as f64;
