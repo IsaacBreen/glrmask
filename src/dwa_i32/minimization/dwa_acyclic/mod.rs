@@ -16,7 +16,7 @@ use crate::dwa_i32::minimization::graph_coloring::{
 use crate::datastructures::RangeMapWeight;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1783,7 +1783,7 @@ struct ProductiveTransition {
 
 fn compute_productive_transitions(dwa: &DWA, range: &[Weight]) -> Vec<Vec<ProductiveTransition>> {
     let mut result = Vec::with_capacity(dwa.states.len());
-    for state in &dwa.states {
+    for state in dwa.states.iter() {
         let mut transitions = Vec::with_capacity(state.transitions.len());
         for (&label, &target) in &state.transitions {
             if target >= dwa.states.len() {
@@ -1817,7 +1817,7 @@ fn are_compatible(
     v: StateID,
     dwa: &DWA,
     needed: &[Weight],
-    range: &[Weight],
+    _range: &[Weight],
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
     productive_transitions: &[Vec<ProductiveTransition>],
@@ -1970,19 +1970,34 @@ fn targets_equivalent_on_domain(
         return false;
     }
     
-    // Check transitions on domain
-    let all_labels: BTreeSet<Label> = bu.transitions.keys()
-        .chain(bv.transitions.keys())
-        .copied()
-        .collect();
-    
-    for lbl in all_labels {
-        let (target_u, w_u) = bu.transitions.get(&lbl)
-            .map(|(t, w)| (*t, w & domain))
-            .unwrap_or((usize::MAX, Weight::zeros()));
-        let (target_v, w_v) = bv.transitions.get(&lbl)
-            .map(|(t, w)| (*t, w & domain))
-            .unwrap_or((usize::MAX, Weight::zeros()));
+    // Check transitions on domain (merge sorted maps without allocation)
+    let mut iter_u = bu.transitions.iter().peekable();
+    let mut iter_v = bv.transitions.iter().peekable();
+
+    while iter_u.peek().is_some() || iter_v.peek().is_some() {
+        let (entry_u, entry_v) = match (iter_u.peek(), iter_v.peek()) {
+            (Some((lu, _)), Some((lv, _))) => {
+                if lu == lv {
+                    (iter_u.next(), iter_v.next())
+                } else if lu < lv {
+                    (iter_u.next(), None)
+                } else {
+                    (None, iter_v.next())
+                }
+            }
+            (Some(_), None) => (iter_u.next(), None),
+            (None, Some(_)) => (None, iter_v.next()),
+            (None, None) => break,
+        };
+
+        let (target_u, w_u) = match entry_u {
+            Some((_, (t, w))) => (*t, w & domain),
+            None => (usize::MAX, Weight::zeros()),
+        };
+        let (target_v, w_v) = match entry_v {
+            Some((_, (t, w))) => (*t, w & domain),
+            None => (usize::MAX, Weight::zeros()),
+        };
         let w_u_empty = w_u.is_empty();
         if w_u != w_v || (!w_u_empty && target_u != target_v) {
             return false;
