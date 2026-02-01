@@ -277,18 +277,9 @@ pub struct DeterminizeAndMinimizeConfig {
     pub use_rustfst_determinize: bool,
 }
 
-impl NWA {
-    #[time_it("NWA::determinize_and_minimize")]
-    pub fn determinize_and_minimize(mut self, profile: DeterminizeAndMinimizeProfile) -> DWA {
-        let _dwa_type_guard = crate::dwa_i32::minimization::graph_coloring::set_current_dwa_type(
-            Some(profile.as_dwa_type()),
-        );
-        if self.states.len() > 1000 && optimize_debug() {
-            return Self::run_determinize_and_minimize_experiment(self, profile);
-        }
-
-        // Production configs based on experiments
-        let config = match profile {
+impl DeterminizeAndMinimizeConfig {
+    pub fn for_profile(profile: DeterminizeAndMinimizeProfile) -> Self {
+        match profile {
             DeterminizeAndMinimizeProfile::Terminal => {
                 // Full pipeline for Terminal DWA construction
                 // Allow disabling rustfst minimization via env var.
@@ -409,18 +400,53 @@ impl NWA {
                     use_rustfst_determinize: false,
                 }
             },
-        };
+        }
+    }
+}
+
+impl NWA {
+    #[time_it("NWA::determinize_and_minimize")]
+    pub fn determinize_and_minimize(mut self, profile: DeterminizeAndMinimizeProfile) -> DWA {
+        self.determinize_and_minimize_with_hook(profile, Option::<fn(&mut DWA)>::None)
+    }
+
+    pub fn determinize_and_minimize_with_hook<F>(
+        mut self,
+        profile: DeterminizeAndMinimizeProfile,
+        pre_dwa_hook: Option<F>,
+    ) -> DWA
+    where
+        F: FnOnce(&mut DWA),
+    {
+        let _dwa_type_guard = crate::dwa_i32::minimization::graph_coloring::set_current_dwa_type(
+            Some(profile.as_dwa_type()),
+        );
+        if self.states.len() > 1000 && optimize_debug() {
+            return Self::run_determinize_and_minimize_experiment(self, profile);
+        }
+        let config = DeterminizeAndMinimizeConfig::for_profile(profile);
         if matches!(profile, DeterminizeAndMinimizeProfile::Parser) {
             crate::dwa_i32::determinization::with_determinize_progress_enabled(true, || {
-                Self::determinize_and_minimize_with_config(&mut self, config)
+                self.determinize_and_minimize_with_config_and_hook(config, pre_dwa_hook)
             })
         } else {
-            Self::determinize_and_minimize_with_config(&mut self, config)
+            self.determinize_and_minimize_with_config_and_hook(config, pre_dwa_hook)
         }
     }
 
     #[time_it("NWA::determinize_and_minimize_with_config")]
     pub fn determinize_and_minimize_with_config(&mut self, config: DeterminizeAndMinimizeConfig) -> DWA {
+        self.determinize_and_minimize_with_config_and_hook(config, Option::<fn(&mut DWA)>::None)
+    }
+
+    fn determinize_and_minimize_with_config_and_hook<F>(
+        &mut self,
+        config: DeterminizeAndMinimizeConfig,
+        pre_dwa_hook: Option<F>,
+    ) -> DWA
+    where
+        F: FnOnce(&mut DWA),
+    {
         let total_start = std::time::Instant::now();
         crate::debug!(5, "Determinize and minimize initial stats: {}",
             self.stats());
@@ -475,6 +501,10 @@ impl NWA {
             pre_min_stats.states,
             pre_min_stats.transitions,
         );
+
+        if let Some(hook) = pre_dwa_hook {
+            hook(&mut dwa);
+        }
 
         // Run DWA passes
         let dwa_passes_start = std::time::Instant::now();

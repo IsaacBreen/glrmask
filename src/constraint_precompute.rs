@@ -29,7 +29,7 @@ use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
 use crate::dwa_i32::{DeterminizeAndMinimizeProfile, DWA, NWA, NWAStateID, Weight};
 use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask_with_offset_map};
 use crate::profiler::{self};
-use crate::interface::{GrammarDefinition, prune_nwa_with_suffix_grammar};
+use crate::interface::{GrammarDefinition, prune_dwa_with_suffix_grammar, prune_nwa_with_suffix_grammar};
 
 use crate::dfa_u8::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
@@ -533,6 +533,37 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
+        let do_dwa_suffix_prune = std::env::var("DWA_SUFFIX_PRUNE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let pre_dwa_suffix_prune = if do_dwa_suffix_prune {
+            let suffix_prune_grammar = self.suffix_prune_grammar.clone();
+            let suffix_prune_terminal_map = self.suffix_prune_terminal_map.clone();
+            let terminals_count = self.terminals_count;
+            Some(move |dwa: &mut DWA| {
+                match (&suffix_prune_grammar, &suffix_prune_terminal_map) {
+                    (Some(grammar_def), Some(terminal_map)) => {
+                        crate::debug!(4, "Terminal DWA (before pre-min suffix pruning): {}", dwa.stats());
+                        let prune_start = std::time::Instant::now();
+                        let (kept, pruned) = prune_dwa_with_suffix_grammar(
+                            dwa,
+                            grammar_def,
+                            terminal_map,
+                            terminals_count,
+                        );
+                        crate::debug!(4, "Terminal DWA pre-min suffix pruning complete. Kept={}, pruned={}", kept, pruned);
+                        crate::debug!(4, "Terminal DWA (after pre-min suffix pruning): {}", dwa.stats());
+                        eprintln!("TIMING: terminal_dwa_suffix_prune_pre_min {:?}", prune_start.elapsed());
+                    }
+                    _ => {
+                        crate::debug!(4, "DWA_SUFFIX_PRUNE set but missing grammar definition or terminal map; skipping");
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
         // Use unified determinize_and_minimize with "Terminal" profile
         // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
         // Expected results: 14647 → 5904 → 5904 → 889 → 189 states
@@ -545,7 +576,10 @@ impl<'r> Precomputer1<'r> {
         }
         crate::debug!(5, "precompute1::determinize_and_minimize start");
         let dwa = timeit!("precompute1::determinize_and_minimize", {
-            self.nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Terminal)
+            self.nwa.determinize_and_minimize_with_hook(
+                DeterminizeAndMinimizeProfile::Terminal,
+                pre_dwa_suffix_prune,
+            )
         });
         crate::debug!(5, "precompute1::determinize_and_minimize end");
         if profile_minimize_only {
