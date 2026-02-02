@@ -2858,6 +2858,148 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
     assert!(terminal_dwa.states.len() > 1, "DWA should have multiple states");
 }
 
+/// Demonstrate a short-token path-length violation in terminal DWA.
+///
+/// This test is ignored by default because it currently fails, demonstrating
+/// the over-approximation bug in terminal DWA weights.
+#[ignore]
+#[test]
+fn test_terminal_dwa_short_token_path_length_violation() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
+    use crate::finite_automata::{Expr, ExprGroup, ExprGroups};
+    use crate::dwa_i32::Weight;
+
+    // Tokenizer with overlapping terminals: '-', '--', '+', '+='
+    let tokenizer = Tokenizer::new(ExprGroups {
+        groups: vec![
+            ExprGroup { expr: Expr::U8Seq(b"-".to_vec()), is_non_greedy: false },
+            ExprGroup { expr: Expr::U8Seq(b"--".to_vec()), is_non_greedy: false },
+            ExprGroup { expr: Expr::U8Seq(b"+".to_vec()), is_non_greedy: false },
+            ExprGroup { expr: Expr::U8Seq(b"+=".to_vec()), is_non_greedy: false },
+        ],
+    }.build());
+
+    // LLM vocab: single short token
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b"--+".to_vec(), LLMTokenID(0));
+
+    let terminals_count = 4; // '-', '--', '+', '+='
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+
+    let terminal_dwa = run_precompute1(
+        &tokenizer,
+        &internal_llm_token_map,
+        0, // max internal token id
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+        None,
+        None,
+    );
+
+    let num_tsids = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        0
+    };
+
+    let weight_contains_token = |weight: &Weight, internal_id: usize| -> bool {
+        if num_tsids == 0 {
+            weight.contains(internal_id)
+        } else {
+            let start = internal_id.saturating_mul(num_tsids);
+            let end = start.saturating_add(num_tsids.saturating_sub(1));
+            for range in weight.ranges() {
+                let r_start = *range.start();
+                let r_end = *range.end();
+                if r_start > end {
+                    break;
+                }
+                if r_end >= start {
+                    return true;
+                }
+            }
+            false
+        }
+    };
+
+    fn max_path_len_for_token(
+        dwa: &crate::dwa_i32::DWA,
+        token_id: usize,
+        terminals_count: usize,
+        weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+    ) -> usize {
+        let n_states = dwa.states.len();
+        let mut memo: Vec<Option<usize>> = vec![None; n_states];
+
+        fn dfs(
+            state_id: usize,
+            dwa: &crate::dwa_i32::DWA,
+            token_id: usize,
+            terminals_count: usize,
+            weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+            memo: &mut Vec<Option<usize>>,
+        ) -> usize {
+            if let Some(v) = memo[state_id] {
+                return v;
+            }
+
+            let mut best = 0usize;
+            if let Some(final_weight) = &dwa.states[state_id].final_weight {
+                if weight_contains_token(final_weight, token_id) {
+                    best = 0;
+                }
+            }
+
+            for (&label, &next_state) in &dwa.states[state_id].transitions {
+                if let Some(weight) = dwa.states[state_id].trans_weights.get(&label) {
+                    if !weight_contains_token(weight, token_id) {
+                        continue;
+                    }
+                    let label_usize = label as usize;
+                    let add: usize = if label_usize < terminals_count { 1 } else { 0 };
+                    let cand = add.saturating_add(dfs(next_state, dwa, token_id, terminals_count, weight_contains_token, memo));
+                    if cand > best {
+                        best = cand;
+                    }
+                }
+            }
+
+            memo[state_id] = Some(best);
+            best
+        }
+
+        dfs(
+            dwa.body.start_state,
+            dwa,
+            token_id,
+            terminals_count,
+            weight_contains_token,
+            &mut memo,
+        )
+    }
+
+    let token_len = 3; // "--+"
+    let max_len = max_path_len_for_token(
+        &terminal_dwa,
+        0,
+        terminals_count,
+        &weight_contains_token,
+    );
+
+    assert!(
+        max_len <= token_len,
+        "token len {} shorter than max path len {} (expected to fail with current over-approximation)",
+        token_len,
+        max_len
+    );
+}
+
 // #[ignore]
 // #[test]
 // fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
