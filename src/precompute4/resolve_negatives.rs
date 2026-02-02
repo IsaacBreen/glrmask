@@ -370,7 +370,7 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
         }
     }
 
-    let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
+    let mut queries: FxHashMap<NWAStateID, FxHashMap<QueryKey, Weight>> = FxHashMap::default();
     let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code)> = VecDeque::new();
     let mut in_queue: Vec<FxHashSet<QueryKey>> = Vec::with_capacity(n);
     in_queue.resize_with(n, FxHashSet::default);
