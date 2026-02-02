@@ -2868,15 +2868,8 @@ fn test_terminal_dwa_short_token_path_length_violation() {
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
     use crate::dwa_i32::Weight;
 
-    // Minimal grammar to reproduce the over-approximation:
-    // #![ignore(IGNORE)]
-    // start ::= '+';
-    // IGNORE ::= ' ';
-    let ebnf_grammar = r#"
-#![ignore(IGNORE)]
-start ::= '+' ;
-IGNORE ::= ' ' ;
-"#;
+    // Use JS grammar tokenizer to mirror real terminal definitions (IGNORE, +, +=, etc.)
+    let ebnf_grammar = include_str!("js.ebnf");
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     let tokenizer = &compiled_grammar.tokenizer;
@@ -2911,6 +2904,188 @@ IGNORE ::= ' ' ;
         None,
     );
 
+    let num_tsids = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        0
+    };
+
+    let weight_contains_token = |weight: &Weight, internal_id: usize| -> bool {
+        if num_tsids == 0 {
+            weight.contains(internal_id)
+        } else {
+            let start = internal_id.saturating_mul(num_tsids);
+            let end = start.saturating_add(num_tsids.saturating_sub(1));
+            for range in weight.ranges() {
+                let r_start = *range.start();
+                let r_end = *range.end();
+                if r_start > end {
+                    break;
+                }
+                if r_end >= start {
+                    return true;
+                }
+            }
+            false
+        }
+    };
+
+    fn max_path_len_for_token(
+        dwa: &crate::dwa_i32::DWA,
+        token_id: usize,
+        terminals_count: usize,
+        weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+    ) -> (usize, Vec<(usize, crate::dwa_i32::common::Label, usize)>) {
+        let n_states = dwa.states.len();
+        let mut memo: Vec<Option<usize>> = vec![None; n_states];
+        let mut choice: Vec<Option<(crate::dwa_i32::common::Label, usize, usize)>> = vec![None; n_states];
+
+        fn dfs(
+            state_id: usize,
+            dwa: &crate::dwa_i32::DWA,
+            token_id: usize,
+            terminals_count: usize,
+            weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+            memo: &mut Vec<Option<usize>>,
+            choice: &mut Vec<Option<(crate::dwa_i32::common::Label, usize, usize)>>,
+        ) -> usize {
+            if let Some(v) = memo[state_id] {
+                return v;
+            }
+
+            let mut best = 0usize;
+            if let Some(final_weight) = &dwa.states[state_id].final_weight {
+                if weight_contains_token(final_weight, token_id) {
+                    best = 0;
+                }
+            }
+
+            for (&label, &next_state) in &dwa.states[state_id].transitions {
+                if let Some(weight) = dwa.states[state_id].trans_weights.get(&label) {
+                    if !weight_contains_token(weight, token_id) {
+                        continue;
+                    }
+                    let label_usize = label as usize;
+                    let add: usize = if label_usize < terminals_count { 1 } else { 0 };
+                    let cand = add.saturating_add(dfs(next_state, dwa, token_id, terminals_count, weight_contains_token, memo, choice));
+                    if cand > best {
+                        best = cand;
+                        choice[state_id] = Some((label, next_state, add));
+                    }
+                }
+            }
+
+            memo[state_id] = Some(best);
+            best
+        }
+
+        let max_len = dfs(
+            dwa.body.start_state,
+            dwa,
+            token_id,
+            terminals_count,
+            weight_contains_token,
+            &mut memo,
+            &mut choice,
+        );
+
+        let mut path = Vec::new();
+        let mut state = dwa.body.start_state;
+        let mut safety = 0usize;
+        while let Some((label, next_state, _add)) = choice[state] {
+            path.push((state, label, next_state));
+            state = next_state;
+            safety += 1;
+            if safety > dwa.states.len().saturating_mul(2).saturating_add(10) {
+                break;
+            }
+        }
+
+        (max_len, path)
+    }
+
+    let token_len = 3; // " ++"
+    let (max_len, witness_path) = max_path_len_for_token(
+        &terminal_dwa,
+        0,
+        terminals_count,
+        &weight_contains_token,
+    );
+
+    if max_len > token_len {
+        eprintln!("WITNESS max_len={} token_len={}", max_len, token_len);
+        let mut terminal_edges = 0usize;
+        for (idx, (src, label, dst)) in witness_path.iter().enumerate() {
+            let label_usize = *label as usize;
+            let is_terminal = label_usize < terminals_count;
+            if is_terminal {
+                terminal_edges += 1;
+            }
+            let has_token = terminal_dwa.states[*src]
+                .trans_weights
+                .get(label)
+                .map(|w| weight_contains_token(w, 0))
+                .unwrap_or(false);
+            if is_terminal {
+                eprintln!("WITNESS[{}] {} --terminal {}--> {} has_token={}", idx, src, label, dst, has_token);
+            } else {
+                let tsid = label_usize.saturating_sub(terminals_count);
+                eprintln!("WITNESS[{}] {} --tsid {}--> {} has_token={}", idx, src, tsid, dst, has_token);
+            }
+        }
+        eprintln!("WITNESS terminal_edges_count={}", terminal_edges);
+    }
+
+    assert!(
+        max_len <= token_len,
+        "token len {} shorter than max path len {} (expected to fail with current over-approximation)",
+        token_len,
+        max_len
+    );
+}
+
+#[test]
+fn test_weight_overapprox_simple() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
+    use crate::dwa_i32::Weight;
+
+    // Use JS grammar tokenizer to match witness path terminal IDs.
+    let ebnf_grammar = include_str!("js.ebnf");
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let tokenizer = &compiled_grammar.tokenizer;
+
+    // Vocab: richer set to reproduce over-approximation
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b" ++".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b" +".to_vec(), LLMTokenID(1));
+    internal_llm_token_map.insert(b" +=".to_vec(), LLMTokenID(2));
+    internal_llm_token_map.insert(b" ++=".to_vec(), LLMTokenID(3));
+    internal_llm_token_map.insert(b" +++".to_vec(), LLMTokenID(4));
+    internal_llm_token_map.insert(b" +++=".to_vec(), LLMTokenID(5));
+    internal_llm_token_map.insert(b"+".to_vec(), LLMTokenID(6));
+    internal_llm_token_map.insert(b"++".to_vec(), LLMTokenID(7));
+    internal_llm_token_map.insert(b"+=".to_vec(), LLMTokenID(8));
+    internal_llm_token_map.insert(b" ++++".to_vec(), LLMTokenID(9));
+
+    let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+
+    let terminal_dwa = run_precompute1(
+        &tokenizer,
+        &internal_llm_token_map,
+        9, // max internal token id
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+        None,
+        None,
+    );
 
     let num_tsids = if is_weight_heavy_enabled() {
         tokenizer.dfa().states.len()
@@ -2938,104 +3113,36 @@ IGNORE ::= ' ' ;
         }
     };
 
-    if std::env::var("DEBUG_DWA_DUMP").is_ok() {
-        println!("Terminal DWA:\n{}", terminal_dwa);
+    // Walk the witness path from the DFS test: labels 5, 83, 91, 10
+    let path: [crate::dwa_i32::common::Label; 4] = [5, 83, 91, 10];
+    let mut state = terminal_dwa.body.start_state;
+    let mut weight: Option<Weight> = None;
 
-        for (state_id, state) in terminal_dwa.states.iter().enumerate() {
-            for (&label, &next_state) in &state.transitions {
-                let has_token = state
-                    .trans_weights
-                    .get(&label)
-                    .map(|w| weight_contains_token(w, 0))
-                    .unwrap_or(false);
-                eprintln!(
-                    "DEBUG_WEIGHT state {} --{}--> {} has_token0={}",
-                    state_id,
-                    label,
-                    next_state,
-                    has_token
-                );
+    for &label in &path {
+        let state_ref = &terminal_dwa.states[state];
+        let next_state = *state_ref
+            .transitions
+            .get(&label)
+            .expect("expected DWA transition on label for fixed path");
+        let trans_weight = state_ref
+            .trans_weights
+            .get(&label)
+            .expect("expected weight for DWA transition on fixed path");
+        weight = Some(match weight {
+            None => trans_weight.clone(),
+            Some(mut w) => {
+                w &= trans_weight;
+                w
             }
-        }
-
-        // Detect cycles on terminal-labeled edges for token 0
-        let n_states = terminal_dwa.states.len();
-        let mut visiting = vec![false; n_states];
-        let mut visited = vec![false; n_states];
-        let mut stack: Vec<usize> = Vec::new();
-
-        fn dfs_cycle(
-            state: usize,
-            terminal_dwa: &crate::dwa_i32::DWA,
-            terminals_count: usize,
-            weight_contains_token: &impl Fn(&Weight, usize) -> bool,
-            visiting: &mut [bool],
-            visited: &mut [bool],
-            stack: &mut Vec<usize>,
-        ) -> bool {
-            visiting[state] = true;
-            stack.push(state);
-
-            for (&label, &next_state) in &terminal_dwa.states[state].transitions {
-                if label as usize >= terminals_count {
-                    continue;
-                }
-                if let Some(weight) = terminal_dwa.states[state].trans_weights.get(&label) {
-                    if !weight_contains_token(weight, 0) {
-                        continue;
-                    }
-                    if visiting[next_state] {
-                        eprintln!("DEBUG_CYCLE: {:?} --{}--> {}", stack, label, next_state);
-                        return true;
-                    }
-                    if !visited[next_state] {
-                        if dfs_cycle(next_state, terminal_dwa, terminals_count, weight_contains_token, visiting, visited, stack) {
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            visiting[state] = false;
-            visited[state] = true;
-            stack.pop();
-            false
-        }
-
-        let has_cycle = dfs_cycle(
-            terminal_dwa.body.start_state,
-            &terminal_dwa,
-            terminals_count,
-            &weight_contains_token,
-            &mut visiting,
-            &mut visited,
-            &mut stack,
-        );
-        eprintln!("DEBUG_CYCLE_FOUND={}", has_cycle);
+        });
+        state = next_state;
     }
 
-    let plus_tid = compiled_grammar
-        .glr_parser
-        .terminal_map
-        .get_by_left(&Terminal::Literal(b"+".to_vec()))
-        .expect("'+' terminal should exist");
-    let plus_label = plus_tid.0 as crate::dwa_i32::common::Label;
+    let weight = weight.expect("expected non-empty path weight");
 
-    let mut plus_transition_count = 0usize;
-    for state in terminal_dwa.states.iter() {
-        if let Some(weight) = state.trans_weights.get(&plus_label) {
-            if weight_contains_token(weight, 0) {
-                plus_transition_count += 1;
-            }
-        }
-    }
-
-    let plus_bytes = 2; // " ++" has two '+' bytes
     assert!(
-        plus_transition_count <= plus_bytes,
-        "token ' ++' appears in {} '+' transitions (expected <= {})",
-        plus_transition_count,
-        plus_bytes
+        !weight_contains_token(&weight, 0),
+        "Bug: token ' ++' survives 4 transitions"
     );
 }
 
