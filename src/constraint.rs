@@ -1367,6 +1367,14 @@ impl GrammarConstraint {
                 })
                 .collect();
 
+            let tid_to_literal_bytes: std::collections::BTreeMap<usize, Vec<u8>> = parser.terminal_map
+                .iter()
+                .filter_map(|(term, tid)| match term {
+                    crate::glr::grammar::Terminal::Literal(bytes) => Some((tid.0, bytes.clone())),
+                    crate::glr::grammar::Terminal::RegexName(_) => None,
+                })
+                .collect();
+
             let reachable_terminals: std::collections::BTreeSet<usize> = {
                 let mut reachable = std::collections::BTreeSet::new();
                 if !terminal_dwa.states.0.is_empty() {
@@ -1443,7 +1451,7 @@ impl GrammarConstraint {
                 format!("{}:{}", internal_id, token_str)
             };
             
-            let mut collected: Vec<(String, usize, crate::dwa_i32::Weight)> = Vec::new();
+            let mut collected: Vec<(String, usize, crate::dwa_i32::Weight, Option<Vec<u8>>)> = Vec::new();
             let max_attempts = target_samples.saturating_mul(50).max(target_samples);
             let max_steps = if sample_long { 2048 } else { 512 };
             let mut attempts = 0usize;
@@ -1451,6 +1459,7 @@ impl GrammarConstraint {
             while collected.len() < target_samples && attempts < max_attempts {
                 let mut current_state = terminal_dwa.body.start_state;
                 let mut path_strs: Vec<String> = Vec::new();
+                let mut path_literal_bytes: Option<Vec<u8>> = Some(Vec::new());
                 let mut path_weight = crate::dwa_i32::Weight::all();
                 let mut steps = 0usize;
                 let mut collected_this_attempt = false;
@@ -1483,7 +1492,7 @@ impl GrammarConstraint {
                         if !w.is_empty() && (choices.is_empty() || rng.gen_bool(end_prob)) {
                             if min_len.map_or(true, |min| path_strs.len() >= min) {
                                 let path_str = path_strs.join(" → ");
-                                collected.push((path_str, path_strs.len(), w));
+                                collected.push((path_str, path_strs.len(), w, path_literal_bytes.clone()));
                                 collected_this_attempt = true;
                                 break;
                             }
@@ -1507,6 +1516,22 @@ impl GrammarConstraint {
                     };
                     path_strs.push(name);
 
+                    path_literal_bytes = match path_literal_bytes {
+                        Some(mut bytes) => {
+                            if label_usize < terminals_count {
+                                if let Some(lit) = tid_to_literal_bytes.get(&label_usize) {
+                                    bytes.extend_from_slice(lit);
+                                    Some(bytes)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    };
+
                     path_weight = next_weight;
                     current_state = next_state;
                     steps += 1;
@@ -1520,38 +1545,38 @@ impl GrammarConstraint {
                 attempts += 1;
             }
 
-            let mut deduped: std::collections::BTreeMap<String, (usize, crate::dwa_i32::Weight)> = std::collections::BTreeMap::new();
-            for (path, len, w) in collected.into_iter() {
-                deduped.entry(path).or_insert((len, w));
+            let mut deduped: std::collections::BTreeMap<String, (usize, crate::dwa_i32::Weight, Option<Vec<u8>>)> = std::collections::BTreeMap::new();
+            for (path, len, w, lit) in collected.into_iter() {
+                deduped.entry(path).or_insert((len, w, lit));
             }
-            let mut collected: Vec<(String, usize, crate::dwa_i32::Weight)> = deduped
+            let mut collected: Vec<(String, usize, crate::dwa_i32::Weight, Option<Vec<u8>>)> = deduped
                 .into_iter()
-                .map(|(path, (len, w))| (path, len, w))
+                .map(|(path, (len, w, lit))| (path, len, w, lit))
                 .collect();
 
             let candidates_len = collected.len();
             let mut distinct_len_count = 0usize;
             if sample_long {
                 collected.sort_by(|a, b| b.1.cmp(&a.1));
-                let mut selected: Vec<(String, usize, crate::dwa_i32::Weight)> = Vec::new();
+                let mut selected: Vec<(String, usize, crate::dwa_i32::Weight, Option<Vec<u8>>)> = Vec::new();
                 let mut used_lengths = std::collections::BTreeSet::new();
-                for (path, len, w) in collected.iter() {
+                for (path, len, w, lit) in collected.iter() {
                     if used_lengths.insert(*len) {
-                        selected.push((path.clone(), *len, w.clone()));
+                        selected.push((path.clone(), *len, w.clone(), lit.clone()));
                         if selected.len() >= num_sample_paths {
                             break;
                         }
                     }
                 }
                 if selected.len() < num_sample_paths {
-                    for (path, len, w) in collected.iter() {
+                    for (path, len, w, lit) in collected.iter() {
                         if selected.len() >= num_sample_paths {
                             break;
                         }
-                        if selected.iter().any(|(p, _, _)| p == path) {
+                        if selected.iter().any(|(p, _, _, _)| p == path) {
                             continue;
                         }
-                        selected.push((path.clone(), *len, w.clone()));
+                        selected.push((path.clone(), *len, w.clone(), lit.clone()));
                     }
                 }
                 distinct_len_count = used_lengths.len();
@@ -1562,7 +1587,7 @@ impl GrammarConstraint {
             }
 
             crate::debug!(5, "Terminal DWA sample paths (n={}, non-empty weights):", collected.len());
-            for (i, (path_str, path_len, w)) in collected.iter().enumerate() {
+            for (i, (path_str, path_len, w, path_literal_bytes)) in collected.iter().enumerate() {
                 let weight_len = w.len();
                 let max_tokens = if weight_len <= 20 { usize::MAX } else { 3 };
                 let mut token_samples: Vec<usize> = Vec::new();
@@ -1588,17 +1613,46 @@ impl GrammarConstraint {
                         break;
                     }
                 }
+                let formatted: Vec<String> = token_samples.iter().copied().map(format_token).collect();
                 let tokens_str = if token_samples.is_empty() {
                     if weight_len <= 20 { "tokens_all=[]".to_string() } else { "tokens_sample=[]".to_string() }
                 } else {
-                    let formatted: Vec<String> = token_samples.into_iter().map(format_token).collect();
                     if weight_len <= 20 {
                         format!("tokens_all=[{}]", formatted.join(", "))
                     } else {
                         format!("tokens_sample=[{}]", formatted.join(", "))
                     }
                 };
-                let weight_info = format!("weight_len={}, {}", weight_len, tokens_str);
+                let validation_note = match path_literal_bytes.as_ref() {
+                    Some(path_bytes) if !token_samples.is_empty() => {
+                        let path_len_bytes = path_bytes.len();
+                        let mut invalid_short: Vec<String> = Vec::new();
+                        let mut invalid_prefix: Vec<String> = Vec::new();
+                        for (internal_id, token_str) in token_samples.iter().zip(formatted.iter()) {
+                            if let Some(token_bytes) = internal_id_to_bytes.get(internal_id) {
+                                if path_len_bytes > token_bytes.len() {
+                                    invalid_short.push(token_str.clone());
+                                } else if !token_bytes.starts_with(path_bytes) {
+                                    invalid_prefix.push(token_str.clone());
+                                }
+                            }
+                        }
+                        if invalid_short.is_empty() && invalid_prefix.is_empty() {
+                            String::new()
+                        } else {
+                            let mut parts = Vec::new();
+                            if !invalid_short.is_empty() {
+                                parts.push(format!("invalid_short=[{}]", invalid_short.join(", ")));
+                            }
+                            if !invalid_prefix.is_empty() {
+                                parts.push(format!("invalid_prefix=[{}]", invalid_prefix.join(", ")));
+                            }
+                            format!(", literal_len={}, {}", path_len_bytes, parts.join(" "))
+                        }
+                    }
+                    _ => String::new(),
+                };
+                let weight_info = format!("weight_len={}, {}{}", weight_len, tokens_str, validation_note);
                 crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path_len, weight_info);
             }
             if collected.len() < num_sample_paths {
@@ -1608,6 +1662,187 @@ impl GrammarConstraint {
                 crate::debug!(5, "  (DWA_SAMPLE_LONG=1: selected {} paths across {} distinct lengths from {} candidates)", collected.len(), distinct_len_count, candidates_len);
                 if candidates_len > 0 && distinct_len_count < 3 {
                     crate::debug!(5, "  (length diversity limited: {} distinct lengths in candidates)", distinct_len_count);
+                }
+            }
+
+            let check_token_path_lengths = std::env::var("CHECK_TOKEN_PATH_LENGTHS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if check_token_path_lengths {
+                use std::collections::VecDeque;
+
+                let n_states = terminal_dwa.states.len();
+                let mut indegree = vec![0usize; n_states];
+                for state in terminal_dwa.states.0.iter() {
+                    for &next_state in state.transitions.values() {
+                        indegree[next_state] = indegree[next_state].saturating_add(1);
+                    }
+                }
+
+                let mut queue: VecDeque<usize> = VecDeque::new();
+                for (sid, &deg) in indegree.iter().enumerate() {
+                    if deg == 0 {
+                        queue.push_back(sid);
+                    }
+                }
+
+                let mut topo: Vec<usize> = Vec::with_capacity(n_states);
+                while let Some(sid) = queue.pop_front() {
+                    topo.push(sid);
+                    for &next_state in terminal_dwa.states[sid].transitions.values() {
+                        indegree[next_state] = indegree[next_state].saturating_sub(1);
+                        if indegree[next_state] == 0 {
+                            queue.push_back(next_state);
+                        }
+                    }
+                }
+
+                if topo.len() != n_states {
+                    crate::debug!(4, "CHECK_TOKEN_PATH_LENGTHS: DWA may be cyclic; topo_len={}, states={}", topo.len(), n_states);
+                }
+
+                let weight_contains_token = |weight: &crate::dwa_i32::Weight, internal_id: usize| -> bool {
+                    if num_tsids_for_conversion == 0 {
+                        weight.contains(internal_id)
+                    } else {
+                        let start = internal_id.saturating_mul(num_tsids_for_conversion);
+                        let end = start.saturating_add(num_tsids_for_conversion.saturating_sub(1));
+                        for range in weight.ranges() {
+                            let r_start = *range.start();
+                            let r_end = *range.end();
+                            if r_start > end {
+                                break;
+                            }
+                            if r_end >= start {
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                };
+
+                let mut violations: Vec<(usize, usize, usize, String)> = Vec::new();
+                let mut short_reports: Vec<(usize, usize, usize, bool, Option<String>)> = Vec::new();
+                let start_state = terminal_dwa.body.start_state;
+
+                for (&internal_id, bytes) in internal_id_to_bytes.iter() {
+                    let token_len = bytes.len();
+                    if token_len == 0 {
+                        continue;
+                    }
+
+                    let mut best_len: Vec<Option<usize>> = vec![None; n_states];
+                    let mut prev: Vec<Option<(usize, crate::dwa_i32::Label)>> = vec![None; n_states];
+                    best_len[start_state] = Some(0);
+
+                    for &sid in topo.iter() {
+                        let Some(curr_len) = best_len[sid] else { continue; };
+                        let state = &terminal_dwa.states[sid];
+                        for (&label, &next_state) in &state.transitions {
+                            if let Some(weight) = state.trans_weights.get(&label) {
+                                if !weight_contains_token(weight, internal_id) {
+                                    continue;
+                                }
+                                let label_usize = label as usize;
+                                let add = if label_usize < terminals_count { 1 } else { 0 };
+                                let cand = curr_len.saturating_add(add);
+                                if best_len[next_state].map_or(true, |v| cand > v) {
+                                    best_len[next_state] = Some(cand);
+                                    prev[next_state] = Some((sid, label));
+                                }
+                            }
+                        }
+                    }
+
+                    let mut max_len: Option<usize> = None;
+                    let mut max_state: Option<usize> = None;
+                    for (sid, state) in terminal_dwa.states.0.iter().enumerate() {
+                        if let Some(final_weight) = &state.final_weight {
+                            if !weight_contains_token(final_weight, internal_id) {
+                                continue;
+                            }
+                            if let Some(len) = best_len[sid] {
+                                if max_len.map_or(true, |v| len > v) {
+                                    max_len = Some(len);
+                                    max_state = Some(sid);
+                                }
+                            }
+                        }
+                    }
+
+                    let max_len = match max_len {
+                        Some(len) => len,
+                        None => {
+                            if token_len <= 5 {
+                                short_reports.push((internal_id, token_len, 0, false, None));
+                            }
+                            continue;
+                        }
+                    };
+
+                    let is_violation = max_len > token_len;
+                    let mut path_str: Option<String> = None;
+
+                    if is_violation {
+                        let mut labels: Vec<usize> = Vec::new();
+                        let mut cur = max_state.unwrap_or(start_state);
+                        while cur != start_state {
+                            if let Some((prev_state, label)) = prev[cur] {
+                                let label_usize = label as usize;
+                                if label_usize < terminals_count {
+                                    labels.push(label_usize);
+                                }
+                                cur = prev_state;
+                            } else {
+                                break;
+                            }
+                        }
+                        labels.reverse();
+
+                        let path = labels
+                            .iter()
+                            .map(|tid| tid_to_name.get(tid).cloned().unwrap_or_else(|| format!("T{}", tid)))
+                            .collect::<Vec<_>>()
+                            .join(" → ");
+                        path_str = Some(path);
+                    }
+
+                    if token_len <= 5 {
+                        short_reports.push((internal_id, token_len, max_len, is_violation, path_str.clone()));
+                    }
+
+                    if is_violation {
+                        if let Some(path) = path_str {
+                            violations.push((internal_id, token_len, max_len, path));
+                        }
+                    }
+                }
+
+                if !violations.is_empty() {
+                    violations.sort_by(|a, b| (b.2.saturating_sub(b.1)).cmp(&a.2.saturating_sub(a.1)));
+                    crate::debug!(4, "CHECK_TOKEN_PATH_LENGTHS: {} violations (showing up to 20)", violations.len());
+                    for (internal_id, token_len, max_len, path_str) in violations.iter().take(20) {
+                        crate::debug!(4, "  token={} (len={}) max_path_len={} path={}", format_token(*internal_id), token_len, max_len, path_str);
+                    }
+
+                    if !short_reports.is_empty() {
+                        short_reports.sort_by(|a, b| a.0.cmp(&b.0));
+                        crate::debug!(4, "CHECK_TOKEN_PATH_LENGTHS: short token report (len<=5)");
+                        for (internal_id, token_len, max_len, is_violation, path_str) in short_reports.iter() {
+                            if *is_violation {
+                                let off_by = max_len.saturating_sub(*token_len);
+                                if let Some(path) = path_str {
+                                    crate::debug!(4, "  token={} (len={}) max_path_len={} -- VIOLATION (off by {}) path={}", format_token(*internal_id), token_len, max_len, off_by, path);
+                                } else {
+                                    crate::debug!(4, "  token={} (len={}) max_path_len={} -- VIOLATION (off by {})", format_token(*internal_id), token_len, max_len, off_by);
+                                }
+                            } else {
+                                crate::debug!(4, "  token={} (len={}) max_path_len={} -- OK", format_token(*internal_id), token_len, max_len);
+                            }
+                        }
+                    }
+                } else {
+                    crate::debug!(4, "CHECK_TOKEN_PATH_LENGTHS: no violations");
                 }
             }
         }
