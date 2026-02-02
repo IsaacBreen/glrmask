@@ -87,6 +87,23 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn is_grammatical_symbol_or_ws(byte: u8) -> bool {
+    if byte.is_ascii_whitespace() {
+        return true;
+    }
+    matches!(
+        byte,
+        b'!' | b'?' | b':' | b';' | b'-' | b'+' | b'=' | b'*' | b'^' | b'%' | b'<' | b'>' | b'~' | b'|' | b'_'
+    )
+}
+
+fn should_filter_grammatical_token(token_bytes: &[u8]) -> bool {
+    if token_bytes.len() <= 2 {
+        return false;
+    }
+    token_bytes.iter().all(|&b| is_grammatical_symbol_or_ws(b))
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let total_start = std::time::Instant::now();
     let args = Args::parse();
@@ -175,6 +192,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id = 0;
+    let filter_grammar_tokens = std::env::var("FILTER_GRAMMATICAL_TOKENS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut filtered_grammar_tokens: usize = 0;
 
     for (token_str, token_id) in vocab {
         let processed_token_str = token_str
@@ -191,6 +212,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !keep { continue; }
         }
 
+        if filter_grammar_tokens && should_filter_grammatical_token(&token_bytes) {
+            filtered_grammar_tokens = filtered_grammar_tokens.saturating_add(1);
+            continue;
+        }
+
         llm_token_map.insert(token_bytes, LLMTokenID(token_id));
         max_original_llm_token_id = max_original_llm_token_id.max(token_id);
     }
@@ -200,6 +226,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if is_debug_level_enabled(2) {
         sep1::debug!(2, "└─ {} tokens {MAGENTA}({}){RESET}", 
             llm_token_map.len(), format_duration(step.elapsed()));
+        if filter_grammar_tokens {
+            sep1::debug!(2, "└─ filtered {} grammar-symbol tokens (FILTER_GRAMMATICAL_TOKENS=1)",
+                filtered_grammar_tokens);
+        }
         println!();
     }
 
