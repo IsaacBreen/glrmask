@@ -337,6 +337,127 @@ impl<'r> Precomputer1<'r> {
             });
         }
 
+        if let Ok(token_str) = std::env::var("DEBUG_PRECOMPUTE1_NWA_TOKEN") {
+            if let Ok(token_id) = token_str.parse::<usize>() {
+                let token_len = std::env::var("DEBUG_PRECOMPUTE1_NWA_TOKEN_LEN")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
+
+                let weight_contains_token = |weight: &Weight| -> bool {
+                    if self.num_tsids == 0 {
+                        weight.contains(token_id)
+                    } else {
+                        let start = token_id.saturating_mul(self.num_tsids);
+                        let end = start.saturating_add(self.num_tsids.saturating_sub(1));
+                        for range in weight.ranges() {
+                            let r_start = *range.start();
+                            let r_end = *range.end();
+                            if r_start > end {
+                                break;
+                            }
+                            if r_end >= start {
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                };
+
+                let mut best_seen: HashMap<NWAStateID, usize> = HashMap::new();
+                let mut found_path: Option<Vec<(NWAStateID, Option<Label>, NWAStateID)>> = None;
+
+                fn dfs_nwa(
+                    nwa: &NWA,
+                    terminals_count: usize,
+                    state: NWAStateID,
+                    term_len: usize,
+                    token_len: usize,
+                    weight_contains_token: &impl Fn(&Weight) -> bool,
+                    best_seen: &mut HashMap<NWAStateID, usize>,
+                    path: &mut Vec<(NWAStateID, Option<Label>, NWAStateID)>,
+                    found_path: &mut Option<Vec<(NWAStateID, Option<Label>, NWAStateID)>>,
+                ) {
+                    if found_path.is_some() {
+                        return;
+                    }
+                    if term_len > token_len {
+                        *found_path = Some(path.clone());
+                        return;
+                    }
+                    if let Some(best) = best_seen.get(&state) {
+                        if *best >= term_len {
+                            return;
+                        }
+                    }
+                    best_seen.insert(state, term_len);
+
+                    // Epsilon transitions
+                    for (next_state, w) in &nwa.states[state].epsilons {
+                        if !weight_contains_token(w) {
+                            continue;
+                        }
+                        path.push((state, None, *next_state));
+                        dfs_nwa(nwa, terminals_count, *next_state, term_len, token_len, weight_contains_token, best_seen, path, found_path);
+                        path.pop();
+                        if found_path.is_some() {
+                            return;
+                        }
+                    }
+
+                    // Terminal transitions
+                    for (&label, targets) in &nwa.states[state].transitions {
+                        for (next_state, w) in targets {
+                            if !weight_contains_token(w) {
+                                continue;
+                            }
+                            let label_usize = label as usize;
+                            let add = if label_usize < terminals_count { 1 } else { 0 };
+                            path.push((state, Some(label), *next_state));
+                            dfs_nwa(nwa, terminals_count, *next_state, term_len + add, token_len, weight_contains_token, best_seen, path, found_path);
+                            path.pop();
+                            if found_path.is_some() {
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                for &start in &self.nwa.body.start_states {
+                    let mut path = Vec::new();
+                    dfs_nwa(
+                        &self.nwa,
+                        self.terminals_count,
+                        start,
+                        0,
+                        token_len,
+                        &weight_contains_token,
+                        &mut best_seen,
+                        &mut path,
+                        &mut found_path,
+                    );
+                    if found_path.is_some() {
+                        break;
+                    }
+                }
+
+                if let Some(path) = found_path {
+                    eprintln!("DEBUG_NWA_TOKEN_PATH token_id={} token_len={} steps={}", token_id, token_len, path.len());
+                    for (idx, (src, label, dst)) in path.iter().enumerate() {
+                        if let Some(label) = label {
+                            let label_usize = *label as usize;
+                            let kind = if label_usize < self.terminals_count { "terminal" } else { "tsid" };
+                            eprintln!("DEBUG_NWA[{}] {} --{} {}--> {}", idx, src, kind, label, dst);
+                        } else {
+                            eprintln!("DEBUG_NWA[{}] {} --eps--> {}", idx, src, dst);
+                        }
+                    }
+                } else {
+                    eprintln!("DEBUG_NWA_TOKEN_PATH token_id={} token_len={} not found", token_id, token_len);
+                }
+            }
+        }
+
         // Create start state with transitions to root states
         let new_start_state = timeit!("precompute1::start_state", {
             let start_state_start = std::time::Instant::now();
@@ -1181,4 +1302,68 @@ pub fn run_precompute1(
     timeit!("precompute1::finish", {
         helper.finish()
     })
+}
+
+#[cfg(test)]
+pub(crate) fn run_precompute1_nwa_for_tests(
+    tokenizer: &Tokenizer,
+    internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
+    internal_max_llm_token: usize,
+    terminals_count: usize,
+    state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
+    tsid_offset_map: Vec<usize>,
+    approx_dfa: Option<ApproximateDfaPruner>,
+) -> NWA {
+    let num_tsids = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        0
+    };
+
+    crate::datastructures::set_global_dims_all_threads(
+        internal_max_llm_token,
+        if num_tsids > 0 { num_tsids } else { 1 },
+    );
+
+    let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    let mut seen_internal_ids = std::collections::HashSet::new();
+
+    for (bytes, id) in internal_llm_token_map {
+        if seen_internal_ids.insert(id.0) {
+            representative_llm_token_map.insert(bytes.clone(), *id);
+        }
+    }
+
+    let mut helper = Precomputer1::new(
+        tokenizer,
+        &representative_llm_token_map,
+        internal_max_llm_token,
+        terminals_count,
+        state_to_rep,
+        num_tsids,
+        tsid_offset_map,
+        approx_dfa,
+        None,
+        None,
+    );
+
+    helper.run_dfs();
+
+    if !helper.direct_insert {
+        for (src, labels) in std::mem::take(&mut helper.pending_transitions) {
+            let state = &mut helper.nwa.states[src];
+            for (label, dsts) in labels {
+                let targets = state.transitions.entry(label).or_default();
+                targets.reserve(dsts.len());
+                targets.extend(dsts.into_iter());
+            }
+        }
+        for (src, dsts) in std::mem::take(&mut helper.pending_epsilons) {
+            let state = &mut helper.nwa.states[src];
+            state.epsilons.reserve(dsts.len());
+            state.epsilons.extend(dsts.into_iter());
+        }
+    }
+
+    helper.nwa
 }

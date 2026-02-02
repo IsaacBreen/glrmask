@@ -1892,6 +1892,48 @@ mod determinization_tests {
     }
 
     #[test]
+    fn test_det_weight_union_overapprox_paths() {
+        let mut nwa = NWA::new();
+        let s1 = nwa.add_state();
+        let s2 = nwa.add_state();
+        let s3 = nwa.add_state();
+
+        let token_a = 0usize;
+        let token_b = 1usize;
+
+        // 0 --a--> 1 (token_a), 0 --a--> 2 (token_b)
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, s1, Weight::from_item(token_a)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, s2, Weight::from_item(token_b)).unwrap();
+
+        // 1 --b--> 3 (token_a)
+        nwa.add_transition(s1, 'b' as Label, s3, Weight::from_item(token_a)).unwrap();
+        // 2 --b--> 3 (token_b)
+        nwa.add_transition(s2, 'b' as Label, s3, Weight::from_item(token_b)).unwrap();
+        // 2 --c--> 3 (token_b)
+        nwa.add_transition(s2, 'c' as Label, s3, Weight::from_item(token_b)).unwrap();
+
+        nwa.states[s3].final_weight = Some(Weight::all());
+
+        let dwa = nwa.determinize();
+
+        let start = dwa.body.start_state;
+        let s_after_a = *dwa.states[start]
+            .transitions
+            .get(&('a' as Label))
+            .expect("expected 'a' transition after determinization");
+
+        let weight_c = dwa.states[s_after_a]
+            .trans_weights
+            .get(&('c' as Label))
+            .expect("expected 'c' transition after determinization");
+
+        assert!(
+            !weight_c.contains(token_a),
+            "token_a should not be present on path a->c (over-approx bug if it is)"
+        );
+    }
+
+    #[test]
     fn test_det_weight_partitioning() {
         // NWA with overlapping weights on 'a'
         let mut nwa = NWA::new();

@@ -1,5 +1,5 @@
 // src/test_constraint_basic.rs
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
@@ -2885,6 +2885,14 @@ fn test_terminal_dwa_short_token_path_length_violation() {
     internal_llm_token_map.insert(b"+".to_vec(), LLMTokenID(6));
     internal_llm_token_map.insert(b"++".to_vec(), LLMTokenID(7));
     internal_llm_token_map.insert(b"+=".to_vec(), LLMTokenID(8));
+    internal_llm_token_map.insert(b" +".to_vec(), LLMTokenID(1));
+    internal_llm_token_map.insert(b" +=".to_vec(), LLMTokenID(2));
+    internal_llm_token_map.insert(b" ++=".to_vec(), LLMTokenID(3));
+    internal_llm_token_map.insert(b" +++".to_vec(), LLMTokenID(4));
+    internal_llm_token_map.insert(b" +++=".to_vec(), LLMTokenID(5));
+    internal_llm_token_map.insert(b"+".to_vec(), LLMTokenID(6));
+    internal_llm_token_map.insert(b"++".to_vec(), LLMTokenID(7));
+    internal_llm_token_map.insert(b"+=".to_vec(), LLMTokenID(8));
 
     let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
     let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
@@ -3027,7 +3035,21 @@ fn test_terminal_dwa_short_token_path_length_violation() {
                 .map(|w| weight_contains_token(w, 0))
                 .unwrap_or(false);
             if is_terminal {
-                eprintln!("WITNESS[{}] {} --terminal {}--> {} has_token={}", idx, src, label, dst, has_token);
+                let term_name = compiled_grammar
+                    .glr_parser
+                    .terminal_map
+                    .get_by_right(&TerminalID(label_usize))
+                    .map(|t| format!("{}", t))
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                eprintln!(
+                    "WITNESS[{}] {} --terminal {} ({})--> {} has_token={}",
+                    idx,
+                    src,
+                    label,
+                    term_name,
+                    dst,
+                    has_token
+                );
             } else {
                 let tsid = label_usize.saturating_sub(terminals_count);
                 eprintln!("WITNESS[{}] {} --tsid {}--> {} has_token={}", idx, src, tsid, dst, has_token);
@@ -3035,6 +3057,159 @@ fn test_terminal_dwa_short_token_path_length_violation() {
         }
         eprintln!("WITNESS terminal_edges_count={}", terminal_edges);
     }
+
+    assert!(
+        max_len <= token_len,
+        "token len {} shorter than max path len {} (expected to fail with current over-approximation)",
+        token_len,
+        max_len
+    );
+}
+
+/// Minimal grammar reproduction for the short-token path-length violation.
+#[test]
+fn test_terminal_dwa_short_token_path_length_violation_minimal() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
+    use crate::dwa_i32::Weight;
+
+    let ebnf_grammar = r#"
+#![ignore(IGNORE)]
+start ::= PLUS | PLUSPLUS | PLUSEQ | template_literal;
+PLUS ::= '+' ;
+PLUSPLUS ::= '++' ;
+PLUSEQ ::= '+=' ;
+EOF ::= '<|endoftext|>';
+
+// Lexical Grammar: Whitespace and Comments (from js.ebnf)
+IGNORE ::= ( WS | COMMENT )+ ;
+WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+COMMENT ::= SINGLE_LINE_COMMENT | MULTI_LINE_COMMENT ;
+SINGLE_LINE_COMMENT ::= '//' ( [^\n\r] )* ;
+MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ;
+
+// Template literal tokens (from js.ebnf)
+template_literal ::= '`' TEMPLATE_CHARS '`' ;
+
+// Template chars (from js.ebnf)
+TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
+TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+"#;
+
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let tokenizer = &compiled_grammar.tokenizer;
+
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b" ++".to_vec(), LLMTokenID(0));
+
+    let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+
+    let terminal_dwa = run_precompute1(
+        &tokenizer,
+        &internal_llm_token_map,
+        8, // max internal token id
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+        None,
+        None,
+    );
+
+    let num_tsids = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        0
+    };
+
+    let weight_contains_token = |weight: &Weight, internal_id: usize| -> bool {
+        if num_tsids == 0 {
+            weight.contains(internal_id)
+        } else {
+            let start = internal_id.saturating_mul(num_tsids);
+            let end = start.saturating_add(num_tsids.saturating_sub(1));
+            for range in weight.ranges() {
+                let r_start = *range.start();
+                let r_end = *range.end();
+                if r_start > end {
+                    break;
+                }
+                if r_end >= start {
+                    return true;
+                }
+            }
+            false
+        }
+    };
+
+    fn max_path_len_for_token(
+        dwa: &crate::dwa_i32::DWA,
+        token_id: usize,
+        terminals_count: usize,
+        weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+    ) -> usize {
+        let n_states = dwa.states.len();
+        let mut memo: Vec<Option<usize>> = vec![None; n_states];
+
+        fn dfs(
+            state_id: usize,
+            dwa: &crate::dwa_i32::DWA,
+            token_id: usize,
+            terminals_count: usize,
+            weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+            memo: &mut Vec<Option<usize>>,
+        ) -> usize {
+            if let Some(v) = memo[state_id] {
+                return v;
+            }
+
+            let mut best = 0usize;
+            if let Some(final_weight) = &dwa.states[state_id].final_weight {
+                if weight_contains_token(final_weight, token_id) {
+                    best = 0;
+                }
+            }
+
+            for (&label, &next_state) in &dwa.states[state_id].transitions {
+                if let Some(weight) = dwa.states[state_id].trans_weights.get(&label) {
+                    if !weight_contains_token(weight, token_id) {
+                        continue;
+                    }
+                    let label_usize = label as usize;
+                    let add: usize = if label_usize < terminals_count { 1 } else { 0 };
+                    let cand = add.saturating_add(dfs(next_state, dwa, token_id, terminals_count, weight_contains_token, memo));
+                    if cand > best {
+                        best = cand;
+                    }
+                }
+            }
+
+            memo[state_id] = Some(best);
+            best
+        }
+
+        dfs(
+            dwa.body.start_state,
+            dwa,
+            token_id,
+            terminals_count,
+            weight_contains_token,
+            &mut memo,
+        )
+    }
+
+    let token_len = 3; // " ++"
+    let max_len = max_path_len_for_token(
+        &terminal_dwa,
+        0,
+        terminals_count,
+        &weight_contains_token,
+    );
 
     assert!(
         max_len <= token_len,
@@ -3113,8 +3288,34 @@ fn test_weight_overapprox_simple() {
         }
     };
 
-    // Walk the witness path from the DFS test: labels 5, 83, 91, 10
-    let path: [crate::dwa_i32::common::Label; 4] = [5, 83, 91, 10];
+    // Walk the witness path using terminal names.
+    let ignore_tid = compiled_grammar
+        .glr_parser
+        .terminal_map
+        .get_by_left(&regex_name("IGNORE"))
+        .expect("IGNORE terminal should exist");
+    let plus_tid = compiled_grammar
+        .glr_parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"+".to_vec()))
+        .expect("'+' terminal should exist");
+    let plusplus_tid = compiled_grammar
+        .glr_parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"++".to_vec()))
+        .expect("'++' terminal should exist");
+    let template_chars_tid = compiled_grammar
+        .glr_parser
+        .terminal_map
+        .get_by_left(&regex_name("TEMPLATE_CHARS"))
+        .expect("TEMPLATE_CHARS terminal should exist");
+
+    let path: [crate::dwa_i32::common::Label; 4] = [
+        ignore_tid.0 as crate::dwa_i32::common::Label,
+        plus_tid.0 as crate::dwa_i32::common::Label,
+        plusplus_tid.0 as crate::dwa_i32::common::Label,
+        template_chars_tid.0 as crate::dwa_i32::common::Label,
+    ];
     let mut state = terminal_dwa.body.start_state;
     let mut weight: Option<Weight> = None;
 
@@ -3138,11 +3339,212 @@ fn test_weight_overapprox_simple() {
         state = next_state;
     }
 
-    let weight = weight.expect("expected non-empty path weight");
+    let mut weight = weight.expect("expected non-empty path weight");
+
+    if let Some(final_w) = &terminal_dwa.states[state].final_weight {
+        weight &= final_w;
+    }
 
     assert!(
         !weight_contains_token(&weight, 0),
         "Bug: token ' ++' survives 4 transitions"
+    );
+}
+
+#[test]
+fn test_terminal_nwa_vs_dwa_overapprox_js() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1, run_precompute1_nwa_for_tests};
+    use crate::dwa_i32::{NWA, Weight};
+
+    let ebnf_grammar = include_str!("js.ebnf");
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let tokenizer = &compiled_grammar.tokenizer;
+
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b" ++".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b" +".to_vec(), LLMTokenID(1));
+    internal_llm_token_map.insert(b" +=".to_vec(), LLMTokenID(2));
+    internal_llm_token_map.insert(b" ++=".to_vec(), LLMTokenID(3));
+    internal_llm_token_map.insert(b" +++".to_vec(), LLMTokenID(4));
+    internal_llm_token_map.insert(b" +++=".to_vec(), LLMTokenID(5));
+    internal_llm_token_map.insert(b"+".to_vec(), LLMTokenID(6));
+    internal_llm_token_map.insert(b"++".to_vec(), LLMTokenID(7));
+    internal_llm_token_map.insert(b"+=".to_vec(), LLMTokenID(8));
+
+    let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+
+    let nwa = run_precompute1_nwa_for_tests(
+        tokenizer,
+        &internal_llm_token_map,
+        8,
+        terminals_count,
+        state_to_rep.clone(),
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+    );
+
+    let terminal_dwa = run_precompute1(
+        tokenizer,
+        &internal_llm_token_map,
+        8,
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+        None,
+        None,
+    );
+
+    let num_tsids = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        0
+    };
+
+    let weight_contains_token = |weight: &Weight, internal_id: usize| -> bool {
+        if num_tsids == 0 {
+            weight.contains(internal_id)
+        } else {
+            let start = internal_id.saturating_mul(num_tsids);
+            let end = start.saturating_add(num_tsids.saturating_sub(1));
+            for range in weight.ranges() {
+                let r_start = *range.start();
+                let r_end = *range.end();
+                if r_start > end {
+                    break;
+                }
+                if r_end >= start {
+                    return true;
+                }
+            }
+            false
+        }
+    };
+
+    fn max_path_len_for_token_nwa(
+        nwa: &NWA,
+        token_id: usize,
+        terminals_count: usize,
+        weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+    ) -> usize {
+        let mut best = 0usize;
+        let mut best_seen: HashMap<crate::dwa_i32::common::NWAStateID, usize> = HashMap::new();
+        let mut queue: VecDeque<(crate::dwa_i32::common::NWAStateID, usize)> = VecDeque::new();
+
+        for &start in &nwa.body.start_states {
+            queue.push_back((start, 0));
+        }
+
+        while let Some((state, len)) = queue.pop_front() {
+            if let Some(prev) = best_seen.get(&state) {
+                if *prev >= len {
+                    continue;
+                }
+            }
+            best_seen.insert(state, len);
+            if len > best {
+                best = len;
+            }
+
+            for (next_state, w) in &nwa.states[state].epsilons {
+                if !weight_contains_token(w, token_id) {
+                    continue;
+                }
+                queue.push_back((*next_state, len));
+            }
+
+            for (&label, targets) in &nwa.states[state].transitions {
+                let label_usize = label as usize;
+                let add = if label_usize < terminals_count { 1 } else { 0 };
+                for (next_state, w) in targets {
+                    if !weight_contains_token(w, token_id) {
+                        continue;
+                    }
+                    queue.push_back((*next_state, len + add));
+                }
+            }
+        }
+
+        best
+    }
+
+    fn max_path_len_for_token_dwa(
+        dwa: &crate::dwa_i32::DWA,
+        token_id: usize,
+        terminals_count: usize,
+        weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+    ) -> usize {
+        let n_states = dwa.states.len();
+        let mut memo: Vec<Option<usize>> = vec![None; n_states];
+
+        fn dfs(
+            state_id: usize,
+            dwa: &crate::dwa_i32::DWA,
+            token_id: usize,
+            terminals_count: usize,
+            weight_contains_token: &impl Fn(&Weight, usize) -> bool,
+            memo: &mut Vec<Option<usize>>,
+        ) -> usize {
+            if let Some(v) = memo[state_id] {
+                return v;
+            }
+
+            let mut best = 0usize;
+            if let Some(final_weight) = &dwa.states[state_id].final_weight {
+                if weight_contains_token(final_weight, token_id) {
+                    best = 0;
+                }
+            }
+
+            for (&label, &next_state) in &dwa.states[state_id].transitions {
+                if let Some(weight) = dwa.states[state_id].trans_weights.get(&label) {
+                    if !weight_contains_token(weight, token_id) {
+                        continue;
+                    }
+                    let label_usize = label as usize;
+                    let add: usize = if label_usize < terminals_count { 1 } else { 0 };
+                    let cand = add.saturating_add(dfs(next_state, dwa, token_id, terminals_count, weight_contains_token, memo));
+                    if cand > best {
+                        best = cand;
+                    }
+                }
+            }
+
+            memo[state_id] = Some(best);
+            best
+        }
+
+        dfs(
+            dwa.body.start_state,
+            dwa,
+            token_id,
+            terminals_count,
+            weight_contains_token,
+            &mut memo,
+        )
+    }
+
+    let token_len = 3; // " ++"
+    let max_len_nwa = max_path_len_for_token_nwa(&nwa, 0, terminals_count, &weight_contains_token);
+    let max_len_dwa = max_path_len_for_token_dwa(&terminal_dwa, 0, terminals_count, &weight_contains_token);
+
+    assert!(
+        max_len_nwa <= token_len,
+        "NWA should not have overlong path (len {} > token_len {})",
+        max_len_nwa,
+        token_len
+    );
+    assert!(
+        max_len_dwa <= token_len,
+        "DWA over-approximates: len {} > token_len {}",
+        max_len_dwa,
+        token_len
     );
 }
 
