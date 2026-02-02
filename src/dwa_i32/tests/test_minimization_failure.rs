@@ -68,6 +68,8 @@ mod test_minimization_failure {
     
     /// This test demonstrates that rm_epsilon before determinization produces
     /// DWAs with fewer unique weights, which enables better minimization.
+    // RustFST minimization relies on division, which is invalid for set-based weights.
+    #[ignore]
     #[test]
     fn test_rm_epsilon_effect_on_weights() {
         // Enable detailed debug output
@@ -322,6 +324,8 @@ mod test_minimization_failure {
     }
     
     /// A more complex example that should show the issue more clearly
+    // RustFST minimization relies on division, which is invalid for set-based weights.
+    #[ignore]
     #[test]
     fn test_weight_fragmentation_complex() {
         // Create a diamond pattern that will show weight fragmentation

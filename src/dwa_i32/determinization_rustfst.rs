@@ -114,23 +114,8 @@ impl ReverseBack<Weight> for Weight {
 }
 
 impl WeaklyDivisibleSemiring for Weight {
-    fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        let new_weight = if *self == *rhs {
-            Weight::all()
-        } else if rhs.is_empty() {
-            Weight::all()
-        } else if rhs.is_all_fast() {
-            self.clone()
-        } else if self.is_all_fast() {
-            Weight::all()
-        } else if self.is_empty() {
-            rhs.complement()
-        } else {
-            self.divide(rhs)
-        };
-
-        *self = new_weight;
-        Ok(())
+    fn divide_assign(&mut self, _rhs: &Self, _divide_type: DivideType) -> Result<()> {
+        panic!("Weight division is not valid for set-based semirings")
     }
 }
 
