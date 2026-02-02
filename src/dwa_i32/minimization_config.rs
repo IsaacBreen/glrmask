@@ -282,20 +282,13 @@ impl DeterminizeAndMinimizeConfig {
         match profile {
             DeterminizeAndMinimizeProfile::Terminal => {
                 // Full pipeline for Terminal DWA construction
-                // Allow disabling rustfst minimization via env var.
-                let skip_minimize_rustfst = std::env::var("TERMINAL_DWA_SKIP_MINIMIZE_RUSTFST")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-
                 let nwa_passes = if std::env::var("SKIP_RUSTFST_MIN").map_or(false, |v| v == "1") {
                     vec![NwaPass::CompressTransitions]
                 } else {
-                    let mut passes = vec![NwaPass::RmEpsilon];
-                    if !skip_minimize_rustfst {
-                        passes.push(NwaPass::MinimizeRustfst);
-                    }
-                    passes.push(NwaPass::CompressTransitions);
-                    passes
+                    vec![
+                        NwaPass::RmEpsilon,
+                        NwaPass::CompressTransitions,
+                    ]
                 };
 
                 let skip_minimize_before_suffix = std::env::var("SKIP_TERMINAL_DWA_MINIMIZE_BEFORE_SUFFIX")
