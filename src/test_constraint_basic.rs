@@ -2862,29 +2862,31 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
 ///
 /// This test is ignored by default because it currently fails, demonstrating
 /// the over-approximation bug in terminal DWA weights.
-#[ignore]
 #[test]
 fn test_terminal_dwa_short_token_path_length_violation() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
-    use crate::finite_automata::{Expr, ExprGroup, ExprGroups};
     use crate::dwa_i32::Weight;
 
-    // Tokenizer with overlapping terminals: '-', '--', '+', '+='
-    let tokenizer = Tokenizer::new(ExprGroups {
-        groups: vec![
-            ExprGroup { expr: Expr::U8Seq(b"-".to_vec()), is_non_greedy: false },
-            ExprGroup { expr: Expr::U8Seq(b"--".to_vec()), is_non_greedy: false },
-            ExprGroup { expr: Expr::U8Seq(b"+".to_vec()), is_non_greedy: false },
-            ExprGroup { expr: Expr::U8Seq(b"+=".to_vec()), is_non_greedy: false },
-        ],
-    }.build());
+    // Use JS grammar tokenizer to mirror real terminal definitions (IGNORE, +, +=, etc.)
+    let ebnf_grammar = include_str!("js.ebnf");
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let tokenizer = &compiled_grammar.tokenizer;
 
-    // LLM vocab: single short token
+    // LLM vocab: short token plus longer extensions with same prefix
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
-    internal_llm_token_map.insert(b"--+".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b" ++".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b" +".to_vec(), LLMTokenID(1));
+    internal_llm_token_map.insert(b" +=".to_vec(), LLMTokenID(2));
+    internal_llm_token_map.insert(b" ++=".to_vec(), LLMTokenID(3));
+    internal_llm_token_map.insert(b" +++".to_vec(), LLMTokenID(4));
+    internal_llm_token_map.insert(b" +++=".to_vec(), LLMTokenID(5));
+    internal_llm_token_map.insert(b"+".to_vec(), LLMTokenID(6));
+    internal_llm_token_map.insert(b"++".to_vec(), LLMTokenID(7));
+    internal_llm_token_map.insert(b"+=".to_vec(), LLMTokenID(8));
 
-    let terminals_count = 4; // '-', '--', '+', '+='
+    let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
     let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
         .iter_states()
         .map(|sid| (sid, sid))
@@ -2893,7 +2895,7 @@ fn test_terminal_dwa_short_token_path_length_violation() {
     let terminal_dwa = run_precompute1(
         &tokenizer,
         &internal_llm_token_map,
-        0, // max internal token id
+        8, // max internal token id
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
@@ -2984,7 +2986,7 @@ fn test_terminal_dwa_short_token_path_length_violation() {
         )
     }
 
-    let token_len = 3; // "--+"
+    let token_len = 3; // " ++"
     let max_len = max_path_len_for_token(
         &terminal_dwa,
         0,
