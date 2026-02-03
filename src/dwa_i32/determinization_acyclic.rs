@@ -23,6 +23,68 @@ fn percentile_index(len: usize, percentile: f64) -> usize {
     }
 }
 
+fn weight_contains_token(weight: &Weight, token_id: usize, num_tsids: usize) -> bool {
+    if num_tsids <= 1 {
+        weight.contains(token_id)
+    } else {
+        let start = token_id.saturating_mul(num_tsids);
+        let end = start.saturating_add(num_tsids.saturating_sub(1));
+        for pos in start..=end {
+            if weight.contains(pos) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DeterminizeGatherDebug {
+    label: Option<Label>,
+    u: Option<NWAStateID>,
+    v: Option<NWAStateID>,
+    dump_weights: bool,
+}
+
+fn token_tsid_ranges(
+    weight: &Weight,
+    token_id: usize,
+    num_tsids: usize,
+    max_ranges: usize,
+) -> (usize, SmallVec<[(usize, usize); 8]>, usize) {
+    if num_tsids == 0 {
+        return (0, SmallVec::new(), 0);
+    }
+    let mut count = 0usize;
+    let mut ranges: SmallVec<[(usize, usize); 8]> = SmallVec::new();
+    let mut total_ranges = 0usize;
+    let mut current_start: Option<usize> = None;
+
+    for tsid in 0..num_tsids {
+        let pos = token_id.saturating_mul(num_tsids).saturating_add(tsid);
+        let has = weight.contains(pos);
+        if has {
+            count = count.saturating_add(1);
+            if current_start.is_none() {
+                current_start = Some(tsid);
+            }
+        } else if let Some(start) = current_start.take() {
+            total_ranges = total_ranges.saturating_add(1);
+            if ranges.len() < max_ranges {
+                ranges.push((start, tsid.saturating_sub(1)));
+            }
+        }
+    }
+    if let Some(start) = current_start.take() {
+        total_ranges = total_ranges.saturating_add(1);
+        if ranges.len() < max_ranges {
+            ranges.push((start, num_tsids.saturating_sub(1)));
+        }
+    }
+
+    (count, ranges, total_ranges)
+}
+
 pub(crate) fn topo_order_if_acyclic(nwa: &NWA) -> Option<Vec<usize>> {
     let n = nwa.states.len();
     if n == 0 {
@@ -235,6 +297,11 @@ fn build_destinations_batched(
     eps_reach: &[WeightedSubset],
     timers: Option<&MaterializeTimers>,
     bulk_stats_enabled: bool,
+    debug_token: Option<usize>,
+    debug_include_complement: bool,
+    debug_gather: DeterminizeGatherDebug,
+    num_tsids: usize,
+    closure_id: usize,
 ) -> Vec<(Label, WeightedSubset, Weight)> {
     if let Some(timers) = timers {
         timers.calls.fetch_add(1, AtomicOrdering::Relaxed);
@@ -288,6 +355,51 @@ fn build_destinations_batched(
                     };
                     if combined.is_empty() {
                         continue;
+                    }
+                    if let Some(token_id) = debug_token {
+                        if weight_contains_token(&combined, token_id, num_tsids) {
+                            eprintln!(
+                                "DEBUG_DETERMINIZE_TOKEN gather closure={} lbl={:?} u={} v={} token={}",
+                                closure_id,
+                                lbl,
+                                u,
+                                v,
+                                token_id,
+                            );
+                            if debug_gather.dump_weights {
+                                let matches_label = debug_gather.label.map_or(true, |l| l == *lbl);
+                                let matches_u = debug_gather.u.map_or(true, |id| id == *u);
+                                let matches_v = debug_gather.v.map_or(true, |id| id == *v);
+                                if matches_label && matches_u && matches_v {
+                                    let (w_u_count, w_u_ranges, w_u_total_ranges) =
+                                        token_tsid_ranges(w_u, token_id, num_tsids, 8);
+                                    let (w_uv_count, w_uv_ranges, w_uv_total_ranges) =
+                                        token_tsid_ranges(w_uv, token_id, num_tsids, 8);
+                                    let (comb_count, comb_ranges, comb_total_ranges) =
+                                        token_tsid_ranges(&combined, token_id, num_tsids, 8);
+                                    eprintln!(
+                                        "DEBUG_DETERMINIZE_TOKEN_WEIGHTS closure={} lbl={:?} u={} v={} token={} w_u_tsids={}/{} ranges_u={:?} total_ranges_u={} w_uv_tsids={}/{} ranges_uv={:?} total_ranges_uv={} combined_tsids={}/{} ranges_combined={:?} total_ranges_combined={}",
+                                        closure_id,
+                                        lbl,
+                                        u,
+                                        v,
+                                        token_id,
+                                        w_u_count,
+                                        num_tsids,
+                                        w_u_ranges,
+                                        w_u_total_ranges,
+                                        w_uv_count,
+                                        num_tsids,
+                                        w_uv_ranges,
+                                        w_uv_total_ranges,
+                                        comb_count,
+                                        num_tsids,
+                                        comb_ranges,
+                                        comb_total_ranges,
+                                    );
+                                }
+                            }
+                        }
                     }
                     target_map.entry(*v).or_default().push(combined);
                 }
@@ -379,6 +491,18 @@ fn build_destinations_batched(
             continue;
         }
 
+        let (mut pre_count, mut pre_sample) = (0usize, SmallVec::<[NWAStateID; 8]>::new());
+        if let Some(token_id) = debug_token {
+            for (sid, w) in &dest_map {
+                if weight_contains_token(w, token_id, num_tsids) {
+                    pre_count = pre_count.saturating_add(1);
+                    if pre_sample.len() < 8 {
+                        pre_sample.push(*sid);
+                    }
+                }
+            }
+        }
+
         let k0 = dest_map.len();
 
         let expand_start = if timers.is_some() { Some(Instant::now()) } else { None };
@@ -444,6 +568,18 @@ fn build_destinations_batched(
             continue;
         }
 
+        let (mut expanded_count, mut expanded_sample) = (0usize, SmallVec::<[NWAStateID; 8]>::new());
+        if let Some(token_id) = debug_token {
+            for (sid, w) in &expanded {
+                if weight_contains_token(w, token_id, num_tsids) {
+                    expanded_count = expanded_count.saturating_add(1);
+                    if expanded_sample.len() < 8 {
+                        expanded_sample.push(*sid);
+                    }
+                }
+            }
+        }
+
         let normalize_start = if timers.is_some() { Some(Instant::now()) } else { None };
         let w_edge_inv = !&w_edge;
         let mut subset: WeightedSubset = Vec::with_capacity(expanded.len());
@@ -468,6 +604,40 @@ fn build_destinations_batched(
             timers
                 .normalize_ns
                 .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+        }
+        if let Some(token_id) = debug_token {
+            let mut normalized_count = 0usize;
+            let mut normalized_sample = SmallVec::<[NWAStateID; 8]>::new();
+            for (sid, w) in subset.iter() {
+                if weight_contains_token(w, token_id, num_tsids) {
+                    normalized_count = normalized_count.saturating_add(1);
+                    if normalized_sample.len() < 8 {
+                        normalized_sample.push(*sid);
+                    }
+                }
+            }
+            let edge_has = weight_contains_token(&w_edge, token_id, num_tsids);
+            let edge_inv_has = weight_contains_token(&w_edge_inv, token_id, num_tsids);
+            let log_needed = edge_has
+                || pre_count > 0
+                || expanded_count > 0
+                || (debug_include_complement && normalized_count > 0 && !edge_has);
+            if log_needed {
+                eprintln!(
+                    "DEBUG_DETERMINIZE_TOKEN closure={} lbl={:?} token={} w_edge={} w_edge_inv={} pre={} expanded={} normalized={} pre_sample={:?} expanded_sample={:?} normalized_sample={:?}",
+                    closure_id,
+                    lbl,
+                    token_id,
+                    edge_has,
+                    edge_inv_has,
+                    pre_count,
+                    expanded_count,
+                    normalized_count,
+                    pre_sample,
+                    expanded_sample,
+                    normalized_sample,
+                );
+            }
         }
         results.push((lbl, subset, w_edge));
     }
@@ -548,6 +718,43 @@ pub(crate) fn determinize_acyclic_with_progress(
     let max_llm_token = crate::datastructures::get_max_llm_token();
     let num_tsids = crate::datastructures::get_num_tsids();
     crate::datastructures::set_global_dims_all_threads(max_llm_token, num_tsids);
+
+    let debug_token = env::var("DEBUG_DETERMINIZE_TOKEN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let debug_include_complement = env::var("DEBUG_DETERMINIZE_TOKEN_INCLUDE_COMPLEMENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let debug_gather = DeterminizeGatherDebug {
+        label: env::var("DEBUG_DETERMINIZE_GATHER_LABEL")
+            .ok()
+            .and_then(|v| v.parse::<Label>().ok()),
+        u: env::var("DEBUG_DETERMINIZE_GATHER_U")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok()),
+        v: env::var("DEBUG_DETERMINIZE_GATHER_V")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok()),
+        dump_weights: env::var("DEBUG_DETERMINIZE_GATHER_DUMP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
+    };
+    if let Some(token_id) = debug_token {
+        eprintln!(
+            "DEBUG_DETERMINIZE_TOKEN enabled token={} num_tsids={} include_complement={}",
+            token_id,
+            num_tsids,
+            debug_include_complement,
+        );
+        if debug_gather.dump_weights {
+            eprintln!(
+                "DEBUG_DETERMINIZE_TOKEN gather_dump label={:?} u={:?} v={:?}",
+                debug_gather.label,
+                debug_gather.u,
+                debug_gather.v,
+            );
+        }
+    }
 
     let eps_unweighted_start = if profile_enabled { Some(Instant::now()) } else { None };
     let eps_reach_unweighted = timeit!("acyclic_det::precompute_eps_closures_unweighted", {
@@ -812,6 +1019,11 @@ pub(crate) fn determinize_acyclic_with_progress(
                                 &eps_reach,
                                 timers,
                                 bulk_stats_enabled,
+                                debug_token,
+                                debug_include_complement,
+                                debug_gather,
+                                num_tsids,
+                                cid,
                             ) {
                                 let Some(&dest_id) = label_to_dest.get(&lbl) else {
                                     continue;

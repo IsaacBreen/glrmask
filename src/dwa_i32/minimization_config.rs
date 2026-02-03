@@ -452,8 +452,32 @@ impl NWA {
         F: FnOnce(&mut DWA),
     {
         let total_start = std::time::Instant::now();
+        let debug_path = crate::debug_path_weight::parse_debug_path_weight_env();
+        let debug_ignore_final = crate::debug_path_weight::debug_path_weight_ignore_final();
+        let debug_num_tsids = crate::datastructures::get_num_tsids();
+        let mut log_path_weight = |stage: &str, weight: &crate::dwa_i32::Weight, token_id: usize, labels: &[crate::dwa_i32::Label]| {
+            let contains = crate::debug_path_weight::weight_contains_token(weight, token_id, debug_num_tsids);
+            eprintln!(
+                "DEBUG_PATH_WEIGHT stage={} token={} labels={:?} contains={} weight_len={} ignore_final={}",
+                stage,
+                token_id,
+                labels,
+                contains,
+                weight.len(),
+                debug_ignore_final,
+            );
+        };
         crate::debug!(5, "Determinize and minimize initial stats: {}",
             self.stats());
+
+        if let Some((token_id, labels)) = debug_path.as_ref() {
+            let weight = if debug_ignore_final {
+                crate::debug_path_weight::check_nwa_path_weight_no_final(self, labels)
+            } else {
+                crate::debug_path_weight::check_nwa_path_weight(self, labels)
+            };
+            log_path_weight("nwa_initial", &weight, *token_id, labels);
+        }
 
         // Run NWA passes
         let nwa_passes_start = std::time::Instant::now();
@@ -481,6 +505,15 @@ impl NWA {
         crate::debug!(5, "NWA minimization: {}", 
             self.stats());
 
+        if let Some((token_id, labels)) = debug_path.as_ref() {
+            let weight = if debug_ignore_final {
+                crate::debug_path_weight::check_nwa_path_weight_no_final(self, labels)
+            } else {
+                crate::debug_path_weight::check_nwa_path_weight(self, labels)
+            };
+            log_path_weight("nwa_post_passes", &weight, *token_id, labels);
+        }
+
         crate::datastructures::hybrid_bitset::reset_profiling();
         crate::datastructures::rangemap_weight::reset_profiling();
         crate::datastructures::abstract_weight::reset_weight_op_profiling();
@@ -499,6 +532,15 @@ impl NWA {
             dwa
         });
         eprintln!("TIMING: NWA::determinize {:?}", det_total_start.elapsed());
+
+        if let Some((token_id, labels)) = debug_path.as_ref() {
+            let weight = if debug_ignore_final {
+                crate::debug_path_weight::check_dwa_path_weight_no_final(&dwa, labels)
+            } else {
+                crate::debug_path_weight::check_dwa_path_weight(&dwa, labels)
+            };
+            log_path_weight("dwa_post_determinize", &weight, *token_id, labels);
+        }
         let pre_min_stats = dwa.stats();
         eprintln!(
             "TIMING: DWA pre_minimize states={} transitions={}",
@@ -508,6 +550,15 @@ impl NWA {
 
         if let Some(hook) = pre_dwa_hook {
             hook(&mut dwa);
+        }
+
+        if let Some((token_id, labels)) = debug_path.as_ref() {
+            let weight = if debug_ignore_final {
+                crate::debug_path_weight::check_dwa_path_weight_no_final(&dwa, labels)
+            } else {
+                crate::debug_path_weight::check_dwa_path_weight(&dwa, labels)
+            };
+            log_path_weight("dwa_post_hook", &weight, *token_id, labels);
         }
 
         // Run DWA passes
@@ -542,6 +593,15 @@ impl NWA {
         eprintln!("TIMING: DWA passes total {:?}", dwa_passes_start.elapsed());
         crate::debug!(5, "DWA minimization: {}",
             dwa.stats());
+
+        if let Some((token_id, labels)) = debug_path.as_ref() {
+            let weight = if debug_ignore_final {
+                crate::debug_path_weight::check_dwa_path_weight_no_final(&dwa, labels)
+            } else {
+                crate::debug_path_weight::check_dwa_path_weight(&dwa, labels)
+            };
+            log_path_weight("dwa_post_minimize", &weight, *token_id, labels);
+        }
         let post_min_stats = dwa.stats();
         eprintln!(
             "TIMING: DWA post_minimize states={} transitions={}",

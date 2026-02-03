@@ -1347,7 +1347,9 @@ impl<'r> Precomputer1<'r> {
                 }
             }
 
-            if crate::r#macro::is_debug_level_enabled(3) {
+            if crate::r#macro::is_debug_level_enabled(3)
+                && std::env::var("SUPPRESS_PRECOMPUTE1_DFS_LOGS").is_err()
+            {
                 eprintln!(
                     "DFS segment done: segment_len={}, pending_iters={}, next_level_assoc={}",
                     segment_bytes.len(),
@@ -1364,7 +1366,9 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        if crate::r#macro::is_debug_level_enabled(3) {
+        if crate::r#macro::is_debug_level_enabled(3)
+            && std::env::var("SUPPRESS_PRECOMPUTE1_DFS_LOGS").is_err()
+        {
             eprintln!("DFS total pending iterations: {}", total_pending_iters);
         }
     }

@@ -55,6 +55,7 @@ pub mod bruteforce_constraint;
 
 pub mod constraint_vocab;
 pub mod constraint_precompute;
+pub mod debug_path_weight;
 mod test_finite_automata;
 mod fill_benchmark;
 mod test_equivalence_analysis;

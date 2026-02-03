@@ -460,6 +460,7 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     }
     
     let total_start = std::time::Instant::now();
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
 
     ARE_COMPAT_CALLS.store(0, Ordering::Relaxed);
     ARE_COMPAT_NANOS.store(0, Ordering::Relaxed);
@@ -571,7 +572,9 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
                 );
                 let color_elapsed = color_start.elapsed();
                 time_coloring += color_elapsed;
-                eprintln!("TIMING: height {} compute_height_coloring {:?}", h, color_elapsed);
+                if !suppress_height_logs {
+                    eprintln!("TIMING: height {} compute_height_coloring {:?}", h, color_elapsed);
+                }
                 coloring
             });
 
@@ -685,30 +688,32 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     let compat_avg = if compat_calls > 0 { compat_nanos / compat_calls } else { 0 };
     let graph_avg = if graph_calls > 0 { graph_nanos / graph_calls } else { 0 };
 
-    eprintln!(
-        "TIMING SUMMARY: compute_height_coloring total {:?} over {} calls (avg {:?})",
-        std::time::Duration::from_nanos(height_nanos),
-        height_calls,
-        std::time::Duration::from_nanos(height_avg),
-    );
-    eprintln!(
-        "TIMING SUMMARY: scan_colors total {:?} over {} calls (avg {:?})",
-        std::time::Duration::from_nanos(scan_nanos),
-        scan_calls,
-        std::time::Duration::from_nanos(scan_avg),
-    );
-    eprintln!(
-        "TIMING SUMMARY: are_compatible total {:?} over {} calls (avg {:?})",
-        std::time::Duration::from_nanos(compat_nanos),
-        compat_calls,
-        std::time::Duration::from_nanos(compat_avg),
-    );
-    eprintln!(
-        "TIMING SUMMARY: build_incompatibility_graph total {:?} over {} calls (avg {:?})",
-        std::time::Duration::from_nanos(graph_nanos),
-        graph_calls,
-        std::time::Duration::from_nanos(graph_avg),
-    );
+    if !suppress_height_logs {
+        eprintln!(
+            "TIMING SUMMARY: compute_height_coloring total {:?} over {} calls (avg {:?})",
+            std::time::Duration::from_nanos(height_nanos),
+            height_calls,
+            std::time::Duration::from_nanos(height_avg),
+        );
+        eprintln!(
+            "TIMING SUMMARY: scan_colors total {:?} over {} calls (avg {:?})",
+            std::time::Duration::from_nanos(scan_nanos),
+            scan_calls,
+            std::time::Duration::from_nanos(scan_avg),
+        );
+        eprintln!(
+            "TIMING SUMMARY: are_compatible total {:?} over {} calls (avg {:?})",
+            std::time::Duration::from_nanos(compat_nanos),
+            compat_calls,
+            std::time::Duration::from_nanos(compat_avg),
+        );
+        eprintln!(
+            "TIMING SUMMARY: build_incompatibility_graph total {:?} over {} calls (avg {:?})",
+            std::time::Duration::from_nanos(graph_nanos),
+            graph_calls,
+            std::time::Duration::from_nanos(graph_avg),
+        );
+    }
     
     Ok(result)
 }
@@ -808,13 +813,14 @@ fn compute_height_coloring_with_range(
     let trace_heights = std::env::var("DWA_TRACE_HEIGHTS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
 
-    if trace_heights {
+    if trace_heights && !suppress_height_logs {
         eprintln!("TRACE: height {} start candidates={}", height, candidates.len());
     }
 
     // Log diagnostic info for large candidate sets
-    if candidates.len() >= 100 {
+    if candidates.len() >= 100 && !suppress_height_logs {
         crate::debug!(5, "  {} new_states (targets) available", new_states.len());
     }
 
@@ -838,10 +844,14 @@ fn compute_height_coloring_with_range(
                 start,
             )
         });
-        crate::debug!(6, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
+        if !suppress_height_logs {
+            crate::debug!(6, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
+        }
         let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
-        crate::debug!(5, "height {} coloring: candidates={}, path=greedy_no_graph, colors={}", height, candidates.len(), num_colors);
-        if trace_heights {
+        if !suppress_height_logs {
+            crate::debug!(5, "height {} coloring: candidates={}, path=greedy_no_graph, colors={}", height, candidates.len(), num_colors);
+        }
+        if trace_heights && !suppress_height_logs {
             eprintln!("TRACE: height {} colors={}", height, num_colors);
         }
         return colors;
@@ -852,10 +862,14 @@ fn compute_height_coloring_with_range(
         let colors = timeit!("coloring::height0_direct", {
             compute_height_0_coloring_direct(candidates, dwa, needed, start)
         });
-        crate::debug!(6, "Height 0 coloring total: {:?}", start.elapsed());
+        if !suppress_height_logs {
+            crate::debug!(6, "Height 0 coloring total: {:?}", start.elapsed());
+        }
         let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
-        crate::debug!(5, "height {} coloring: candidates={}, path=height0_direct, colors={}", height, candidates.len(), num_colors);
-        if trace_heights {
+        if !suppress_height_logs {
+            crate::debug!(5, "height {} coloring: candidates={}, path=height0_direct, colors={}", height, candidates.len(), num_colors);
+        }
+        if trace_heights && !suppress_height_logs {
             eprintln!("TRACE: height {} colors={}", height, num_colors);
         }
         return colors;
@@ -889,8 +903,10 @@ fn compute_height_coloring_with_range(
         && candidates.len() > 200
         && signature_coverage > 0.70
     {
-        crate::debug!(5, "  Fast path: {} sig groups / {} candidates ({:.1}% coverage) -> using signatures as colors",
-            num_groups, candidates.len(), signature_coverage * 100.0);
+        if !suppress_height_logs {
+            crate::debug!(5, "  Fast path: {} sig groups / {} candidates ({:.1}% coverage) -> using signatures as colors",
+                num_groups, candidates.len(), signature_coverage * 100.0);
+        }
 
         // Assign colors based on signature
         let assign_start = std::time::Instant::now();
@@ -912,9 +928,11 @@ fn compute_height_coloring_with_range(
         let total_time = start.elapsed();
         let accounted = sig_time + group_time + assign_time;
         let unaccounted = total_time.saturating_sub(accounted);
-        crate::debug!(5, "Coloring fast path breakdown: signature={:?}, assign={:?}, unaccounted={:?}",
-            sig_time, assign_time, unaccounted);
-        if trace_heights {
+        if !suppress_height_logs {
+            crate::debug!(5, "Coloring fast path breakdown: signature={:?}, assign={:?}, unaccounted={:?}",
+                sig_time, assign_time, unaccounted);
+        }
+        if trace_heights && !suppress_height_logs {
             let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
             eprintln!("TRACE: height {} colors={}", height, num_colors);
         }
@@ -923,12 +941,14 @@ fn compute_height_coloring_with_range(
 
     // Build full incompatibility graph
     let graph_start = std::time::Instant::now();
-    eprintln!(
-        "Height {}: graph construction start candidates={}",
-        height,
-        candidates.len()
-    );
-    if trace_heights {
+    if !suppress_height_logs {
+        eprintln!(
+            "Height {}: graph construction start candidates={}",
+            height,
+            candidates.len()
+        );
+    }
+    if trace_heights && !suppress_height_logs {
         eprintln!("TRACE: height {} building incompatibility graph", height);
     }
     let adj = timeit!("coloring::build_incompatibility_graph", {
@@ -944,14 +964,16 @@ fn compute_height_coloring_with_range(
     });
     let graph_time = graph_start.elapsed();
     let edge_count = adj.iter().map(|v| v.len()).sum::<usize>() / 2;
-    eprintln!(
-        "Height {}: graph constructed in {:?} (nodes={}, edges={})",
-        height,
-        graph_time,
-        adj.len(),
-        edge_count
-    );
-    if trace_heights {
+    if !suppress_height_logs {
+        eprintln!(
+            "Height {}: graph constructed in {:?} (nodes={}, edges={})",
+            height,
+            graph_time,
+            adj.len(),
+            edge_count
+        );
+    }
+    if trace_heights && !suppress_height_logs {
         eprintln!("TRACE: height {} graph nodes={} edges={}", height, adj.len(), edge_count);
     }
 
@@ -984,7 +1006,7 @@ fn compute_height_coloring_with_range(
         ColoringMode::ColPackVerified => solve_colpack_with_verification(&adj),
     };
     set_exact_coloring_height(None);
-    if trace_heights {
+    if trace_heights && !suppress_height_logs {
         eprintln!("TRACE: height {} coloring done", height);
     }
     let color_time = color_start.elapsed();
@@ -997,12 +1019,16 @@ fn compute_height_coloring_with_range(
     }
     let accounted = sig_time + group_time + graph_time + color_time;
     let unaccounted = total_time.saturating_sub(accounted);
-    crate::debug!(5, "Coloring breakdown: signature={:?}, graph={:?}, coloring={:?}, unaccounted={:?}",
-        sig_time, graph_time, color_time, unaccounted);
+    if !suppress_height_logs {
+        crate::debug!(5, "Coloring breakdown: signature={:?}, graph={:?}, coloring={:?}, unaccounted={:?}",
+            sig_time, graph_time, color_time, unaccounted);
+    }
     
     let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
-    crate::debug!(5, "height {} coloring: candidates={}, path=graph_exact, colors={}", height, candidates.len(), num_colors);
-    if trace_heights {
+    if !suppress_height_logs {
+        crate::debug!(5, "height {} coloring: candidates={}, path=graph_exact, colors={}", height, candidates.len(), num_colors);
+    }
+    if trace_heights && !suppress_height_logs {
         eprintln!("TRACE: height {} colors={}", height, num_colors);
     }
     if matches!(coloring_mode, ColoringMode::ExactColPack | ColoringMode::ColPackVerified) {
@@ -1095,17 +1121,22 @@ fn export_coloring_graph(
     adj: &Vec<Vec<usize>>,
     signature_groups: usize,
 ) {
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
     let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type()
         .unwrap_or("unknown");
     let export_enabled = std::env::var("EXPORT_COLORING_GRAPHS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    eprintln!("EXPORT CHECK: height={} dwa_type={} enabled={}", height, dwa_type, export_enabled);
+    if !suppress_height_logs {
+        eprintln!("EXPORT CHECK: height={} dwa_type={} enabled={}", height, dwa_type, export_enabled);
+    }
     if !export_enabled {
         return;
     }
 
-    eprintln!("EXPORT DEBUG: height={} dwa_type={}", height, dwa_type);
+    if !suppress_height_logs {
+        eprintln!("EXPORT DEBUG: height={} dwa_type={}", height, dwa_type);
+    }
     let dir = std::env::var("EXPORT_COLORING_GRAPHS_DIR")
         .unwrap_or_else(|_| "coloring_graphs".to_string());
     let grammar = std::env::var("EXPORT_COLORING_GRAMMAR")
@@ -2065,6 +2096,7 @@ fn build_incompatibility_graph_height_0(
     dwa: &DWA,
     needed: &[Weight],
 ) -> Vec<Vec<usize>> {
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
     let n = candidates.len();
     let start = std::time::Instant::now();
     
@@ -2159,7 +2191,7 @@ fn build_incompatibility_graph_height_0(
         }
     });
     
-    if n >= 100 {
+    if n >= 100 && !suppress_height_logs {
         let total_time = start.elapsed();
         let accounted = footprint_overlap_time + pair_overlap_time;
         let unaccounted = total_time.saturating_sub(accounted);
@@ -2185,6 +2217,7 @@ fn greedy_color_without_graph(
     productive_transitions: &[Vec<ProductiveTransition>],
     _start: std::time::Instant,
 ) -> Vec<usize> {
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
     let n = candidates.len();
     if n == 0 { return vec![]; }
 
@@ -2216,8 +2249,10 @@ fn greedy_color_without_graph(
     
     // If >50% unique signatures, cross-signature merging is unlikely - use signatures as colors
     if signature_coverage > 0.50 {
-        crate::debug!(5, "Greedy fast path: {} sig groups / {} candidates ({:.1}% coverage) -> using signatures as colors",
-            num_groups, n, signature_coverage * 100.0);
+        if !suppress_height_logs {
+            crate::debug!(5, "Greedy fast path: {} sig groups / {} candidates ({:.1}% coverage) -> using signatures as colors",
+                num_groups, n, signature_coverage * 100.0);
+        }
         let assign_start = std::time::Instant::now();
         let colors = timeit!("greedy_no_graph::assign_fast", {
             let mut colors = vec![0; n];
@@ -2238,8 +2273,10 @@ fn greedy_color_without_graph(
         let total_time = total_start.elapsed();
         let accounted = sig_time + grouping_time + assign_time;
         let unaccounted = total_time.saturating_sub(accounted);
-        crate::debug!(5, "Greedy fast path breakdown: signature={:?}, grouping={:?}, assign={:?}, unaccounted={:?}",
-            sig_time, grouping_time, assign_time, unaccounted);
+        if !suppress_height_logs {
+            crate::debug!(5, "Greedy fast path breakdown: signature={:?}, grouping={:?}, assign={:?}, unaccounted={:?}",
+                sig_time, grouping_time, assign_time, unaccounted);
+        }
         return colors;
     }
     
@@ -2354,6 +2391,7 @@ fn build_incompatibility_graph_general(
     productive_transitions: &[Vec<ProductiveTransition>],
     start: std::time::Instant,
 ) -> Vec<Vec<usize>> {
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
     let n = candidates.len();
     
     // Compute signatures for each candidate
@@ -2435,7 +2473,7 @@ fn build_incompatibility_graph_general(
         }
     }
     
-    if n >= 100 {
+    if n >= 100 && !suppress_height_logs {
         let total_time = start.elapsed();
         let unaccounted = total_time.saturating_sub(compare_time);
         crate::debug!(5, "Incomp graph: {} candidates, {} sig groups, {} comparisons, {} edges, {:?}",
