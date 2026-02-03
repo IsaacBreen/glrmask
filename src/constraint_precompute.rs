@@ -10,7 +10,7 @@
 //! how each terminal type interacts with the parser stack.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
 use bimap::BiBTreeMap;
@@ -34,6 +34,120 @@ use crate::interface::{GrammarDefinition, prune_dwa_with_suffix_grammar, prune_n
 use crate::dfa_u8::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::dwa_i32::common::Label;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ChainCollapseStats {
+    pub(crate) collapsed_states: usize,
+    pub(crate) rewired_transitions: usize,
+    pub(crate) pruned_states: usize,
+    pub(crate) iterations: usize,
+}
+
+pub(crate) fn collapse_self_extending_chains(
+    dwa: &mut DWA,
+    self_extending_labels: &HashSet<Label>,
+) -> ChainCollapseStats {
+    let mut stats = ChainCollapseStats::default();
+
+    loop {
+        let num_states = dwa.states.len();
+        if num_states == 0 {
+            break;
+        }
+
+        let mut incoming_total = vec![0usize; num_states];
+        let mut incoming_by_label: HashMap<(usize, Label), usize> = HashMap::new();
+        let mut incoming_sources: HashMap<(usize, Label), Vec<usize>> = HashMap::new();
+
+        for (src, state) in dwa.states.0.iter().enumerate() {
+            for (&label, &dst) in &state.transitions {
+                incoming_total[dst] += 1;
+                *incoming_by_label.entry((dst, label)).or_insert(0) += 1;
+                incoming_sources.entry((dst, label)).or_default().push(src);
+            }
+        }
+
+        let mut changed = false;
+        for b in 0..num_states {
+            if b == dwa.body.start_state {
+                continue;
+            }
+            let state_b = &dwa.states[b];
+            if state_b.transitions.len() != 1 {
+                continue;
+            }
+            let (&label, &c) = match state_b.transitions.iter().next() {
+                Some(entry) => entry,
+                None => continue,
+            };
+            if !self_extending_labels.contains(&label) {
+                continue;
+            }
+            if c == b {
+                continue; // self-loop
+            }
+            let incoming_label = incoming_by_label.get(&(b, label)).copied().unwrap_or(0);
+            if incoming_label == 0 || incoming_total[b] != incoming_label {
+                continue; // other incoming labels exist
+            }
+
+            let preds = incoming_sources.get(&(b, label)).cloned().unwrap_or_default();
+            if preds.is_empty() {
+                continue;
+            }
+
+            let w_out = state_b
+                .trans_weights
+                .get(&label)
+                .cloned()
+                .unwrap_or_else(Weight::zeros);
+            let final_weight_b = state_b.final_weight.clone();
+
+            for p in preds {
+                let w_in = dwa.states[p]
+                    .trans_weights
+                    .get(&label)
+                    .cloned()
+                    .unwrap_or_else(Weight::zeros);
+                let mut new_w = w_in;
+                new_w |= &w_out;
+                dwa.states[p].trans_weights.insert(label, new_w);
+                dwa.states[p].transitions.insert(label, c);
+                stats.rewired_transitions += 1;
+            }
+
+            if let Some(fw_b) = final_weight_b {
+                let fw_c = dwa.states[c]
+                    .final_weight
+                    .get_or_insert_with(Weight::zeros);
+                *fw_c |= &fw_b;
+            }
+
+            let state_b_mut = &mut dwa.states[b];
+            state_b_mut.transitions.clear();
+            state_b_mut.trans_weights.clear();
+            state_b_mut.final_weight = None;
+
+            stats.collapsed_states += 1;
+            changed = true;
+        }
+
+        stats.iterations += 1;
+        if !changed {
+            break;
+        }
+    }
+
+    let before = dwa.states.len();
+    if dwa.prune_unreachable() {
+        let after = dwa.states.len();
+        if after < before {
+            stats.pruned_states += before - after;
+        }
+    }
+
+    stats
+}
 
 // No-op progress bar replacement
 struct NoOpPb;
@@ -141,6 +255,7 @@ pub(crate) struct Precomputer1<'r> {
     direct_insert: bool,
     suffix_prune_grammar: Option<Arc<GrammarDefinition>>,
     suffix_prune_terminal_map: Option<BiBTreeMap<Terminal, TerminalID>>,
+    self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -155,6 +270,7 @@ impl<'r> Precomputer1<'r> {
         approx_dfa: Option<ApproximateDfaPruner>,
         suffix_prune_grammar: Option<Arc<GrammarDefinition>>,
         suffix_prune_terminal_map: Option<BiBTreeMap<Terminal, TerminalID>>,
+        self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -255,6 +371,7 @@ impl<'r> Precomputer1<'r> {
             direct_insert,
             suffix_prune_grammar,
             suffix_prune_terminal_map,
+            self_extending_labels_for_collapse,
         }
     }
 
@@ -685,6 +802,35 @@ impl<'r> Precomputer1<'r> {
             None
         };
 
+        let collapse_labels = self.self_extending_labels_for_collapse.clone();
+        let pre_dwa_hook = match (pre_dwa_suffix_prune, collapse_labels) {
+            (None, None) => None,
+            (prune_opt, collapse_opt) => Some(move |dwa: &mut DWA| {
+                if let Some(labels) = collapse_opt.as_ref() {
+                    let before_stats = dwa.stats();
+                    let collapse_start = std::time::Instant::now();
+                    let stats = collapse_self_extending_chains(dwa, labels);
+                    eprintln!(
+                        "TIMING: terminal_dwa_self_ext_chain_collapse {:?}",
+                        collapse_start.elapsed()
+                    );
+                    crate::debug!(
+                        4,
+                        "Terminal DWA self-ext chain collapse: {} -> {} (collapsed_states={}, rewired={}, pruned={}, iterations={})",
+                        before_stats,
+                        dwa.stats(),
+                        stats.collapsed_states,
+                        stats.rewired_transitions,
+                        stats.pruned_states,
+                        stats.iterations,
+                    );
+                }
+                if let Some(prune) = prune_opt {
+                    prune(dwa);
+                }
+            }),
+        };
+
         // Use unified determinize_and_minimize with "Terminal" profile
         // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
         // Expected results: 14647 → 5904 → 5904 → 889 → 189 states
@@ -699,7 +845,7 @@ impl<'r> Precomputer1<'r> {
         let dwa = timeit!("precompute1::determinize_and_minimize", {
             self.nwa.determinize_and_minimize_with_hook(
                 DeterminizeAndMinimizeProfile::Terminal,
-                pre_dwa_suffix_prune,
+                pre_dwa_hook,
             )
         });
         crate::debug!(5, "precompute1::determinize_and_minimize end");
@@ -1250,6 +1396,7 @@ pub fn run_precompute1(
     approx_dfa: Option<ApproximateDfaPruner>,
     suffix_prune_grammar: Option<Arc<GrammarDefinition>>,
     suffix_prune_terminal_map: Option<BiBTreeMap<Terminal, TerminalID>>,
+    self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
 ) -> DWA {
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
     let num_tsids = if is_weight_heavy_enabled() {
@@ -1292,6 +1439,7 @@ pub fn run_precompute1(
             approx_dfa,
             suffix_prune_grammar,
             suffix_prune_terminal_map,
+            self_extending_labels_for_collapse,
         )
     });
 
@@ -1343,6 +1491,7 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         num_tsids,
         tsid_offset_map,
         approx_dfa,
+        None,
         None,
         None,
     );

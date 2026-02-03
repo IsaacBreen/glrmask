@@ -930,6 +930,7 @@ fn test_precompute_a_plus_tokenizer() {
         None,
         None,
         None,
+        None,
     );
 
     // --- Verification ---
@@ -1014,6 +1015,7 @@ fn test_precompute_x_eq() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
+        None,
         None,
         None,
         None,
@@ -2841,6 +2843,7 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         None,
         None,
         None,
+        None,
     );
     
     println!("Actual Terminal DWA:\n{}", terminal_dwa);
@@ -2907,6 +2910,7 @@ fn test_terminal_dwa_short_token_path_length_violation() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
+        None,
         None,
         None,
         None,
@@ -3119,6 +3123,7 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
         None,
         None,
         None,
+        None,
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3260,6 +3265,7 @@ fn test_weight_overapprox_simple() {
         None,
         None,
         None,
+        None,
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3396,6 +3402,7 @@ fn test_terminal_nwa_vs_dwa_overapprox_js() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
+        None,
         None,
         None,
         None,
@@ -3786,6 +3793,7 @@ fn test_suffix_grammar_validation() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
+        None,
         None,
         None,
         None,

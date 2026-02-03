@@ -113,6 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         None,
         None,
+        None,
     );
     if is_debug_level_enabled(5) {
         println!("Terminal DWA (before minimize):");

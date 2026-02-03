@@ -26,7 +26,7 @@ use crate::{
     },
     dfa_u8::{Regex, Tokenizer},
     glr::{
-        analyze::compute_terminal_follow_sets,
+        analyze::{compute_always_follow_sets, compute_self_extending_terminals, compute_terminal_follow_sets},
         grammar::Terminal,
         parser::{GLRParser, GLRParserState},
     },
@@ -160,6 +160,7 @@ fn optimize_dwa_and_vocab(
     // which need to be updated for the new abstraction.
     crate::debug!(4, "DWA Vocab Optimization: Disabled (AbstractWeight migration)");
 }
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -1046,6 +1047,157 @@ impl GrammarConstraint {
             }
         }
 
+        let collapse_self_extending_enabled = std::env::var("ENABLE_TERMINAL_SELF_EXT_CHAIN_COLLAPSE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let self_extending_labels_for_collapse: Option<Arc<HashSet<crate::dwa_i32::Label>>> =
+            if collapse_self_extending_enabled {
+                Some(Arc::new(
+                    compute_self_extending_terminals(&parser)
+                        .into_iter()
+                        .map(|tid| tid.0 as crate::dwa_i32::Label)
+                        .collect(),
+                ))
+            } else {
+                None
+            };
+
+        if std::env::var("DEBUG_TERMINAL_FOLLOW_MAP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            let total_terminals = parser.terminal_map.len();
+            let mut size_counts: BTreeMap<usize, usize> = BTreeMap::new();
+            let mut singleton_pairs: Vec<(GrammarTokenID, GrammarTokenID)> = Vec::new();
+            let mut multi_count = 0usize;
+
+            for (tid, follows) in &terminal_follow_map {
+                let size = follows.len();
+                *size_counts.entry(size).or_insert(0) += 1;
+                if size == 1 {
+                    if let Some(&only) = follows.iter().next() {
+                        singleton_pairs.push((*tid, only));
+                    }
+                } else if size > 1 {
+                    multi_count += 1;
+                }
+            }
+
+            eprintln!(
+                "TERMINAL_FOLLOW_MAP: total_terminals={}, non_empty_entries={}, multi_follow_entries={}, size_counts={:?}",
+                total_terminals,
+                terminal_follow_map.len(),
+                multi_count,
+                size_counts,
+            );
+
+            let print_limit = 40usize;
+            if !singleton_pairs.is_empty() {
+                eprintln!("TERMINAL_FOLLOW_MAP: singleton follows (showing up to {})", print_limit);
+                for (tid, only) in singleton_pairs.iter().take(print_limit) {
+                    let t1 = parser
+                        .terminal_map
+                        .get_by_right(tid)
+                        .map(|t| format!("{:?}", t))
+                        .unwrap_or_else(|| format!("TerminalID({})", tid.0));
+                    let t2 = parser
+                        .terminal_map
+                        .get_by_right(only)
+                        .map(|t| format!("{:?}", t))
+                        .unwrap_or_else(|| format!("TerminalID({})", only.0));
+                    eprintln!("TERMINAL_FOLLOW_MAP: {} -> {}", t1, t2);
+                }
+            }
+        }
+
+        if std::env::var("DEBUG_TERMINAL_ALWAYS_FOLLOW_MAP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            let always_follow_map = compute_always_follow_sets(&parser);
+            let total_terminals = parser.terminal_map.len();
+            let mut size_counts: BTreeMap<usize, usize> = BTreeMap::new();
+            let mut singleton_pairs: Vec<(GrammarTokenID, GrammarTokenID)> = Vec::new();
+            let mut multi_entries: Vec<(GrammarTokenID, usize)> = Vec::new();
+            let mut multi_count = 0usize;
+
+            for (tid, follows) in &always_follow_map {
+                let size = follows.len();
+                *size_counts.entry(size).or_insert(0) += 1;
+                if size == 1 {
+                    if let Some(&only) = follows.iter().next() {
+                        singleton_pairs.push((*tid, only));
+                    }
+                } else if size > 1 {
+                    multi_count += 1;
+                    multi_entries.push((*tid, size));
+                }
+            }
+
+            eprintln!(
+                "TERMINAL_ALWAYS_FOLLOW: total_terminals={}, non_empty_entries={}, multi_follow_entries={}, size_counts={:?}",
+                total_terminals,
+                always_follow_map.len(),
+                multi_count,
+                size_counts,
+            );
+
+            let print_limit = 40usize;
+            if !singleton_pairs.is_empty() {
+                eprintln!("TERMINAL_ALWAYS_FOLLOW: singleton follows (showing up to {})", print_limit);
+                for (tid, only) in singleton_pairs.iter().take(print_limit) {
+                    let t1 = parser
+                        .terminal_map
+                        .get_by_right(tid)
+                        .map(|t| format!("{:?}", t))
+                        .unwrap_or_else(|| format!("TerminalID({})", tid.0));
+                    let t2 = parser
+                        .terminal_map
+                        .get_by_right(only)
+                        .map(|t| format!("{:?}", t))
+                        .unwrap_or_else(|| format!("TerminalID({})", only.0));
+                    eprintln!("TERMINAL_ALWAYS_FOLLOW: {} -> {}", t1, t2);
+                }
+            }
+
+            if !multi_entries.is_empty() {
+                eprintln!("TERMINAL_ALWAYS_FOLLOW: multi follows (showing up to {})", print_limit);
+                for (tid, size) in multi_entries.iter().take(print_limit) {
+                    let t1 = parser
+                        .terminal_map
+                        .get_by_right(tid)
+                        .map(|t| format!("{:?}", t))
+                        .unwrap_or_else(|| format!("TerminalID({})", tid.0));
+                    eprintln!("TERMINAL_ALWAYS_FOLLOW: {} -> {} terminals", t1, size);
+                }
+            }
+        }
+
+        if std::env::var("DEBUG_TERMINAL_SELF_EXTENDING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            let self_extending = compute_self_extending_terminals(&parser);
+            let total_terminals = parser.terminal_map.len();
+            eprintln!(
+                "TERMINAL_SELF_EXTENDING: count={}, total_terminals={}",
+                self_extending.len(),
+                total_terminals
+            );
+            let print_limit = 60usize;
+            if !self_extending.is_empty() {
+                eprintln!("TERMINAL_SELF_EXTENDING: terminals (showing up to {})", print_limit);
+                for tid in self_extending.iter().take(print_limit) {
+                    let name = parser
+                        .terminal_map
+                        .get_by_right(tid)
+                        .map(|t| format!("{:?}", t))
+                        .unwrap_or_else(|| format!("TerminalID({})", tid.0));
+                    eprintln!("TERMINAL_SELF_EXTENDING: {}", name);
+                }
+            }
+        }
+
         // commit_vocab is already computed in setup_combined above
 
         let mut vocab = StageVocab {
@@ -1209,6 +1361,7 @@ impl GrammarConstraint {
                 approx_dfa,
                 suffix_prune_grammar,
                 suffix_prune_terminal_map,
+                self_extending_labels_for_collapse.clone(),
             )
         });
         eprintln!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());
@@ -1271,6 +1424,118 @@ impl GrammarConstraint {
         
         // Trim weights to domain_max to remove unnecessary range extensions to usize::MAX
         terminal_dwa.trim_weights_to_domain(domain_max);
+
+        if std::env::var("DEBUG_TERMINAL_SELF_EXTENDING_CHAINS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            let self_extending = compute_self_extending_terminals(&parser);
+            let terminals_count = parser.terminal_map.len();
+            let mut self_ext_transitions = 0usize;
+
+            for state in &terminal_dwa.states.0 {
+                for (&label, _) in &state.transitions {
+                    let label_usize = label as usize;
+                    if label_usize < terminals_count
+                        && self_extending.contains(&GrammarTokenID(label_usize))
+                    {
+                        self_ext_transitions += 1;
+                    }
+                }
+            }
+
+            let mut terminals_with_repeatable_chain = 0usize;
+            let mut max_chain_len_overall = 0usize;
+            let mut repeatable_edges = 0usize;
+            let mut repeatable_states = 0usize;
+            let mut terminal_chain_lengths: Vec<(GrammarTokenID, usize)> = Vec::new();
+
+            for tid in &self_extending {
+                let label = tid.0 as i32;
+                let mut next_t: Vec<Option<usize>> = vec![None; terminal_dwa.states.len()];
+                for (sid, state) in terminal_dwa.states.0.iter().enumerate() {
+                    if let Some(&dst) = state.transitions.get(&label) {
+                        next_t[sid] = Some(dst);
+                    }
+                }
+
+                let mut memo: Vec<Option<usize>> = vec![None; terminal_dwa.states.len()];
+                let mut visiting = vec![false; terminal_dwa.states.len()];
+                fn chain_len(
+                    state: usize,
+                    next_t: &[Option<usize>],
+                    memo: &mut [Option<usize>],
+                    visiting: &mut [bool],
+                ) -> usize {
+                    if let Some(len) = memo[state] {
+                        return len;
+                    }
+                    if visiting[state] {
+                        return 1;
+                    }
+                    visiting[state] = true;
+                    let len = if let Some(next) = next_t[state] {
+                        1 + chain_len(next, next_t, memo, visiting)
+                    } else {
+                        0
+                    };
+                    visiting[state] = false;
+                    memo[state] = Some(len);
+                    len
+                }
+
+                let mut max_len_t = 0usize;
+                let mut has_repeat_chain = false;
+                for sid in 0..terminal_dwa.states.len() {
+                    if next_t[sid].is_none() {
+                        continue;
+                    }
+                    let len = chain_len(sid, &next_t, &mut memo, &mut visiting);
+                    max_len_t = max_len_t.max(len);
+                    if len >= 2 {
+                        has_repeat_chain = true;
+                        repeatable_states += 1;
+                    }
+                    if let Some(next) = next_t[sid] {
+                        if next_t[next].is_some() {
+                            repeatable_edges += 1;
+                        }
+                    }
+                }
+
+                if has_repeat_chain {
+                    terminals_with_repeatable_chain += 1;
+                }
+                max_chain_len_overall = max_chain_len_overall.max(max_len_t);
+                terminal_chain_lengths.push((*tid, max_len_t));
+            }
+
+            terminal_chain_lengths.sort_by(|a, b| b.1.cmp(&a.1));
+            let top_limit = 10usize;
+            let top_chains: Vec<String> = terminal_chain_lengths
+                .iter()
+                .take(top_limit)
+                .map(|(tid, len)| {
+                    let name = parser
+                        .terminal_map
+                        .get_by_right(tid)
+                        .map(|t| format!("{:?}", t))
+                        .unwrap_or_else(|| format!("TerminalID({})", tid.0));
+                    format!("{}: {}", name, len)
+                })
+                .collect();
+
+            eprintln!(
+                "TERMINAL_SELF_EXT_CHAINS: terminals_self_extending={}, transitions_self_extending={}, terminals_with_repeatable_chain={}, repeatable_edges={}, repeatable_states={}, max_chain_len={}, top_chain_lengths={:?}",
+                self_extending.len(),
+                self_ext_transitions,
+                terminals_with_repeatable_chain,
+                repeatable_edges,
+                repeatable_states,
+                max_chain_len_overall,
+                top_chains,
+            );
+        }
 
         // Weight complexity instrumentation (unique weights are interned).
         if crate::r#macro::is_debug_level_enabled(5) {

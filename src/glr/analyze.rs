@@ -6,6 +6,8 @@ use crate::glr::automaton::{
     Nullability,
 };
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::parser::GLRParser;
+use crate::glr::table::{get_row, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Find all non-terminals that are part of a cycle in the given graph using Tarjan's SCC algorithm.
@@ -852,6 +854,289 @@ pub fn compute_terminal_follow_sets(
     }
 
     terminal_follows
+}
+
+/// Compute a conservative "always-follow" relation for terminals.
+///
+/// For terminal `t1`, returns terminals `t2` such that for **every parser state**
+/// where `t1` is valid, shifting `t1` leads to a state where `t2` is valid as lookahead.
+///
+/// Notes:
+/// - If any state provides a reduce with `len > 0` for `t1`, the relation is treated
+///   as unknown and no always-follow entries are returned for `t1` (conservative).
+/// - ε-reductions (`len == 0`) are followed via GOTO to find shift targets for `t1`.
+pub fn compute_always_follow_sets(
+    parser: &GLRParser,
+) -> BTreeMap<TerminalID, BTreeSet<TerminalID>> {
+    let num_terminals = parser.terminal_map.len();
+
+    let mut valid_terminals_by_state: BTreeMap<StateID, BTreeSet<TerminalID>> = BTreeMap::new();
+    for (&state_id, row) in parser.table.iter() {
+        let mut valid = BTreeSet::new();
+        for tid in 0..num_terminals {
+            let terminal_id = TerminalID(tid);
+            if row.get_shifts_and_reduces_for_terminal(&terminal_id).is_some() {
+                valid.insert(terminal_id);
+            }
+        }
+        valid_terminals_by_state.insert(state_id, valid);
+    }
+
+    fn collect_shift_targets_for_terminal(
+        parser: &GLRParser,
+        start_state: StateID,
+        terminal_id: TerminalID,
+    ) -> (BTreeSet<StateID>, bool) {
+        let mut shift_targets: BTreeSet<StateID> = BTreeSet::new();
+        let mut has_reduce_len_gt_0 = false;
+        let mut queue: VecDeque<StateID> = VecDeque::new();
+        let mut visited: BTreeSet<StateID> = BTreeSet::new();
+
+        queue.push_back(start_state);
+        visited.insert(start_state);
+
+        while let Some(state_id) = queue.pop_front() {
+            let Some(row) = get_row(&parser.table, state_id) else {
+                continue;
+            };
+            let Some(action) = row.get_shifts_and_reduces_for_terminal(&terminal_id) else {
+                continue;
+            };
+
+            match action {
+                Stage7ShiftsAndReducesLookaheadValue::Shift(target_state) => {
+                    shift_targets.insert(target_state);
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                    if len == 0 {
+                        if let Some(goto) = row.get_gotos().get(&nonterminal_id) {
+                            if let Some(goto_state) = goto.state_id {
+                                if visited.insert(goto_state) {
+                                    queue.push_back(goto_state);
+                                }
+                            }
+                        }
+                    } else {
+                        has_reduce_len_gt_0 = true;
+                    }
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                    if let Some(target_state) = shift {
+                        shift_targets.insert(target_state);
+                    }
+                    for (&reduce_len, nonterminals) in reduces.iter() {
+                        if reduce_len == 0 {
+                            for nt_id in nonterminals.keys() {
+                                if let Some(goto) = row.get_gotos().get(nt_id) {
+                                    if let Some(goto_state) = goto.state_id {
+                                        if visited.insert(goto_state) {
+                                            queue.push_back(goto_state);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            has_reduce_len_gt_0 = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        (shift_targets, has_reduce_len_gt_0)
+    }
+
+    let mut always_follow: BTreeMap<TerminalID, BTreeSet<TerminalID>> = BTreeMap::new();
+
+    for tid in 0..num_terminals {
+        let terminal_id = TerminalID(tid);
+        let mut intersection: Option<BTreeSet<TerminalID>> = None;
+        let mut saw_context = false;
+        let mut invalid = false;
+
+        for (&state_id, row) in parser.table.iter() {
+            if row.get_shifts_and_reduces_for_terminal(&terminal_id).is_none() {
+                continue;
+            }
+
+            saw_context = true;
+
+            let (shift_targets, has_reduce_len_gt_0) =
+                collect_shift_targets_for_terminal(parser, state_id, terminal_id);
+
+            if has_reduce_len_gt_0 || shift_targets.is_empty() {
+                invalid = true;
+                break;
+            }
+
+            let mut next_valid = BTreeSet::new();
+            for target_state in shift_targets {
+                if let Some(valid) = valid_terminals_by_state.get(&target_state) {
+                    next_valid.extend(valid.iter().copied());
+                }
+            }
+
+            match &mut intersection {
+                None => intersection = Some(next_valid),
+                Some(current) => {
+                    current.retain(|t| next_valid.contains(t));
+                    if current.is_empty() {
+                        invalid = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !saw_context || invalid {
+            continue;
+        }
+
+        if let Some(set) = intersection {
+            if !set.is_empty() {
+                always_follow.insert(terminal_id, set);
+            }
+        }
+    }
+
+    always_follow
+}
+
+/// Compute terminals that are self-extending in the parser table.
+///
+/// A terminal `t` is considered self-extending if, in every parser state where `t` is valid,
+/// shifting `t` leads to a state where `t` is still valid as lookahead. For reduce actions
+/// on `t`, this uses a conservative heuristic: `t` must be in FOLLOW(nonterminal) for the
+/// reduced nonterminal.
+pub fn compute_self_extending_terminals(parser: &GLRParser) -> BTreeSet<TerminalID> {
+    let num_terminals = parser.terminal_map.len();
+
+    let nullable_nonterminals = compute_nullable_nonterminals(&parser.productions);
+    let first_sets = compute_first_sets_for_nonterminals(&parser.productions, &nullable_nonterminals);
+    let follow_sets =
+        compute_follow_sets_for_nonterminals(&parser.productions, &first_sets, &nullable_nonterminals);
+
+    let terminal_in_follow = |nt_id: &crate::glr::table::NonTerminalID, tid: TerminalID| -> bool {
+        let Some(nt) = parser.non_terminal_map.get_by_right(nt_id) else {
+            return false;
+        };
+        let Some(term) = parser.terminal_map.get_by_right(&tid) else {
+            return false;
+        };
+        follow_sets
+            .get(nt)
+            .map(|set| set.contains(&Some(term.clone())))
+            .unwrap_or(false)
+    };
+
+    let terminal_is_valid_in_state = |state_id: StateID, tid: TerminalID| -> bool {
+        get_row(&parser.table, state_id)
+            .and_then(|row| row.get_shifts_and_reduces_for_terminal(&tid))
+            .is_some()
+    };
+
+    fn self_extends_in_state(
+        parser: &GLRParser,
+        start_state: StateID,
+        terminal_id: TerminalID,
+        terminal_in_follow: &impl Fn(&crate::glr::table::NonTerminalID, TerminalID) -> bool,
+        terminal_is_valid_in_state: &impl Fn(StateID, TerminalID) -> bool,
+    ) -> bool {
+        let mut queue: VecDeque<StateID> = VecDeque::new();
+        let mut visited: BTreeSet<StateID> = BTreeSet::new();
+
+        queue.push_back(start_state);
+        visited.insert(start_state);
+
+        while let Some(state_id) = queue.pop_front() {
+            let Some(row) = get_row(&parser.table, state_id) else {
+                continue;
+            };
+            let Some(action) = row.get_shifts_and_reduces_for_terminal(&terminal_id) else {
+                continue;
+            };
+
+            match action {
+                Stage7ShiftsAndReducesLookaheadValue::Shift(target_state) => {
+                    if !terminal_is_valid_in_state(target_state, terminal_id) {
+                        return false;
+                    }
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                    if len == 0 {
+                        if let Some(goto) = row.get_gotos().get(&nonterminal_id) {
+                            if let Some(goto_state) = goto.state_id {
+                                if visited.insert(goto_state) {
+                                    queue.push_back(goto_state);
+                                }
+                            }
+                        }
+                    } else if !terminal_in_follow(&nonterminal_id, terminal_id) {
+                        return false;
+                    }
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                    if let Some(target_state) = shift {
+                        if !terminal_is_valid_in_state(target_state, terminal_id) {
+                            return false;
+                        }
+                    }
+                    for (&reduce_len, nonterminals) in reduces.iter() {
+                        if reduce_len == 0 {
+                            for nt_id in nonterminals.keys() {
+                                if let Some(goto) = row.get_gotos().get(nt_id) {
+                                    if let Some(goto_state) = goto.state_id {
+                                        if visited.insert(goto_state) {
+                                            queue.push_back(goto_state);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            for nt_id in nonterminals.keys() {
+                                if !terminal_in_follow(nt_id, terminal_id) {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    let mut self_extending: BTreeSet<TerminalID> = BTreeSet::new();
+
+    for tid in 0..num_terminals {
+        let terminal_id = TerminalID(tid);
+        let mut saw_context = false;
+        let mut ok = true;
+
+        for (&state_id, row) in parser.table.iter() {
+            if row.get_shifts_and_reduces_for_terminal(&terminal_id).is_none() {
+                continue;
+            }
+            saw_context = true;
+            if !self_extends_in_state(
+                parser,
+                state_id,
+                terminal_id,
+                &terminal_in_follow,
+                &terminal_is_valid_in_state,
+            ) {
+                ok = false;
+                break;
+            }
+        }
+
+        if saw_context && ok {
+            self_extending.insert(terminal_id);
+        }
+    }
+
+    self_extending
 }
 
 /// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
