@@ -123,6 +123,24 @@ impl ReduceStats {
 
 pub fn build_approximate_parser_dfa(parser: &GLRParser) -> LazyApproximateDFA {
     let num_states = table_state_count(&parser.table);
+    let initial_set = Bitset::ones(num_states);
+    build_approximate_parser_dfa_with_initial(parser, initial_set)
+}
+
+pub fn build_approximate_parser_dfa_from_start(parser: &GLRParser) -> LazyApproximateDFA {
+    let num_states = table_state_count(&parser.table);
+    let mut initial_set = Bitset::new(num_states);
+    if num_states > 0 {
+        initial_set.insert(parser.start_state_id.0);
+    }
+    build_approximate_parser_dfa_with_initial(parser, initial_set)
+}
+
+fn build_approximate_parser_dfa_with_initial(
+    parser: &GLRParser,
+    initial_set: Bitset,
+) -> LazyApproximateDFA {
+    let num_states = table_state_count(&parser.table);
     crate::debug!(4, "Approximate DFA: building lazy DFA from parser with {} states", num_states);
     let underneath_map = compute_underneath_map(&parser.table, num_states);
     let nfa = build_nfa(parser, num_states, &underneath_map);
@@ -136,7 +154,6 @@ pub fn build_approximate_parser_dfa(parser: &GLRParser) -> LazyApproximateDFA {
         let avg = if nfa.num_states == 0 { 0.0 } else { total_edges as f64 / nfa.num_states as f64 };
         crate::debug!(5, "Approximate DFA: NFA has {} transitions (avg {:.2} per state)", total_edges, avg);
     }
-    let initial_set = Bitset::ones(nfa.num_states);
     LazyApproximateDFA::new_with_initial(nfa, initial_set)
 }
 

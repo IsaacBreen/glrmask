@@ -1295,19 +1295,21 @@ impl GrammarConstraint {
             }
         };
 
+        let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let suffix_prune_grammar = if do_nwa_suffix_prune {
+            grammar_definition.clone()
+        } else {
+            None
+        };
+        let suffix_prune_terminal_map = if do_nwa_suffix_prune && grammar_definition.is_some() {
+            Some(parser.terminal_map.clone())
+        } else {
+            None
+        };
+
         let approx_dfa = if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
-            crate::debug!(4, "Building approximate parser DFA (lazy, all-states initial) for precompute1...");
-            let approx_start = std::time::Instant::now();
-            let approx_dfa = parser.build_approximate_parser_dfa();
-            eprintln!("TIMING: build_approximate_parser_dfa {:?}", approx_start.elapsed());
-
-            let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
-            for (_term, orig_tid) in parser.terminal_map.iter() {
-                if orig_tid.0 < orig_to_suffix_tid.len() {
-                    orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
-                }
-            }
-
             let mut ignored_terminals = vec![false; parser.terminal_map.len()];
             if let Some(ref grammar_def) = grammar_definition {
                 for tid in &grammar_def.ignore_terminal_ids {
@@ -1323,26 +1325,69 @@ impl GrammarConstraint {
                 }
             }
 
-            crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
-            Some(ApproximateDfaPruner {
-                dfa: approx_dfa,
-                orig_to_suffix_tid,
-                ignored_terminals,
-            })
-        } else {
-            None
-        };
+            if do_nwa_suffix_prune {
+                if let Some(ref grammar_def) = grammar_definition {
+                    crate::debug!(4, "Building approximate suffix DFA (lazy, start-state initial) for precompute1...");
+                    let approx_start = std::time::Instant::now();
+                    let suffix_grammar = crate::interface::grammar_to_suffix_grammar(grammar_def);
+                    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
+                    let suffix_parser = suffix_compiled.glr_parser();
+                    let approx_dfa = crate::glr::approximate_dfa::build_approximate_parser_dfa_from_start(&suffix_parser);
+                    eprintln!("TIMING: build_approximate_suffix_dfa {:?}", approx_start.elapsed());
 
-        let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let suffix_prune_grammar = if do_nwa_suffix_prune {
-            grammar_definition.clone()
-        } else {
-            None
-        };
-        let suffix_prune_terminal_map = if do_nwa_suffix_prune && grammar_definition.is_some() {
-            Some(parser.terminal_map.clone())
+                    let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
+                    for (term, orig_tid) in parser.terminal_map.iter() {
+                        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
+                            orig_to_suffix_tid[orig_tid.0] = Some(*suffix_tid);
+                        }
+                    }
+
+                    crate::debug!(4, "Approximate suffix DFA built (lazy), start_state={}", approx_dfa.start_state);
+                    Some(ApproximateDfaPruner {
+                        dfa: approx_dfa,
+                        orig_to_suffix_tid,
+                        ignored_terminals,
+                    })
+                } else {
+                    crate::debug!(4, "Approximate suffix DFA requested but missing grammar definition; falling back to parser DFA...");
+                    let approx_start = std::time::Instant::now();
+                    let approx_dfa = parser.build_approximate_parser_dfa();
+                    eprintln!("TIMING: build_approximate_parser_dfa {:?}", approx_start.elapsed());
+
+                    let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
+                    for (_term, orig_tid) in parser.terminal_map.iter() {
+                        if orig_tid.0 < orig_to_suffix_tid.len() {
+                            orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
+                        }
+                    }
+
+                    crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
+                    Some(ApproximateDfaPruner {
+                        dfa: approx_dfa,
+                        orig_to_suffix_tid,
+                        ignored_terminals,
+                    })
+                }
+            } else {
+                crate::debug!(4, "Building approximate parser DFA (lazy, all-states initial) for precompute1...");
+                let approx_start = std::time::Instant::now();
+                let approx_dfa = parser.build_approximate_parser_dfa();
+                eprintln!("TIMING: build_approximate_parser_dfa {:?}", approx_start.elapsed());
+
+                let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
+                for (_term, orig_tid) in parser.terminal_map.iter() {
+                    if orig_tid.0 < orig_to_suffix_tid.len() {
+                        orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
+                    }
+                }
+
+                crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
+                Some(ApproximateDfaPruner {
+                    dfa: approx_dfa,
+                    orig_to_suffix_tid,
+                    ignored_terminals,
+                })
+            }
         } else {
             None
         };
