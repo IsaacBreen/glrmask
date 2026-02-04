@@ -92,6 +92,7 @@ test-js: ## Compile the JavaScript grammar (verifies it compiles)
 		--format ebnf \
 		--output .cache/test_vocabs/constraint_js.json.gz \
 		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+		--skip-if-up-to-date \
 		$(if $(SKIP_MATURIN),--no-recompile,)
 
 test-json-schema: ## Compile a JSON schema grammar (verifies schema-to-EBNF works)

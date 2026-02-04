@@ -138,7 +138,7 @@ def resolve_vocab_path(url: Optional[str], path: Optional[Path], vocab_list: Opt
     raise ValueError("No vocabulary source provided")
 
 
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Optional[Path], recompile: bool, disable_progress_bar: bool, token_lens: Optional[List[str]], build_profile: str = "release", save_pc0: Optional[Path] = None, from_pc0: Optional[Path] = None, pc0_only: bool = False, format: Optional[str] = None):
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Optional[Path], recompile: bool, disable_progress_bar: bool, token_lens: Optional[List[str]], build_profile: str = "release", save_pc0: Optional[Path] = None, from_pc0: Optional[Path] = None, pc0_only: bool = False, format: Optional[str] = None, skip_if_up_to_date: bool = False):
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
@@ -147,6 +147,15 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
     env = os.environ.copy()
     if not disable_progress_bar:
         env["ENABLE_PROGRESS_BAR"] = "1"
+
+    if skip_if_up_to_date and output_path and output_path.exists():
+        inputs = [grammar_path, vocab_path]
+        if from_pc0:
+            inputs.append(from_pc0)
+        output_mtime = output_path.stat().st_mtime
+        if all(path.exists() and path.stat().st_mtime <= output_mtime for path in inputs):
+            log(Colors.success(f"Output up-to-date; skipping compile: {output_path}"), force=True)
+            return
 
     if recompile:
         build_cmd = ["cargo", "build"]
@@ -269,6 +278,7 @@ Examples:
     parser.add_argument("--compiler-path", type=Path, help="Path to the grammar-compiler executable. Defaults to target/{profile}/grammar-compiler based on --build-profile.")
     parser.add_argument("--build-profile", type=str, default="release", help="Cargo build profile to use (e.g., 'release', 'debug'). Default: release.")
     parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
+    parser.add_argument("--skip-if-up-to-date", action="store_true", help="Skip compilation if output is newer than inputs.")
     parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
     parser.add_argument("--no-progress-bar", action="store_true", help="Disable the progress bar output during compilation.")
     
@@ -332,6 +342,7 @@ Examples:
             from_pc0=args.from_precompute0,
             pc0_only=args.precompute0_only,
             format=args.format,
+            skip_if_up_to_date=args.skip_if_up_to_date,
         )
         log_timing("Run Rust Compiler")
     finally:
