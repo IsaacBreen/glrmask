@@ -39,6 +39,7 @@ use crate::dwa_i32::common::Label;
 pub(crate) struct ChainCollapseStats {
     pub(crate) collapsed_states: usize,
     pub(crate) rewired_transitions: usize,
+    pub(crate) blocked_repeat_transitions: usize,
     pub(crate) pruned_states: usize,
     pub(crate) iterations: usize,
 }
@@ -135,6 +136,29 @@ pub(crate) fn collapse_self_extending_chains(
         stats.iterations += 1;
         if !changed {
             break;
+        }
+    }
+
+    if !self_extending_labels.is_empty() && !dwa.states.0.is_empty() {
+        let mut incoming_label: HashSet<(usize, Label)> = HashSet::new();
+        for state in dwa.states.0.iter() {
+            for (&label, &dst) in &state.transitions {
+                if self_extending_labels.contains(&label) {
+                    incoming_label.insert((dst, label));
+                }
+            }
+        }
+
+        for (dst, label) in incoming_label {
+            if dst == dwa.body.start_state {
+                continue;
+            }
+            if let Some(state) = dwa.states.0.get_mut(dst) {
+                if state.transitions.remove(&label).is_some() {
+                    state.trans_weights.remove(&label);
+                    stats.blocked_repeat_transitions += 1;
+                }
+            }
         }
     }
 
@@ -816,11 +840,12 @@ impl<'r> Precomputer1<'r> {
                     );
                     crate::debug!(
                         4,
-                        "Terminal DWA self-ext chain collapse: {} -> {} (collapsed_states={}, rewired={}, pruned={}, iterations={})",
+                        "Terminal DWA self-ext chain collapse: {} -> {} (collapsed_states={}, rewired={}, blocked_repeats={}, pruned={}, iterations={})",
                         before_stats,
                         dwa.stats(),
                         stats.collapsed_states,
                         stats.rewired_transitions,
+                        stats.blocked_repeat_transitions,
                         stats.pruned_states,
                         stats.iterations,
                     );

@@ -3312,8 +3312,7 @@ fn test_terminal_dwa_tilde_sequence_weights_simple_grammar() {
     use crate::dwa_i32::common::Label;
 
     let ebnf_grammar = r#"
-start ::= TILDE+ ;
-TILDE ::= '~' ;
+start ::= '~'+ ;
 "#;
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
