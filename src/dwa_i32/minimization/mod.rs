@@ -33,6 +33,16 @@ use crate::dwa_i32::dwa::DWA;
 use crate::dwa_i32::Weight;
 use profiler_macro::time_it;
 
+fn detail_debug_enabled() -> bool {
+    let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type();
+    let is_big = matches!(dwa_type, None | Some("terminal") | Some("super") | Some("parser"));
+    if is_big {
+        crate::r#macro::is_debug_level_enabled(5)
+    } else {
+        crate::r#macro::is_debug_level_enabled(6)
+    }
+}
+
 impl DWA {
     /// Minimizes the DWA to its optimal state count.
     /// Dispatches to acyclic or cyclic implementation based on graph structure.
@@ -194,8 +204,9 @@ impl DWA {
             .unwrap_or("unknown");
         let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
         let suppress_fast_logs = std::env::var("SUPPRESS_MINIMIZE_FAST_LOGS").is_ok();
-        if !suppress_height_logs && !suppress_fast_logs {
-            crate::debug!(6, "minimize_states_fast: dwa_type={}, is_cyclic={}, {} states before", 
+        let detail_debug = detail_debug_enabled();
+        if !suppress_height_logs && !suppress_fast_logs && detail_debug {
+            crate::debug!(5, "minimize_states_fast: dwa_type={}, is_cyclic={}, {} states before", 
                 dwa_type, is_cyc, before);
         }
         if is_cyc {

@@ -38,6 +38,16 @@ fn weight_contains_token(weight: &Weight, token_id: usize, num_tsids: usize) -> 
     }
 }
 
+fn detail_debug_enabled() -> bool {
+    let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type();
+    let is_big = matches!(dwa_type, None | Some("terminal") | Some("super") | Some("parser"));
+    if is_big {
+        crate::r#macro::is_debug_level_enabled(5)
+    } else {
+        crate::r#macro::is_debug_level_enabled(6)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct DeterminizeGatherDebug {
     label: Option<Label>,
@@ -711,6 +721,8 @@ pub(crate) fn determinize_acyclic_with_progress(
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
             || macro_level >= 7);
+    let detail_debug = detail_debug_enabled();
+    let timing_debug = profile_enabled && detail_debug;
 
     let start_time = Instant::now();
     crate::debug!(3, "Determinizing acyclic NWA: precomputing state sets...");
@@ -766,7 +778,7 @@ pub(crate) fn determinize_acyclic_with_progress(
     let eps_reach = timeit!("acyclic_det::precompute_eps_closures", {
         precompute_all_epsilon_closures_acyclic(&nwa.states, topo_order)
     });
-    if profile_enabled {
+    if timing_debug {
         let mut sizes: Vec<usize> = eps_reach.iter().map(|subset| subset.len()).collect();
         sizes.sort_unstable();
         let len = sizes.len();
@@ -1158,25 +1170,31 @@ pub(crate) fn determinize_acyclic_with_progress(
         seen.insert(Arc::clone(closure), id);
     }
 
-    crate::debug!(
-        3,
-        "Acyclic determinize closures: unweighted={}, weighted={}, unique_weighted={}",
-        unweighted_closures.len(),
-        closures.len(),
-        seen.len(),
-    );
+    if detail_debug {
+        crate::debug!(
+            5,
+            "Acyclic determinize closures: unweighted={}, weighted={}, unique_weighted={}",
+            unweighted_closures.len(),
+            closures.len(),
+            seen.len(),
+        );
+    }
     if let Some(start_closure) = closures.get(start_id) {
         let seen_start = seen.get(start_closure).copied().unwrap_or(usize::MAX);
-        crate::debug!(
-            3,
-            "Acyclic determinize start_id={} seen_start_id={}",
-            start_id,
-            seen_start,
-        );
+        if detail_debug {
+            crate::debug!(
+                5,
+                "Acyclic determinize start_id={} seen_start_id={}",
+                start_id,
+                seen_start,
+            );
+        }
     }
 
     let total_states = closures.len();
-    crate::debug!(3, "Found {} DWA states to process", total_states);
+    if detail_debug {
+        crate::debug!(5, "Found {} DWA states to process", total_states);
+    }
 
     let processed = AtomicUsize::new(0);
     let next_log = AtomicUsize::new(0);
@@ -1251,7 +1269,7 @@ pub(crate) fn determinize_acyclic_with_progress(
         );
     }
 
-    if profile_enabled {
+    if timing_debug {
         if let Some(t) = eps_unweighted_time {
             eprintln!("TIMING: determinize_acyclic::precompute_eps_unweighted {:?}", t);
         }

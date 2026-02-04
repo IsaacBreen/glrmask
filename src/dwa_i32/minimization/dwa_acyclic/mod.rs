@@ -45,6 +45,16 @@ fn clear_target_eq_cache() {
     TARGET_EQ_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
+fn detail_debug_enabled() -> bool {
+    let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type();
+    let is_big = matches!(dwa_type, None | Some("terminal") | Some("super") | Some("parser"));
+    if is_big {
+        crate::r#macro::is_debug_level_enabled(5)
+    } else {
+        crate::r#macro::is_debug_level_enabled(6)
+    }
+}
+
 struct TimingGuard {
     start: std::time::Instant,
     nanos: &'static AtomicU64,
@@ -281,6 +291,7 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
     if n == 0 { return false; }
 
     let start = std::time::Instant::now();
+    let detail_debug = detail_debug_enabled();
     crate::datastructures::hybrid_bitset::reset_profiling();
     crate::datastructures::rangemap_weight::reset_profiling();
     crate::datastructures::abstract_weight::reset_weight_op_profiling();
@@ -387,9 +398,11 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
         }
     }
     let push_time = push_start.elapsed();
-    crate::debug!(5, "push_weights_acyclic breakdown: topo={:?}, reachable={:?}, push={:?}", topo_time, reachable_time, push_time);
-    crate::debug!(5, "push_weights_acyclic ops: reachable_clone={:?}, reachable_and={:?}, reachable_or={:?}, push_and={:?}", reachable_clone_time, reachable_and_time, reachable_or_time, push_and_time);
-    crate::debug!(5, "push_weights_acyclic: {:?} (changed={})", start.elapsed(), changed);
+    if detail_debug {
+        crate::debug!(5, "push_weights_acyclic breakdown: topo={:?}, reachable={:?}, push={:?}", topo_time, reachable_time, push_time);
+        crate::debug!(5, "push_weights_acyclic ops: reachable_clone={:?}, reachable_and={:?}, reachable_or={:?}, push_and={:?}", reachable_clone_time, reachable_and_time, reachable_or_time, push_and_time);
+        crate::debug!(5, "push_weights_acyclic: {:?} (changed={})", start.elapsed(), changed);
+    }
     changed
 }
 
@@ -460,8 +473,9 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     }
     
     let total_start = std::time::Instant::now();
+    let detail_debug = detail_debug_enabled();
     let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
-        || !crate::r#macro::is_debug_level_enabled(6);
+        || !detail_debug;
 
     ARE_COMPAT_CALLS.store(0, Ordering::Relaxed);
     ARE_COMPAT_NANOS.store(0, Ordering::Relaxed);
@@ -475,26 +489,36 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     clear_target_eq_cache();
     
     // Step 0: Preprocess - tighten weights by removing unreachable tokens
-    crate::debug!(5, "Acyclic minimize step 0 start (tighten_weights)");
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 0 start (tighten_weights)");
+    }
     let step0_start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
     crate::datastructures::rangemap_weight::reset_profiling();
     crate::datastructures::abstract_weight::reset_weight_op_profiling();
     let dwa = tighten_weights(dwa)?;
-    crate::debug!(5, "Acyclic minimize step 0 end (tighten_weights): {:?}", step0_start.elapsed());
-    crate::debug!(5, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 0 end (tighten_weights): {:?}", step0_start.elapsed());
+        crate::debug!(5, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
+    }
 
     // 1. Topological Sort & Reachability Analysis
-    crate::debug!(5, "Acyclic minimize step 1 start (topo_order)");
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 1 start (topo_order)");
+    }
     let step1_start = std::time::Instant::now();
     let topo_order = timeit!("minimize_acyclic::topo_order", {
         compute_topo_order(&dwa)?
     });
-    crate::debug!(5, "Acyclic minimize step 1 end (topo_order): {:?}", step1_start.elapsed());
-    crate::debug!(5, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 1 end (topo_order): {:?}", step1_start.elapsed());
+        crate::debug!(5, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
+    }
 
     // 2. Compute "Needed" sets (Reverse Flow Analysis).
-    crate::debug!(5, "Acyclic minimize step 2 start (needed_sets)");
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 2 start (needed_sets)");
+    }
     let step2_start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
     crate::datastructures::rangemap_weight::reset_profiling();
@@ -510,8 +534,10 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
         vec![Weight::all(); dwa.states.len()]
     };
     let productive_transitions = compute_productive_transitions(&dwa, &range);
-    crate::debug!(5, "Acyclic minimize step 2 end (needed_sets): {:?}", step2_start.elapsed());
-    crate::debug!(5, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 2 end (needed_sets): {:?}", step2_start.elapsed());
+        crate::debug!(5, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
+    }
 
     // 3. Layer states by topological height (distance to sink).
     let step3_start = std::time::Instant::now();
@@ -519,7 +545,9 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     let heights = timeit!("minimize_acyclic::compute_heights", {
         compute_heights(&dwa, &topo_order)
     });
-    crate::debug!(5, "Acyclic minimize step 3a (compute_heights): {:?}", step3_start.elapsed());
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 3a (compute_heights): {:?}", step3_start.elapsed());
+    }
 
     let step3b_start = std::time::Instant::now();
     let max_height = heights.iter().max().copied().unwrap_or(0);
@@ -529,10 +557,12 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
         if needed[id].is_empty() && id != dwa.body.start_state { continue; }
         states_by_height[h].push(id);
     }
-    crate::debug!(5, "Acyclic minimize step 3b (states_by_height): {:?}, max_height={}, largest_level={}", 
-        step3b_start.elapsed(), max_height,
-        states_by_height.iter().map(|v| v.len()).max().unwrap_or(0));
-    crate::debug!(5, "Acyclic minimize step 3 (heights): {:?}", step3_total_start.elapsed());
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 3b (states_by_height): {:?}, max_height={}, largest_level={}", 
+            step3b_start.elapsed(), max_height,
+            states_by_height.iter().map(|v| v.len()).max().unwrap_or(0));
+        crate::debug!(5, "Acyclic minimize step 3 (heights): {:?}", step3_total_start.elapsed());
+    }
 
     // 4. Bottom-Up Exact Minimization
     let mut old_to_new = vec![UNMAPPED_STATE; dwa.states.len()];
@@ -573,7 +603,7 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
                 );
                 let color_elapsed = color_start.elapsed();
                 time_coloring += color_elapsed;
-                if !suppress_height_logs && crate::r#macro::is_debug_level_enabled(6) {
+                if !suppress_height_logs {
                     eprintln!("TIMING: height {} compute_height_coloring {:?}", h, color_elapsed);
                 }
                 coloring
@@ -651,15 +681,17 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
         }
     });
 
-    crate::debug!(
-        5,
-        "Acyclic minimize step 4 breakdown: coloring={:?}, insert={:?}, extend={:?}, merge={:?}, merge_and_time={:?}",
-        time_coloring,
-        time_insert,
-        time_extend,
-        time_merge,
-        std::time::Duration::from_micros(merge_and_time_us_total),
-    );
+    if detail_debug {
+        crate::debug!(
+            5,
+            "Acyclic minimize step 4 breakdown: coloring={:?}, insert={:?}, extend={:?}, merge={:?}, merge_and_time={:?}",
+            time_coloring,
+            time_insert,
+            time_extend,
+            time_merge,
+            std::time::Duration::from_micros(merge_and_time_us_total),
+        );
+    }
     crate::debug!(6, "Acyclic minimize: {} -> {} states in {:?}", 
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
@@ -668,7 +700,9 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     let result = timeit!("minimize_acyclic::reconstruct", {
         reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?
     });
-    crate::debug!(5, "Acyclic minimize step 5 (reconstruct): {:?}", step5_start.elapsed());
+    if detail_debug {
+        crate::debug!(5, "Acyclic minimize step 5 (reconstruct): {:?}", step5_start.elapsed());
+    }
     
     // 6. Stochastic validation (only when STOCHASTIC_MERGE_VALIDATION=1)
     if std::env::var("STOCHASTIC_MERGE_VALIDATION").is_ok() {
@@ -815,7 +849,7 @@ fn compute_height_coloring_with_range(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
-        || !crate::r#macro::is_debug_level_enabled(6);
+        || !detail_debug_enabled();
 
     if trace_heights && !suppress_height_logs {
         eprintln!("TRACE: height {} start candidates={}", height, candidates.len());
@@ -1124,20 +1158,20 @@ fn export_coloring_graph(
     signature_groups: usize,
 ) {
     let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
-        || !crate::r#macro::is_debug_level_enabled(6);
+        || !detail_debug_enabled();
     let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type()
         .unwrap_or("unknown");
     let export_enabled = std::env::var("EXPORT_COLORING_GRAPHS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if !suppress_height_logs && crate::r#macro::is_debug_level_enabled(6) {
+    if !suppress_height_logs {
         eprintln!("EXPORT CHECK: height={} dwa_type={} enabled={}", height, dwa_type, export_enabled);
     }
     if !export_enabled {
         return;
     }
 
-    if !suppress_height_logs && crate::r#macro::is_debug_level_enabled(6) {
+    if !suppress_height_logs {
         eprintln!("EXPORT DEBUG: height={} dwa_type={}", height, dwa_type);
     }
     let dir = std::env::var("EXPORT_COLORING_GRAPHS_DIR")
@@ -1548,6 +1582,7 @@ fn compute_topo_order(dwa: &DWA) -> Result<Vec<StateID>, DWABuildError> {
 
 #[time_it("compute_needed_sets")]
 fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
+    let detail_debug = detail_debug_enabled();
     let total_start = std::time::Instant::now();
     let mut time_final_clone = std::time::Duration::ZERO;
     let mut time_weight_lookup = std::time::Duration::ZERO;
@@ -1595,18 +1630,20 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
             time_loop_other += other;
         }
     }
-    crate::debug!(
-        5,
-        "compute_needed_sets breakdown: total={:?}, loop={:?}, loop_other={:?}, final_clone={:?}, weight_lookup={:?}, and={:?}, or={:?}, transitions={}",
-        total_start.elapsed(),
-        time_loop,
-        time_loop_other,
-        time_final_clone,
-        time_weight_lookup,
-        time_and,
-        time_or,
-        count_transitions,
-    );
+    if detail_debug {
+        crate::debug!(
+            5,
+            "compute_needed_sets breakdown: total={:?}, loop={:?}, loop_other={:?}, final_clone={:?}, weight_lookup={:?}, and={:?}, or={:?}, transitions={}",
+            total_start.elapsed(),
+            time_loop,
+            time_loop_other,
+            time_final_clone,
+            time_weight_lookup,
+            time_and,
+            time_or,
+            count_transitions,
+        );
+    }
     needed
 }
 
@@ -2100,7 +2137,7 @@ fn build_incompatibility_graph_height_0(
     needed: &[Weight],
 ) -> Vec<Vec<usize>> {
     let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
-        || !crate::r#macro::is_debug_level_enabled(6);
+        || !detail_debug_enabled();
     let n = candidates.len();
     let start = std::time::Instant::now();
     
@@ -2222,7 +2259,7 @@ fn greedy_color_without_graph(
     _start: std::time::Instant,
 ) -> Vec<usize> {
     let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
-        || !crate::r#macro::is_debug_level_enabled(6);
+        || !detail_debug_enabled();
     let n = candidates.len();
     if n == 0 { return vec![]; }
 
@@ -2397,7 +2434,7 @@ fn build_incompatibility_graph_general(
     start: std::time::Instant,
 ) -> Vec<Vec<usize>> {
     let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
-        || !crate::r#macro::is_debug_level_enabled(6);
+        || !detail_debug_enabled();
     let n = candidates.len();
     
     // Compute signatures for each candidate
