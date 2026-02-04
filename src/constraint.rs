@@ -2072,6 +2072,14 @@ impl GrammarConstraint {
                 }
 
                 let start_state = terminal_dwa.body.start_state;
+                crate::debug!(
+                    4,
+                    "CHECK_TOKEN_PATH_LENGTHS: context terminal_dwa states={} start_state={} terminals_count={} num_tsids_for_conversion={}",
+                    n_states,
+                    start_state,
+                    terminals_count,
+                    num_tsids_for_conversion
+                );
 
                 let weight_contains_token = |weight: &crate::dwa_i32::Weight, internal_id: usize| -> bool {
                     if num_tsids_for_conversion == 0 {
@@ -2202,13 +2210,17 @@ impl GrammarConstraint {
                         }
                     }
                     let mut path_str: Option<String> = None;
+                    let mut labels_full: Option<Vec<usize>> = None;
+                    let mut full_path_str: Option<String> = None;
 
                     if is_violation {
                         let mut labels: Vec<usize> = Vec::new();
+                        let mut labels_all: Vec<usize> = Vec::new();
                         let mut cur = max_state.unwrap_or(start_state);
                         while cur != start_state {
                             if let Some((prev_state, label)) = prev[cur] {
                                 let label_usize = label as usize;
+                                labels_all.push(label_usize);
                                 if label_usize < terminals_count {
                                     labels.push(label_usize);
                                 }
@@ -2218,6 +2230,8 @@ impl GrammarConstraint {
                             }
                         }
                         labels.reverse();
+                        labels_all.reverse();
+                        labels_full = Some(labels_all.clone());
 
                         let path = labels
                             .iter()
@@ -2231,6 +2245,24 @@ impl GrammarConstraint {
                             .collect::<Vec<_>>()
                             .join(" → ");
                         path_str = Some(path);
+
+                        let full_path = labels_all
+                            .iter()
+                            .map(|lid| {
+                                if *lid < terminals_count {
+                                    if let Some(name) = tid_to_name.get(lid) {
+                                        format!("{}({})", name, lid)
+                                    } else {
+                                        format!("T{}({})", lid, lid)
+                                    }
+                                } else {
+                                    let tsid = lid.saturating_sub(terminals_count);
+                                    format!("TSID{}({})", tsid, lid)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" → ");
+                        full_path_str = Some(full_path);
                     }
 
                     if token_len <= 5 {
@@ -2238,6 +2270,20 @@ impl GrammarConstraint {
                     }
 
                     if is_violation {
+                        if let Some(labels_all) = &labels_full {
+                            crate::debug!(
+                                4,
+                                "  CHECK_TOKEN_PATH_LENGTHS: violation_context token_internal_id={} labels_raw={:?} labels_full={:?} full_path={}",
+                                internal_id,
+                                labels_all
+                                    .iter()
+                                    .filter(|lid| **lid < terminals_count)
+                                    .copied()
+                                    .collect::<Vec<usize>>(),
+                                labels_all,
+                                full_path_str.as_deref().unwrap_or("<none>")
+                            );
+                        }
                         if let Some(path) = path_str {
                             violations.push((internal_id, token_len, max_len, path));
                         }
