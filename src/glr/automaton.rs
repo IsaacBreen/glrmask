@@ -174,7 +174,7 @@ pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerm
 }
 
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
-    crate::debug!(5, "Computing nullable non-terminals");
+    crate::debug!(6, "Computing nullable non-terminals");
     let start = std::time::Instant::now();
     let res = compute_nonterminal_nullability(productions)
         .into_iter()
@@ -182,7 +182,7 @@ pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<Non
             (status == Nullability::Nullable || status == Nullability::Null).then_some(nt)
         })
         .collect();
-    crate::debug!(5, "Computed nullable non-terminals in {:.2?}", start.elapsed());
+    crate::debug!(6, "Computed nullable non-terminals in {:.2?}", start.elapsed());
     res
 }
 

@@ -460,7 +460,8 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
     }
     
     let total_start = std::time::Instant::now();
-    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
+        || !crate::r#macro::is_debug_level_enabled(6);
 
     ARE_COMPAT_CALLS.store(0, Ordering::Relaxed);
     ARE_COMPAT_NANOS.store(0, Ordering::Relaxed);
@@ -572,7 +573,7 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
                 );
                 let color_elapsed = color_start.elapsed();
                 time_coloring += color_elapsed;
-                if !suppress_height_logs {
+                if !suppress_height_logs && crate::r#macro::is_debug_level_enabled(6) {
                     eprintln!("TIMING: height {} compute_height_coloring {:?}", h, color_elapsed);
                 }
                 coloring
@@ -813,7 +814,8 @@ fn compute_height_coloring_with_range(
     let trace_heights = std::env::var("DWA_TRACE_HEIGHTS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
+        || !crate::r#macro::is_debug_level_enabled(6);
 
     if trace_heights && !suppress_height_logs {
         eprintln!("TRACE: height {} start candidates={}", height, candidates.len());
@@ -1121,20 +1123,21 @@ fn export_coloring_graph(
     adj: &Vec<Vec<usize>>,
     signature_groups: usize,
 ) {
-    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
+        || !crate::r#macro::is_debug_level_enabled(6);
     let dwa_type = crate::dwa_i32::minimization::graph_coloring::current_dwa_type()
         .unwrap_or("unknown");
     let export_enabled = std::env::var("EXPORT_COLORING_GRAPHS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if !suppress_height_logs {
+    if !suppress_height_logs && crate::r#macro::is_debug_level_enabled(6) {
         eprintln!("EXPORT CHECK: height={} dwa_type={} enabled={}", height, dwa_type, export_enabled);
     }
     if !export_enabled {
         return;
     }
 
-    if !suppress_height_logs {
+    if !suppress_height_logs && crate::r#macro::is_debug_level_enabled(6) {
         eprintln!("EXPORT DEBUG: height={} dwa_type={}", height, dwa_type);
     }
     let dir = std::env::var("EXPORT_COLORING_GRAPHS_DIR")
@@ -2096,7 +2099,8 @@ fn build_incompatibility_graph_height_0(
     dwa: &DWA,
     needed: &[Weight],
 ) -> Vec<Vec<usize>> {
-    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
+        || !crate::r#macro::is_debug_level_enabled(6);
     let n = candidates.len();
     let start = std::time::Instant::now();
     
@@ -2217,7 +2221,8 @@ fn greedy_color_without_graph(
     productive_transitions: &[Vec<ProductiveTransition>],
     _start: std::time::Instant,
 ) -> Vec<usize> {
-    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
+        || !crate::r#macro::is_debug_level_enabled(6);
     let n = candidates.len();
     if n == 0 { return vec![]; }
 
@@ -2368,7 +2373,7 @@ fn greedy_color_without_graph(
     });
 
     let assign_time = assign_start.elapsed();
-    if n >= 100 {
+    if n >= 100 && !suppress_height_logs {
         let num_colors = color_representatives.len();
         let total_time = total_start.elapsed();
         let accounted = sig_time + grouping_time + compare_time + assign_time;
@@ -2391,7 +2396,8 @@ fn build_incompatibility_graph_general(
     productive_transitions: &[Vec<ProductiveTransition>],
     start: std::time::Instant,
 ) -> Vec<Vec<usize>> {
-    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok();
+    let suppress_height_logs = std::env::var("SUPPRESS_MINIMIZE_HEIGHT_LOGS").is_ok()
+        || !crate::r#macro::is_debug_level_enabled(6);
     let n = candidates.len();
     
     // Compute signatures for each candidate
