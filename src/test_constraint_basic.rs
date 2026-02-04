@@ -3225,6 +3225,169 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 }
 
 #[test]
+fn test_terminal_dwa_tilde_sequence_weights() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
+    use crate::dwa_i32::Weight;
+    use crate::dwa_i32::common::Label;
+
+    let ebnf_grammar = include_str!("js.ebnf");
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let tokenizer = &compiled_grammar.tokenizer;
+
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b"~".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b"~~~~".to_vec(), LLMTokenID(1));
+
+    let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
+    let tilde_tid = compiled_grammar
+        .glr_parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"~".to_vec()))
+        .expect("'~' terminal should exist");
+    let tilde_label = tilde_tid.0 as Label;
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+
+    let terminal_dwa = run_precompute1(
+        &tokenizer,
+        &internal_llm_token_map,
+        1, // max internal token id
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+        None,
+        None,
+        Some(Arc::new(HashSet::from([tilde_label]))),
+    );
+
+    let num_tsids = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        0
+    };
+
+    let weight_contains_token = |weight: &Weight, internal_id: usize| -> bool {
+        if num_tsids == 0 {
+            weight.contains(internal_id)
+        } else {
+            let start = internal_id.saturating_mul(num_tsids);
+            let end = start.saturating_add(num_tsids.saturating_sub(1));
+            for range in weight.ranges() {
+                let r_start = *range.start();
+                let r_end = *range.end();
+                if r_start > end {
+                    break;
+                }
+                if r_end >= start {
+                    return true;
+                }
+            }
+            false
+        }
+    };
+
+    let w_single = crate::debug_path_weight::check_dwa_path_weight(&terminal_dwa, &[tilde_label]);
+    let w_quad = crate::debug_path_weight::check_dwa_path_weight(
+        &terminal_dwa,
+        &[tilde_label, tilde_label, tilde_label, tilde_label],
+    );
+
+    assert!(
+        weight_contains_token(&w_single, 0),
+        "expected '~' to be allowed for token id 0"
+    );
+    assert!(w_quad.is_empty(), "expected '~~~~' weight to be empty");
+}
+
+#[test]
+fn test_terminal_dwa_tilde_sequence_weights_simple_grammar() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
+    use crate::dwa_i32::Weight;
+    use crate::dwa_i32::common::Label;
+
+    let ebnf_grammar = r#"
+start ::= TILDE+ ;
+TILDE ::= '~' ;
+"#;
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let tokenizer = &compiled_grammar.tokenizer;
+
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b"~".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b"~~~~".to_vec(), LLMTokenID(1));
+
+    let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
+    let tilde_tid = compiled_grammar
+        .glr_parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"~".to_vec()))
+        .expect("'~' terminal should exist");
+    let tilde_label = tilde_tid.0 as Label;
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+
+    let terminal_dwa = run_precompute1(
+        &tokenizer,
+        &internal_llm_token_map,
+        1, // max internal token id
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+        None,
+        None,
+        Some(Arc::new(HashSet::from([tilde_label]))),
+    );
+
+    let num_tsids = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        0
+    };
+
+    let weight_contains_token = |weight: &Weight, internal_id: usize| -> bool {
+        if num_tsids == 0 {
+            weight.contains(internal_id)
+        } else {
+            let start = internal_id.saturating_mul(num_tsids);
+            let end = start.saturating_add(num_tsids.saturating_sub(1));
+            for range in weight.ranges() {
+                let r_start = *range.start();
+                let r_end = *range.end();
+                if r_start > end {
+                    break;
+                }
+                if r_end >= start {
+                    return true;
+                }
+            }
+            false
+        }
+    };
+
+    let w_single = crate::debug_path_weight::check_dwa_path_weight(&terminal_dwa, &[tilde_label]);
+    let w_quad = crate::debug_path_weight::check_dwa_path_weight(
+        &terminal_dwa,
+        &[tilde_label, tilde_label, tilde_label, tilde_label],
+    );
+
+    assert!(
+        weight_contains_token(&w_single, 0),
+        "expected '~' to be allowed for token id 0"
+    );
+    assert!(w_quad.is_empty(), "expected '~~~~' weight to be empty");
+}
+
+#[test]
 fn test_weight_overapprox_simple() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
