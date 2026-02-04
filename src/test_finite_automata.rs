@@ -66,6 +66,18 @@ mod tests {
     }
 
     #[test]
+    fn test_trivial_seq_simplification() {
+        let expr = Expr::make_seq(vec![Expr::U8Seq(vec![b'a'])]);
+        assert!(matches!(expr, Expr::U8Seq(bytes) if bytes == vec![b'a']));
+
+        let expr = Expr::make_seq(vec![Expr::Epsilon, Expr::U8Seq(vec![b'a']), Expr::Epsilon]);
+        assert!(matches!(expr, Expr::U8Seq(bytes) if bytes == vec![b'a']));
+
+        let expr = Expr::make_seq(vec![Expr::Epsilon]);
+        assert!(matches!(expr, Expr::Epsilon));
+    }
+
+    #[test]
     fn test_opt() {
         let expr = opt(eat_u8(b'a'));
         dbg!(&expr);
