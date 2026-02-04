@@ -3498,6 +3498,97 @@ fn test_suffix_dfa_prunes_tilde_equals() {
 }
 
 #[test]
+fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    use crate::constraint_precompute::{run_precompute1, ApproximateDfaPruner};
+    use crate::glr::approximate_dfa::build_approximate_parser_dfa_from_start;
+    use crate::glr::grammar::Terminal;
+    use crate::interface::grammar_to_suffix_grammar;
+    use crate::dwa_i32::common::Label;
+
+    let ebnf_grammar = include_str!("js.ebnf");
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+    let parser = compiled_grammar.glr_parser();
+    let tokenizer = &compiled_grammar.tokenizer;
+
+    let suffix_grammar = grammar_to_suffix_grammar(&grammar_definition);
+    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
+    let suffix_parser = suffix_compiled.glr_parser();
+
+    let approx_dfa = build_approximate_parser_dfa_from_start(&suffix_parser);
+    let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
+    for (term, orig_tid) in parser.terminal_map.iter() {
+        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
+            orig_to_suffix_tid[orig_tid.0] = Some(*suffix_tid);
+        }
+    }
+
+    let mut ignored_terminals = vec![false; parser.terminal_map.len()];
+    for tid in &grammar_definition.ignore_terminal_ids {
+        if tid.0 < ignored_terminals.len() {
+            ignored_terminals[tid.0] = true;
+        }
+    }
+
+    let approx_pruner = ApproximateDfaPruner {
+        dfa: approx_dfa,
+        orig_to_suffix_tid,
+        ignored_terminals,
+    };
+
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b"**=".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b"~".to_vec(), LLMTokenID(1));
+    internal_llm_token_map.insert(b"=".to_vec(), LLMTokenID(2));
+
+    let terminals_count = parser.terminal_map.len();
+    let pow_assign_tid = parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"**=".to_vec()))
+        .expect("'**=' terminal should exist");
+    let tilde_tid = parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"~".to_vec()))
+        .expect("'~' terminal should exist");
+    let eq_tid = parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"=".to_vec()))
+        .expect("'=' terminal should exist");
+    let pow_assign_label = pow_assign_tid.0 as Label;
+    let tilde_label = tilde_tid.0 as Label;
+    let eq_label = eq_tid.0 as Label;
+
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+
+    let terminal_dwa = run_precompute1(
+        &tokenizer,
+        &internal_llm_token_map,
+        2,
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        Some(approx_pruner),
+        None,
+        None,
+        None,
+    );
+
+    let w_pow_assign_tilde_eq_tilde = crate::debug_path_weight::check_dwa_path_weight(
+        &terminal_dwa,
+        &[pow_assign_label, tilde_label, eq_label, tilde_label],
+    );
+
+    assert!(
+        w_pow_assign_tilde_eq_tilde.is_empty(),
+        "expected '**=' -> '~' -> '=' -> '~' to be pruned by suffix DFA"
+    );
+}
+
+#[test]
 fn test_weight_overapprox_simple() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
