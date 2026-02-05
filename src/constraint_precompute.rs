@@ -191,8 +191,22 @@ struct DfsProfile {
     tokens_accessible_time_us: u64,
     expanded_item_calls: u64,
     expanded_item_time_us: u64,
+    expanded_item_cache_hit_calls: u64,
+    expanded_item_cache_hit_time_us: u64,
+    expanded_item_cache_miss_calls: u64,
+    expanded_item_cache_miss_time_us: u64,
+    expanded_item_build_rsb_time_us: u64,
+    expanded_item_weight_from_rsb_time_us: u64,
+    expanded_item_cache_store_time_us: u64,
     expanded_rsb_calls: u64,
     expanded_rsb_time_us: u64,
+    expanded_rsb_cache_hit_calls: u64,
+    expanded_rsb_cache_hit_time_us: u64,
+    expanded_rsb_cache_miss_calls: u64,
+    expanded_rsb_cache_miss_time_us: u64,
+    expanded_rsb_expand_time_us: u64,
+    expanded_rsb_weight_from_rsb_time_us: u64,
+    expanded_rsb_cache_store_time_us: u64,
     expanded_all_calls: u64,
     expanded_all_time_us: u64,
     add_transition_calls: u64,
@@ -222,7 +236,43 @@ impl DfsProfile {
         crate::debug!(5, "precompute1 dfs profile: possible_matches={} calls, {:.2}ms", self.possible_matches_calls, ms(self.possible_matches_time_us));
         crate::debug!(5, "precompute1 dfs profile: tokens_accessible={} calls, {:.2}ms", self.tokens_accessible_calls, ms(self.tokens_accessible_time_us));
         crate::debug!(5, "precompute1 dfs profile: expanded_item={} calls, {:.2}ms", self.expanded_item_calls, ms(self.expanded_item_time_us));
+        let expanded_item_miss_detail_us = self.expanded_item_build_rsb_time_us
+            + self.expanded_item_weight_from_rsb_time_us
+            + self.expanded_item_cache_store_time_us;
+        let expanded_item_miss_other_us = self
+            .expanded_item_cache_miss_time_us
+            .saturating_sub(expanded_item_miss_detail_us);
+        crate::debug!(
+            5,
+            "precompute1 dfs profile: expanded_item hits={} calls, {:.2}ms; misses={} calls, {:.2}ms (build_rsb {:.2}ms, weight_from_rsb {:.2}ms, cache_store {:.2}ms, other {:.2}ms)",
+            self.expanded_item_cache_hit_calls,
+            ms(self.expanded_item_cache_hit_time_us),
+            self.expanded_item_cache_miss_calls,
+            ms(self.expanded_item_cache_miss_time_us),
+            ms(self.expanded_item_build_rsb_time_us),
+            ms(self.expanded_item_weight_from_rsb_time_us),
+            ms(self.expanded_item_cache_store_time_us),
+            ms(expanded_item_miss_other_us),
+        );
         crate::debug!(5, "precompute1 dfs profile: expanded_rsb={} calls, {:.2}ms", self.expanded_rsb_calls, ms(self.expanded_rsb_time_us));
+        let expanded_rsb_miss_detail_us = self.expanded_rsb_expand_time_us
+            + self.expanded_rsb_weight_from_rsb_time_us
+            + self.expanded_rsb_cache_store_time_us;
+        let expanded_rsb_miss_other_us = self
+            .expanded_rsb_cache_miss_time_us
+            .saturating_sub(expanded_rsb_miss_detail_us);
+        crate::debug!(
+            5,
+            "precompute1 dfs profile: expanded_rsb hits={} calls, {:.2}ms; misses={} calls, {:.2}ms (expand {:.2}ms, weight_from_rsb {:.2}ms, cache_store {:.2}ms, other {:.2}ms)",
+            self.expanded_rsb_cache_hit_calls,
+            ms(self.expanded_rsb_cache_hit_time_us),
+            self.expanded_rsb_cache_miss_calls,
+            ms(self.expanded_rsb_cache_miss_time_us),
+            ms(self.expanded_rsb_expand_time_us),
+            ms(self.expanded_rsb_weight_from_rsb_time_us),
+            ms(self.expanded_rsb_cache_store_time_us),
+            ms(expanded_rsb_miss_other_us),
+        );
         crate::debug!(5, "precompute1 dfs profile: expanded_all={} calls, {:.2}ms", self.expanded_all_calls, ms(self.expanded_all_time_us));
         crate::debug!(5, "precompute1 dfs profile: add_transition={} calls, {:.2}ms", self.add_transition_calls, ms(self.add_transition_time_us));
         crate::debug!(5, "precompute1 dfs profile: add_epsilon={} calls, {:.2}ms", self.add_epsilon_calls, ms(self.add_epsilon_time_us));
@@ -1020,31 +1070,56 @@ impl<'r> Precomputer1<'r> {
     /// If num_tsids == 0 (symbol-heavy mode), returns the token ID directly in N-space.
     #[inline]
     fn expanded_weight_from_item(&mut self, token_id: usize) -> Weight {
-        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let total_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if let Some(Some(cached)) = self.expanded_item_cache.get(token_id) {
-            if let Some(start) = start {
+            if let Some(start) = total_start {
+                let elapsed = start.elapsed().as_micros() as u64;
                 self.dfs_profile.expanded_item_calls += 1;
-                self.dfs_profile.expanded_item_time_us += start.elapsed().as_micros() as u64;
+                self.dfs_profile.expanded_item_time_us += elapsed;
+                self.dfs_profile.expanded_item_cache_hit_calls += 1;
+                self.dfs_profile.expanded_item_cache_hit_time_us += elapsed;
             }
             return cached.clone();
         }
 
-        let weight = if self.num_tsids == 0 {
+        let miss_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+
+        let rsb_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let rsb = if self.num_tsids == 0 {
             // Symbol-heavy mode: just use the token ID directly
-            Weight::from_rsb(RangeSetBlaze::from_iter([token_id..=token_id]))
+            RangeSetBlaze::from_iter([token_id..=token_id])
         } else {
             // Weight-heavy mode: A single token ID in N-space becomes a range in N×M-space
             // Token i becomes positions [i*M, i*M + M - 1]
             let start = token_id * self.num_tsids;
             let end = start + self.num_tsids - 1;
             // IMPORTANT: Use [start..=end] to create from ONE range, not iterate over all integers!
-            Weight::from_rsb(RangeSetBlaze::from_iter([start..=end]))
+            RangeSetBlaze::from_iter([start..=end])
         };
 
-        if let Some(slot) = self.expanded_item_cache.get_mut(token_id) {
-            *slot = Some(weight.clone());
+        if let Some(start) = rsb_start {
+            self.dfs_profile.expanded_item_build_rsb_time_us += start.elapsed().as_micros() as u64;
         }
-        if let Some(start) = start {
+
+        let weight_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let weight = Weight::from_rsb(rsb);
+        if let Some(start) = weight_start {
+            self.dfs_profile.expanded_item_weight_from_rsb_time_us += start.elapsed().as_micros() as u64;
+        }
+
+        if let Some(slot) = self.expanded_item_cache.get_mut(token_id) {
+            let store_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+            *slot = Some(weight.clone());
+            if let Some(start) = store_start {
+                self.dfs_profile.expanded_item_cache_store_time_us += start.elapsed().as_micros() as u64;
+            }
+        }
+
+        if let Some(start) = miss_start {
+            self.dfs_profile.expanded_item_cache_miss_calls += 1;
+            self.dfs_profile.expanded_item_cache_miss_time_us += start.elapsed().as_micros() as u64;
+        }
+        if let Some(start) = total_start {
             self.dfs_profile.expanded_item_calls += 1;
             self.dfs_profile.expanded_item_time_us += start.elapsed().as_micros() as u64;
         }
@@ -1055,44 +1130,71 @@ impl<'r> Precomputer1<'r> {
     /// If num_tsids <= 1 (symbol-heavy or degenerate single-tsid mode), returns the rsb directly.
     #[inline]
     fn expanded_weight_from_rsb(&mut self, rsb: &RangeSetBlaze<usize>, cache_key: Option<usize>) -> Weight {
-        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let total_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if rsb.is_empty() {
-            if let Some(start) = start {
+            if let Some(start) = total_start {
+                let elapsed = start.elapsed().as_micros() as u64;
                 self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+                self.dfs_profile.expanded_rsb_time_us += elapsed;
+                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
+                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
             }
             return Weight::zeros();
         }
         if std::ptr::eq(rsb, &self.all_llm_tokens) {
-            if let Some(start) = start {
+            if let Some(start) = total_start {
+                let elapsed = start.elapsed().as_micros() as u64;
                 self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+                self.dfs_profile.expanded_rsb_time_us += elapsed;
+                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
+                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
             }
             return self.expanded_all_weight.clone();
         }
         if let Some(key) = cache_key {
             if let Some(cached) = self.expanded_rsb_cache.get(&key) {
-                if let Some(start) = start {
+                if let Some(start) = total_start {
+                    let elapsed = start.elapsed().as_micros() as u64;
                     self.dfs_profile.expanded_rsb_calls += 1;
-                    self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+                    self.dfs_profile.expanded_rsb_time_us += elapsed;
+                    self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
+                    self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
                 }
                 return cached.clone();
             }
         }
 
-        let weight = if self.num_tsids <= 1 {
-            // Symbol-heavy or single-tsid mode: use rsb directly
-            Weight::from_rsb(rsb.clone())
+        let miss_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+
+        let expand_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let expanded = if self.num_tsids <= 1 {
+            rsb.clone()
         } else {
-            // Weight-heavy mode: expand to N×M space
-            Weight::from_rsb(expand_rsb(rsb, self.num_tsids))
+            expand_rsb(rsb, self.num_tsids)
         };
+        if let Some(start) = expand_start {
+            self.dfs_profile.expanded_rsb_expand_time_us += start.elapsed().as_micros() as u64;
+        }
+
+        let weight_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let weight = Weight::from_rsb(expanded);
+        if let Some(start) = weight_start {
+            self.dfs_profile.expanded_rsb_weight_from_rsb_time_us += start.elapsed().as_micros() as u64;
+        }
         if let Some(key) = cache_key {
             if self.expanded_rsb_cache.len() < EXPANDED_RSB_CACHE_MAX_ENTRIES {
+                let store_start = self.dfs_profile_enabled.then(std::time::Instant::now);
                 self.expanded_rsb_cache.insert(key, weight.clone());
+                if let Some(start) = store_start {
+                    self.dfs_profile.expanded_rsb_cache_store_time_us += start.elapsed().as_micros() as u64;
+                }
             }
         }
-        if let Some(start) = start {
+        if let Some(start) = miss_start {
+            self.dfs_profile.expanded_rsb_cache_miss_calls += 1;
+            self.dfs_profile.expanded_rsb_cache_miss_time_us += start.elapsed().as_micros() as u64;
+        }
+        if let Some(start) = total_start {
             self.dfs_profile.expanded_rsb_calls += 1;
             self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
         }
@@ -1103,40 +1205,69 @@ impl<'r> Precomputer1<'r> {
     /// Uses a value cache keyed by the full RangeSetBlaze (avoids pointer-only caching).
     #[inline]
     fn expanded_weight_from_rsb_owned(&mut self, rsb: RangeSetBlaze<usize>) -> Weight {
-        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let total_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if rsb.is_empty() {
-            if let Some(start) = start {
+            if let Some(start) = total_start {
+                let elapsed = start.elapsed().as_micros() as u64;
                 self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+                self.dfs_profile.expanded_rsb_time_us += elapsed;
+                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
+                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
             }
             return Weight::zeros();
         }
         if rsb == self.all_llm_tokens {
-            if let Some(start) = start {
+            if let Some(start) = total_start {
+                let elapsed = start.elapsed().as_micros() as u64;
                 self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+                self.dfs_profile.expanded_rsb_time_us += elapsed;
+                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
+                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
             }
             return self.expanded_all_weight.clone();
         }
 
         if let Some(cached) = self.expanded_rsb_value_cache.get(&rsb) {
-            if let Some(start) = start {
+            if let Some(start) = total_start {
+                let elapsed = start.elapsed().as_micros() as u64;
                 self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+                self.dfs_profile.expanded_rsb_time_us += elapsed;
+                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
+                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
             }
             return cached.clone();
         }
 
-        let weight = if self.num_tsids <= 1 {
-            Weight::from_rsb(rsb.clone())
+        let miss_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+
+        let expand_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let expanded = if self.num_tsids <= 1 {
+            rsb.clone()
         } else {
-            Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
+            expand_rsb(&rsb, self.num_tsids)
         };
+        if let Some(start) = expand_start {
+            self.dfs_profile.expanded_rsb_expand_time_us += start.elapsed().as_micros() as u64;
+        }
+
+        let weight_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let weight = Weight::from_rsb(expanded);
+        if let Some(start) = weight_start {
+            self.dfs_profile.expanded_rsb_weight_from_rsb_time_us += start.elapsed().as_micros() as u64;
+        }
 
         if self.expanded_rsb_value_cache.len() < EXPANDED_RSB_VALUE_CACHE_MAX_ENTRIES {
+            let store_start = self.dfs_profile_enabled.then(std::time::Instant::now);
             self.expanded_rsb_value_cache.insert(rsb, weight.clone());
+            if let Some(start) = store_start {
+                self.dfs_profile.expanded_rsb_cache_store_time_us += start.elapsed().as_micros() as u64;
+            }
         }
-        if let Some(start) = start {
+        if let Some(start) = miss_start {
+            self.dfs_profile.expanded_rsb_cache_miss_calls += 1;
+            self.dfs_profile.expanded_rsb_cache_miss_time_us += start.elapsed().as_micros() as u64;
+        }
+        if let Some(start) = total_start {
             self.dfs_profile.expanded_rsb_calls += 1;
             self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
         }
