@@ -18,7 +18,9 @@ use range_set_blaze::RangeSetBlaze;
 use profiler_macro::{time_it, timeit};
 
 use crate::constraint_vocab::LLMTokenBV;
+use crate::datastructures::abstract_weight::{BackendChoice, current_backend_choice};
 use crate::datastructures::hybrid_bitset::RangeSet;
+use crate::datastructures::rangemap_weight::{RangeMapWeight, intern_rangemap};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::dfa_u8::{Tokenizer, Regex};
 use crate::glr::approximate_dfa::LazyApproximateDFA;
@@ -1019,6 +1021,11 @@ impl<'r> Precomputer1<'r> {
         let weight = if self.num_tsids == 0 {
             // Symbol-heavy mode: just use the token ID directly
             Weight::from_rsb(RangeSetBlaze::from_iter([token_id..=token_id]))
+        } else if matches!(current_backend_choice(), BackendChoice::RangeMap) {
+            // RangeMap backend: avoid expand->from_rsb per-token overhead
+            Weight::RangeMap(intern_rangemap(
+                RangeMapWeight::from_token_range_full_tsids(token_id, token_id, self.num_tsids),
+            ))
         } else {
             // Weight-heavy mode: A single token ID in N-space becomes a range in N×M-space
             // Token i becomes positions [i*M, i*M + M - 1]
@@ -1070,6 +1077,11 @@ impl<'r> Precomputer1<'r> {
         let weight = if self.num_tsids <= 1 {
             // Symbol-heavy or single-tsid mode: use rsb directly
             Weight::from_rsb(rsb.clone())
+        } else if matches!(current_backend_choice(), BackendChoice::RangeMap) {
+            // RangeMap backend: create full-tsid token ranges directly
+            Weight::RangeMap(intern_rangemap(
+                RangeMapWeight::from_token_ranges_full_tsids(rsb, self.num_tsids),
+            ))
         } else {
             // Weight-heavy mode: expand to N×M space
             Weight::from_rsb(expand_rsb(rsb, self.num_tsids))
@@ -1116,6 +1128,10 @@ impl<'r> Precomputer1<'r> {
 
         let weight = if self.num_tsids <= 1 {
             Weight::from_rsb(rsb.clone())
+        } else if matches!(current_backend_choice(), BackendChoice::RangeMap) {
+            Weight::RangeMap(intern_rangemap(
+                RangeMapWeight::from_token_ranges_full_tsids(&rsb, self.num_tsids),
+            ))
         } else {
             Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
         };
