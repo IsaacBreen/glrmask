@@ -212,6 +212,7 @@ pub struct GrammarConstraint {
     pub parser_dwa_vocab: StageVocab,
     
     /// Number of tokenizer states (M in weight-heavy encoding).
+    /// When representative compression is enabled, this becomes the number of rep states.
     /// When > 0, indicates weight-heavy mode where weights are in N×M space.
     /// When 0, indicates symbol-heavy mode (tsid as initial transition labels).
     pub num_tsids: usize,
@@ -1015,9 +1016,7 @@ impl GrammarConstraint {
         crate::debug!(5, "setup_combined: end");
         let commit_vocab = Arc::new(commit_vocab_data);
 
-        if std::env::var("DISABLE_DFA_STATE_REORDER").map(|v| v == "1").unwrap_or(false) {
-            crate::debug!(4, "DFA state reorder disabled via DISABLE_DFA_STATE_REORDER=1");
-        } else {
+        if std::env::var("ENABLE_DFA_STATE_REORDER").map(|v| v == "1").unwrap_or(false) {
             let reorder_start = std::time::Instant::now();
             let (new_state_to_rep, new_representatives) = Self::reorder_tokenizer_states(
                 &mut tokenizer,
@@ -1027,6 +1026,8 @@ impl GrammarConstraint {
             state_to_rep = new_state_to_rep;
             representative_states = new_representatives;
             crate::debug!(4, "DFA state reorder complete in {:?}", reorder_start.elapsed());
+        } else {
+            crate::debug!(4, "DFA state reorder disabled (set ENABLE_DFA_STATE_REORDER=1 to enable)");
         }
 
         let internal_max_llm_token = original_to_internal_map
@@ -1303,8 +1304,16 @@ impl GrammarConstraint {
 
         // Number of tokenizer states for weight-heavy encoding
         let weight_heavy_enabled = crate::constraint_precompute::is_weight_heavy_enabled();
+        let original_num_tsids = tokenizer.dfa().states.len();
+        let use_rep_tsids = std::env::var("ENABLE_REP_TSID_COMPRESSION")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let num_tsids = if weight_heavy_enabled {
-            tokenizer.dfa().states.len()
+            if use_rep_tsids {
+                representative_states.len()
+            } else {
+                original_num_tsids
+            }
         } else {
             0
         };
@@ -1321,20 +1330,87 @@ impl GrammarConstraint {
         // significantly reduce RangeSet fragmentation for tsid-set masks.
         let tsid_offset_map: Vec<usize> = if num_tsids == 0 {
             Vec::new()
-        } else if std::env::var("DISABLE_TSID_OFFSET_PERMUTE").map(|v| v == "1").unwrap_or(false) {
-            (0..num_tsids).collect()
-        } else {
-            // Heuristic permutation to reduce RangeSet fragmentation in weight-heavy mode:
-            //
-            // - We assign offsets in contiguous blocks per representative tokenizer state.
-            // - We order these representative blocks by a stable "terminal-possibility signature"
-            //   (a 175-bit bitset over parser terminals), so reps which can start with similar
-            //   terminals tend to be adjacent.
-            //
-            // This is a cheap approximation of the co-occurrence structure induced during
-            // determinization (many determinized weights are unions over reps that share
-            // an outgoing label), and usually does better than ordering reps numerically.
+        } else if !use_rep_tsids {
+            if std::env::var("DISABLE_TSID_OFFSET_PERMUTE").map(|v| v == "1").unwrap_or(false) {
+                (0..num_tsids).collect()
+            } else {
+                // Heuristic permutation to reduce RangeSet fragmentation in weight-heavy mode:
+                //
+                // - We assign offsets in contiguous blocks per representative tokenizer state.
+                // - We order these representative blocks by a stable "terminal-possibility signature"
+                //   (a 175-bit bitset over parser terminals), so reps which can start with similar
+                //   terminals tend to be adjacent.
+                //
+                // This is a cheap approximation of the co-occurrence structure induced during
+                // determinization (many determinized weights are unions over reps that share
+                // an outgoing label), and usually does better than ordering reps numerically.
 
+                let mut rep_to_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
+                for (tsid, rep) in &state_to_rep {
+                    rep_to_tsids.entry(*rep).or_default().push(tsid.0);
+                }
+                for tsids in rep_to_tsids.values_mut() {
+                    tsids.sort_unstable();
+                }
+
+                // terminal signatures are 175 bits => 3x u64 is enough (192 bits)
+                let mut rep_blocks: Vec<([u64; 3], TokenizerStateID, Vec<usize>)> = Vec::with_capacity(rep_to_tsids.len());
+                for (rep, tsids) in rep_to_tsids {
+                    let mut sig = [0u64; 3];
+                    if let Some(m) = computed_possible_matches.get(&rep) {
+                        for (tid, _mask) in m {
+                            let idx = tid.0;
+                            let word = idx / 64;
+                            let bit = idx % 64;
+                            if word < sig.len() {
+                                sig[word] |= 1u64 << bit;
+                            }
+                        }
+                    }
+                    rep_blocks.push((sig, rep, tsids));
+                }
+                let start_rep = state_to_rep
+                    .get(&TokenizerStateID(0))
+                    .copied()
+                    .unwrap_or(TokenizerStateID(0));
+                rep_blocks.sort_by(|(sig_a, rep_a, _), (sig_b, rep_b, _)| {
+                    let a_is_start = *rep_a == start_rep;
+                    let b_is_start = *rep_b == start_rep;
+                    match (a_is_start, b_is_start) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => sig_a.cmp(sig_b).then_with(|| rep_a.cmp(rep_b)),
+                    }
+                });
+
+                let mut map = vec![usize::MAX; num_tsids];
+                let mut next_offset = 0usize;
+                for (_sig, _rep, tsids) in rep_blocks {
+                    for tsid in tsids {
+                        if tsid < map.len() {
+                            map[tsid] = next_offset;
+                            next_offset += 1;
+                        }
+                    }
+                }
+
+                // Fill any missing entries conservatively.
+                for slot in map.iter_mut() {
+                    if *slot == usize::MAX {
+                        *slot = next_offset;
+                        next_offset += 1;
+                    }
+                }
+
+                if next_offset != num_tsids {
+                    crate::debug!(2, "WARNING: tsid_offset_map size mismatch (assigned {} != num_tsids {}); falling back to identity", next_offset, num_tsids);
+                    (0..num_tsids).collect()
+                } else {
+                    map
+                }
+            }
+        } else {
+            // Rep compression: map original tsid -> rep index in [0, num_tsids).
             let mut rep_to_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
             for (tsid, rep) in &state_to_rep {
                 rep_to_tsids.entry(*rep).or_default().push(tsid.0);
@@ -1359,45 +1435,45 @@ impl GrammarConstraint {
                 }
                 rep_blocks.push((sig, rep, tsids));
             }
+
             let start_rep = state_to_rep
                 .get(&TokenizerStateID(0))
                 .copied()
                 .unwrap_or(TokenizerStateID(0));
-            rep_blocks.sort_by(|(sig_a, rep_a, _), (sig_b, rep_b, _)| {
-                let a_is_start = *rep_a == start_rep;
-                let b_is_start = *rep_b == start_rep;
-                match (a_is_start, b_is_start) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => sig_a.cmp(sig_b).then_with(|| rep_a.cmp(rep_b)),
-                }
-            });
 
-            let mut map = vec![usize::MAX; num_tsids];
-            let mut next_offset = 0usize;
-            for (_sig, _rep, tsids) in rep_blocks {
-                for tsid in tsids {
-                    if tsid < map.len() {
-                        map[tsid] = next_offset;
-                        next_offset += 1;
+            if std::env::var("DISABLE_TSID_OFFSET_PERMUTE").map(|v| v == "1").unwrap_or(false) {
+                rep_blocks.sort_by(|(_, rep_a, _), (_, rep_b, _)| rep_a.cmp(rep_b));
+            } else {
+                rep_blocks.sort_by(|(sig_a, rep_a, _), (sig_b, rep_b, _)| {
+                    let a_is_start = *rep_a == start_rep;
+                    let b_is_start = *rep_b == start_rep;
+                    match (a_is_start, b_is_start) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => sig_a.cmp(sig_b).then_with(|| rep_a.cmp(rep_b)),
                     }
-                }
+                });
             }
 
-            // Fill any missing entries conservatively.
-            for slot in map.iter_mut() {
-                if *slot == usize::MAX {
-                    *slot = next_offset;
-                    next_offset += 1;
-                }
+            let mut rep_to_offset: BTreeMap<TokenizerStateID, usize> = BTreeMap::new();
+            let mut next_offset = 0usize;
+            for (_sig, rep, _tsids) in &rep_blocks {
+                rep_to_offset.insert(*rep, next_offset);
+                next_offset += 1;
             }
 
             if next_offset != num_tsids {
-                crate::debug!(2, "WARNING: tsid_offset_map size mismatch (assigned {} != num_tsids {}); falling back to identity", next_offset, num_tsids);
-                (0..num_tsids).collect()
-            } else {
-                map
+                crate::debug!(2, "WARNING: rep offset size mismatch (assigned {} != num_tsids {}); falling back to identity", next_offset, num_tsids);
             }
+
+            let mut map = vec![0usize; original_num_tsids];
+            for (tsid, rep) in &state_to_rep {
+                let offset = rep_to_offset.get(rep).copied().unwrap_or(0);
+                if tsid.0 < map.len() {
+                    map[tsid.0] = offset;
+                }
+            }
+            map
         };
 
         let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
