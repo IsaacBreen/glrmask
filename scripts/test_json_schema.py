@@ -18,6 +18,8 @@ import time
 import os
 import sys
 import glob
+import hashlib
+import gzip
 
 # Add project root and python/ dir to sys.path to find _sep1 module
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,6 +27,71 @@ sys.path.insert(0, repo_root)
 sys.path.insert(0, os.path.join(repo_root, "python"))
 
 import _sep1
+
+CACHE_VERSION = 1
+CACHE_ENV_KEYS = [
+    "DISABLE_WEIGHT_HEAVY",
+    "PRECOMPUTE1_DIRECT_INSERT",
+    "NWA_SUFFIX_PRUNE",
+    "DWA_SUFFIX_PRUNE",
+    "ABSTRACT_WEIGHT_BACKEND",
+    "ALLOW_FACTORIZED_EXPANSION",
+    "SEP1_SPLIT_STRING_KEYS",
+    "ENABLE_EBNF_CHOICE_FACTORING",
+]
+
+def _canonical_json(obj) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+def _cache_dir() -> str:
+    return os.environ.get("SEP1_CACHE_DIR", os.path.join(repo_root, ".cache", "sep1"))
+
+def _cache_enabled() -> bool:
+    if os.environ.get("SEP1_CACHE_DISABLE") == "1":
+        return False
+    if os.environ.get("PRINT_EBNF") or os.environ.get("PRINT_RAW_EBNF") or os.environ.get("PRINT_JSON_SCHEMA"):
+        return False
+    return True
+
+def _vocab_id() -> str:
+    override = os.environ.get("SEP1_VOCAB_ID")
+    if override:
+        return override
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("gpt2")
+        return f"tiktoken:{enc.name}:n{enc.n_vocab}"
+    except Exception:
+        return "hf:gpt2:vocab.json"
+
+def _cache_key(schema_obj: dict, vocab_id: str) -> str:
+    schema_hash = _hash_bytes(_canonical_json(schema_obj).encode("utf-8"))
+    env_config = {k: os.environ.get(k, "") for k in CACHE_ENV_KEYS}
+    config_blob = json.dumps({"v": CACHE_VERSION, "env": env_config}, sort_keys=True)
+    config_hash = _hash_bytes(config_blob.encode("utf-8"))
+    key_blob = f"{schema_hash}|{vocab_id}|{config_hash}".encode("utf-8")
+    return _hash_bytes(key_blob)
+
+def _cache_path(cache_key: str) -> str:
+    return os.path.join(_cache_dir(), f"constraint_{cache_key}.json.gz")
+
+def _load_constraint_from_cache(cache_path: str):
+    with gzip.open(cache_path, "rt", encoding="utf-8") as f:
+        json_str = f.read()
+    return _sep1.GrammarConstraint.from_json_string(json_str)
+
+def _save_constraint_to_cache(cache_path: str, constraint) -> None:
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    json_str = constraint.to_json_string()
+    with gzip.open(cache_path, "wt", encoding="utf-8") as f:
+        f.write(json_str)
+
+def _token_to_id_from_constraint(constraint) -> dict:
+    id_to_token = constraint.get_id_to_token_map()
+    return {token_bytes: token_id for token_id, token_bytes in id_to_token.items()}
 
 def find_schema_by_id(schema_id: str) -> str:
     """Find a schema file by its ID in benchmark data directories."""
@@ -79,38 +146,65 @@ if os.environ.get("PRINT_JSON_SCHEMA"):
     sys.exit(0)
 
 
-# Load vocabulary
-try:
-    import tiktoken
-    print("Loading vocabulary using tiktoken (matching benchmark runner)...")
-    enc = tiktoken.get_encoding("gpt2")
-    
-    print("\nGeneration token_to_id map (matching Sep1Adapter._get_token_to_id)...")
-    start = time.time()
-    token_to_id = {}
-    for token_id in range(enc.n_vocab):
-        token_bytes = enc.decode_single_token_bytes(token_id)
-        token_to_id[token_bytes] = token_id
-    vocab_time = time.time() - start
-    print(f"   Token map generation: {vocab_time*1000:.1f}ms")
+token_to_id = None
+vocab_time = 0.0
+ebnf_time = 0.0
+parse_time = 0.0
+compile_time = 0.0
+constraint_time = 0.0
 
-except ImportError:
-    print("tiktoken not found, falling back to downloading vocab.json...")
-    import urllib.request
-    vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
-    start = time.time()
-    with urllib.request.urlopen(vocab_url) as resp:
-        vocab = json.loads(resp.read().decode())
-    token_to_id = {k.encode('utf-8'): v for k, v in vocab.items()}
-    vocab_time = time.time() - start
-    print(f"   Vocab download/parse: {vocab_time*1000:.1f}ms")
+cache_key = None
+cache_path = None
+cache_hit = False
+constraint = None
 
-# Step 1: Convert JSON schema to EBNF
-print("\n1. Converting JSON schema to EBNF...", file=sys.stderr)
-start = time.time()
-ebnf = _sep1.json_schema_to_ebnf_py(json.dumps(schema))
-ebnf_time = time.time() - start
-print(f"   EBNF conversion: {ebnf_time*1000:.1f}ms ({len(ebnf)} chars)", file=sys.stderr)
+if _cache_enabled():
+    vocab_id = _vocab_id()
+    cache_key = _cache_key(schema, vocab_id)
+    cache_path = _cache_path(cache_key)
+    if os.path.exists(cache_path):
+        print(f"\nCache hit: {cache_path}")
+        start = time.time()
+        constraint = _load_constraint_from_cache(cache_path)
+        constraint_time = time.time() - start
+        print(f"   Constraint load: {constraint_time*1000:.1f}ms")
+        token_to_id = _token_to_id_from_constraint(constraint)
+        cache_hit = True
+
+if not cache_hit:
+    # Load vocabulary
+    try:
+        import tiktoken
+        print("Loading vocabulary using tiktoken (matching benchmark runner)...")
+        enc = tiktoken.get_encoding("gpt2")
+        
+        print("\nGeneration token_to_id map (matching Sep1Adapter._get_token_to_id)...")
+        start = time.time()
+        token_to_id = {}
+        for token_id in range(enc.n_vocab):
+            token_bytes = enc.decode_single_token_bytes(token_id)
+            token_to_id[token_bytes] = token_id
+        vocab_time = time.time() - start
+        print(f"   Token map generation: {vocab_time*1000:.1f}ms")
+
+    except ImportError:
+        print("tiktoken not found, falling back to downloading vocab.json...")
+        import urllib.request
+        vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+        start = time.time()
+        with urllib.request.urlopen(vocab_url) as resp:
+            vocab = json.loads(resp.read().decode())
+        token_to_id = {k.encode('utf-8'): v for k, v in vocab.items()}
+        vocab_time = time.time() - start
+        print(f"   Vocab download/parse: {vocab_time*1000:.1f}ms")
+
+if not cache_hit:
+    # Step 1: Convert JSON schema to EBNF
+    print("\n1. Converting JSON schema to EBNF...", file=sys.stderr)
+    start = time.time()
+    ebnf = _sep1.json_schema_to_ebnf_py(json.dumps(schema))
+    ebnf_time = time.time() - start
+    print(f"   EBNF conversion: {ebnf_time*1000:.1f}ms ({len(ebnf)} chars)", file=sys.stderr)
 
 # If PRINT_RAW_EBNF is set, output the raw EBNF and exit
 if os.environ.get("PRINT_RAW_EBNF"):
@@ -139,27 +233,34 @@ if os.environ.get("PRINT_EBNF"):
         print(parsed_ebnf)
     sys.exit(0)
 
-# Step 2: Parse EBNF to GrammarDefinition
-# Note: from_ebnf() does NOT optimize by default
-print("\n2. Parsing EBNF to GrammarDefinition...")
-start = time.time()
-grammar_def = _sep1.grammar_definition_from_json_schema(json.dumps(schema))
-parse_time = time.time() - start
-print(f"   Grammar parsing: {parse_time*1000:.1f}ms")
+if not cache_hit:
+    # Step 2: Parse EBNF to GrammarDefinition
+    # Note: from_ebnf() does NOT optimize by default
+    print("\n2. Parsing EBNF to GrammarDefinition...")
+    start = time.time()
+    grammar_def = _sep1.grammar_definition_from_json_schema(json.dumps(schema))
+    parse_time = time.time() - start
+    print(f"   Grammar parsing: {parse_time*1000:.1f}ms")
 
-# Step 3: Compile to GLR parser
-print("\n3. Compiling grammar...")
-start = time.time()
-compiled = grammar_def.compile()
-compile_time = time.time() - start
-print(f"   Grammar compilation: {compile_time*1000:.1f}ms")
+    # Step 3: Compile to GLR parser
+    print("\n3. Compiling grammar...")
+    start = time.time()
+    compiled = grammar_def.compile()
+    compile_time = time.time() - start
+    print(f"   Grammar compilation: {compile_time*1000:.1f}ms")
 
-# Step 4: Create constraint with vocabulary
-print("\n4. Creating constraint with vocabulary...")
-start = time.time()
-constraint = _sep1.GrammarConstraint(compiled, token_to_id)
-constraint_time = time.time() - start
-print(f"   Constraint creation: {constraint_time*1000:.1f}ms")
+    # Step 4: Create constraint with vocabulary
+    print("\n4. Creating constraint with vocabulary...")
+    start = time.time()
+    constraint = _sep1.GrammarConstraint(compiled, token_to_id)
+    constraint_time = time.time() - start
+    print(f"   Constraint creation: {constraint_time*1000:.1f}ms")
+
+    if _cache_enabled() and cache_path:
+        cache_start = time.time()
+        _save_constraint_to_cache(cache_path, constraint)
+        cache_write_time = time.time() - cache_start
+        print(f"   Cached constraint: {cache_path} ({cache_write_time*1000:.1f}ms)")
 
 # Step 5: Test stepping through a valid input
 if os.environ.get("SKIP_STEP_5"):
