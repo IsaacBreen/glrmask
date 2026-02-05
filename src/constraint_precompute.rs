@@ -200,7 +200,8 @@ struct DfsProfile {
     add_epsilon_time_us: u64,
 }
 
-const EXPANDED_RSB_CACHE_MAX_ENTRIES: usize = 20_000;
+const EXPANDED_RSB_CACHE_MAX_ENTRIES: usize = 100_000;
+const EXPANDED_RSB_VALUE_CACHE_MAX_ENTRIES: usize = 50_000;
 
 impl DfsProfile {
     fn print(&self) {
@@ -265,6 +266,7 @@ pub(crate) struct Precomputer1<'r> {
     expanded_item_cache: Vec<Option<Weight>>,
     // Cache for expanded RangeSetBlaze weights (pointer-keyed, stable sets only)
     expanded_rsb_cache: HashMap<usize, Weight>,
+    expanded_rsb_value_cache: HashMap<RangeSetBlaze<usize>, Weight>,
     // Weight-heavy mode: number of tokenizer states
     pub(crate) num_tsids: usize,
     // Max LLM token ID for creating tsid masks
@@ -382,6 +384,7 @@ impl<'r> Precomputer1<'r> {
             accessible_terminals_cache: HashMap::new(),
             expanded_item_cache: vec![None; internal_max_llm_token.saturating_add(1)],
             expanded_rsb_cache: HashMap::new(),
+            expanded_rsb_value_cache: HashMap::new(),
             num_tsids,
             internal_max_llm_token,
             tsid_offset_map,
@@ -1040,6 +1043,20 @@ impl<'r> Precomputer1<'r> {
     #[inline]
     fn expanded_weight_from_rsb(&mut self, rsb: &RangeSetBlaze<usize>, cache_key: Option<usize>) -> Weight {
         let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        if rsb.is_empty() {
+            if let Some(start) = start {
+                self.dfs_profile.expanded_rsb_calls += 1;
+                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+            }
+            return Weight::zeros();
+        }
+        if std::ptr::eq(rsb, &self.all_llm_tokens) {
+            if let Some(start) = start {
+                self.dfs_profile.expanded_rsb_calls += 1;
+                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+            }
+            return self.expanded_all_weight.clone();
+        }
         if let Some(key) = cache_key {
             if let Some(cached) = self.expanded_rsb_cache.get(&key) {
                 if let Some(start) = start {
@@ -1061,6 +1078,50 @@ impl<'r> Precomputer1<'r> {
             if self.expanded_rsb_cache.len() < EXPANDED_RSB_CACHE_MAX_ENTRIES {
                 self.expanded_rsb_cache.insert(key, weight.clone());
             }
+        }
+        if let Some(start) = start {
+            self.dfs_profile.expanded_rsb_calls += 1;
+            self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+        }
+        weight
+    }
+
+    /// Create an expanded weight from an owned RangeSetBlaze of token IDs.
+    /// Uses a value cache keyed by the full RangeSetBlaze (avoids pointer-only caching).
+    #[inline]
+    fn expanded_weight_from_rsb_owned(&mut self, rsb: RangeSetBlaze<usize>) -> Weight {
+        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        if rsb.is_empty() {
+            if let Some(start) = start {
+                self.dfs_profile.expanded_rsb_calls += 1;
+                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+            }
+            return Weight::zeros();
+        }
+        if rsb == self.all_llm_tokens {
+            if let Some(start) = start {
+                self.dfs_profile.expanded_rsb_calls += 1;
+                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+            }
+            return self.expanded_all_weight.clone();
+        }
+
+        if let Some(cached) = self.expanded_rsb_value_cache.get(&rsb) {
+            if let Some(start) = start {
+                self.dfs_profile.expanded_rsb_calls += 1;
+                self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
+            }
+            return cached.clone();
+        }
+
+        let weight = if self.num_tsids <= 1 {
+            Weight::from_rsb(rsb.clone())
+        } else {
+            Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
+        };
+
+        if self.expanded_rsb_value_cache.len() < EXPANDED_RSB_VALUE_CACHE_MAX_ENTRIES {
+            self.expanded_rsb_value_cache.insert(rsb, weight.clone());
         }
         if let Some(start) = start {
             self.dfs_profile.expanded_rsb_calls += 1;
@@ -1294,7 +1355,7 @@ impl<'r> Precomputer1<'r> {
                             std::borrow::Cow::Borrowed(rsb) => {
                                 self.expanded_weight_from_rsb(rsb, Some(rsb as *const _ as usize))
                             }
-                            std::borrow::Cow::Owned(rsb) => self.expanded_weight_from_rsb(&rsb, None),
+                            std::borrow::Cow::Owned(rsb) => self.expanded_weight_from_rsb_owned(rsb),
                         };
 
                         let target_entry = dest_map.entry(DfsKey::new(initial_tsid, next_approx_state));
