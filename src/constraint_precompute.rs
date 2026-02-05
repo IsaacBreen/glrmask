@@ -182,6 +182,7 @@ impl NoOpPb {
 
 #[derive(Default, Clone)]
 struct DfsProfile {
+    dfs_total_time_us: u64,
     exec_calls: u64,
     exec_time_us: u64,
     possible_matches_calls: u64,
@@ -206,6 +207,17 @@ const EXPANDED_RSB_VALUE_CACHE_MAX_ENTRIES: usize = 50_000;
 impl DfsProfile {
     fn print(&self) {
         let ms = |us: u64| us as f64 / 1000.0;
+        let total_us = self.dfs_total_time_us;
+        let accounted_us = self.exec_time_us
+            + self.possible_matches_time_us
+            + self.tokens_accessible_time_us
+            + self.expanded_item_time_us
+            + self.expanded_rsb_time_us
+            + self.expanded_all_time_us
+            + self.add_transition_time_us
+            + self.add_epsilon_time_us;
+        let other_us = total_us.saturating_sub(accounted_us);
+        crate::debug!(5, "precompute1 dfs profile: total={:.2}ms", ms(total_us));
         crate::debug!(5, "precompute1 dfs profile: exec={} calls, {:.2}ms", self.exec_calls, ms(self.exec_time_us));
         crate::debug!(5, "precompute1 dfs profile: possible_matches={} calls, {:.2}ms", self.possible_matches_calls, ms(self.possible_matches_time_us));
         crate::debug!(5, "precompute1 dfs profile: tokens_accessible={} calls, {:.2}ms", self.tokens_accessible_calls, ms(self.tokens_accessible_time_us));
@@ -214,6 +226,7 @@ impl DfsProfile {
         crate::debug!(5, "precompute1 dfs profile: expanded_all={} calls, {:.2}ms", self.expanded_all_calls, ms(self.expanded_all_time_us));
         crate::debug!(5, "precompute1 dfs profile: add_transition={} calls, {:.2}ms", self.add_transition_calls, ms(self.add_transition_time_us));
         crate::debug!(5, "precompute1 dfs profile: add_epsilon={} calls, {:.2}ms", self.add_epsilon_calls, ms(self.add_epsilon_time_us));
+        crate::debug!(5, "precompute1 dfs profile: other={:.2}ms", ms(other_us));
     }
 }
 
@@ -1208,7 +1221,11 @@ impl<'r> Precomputer1<'r> {
             eprintln!("Vocab tree has {} nodes", vocab_node_count);
         }
         
+        let dfs_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         self.dfs(&vocab.root, assoc);
+        if let Some(start) = dfs_start {
+            self.dfs_profile.dfs_total_time_us = start.elapsed().as_micros() as u64;
+        }
         self.vocab = vocab;
         self.pb.finish();
         if self.dfs_profile_enabled {
