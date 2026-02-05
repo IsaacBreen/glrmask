@@ -38,24 +38,9 @@ paper-open: paper ## Build and open paper
 
 # === Visualization Commands ===
 
-VENV_DIR := $(abspath .venv)
-VENV_BIN := $(VENV_DIR)/bin
-VENV_PYTHON := $(VENV_BIN)/python
-VENV_PIP := $(VENV_BIN)/pip
-
 ffi: ## Build the Python FFI binding (required for visualizations)
 	@if [ -z "$(SKIP_MATURIN)" ]; then \
-		if [ -x "$(VENV_PYTHON)" ]; then \
-			cd python && \
-				env -u CONDA_PREFIX -u CONDA_DEFAULT_ENV \
-					VIRTUAL_ENV="$(VENV_DIR)" \
-					PATH="$(VENV_BIN):$$PATH" \
-					RUSTFLAGS=-Awarnings \
-					"$(VENV_PYTHON)" -m maturin develop -r --pip-path "$(VENV_PIP)"; \
-		else \
-			echo "Error: $(VENV_PYTHON) not found. Create .venv before running ffi targets."; \
-			exit 1; \
-		fi; \
+		cd python && RUSTFLAGS=-Awarnings maturin develop -r; \
 	else \
 		echo "Skipping maturin compilation (SKIP_MATURIN is set)"; \
 	fi
@@ -109,12 +94,12 @@ test-js: ## Compile the JavaScript grammar (verifies it compiles)
 		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
 		$(if $(SKIP_MATURIN),--no-recompile,)
 
-test-json-schema: ffi ## Compile a JSON schema grammar (verifies schema-to-EBNF works)
+test-json-schema: ## Compile a JSON schema grammar (verifies schema-to-EBNF works)
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
-		$(PYTHON) scripts/test_json_schema.py
+		python3 scripts/test_json_schema.py
 
-test-json-schema-o1051: ffi ## Compile o1051 (Github Hard) schema
+test-json-schema-o1051: ## Compile o1051 (Github Hard) schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o1051.json" \
 		$(PYTHON) scripts/test_json_schema.py
@@ -124,7 +109,7 @@ test-tsconfig: ## Compile TSConfig schema
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
 		python3 scripts/test_json_schema.py
 
-PYTHON ?= $(if $(wildcard $(VENV_PYTHON)),$(VENV_PYTHON),python)
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 
 test-schema-id: ffi ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
