@@ -82,6 +82,12 @@ impl Tokenizer {
     pub fn dfa(&self) -> &DFA {
         &self.inner.dfa
     }
+
+    /// Reorder DFA states according to an old->new mapping.
+    /// The mapping must be a permutation and should keep the start state at 0.
+    pub fn reorder_states(&mut self, old_to_new: &[usize]) {
+        self.inner.dfa.reorder_states(old_to_new);
+    }
     
     /// Get the total number of groups (terminal types) in the tokenizer.
     pub fn num_groups(&self) -> usize {

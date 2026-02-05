@@ -2664,6 +2664,50 @@ impl NFA {
 }
 
 impl DFA {
+    pub fn reorder_states(&mut self, old_to_new: &[usize]) {
+        let n = self.states.len();
+        if n == 0 {
+            return;
+        }
+        if old_to_new.len() != n {
+            panic!(
+                "reorder_states: mapping length {} != num states {}",
+                old_to_new.len(),
+                n
+            );
+        }
+
+        let mut seen = vec![false; n];
+        for &new_idx in old_to_new {
+            if new_idx >= n {
+                panic!("reorder_states: new index {} out of bounds {}", new_idx, n);
+            }
+            if seen[new_idx] {
+                panic!("reorder_states: duplicate new index {}", new_idx);
+            }
+            seen[new_idx] = true;
+        }
+
+        let mut new_states: Vec<Option<DFAState>> = vec![None; n];
+        for (old_idx, state) in self.states.iter().enumerate() {
+            let new_idx = old_to_new[old_idx];
+            let mut new_state = state.clone();
+            new_state.transitions = new_state
+                .transitions
+                .iter()
+                .map(|(u8, &old_next)| (u8, old_to_new[old_next]))
+                .collect();
+            new_states[new_idx] = Some(new_state);
+        }
+
+        self.states = new_states
+            .into_iter()
+            .map(|s| s.expect("reorder_states: missing state"))
+            .collect();
+        self.start_state = old_to_new[self.start_state];
+        self.recompute_metadata();
+    }
+
     #[time_it]
     pub fn to_nfa(&self) -> NFA {
         let mut states = Vec::with_capacity(self.states.len());

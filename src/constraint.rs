@@ -809,6 +809,83 @@ impl GrammarConstraint {
         (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep, representative_states)
     }
 
+    /// Reorder tokenizer DFA states so equivalence classes are contiguous, keeping start state 0.
+    /// Returns updated (state_to_rep, representative_states).
+    fn reorder_tokenizer_states(
+        tokenizer: &mut Tokenizer,
+        state_to_rep: &BTreeMap<TokenizerStateID, TokenizerStateID>,
+        representative_states: &[usize],
+    ) -> (BTreeMap<TokenizerStateID, TokenizerStateID>, Vec<usize>) {
+        let num_states = tokenizer.max_state();
+        if num_states == 0 {
+            return (state_to_rep.clone(), representative_states.to_vec());
+        }
+
+        let start_state = tokenizer.initial_state_id().0;
+        let start_rep = state_to_rep
+            .get(&TokenizerStateID(start_state))
+            .copied()
+            .unwrap_or(TokenizerStateID(start_state))
+            .0;
+
+        let mut rep_to_states: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (state, rep) in state_to_rep {
+            rep_to_states.entry(rep.0).or_default().push(state.0);
+        }
+
+        let mut rep_keys: Vec<usize> = rep_to_states.keys().copied().collect();
+        rep_keys.sort_unstable();
+        if let Some(pos) = rep_keys.iter().position(|&r| r == start_rep) {
+            rep_keys.swap(0, pos);
+        }
+
+        let mut old_to_new = vec![usize::MAX; num_states];
+        let mut next = 0usize;
+        for rep in rep_keys {
+            let mut states = rep_to_states.remove(&rep).unwrap_or_default();
+            states.sort_unstable();
+            if rep == start_rep {
+                if let Some(pos) = states.iter().position(|&s| s == start_state) {
+                    states.swap(0, pos);
+                }
+            }
+            for s in states {
+                if s < old_to_new.len() {
+                    old_to_new[s] = next;
+                    next += 1;
+                }
+            }
+        }
+
+        if next != num_states || old_to_new.iter().any(|&v| v == usize::MAX) {
+            crate::debug!(2, "State reorder incomplete (assigned {} of {}); falling back to identity", next, num_states);
+            old_to_new = (0..num_states).collect();
+        }
+
+        if old_to_new[start_state] != 0 {
+            crate::debug!(2, "State reorder did not keep start state at 0 ({}); falling back to identity", old_to_new[start_state]);
+            old_to_new = (0..num_states).collect();
+        }
+
+        tokenizer.reorder_states(&old_to_new);
+
+        let mut new_state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        for (state, rep) in state_to_rep {
+            let new_state = TokenizerStateID(old_to_new[state.0]);
+            let new_rep = TokenizerStateID(old_to_new[rep.0]);
+            new_state_to_rep.insert(new_state, new_rep);
+        }
+
+        let mut new_representative_states: Vec<usize> = representative_states
+            .iter()
+            .map(|s| old_to_new[*s])
+            .collect();
+        new_representative_states.sort_unstable();
+        new_representative_states.dedup();
+
+        (new_state_to_rep, new_representative_states)
+    }
+
     #[time_it("GrammarConstraint::build_with_config")]
     fn build_with_config(
         tokenizer: Tokenizer,
@@ -897,6 +974,8 @@ impl GrammarConstraint {
         grammar_definition: Option<Arc<GrammarDefinition>>,
     ) -> Self {
         crate::debug!(5, "GrammarConstraint build_with_config_inner: start");
+        let mut tokenizer = tokenizer;
+
         // Epsilon tokens are not supported.
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer
             .execute_from_state(&[], tokenizer.initial_state_id())
@@ -922,8 +1001,8 @@ impl GrammarConstraint {
             commit_vocab_data,
             internal_llm_token_map,
             mask_classes,
-            state_to_rep,
-            representative_states,
+            mut state_to_rep,
+            mut representative_states,
         ) = timeit!("setup_combined", {
             Self::setup_combined(
                 &llm_token_map,
@@ -935,6 +1014,20 @@ impl GrammarConstraint {
         eprintln!("TIMING: setup_combined {:?}", setup_start.elapsed());
         crate::debug!(5, "setup_combined: end");
         let commit_vocab = Arc::new(commit_vocab_data);
+
+        if std::env::var("DISABLE_DFA_STATE_REORDER").map(|v| v == "1").unwrap_or(false) {
+            crate::debug!(4, "DFA state reorder disabled via DISABLE_DFA_STATE_REORDER=1");
+        } else {
+            let reorder_start = std::time::Instant::now();
+            let (new_state_to_rep, new_representatives) = Self::reorder_tokenizer_states(
+                &mut tokenizer,
+                &state_to_rep,
+                &representative_states,
+            );
+            state_to_rep = new_state_to_rep;
+            representative_states = new_representatives;
+            crate::debug!(4, "DFA state reorder complete in {:?}", reorder_start.elapsed());
+        }
 
         let internal_max_llm_token = original_to_internal_map
             .values()
