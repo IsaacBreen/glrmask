@@ -984,7 +984,6 @@ impl ExprGroups {
         type ContState = usize;     // continuation NFA state
         type CpsCacheKey = (SharedId, ContState);
         type CpsCache = HashMap<CpsCacheKey, usize>;
-        type BoundedRepeatCache = HashMap<Expr, Arc<DFA>>;
 
         let mut nfa = NFA {
             states: vec![NFAState::new()],
@@ -992,7 +991,6 @@ impl ExprGroups {
         };
 
         let mut cache: CpsCache = HashMap::new();
-        let mut bounded_cache: BoundedRepeatCache = HashMap::new();
 
         crate::debug!(4, "Expr stats: {}", self.get_stats());
 
@@ -1005,7 +1003,7 @@ impl ExprGroups {
         // Compile optional prefix into the split point
         let start_state = if let Some(prefix_expr) = prefix {
             crate::debug!(4, "Factored out common prefix in NFA construction");
-            Expr::compile_cps(&prefix_expr, &mut nfa, split_point, &mut cache, &mut bounded_cache)
+            Expr::compile_cps(&prefix_expr, &mut nfa, split_point, &mut cache)
         } else {
             split_point
         };
@@ -1022,7 +1020,7 @@ impl ExprGroups {
             }
             
             // Compile the group expression into the accept state
-            let group_start = Expr::compile_cps(&expr, &mut nfa, accept, &mut cache, &mut bounded_cache);
+            let group_start = Expr::compile_cps(&expr, &mut nfa, accept, &mut cache);
             
             // Connect from split point to group start
             nfa.add_epsilon_transition(split_point, group_start);
@@ -1095,67 +1093,6 @@ impl Expr {
         }
     }
 
-    fn build_single_expr_nfa(
-        expr: &Expr,
-        bounded_cache: &mut HashMap<Expr, Arc<DFA>>,
-    ) -> NFA {
-        let mut nfa = NFA {
-            states: vec![NFAState::new()],
-            start_state: 0,
-        };
-        let accept = nfa.add_state();
-        nfa.states[accept].finalizers.insert(0);
-
-        let mut cache: HashMap<(usize, usize), usize> = HashMap::new();
-        let start = Self::compile_cps(expr, &mut nfa, accept, &mut cache, bounded_cache);
-        nfa.add_epsilon_transition(nfa.start_state, start);
-        nfa
-    }
-
-    fn bounded_repeat_dfa(
-        inner: &Expr,
-        bounded_cache: &mut HashMap<Expr, Arc<DFA>>,
-    ) -> Arc<DFA> {
-        if let Some(dfa) = bounded_cache.get(inner).cloned() {
-            return dfa;
-        }
-
-        let nfa = Self::build_single_expr_nfa(inner, bounded_cache);
-        let mut dfa = nfa.to_dfa();
-        dfa.minimize();
-        let dfa = Arc::new(dfa);
-        bounded_cache.insert(inner.clone(), dfa.clone());
-        dfa
-    }
-
-    fn insert_dfa_as_nfa(nfa: &mut NFA, dfa: &DFA, cont: usize) -> usize {
-        let offset = nfa.states.len();
-        for _ in 0..dfa.states.len() {
-            nfa.add_state();
-        }
-
-        for (i, state) in dfa.states.iter().enumerate() {
-            let nfa_state = offset + i;
-            let mut target_to_set: BTreeMap<usize, U8Set> = BTreeMap::new();
-            for (byte, target) in state.transitions.iter() {
-                target_to_set
-                    .entry(*target)
-                    .and_modify(|set| {
-                        set.insert(byte);
-                    })
-                    .or_insert_with(|| U8Set::from_u8(byte));
-            }
-            for (target, set) in target_to_set {
-                nfa.add_u8set_transition(nfa_state, set, offset + target);
-            }
-            if !state.finalizers.is_empty() {
-                nfa.add_epsilon_transition(nfa_state, cont);
-            }
-        }
-
-        offset + dfa.start_state
-    }
-
     /// CPS (Continuation-Passing Style) NFA compilation.
     /// 
     /// Compiles an expression into an NFA fragment that, when entered at the returned
@@ -1172,7 +1109,6 @@ impl Expr {
         nfa: &mut NFA,
         cont: usize,
         cache: &mut HashMap<(usize, usize), usize>,
-        bounded_cache: &mut HashMap<Expr, Arc<DFA>>,
     ) -> usize {
         match expr {
             Expr::Epsilon => {
@@ -1210,7 +1146,7 @@ impl Expr {
                 // is the start of the suffix
                 let mut s = cont;
                 for child in children.iter().rev() {
-                    s = Self::compile_cps(child, nfa, s, cache, bounded_cache);
+                    s = Self::compile_cps(child, nfa, s, cache);
                 }
                 s
             }
@@ -1223,7 +1159,7 @@ impl Expr {
                 // Create one split state with epsilon transitions to each alternative's start
                 let split = nfa.add_state();
                 for alt in alts.iter() {
-                    let alt_start = Self::compile_cps(alt, nfa, cont, cache, bounded_cache);
+                    let alt_start = Self::compile_cps(alt, nfa, cont, cache);
                     nfa.add_epsilon_transition(split, alt_start);
                 }
                 split
@@ -1239,7 +1175,7 @@ impl Expr {
                         let split = nfa.add_state();
                         nfa.add_epsilon_transition(split, cont);  // skip path
                         
-                        let body_start = Self::compile_cps(inner.as_ref(), nfa, split, cache, bounded_cache);
+                        let body_start = Self::compile_cps(inner.as_ref(), nfa, split, cache);
                         nfa.add_epsilon_transition(split, body_start);  // take path
                         
                         split
@@ -1251,7 +1187,7 @@ impl Expr {
                         nfa.add_epsilon_transition(loop_split, cont);  // exit loop
                         
                         // Body of the star: ends at loop_split
-                        let body_start = Self::compile_cps(inner.as_ref(), nfa, loop_split, cache, bounded_cache);
+                        let body_start = Self::compile_cps(inner.as_ref(), nfa, loop_split, cache);
                         nfa.add_epsilon_transition(loop_split, body_start);  // loop back
                         
                         // For +: must do body once before reaching loop_split
@@ -1262,7 +1198,7 @@ impl Expr {
                         // e? is choice between e and epsilon
                         let split = nfa.add_state();
                         nfa.add_epsilon_transition(split, cont);  // skip (epsilon path)
-                        let body_start = Self::compile_cps(inner.as_ref(), nfa, cont, cache, bounded_cache);
+                        let body_start = Self::compile_cps(inner.as_ref(), nfa, cont, cache);
                         nfa.add_epsilon_transition(split, body_start);  // take path
                         split
                     }
@@ -1271,48 +1207,16 @@ impl Expr {
 
             Expr::RepeatBounded { inner, min, max } => {
                 let min = *min;
-                let use_bounded_dfa = std::env::var("ENABLE_BOUNDED_REPEAT_DFA")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
                 match *max {
                     Some(max_val) => {
                         if min > max_val {
                             return nfa.add_state();
                         }
 
-                        if use_bounded_dfa && (max_val > 1 || min > 1) {
-                            let dfa = Self::bounded_repeat_dfa(inner.as_ref(), bounded_cache);
-
-                            if max_val == min {
-                                let mut s = cont;
-                                for _ in 0..min {
-                                    s = Self::insert_dfa_as_nfa(nfa, &dfa, s);
-                                }
-                                return s;
-                            }
-
-                            let mut boundaries = Vec::with_capacity(max_val + 1);
-                            for _ in 0..=max_val {
-                                boundaries.push(nfa.add_state());
-                            }
-
-                            nfa.add_epsilon_transition(boundaries[max_val], cont);
-
-                            for i in (0..max_val).rev() {
-                                let start = Self::insert_dfa_as_nfa(nfa, &dfa, boundaries[i + 1]);
-                                nfa.add_epsilon_transition(boundaries[i], start);
-                                if i >= min {
-                                    nfa.add_epsilon_transition(boundaries[i], cont);
-                                }
-                            }
-
-                            return boundaries[0];
-                        }
-
                         if max_val == min {
                             let mut s = cont;
                             for _ in 0..min {
-                                s = Self::compile_cps(inner.as_ref(), nfa, s, cache, bounded_cache);
+                                s = Self::compile_cps(inner.as_ref(), nfa, s, cache);
                             }
                             return s;
                         }
@@ -1325,7 +1229,7 @@ impl Expr {
                         nfa.add_epsilon_transition(boundaries[max_val], cont);
 
                         for i in (0..max_val).rev() {
-                            let start = Self::compile_cps(inner.as_ref(), nfa, boundaries[i + 1], cache, bounded_cache);
+                            let start = Self::compile_cps(inner.as_ref(), nfa, boundaries[i + 1], cache);
                             nfa.add_epsilon_transition(boundaries[i], start);
                             if i >= min {
                                 nfa.add_epsilon_transition(boundaries[i], cont);
@@ -1339,12 +1243,12 @@ impl Expr {
                         let loop_split = nfa.add_state();
                         nfa.add_epsilon_transition(loop_split, cont);
 
-                        let body_start = Self::compile_cps(inner.as_ref(), nfa, loop_split, cache, bounded_cache);
+                        let body_start = Self::compile_cps(inner.as_ref(), nfa, loop_split, cache);
                         nfa.add_epsilon_transition(loop_split, body_start);
 
                         s = loop_split;
                         for _ in 0..min {
-                            s = Self::compile_cps(inner.as_ref(), nfa, s, cache, bounded_cache);
+                            s = Self::compile_cps(inner.as_ref(), nfa, s, cache);
                         }
                         s
                     }
@@ -1362,7 +1266,7 @@ impl Expr {
                 }
                 
                 // Cache miss: compile underlying expr with same continuation
-                let start = Self::compile_cps(inner_arc.as_ref(), nfa, cont, cache, bounded_cache);
+                let start = Self::compile_cps(inner_arc.as_ref(), nfa, cont, cache);
                 
                 // Memoize for future reuse
                 cache.insert(key, start);
