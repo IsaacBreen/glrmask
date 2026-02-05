@@ -1266,7 +1266,19 @@ impl GrammarConstraint {
                 }
                 rep_blocks.push((sig, rep, tsids));
             }
-            rep_blocks.sort_by(|(sig_a, rep_a, _), (sig_b, rep_b, _)| sig_a.cmp(sig_b).then_with(|| rep_a.cmp(rep_b)));
+            let start_rep = state_to_rep
+                .get(&TokenizerStateID(0))
+                .copied()
+                .unwrap_or(TokenizerStateID(0));
+            rep_blocks.sort_by(|(sig_a, rep_a, _), (sig_b, rep_b, _)| {
+                let a_is_start = *rep_a == start_rep;
+                let b_is_start = *rep_b == start_rep;
+                match (a_is_start, b_is_start) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => sig_a.cmp(sig_b).then_with(|| rep_a.cmp(rep_b)),
+                }
+            });
 
             let mut map = vec![usize::MAX; num_tsids];
             let mut next_offset = 0usize;
