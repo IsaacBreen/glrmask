@@ -54,6 +54,17 @@ pub fn get_expr_nullability(expr: &Expr) -> ExprNullability {
                 QuantifierType::OneOrMore => _get_nullability(inner, cache),
                 QuantifierType::ZeroOrOne => ExprNullability::CanBeNull,
             },
+            Expr::RepeatBounded { inner, min, max } => {
+                match (*min, *max) {
+                    (0, Some(0)) => ExprNullability::AlwaysNull,
+                    (0, _) => ExprNullability::CanBeNull,
+                    _ => match _get_nullability(inner, cache) {
+                        ExprNullability::AlwaysNull => ExprNullability::AlwaysNull,
+                        ExprNullability::CanBeNull => ExprNullability::CanBeNull,
+                        ExprNullability::NeverNull => ExprNullability::NeverNull,
+                    },
+                }
+            }
             Expr::Choice(exprs) => {
                 let nullabilities: Vec<ExprNullability> = exprs
                     .iter()
@@ -668,6 +679,19 @@ impl GrammarDefinition {
                     format!("({}){}", inner_str, suffix)
                 } else {
                     format!("{}{}", inner_str, suffix)
+                }
+            }
+            RepeatBounded { inner, min, max } => {
+                let inner_str = Self::format_expr(inner);
+                let needs_parens = matches!(**inner, Choice(_) | Seq(_));
+                let wrapped = if needs_parens {
+                    format!("({})", inner_str)
+                } else {
+                    inner_str
+                };
+                match max {
+                    Some(max_val) => format!("{}{{{},{}}}", wrapped, min, max_val),
+                    None => format!("{}{{{},}}", wrapped, min),
                 }
             }
             Choice(exprs) => {
@@ -1454,47 +1478,11 @@ impl GrammarDefinition {
                     memo,
                     resolving_stack,
                 )?;
-                // Expand bounded repetition: {min,max} -> inner^min (inner?)^(max-min)
-                // or {min,} -> inner^min inner*
-                match max {
-                    Some(max_val) => {
-                        let mut parts = Vec::new();
-                        // min required copies
-                        for _ in 0..*min {
-                            parts.push(sub_expr.clone());
-                        }
-                        // (max - min) optional copies
-                        for _ in 0..(max_val - min) {
-                            parts.push(Expr::Quantifier(
-                                Box::new(sub_expr.clone()),
-                                QuantifierType::ZeroOrOne,
-                            ));
-                        }
-                        if parts.is_empty() {
-                            Ok(Expr::Epsilon)
-                        } else if parts.len() == 1 {
-                            Ok(parts.pop().unwrap())
-                        } else {
-                            Ok(Expr::Seq(parts))
-                        }
-                    }
-                    None => {
-                        // Unbounded: min required, then *
-                        let mut parts = Vec::new();
-                        for _ in 0..*min {
-                            parts.push(sub_expr.clone());
-                        }
-                        parts.push(Expr::Quantifier(
-                            Box::new(sub_expr),
-                            QuantifierType::ZeroOrMore,
-                        ));
-                        if parts.len() == 1 {
-                            Ok(parts.pop().unwrap())
-                        } else {
-                            Ok(Expr::Seq(parts))
-                        }
-                    }
-                }
+                Ok(Expr::RepeatBounded {
+                    inner: Box::new(sub_expr),
+                    min: *min,
+                    max: *max,
+                })
             }
         }
     }

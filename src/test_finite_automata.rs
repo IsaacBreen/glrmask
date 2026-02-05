@@ -113,6 +113,25 @@ mod tests {
         assert!(!regex.could_match(b"b"));
         assert!(!regex.could_match(b"ba"));
     }
+
+    #[test]
+    fn test_repeat_bounded() {
+        let expr = Expr::RepeatBounded {
+            inner: Box::new(eat_u8(b'a')),
+            min: 2,
+            max: Some(4),
+        };
+        dbg!(&expr);
+        let regex = expr.build();
+        dbg!(&regex);
+
+        assert!(!regex.definitely_fully_matches(b""));
+        assert!(!regex.definitely_fully_matches(b"a"));
+        assert!(regex.definitely_fully_matches(b"aa"));
+        assert!(regex.definitely_fully_matches(b"aaa"));
+        assert!(regex.definitely_fully_matches(b"aaaa"));
+        assert!(!regex.could_fully_match(b"aaaaa"));
+    }
 }
 
 #[cfg(test)]

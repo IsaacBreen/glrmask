@@ -363,6 +363,11 @@ pub enum Expr {
     U8Class(U8Set),
     Shared(Arc<Expr>), // Shared sub-expression
     Quantifier(Box<Expr>, QuantifierType),
+    RepeatBounded {
+        inner: Box<Expr>,
+        min: usize,
+        max: Option<usize>,
+    },
     Choice(Vec<Expr>),
     Seq(Vec<Expr>),
     Epsilon, // Explicit epsilon transition
@@ -375,6 +380,7 @@ enum ExprJSON {
     U8Class { u8set: U8Set },
     Shared { inner: Box<ExprJSON> },
     Quantifier { expr: Box<ExprJSON>, q_type: QuantifierType },
+    RepeatBounded { inner: Box<ExprJSON>, min: usize, max: Option<usize> },
     Choice { exprs: Vec<ExprJSON> },
     Seq { exprs: Vec<ExprJSON> },
     Epsilon,
@@ -389,6 +395,11 @@ impl ExprJSON {
             Expr::Quantifier(expr, q_type) => ExprJSON::Quantifier {
                 expr: Box::new(ExprJSON::from_expr(expr)),
                 q_type: q_type.clone(),
+            },
+            Expr::RepeatBounded { inner, min, max } => ExprJSON::RepeatBounded {
+                inner: Box::new(ExprJSON::from_expr(inner)),
+                min: *min,
+                max: *max,
             },
             Expr::Choice(exprs) => ExprJSON::Choice {
                 exprs: exprs.iter().map(ExprJSON::from_expr).collect(),
@@ -406,6 +417,11 @@ impl ExprJSON {
             ExprJSON::U8Class { u8set } => Expr::U8Class(u8set),
             ExprJSON::Shared { inner } => Expr::Shared(Arc::new(inner.to_expr())),
             ExprJSON::Quantifier { expr, q_type } => Expr::Quantifier(Box::new(expr.to_expr()), q_type),
+            ExprJSON::RepeatBounded { inner, min, max } => Expr::RepeatBounded {
+                inner: Box::new(inner.to_expr()),
+                min,
+                max,
+            },
             ExprJSON::Choice { exprs } => Expr::Choice(exprs.into_iter().map(|e| e.to_expr()).collect()),
             ExprJSON::Seq { exprs } => Expr::Seq(exprs.into_iter().map(|e| e.to_expr()).collect()),
             ExprJSON::Epsilon => Expr::Epsilon,
@@ -435,6 +451,18 @@ impl Display for Expr {
                     write!(f, "({}){}", inner, suffix)
                 } else {
                     write!(f, "{}{}", inner, suffix)
+                }
+            }
+            Expr::RepeatBounded { inner, min, max } => {
+                let needs_parens = matches!(**inner, Expr::Choice(_) | Expr::Seq(_));
+                let format_inner = if needs_parens {
+                    format!("({})", inner)
+                } else {
+                    format!("{}", inner)
+                };
+                match max {
+                    Some(max_val) => write!(f, "{}{{{},{}}}", format_inner, min, max_val),
+                    None => write!(f, "{}{{{},}}", format_inner, min),
                 }
             }
             Expr::Choice(exprs) => {
@@ -573,6 +601,7 @@ pub struct ExprStats {
     pub shared_unique: usize,   // Unique Shared nodes (by Arc pointer)
     pub shared_inlineable: usize, // Shared wrapping U8Seq/U8Class/Epsilon
     pub quantifier: usize,
+    pub repeat_bounded: usize,
     pub choice: usize,
     pub seq: usize,
     pub epsilon: usize,
@@ -581,8 +610,8 @@ pub struct ExprStats {
 
 impl std::fmt::Display for ExprStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Nodes: {}, Depth: {}, Seq: {}, Choice: {}, Quant: {}, Shared: {} (unique: {}, inlineable: {}), U8Seq: {}, U8Class: {}, Eps: {}",
-            self.nodes, self.max_depth, self.seq, self.choice, self.quantifier, self.shared, self.shared_unique, self.shared_inlineable, self.u8seq, self.u8class, self.epsilon)
+        write!(f, "Nodes: {}, Depth: {}, Seq: {}, Choice: {}, Quant: {}, RepeatBounded: {}, Shared: {} (unique: {}, inlineable: {}), U8Seq: {}, U8Class: {}, Eps: {}",
+            self.nodes, self.max_depth, self.seq, self.choice, self.quantifier, self.repeat_bounded, self.shared, self.shared_unique, self.shared_inlineable, self.u8seq, self.u8class, self.epsilon)
     }
 }
 
@@ -658,6 +687,10 @@ impl ExprGroups {
                     }
                     Expr::Quantifier(inner, _) => {
                         stats.quantifier += 1;
+                        stack.push((inner, depth + 1));
+                    }
+                    Expr::RepeatBounded { inner, .. } => {
+                        stats.repeat_bounded += 1;
                         stack.push((inner, depth + 1));
                     }
                     Expr::Choice(children) => {
@@ -1047,6 +1080,9 @@ impl Expr {
             Expr::Quantifier(expr, _) => {
                 expr.add_size_recursive(total, visited);
             }
+            Expr::RepeatBounded { inner, .. } => {
+                inner.add_size_recursive(total, visited);
+            }
             Expr::Choice(exprs) | Expr::Seq(exprs) => {
                 *total += exprs.capacity() * std::mem::size_of::<Expr>();
                 for expr in exprs {
@@ -1168,6 +1204,56 @@ impl Expr {
                     }
                 }
             }
+
+            Expr::RepeatBounded { inner, min, max } => {
+                let min = *min;
+                match *max {
+                    Some(max_val) => {
+                        if min > max_val {
+                            return nfa.add_state();
+                        }
+
+                        if max_val == min {
+                            let mut s = cont;
+                            for _ in 0..min {
+                                s = Self::compile_cps(inner.as_ref(), nfa, s, cache);
+                            }
+                            return s;
+                        }
+
+                        let mut boundaries = Vec::with_capacity(max_val + 1);
+                        for _ in 0..=max_val {
+                            boundaries.push(nfa.add_state());
+                        }
+
+                        nfa.add_epsilon_transition(boundaries[max_val], cont);
+
+                        for i in (0..max_val).rev() {
+                            let start = Self::compile_cps(inner.as_ref(), nfa, boundaries[i + 1], cache);
+                            nfa.add_epsilon_transition(boundaries[i], start);
+                            if i >= min {
+                                nfa.add_epsilon_transition(boundaries[i], cont);
+                            }
+                        }
+
+                        boundaries[0]
+                    }
+                    None => {
+                        let mut s = cont;
+                        let loop_split = nfa.add_state();
+                        nfa.add_epsilon_transition(loop_split, cont);
+
+                        let body_start = Self::compile_cps(inner.as_ref(), nfa, loop_split, cache);
+                        nfa.add_epsilon_transition(loop_split, body_start);
+
+                        s = loop_split;
+                        for _ in 0..min {
+                            s = Self::compile_cps(inner.as_ref(), nfa, s, cache);
+                        }
+                        s
+                    }
+                }
+            }
             
             Expr::Shared(inner_arc) => {
                 // Key rule: cache by (Arc_ptr, cont) for safe sharing
@@ -1252,6 +1338,7 @@ impl Expr {
             Seq(usize),
             Choice(usize),
             Quantifier(QuantifierType),
+            RepeatBounded { min: usize, max: Option<usize> },
             Shared(usize, Arc<Expr>),
         }
 
@@ -1289,6 +1376,10 @@ impl Expr {
                     Expr::Quantifier(sub, q) => {
                         stack.push(Task::Quantifier(q));
                         stack.push(Task::Expand(*sub));
+                    }
+                    Expr::RepeatBounded { inner, min, max } => {
+                        stack.push(Task::RepeatBounded { min, max });
+                        stack.push(Task::Expand(*inner));
                     }
                     Expr::Shared(inner) => {
                         let ptr = Arc::as_ptr(&inner) as usize;
@@ -1395,6 +1486,22 @@ impl Expr {
                     };
                     
                     values.push(minimized);
+                }
+                Task::RepeatBounded { min, max } => {
+                    let child = values.pop().unwrap();
+                    let simplified = match (min, max) {
+                        (0, Some(0)) => Expr::Epsilon,
+                        (0, Some(1)) => Expr::Quantifier(Box::new(child), QuantifierType::ZeroOrOne),
+                        (1, Some(1)) => child,
+                        (0, None) => Expr::Quantifier(Box::new(child), QuantifierType::ZeroOrMore),
+                        (1, None) => Expr::Quantifier(Box::new(child), QuantifierType::OneOrMore),
+                        _ => Expr::RepeatBounded {
+                            inner: Box::new(child),
+                            min,
+                            max,
+                        },
+                    };
+                    values.push(simplified);
                 }
                 Task::Shared(ptr, _) => {
                     let child = values.pop().unwrap();

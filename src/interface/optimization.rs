@@ -3202,6 +3202,9 @@ fn has_unbounded_repetition(expr: &Expr) -> bool {
             matches!(q_type, QuantifierType::ZeroOrMore | QuantifierType::OneOrMore)
                 || has_unbounded_repetition(inner)
         }
+        Expr::RepeatBounded { inner, max, .. } => {
+            max.is_none() || has_unbounded_repetition(inner)
+        }
         Expr::Seq(children) | Expr::Choice(children) => {
             children.iter().any(|c| has_unbounded_repetition(c))
         }
@@ -3239,6 +3242,7 @@ fn has_overlapping_choice(expr: &Expr) -> bool {
         }
         Expr::Seq(children) => children.iter().any(|c| has_overlapping_choice(c)),
         Expr::Quantifier(inner, _) => has_overlapping_choice(inner),
+        Expr::RepeatBounded { inner, .. } => has_overlapping_choice(inner),
         Expr::Shared(inner) => has_overlapping_choice(inner),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
     }
@@ -3290,6 +3294,7 @@ fn get_first_bytes(expr: &Expr) -> crate::datastructures::u8set::U8Set {
                 QuantifierType::OneOrMore => get_first_bytes(inner),
             }
         }
+        Expr::RepeatBounded { inner, .. } => get_first_bytes(inner),
         Expr::Shared(inner) => get_first_bytes(inner),
     }
 }
@@ -3304,6 +3309,15 @@ fn can_be_empty(expr: &Expr) -> bool {
         Expr::Choice(alternatives) => alternatives.iter().any(|a| can_be_empty(a)),
         Expr::Quantifier(_, q_type) => {
             matches!(q_type, QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne)
+        }
+        Expr::RepeatBounded { inner, min, max } => {
+            if *min == 0 {
+                true
+            } else if matches!(max, Some(0)) {
+                true
+            } else {
+                can_be_empty(inner)
+            }
         }
         Expr::Shared(inner) => can_be_empty(inner),
     }
@@ -3402,6 +3416,8 @@ enum TerminalPatternType {
     Choice(usize),
     /// Quantifier (*, +, ?) (not used in minimized version)
     Quantifier(QuantifierType),
+    /// Bounded repetition {min,max}
+    RepeatBounded { min: usize, max: Option<usize> },
     /// Epsilon (not used in minimized version)
     Epsilon,
 }
@@ -3431,6 +3447,7 @@ fn extract_expr_pattern(expr: &Expr) -> TerminalPatternType {
         Expr::Seq(children) => TerminalPatternType::Seq(children.len()),
         Expr::Choice(alternatives) => TerminalPatternType::Choice(alternatives.len()),
         Expr::Quantifier(_, q_type) => TerminalPatternType::Quantifier(*q_type),
+        Expr::RepeatBounded { min, max, .. } => TerminalPatternType::RepeatBounded { min: *min, max: *max },
         Expr::Shared(inner) => extract_expr_pattern(inner),
     }
 }
@@ -3447,7 +3464,8 @@ fn pattern_contains_nondeterminism(pattern: &[PatternElement]) -> bool {
             PatternElement::Terminal(term_type) => {
                 matches!(term_type, 
                     TerminalPatternType::Choice(_) |
-                    TerminalPatternType::Quantifier(_)
+                    TerminalPatternType::Quantifier(_) |
+                    TerminalPatternType::RepeatBounded { .. }
                 )
             }
         }
