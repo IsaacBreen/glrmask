@@ -846,6 +846,26 @@ impl RangeMapWeight {
 
     pub(crate) fn from_rsb_with_num_tsids(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> Self {
         let num_tsids = normalize_num_tsids(num_tsids);
+        if rsb.is_empty() {
+            return Self::new(num_tsids);
+        }
+
+        let mut ranges = rsb.ranges();
+        if let Some(range) = ranges.next() {
+            if ranges.next().is_none() {
+                let start = *range.start();
+                let end = *range.end();
+                if start <= end
+                    && start % num_tsids == 0
+                    && end % num_tsids == num_tsids.saturating_sub(1)
+                {
+                    let token_start = start / num_tsids;
+                    let token_end = end / num_tsids;
+                    let full_tsids = Self::full_tsids(num_tsids);
+                    return Self::from_uniform_tsid_set(token_start, token_end, full_tsids, num_tsids);
+                }
+            }
+        }
         let mut token_map: BTreeMap<usize, RangeSet> = BTreeMap::new();
 
         for range in rsb.ranges() {
