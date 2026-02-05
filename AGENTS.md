@@ -73,6 +73,18 @@ RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 cargo test --colo
 
 ---
 
+## Performance Integrity Rules (No Cheating)
+
+When working on performance targets (e.g., `make test-js`):
+
+- **Do not add caching, skipping, or short‑circuit logic** just to hit timing targets unless explicitly approved.
+- **Do not change inputs** (grammar, vocab, model, debug level, timeouts) to make runs faster unless requested.
+- **Do not disable correctness steps** (determinization, minimization, pruning, validation, etc.) unless the task explicitly allows a fast/approx mode.
+- **Do not fake or estimate timings**—always measure and report actual runs.
+- **Do not modify test targets** to bypass heavy work unless the change is explicitly signed off.
+
+If a target is too slow, optimize the real code path or propose a sanctioned fast‑mode that preserves correctness guarantees.
+
 
 ---
 
