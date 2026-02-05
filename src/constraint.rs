@@ -1016,7 +1016,10 @@ impl GrammarConstraint {
         crate::debug!(5, "setup_combined: end");
         let commit_vocab = Arc::new(commit_vocab_data);
 
-        if std::env::var("ENABLE_DFA_STATE_REORDER").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("ENABLE_DFA_STATE_REORDER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true)
+        {
             let reorder_start = std::time::Instant::now();
             let (new_state_to_rep, new_representatives) = Self::reorder_tokenizer_states(
                 &mut tokenizer,
@@ -1027,7 +1030,7 @@ impl GrammarConstraint {
             representative_states = new_representatives;
             crate::debug!(4, "DFA state reorder complete in {:?}", reorder_start.elapsed());
         } else {
-            crate::debug!(4, "DFA state reorder disabled (set ENABLE_DFA_STATE_REORDER=1 to enable)");
+            crate::debug!(4, "DFA state reorder disabled (set ENABLE_DFA_STATE_REORDER=0 to disable)");
         }
 
         let internal_max_llm_token = original_to_internal_map
