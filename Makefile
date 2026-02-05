@@ -99,10 +99,11 @@ test-json-schema: ## Compile a JSON schema grammar (verifies schema-to-EBNF work
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
 		python3 scripts/test_json_schema.py
 
-test-json-schema-o1051: ## Compile o1051 (Github Hard) schema
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
-	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o1051.json" \
-		$(PYTHON) scripts/test_json_schema.py
+test-json-schema-o1051: build ## Compile o1051 (Github Hard) schema
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o1051.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_o1051.json.gz
 
 test-tsconfig: ## Compile TSConfig schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
