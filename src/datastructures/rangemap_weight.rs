@@ -844,42 +844,6 @@ impl RangeMapWeight {
         Self::from_map(map, num_tsids)
     }
 
-    pub(crate) fn from_token_range_full_tsids(
-        token_start: usize,
-        token_end: usize,
-        num_tsids: usize,
-    ) -> Self {
-        let num_tsids = normalize_num_tsids(num_tsids);
-        if token_start > token_end {
-            return Self::new(num_tsids);
-        }
-        let full_tsids = Self::full_tsids(num_tsids);
-        Self::from_uniform_tsid_set(token_start, token_end, full_tsids, num_tsids)
-    }
-
-    pub(crate) fn from_token_ranges_full_tsids(
-        rsb: &RangeSetBlaze<usize>,
-        num_tsids: usize,
-    ) -> Self {
-        let num_tsids = normalize_num_tsids(num_tsids);
-        if rsb.is_empty() {
-            return Self::new(num_tsids);
-        }
-        if Self::tsid_outer_enabled() {
-            let token_rs = RangeSet::from(rsb.clone());
-            let mut map = RangeMapBlaze::new();
-            map.ranges_insert(0..=num_tsids.saturating_sub(1), token_rs);
-            return Self::from_map(map, num_tsids);
-        }
-
-        let full_tsids = Self::full_tsids(num_tsids);
-        let mut map = RangeMapBlaze::new();
-        for range in rsb.ranges() {
-            map.ranges_insert(*range.start()..=*range.end(), full_tsids.clone());
-        }
-        Self::from_map(map, num_tsids)
-    }
-
     pub(crate) fn from_rsb_with_num_tsids(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> Self {
         let num_tsids = normalize_num_tsids(num_tsids);
         let mut token_map: BTreeMap<usize, RangeSet> = BTreeMap::new();
