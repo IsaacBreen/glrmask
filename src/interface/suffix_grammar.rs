@@ -239,7 +239,6 @@ pub fn validate_terminal_dwa_paths_verbose(
     use crate::interface::CompiledGrammar;
     use crate::glr::table::TerminalID;
     use rand::Rng;
-    use std::sync::Arc;
     
     if verbose {
         println!("\n=== Original Grammar ===");
@@ -269,8 +268,7 @@ pub fn validate_terminal_dwa_paths_verbose(
         }
     }
     
-    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
-    let suffix_parser = suffix_compiled.glr_parser();
+    let suffix_parser = CompiledGrammar::glr_parser_from_definition(&suffix_grammar);
     
     if verbose {
         println!("\n=== Suffix Parser Terminal Map ===");
@@ -383,7 +381,6 @@ pub fn prune_dwa_with_suffix_grammar(
     use crate::interface::CompiledGrammar;
     use crate::glr::table::TerminalID;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
-    use std::sync::Arc;
     
     crate::debug!(4, "Starting suffix grammar DWA pruning");
     
@@ -409,10 +406,8 @@ pub fn prune_dwa_with_suffix_grammar(
     // we need to optimize the suffix grammar construction itself rather than skip.
     
     crate::debug!(4, "  Compiling suffix grammar...");
-    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
+    let suffix_parser = CompiledGrammar::glr_parser_from_definition(&suffix_grammar);
     crate::debug!(4, "  Suffix grammar compiled");
-    
-    let suffix_parser = suffix_compiled.glr_parser();
     
     // Build mapping from original terminal IDs to suffix parser terminal IDs
     // The suffix parser may have different terminal IDs
@@ -647,7 +642,6 @@ pub fn prune_nwa_with_suffix_grammar(
     use crate::interface::CompiledGrammar;
     use crate::glr::table::TerminalID;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
-    use std::sync::Arc;
 
     crate::debug!(4, "Starting suffix grammar NWA pruning");
 
@@ -669,10 +663,8 @@ pub fn prune_nwa_with_suffix_grammar(
     }
 
     crate::debug!(4, "  Compiling suffix grammar...");
-    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
+    let suffix_parser = CompiledGrammar::glr_parser_from_definition(&suffix_grammar);
     crate::debug!(4, "  Suffix grammar compiled");
-
-    let suffix_parser = suffix_compiled.glr_parser();
 
     // Build mapping from original terminal IDs to suffix parser terminal IDs
     let mut orig_to_suffix_tid: BTreeMap<usize, TerminalID> = BTreeMap::new();

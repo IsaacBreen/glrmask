@@ -1511,8 +1511,7 @@ impl GrammarConstraint {
                     crate::debug!(4, "Building approximate suffix DFA (lazy, start-state initial) for precompute1...");
                     let approx_start = std::time::Instant::now();
                     let suffix_grammar = crate::interface::grammar_to_suffix_grammar(grammar_def);
-                    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
-                    let suffix_parser = suffix_compiled.glr_parser();
+                    let suffix_parser = CompiledGrammar::glr_parser_from_definition(&suffix_grammar);
                     let approx_dfa = crate::glr::approximate_dfa::build_approximate_parser_dfa_from_start(&suffix_parser);
                     eprintln!("TIMING: build_approximate_suffix_dfa {:?}", approx_start.elapsed());
 

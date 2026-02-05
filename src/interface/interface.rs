@@ -2075,17 +2075,9 @@ impl JSONConvertible for CompiledGrammar {
 }
 
 impl CompiledGrammar {
-    /// Creates a `CompiledGrammar` from an `Arc<GrammarDefinition>`.
-    pub fn from_definition(definition: Arc<GrammarDefinition>) -> Self {
-        let tokenizer_start = std::time::Instant::now();
-        debug!(3, "Building tokenizer from definition");
-        let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
-        let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
-        let tokenizer = Tokenizer::new(tokenizer_expr_groups_obj.build());
-        eprintln!("TIMING: build_tokenizer {:?}", tokenizer_start.elapsed());
-
-        let parser_start = std::time::Instant::now();
-        debug!(3, "Building GLR parser from definition");
+    fn build_terminal_map(
+        definition: &GrammarDefinition,
+    ) -> BiBTreeMap<Terminal, TerminalID> {
         let mut terminal_map: BiBTreeMap<Terminal, TerminalID> =
             definition
                 .regex_name_to_group_id
@@ -2106,7 +2098,13 @@ impl CompiledGrammar {
                 TerminalID(*group_id),
             );
         }
-        
+        terminal_map
+    }
+
+    /// Builds a GLR parser from a `GrammarDefinition` without compiling a tokenizer.
+    pub fn glr_parser_from_definition(definition: &GrammarDefinition) -> GLRParser {
+        let terminal_map = Self::build_terminal_map(definition);
+
         // Get nullable terminals from the definition
         let nullable_terminals = definition.get_nullable_terminals();
         if !nullable_terminals.is_empty() {
@@ -2115,13 +2113,27 @@ impl CompiledGrammar {
                 debug!(5, "  Nullable terminal: {:?}", t);
             }
         }
-        
-        let glr_parser = generate_glr_parser_with_terminal_map(
+
+        generate_glr_parser_with_terminal_map(
             &definition.productions,
             terminal_map,
             &nullable_terminals,
             definition.ignore_terminal_ids.clone(),
-        );
+        )
+    }
+
+    /// Creates a `CompiledGrammar` from an `Arc<GrammarDefinition>`.
+    pub fn from_definition(definition: Arc<GrammarDefinition>) -> Self {
+        let tokenizer_start = std::time::Instant::now();
+        debug!(3, "Building tokenizer from definition");
+        let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
+        let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
+        let tokenizer = Tokenizer::new(tokenizer_expr_groups_obj.build());
+        eprintln!("TIMING: build_tokenizer {:?}", tokenizer_start.elapsed());
+
+        let parser_start = std::time::Instant::now();
+        debug!(3, "Building GLR parser from definition");
+        let glr_parser = Self::glr_parser_from_definition(&definition);
         eprintln!("TIMING: build_glr_parser {:?}", parser_start.elapsed());
 
         // Report terminal equivalence classes at debug level 5
