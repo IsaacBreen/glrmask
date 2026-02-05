@@ -102,14 +102,14 @@ test-json-schema: ## Compile a JSON schema grammar (verifies schema-to-EBNF work
 test-json-schema-o1051: ## Compile o1051 (Github Hard) schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o1051.json" \
-		python3 scripts/test_json_schema.py
+		$(PYTHON) scripts/test_json_schema.py
 
 test-tsconfig: ## Compile TSConfig schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
 		python3 scripts/test_json_schema.py
 
-PYTHON ?= python
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 
 test-schema-id: ffi ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
