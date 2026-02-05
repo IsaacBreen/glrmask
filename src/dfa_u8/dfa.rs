@@ -608,6 +608,31 @@ pub struct ExprStats {
     pub max_depth: usize,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct TokenizerDfaTimings {
+    pub total: std::time::Duration,
+    pub compute_equivalence_classes: std::time::Duration,
+    pub remap_transitions: std::time::Duration,
+    pub build_compact_nfa: std::time::Duration,
+    pub precompute_closures: std::time::Duration,
+    pub start_closure: std::time::Duration,
+    pub main_loop: std::time::Duration,
+    pub metadata: std::time::Duration,
+    pub other: std::time::Duration,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TokenizerBuildTimings {
+    pub total: std::time::Duration,
+    pub stats: std::time::Duration,
+    pub optimize: std::time::Duration,
+    pub build_nfa: std::time::Duration,
+    pub condense_epsilon_sccs: std::time::Duration,
+    pub to_dfa: TokenizerDfaTimings,
+    pub minimize: std::time::Duration,
+    pub other: std::time::Duration,
+}
+
 impl std::fmt::Display for ExprStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Nodes: {}, Depth: {}, Seq: {}, Choice: {}, Quant: {}, RepeatBounded: {}, Shared: {} (unique: {}, inlineable: {}), U8Seq: {}, U8Class: {}, Eps: {}",
@@ -913,14 +938,25 @@ impl NFAState {
 
 impl ExprGroups {
     pub fn build(self) -> Regex {
-        self.build_impl(true)
+        self.build_impl(true, None)
     }
 
     pub fn build_unminimized(self) -> Regex {
-        self.build_impl(false)
+        self.build_impl(false, None)
     }
 
-    fn build_impl(self, minimize: bool) -> Regex {
+    pub fn build_with_timings(self) -> (Regex, TokenizerBuildTimings) {
+        let mut timings = TokenizerBuildTimings::default();
+        let regex = self.build_impl(true, Some(&mut timings));
+        (regex, timings)
+    }
+
+    fn build_impl(
+        self,
+        minimize: bool,
+        mut timings: Option<&mut TokenizerBuildTimings>,
+    ) -> Regex {
+        let total_start = std::time::Instant::now();
         // Debug: serialize ExprGroups if DUMP_EXPR_GROUPS_PATH env var is set.
         // Useful for capturing expressions that cause slow builds.
         // Usage: DUMP_EXPR_GROUPS_PATH=expr_groups.json cargo test ...
@@ -935,14 +971,17 @@ impl ExprGroups {
             }
         }
         
+        let stats_start = std::time::Instant::now();
         let stats = self.get_stats();
+        let stats_time = stats_start.elapsed();
         crate::debug!(5, "Expr Stats: {}", stats);
 
         // Optimize the expression first to minimize nested quantifiers
         crate::debug!(4, "Optimizing expression");
-        let start_optimize = std::time::Instant::now();
+        let optimize_start = std::time::Instant::now();
         let optimized = crate::time!("optimize_expr", self.optimize());
-        crate::debug!(5, "Optimized expression in {:.2?}", start_optimize.elapsed());
+        let optimize_time = optimize_start.elapsed();
+        crate::debug!(5, "Optimized expression in {:.2?}", optimize_time);
         
         // Print the optimized expression for debugging DFA explosion
         crate::debug!(6, "Optimized expression groups:");
@@ -951,25 +990,55 @@ impl ExprGroups {
         }
 
         crate::debug!(4, "Building NFA");
-        let start = std::time::Instant::now();
+        let build_nfa_start = std::time::Instant::now();
         let mut nfa = crate::time!("build_nfa", optimized.build_nfa());
-        crate::debug!(5, "Built NFA with {} states in {:.2?}", nfa.states.len(), start.elapsed());
+        let build_nfa_time = build_nfa_start.elapsed();
+        crate::debug!(5, "Built NFA with {} states in {:.2?}", nfa.states.len(), build_nfa_time);
 
-        let start_condense = std::time::Instant::now();
+        let condense_start = std::time::Instant::now();
         let nfa_states_before = nfa.states.len();
         crate::time!("condense_epsilon_sccs", nfa.condense_epsilon_sccs());
-        crate::debug!(5, "Condensed NFA {} → {} states in {:.2?}", nfa_states_before, nfa.states.len(), start_condense.elapsed());
+        let condense_time = condense_start.elapsed();
+        crate::debug!(5, "Condensed NFA {} → {} states in {:.2?}", nfa_states_before, nfa.states.len(), condense_time);
 
         crate::debug!(4, "Converting NFA to DFA");
-        let start = std::time::Instant::now();
-        let mut dfa = crate::time!("to_dfa", nfa.to_dfa());
-        crate::debug!(5, "Converted NFA to DFA in {:.2?}", start.elapsed());
+        let to_dfa_start = std::time::Instant::now();
+        let mut dfa = crate::time!("to_dfa", {
+            if let Some(timings) = timings.as_mut() {
+                nfa.to_dfa_with_timings(&mut timings.to_dfa)
+            } else {
+                nfa.to_dfa()
+            }
+        });
+        let to_dfa_time = to_dfa_start.elapsed();
+        crate::debug!(5, "Converted NFA to DFA in {:.2?}", to_dfa_time);
 
+        let mut minimize_time = std::time::Duration::default();
         if minimize {
             crate::debug!(4, "Minimizing DFA");
-            let start = std::time::Instant::now();
+            let minimize_start = std::time::Instant::now();
             crate::time!("minimize_dfa", dfa.minimize());
-            crate::debug!(5, "Minimized DFA in {:.2?}", start.elapsed());
+            minimize_time = minimize_start.elapsed();
+            crate::debug!(5, "Minimized DFA in {:.2?}", minimize_time);
+        }
+
+        if let Some(timings) = timings.as_mut() {
+            let total_time = total_start.elapsed();
+            let to_dfa_total = if timings.to_dfa.total.is_zero() {
+                to_dfa_time
+            } else {
+                timings.to_dfa.total
+            };
+            let accounted = stats_time + optimize_time + build_nfa_time + condense_time + to_dfa_total + minimize_time;
+            let other = total_time.checked_sub(accounted).unwrap_or_default();
+
+            timings.total = total_time;
+            timings.stats = stats_time;
+            timings.optimize = optimize_time;
+            timings.build_nfa = build_nfa_time;
+            timings.condense_epsilon_sccs = condense_time;
+            timings.minimize = minimize_time;
+            timings.other = other;
         }
 
         Regex { dfa }
@@ -2220,7 +2289,7 @@ impl NFA {
         if profile_dfa_only {
             crate::profiler::reset();
         }
-        let dfa = self.to_dfa_impl();
+        let dfa = self.to_dfa_impl(None);
         if profile_dfa_only {
             crate::profiler::print_summary();
         }
@@ -2232,10 +2301,21 @@ impl NFA {
         dfa
     }
 
+    pub fn to_dfa_with_timings(self, timings: &mut TokenizerDfaTimings) -> DFA {
+        self.to_dfa_impl(Some(timings))
+    }
+
     #[time_it]
-    fn to_dfa_impl(self) -> DFA {
+    fn to_dfa_impl(self, mut timings: Option<&mut TokenizerDfaTimings>) -> DFA {
         let mut stats = DFAConversionStats::default();
         let start_time = std::time::Instant::now();
+        let mut class_time = std::time::Duration::default();
+        let mut remap_time = std::time::Duration::default();
+        let mut compact_time = std::time::Duration::default();
+        let mut precompute_time = std::time::Duration::default();
+        let mut start_closure_time = std::time::Duration::default();
+        let mut main_loop_time = std::time::Duration::default();
+        let mut metadata_time = std::time::Duration::default();
         let mut dfa_states: Vec<DFAState> = Vec::with_capacity(120_000);
         // Use FxHashMap for faster hashing
         use rustc_hash::FxHashMap;
@@ -2247,6 +2327,7 @@ impl NFA {
         let start_classes = std::time::Instant::now();
         let (class_map, num_classes, class_members) = crate::time!("compute_equivalence_classes", self.compute_equivalence_classes());
         stats.class_computation_time = start_classes.elapsed();
+        class_time = stats.class_computation_time;
         crate::debug!(4, "Computed {} input equivalence classes in {:.2?}", num_classes, stats.class_computation_time);
 
         let start_remap = std::time::Instant::now();
@@ -2267,6 +2348,7 @@ impl NFA {
             remapped_transitions
         });
         stats.remapped_transitions_time = start_remap.elapsed();
+        remap_time = stats.remapped_transitions_time;
 
         // Shared buffers
         let num_nfa_states = self.states.len();
@@ -2274,9 +2356,12 @@ impl NFA {
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
         // Compact NFA for faster BFS
+        let compact_start = std::time::Instant::now();
         let compact_nfa = self.build_compact_nfa();
+        compact_time = compact_start.elapsed();
         
         // Pre-compute the number of outgoing epsilons per state for fast-path detection
+        let precompute_start = std::time::Instant::now();
         let out_degree: Vec<u32> = (0..num_nfa_states).map(|s| {
             (compact_nfa.epsilon_offsets[s + 1] - compact_nfa.epsilon_offsets[s])
         }).collect();
@@ -2293,7 +2378,6 @@ impl NFA {
         
         // Precompute closures for states with out-degree >= precompute_threshold
         // This avoids repeated BFS traversal from these states
-        let precompute_start = std::time::Instant::now();
         let mut high_degree_closures: Vec<Option<Vec<u32>>> = vec![None; num_nfa_states];
         let mut num_precomputed = 0;
         
@@ -2375,9 +2459,11 @@ impl NFA {
         }
         let total_closure_size: usize = high_degree_closures.iter().filter_map(|c| c.as_ref().map(|v| v.len())).sum();
         let avg_closure_size = if num_precomputed > 0 { total_closure_size / num_precomputed } else { 0 };
-        crate::debug!(5, "Precomputed {} high-degree closures (avg size {}) in {:.2?}", num_precomputed, avg_closure_size, precompute_start.elapsed());
+        precompute_time = precompute_start.elapsed();
+        crate::debug!(5, "Precomputed {} high-degree closures (avg size {}) in {:.2?}", num_precomputed, avg_closure_size, precompute_time);
 
         // Compute start state closure using BFS
+        let start_closure_start = std::time::Instant::now();
         closure_set.insert(self.start_state);
         if out_degree[self.start_state] > 0 {
             stack.push(self.start_state);
@@ -2396,6 +2482,7 @@ impl NFA {
         }
 
         let start_state_set = CompressedStateSet::from_sparse(&closure_set);
+        start_closure_time = start_closure_start.elapsed();
 
         dfa_state_map.insert(start_state_set.clone(), 0);
         worklist.push(start_state_set.clone());
@@ -2498,45 +2585,62 @@ impl NFA {
                     let target_set = unsafe { transition_targets.get_unchecked(class_id) };
                     
                     let t1 = if enable_timing { Some(std::time::Instant::now()) } else { None };
-                    closure_set.clear();
-                    
-                    // Fast path: check if all states have no outgoing epsilons
-                    let mut needs_bfs = false;
-                    for &w_idx in &target_set.dirty_words {
-                        let mut w = target_set.dense.words[w_idx];
-                        while w != 0 {
-                            let t = w.trailing_zeros();
-                            w &= !(1u64 << t);
-                            let next_state = w_idx * 64 + t as usize;
-                            
-                            // Check if this state has a precomputed closure
-                            if let Some(ref closure) = unsafe { high_degree_closures.get_unchecked(next_state) } {
-                                // Use bulk insertion for precomputed closures
-                                closure_set.insert_many(closure);
-                            } else {
-                                closure_set.insert(next_state);
-                                if unsafe { *out_degree.get_unchecked(next_state) } > 0 {
-                                    needs_bfs = true;
-                                    stack.push(next_state);
-                                }
+                    let mut fast_singleton_state: Option<usize> = None;
+                    if target_set.dirty_words.len() == 1 {
+                        let w_idx = unsafe { *target_set.dirty_words.get_unchecked(0) };
+                        let w = unsafe { *target_set.dense.words.get_unchecked(w_idx) };
+                        if w != 0 && (w & (w - 1)) == 0 {
+                            let t = w.trailing_zeros() as usize;
+                            let state = w_idx * 64 + t;
+                            if unsafe { *out_degree.get_unchecked(state) } == 0
+                                && unsafe { high_degree_closures.get_unchecked(state) }.is_none()
+                            {
+                                fast_singleton_state = Some(state);
                             }
                         }
                     }
-                    
-                    // BFS Closure - only if needed for non-precomputed states
-                    if needs_bfs {
-                        while let Some(u) = stack.pop() {
-                            let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
-                            let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
-                            
-                            for i in start_offs..end_offs {
-                                let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
-                                if closure_set.insert(v) {
-                                    // Check if v has precomputed closure
-                                    if let Some(ref closure) = unsafe { high_degree_closures.get_unchecked(v) } {
-                                        closure_set.insert_many(closure);
-                                    } else if unsafe { *out_degree.get_unchecked(v) } > 0 {
-                                        stack.push(v);
+
+                    if fast_singleton_state.is_none() {
+                        closure_set.clear();
+                        
+                        // Fast path: check if all states have no outgoing epsilons
+                        let mut needs_bfs = false;
+                        for &w_idx in &target_set.dirty_words {
+                            let mut w = target_set.dense.words[w_idx];
+                            while w != 0 {
+                                let t = w.trailing_zeros();
+                                w &= !(1u64 << t);
+                                let next_state = w_idx * 64 + t as usize;
+                                
+                                // Check if this state has a precomputed closure
+                                if let Some(ref closure) = unsafe { high_degree_closures.get_unchecked(next_state) } {
+                                    // Use bulk insertion for precomputed closures
+                                    closure_set.insert_many(closure);
+                                } else {
+                                    closure_set.insert(next_state);
+                                    if unsafe { *out_degree.get_unchecked(next_state) } > 0 {
+                                        needs_bfs = true;
+                                        stack.push(next_state);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // BFS Closure - only if needed for non-precomputed states
+                        if needs_bfs {
+                            while let Some(u) = stack.pop() {
+                                let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
+                                let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
+                                
+                                for i in start_offs..end_offs {
+                                    let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
+                                    if closure_set.insert(v) {
+                                        // Check if v has precomputed closure
+                                        if let Some(ref closure) = unsafe { high_degree_closures.get_unchecked(v) } {
+                                            closure_set.insert_many(closure);
+                                        } else if unsafe { *out_degree.get_unchecked(v) } > 0 {
+                                            stack.push(v);
+                                        }
                                     }
                                 }
                             }
@@ -2547,7 +2651,16 @@ impl NFA {
 
                     // Compress state set
                     let t2 = if enable_timing { Some(std::time::Instant::now()) } else { None };
-                    CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut sort_scratch);
+                    if let Some(state) = fast_singleton_state {
+                        scratch_closure.words.clear();
+                        let word_idx = (state >> 6) as u32;
+                        let mask = 1u64 << (state & 0x3F);
+                        scratch_closure.words.push((word_idx, mask));
+                        scratch_closure.hash = (word_idx as u64).wrapping_mul(0x517cc1b727220a95)
+                            ^ mask.wrapping_mul(0x9e3779b97f4a7c15);
+                    } else {
+                        CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut sort_scratch);
+                    }
                     if let Some(t) = t2 { time_compress += t.elapsed().as_nanos() as u64; }
 
                     // Map lookup/insert
@@ -2600,7 +2713,9 @@ impl NFA {
                 }
 
             // Bulk insert transitions
-            dfa_transitions_vec.sort_unstable_by_key(|k| k.0);
+            if dfa_transitions_vec.len() > 1 {
+                dfa_transitions_vec.sort_unstable_by_key(|k| k.0);
+            }
             dfa_states[current_dfa_state].transitions = CharTransitions::from_sorted_entries(dfa_transitions_vec);
 
             for &idx in &used_classes {
@@ -2611,6 +2726,7 @@ impl NFA {
         }
         
         stats.main_loop_time = main_loop_start.elapsed();
+        main_loop_time = stats.main_loop_time;
         
         // Print timing breakdown only if detailed timing was enabled
         if enable_timing {
@@ -2637,9 +2753,32 @@ impl NFA {
         let meta_start = std::time::Instant::now();
         crate::time!("recompute_metadata", dfa.recompute_metadata());
         stats.dfa_metadata_time = meta_start.elapsed();
+        metadata_time = stats.dfa_metadata_time;
         
         stats.total_time = start_time.elapsed();
         stats.dfa_states_created = dfa.states.len();
+
+        if let Some(timings) = timings.as_mut() {
+            let total_time = stats.total_time;
+            let accounted = class_time
+                + remap_time
+                + compact_time
+                + precompute_time
+                + start_closure_time
+                + main_loop_time
+                + metadata_time;
+            let other = total_time.checked_sub(accounted).unwrap_or_default();
+
+            timings.total = total_time;
+            timings.compute_equivalence_classes = class_time;
+            timings.remap_transitions = remap_time;
+            timings.build_compact_nfa = compact_time;
+            timings.precompute_closures = precompute_time;
+            timings.start_closure = start_closure_time;
+            timings.main_loop = main_loop_time;
+            timings.metadata = metadata_time;
+            timings.other = other;
+        }
 
         // Level 4: Brief summary. Level 5+: Full stats.
         crate::debug!(4, "NFA → DFA: {} → {} states ({:.2?})", self.states.len(), dfa.states.len(), stats.total_time);

@@ -2125,11 +2125,67 @@ impl CompiledGrammar {
     /// Creates a `CompiledGrammar` from an `Arc<GrammarDefinition>`.
     pub fn from_definition(definition: Arc<GrammarDefinition>) -> Self {
         let tokenizer_start = std::time::Instant::now();
+        let profile_tokenizer = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
         debug!(3, "Building tokenizer from definition");
+        let terminal_expr_start = std::time::Instant::now();
         let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
+        let terminal_expr_time = terminal_expr_start.elapsed();
+        let groups_start = std::time::Instant::now();
         let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
-        let tokenizer = Tokenizer::new(tokenizer_expr_groups_obj.build());
-        eprintln!("TIMING: build_tokenizer {:?}", tokenizer_start.elapsed());
+        let groups_time = groups_start.elapsed();
+        let (tokenizer_regex, tokenizer_timings) = if profile_tokenizer {
+            let (regex, timings) = tokenizer_expr_groups_obj.build_with_timings();
+            (regex, Some(timings))
+        } else {
+            (tokenizer_expr_groups_obj.build(), None)
+        };
+        let tokenizer = Tokenizer::new(tokenizer_regex);
+        let tokenizer_total = tokenizer_start.elapsed();
+        if let Some(timings) = tokenizer_timings {
+            let regex_total = timings.total;
+            let build_other = tokenizer_total
+                .checked_sub(terminal_expr_time + groups_time + regex_total)
+                .unwrap_or_default();
+            eprintln!("TIMING: build_tokenizer.terminal_exprs {:?}", terminal_expr_time);
+            eprintln!("TIMING: build_tokenizer.groups {:?}", groups_time);
+            eprintln!("TIMING: build_tokenizer.regex.total {:?}", regex_total);
+            eprintln!("TIMING: build_tokenizer.regex.stats {:?}", timings.stats);
+            eprintln!("TIMING: build_tokenizer.regex.optimize {:?}", timings.optimize);
+            eprintln!("TIMING: build_tokenizer.regex.build_nfa {:?}", timings.build_nfa);
+            eprintln!("TIMING: build_tokenizer.regex.condense_epsilon_sccs {:?}", timings.condense_epsilon_sccs);
+            eprintln!("TIMING: build_tokenizer.regex.to_dfa {:?}", timings.to_dfa.total);
+            eprintln!("TIMING: build_tokenizer.regex.minimize {:?}", timings.minimize);
+            eprintln!("TIMING: build_tokenizer.regex.other {:?}", timings.other);
+
+            eprintln!(
+                "TIMING: build_tokenizer.to_dfa.compute_equivalence_classes {:?}",
+                timings.to_dfa.compute_equivalence_classes
+            );
+            eprintln!(
+                "TIMING: build_tokenizer.to_dfa.remap_transitions {:?}",
+                timings.to_dfa.remap_transitions
+            );
+            eprintln!(
+                "TIMING: build_tokenizer.to_dfa.build_compact_nfa {:?}",
+                timings.to_dfa.build_compact_nfa
+            );
+            eprintln!(
+                "TIMING: build_tokenizer.to_dfa.precompute_closures {:?}",
+                timings.to_dfa.precompute_closures
+            );
+            eprintln!(
+                "TIMING: build_tokenizer.to_dfa.start_closure {:?}",
+                timings.to_dfa.start_closure
+            );
+            eprintln!(
+                "TIMING: build_tokenizer.to_dfa.main_loop {:?}",
+                timings.to_dfa.main_loop
+            );
+            eprintln!("TIMING: build_tokenizer.to_dfa.metadata {:?}", timings.to_dfa.metadata);
+            eprintln!("TIMING: build_tokenizer.to_dfa.other {:?}", timings.to_dfa.other);
+            eprintln!("TIMING: build_tokenizer.other {:?}", build_other);
+        }
+        eprintln!("TIMING: build_tokenizer {:?}", tokenizer_total);
 
         let parser_start = std::time::Instant::now();
         debug!(3, "Building GLR parser from definition");
