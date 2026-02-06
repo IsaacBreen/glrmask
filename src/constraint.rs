@@ -651,16 +651,33 @@ impl GrammarConstraint {
             );
         }
 
+        let profile_setup_combined = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok()
+            || std::env::var("PROFILE_SETUP_COMBINED").is_ok();
+        let setup_combined_start = std::time::Instant::now();
+        let mut timing_sort_tokens = std::time::Duration::ZERO;
+        let mut timing_collect_strings = std::time::Duration::ZERO;
+        let mut timing_all_states = std::time::Duration::ZERO;
+        let mut timing_compute_equivalence = std::time::Duration::ZERO;
+        let mut timing_build_state_to_rep = std::time::Duration::ZERO;
+        let mut timing_filter_states = std::time::Duration::ZERO;
+        let mut timing_build_original_to_internal = std::time::Duration::ZERO;
+        let mut timing_commit_vocab_prep = std::time::Duration::ZERO;
+        let mut timing_build_internal_llm_token_map = std::time::Duration::ZERO;
+        let mut timing_commit_vocab = std::time::Duration::ZERO;
+
         // Sort tokens by bytes for consistent ordering
         let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
+        let sort_start = std::time::Instant::now();
         timeit!("setup_combined::sort_tokens", {
             sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
         });
+        timing_sort_tokens = sort_start.elapsed();
 
         let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
         let mut original_ids: Vec<usize> = Vec::with_capacity(sorted_tokens.len());
         let mut highest_original_id = 0usize;
 
+        let collect_start = std::time::Instant::now();
         timeit!("setup_combined::collect_token_strings", {
             for (bytes, id) in &sorted_tokens {
                 highest_original_id = highest_original_id.max(id.0);
@@ -668,12 +685,16 @@ impl GrammarConstraint {
                 original_ids.push(id.0);
             }
         });
+        timing_collect_strings = collect_start.elapsed();
 
         // Get ALL states for equivalence analysis
+        let all_states_start = std::time::Instant::now();
         let all_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+        timing_all_states = all_states_start.elapsed();
         
         // Use combined equivalence analysis
         // State reduction threshold of 0 means always apply state reduction
+        let compute_equivalence_start = std::time::Instant::now();
         let combined_result = timeit!("setup_combined::compute_equivalence", {
             compute_combined_equivalence(
                 tokenizer,
@@ -681,11 +702,13 @@ impl GrammarConstraint {
                 &all_states,
             )
         });
+        timing_compute_equivalence = compute_equivalence_start.elapsed();
         
         // Derive state_to_rep and representative_states from state_classes
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut representative_set: BTreeSet<usize> = BTreeSet::new();
         
+        let build_state_to_rep_start = std::time::Instant::now();
         timeit!("setup_combined::build_state_to_rep", {
             for class in &combined_result.state_classes {
                 // Pick the first (smallest) state as representative
@@ -697,12 +720,14 @@ impl GrammarConstraint {
                 }
             }
         });
+        timing_build_state_to_rep = build_state_to_rep_start.elapsed();
         
         let representative_states: Vec<usize> = representative_set.into_iter().collect();
 
         // Filter states for vocab equivalence to only grammar-relevant ones
         // (This filtering was already done inside compute_combined_equivalence? Let's check)
         // Actually the combined analysis used all_states, so we need to filter here for logging
+        let filter_states_start = std::time::Instant::now();
         let initial_states_for_vocab: Vec<usize> = if !grammar_group_ids.is_empty() {
             let filtered: Vec<usize> = representative_states
                 .iter()
@@ -729,6 +754,7 @@ impl GrammarConstraint {
         } else {
             representative_states.clone()
         };
+        timing_filter_states = filter_states_start.elapsed();
 
         crate::debug!(
             3,
@@ -751,6 +777,7 @@ impl GrammarConstraint {
 
         // Build original_to_internal map AND track best representative per class (combined)
         // Use Vec for O(1) access instead of BTreeMap O(log n)
+        let build_original_to_internal_start = std::time::Instant::now();
         let mut original_to_internal_vec: Vec<usize> = vec![usize::MAX; highest_original_id + 1];
         let mut best_rep_by_internal: Vec<usize> = Vec::with_capacity(mask_classes.len());
         let mut internal_id_counter = 0;
@@ -779,13 +806,17 @@ impl GrammarConstraint {
             .enumerate()
             .filter(|&(_, v)| v != usize::MAX)
             .collect();
+        timing_build_original_to_internal = build_original_to_internal_start.elapsed();
 
         // TEMP: disable commit vocab optimization
+        let commit_vocab_prep_start = std::time::Instant::now();
         let representatives: Vec<Vec<u8>> = (0..llm_token_strings.len()).map(|i| llm_token_strings[i].clone()).collect();
         let original_to_representative = (0..llm_token_strings.len()).map(|i| i as u32).collect();
+        timing_commit_vocab_prep = commit_vocab_prep_start.elapsed();
 
         // Build internal_llm_token_map using best representatives we already computed
         // This avoids iterating 50K tokens again!
+        let build_internal_map_start = std::time::Instant::now();
         let internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = timeit!(
             "setup_combined::build_internal_llm_token_map",
             {
@@ -798,6 +829,7 @@ impl GrammarConstraint {
                     .collect()
             }
         );
+        timing_build_internal_llm_token_map = build_internal_map_start.elapsed();
         
         crate::debug!(
             4,
@@ -806,7 +838,37 @@ impl GrammarConstraint {
             llm_token_strings.len()
         );
 
+        let commit_vocab_start = std::time::Instant::now();
         let commit_vocab = CommitVocab::new(representatives, original_to_representative);
+        timing_commit_vocab = commit_vocab_start.elapsed();
+
+        if profile_setup_combined {
+            let total = setup_combined_start.elapsed();
+            let sum = timing_sort_tokens
+                + timing_collect_strings
+                + timing_all_states
+                + timing_compute_equivalence
+                + timing_build_state_to_rep
+                + timing_filter_states
+                + timing_build_original_to_internal
+                + timing_commit_vocab_prep
+                + timing_build_internal_llm_token_map
+                + timing_commit_vocab;
+            let other = total.saturating_sub(sum);
+
+            eprintln!("TIMING: setup_combined::sort_tokens {:?}", timing_sort_tokens);
+            eprintln!("TIMING: setup_combined::collect_token_strings {:?}", timing_collect_strings);
+            eprintln!("TIMING: setup_combined::all_states {:?}", timing_all_states);
+            eprintln!("TIMING: setup_combined::compute_equivalence {:?}", timing_compute_equivalence);
+            eprintln!("TIMING: setup_combined::build_state_to_rep {:?}", timing_build_state_to_rep);
+            eprintln!("TIMING: setup_combined::filter_states {:?}", timing_filter_states);
+            eprintln!("TIMING: setup_combined::build_original_to_internal {:?}", timing_build_original_to_internal);
+            eprintln!("TIMING: setup_combined::commit_vocab_prep {:?}", timing_commit_vocab_prep);
+            eprintln!("TIMING: setup_combined::build_internal_llm_token_map {:?}", timing_build_internal_llm_token_map);
+            eprintln!("TIMING: setup_combined::commit_vocab {:?}", timing_commit_vocab);
+            eprintln!("TIMING: setup_combined::other {:?}", other);
+            eprintln!("TIMING: setup_combined::total {:?}", total);
+        }
         (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep, representative_states)
     }
 
