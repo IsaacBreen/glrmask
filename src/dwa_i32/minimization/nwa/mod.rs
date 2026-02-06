@@ -666,6 +666,119 @@ impl NWA {
         true
     }
 
+    fn try_rm_epsilon_single_source(&mut self, source: NWAStateID) -> bool {
+        let profile_rm_epsilon = std::env::var("PROFILE_RM_EPSILON").is_ok();
+        let start_time = std::time::Instant::now();
+        let mut total_eps = 0usize;
+
+        let new_state = {
+            let states = &self.states.0;
+            let src_state = &states[source];
+
+            let mut final_weights: Vec<Weight> = Vec::new();
+            let mut trans_collected: BTreeMap<Label, HashMap<NWAStateID, Vec<Weight>>> = BTreeMap::new();
+
+            if let Some(fw) = &src_state.final_weight {
+                if !fw.is_empty() {
+                    final_weights.push(fw.clone());
+                }
+            }
+
+            for (label, targets) in &src_state.transitions {
+                let entry = trans_collected.entry(*label).or_insert_with(HashMap::new);
+                for (tgt, w_tr) in targets {
+                    if w_tr.is_empty() {
+                        continue;
+                    }
+                    entry.entry(*tgt).or_insert_with(Vec::new).push(w_tr.clone());
+                }
+            }
+
+            for (tgt, w_eps) in &src_state.epsilons {
+                if w_eps.is_empty() {
+                    continue;
+                }
+                total_eps += 1;
+
+                let w_eps_all = w_eps.is_all_fast();
+                let tgt_state = &states[*tgt];
+
+                if let Some(fw) = &tgt_state.final_weight {
+                    if !fw.is_empty() {
+                        let w = if w_eps_all { fw.clone() } else { w_eps & fw };
+                        if !w.is_empty() {
+                            final_weights.push(w);
+                        }
+                    }
+                }
+
+                for (label, targets) in &tgt_state.transitions {
+                    let entry = trans_collected.entry(*label).or_insert_with(HashMap::new);
+                    for (next, w_tr) in targets {
+                        if w_tr.is_empty() {
+                            continue;
+                        }
+                        let w = if w_eps_all {
+                            w_tr.clone()
+                        } else if w_tr.is_all_fast() {
+                            w_eps.clone()
+                        } else {
+                            w_eps & w_tr
+                        };
+                        if w.is_empty() {
+                            continue;
+                        }
+                        entry.entry(*next).or_insert_with(Vec::new).push(w);
+                    }
+                }
+            }
+
+            let final_weight = if final_weights.is_empty() {
+                None
+            } else if final_weights.len() == 1 {
+                Some(final_weights.pop().unwrap())
+            } else {
+                let refs: Vec<&Weight> = final_weights.iter().collect();
+                Some(Weight::bulk_union(&refs))
+            };
+
+            let mut transitions: BTreeMap<Label, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
+            for (label, targets) in trans_collected {
+                let mut merged_targets: Vec<(NWAStateID, Weight)> = Vec::with_capacity(targets.len());
+                for (tgt, weights) in targets {
+                    let combined = if weights.len() == 1 {
+                        weights.into_iter().next().unwrap()
+                    } else {
+                        let refs: Vec<&Weight> = weights.iter().collect();
+                        Weight::bulk_union(&refs)
+                    };
+                    if combined.is_empty() {
+                        continue;
+                    }
+                    merged_targets.push((tgt, combined));
+                }
+                if !merged_targets.is_empty() {
+                    transitions.insert(label, merged_targets);
+                }
+            }
+
+            let mut new_state = NWAState::default();
+            new_state.final_weight = final_weight;
+            new_state.transitions = transitions;
+            new_state.epsilons.clear();
+            new_state
+        };
+
+        self.states.0[source] = new_state;
+
+        if profile_rm_epsilon {
+            eprintln!("TIMING: NWA::rm_epsilon::single_source_total {:?}", start_time.elapsed());
+            eprintln!("NWA::rm_epsilon::single_source_stats eps={}", total_eps);
+        }
+
+        true
+    }
+
     fn rm_epsilon_weighted_in_place(&mut self) {
         if timeit!("NWA::rm_epsilon::dag_weighted", {
             self.try_rm_epsilon_weighted_dag_in_place()
@@ -816,17 +929,86 @@ impl NWA {
         }
     }
 
+    fn try_rm_epsilon_single_source_fast(&mut self, profile_rm_epsilon: bool) -> (bool, usize) {
+        let mut total_epsilons = 0;
+        let mut non_empty_epsilons = 0;
+        let mut eps_source: Option<NWAStateID> = None;
+        let mut source_count = 0usize;
+        let mut has_any_eps = false;
+        let mut has_non_empty_eps = false;
+
+        for (u, st) in self.states.0.iter().enumerate() {
+            if !st.epsilons.is_empty() {
+                has_any_eps = true;
+            }
+            let mut has_non_empty_eps_for_state = false;
+            for (_, w) in &st.epsilons {
+                total_epsilons += 1;
+                if w.is_empty() {
+                    continue;
+                }
+                non_empty_epsilons += 1;
+                has_non_empty_eps_for_state = true;
+            }
+            if has_non_empty_eps_for_state {
+                has_non_empty_eps = true;
+                source_count += 1;
+                if eps_source.is_none() {
+                    eps_source = Some(u);
+                }
+            }
+        }
+        let has_multiple_sources = source_count > 1;
+
+        if profile_rm_epsilon {
+            eprintln!(
+                "NWA::rm_epsilon::single_source_check total_eps={} non_empty_eps={} sources={} has_any_eps={} has_non_empty_eps={} has_multiple_sources={} eps_source={:?}",
+                total_epsilons,
+                non_empty_epsilons,
+                source_count,
+                has_any_eps,
+                has_non_empty_eps,
+                has_multiple_sources,
+                eps_source,
+            );
+        }
+
+        if !has_non_empty_eps {
+            if has_any_eps {
+                for st in &mut self.states.0 {
+                    st.epsilons.clear();
+                }
+            }
+            return (true, total_epsilons);
+        }
+
+        if !has_multiple_sources {
+            if let Some(src) = eps_source {
+                crate::debug!(6, "[NWA] Using single-source epsilon fast path (src={})", src);
+                if self.try_rm_epsilon_single_source(src) {
+                    for st in &mut self.states.0 {
+                        st.epsilons.clear();
+                    }
+                    return (true, total_epsilons);
+                }
+            }
+        }
+
+        (false, total_epsilons)
+    }
+
     pub fn rm_epsilon(&mut self) {
         crate::debug!(6, "[NWA] Removing epsilon transitions...");
+        let profile_rm_epsilon = std::env::var("PROFILE_RM_EPSILON").is_ok();
         let initial_states = self.states.len();
         if initial_states == 0 {
             return;
         }
-        let mut total_epsilons = 0;
-        for st in &self.states.0 {
-            total_epsilons += st.epsilons.len();
-        }
+        let (handled, total_epsilons) = self.try_rm_epsilon_single_source_fast(profile_rm_epsilon);
         crate::debug!(7, "[NWA] Initial number of states: {}, total epsilon transitions: {}", initial_states, total_epsilons);
+        if handled {
+            return;
+        }
 
         if let Some(new_states) = timeit!("NWA::rm_epsilon::dag_fast_path", {
             self.try_rm_epsilon_unweighted_scc()
@@ -859,7 +1041,10 @@ impl NWA {
                     before_eps,
                     after_eps,
                 );
-                reduced.rm_epsilon_weighted_in_place();
+                let (handled, _) = reduced.try_rm_epsilon_single_source_fast(false);
+                if !handled {
+                    reduced.rm_epsilon_weighted_in_place();
+                }
                 *self = reduced;
                 did_precollapse = true;
             }
