@@ -125,7 +125,7 @@ pub fn find_state_equivalence_classes_kstep(
     states: &[usize],
     k: usize,
 ) -> Vec<usize> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     if states.is_empty() {
         return Vec::new();
@@ -135,10 +135,53 @@ pub fn find_state_equivalence_classes_kstep(
     let dfa = regex.dfa();
 
     // Precompute transition lists (sparse) for each state.
-    let transitions: Vec<Vec<(u8, usize)>> = dfa.states
+    let transitions: Vec<Vec<(u8, usize)>> = dfa
+        .states
         .iter()
         .map(|state| state.transitions.iter().map(|(b, &t)| (b, t)).collect())
         .collect();
+
+    let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
+    let mut class_for_state: Vec<usize> = Vec::new();
+    let mut class_reps: Vec<usize> = Vec::new();
+    let mut use_trans_class_cache = false;
+
+    {
+        let mut trans_pattern_to_class: HashMap<Vec<(u8, usize)>, usize> = HashMap::new();
+        class_for_state = vec![0usize; transitions.len()];
+
+        for (idx, trans) in transitions.iter().enumerate() {
+            let class_id = match trans_pattern_to_class.get(trans) {
+                Some(&existing) => existing,
+                None => {
+                    let new_id = class_reps.len();
+                    trans_pattern_to_class.insert(trans.clone(), new_id);
+                    class_reps.push(idx);
+                    new_id
+                }
+            };
+            class_for_state[idx] = class_id;
+        }
+
+        let num_classes = class_reps.len();
+        let num_states = transitions.len();
+        let shared = num_states.saturating_sub(num_classes);
+        if profile_equivalence {
+            eprintln!(
+                "DFA transition classes: {} classes for {} states ({} shared)",
+                num_classes,
+                num_states,
+                shared
+            );
+        }
+
+        if num_states > 0 && shared * 2 >= num_states {
+            use_trans_class_cache = true;
+        } else {
+            class_for_state.clear();
+            class_reps.clear();
+        }
+    }
 
     // Precompute label hashes for each state (finalizers + possible futures).
     let label_hashes: Vec<u64> = dfa.states
@@ -161,56 +204,55 @@ pub fn find_state_equivalence_classes_kstep(
     }
 
     // Initialize hashes for depth 0 (empty string).
-    let mut hashes: Vec<u64> = label_hashes
+    let mut buf_a: Vec<u64> = label_hashes
         .iter()
         .map(|&h| mix_u64(h ^ 0x9E37_79B9_7F4A_7C15))
         .collect();
-
-    let mut analyzed_hashes: HashSet<u64> = HashSet::with_capacity(states.len());
-    let mut prev_analyzed_distinct = 0usize;
-    let mut stable_count = 0usize;
+    let mut buf_b: Vec<u64> = vec![0u64; dfa.states.len()];
 
     // Iteratively refine hashes for depths 1..=k.
     for iter in 0..k {
-        let prev_hashes = &hashes;
-        hashes = (0..dfa.states.len())
-            .into_par_iter()
-            .map(|idx| {
-                let mut trans_sum = dead_base_sum;
-                for &(byte, target) in &transitions[idx] {
-                    let b_idx = byte as usize;
-                    trans_sum = trans_sum.wrapping_sub(dead_byte_mix[b_idx]);
-                    let next_hash = prev_hashes[target];
-                    let contrib = mix_u64(next_hash ^ (((byte as u64) << 1) | 1));
-                    trans_sum = trans_sum.wrapping_add(contrib);
-                }
+        let (src, dst) = if iter % 2 == 0 {
+            (&buf_a, &mut buf_b)
+        } else {
+            (&buf_b, &mut buf_a)
+        };
+
+        let compute_trans_sum = |idx: usize, prev_hashes: &[u64]| -> u64 {
+            let mut trans_sum = dead_base_sum;
+            for &(byte, target) in &transitions[idx] {
+                let b_idx = byte as usize;
+                trans_sum = trans_sum.wrapping_sub(dead_byte_mix[b_idx]);
+                let next_hash = prev_hashes[target];
+                let contrib = mix_u64(next_hash ^ (((byte as u64) << 1) | 1));
+                trans_sum = trans_sum.wrapping_add(contrib);
+            }
+            trans_sum
+        };
+
+        if use_trans_class_cache {
+            let trans_sum_per_class: Vec<u64> = (0..class_reps.len())
+                .into_par_iter()
+                .map(|class_id| compute_trans_sum(class_reps[class_id], src))
+                .collect();
+
+            dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let trans_sum = trans_sum_per_class[class_for_state[idx]];
                 let mut h = mix_u64(label_hashes[idx] ^ 0xC0DE_C0DE_C0DE_C0DE);
                 h = h.wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
-                h
-            })
-            .collect();
-
-        analyzed_hashes.clear();
-        for &state_id in states {
-            analyzed_hashes.insert(hashes[state_id]);
-        }
-        let analyzed_distinct = analyzed_hashes.len();
-        if analyzed_distinct == prev_analyzed_distinct {
-            stable_count += 1;
-            if stable_count >= 3 {
-                eprintln!(
-                    "k-step: converged at iteration {} of {} ({} groups)",
-                    iter + 1,
-                    k,
-                    analyzed_distinct
-                );
-                break;
-            }
+                *out = h;
+            });
         } else {
-            stable_count = 0;
+            dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let trans_sum = compute_trans_sum(idx, src);
+                let mut h = mix_u64(label_hashes[idx] ^ 0xC0DE_C0DE_C0DE_C0DE);
+                h = h.wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
+                *out = h;
+            });
         }
-        prev_analyzed_distinct = analyzed_distinct;
     }
+
+    let hashes = if k % 2 == 0 { &buf_a } else { &buf_b };
 
     // Group analyzed states by hash_k and pick representatives.
     let mut hash_to_rep: HashMap<u64, usize> = HashMap::new();
@@ -366,120 +408,184 @@ fn find_state_equivalence_classes_token_based(
         })
         .collect();
 
-    // Initialize state hashes to zero (like reference implementation)
-    let mut state_hashes: Vec<u128> = vec![0u128; states.len()];
-
     // Get non-greedy finalizers for proper position tracking
     let non_greedy_finalizers = &dfa.non_greedy_finalizers;
 
-    // Process tokens in batches for memory efficiency, but process ALL tokens for ALL states
-    // to ensure correct equivalence (no early singleton exit optimization)
-    let batch_size = if states.len() > 10000 {
-        25000.min(tokens.len())
-    } else {
-        10000.min(tokens.len())
+    // Process tokens in lexicographic order and reuse prefix simulations per state.
+    let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
+    sorted_indices.sort_by(|&a, &b| tokens[a].cmp(&tokens[b]));
+
+    let mut sorted_tokens: Vec<&[u8]> = Vec::with_capacity(tokens.len());
+    let mut sorted_weights: Vec<u128> = Vec::with_capacity(tokens.len());
+    for &idx in &sorted_indices {
+        sorted_tokens.push(tokens[idx].as_slice());
+        sorted_weights.push(mix_u128((idx + 1) as u128));
+    }
+
+    let common_prefix_len = |a: &[u8], b: &[u8]| -> usize {
+        let len = a.len().min(b.len());
+        let mut i = 0usize;
+        while i < len && a[i] == b[i] {
+            i += 1;
+        }
+        i
     };
+
+    let mut lcp_with_prev: Vec<usize> = Vec::with_capacity(sorted_tokens.len());
+    let mut prev_token: Option<&[u8]> = None;
+    for token in &sorted_tokens {
+        let lcp = prev_token.map_or(0, |prev| common_prefix_len(prev, token));
+        lcp_with_prev.push(lcp);
+        prev_token = Some(token);
+    }
+
+    let early_stop = std::env::var("STATE_EQUIV_EARLY_STOP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let batch_size = 5000usize;
+    let total_tokens = sorted_tokens.len();
+
+    let mut group_ids: Vec<usize> = vec![0usize; states.len()];
+    let mut next_group_ids: Vec<usize> = vec![0usize; states.len()];
+    let mut prev_groups = 1usize;
+    let mut stable_batches = 0usize;
     let mut tokens_tested = 0usize;
+    let mut early_stop_triggered = false;
 
-    while tokens_tested < tokens.len() {
-        // Prepare next batch of tokens
-        let batch_end = (tokens_tested + batch_size).min(tokens.len());
-        let batch_tokens: Vec<&Vec<u8>> = (tokens_tested..batch_end)
-            .map(|i| &tokens[i])
-            .collect();
+    let mut batch_start = 0usize;
+    while batch_start < total_tokens {
+        let batch_end = (batch_start + batch_size).min(total_tokens);
 
-        // Precompute token weights based on global token index (for consistent hashing)
-        let batch_weights: Vec<u128> = (tokens_tested..batch_end)
-            .map(|i| mix_u128((i + 1) as u128)) // Match reference: mix(token_index + 1)
-            .collect();
-
-        // Update hashes for ALL states
-        let updates: Vec<(usize, u128)> = (0..states.len())
+        let batch_hashes: Vec<u128> = (0..states.len())
             .into_par_iter()
             .map(|i| {
-                let state = states[i];
+                let state = states[i] as u32;
                 let mut hash_delta: u128 = 0;
+                let mut state_stack: Vec<u32> = vec![state];
 
-                for (batch_idx, token) in batch_tokens.iter().enumerate() {
-                    let mut current = state as u32;
+                for token_idx in batch_start..batch_end {
+                    let token = sorted_tokens[token_idx];
+                    let mut prefix_len = if token_idx == batch_start {
+                        0
+                    } else {
+                        lcp_with_prev[token_idx]
+                    };
+                    let max_prefix = state_stack.len().saturating_sub(1);
+                    if prefix_len > max_prefix {
+                        prefix_len = max_prefix;
+                    }
+                    state_stack.truncate(prefix_len + 1);
+
+                    let mut matches: std::collections::BTreeMap<usize, usize> =
+                        std::collections::BTreeMap::new();
                     let mut dead_at_depth: Option<usize> = None;
 
-                    // Track (group_id, position) with proper greedy/non-greedy semantics
-                    let mut matches: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
-
-                    for (depth, &byte) in (*token).iter().enumerate() {
-                        // Safety check - should never trigger since we break after setting NONE_STATE
+                    for depth in 1..=prefix_len {
+                        let current = state_stack[depth];
                         if current == NONE_STATE {
                             dead_at_depth = Some(depth);
                             break;
                         }
-                        let next = dfa_transitions[current as usize][byte as usize];
-                        if next == NONE_STATE {
-                            dead_at_depth = Some(depth + 1);
-                            current = NONE_STATE;
-                            break;
-                        }
-                        current = next;
-                        let position = depth + 1;
-
-                        // Record matches with proper greedy/non-greedy semantics
+                        let position = depth;
                         for &gid in &dfa_finalizers[current as usize] {
                             if non_greedy_finalizers.contains(&gid) {
-                                // Non-greedy: keep first
                                 matches.entry(gid).or_insert(position);
                             } else {
-                                // Greedy: keep last
                                 matches.insert(gid, position);
                             }
                         }
                     }
 
-                    // Hash structure: dead position OR (matches + end state)
-                    let structure_hash: u128;
-                    let end_hash: u128;
+                    if dead_at_depth.is_none() {
+                        let mut current = *state_stack.last().unwrap();
+                        for (offset, &byte) in token[prefix_len..].iter().enumerate() {
+                            if current == NONE_STATE {
+                                dead_at_depth = Some(prefix_len + offset);
+                                break;
+                            }
+                            let next = dfa_transitions[current as usize][byte as usize];
+                            if next == NONE_STATE {
+                                dead_at_depth = Some(prefix_len + offset + 1);
+                                state_stack.push(NONE_STATE);
+                                current = NONE_STATE;
+                                break;
+                            }
+                            current = next;
+                            state_stack.push(current);
+                            let position = prefix_len + offset + 1;
+                            for &gid in &dfa_finalizers[current as usize] {
+                                if non_greedy_finalizers.contains(&gid) {
+                                    matches.entry(gid).or_insert(position);
+                                } else {
+                                    matches.insert(gid, position);
+                                }
+                            }
+                        }
+                    }
 
-                    if let Some(dead_depth) = dead_at_depth {
-                        // Token leads to dead state - hash the dead depth
-                        structure_hash = mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD);
-                        end_hash = mix_u128(0xDEADBEEF_u128);
+                    let (structure_hash, end_hash) = if let Some(dead_depth) = dead_at_depth {
+                        (
+                            mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD),
+                            mix_u128(0xDEADBEEF_u128),
+                        )
                     } else {
-                        // Token is valid - hash the (group_id, position) pairs
                         let mut sh = mix_u128(matches.len() as u128 | (1u128 << 48));
                         for (&gid, &pos) in &matches {
                             sh = sh.wrapping_add(mix_u128((gid as u128) | ((pos as u128) << 32)));
                         }
-                        structure_hash = sh;
-
-                        // Hash end state possible_futures (precomputed)
-                        end_hash = end_state_hashes[current as usize];
-                    }
+                        let current = *state_stack.last().unwrap();
+                        (sh, end_state_hashes[current as usize])
+                    };
 
                     let token_hash = end_hash.wrapping_add(structure_hash);
-                    hash_delta = hash_delta.wrapping_add(token_hash.wrapping_mul(batch_weights[batch_idx]));
+                    hash_delta = hash_delta.wrapping_add(
+                        token_hash.wrapping_mul(sorted_weights[token_idx]),
+                    );
                 }
 
-                (i, hash_delta)
+                hash_delta
             })
             .collect();
 
-        // Apply updates
-        for (i, delta) in updates {
-            state_hashes[i] = state_hashes[i].wrapping_add(delta);
+        let mut key_to_group: HashMap<(usize, u128), usize> = HashMap::new();
+        let mut num_groups = 0usize;
+        for i in 0..states.len() {
+            let key = (group_ids[i], batch_hashes[i]);
+            let entry = key_to_group.entry(key).or_insert_with(|| {
+                let id = num_groups;
+                num_groups += 1;
+                id
+            });
+            next_group_ids[i] = *entry;
         }
+        std::mem::swap(&mut group_ids, &mut next_group_ids);
 
         tokens_tested = batch_end;
+        if early_stop && tokens_tested * 2 >= total_tokens {
+            if num_groups == prev_groups {
+                stable_batches += 1;
+            } else {
+                stable_batches = 0;
+            }
+            if stable_batches >= 2 {
+                early_stop_triggered = true;
+                break;
+            }
+        }
+
+        prev_groups = num_groups;
+        batch_start = batch_end;
     }
 
-    // Group by final hash
-    let mut groups: HashMap<u128, Vec<usize>> = HashMap::new();
-    for (i, &hash) in state_hashes.iter().enumerate() {
-        groups.entry(hash).or_default().push(i);
+    let num_groups = group_ids.iter().copied().max().map(|v| v + 1).unwrap_or(0);
+    let mut group_sizes = vec![0usize; num_groups];
+    for &gid in &group_ids {
+        group_sizes[gid] += 1;
     }
 
     let phase1_time = instant.elapsed();
-    let num_groups = groups.len();
-    let singleton_groups = groups.values().filter(|g| g.len() == 1).count();
-    let ambiguous_states: usize = groups.values().filter(|g| g.len() > 1).map(|g| g.len()).sum();
+    let singleton_groups = group_sizes.iter().filter(|&&n| n == 1).count();
+    let ambiguous_states: usize = group_sizes.iter().filter(|&&n| n > 1).sum();
 
     crate::debug!(
         4,
@@ -491,162 +597,28 @@ fn find_state_equivalence_classes_token_based(
         tokens_tested
     );
 
-    // If all groups are singletons, we're done (no states are equivalent)
-    if ambiguous_states == 0 {
-        // Convert from state index to state ID
-        let mapping: Vec<usize> = states.to_vec();
+    if early_stop_triggered {
         crate::debug!(
-            3,
-            "State equivalence analysis took {:.2?}. Reduced {} states to {} (all unique).",
-            instant.elapsed(),
-            states.len(),
-            states.len()
+            4,
+            "State equiv early stop enabled: processed {} of {} tokens",
+            tokens_tested,
+            total_tokens
         );
-        return mapping;
     }
 
-    // If we've tested ALL tokens in phase 1, the groups are already correct.
-    // Phase 2 would just recompute the same result.
-    // All non-singleton states have seen all tokens (singletons stopped early but are already unique).
-    if tokens_tested >= tokens.len() {
-        // Build mapping from phase 1 groups
-        // Note: groups contains state indices (positions in `states`), not state IDs
-        let mut mapping = vec![0usize; states.len()];
-        for group in groups.values() {
-            let rep_state_id = states[group[0]]; // Convert representative index to state ID
-            for &idx in group {
-                mapping[idx] = rep_state_id;
-            }
+    let mut rep_for_group: Vec<usize> = vec![usize::MAX; num_groups];
+    for (idx, &gid) in group_ids.iter().enumerate() {
+        if rep_for_group[gid] == usize::MAX {
+            rep_for_group[gid] = states[idx];
         }
-        let num_representatives: usize = mapping.iter().collect::<std::collections::HashSet<_>>().len();
-        crate::debug!(
-            3,
-            "State equivalence analysis took {:.2?}. Reduced {} states to {} (phase 1 complete).",
-            instant.elapsed(),
-            states.len(),
-            num_representatives
-        );
-        return mapping;
     }
 
-    // PHASE 2: Full token analysis for ambiguous states
-    // =========================================================================
-    // Only needed when phase 1 didn't test all tokens (early exit due to all singletons).
-    // Use full token analysis for correctness.
-
-    // Collect all ambiguous state indices (positions in `states` array)
-    let ambiguous_idx_list: Vec<usize> = groups
-        .values()
-        .filter(|g| g.len() > 1)
-        .flat_map(|g| g.iter().copied())
-        .collect();
-
-    // Full analysis: use all tokens
-    let phase2_tokens: Vec<&Vec<u8>> = tokens.iter().collect();
-    let phase2_token_weights: Vec<u128> = (0..tokens.len())
-        .map(|i| mix_u128(((i + 1) as u128).wrapping_mul(0x9E3779B97F4A7C15)))
-        .collect();
-
-    crate::debug!(
-        4,
-        "State equiv phase 2: analyzing {} states with {} tokens (full)",
-        ambiguous_states,
-        phase2_tokens.len()
-    );
-    // Compute signatures for all ambiguous states in parallel
-    // Returns (state_index, signature) pairs
-    let ambiguous_signatures: Vec<(usize, u128)> = ambiguous_idx_list
-        .par_iter()
-        .map(|&idx| {
-            let state = states[idx]; // Convert index to actual state ID
-            let mut hash: u128 = 0;
-
-            for (token_idx, token) in phase2_tokens.iter().enumerate() {
-                let mut current = state as u32;
-                let mut dead_at_depth: Option<usize> = None;
-
-                // Track (group_id, position) with proper greedy/non-greedy semantics
-                let mut matches: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
-
-                const NONE_STATE: u32 = u32::MAX;
-                for (depth, &byte) in (*token).iter().enumerate() {
-                    let next = dfa_transitions[current as usize][byte as usize];
-                    if next == NONE_STATE {
-                        dead_at_depth = Some(depth + 1);
-                        current = NONE_STATE;
-                        break;
-                    }
-                    current = next;
-                    let position = depth + 1;
-
-                    // Record matches with proper greedy/non-greedy semantics
-                    for &gid in &dfa_finalizers[current as usize] {
-                        if non_greedy_finalizers.contains(&gid) {
-                            // Non-greedy: keep first
-                            matches.entry(gid).or_insert(position);
-                        } else {
-                            // Greedy: keep last
-                            matches.insert(gid, position);
-                        }
-                    }
-                }
-
-                // Hash structure: dead position OR (matches + end state)
-                let structure_hash: u128;
-                let end_hash: u128;
-
-                if let Some(dead_depth) = dead_at_depth {
-                    // Token leads to dead state - hash the dead depth
-                    structure_hash = mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD);
-                    end_hash = mix_u128(0xDEADBEEF_u128);
-                } else {
-                    // Token is valid - hash the (group_id, position) pairs
-                    let mut sh = mix_u128(matches.len() as u128 | (1u128 << 48));
-                    for (&gid, &pos) in &matches {
-                        sh = sh.wrapping_add(mix_u128((gid as u128) | ((pos as u128) << 32)));
-                    }
-                    structure_hash = sh;
-
-                    // Hash end state possible_futures (precomputed)
-                    end_hash = end_state_hashes[current as usize];
-                }
-
-                let token_hash = end_hash.wrapping_add(structure_hash);
-                hash = hash.wrapping_add(token_hash.wrapping_mul(phase2_token_weights[token_idx]));
-            }
-
-            (idx, hash) // Return index, not state ID
-        })
-        .collect();
-
-    // Build index -> signature map
-    let idx_to_sig: HashMap<usize, u128> = ambiguous_signatures.iter().copied().collect();
-
-    // Build final mapping: mapping[index] = representative state ID
     let mut mapping = vec![0usize; states.len()];
-
-    // Singleton groups: state maps to itself
-    for group in groups.values() {
-        if group.len() == 1 {
-            let idx = group[0];
-            mapping[idx] = states[idx]; // Map to own state ID
-        }
+    for (idx, &gid) in group_ids.iter().enumerate() {
+        mapping[idx] = rep_for_group[gid];
     }
 
-    // Ambiguous groups: refine by full signature
-    for group in groups.values() {
-        if group.len() > 1 {
-            // Group by full signature within this group
-            let mut sig_to_rep: HashMap<u128, usize> = HashMap::new();
-            for &idx in group {
-                let sig = idx_to_sig[&idx];
-                let rep_idx = *sig_to_rep.entry(sig).or_insert(idx);
-                mapping[idx] = states[rep_idx]; // Map to representative's state ID
-            }
-        }
-    }
-
-    let num_representatives: usize = mapping.iter().collect::<std::collections::HashSet<_>>().len();
+    let num_representatives = rep_for_group.iter().filter(|&&v| v != usize::MAX).count();
 
     crate::debug!(
         3,
