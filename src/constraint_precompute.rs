@@ -866,8 +866,8 @@ impl<'r> Precomputer1<'r> {
         }
 
         let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true);
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         if do_nwa_suffix_prune {
             match (&self.suffix_prune_grammar, &self.suffix_prune_terminal_map) {
                 (Some(grammar_def), Some(terminal_map)) => {

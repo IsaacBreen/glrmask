@@ -1540,7 +1540,7 @@ impl GrammarConstraint {
 
         let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+            .unwrap_or(false);
         let suffix_prune_grammar = if do_nwa_suffix_prune {
             grammar_definition.clone()
         } else {

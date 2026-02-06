@@ -257,12 +257,15 @@ impl NWA {
     }
 
     fn collapse_all_weight_eps(&self) -> Option<NWA> {
+        let profile_rm_epsilon = std::env::var("PROFILE_RM_EPSILON").is_ok();
+        let mut union_time = std::time::Duration::ZERO;
         let states = &self.states.0;
         let num_states = states.len();
         if num_states == 0 {
             return None;
         }
 
+        let scc_start = Instant::now();
         let mut adj_all: Vec<Vec<NWAStateID>> = vec![Vec::new(); num_states];
         let mut radj_all: Vec<Vec<NWAStateID>> = vec![Vec::new(); num_states];
         let mut all_eps = 0usize;
@@ -368,6 +371,10 @@ impl NWA {
             }
         }
 
+        let scc_elapsed = scc_start.elapsed();
+
+        let collect_start = Instant::now();
+
         let mut comp_transitions: Vec<BTreeMap<Label, HashMap<NWAStateID, Weight>>> =
             vec![BTreeMap::new(); num_comps];
         let mut comp_eps: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); num_comps];
@@ -378,7 +385,17 @@ impl NWA {
             if let Some(fw) = &st.final_weight {
                 if !fw.is_empty() {
                     comp_final[cu] = Some(match comp_final[cu].take() {
-                        Some(cur) => cur | fw,
+                        Some(cur) => {
+                            if profile_rm_epsilon {
+                                let mut acc = cur;
+                                let start = Instant::now();
+                                acc |= fw;
+                                union_time += start.elapsed();
+                                acc
+                            } else {
+                                cur | fw
+                            }
+                        }
                         None => fw.clone(),
                     });
                 }
@@ -393,7 +410,15 @@ impl NWA {
                     let ct = comp_id[*tgt];
                     entry
                         .entry(ct)
-                        .and_modify(|acc| *acc |= w)
+                        .and_modify(|acc| {
+                            if profile_rm_epsilon {
+                                let start = Instant::now();
+                                *acc |= w;
+                                union_time += start.elapsed();
+                            } else {
+                                *acc |= w;
+                            }
+                        })
                         .or_insert_with(|| w.clone());
                 }
             }
@@ -405,11 +430,22 @@ impl NWA {
                 let cv = comp_id[*v];
                 comp_eps[cu]
                     .entry(cv)
-                    .and_modify(|acc| *acc |= w)
+                    .and_modify(|acc| {
+                        if profile_rm_epsilon {
+                            let start = Instant::now();
+                            *acc |= w;
+                            union_time += start.elapsed();
+                        } else {
+                            *acc |= w;
+                        }
+                    })
                     .or_insert_with(|| w.clone());
             }
         }
 
+        let collect_elapsed = collect_start.elapsed();
+
+        let propagate_start = Instant::now();
         for &c in topo.iter().rev() {
             for &succ in &comp_adj[c] {
                 let (c_final, succ_final) = if c < succ {
@@ -462,11 +498,23 @@ impl NWA {
                     }
                     c_eps
                         .entry(*tgt)
-                        .and_modify(|acc| *acc |= w)
+                        .and_modify(|acc| {
+                            if profile_rm_epsilon {
+                                let start = Instant::now();
+                                *acc |= w;
+                                union_time += start.elapsed();
+                            } else {
+                                *acc |= w;
+                            }
+                        })
                         .or_insert_with(|| w.clone());
                 }
             }
         }
+
+        let propagate_elapsed = propagate_start.elapsed();
+
+        let build_start = Instant::now();
 
         let mut new_states: Vec<NWAState> = Vec::with_capacity(num_comps);
         for c in 0..num_comps {
@@ -493,6 +541,17 @@ impl NWA {
             .collect();
         new_starts.sort_unstable();
         new_starts.dedup();
+
+        let build_elapsed = build_start.elapsed();
+
+        if profile_rm_epsilon {
+            eprintln!("TIMING: NWA::rm_epsilon::precollapse_scc_elapsed {:?}", scc_elapsed);
+            eprintln!("TIMING: NWA::rm_epsilon::precollapse_scc_components {}", num_comps);
+            eprintln!("TIMING: NWA::rm_epsilon::precollapse_collect_elapsed {:?}", collect_elapsed);
+            eprintln!("TIMING: NWA::rm_epsilon::precollapse_propagate_elapsed {:?}", propagate_elapsed);
+            eprintln!("TIMING: NWA::rm_epsilon::precollapse_build_elapsed {:?}", build_elapsed);
+            eprintln!("TIMING: NWA::rm_epsilon::precollapse_union {:?}", union_time);
+        }
 
         Some(NWA {
             states: NWAStates(new_states),
@@ -1023,9 +1082,16 @@ impl NWA {
             .unwrap_or(true);
         let mut did_precollapse = false;
         if use_precollapse {
-            if let Some(mut reduced) = timeit!("NWA::rm_epsilon::precollapse_all", {
-                self.collapse_all_weight_eps()
-            }) {
+            if profile_rm_epsilon {
+                eprintln!("TIMING: NWA::rm_epsilon::precollapse_eps_count {}", total_epsilons);
+            }
+            let precollapse_start = Instant::now();
+            let reduced_opt = self.collapse_all_weight_eps();
+            let precollapse_elapsed = precollapse_start.elapsed();
+            if profile_rm_epsilon {
+                eprintln!("TIMING: NWA::rm_epsilon::precollapse_elapsed {:?}", precollapse_elapsed);
+            }
+            if let Some(mut reduced) = reduced_opt {
                 let before_states = self.states.len();
                 let before_eps = total_epsilons;
                 let after_states = reduced.states.len();
