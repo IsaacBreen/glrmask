@@ -2148,6 +2148,16 @@ impl CompiledGrammar {
                 .unwrap_or_default();
             eprintln!("TIMING: build_tokenizer.terminal_exprs {:?}", terminal_expr_time);
             eprintln!("TIMING: build_tokenizer.groups {:?}", groups_time);
+            eprintln!(
+                "TIMING: build_tokenizer.nfa_size states={} transitions={}",
+                timings.nfa_states,
+                timings.nfa_transitions
+            );
+            eprintln!(
+                "TIMING: build_tokenizer.dfa_size states={} transitions={}",
+                timings.dfa_states,
+                timings.dfa_transitions
+            );
             eprintln!("TIMING: build_tokenizer.regex.total {:?}", regex_total);
             eprintln!("TIMING: build_tokenizer.regex.stats {:?}", timings.stats);
             eprintln!("TIMING: build_tokenizer.regex.optimize {:?}", timings.optimize);

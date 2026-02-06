@@ -631,6 +631,99 @@ pub struct TokenizerBuildTimings {
     pub to_dfa: TokenizerDfaTimings,
     pub minimize: std::time::Duration,
     pub other: std::time::Duration,
+    pub nfa_states: usize,
+    pub nfa_transitions: usize,
+    pub dfa_states: usize,
+    pub dfa_transitions: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RepeatBoundedSample {
+    pub min: usize,
+    pub max: Option<usize>,
+    pub inner_kind: &'static str,
+    pub inner_nodes: usize,
+    pub est_unroll: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RepeatBoundedStats {
+    pub count: usize,
+    pub with_max: usize,
+    pub without_max: usize,
+    pub max_max: usize,
+    pub max_min: usize,
+    pub inner_kind_counts: BTreeMap<&'static str, usize>,
+    pub top_by_max: Vec<RepeatBoundedSample>,
+    pub top_by_est: Vec<RepeatBoundedSample>,
+}
+
+impl RepeatBoundedStats {
+    fn record(&mut self, min: usize, max: Option<usize>, inner_kind: &'static str, inner_nodes: usize) {
+        self.count += 1;
+        self.max_min = self.max_min.max(min);
+        match max {
+            Some(max_val) => {
+                self.with_max += 1;
+                self.max_max = self.max_max.max(max_val);
+            }
+            None => {
+                self.without_max += 1;
+            }
+        }
+
+        *self.inner_kind_counts.entry(inner_kind).or_insert(0) += 1;
+
+        let max_val = max.unwrap_or(min);
+        let est_unroll = max_val.saturating_mul(inner_nodes.max(1));
+        let sample = RepeatBoundedSample {
+            min,
+            max,
+            inner_kind,
+            inner_nodes,
+            est_unroll,
+        };
+
+        Self::push_top(&mut self.top_by_est, sample.clone(), |s| s.est_unroll);
+        if max.is_some() {
+            Self::push_top(&mut self.top_by_max, sample, |s| s.max.unwrap_or(0));
+        }
+    }
+
+    fn push_top<F>(vec: &mut Vec<RepeatBoundedSample>, sample: RepeatBoundedSample, key: F)
+    where
+        F: Fn(&RepeatBoundedSample) -> usize,
+    {
+        vec.push(sample);
+        vec.sort_by_key(|s| std::cmp::Reverse(key(s)));
+        vec.truncate(10);
+    }
+
+    fn log(&self) {
+        eprintln!(
+            "REPEAT_BOUNDED: count={} with_max={} without_max={} max_max={} max_min={}",
+            self.count, self.with_max, self.without_max, self.max_max, self.max_min
+        );
+        eprintln!("REPEAT_BOUNDED: inner_kinds={:?}", self.inner_kind_counts);
+        if !self.top_by_max.is_empty() {
+            eprintln!("REPEAT_BOUNDED: top_by_max (min,max,kind,inner_nodes,est_unroll):");
+            for s in &self.top_by_max {
+                eprintln!(
+                    "  - min={} max={:?} kind={} inner_nodes={} est_unroll={}",
+                    s.min, s.max, s.inner_kind, s.inner_nodes, s.est_unroll
+                );
+            }
+        }
+        if !self.top_by_est.is_empty() {
+            eprintln!("REPEAT_BOUNDED: top_by_est_unroll (min,max,kind,inner_nodes,est_unroll):");
+            for s in &self.top_by_est {
+                eprintln!(
+                    "  - min={} max={:?} kind={} inner_nodes={} est_unroll={}",
+                    s.min, s.max, s.inner_kind, s.inner_nodes, s.est_unroll
+                );
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for ExprStats {
@@ -733,6 +826,14 @@ impl ExprGroups {
                     Expr::Epsilon => stats.epsilon += 1,
                 }
             }
+        }
+        stats
+    }
+
+    pub fn get_repeat_bounded_stats(&self) -> RepeatBoundedStats {
+        let mut stats = RepeatBoundedStats::default();
+        for group in &self.groups {
+            group.expr.collect_repeat_bounded_stats(&mut stats);
         }
         stats
     }
@@ -975,6 +1076,10 @@ impl ExprGroups {
         let stats = self.get_stats();
         let stats_time = stats_start.elapsed();
         crate::debug!(5, "Expr Stats: {}", stats);
+        if std::env::var("PROFILE_REPEAT_BOUNDED").is_ok() {
+            let repeat_stats = self.get_repeat_bounded_stats();
+            repeat_stats.log();
+        }
 
         // Optimize the expression first to minimize nested quantifiers
         crate::debug!(4, "Optimizing expression");
@@ -1000,6 +1105,8 @@ impl ExprGroups {
         crate::time!("condense_epsilon_sccs", nfa.condense_epsilon_sccs());
         let condense_time = condense_start.elapsed();
         crate::debug!(5, "Condensed NFA {} → {} states in {:.2?}", nfa_states_before, nfa.states.len(), condense_time);
+        let nfa_states = nfa.states.len();
+        let nfa_transitions = nfa.states.iter().map(|s| s.transitions.len() + s.epsilon_transitions.len()).sum();
 
         crate::debug!(4, "Converting NFA to DFA");
         let to_dfa_start = std::time::Instant::now();
@@ -1031,6 +1138,8 @@ impl ExprGroups {
             };
             let accounted = stats_time + optimize_time + build_nfa_time + condense_time + to_dfa_total + minimize_time;
             let other = total_time.checked_sub(accounted).unwrap_or_default();
+            let dfa_states = dfa.states.len();
+            let dfa_transitions = dfa.states.iter().map(|s| s.transitions.len()).sum();
 
             timings.total = total_time;
             timings.stats = stats_time;
@@ -1039,6 +1148,10 @@ impl ExprGroups {
             timings.condense_epsilon_sccs = condense_time;
             timings.minimize = minimize_time;
             timings.other = other;
+            timings.nfa_states = nfa_states;
+            timings.nfa_transitions = nfa_transitions;
+            timings.dfa_states = dfa_states;
+            timings.dfa_transitions = dfa_transitions;
         }
 
         Regex { dfa }
@@ -1159,6 +1272,46 @@ impl Expr {
                 }
             }
             Expr::Epsilon => {}
+        }
+    }
+
+    fn repeat_inner_kind(expr: &Expr) -> &'static str {
+        match expr {
+            Expr::U8Seq(_) => "literal",
+            Expr::U8Class(_) => "charclass",
+            Expr::Shared(inner) => Self::repeat_inner_kind(inner.as_ref()),
+            _ => "subexpr",
+        }
+    }
+
+    fn count_nodes(&self) -> usize {
+        match self {
+            Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => 1,
+            Expr::Shared(inner) => inner.count_nodes(),
+            Expr::Quantifier(inner, _) => 1 + inner.count_nodes(),
+            Expr::RepeatBounded { inner, .. } => 1 + inner.count_nodes(),
+            Expr::Choice(children) | Expr::Seq(children) => {
+                1 + children.iter().map(|c| c.count_nodes()).sum::<usize>()
+            }
+        }
+    }
+
+    fn collect_repeat_bounded_stats(&self, stats: &mut RepeatBoundedStats) {
+        match self {
+            Expr::RepeatBounded { inner, min, max } => {
+                let inner_kind = Self::repeat_inner_kind(inner.as_ref());
+                let inner_nodes = inner.count_nodes();
+                stats.record(*min, *max, inner_kind, inner_nodes);
+                inner.collect_repeat_bounded_stats(stats);
+            }
+            Expr::Quantifier(inner, _) => inner.collect_repeat_bounded_stats(stats),
+            Expr::Choice(children) | Expr::Seq(children) => {
+                for child in children {
+                    child.collect_repeat_bounded_stats(stats);
+                }
+            }
+            Expr::Shared(inner) => inner.collect_repeat_bounded_stats(stats),
+            Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => {}
         }
     }
 
