@@ -2,9 +2,7 @@ use crate::interface::GrammarExpr::CharClass;
 use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
 use regex::Regex;
 use std::collections::HashSet;
-use std::iter::Peekable;
 use std::sync::OnceLock;
-use std::vec::IntoIter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Span {
@@ -263,7 +261,8 @@ pub(super) struct EbnfParseResult {
 
 pub(super) struct EbnfParser<'a> {
     source: &'a str,
-    tokens: Peekable<IntoIter<EbnfToken>>,
+    tokens: Vec<EbnfToken>,
+    pos: usize,
 }
 
 impl<'a> EbnfParser<'a> {
@@ -271,8 +270,23 @@ impl<'a> EbnfParser<'a> {
         let tokens = tokenize(source)?;
         Ok(EbnfParser {
             source,
-            tokens: tokens.into_iter().peekable(),
+            tokens,
+            pos: 0,
         })
+    }
+
+    fn peek(&self) -> Option<&EbnfToken> {
+        self.tokens.get(self.pos)
+    }
+
+    fn advance(&mut self) -> Option<EbnfToken> {
+        if self.pos < self.tokens.len() {
+            let token = self.tokens[self.pos].clone();
+            self.pos += 1;
+            Some(token)
+        } else {
+            None
+        }
     }
 
     fn parse_rule_body(&mut self) -> Result<GrammarExpr, ParseError> {
@@ -290,9 +304,9 @@ impl<'a> EbnfParser<'a> {
         let mut seen_names = HashSet::new();
         let mut ignore_symbol_name = None;
 
-        while self.tokens.peek().is_some() {
+        while self.peek().is_some() {
             if self.peek_grammar_op("#") {
-                let directive_span = self.tokens.peek().unwrap().span;
+                let directive_span = self.peek().unwrap().span;
                 self.consume_grammar_op("#")?;
                 self.expect_grammar_op("!")?;
                 self.expect_grammar_op("[")?;
@@ -362,7 +376,7 @@ impl<'a> EbnfParser<'a> {
     fn parse_grammar_sequence(&mut self) -> Result<GrammarExpr, ParseError> {
         let mut terms = Vec::new();
         // A sequence can be empty, which is a valid choice in an expression (e.g., `A ::= B | ;`)
-        while self.tokens.peek().is_some()
+        while self.peek().is_some()
             && !self.peek_grammar_op(")")
             && !self.peek_grammar_op("]")
             && !self.peek_grammar_op("}")
@@ -392,8 +406,8 @@ impl<'a> EbnfParser<'a> {
         } else if self.peek_grammar_op("+") {
             self.consume_grammar_op("+")?;
             Ok(sequence(vec![factor.clone(), repeat(factor)]))
-        } else if let Some(EbnfToken { kind: EbnfTokenKind::Repetition { min, max }, .. }) = self.tokens.peek().cloned() {
-            self.tokens.next();
+        } else if let Some(EbnfToken { kind: EbnfTokenKind::Repetition { min, max }, .. }) = self.peek().cloned() {
+            self.advance();
             Ok(GrammarExpr::RepeatBounded {
                 min,
                 max,
@@ -408,14 +422,14 @@ impl<'a> EbnfParser<'a> {
         if self.peek_grammar_op(".") {
             self.consume_grammar_op(".")?;
             Ok(GrammarExpr::AnyChar)
-        } else if let Some(EbnfToken { kind: EbnfTokenKind::Ident(id), .. }) = self.tokens.peek().cloned() {
-            self.tokens.next();
+        } else if let Some(EbnfToken { kind: EbnfTokenKind::Ident(id), .. }) = self.peek().cloned() {
+            self.advance();
             Ok(r#ref(&id))
-        } else if let Some(EbnfToken { kind: EbnfTokenKind::Literal(lit), .. }) = self.tokens.peek().cloned() {
-            self.tokens.next();
+        } else if let Some(EbnfToken { kind: EbnfTokenKind::Literal(lit), .. }) = self.peek().cloned() {
+            self.advance();
             Ok(literal(lit.into_bytes()))
-        } else if let Some(EbnfToken { kind: EbnfTokenKind::CharClass(cc), .. }) = self.tokens.peek().cloned() {
-            self.tokens.next();
+        } else if let Some(EbnfToken { kind: EbnfTokenKind::CharClass(cc), .. }) = self.peek().cloned() {
+            self.advance();
             Ok(CharClass(cc))
         } else if self.peek_grammar_op("(") {
             self.consume_grammar_op("(")?;
@@ -433,7 +447,7 @@ impl<'a> EbnfParser<'a> {
             self.expect_grammar_op("}")?;
             Ok(repeat(expr))
         } else {
-            let (message, span) = if let Some(token) = self.tokens.peek() {
+            let (message, span) = if let Some(token) = self.peek() {
                 (
                     format!(
                         "Expected identifier, literal, group, or '.', found {:?}",
@@ -461,25 +475,24 @@ impl<'a> EbnfParser<'a> {
     /// GBNF compatibility: check if we're at the start of a new rule (ident ::=)
     /// Used to detect rule boundaries when there's no semicolon terminator.
     fn at_rule_start(&self) -> bool {
-        let mut iter = self.tokens.clone();
-        if let Some(EbnfToken { kind: EbnfTokenKind::Ident(_), .. }) = iter.next() {
-            if let Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) = iter.next() {
+        if let Some(EbnfToken { kind: EbnfTokenKind::Ident(_), .. }) = self.tokens.get(self.pos) {
+            if let Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) = self.tokens.get(self.pos + 1) {
                 return s == "::=";
             }
         }
         false
     }
 
-    fn peek_grammar_op(&mut self, op: &str) -> bool {
-        matches!(self.tokens.peek(), Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op)
+    fn peek_grammar_op(&self, op: &str) -> bool {
+        matches!(self.peek(), Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op)
     }
 
     fn consume_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
         if self.peek_grammar_op(op) {
-            self.tokens.next();
+            self.advance();
             Ok(())
         } else {
-            let (message, span) = if let Some(token) = self.tokens.peek() {
+            let (message, span) = if let Some(token) = self.peek() {
                 (
                     format!("Expected op '{}', found {:?}", op, &token.kind),
                     token.span,
@@ -495,7 +508,7 @@ impl<'a> EbnfParser<'a> {
     }
 
     fn expect_grammar_op(&mut self, op: &str) -> Result<(), ParseError> {
-        match self.tokens.next() {
+        match self.advance() {
             Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) if s == op => Ok(()),
             Some(other) => Err(ParseError::new(
                 self.source,
@@ -511,7 +524,7 @@ impl<'a> EbnfParser<'a> {
     }
 
     fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
-        match self.tokens.next() {
+        match self.advance() {
             Some(EbnfToken { kind: EbnfTokenKind::Ident(id), span }) => Ok((id, span)),
             Some(other) => Err(ParseError::new(
                 self.source,
