@@ -509,19 +509,36 @@ impl NWA {
             return Some(Vec::new());
         }
 
+        let profile_rm_epsilon = std::env::var("PROFILE_RM_EPSILON").is_ok();
+        let dag_start = std::time::Instant::now();
+        let mut timing_build_adj = std::time::Duration::ZERO;
+        let mut timing_toposort = std::time::Duration::ZERO;
+        let mut timing_build_states = std::time::Duration::ZERO;
+        let mut total_eps = 0usize;
+        let mut states_with_no_eps = 0usize;
+
         let mut adj: Vec<Vec<(NWAStateID, Weight)>> = vec![Vec::new(); num_states];
         let mut indegree = vec![0usize; num_states];
 
+        let build_adj_start = std::time::Instant::now();
         for (u, st) in states.iter().enumerate() {
+            let mut has_eps = false;
             for (v, w) in &st.epsilons {
                 if w.is_empty() {
                     continue;
                 }
+                has_eps = true;
+                total_eps += 1;
                 adj[u].push((*v, w.clone()));
                 indegree[*v] += 1;
             }
+            if !has_eps {
+                states_with_no_eps += 1;
+            }
         }
+        timing_build_adj = build_adj_start.elapsed();
 
+        let toposort_start = std::time::Instant::now();
         let mut queue: VecDeque<NWAStateID> = VecDeque::new();
         for u in 0..num_states {
             if indegree[u] == 0 {
@@ -539,14 +556,22 @@ impl NWA {
                 }
             }
         }
+        timing_toposort = toposort_start.elapsed();
 
         if order.len() != num_states {
             return None; // epsilon graph has cycles
         }
 
-        let mut new_states: Vec<NWAState> = vec![NWAState::default(); num_states];
+        let mut new_states: Vec<NWAState> = states.clone();
+        for st in &mut new_states {
+            st.epsilons.clear();
+        }
 
+        let build_states_start = std::time::Instant::now();
         for &u in order.iter().rev() {
+            if adj[u].is_empty() {
+                continue;
+            }
             let mut final_weight: Option<Weight> = None;
             let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
 
@@ -620,6 +645,19 @@ impl NWA {
             new_state.epsilons.clear();
             new_states[u] = new_state;
         }
+        timing_build_states = build_states_start.elapsed();
+
+        if profile_rm_epsilon {
+            let total = dag_start.elapsed();
+            let sum = timing_build_adj + timing_toposort + timing_build_states;
+            let other = total.saturating_sub(sum);
+            eprintln!("TIMING: NWA::rm_epsilon::dag_build_adj {:?}", timing_build_adj);
+            eprintln!("TIMING: NWA::rm_epsilon::dag_toposort {:?}", timing_toposort);
+            eprintln!("TIMING: NWA::rm_epsilon::dag_build_states {:?}", timing_build_states);
+            eprintln!("TIMING: NWA::rm_epsilon::dag_other {:?}", other);
+            eprintln!("TIMING: NWA::rm_epsilon::dag_total {:?}", total);
+            eprintln!("NWA::rm_epsilon::dag_stats states={} eps={} no_eps_states={}", num_states, total_eps, states_with_no_eps);
+        }
 
         Some(new_states)
     }
@@ -631,6 +669,14 @@ impl NWA {
             self.states.0 = new_states;
             return;
         }
+
+        let profile_rm_epsilon = std::env::var("PROFILE_RM_EPSILON").is_ok();
+        let rm_epsilon_start = std::time::Instant::now();
+        let mut timing_closure = std::time::Duration::ZERO;
+        let mut timing_accumulate = std::time::Duration::ZERO;
+        let mut timing_finalize = std::time::Duration::ZERO;
+        let mut states_with_no_eps = 0usize;
+        let mut total_eps = 0usize;
 
         let weight_all = Weight::all();
         let states = &self.states.0;
@@ -644,6 +690,13 @@ impl NWA {
 
         timeit!("NWA::rm_epsilon::build_states", {
             for u in 0..num_states {
+                let eps_len = states[u].epsilons.len();
+                total_eps += eps_len;
+                if eps_len == 0 {
+                    states_with_no_eps += 1;
+                }
+
+                let closure_start = std::time::Instant::now();
                 touched.clear();
                 queue.clear();
                 closure_weights[u] = weight_all.clone();
@@ -675,10 +728,12 @@ impl NWA {
                         }
                     }
                 }
+                timing_closure += closure_start.elapsed();
 
                 let mut final_weight: Option<Weight> = None;
                 let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
 
+                let accumulate_start = std::time::Instant::now();
                 timeit!("NWA::rm_epsilon::accumulate", {
                     for &v in &touched {
                         let w_uv = &closure_weights[v];
@@ -723,7 +778,9 @@ impl NWA {
                         }
                     }
                 });
+                timing_accumulate += accumulate_start.elapsed();
 
+                let finalize_start = std::time::Instant::now();
                 let mut new_state = NWAState::default();
                 new_state.final_weight = final_weight;
                 new_state.transitions = trans_map
@@ -737,10 +794,23 @@ impl NWA {
                     closure_weights[v] = Weight::zeros();
                     in_queue[v] = false;
                 }
+                timing_finalize += finalize_start.elapsed();
             }
         });
 
         self.states.0 = new_states;
+
+        if profile_rm_epsilon {
+            let total = rm_epsilon_start.elapsed();
+            let sum = timing_closure + timing_accumulate + timing_finalize;
+            let other = total.saturating_sub(sum);
+            eprintln!("TIMING: NWA::rm_epsilon::closure {:?}", timing_closure);
+            eprintln!("TIMING: NWA::rm_epsilon::accumulate {:?}", timing_accumulate);
+            eprintln!("TIMING: NWA::rm_epsilon::finalize {:?}", timing_finalize);
+            eprintln!("TIMING: NWA::rm_epsilon::other {:?}", other);
+            eprintln!("TIMING: NWA::rm_epsilon::total {:?}", total);
+            eprintln!("NWA::rm_epsilon::stats states={} eps={} no_eps_states={}", num_states, total_eps, states_with_no_eps);
+        }
     }
 
     pub fn rm_epsilon(&mut self) {
