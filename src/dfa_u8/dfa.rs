@@ -1920,6 +1920,13 @@ impl NFA {
         new_index
     }
 
+    pub fn transition_count(&self) -> usize {
+        self.states
+            .iter()
+            .map(|s| s.transitions.len() + s.epsilon_transitions.len())
+            .sum()
+    }
+
     pub fn add_transition(&mut self, from: usize, on_u8: u8, to: usize) {
         self.states[from].transitions.push((U8Set::from_u8(on_u8), to));
     }

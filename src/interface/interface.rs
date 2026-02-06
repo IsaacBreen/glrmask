@@ -2130,6 +2130,44 @@ impl CompiledGrammar {
         let terminal_expr_start = std::time::Instant::now();
         let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
         let terminal_expr_time = terminal_expr_start.elapsed();
+        if std::env::var("PROFILE_TOKENIZER_GROUPS").is_ok() {
+            let mut labels: Vec<String> = (0..terminal_expr_groups.len())
+                .map(|idx| format!("group_{}", idx))
+                .collect();
+            for (name, group_id) in &definition.regex_name_to_group_id {
+                if *group_id < labels.len() {
+                    labels[*group_id] = format!("regex:{}", name);
+                }
+            }
+            for (val_bytes, group_id) in &definition.literal_to_group_id {
+                if *group_id < labels.len() {
+                    labels[*group_id] = format!("literal:{:?}", val_bytes);
+                }
+            }
+            for (name, group_id) in &definition.external_name_to_group_id {
+                if *group_id < labels.len() {
+                    labels[*group_id] = format!("external:{}", name);
+                }
+            }
+
+            let mut group_stats: Vec<(usize, String, usize, usize)> = Vec::with_capacity(terminal_expr_groups.len());
+            for (group_id, expr_group) in terminal_expr_groups.iter().enumerate() {
+                let expr_groups = crate::finite_automata::ExprGroups {
+                    groups: vec![expr_group.clone()],
+                };
+                let nfa = expr_groups.build_nfa();
+                group_stats.push((group_id, labels[group_id].clone(), nfa.states.len(), nfa.transition_count()));
+            }
+
+            group_stats.sort_by_key(|(_, _, states, _)| std::cmp::Reverse(*states));
+            eprintln!("TOKENIZER_GROUPS: top by NFA states (group_id,label,states,transitions):");
+            for (group_id, label, states, transitions) in group_stats.iter().take(10) {
+                eprintln!(
+                    "  - id={} label={} states={} transitions={}",
+                    group_id, label, states, transitions
+                );
+            }
+        }
         let groups_start = std::time::Instant::now();
         let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
         let groups_time = groups_start.elapsed();
