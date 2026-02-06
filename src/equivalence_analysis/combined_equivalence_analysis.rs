@@ -50,6 +50,8 @@ pub fn compute_combined_equivalence(
     let state_reduction_threshold = 50;
 
     let start = std::time::Instant::now();
+    let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
+    let state_start = std::time::Instant::now();
     
     // Step 1: State equivalence analysis (if beneficial)
     let (reduced_states, state_classes) = if initial_states.len() > state_reduction_threshold {
@@ -89,6 +91,16 @@ pub fn compute_combined_equivalence(
         
         (initial_states.to_vec(), state_classes)
     };
+
+    let state_time = state_start.elapsed();
+    if profile_equivalence {
+        eprintln!(
+            "TIMING: equivalence.state {:?} ({} -> {} states)",
+            state_time,
+            initial_states.len(),
+            reduced_states.len(),
+        );
+    }
     
     // Step 2: Vocab equivalence analysis on reduced states
     let vocab_start = std::time::Instant::now();
@@ -98,6 +110,17 @@ pub fn compute_combined_equivalence(
         tokens,
         &reduced_states,
     );
+
+    if profile_equivalence {
+        let vocab_time = vocab_start.elapsed();
+        eprintln!(
+            "TIMING: equivalence.vocab {:?} ({} tokens -> {} classes)",
+            vocab_time,
+            tokens.len(),
+            vocab_classes.len(),
+        );
+        eprintln!("TIMING: equivalence.total {:?}", start.elapsed());
+    }
     
     crate::debug!(
         3,
