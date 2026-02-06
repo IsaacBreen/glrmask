@@ -31,6 +31,7 @@
 //! ```
 
 use crate::interface::GrammarExpr;
+use std::collections::BTreeMap;
 use serde_json::Value;
 
 // Type definitions
@@ -64,6 +65,11 @@ pub use emit::GrammarEmitter;
 /// This is the main entry point for JSON Schema → EBNF conversion.
 pub fn json_schema_to_ebnf(schema_json: &str) -> Result<String, String> {
     let rules = json_schema_to_grammar_exprs(schema_json)?;
+
+    if std::env::var("PROFILE_GRAMMAR_REPEAT_BOUNDED").is_ok() {
+        let stats = GrammarRepeatBoundedStats::from_rules(&rules);
+        stats.log();
+    }
     
     // Check if whitespace is disabled
     let no_whitespace = std::env::var("SEP1_NO_JSON_WHITESPACE")
@@ -93,6 +99,99 @@ pub fn json_schema_to_ebnf(schema_json: &str) -> Result<String, String> {
     }
     
     Ok(ebnf)
+}
+
+#[derive(Debug, Default, Clone)]
+struct GrammarRepeatBoundedSample {
+    rule: String,
+    min: usize,
+    max: Option<usize>,
+    inner_kind: &'static str,
+}
+
+#[derive(Debug, Default, Clone)]
+struct GrammarRepeatBoundedStats {
+    count: usize,
+    with_max: usize,
+    without_max: usize,
+    max_max: usize,
+    inner_kind_counts: BTreeMap<&'static str, usize>,
+    top_by_max: Vec<GrammarRepeatBoundedSample>,
+}
+
+impl GrammarRepeatBoundedStats {
+    fn from_rules(rules: &[(String, GrammarExpr)]) -> Self {
+        let mut stats = GrammarRepeatBoundedStats::default();
+        for (name, expr) in rules {
+            if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                stats.collect(expr, name);
+            }
+        }
+        stats
+    }
+
+    fn inner_kind(expr: &GrammarExpr) -> &'static str {
+        match expr {
+            GrammarExpr::Literal(_) => "literal",
+            GrammarExpr::CharClass(_) => "charclass",
+            GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => Self::inner_kind(inner),
+            GrammarExpr::RepeatBounded { inner, .. } => Self::inner_kind(inner),
+            _ => "subexpr",
+        }
+    }
+
+    fn collect(&mut self, expr: &GrammarExpr, rule: &str) {
+        match expr {
+            GrammarExpr::RepeatBounded { min, max, inner } => {
+                self.count += 1;
+                match max {
+                    Some(max_val) => {
+                        self.with_max += 1;
+                        self.max_max = self.max_max.max(*max_val);
+                    }
+                    None => self.without_max += 1,
+                }
+
+                let inner_kind = Self::inner_kind(inner);
+                *self.inner_kind_counts.entry(inner_kind).or_insert(0) += 1;
+
+                let sample = GrammarRepeatBoundedSample {
+                    rule: rule.to_string(),
+                    min: *min,
+                    max: *max,
+                    inner_kind,
+                };
+                self.top_by_max.push(sample);
+            }
+            GrammarExpr::Sequence(children) | GrammarExpr::Choice(children) => {
+                for child in children {
+                    self.collect(child, rule);
+                }
+            }
+            GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => self.collect(inner, rule),
+            GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::CharClass(_) | GrammarExpr::AnyChar => {}
+        }
+    }
+
+    fn log(&self) {
+        let mut top_by_max = self.top_by_max.clone();
+        top_by_max.sort_by_key(|s| std::cmp::Reverse(s.max.unwrap_or(0)));
+        top_by_max.truncate(10);
+        eprintln!(
+            "GRAMMAR_REPEAT_BOUNDED: count={} with_max={} without_max={} max_max={}",
+            self.count, self.with_max, self.without_max, self.max_max
+        );
+        eprintln!("GRAMMAR_REPEAT_BOUNDED: inner_kinds={:?}", self.inner_kind_counts);
+        if !top_by_max.is_empty() {
+            eprintln!("GRAMMAR_REPEAT_BOUNDED: top_by_max (rule,min,max,kind):");
+            for s in &top_by_max {
+                eprintln!(
+                    "  - rule={} min={} max={:?} kind={}",
+                    s.rule, s.min, s.max, s.inner_kind
+                );
+            }
+        }
+    }
 }
 
 /// Convert a JSON Schema to a Vec<(String, GrammarExpr)>.
