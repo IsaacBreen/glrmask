@@ -1897,12 +1897,16 @@ fn are_compatible(
     let _compat_timer = TimingGuard::new(&ARE_COMPAT_NANOS);
     let needed_u = &needed[u];
     let needed_v = &needed[v];
-    let domain_overlap = needed_u & needed_v;
-    let domain_overlap_empty = domain_overlap.is_empty();
+    
+    // Fast disjoint check: avoids expensive full intersection when sets don't overlap
+    let domain_overlap_empty = needed_u.is_disjoint_with(needed_v);
+    // Lazily compute full overlap only when needed
+    let domain_overlap_lazy = || needed_u & needed_v;
 
     let fw_u = dwa.states[u].final_weight.as_ref();
     let fw_v = dwa.states[v].final_weight.as_ref();
     if !domain_overlap_empty && fw_u != fw_v {
+        let domain_overlap = domain_overlap_lazy();
         let fw_u_overlap = fw_u
             .map(|w| w & &domain_overlap)
             .unwrap_or_else(Weight::zeros);
@@ -1919,6 +1923,8 @@ fn are_compatible(
     let trans_v = &productive_transitions[v];
     let mut idx_u = 0usize;
     let mut idx_v = 0usize;
+    // Lazily materialize domain_overlap for transition checks
+    let mut domain_overlap_cached: Option<Weight> = None;
 
     while idx_u < trans_u.len() || idx_v < trans_v.len() {
         let (entry_u, entry_v) = match (trans_u.get(idx_u), trans_v.get(idx_v)) {
@@ -1950,11 +1956,13 @@ fn are_compatible(
         let w_v_productive = entry_v.map(|t| (t.target, &t.weight));
 
         if !domain_overlap_empty {
+            let domain_overlap = domain_overlap_cached
+                .get_or_insert_with(|| domain_overlap_lazy());
             let w_u_overlap = w_u_productive
-                .map(|(_, w)| w & &domain_overlap)
+                .map(|(_, w)| w & domain_overlap)
                 .unwrap_or_else(Weight::zeros);
             let w_v_overlap = w_v_productive
-                .map(|(_, w)| w & &domain_overlap)
+                .map(|(_, w)| w & domain_overlap)
                 .unwrap_or_else(Weight::zeros);
 
             if w_u_overlap.is_empty() && w_v_overlap.is_empty() {
@@ -1982,7 +1990,6 @@ fn are_compatible(
     }
     true
 }
-
 /// Check if two transition targets are compatible for merging.
 fn targets_compatible(
     tu: StateID,
@@ -2461,14 +2468,61 @@ fn build_incompatibility_graph_general(
     let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
+    let mut skipped_by_labels = 0usize;
     let mut compare_time = std::time::Duration::ZERO;
-    
-    // Compare across groups
+
+    // Pre-compute productive label sets and mapped target maps per candidate
+    // for fast cross-group filtering
+    let candidate_label_targets: Vec<FxHashMap<Label, Option<StateID>>> = candidates.iter().map(|&id| {
+        let mut lt = FxHashMap::default();
+        for t in &productive_transitions[id] {
+            let mapped = old_to_new_get(old_to_new, t.target);
+            lt.insert(t.label, mapped);
+        }
+        lt
+    }).collect();
+
+    // Compare across groups, with fast label-target conflict filtering
     timeit!("coloring::build_incompatibility_graph::compare_pairs", {
         for i in 0..groups.len() {
             for j in (i + 1)..groups.len() {
                 for &idx_i in &groups[i] {
                     for &idx_j in &groups[j] {
+                        // Fast check: do they share any label with different mapped targets?
+                        // If no shared labels at all, then targets_compatible is never called,
+                        // so check if needed sets overlap (the only other incompatibility source)
+                        let lt_i = &candidate_label_targets[idx_i];
+                        let lt_j = &candidate_label_targets[idx_j];
+
+                        // Quick skip: if one has no productive transitions,
+                        // incompatibility can only come from needed overlap + final weight
+                        let have_label_conflict = if lt_i.len() <= lt_j.len() {
+                            lt_i.iter().any(|(label, target_i)| {
+                                if let Some(target_j) = lt_j.get(label) {
+                                    target_i != target_j
+                                } else {
+                                    false
+                                }
+                            })
+                        } else {
+                            lt_j.iter().any(|(label, target_j)| {
+                                if let Some(target_i) = lt_i.get(label) {
+                                    target_i != target_j
+                                } else {
+                                    false
+                                }
+                            })
+                        };
+
+                        if have_label_conflict {
+                            // Definitely incompatible: different mapped targets on shared label
+                            adj[idx_i].push(idx_j);
+                            adj[idx_j].push(idx_i);
+                            edge_count += 1;
+                            skipped_by_labels += 1;
+                            continue;
+                        }
+
                         compare_count += 1;
                         let cmp_start = std::time::Instant::now();
                         let compatible = are_compatible(
@@ -2519,8 +2573,8 @@ fn build_incompatibility_graph_general(
     if n >= 100 && !suppress_height_logs {
         let total_time = start.elapsed();
         let unaccounted = total_time.saturating_sub(compare_time);
-        crate::debug!(5, "Incomp graph: {} candidates, {} sig groups, {} comparisons, {} edges, {:?}",
-            n, num_groups, compare_count, edge_count, total_time);
+        crate::debug!(5, "Incomp graph: {} candidates, {} sig groups, {} comparisons ({} skipped by label-target), {} edges, {:?}",
+            n, num_groups, compare_count, skipped_by_labels, edge_count, total_time);
         crate::debug!(5, "Incomp graph breakdown: compare={:?}, unaccounted={:?}",
             compare_time, unaccounted);
     }

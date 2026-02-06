@@ -927,6 +927,24 @@ impl AbstractWeight {
         }
     }
 
+    /// Check if two weights are disjoint (no overlapping positions).
+    /// This is cheaper than computing the full intersection and checking is_empty,
+    /// because it can early-exit as soon as any overlap is found.
+    pub fn is_disjoint_with(&self, other: &Self) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return true;
+        }
+        match (self, other) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                a.is_disjoint(b)
+            }
+            _ => {
+                // Fallback: compute intersection and check empty
+                (self & other).is_empty()
+            }
+        }
+    }
+
     /// Get the number of positions in the weight.
     pub fn len(&self) -> usize {
         match self {
