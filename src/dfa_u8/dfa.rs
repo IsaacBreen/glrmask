@@ -1053,6 +1053,12 @@ impl ExprGroups {
         (regex, timings)
     }
 
+    pub fn build_with_timings_unminimized(self) -> (Regex, TokenizerBuildTimings) {
+        let mut timings = TokenizerBuildTimings::default();
+        let regex = self.build_impl(false, Some(&mut timings));
+        (regex, timings)
+    }
+
     fn build_impl(
         self,
         minimize: bool,

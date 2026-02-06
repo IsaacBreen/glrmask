@@ -2171,11 +2171,25 @@ impl CompiledGrammar {
         let groups_start = std::time::Instant::now();
         let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
         let groups_time = groups_start.elapsed();
+        let skip_minimize = std::env::var("SKIP_TOKENIZER_DFA_MINIMIZE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let force_minimize = std::env::var("FORCE_TOKENIZER_DFA_MINIMIZE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let minimize_dfa = force_minimize && !skip_minimize;
+
         let (tokenizer_regex, tokenizer_timings) = if profile_tokenizer {
-            let (regex, timings) = tokenizer_expr_groups_obj.build_with_timings();
+            let (regex, timings) = if minimize_dfa {
+                tokenizer_expr_groups_obj.build_with_timings()
+            } else {
+                tokenizer_expr_groups_obj.build_with_timings_unminimized()
+            };
             (regex, Some(timings))
-        } else {
+        } else if minimize_dfa {
             (tokenizer_expr_groups_obj.build(), None)
+        } else {
+            (tokenizer_expr_groups_obj.build_unminimized(), None)
         };
         let tokenizer = Tokenizer::new(tokenizer_regex);
         let tokenizer_total = tokenizer_start.elapsed();
