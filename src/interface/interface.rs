@@ -2158,6 +2158,10 @@ impl CompiledGrammar {
                 timings.dfa_states,
                 timings.dfa_transitions
             );
+            eprintln!(
+                "TIMING: build_tokenizer.dfa_unique_pairs {}",
+                timings.dfa_unique_pairs
+            );
             eprintln!("TIMING: build_tokenizer.regex.total {:?}", regex_total);
             eprintln!("TIMING: build_tokenizer.regex.stats {:?}", timings.stats);
             eprintln!("TIMING: build_tokenizer.regex.optimize {:?}", timings.optimize);

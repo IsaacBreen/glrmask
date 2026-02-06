@@ -635,6 +635,7 @@ pub struct TokenizerBuildTimings {
     pub nfa_transitions: usize,
     pub dfa_states: usize,
     pub dfa_transitions: usize,
+    pub dfa_unique_pairs: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1140,6 +1141,13 @@ impl ExprGroups {
             let other = total_time.checked_sub(accounted).unwrap_or_default();
             let dfa_states = dfa.states.len();
             let dfa_transitions = dfa.states.iter().map(|s| s.transitions.len()).sum();
+            let dfa_unique_pairs = dfa.states.iter().map(|s| {
+                let mut targets = rustc_hash::FxHashSet::default();
+                for (_, target) in &s.transitions {
+                    targets.insert(*target);
+                }
+                targets.len()
+            }).sum();
 
             timings.total = total_time;
             timings.stats = stats_time;
@@ -1152,6 +1160,7 @@ impl ExprGroups {
             timings.nfa_transitions = nfa_transitions;
             timings.dfa_states = dfa_states;
             timings.dfa_transitions = dfa_transitions;
+            timings.dfa_unique_pairs = dfa_unique_pairs;
         }
 
         Regex { dfa }
