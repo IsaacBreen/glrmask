@@ -502,11 +502,10 @@ impl NWA {
         })
     }
 
-    fn try_rm_epsilon_weighted_dag(&self) -> Option<Vec<NWAState>> {
-        let states = &self.states.0;
-        let num_states = states.len();
+    fn try_rm_epsilon_weighted_dag_in_place(&mut self) -> bool {
+        let num_states = self.states.len();
         if num_states == 0 {
-            return Some(Vec::new());
+            return true;
         }
 
         let profile_rm_epsilon = std::env::var("PROFILE_RM_EPSILON").is_ok();
@@ -521,19 +520,22 @@ impl NWA {
         let mut indegree = vec![0usize; num_states];
 
         let build_adj_start = std::time::Instant::now();
-        for (u, st) in states.iter().enumerate() {
-            let mut has_eps = false;
-            for (v, w) in &st.epsilons {
-                if w.is_empty() {
-                    continue;
+        {
+            let states = &self.states.0;
+            for (u, st) in states.iter().enumerate() {
+                let mut has_eps = false;
+                for (v, w) in &st.epsilons {
+                    if w.is_empty() {
+                        continue;
+                    }
+                    has_eps = true;
+                    total_eps += 1;
+                    adj[u].push((*v, w.clone()));
+                    indegree[*v] += 1;
                 }
-                has_eps = true;
-                total_eps += 1;
-                adj[u].push((*v, w.clone()));
-                indegree[*v] += 1;
-            }
-            if !has_eps {
-                states_with_no_eps += 1;
+                if !has_eps {
+                    states_with_no_eps += 1;
+                }
             }
         }
         timing_build_adj = build_adj_start.elapsed();
@@ -559,91 +561,93 @@ impl NWA {
         timing_toposort = toposort_start.elapsed();
 
         if order.len() != num_states {
-            return None; // epsilon graph has cycles
-        }
-
-        let mut new_states: Vec<NWAState> = states.clone();
-        for st in &mut new_states {
-            st.epsilons.clear();
+            return false; // epsilon graph has cycles
         }
 
         let build_states_start = std::time::Instant::now();
         for &u in order.iter().rev() {
             if adj[u].is_empty() {
+                self.states.0[u].epsilons.clear();
                 continue;
             }
-            let mut final_weight: Option<Weight> = None;
-            let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
 
-            if let Some(fw) = &states[u].final_weight {
-                if !fw.is_empty() {
-                    final_weight = Some(fw.clone());
-                }
-            }
+            let new_state = {
+                let states = &self.states.0;
+                let mut final_weight: Option<Weight> = None;
+                let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
 
-            for (label, targets) in &states[u].transitions {
-                let entry = trans_map.entry(*label).or_insert_with(HashMap::new);
-                for (tgt, w_tr) in targets {
-                    if w_tr.is_empty() {
-                        continue;
-                    }
-                    entry
-                        .entry(*tgt)
-                        .and_modify(|acc| *acc |= w_tr)
-                        .or_insert_with(|| w_tr.clone());
-                }
-            }
-
-            for (v, w_uv) in &adj[u] {
-                if w_uv.is_empty() {
-                    continue;
-                }
-                let w_uv_all = w_uv.is_all_fast();
-
-                if let Some(fw) = &new_states[*v].final_weight {
+                if let Some(fw) = &states[u].final_weight {
                     if !fw.is_empty() {
-                        let w = if w_uv_all { fw.clone() } else { w_uv & fw };
-                        if !w.is_empty() {
-                            final_weight = Some(match final_weight {
-                                Some(cur) => cur | &w,
-                                None => w,
-                            });
-                        }
+                        final_weight = Some(fw.clone());
                     }
                 }
 
-                for (label, targets) in &new_states[*v].transitions {
+                for (label, targets) in &states[u].transitions {
                     let entry = trans_map.entry(*label).or_insert_with(HashMap::new);
                     for (tgt, w_tr) in targets {
                         if w_tr.is_empty() {
                             continue;
                         }
-                        let w = if w_uv_all {
-                            w_tr.clone()
-                        } else if w_tr.is_all_fast() {
-                            w_uv.clone()
-                        } else {
-                            w_uv & w_tr
-                        };
-                        if w.is_empty() {
-                            continue;
-                        }
                         entry
                             .entry(*tgt)
-                            .and_modify(|acc| *acc |= &w)
-                            .or_insert(w);
+                            .and_modify(|acc| *acc |= w_tr)
+                            .or_insert_with(|| w_tr.clone());
                     }
                 }
-            }
 
-            let mut new_state = NWAState::default();
-            new_state.final_weight = final_weight;
-            new_state.transitions = trans_map
-                .into_iter()
-                .map(|(label, map)| (label, map.into_iter().collect()))
-                .collect();
-            new_state.epsilons.clear();
-            new_states[u] = new_state;
+                for (v, w_uv) in &adj[u] {
+                    if w_uv.is_empty() {
+                        continue;
+                    }
+                    let w_uv_all = w_uv.is_all_fast();
+
+                    if let Some(fw) = &states[*v].final_weight {
+                        if !fw.is_empty() {
+                            let w = if w_uv_all { fw.clone() } else { w_uv & fw };
+                            if !w.is_empty() {
+                                final_weight = Some(match final_weight {
+                                    Some(cur) => cur | &w,
+                                    None => w,
+                                });
+                            }
+                        }
+                    }
+
+                    for (label, targets) in &states[*v].transitions {
+                        let entry = trans_map.entry(*label).or_insert_with(HashMap::new);
+                        for (tgt, w_tr) in targets {
+                            if w_tr.is_empty() {
+                                continue;
+                            }
+                            let w = if w_uv_all {
+                                w_tr.clone()
+                            } else if w_tr.is_all_fast() {
+                                w_uv.clone()
+                            } else {
+                                w_uv & w_tr
+                            };
+                            if w.is_empty() {
+                                continue;
+                            }
+                            entry
+                                .entry(*tgt)
+                                .and_modify(|acc| *acc |= &w)
+                                .or_insert(w);
+                        }
+                    }
+                }
+
+                let mut new_state = NWAState::default();
+                new_state.final_weight = final_weight;
+                new_state.transitions = trans_map
+                    .into_iter()
+                    .map(|(label, map)| (label, map.into_iter().collect()))
+                    .collect();
+                new_state.epsilons.clear();
+                new_state
+            };
+
+            self.states.0[u] = new_state;
         }
         timing_build_states = build_states_start.elapsed();
 
@@ -659,14 +663,13 @@ impl NWA {
             eprintln!("NWA::rm_epsilon::dag_stats states={} eps={} no_eps_states={}", num_states, total_eps, states_with_no_eps);
         }
 
-        Some(new_states)
+        true
     }
 
     fn rm_epsilon_weighted_in_place(&mut self) {
-        if let Some(new_states) = timeit!("NWA::rm_epsilon::dag_weighted", {
-            self.try_rm_epsilon_weighted_dag()
+        if timeit!("NWA::rm_epsilon::dag_weighted", {
+            self.try_rm_epsilon_weighted_dag_in_place()
         }) {
-            self.states.0 = new_states;
             return;
         }
 
