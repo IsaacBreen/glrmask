@@ -2,7 +2,7 @@ use crate::constraint::GrammarConstraint;
 use crate::datastructures::u8set::U8Set;
 use crate::debug;
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
-use crate::dfa_u8::Tokenizer;
+use crate::dfa_u8::{Tokenizer, TokenizerLenConstraint};
 use crate::glr::analyze::minimize_grammar;
 use crate::glr::grammar::regex_name;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -2128,8 +2128,94 @@ impl CompiledGrammar {
         let profile_tokenizer = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
         debug!(3, "Building tokenizer from definition");
         let terminal_expr_start = std::time::Instant::now();
-        let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
+        let mut terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
         let terminal_expr_time = terminal_expr_start.elapsed();
+        let enable_len_filter = std::env::var("TOKENIZER_LEN_FILTER").is_ok();
+        let len_filter_threshold = std::env::var("TOKENIZER_LEN_FILTER_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(256);
+        let mut len_constraints: BTreeMap<GroupID, TokenizerLenConstraint> = BTreeMap::new();
+        if enable_len_filter {
+            let mut regex_name_by_group_id: BTreeMap<usize, String> = BTreeMap::new();
+            for (name, group_id) in &definition.regex_name_to_group_id {
+                regex_name_by_group_id.insert(*group_id, name.clone());
+            }
+
+            fn parse_string_len_name(name: &str) -> Option<(usize, Option<usize>)> {
+                let rest = name.strip_prefix("STRING_LEN_")?;
+                let mut parts = rest.split('_');
+                let min = parts.next()?.parse::<usize>().ok()?;
+                let max_part = parts.next()?;
+                let max = if max_part.eq_ignore_ascii_case("INF") {
+                    None
+                } else {
+                    Some(max_part.parse::<usize>().ok()?)
+                };
+                if parts.next().is_some() {
+                    return None;
+                }
+                Some((min, max))
+            }
+
+            fn is_quote(expr: &Expr) -> bool {
+                match expr {
+                    Expr::U8Seq(bytes) => bytes.len() == 1 && bytes[0] == b'"',
+                    Expr::Shared(inner) => is_quote(inner.as_ref()),
+                    _ => false,
+                }
+            }
+
+            fn rewrite_string_len_expr(expr: &mut Expr, min: usize, max: Option<usize>) -> bool {
+                match expr {
+                    Expr::Seq(parts) if parts.len() == 3 => {
+                        if !is_quote(&parts[0]) || !is_quote(&parts[2]) {
+                            return false;
+                        }
+                        match &mut parts[1] {
+                            Expr::RepeatBounded { inner, min: inner_min, max: inner_max } => {
+                                if *inner_min != min || *inner_max != max {
+                                    return false;
+                                }
+                                *inner_max = None;
+                                let _ = inner;
+                                true
+                            }
+                            Expr::Shared(inner) => {
+                                let inner_mut = Arc::make_mut(inner);
+                                rewrite_string_len_expr(inner_mut, min, max)
+                            }
+                            _ => false,
+                        }
+                    }
+                    Expr::Shared(inner) => {
+                        let inner_mut = Arc::make_mut(inner);
+                        rewrite_string_len_expr(inner_mut, min, max)
+                    }
+                    _ => false,
+                }
+            }
+
+            for (group_id, expr_group) in terminal_expr_groups.iter_mut().enumerate() {
+                let Some(name) = regex_name_by_group_id.get(&group_id) else {
+                    continue;
+                };
+                let Some((min, max)) = parse_string_len_name(name) else {
+                    continue;
+                };
+                let Some(max_val) = max else { continue; };
+                if max_val < len_filter_threshold {
+                    continue;
+                }
+                if rewrite_string_len_expr(&mut expr_group.expr, min, max) {
+                    len_constraints.insert(group_id, TokenizerLenConstraint { min, max });
+                }
+            }
+
+            if !len_constraints.is_empty() {
+                debug!(4, "Tokenizer length filters enabled for {} groups", len_constraints.len());
+            }
+        }
         if std::env::var("PROFILE_TOKENIZER_GROUPS").is_ok() {
             let mut labels: Vec<String> = (0..terminal_expr_groups.len())
                 .map(|idx| format!("group_{}", idx))
@@ -2177,7 +2263,11 @@ impl CompiledGrammar {
         } else {
             (tokenizer_expr_groups_obj.build(), None)
         };
-        let tokenizer = Tokenizer::new(tokenizer_regex);
+        let tokenizer = if enable_len_filter && !len_constraints.is_empty() {
+            Tokenizer::new_with_len_constraints(tokenizer_regex, len_constraints)
+        } else {
+            Tokenizer::new(tokenizer_regex)
+        };
         let tokenizer_total = tokenizer_start.elapsed();
         if let Some(timings) = tokenizer_timings {
             let regex_total = timings.total;

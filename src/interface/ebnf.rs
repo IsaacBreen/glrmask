@@ -394,39 +394,11 @@ impl<'a> EbnfParser<'a> {
             Ok(sequence(vec![factor.clone(), repeat(factor)]))
         } else if let Some(EbnfToken { kind: EbnfTokenKind::Repetition { min, max }, .. }) = self.tokens.peek().cloned() {
             self.tokens.next();
-            // Build repetition expression:
-            // {0,} or {0,None} -> repeat(factor)  (same as *)
-            // {1,} or {1,None} -> factor repeat(factor) (same as +)
-            // {m,} -> factor^m repeat(factor)
-            // {m,n} -> factor^m (factor?)^(n-m)
-            // {0,n} -> (factor?)^n
-            if min == 0 && max.is_none() {
-                Ok(repeat(factor))
-            } else if min == 1 && max.is_none() {
-                Ok(sequence(vec![factor.clone(), repeat(factor)]))
-            } else if max.is_none() {
-                // {m,} -> m copies of factor followed by repeat(factor)
-                let mut parts: Vec<GrammarExpr> = (0..min).map(|_| factor.clone()).collect();
-                parts.push(repeat(factor));
-                Ok(sequence(parts))
-            } else {
-                let max_val = max.unwrap();
-                if min == max_val {
-                    // {m} -> exactly m copies
-                    if min == 0 {
-                        Ok(sequence(vec![]))
-                    } else {
-                        Ok(sequence((0..min).map(|_| factor.clone()).collect()))
-                    }
-                } else {
-                    // {m,n} -> m copies followed by (n-m) optional copies
-                    let mut parts: Vec<GrammarExpr> = (0..min).map(|_| factor.clone()).collect();
-                    for _ in 0..(max_val - min) {
-                        parts.push(optional(factor.clone()));
-                    }
-                    Ok(sequence(parts))
-                }
-            }
+            Ok(GrammarExpr::RepeatBounded {
+                min,
+                max,
+                inner: Box::new(factor),
+            })
         } else {
             Ok(factor)
         }
