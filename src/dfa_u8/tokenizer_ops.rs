@@ -4,7 +4,7 @@ use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;
 use json_convertible_derive::JSONConvertible;
 // Added
-use std::collections::{BTreeMap as StdMap, BTreeSet, BTreeMap};
+use std::collections::{BTreeSet, BTreeMap};
 // Added for derive macro pattern, aliased to avoid conflict
 
 pub type LLMToken = Vec<u8>;
@@ -24,12 +24,6 @@ pub struct Token {
     pub width: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TokenizerLenConstraint {
-    pub min: usize,
-    pub max: Option<usize>,
-}
-
 #[derive(Debug, JSONConvertible)]
 pub struct ExecuteResult {
     pub matches: Vec<Token>,
@@ -45,26 +39,12 @@ pub struct ExecuteResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tokenizer {
     inner: Regex,
-    len_constraints: Option<BTreeMap<GroupID, TokenizerLenConstraint>>,
 }
 
 impl Tokenizer {
     /// Create a new Tokenizer from a Regex.
     pub fn new(regex: Regex) -> Self {
-        Self {
-            inner: regex,
-            len_constraints: None,
-        }
-    }
-
-    pub fn new_with_len_constraints(
-        regex: Regex,
-        len_constraints: BTreeMap<GroupID, TokenizerLenConstraint>,
-    ) -> Self {
-        Self {
-            inner: regex,
-            len_constraints: if len_constraints.is_empty() { None } else { Some(len_constraints) },
-        }
+        Self { inner: regex }
     }
     
     /// Get the initial state ID.
@@ -75,34 +55,7 @@ impl Tokenizer {
     /// Execute the tokenizer from a given state on a byte slice.
     /// Returns the matched tokens and the end state (None if no more matches possible).
     pub fn execute_from_state(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {
-        let mut result = self.inner.execute_from_state(text, state);
-        if let Some(constraints) = &self.len_constraints {
-            result.matches.retain(|token| {
-                if let Some(constraint) = constraints.get(&token.id) {
-                    let slice = if token.width <= text.len() {
-                        &text[..token.width]
-                    } else {
-                        return false;
-                    };
-                    if let Some(count) = count_json_string_units(slice) {
-                        if count < constraint.min {
-                            return false;
-                        }
-                        if let Some(max) = constraint.max {
-                            if count > max {
-                                return false;
-                            }
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    true
-                }
-            });
-        }
-        result
+        self.inner.execute_from_state(text, state)
     }
     
     /// Get the set of terminal IDs that could be matched from a given state.
@@ -155,48 +108,6 @@ impl Tokenizer {
     pub fn init(&self) -> crate::dfa_u8::dfa::RegexState<'_> {
         self.inner.init()
     }
-}
-
-fn count_json_string_units(bytes: &[u8]) -> Option<usize> {
-    if bytes.len() < 2 || bytes.first().copied() != Some(b'"') || bytes.last().copied() != Some(b'"') {
-        return None;
-    }
-
-    let mut i = 1usize;
-    let end = bytes.len() - 1;
-    let mut count = 0usize;
-
-    while i < end {
-        let b = bytes[i];
-        if b == b'\\' {
-            if i + 1 >= end {
-                return None;
-            }
-            let esc = bytes[i + 1];
-            match esc {
-                b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
-                    i += 2;
-                    count += 1;
-                }
-                b'u' => {
-                    if i + 5 >= end {
-                        return None;
-                    }
-                    if !bytes[i + 2..i + 6].iter().all(|c| c.is_ascii_hexdigit()) {
-                        return None;
-                    }
-                    i += 6;
-                    count += 1;
-                }
-                _ => return None,
-            }
-        } else {
-            i += 1;
-            count += 1;
-        }
-    }
-
-    Some(count)
 }
 
 impl From<Regex> for Tokenizer {
