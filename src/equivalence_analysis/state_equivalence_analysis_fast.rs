@@ -32,26 +32,36 @@ fn mix_u128(mut x: u128) -> u128 {
     x
 }
 
+#[inline(always)]
+fn mix_u64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+    x
+}
+
 // -----------------------------------------------------------------------------
 // State Equivalence Analysis (k-step inductive hashing)
 // -----------------------------------------------------------------------------
 
 #[inline(always)]
-fn hash_sorted_set(values: &[usize], tag: u128) -> u128 {
-    let mut h = mix_u128((values.len() as u128) ^ tag);
+fn hash_sorted_set(values: &[usize], tag: u64) -> u64 {
+    let mut h = mix_u64((values.len() as u64) ^ tag);
     for &v in values {
-        h = h.wrapping_add(mix_u128((v as u128) ^ tag.rotate_left(17)));
+        h = h.wrapping_add(mix_u64((v as u64) ^ tag.rotate_left(17)));
     }
     h
 }
 
 #[inline(always)]
-fn hash_state_label(finalizers: &[usize], possible_futures: &[usize]) -> u128 {
-    const FINALIZER_TAG: u128 = 0xF11A_F11A_F11A_F11A;
-    const FUTURE_TAG: u128 = 0xF0C7_F0C7_F0C7_F0C7;
+fn hash_state_label(finalizers: &[usize], possible_futures: &[usize]) -> u64 {
+    const FINALIZER_TAG: u64 = 0xF11A_F11A_F11A_F11A;
+    const FUTURE_TAG: u64 = 0xF0C7_F0C7_F0C7_F0C7;
     let finalizer_hash = hash_sorted_set(finalizers, FINALIZER_TAG);
     let future_hash = hash_sorted_set(possible_futures, FUTURE_TAG);
-    mix_u128(finalizer_hash.wrapping_add(future_hash))
+    mix_u64(finalizer_hash.wrapping_add(future_hash))
 }
 
 /// Find state equivalence classes using k-step inductive hashing.
@@ -115,7 +125,7 @@ pub fn find_state_equivalence_classes_kstep(
     states: &[usize],
     k: usize,
 ) -> Vec<usize> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     if states.is_empty() {
         return Vec::new();
@@ -131,7 +141,7 @@ pub fn find_state_equivalence_classes_kstep(
         .collect();
 
     // Precompute label hashes for each state (finalizers + possible futures).
-    let label_hashes: Vec<u128> = dfa.states
+    let label_hashes: Vec<u64> = dfa.states
         .iter()
         .map(|state| {
             let finalizers: Vec<usize> = state.finalizers.iter().collect();
@@ -141,23 +151,27 @@ pub fn find_state_equivalence_classes_kstep(
         .collect();
 
     // Dead transition hash is a unique constant that cannot collide with real labels.
-    let dead_hash = mix_u128(0xDEAD_BEEF_DEAD_BEEF);
-    let mut dead_byte_mix: Vec<u128> = vec![0u128; 256];
-    let mut dead_base_sum: u128 = 0;
+    let dead_hash = mix_u64(0xDEAD_BEEF_DEAD_BEEF);
+    let mut dead_byte_mix: Vec<u64> = vec![0u64; 256];
+    let mut dead_base_sum: u64 = 0;
     for b in 0u8..=255u8 {
-        let contrib = mix_u128(dead_hash ^ (((b as u128) << 1) | 1));
+        let contrib = mix_u64(dead_hash ^ (((b as u64) << 1) | 1));
         dead_byte_mix[b as usize] = contrib;
         dead_base_sum = dead_base_sum.wrapping_add(contrib);
     }
 
     // Initialize hashes for depth 0 (empty string).
-    let mut hashes: Vec<u128> = label_hashes
+    let mut hashes: Vec<u64> = label_hashes
         .iter()
-        .map(|&h| mix_u128(h ^ 0x9E37_79B9_7F4A_7C15))
+        .map(|&h| mix_u64(h ^ 0x9E37_79B9_7F4A_7C15))
         .collect();
 
+    let mut analyzed_hashes: HashSet<u64> = HashSet::with_capacity(states.len());
+    let mut prev_analyzed_distinct = 0usize;
+    let mut stable_count = 0usize;
+
     // Iteratively refine hashes for depths 1..=k.
-    for _ in 0..k {
+    for iter in 0..k {
         let prev_hashes = &hashes;
         hashes = (0..dfa.states.len())
             .into_par_iter()
@@ -167,18 +181,39 @@ pub fn find_state_equivalence_classes_kstep(
                     let b_idx = byte as usize;
                     trans_sum = trans_sum.wrapping_sub(dead_byte_mix[b_idx]);
                     let next_hash = prev_hashes[target];
-                    let contrib = mix_u128(next_hash ^ (((byte as u128) << 1) | 1));
+                    let contrib = mix_u64(next_hash ^ (((byte as u64) << 1) | 1));
                     trans_sum = trans_sum.wrapping_add(contrib);
                 }
-                let mut h = mix_u128(label_hashes[idx] ^ 0xC0DE_C0DE_C0DE_C0DE);
-                h = h.wrapping_add(mix_u128(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
+                let mut h = mix_u64(label_hashes[idx] ^ 0xC0DE_C0DE_C0DE_C0DE);
+                h = h.wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
                 h
             })
             .collect();
+
+        analyzed_hashes.clear();
+        for &state_id in states {
+            analyzed_hashes.insert(hashes[state_id]);
+        }
+        let analyzed_distinct = analyzed_hashes.len();
+        if analyzed_distinct == prev_analyzed_distinct {
+            stable_count += 1;
+            if stable_count >= 3 {
+                eprintln!(
+                    "k-step: converged at iteration {} of {} ({} groups)",
+                    iter + 1,
+                    k,
+                    analyzed_distinct
+                );
+                break;
+            }
+        } else {
+            stable_count = 0;
+        }
+        prev_analyzed_distinct = analyzed_distinct;
     }
 
     // Group analyzed states by hash_k and pick representatives.
-    let mut hash_to_rep: HashMap<u128, usize> = HashMap::new();
+    let mut hash_to_rep: HashMap<u64, usize> = HashMap::new();
     let mut mapping = vec![0usize; states.len()];
     for (i, &state_id) in states.iter().enumerate() {
         let h = hashes[state_id];

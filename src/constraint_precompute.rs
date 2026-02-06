@@ -183,6 +183,20 @@ impl NoOpPb {
 #[derive(Default, Clone)]
 struct DfsProfile {
     dfs_total_time_us: u64,
+    segment_setup_calls: u64,
+    segment_setup_time_us: u64,
+    pending_pop_calls: u64,
+    pending_pop_time_us: u64,
+    pending_entry_calls: u64,
+    pending_entry_time_us: u64,
+    pending_target_entry_calls: u64,
+    pending_target_entry_time_us: u64,
+    next_level_assoc_calls: u64,
+    next_level_assoc_time_us: u64,
+    approx_step_calls: u64,
+    approx_step_time_us: u64,
+    edge_bv_calls: u64,
+    edge_bv_time_us: u64,
     exec_calls: u64,
     exec_time_us: u64,
     possible_matches_calls: u64,
@@ -225,6 +239,13 @@ impl DfsProfile {
         let accounted_us = self.exec_time_us
             + self.possible_matches_time_us
             + self.tokens_accessible_time_us
+            + self.segment_setup_time_us
+            + self.pending_pop_time_us
+            + self.pending_entry_time_us
+            + self.pending_target_entry_time_us
+            + self.next_level_assoc_time_us
+            + self.approx_step_time_us
+            + self.edge_bv_time_us
             + self.expanded_item_time_us
             + self.expanded_rsb_time_us
             + self.expanded_all_time_us
@@ -232,6 +253,13 @@ impl DfsProfile {
             + self.add_epsilon_time_us;
         let other_us = total_us.saturating_sub(accounted_us);
         crate::debug!(5, "precompute1 dfs profile: total={:.2}ms", ms(total_us));
+        crate::debug!(5, "precompute1 dfs profile: segment_setup={} calls, {:.2}ms", self.segment_setup_calls, ms(self.segment_setup_time_us));
+        crate::debug!(5, "precompute1 dfs profile: pending_pop={} calls, {:.2}ms", self.pending_pop_calls, ms(self.pending_pop_time_us));
+        crate::debug!(5, "precompute1 dfs profile: pending_entry={} calls, {:.2}ms", self.pending_entry_calls, ms(self.pending_entry_time_us));
+        crate::debug!(5, "precompute1 dfs profile: pending_target_entry={} calls, {:.2}ms", self.pending_target_entry_calls, ms(self.pending_target_entry_time_us));
+        crate::debug!(5, "precompute1 dfs profile: next_level_assoc={} calls, {:.2}ms", self.next_level_assoc_calls, ms(self.next_level_assoc_time_us));
+        crate::debug!(5, "precompute1 dfs profile: approx_step={} calls, {:.2}ms", self.approx_step_calls, ms(self.approx_step_time_us));
+        crate::debug!(5, "precompute1 dfs profile: edge_bv={} calls, {:.2}ms", self.edge_bv_calls, ms(self.edge_bv_time_us));
         crate::debug!(5, "precompute1 dfs profile: exec={} calls, {:.2}ms", self.exec_calls, ms(self.exec_time_us));
         crate::debug!(5, "precompute1 dfs profile: possible_matches={} calls, {:.2}ms", self.possible_matches_calls, ms(self.possible_matches_time_us));
         crate::debug!(5, "precompute1 dfs profile: tokens_accessible={} calls, {:.2}ms", self.tokens_accessible_calls, ms(self.tokens_accessible_time_us));
@@ -1021,26 +1049,29 @@ impl<'r> Precomputer1<'r> {
 
     #[inline]
     fn approx_step(&mut self, approx_state: usize, terminal_id: GrammarTokenID) -> Option<usize> {
-        let Some(approx_dfa) = self.approx_dfa.as_mut() else {
-            return Some(approx_state);
+        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let result = if let Some(approx_dfa) = self.approx_dfa.as_mut() {
+            let term_idx = terminal_id.0;
+            if approx_dfa
+                .ignored_terminals
+                .get(term_idx)
+                .copied()
+                .unwrap_or(false)
+            {
+                Some(approx_state)
+            } else if let Some(suffix_tid) = approx_dfa.orig_to_suffix_tid.get(term_idx).copied().flatten() {
+                approx_dfa.dfa.step(approx_state, suffix_tid)
+            } else {
+                Some(approx_state)
+            }
+        } else {
+            Some(approx_state)
         };
-
-        let term_idx = terminal_id.0;
-        if approx_dfa
-            .ignored_terminals
-            .get(term_idx)
-            .copied()
-            .unwrap_or(false)
-        {
-            return Some(approx_state);
+        if let Some(start) = start {
+            self.dfs_profile.approx_step_calls += 1;
+            self.dfs_profile.approx_step_time_us += start.elapsed().as_micros() as u64;
         }
-
-        let suffix_tid = approx_dfa.orig_to_suffix_tid.get(term_idx).copied().flatten();
-        let Some(suffix_tid) = suffix_tid else {
-            return Some(approx_state);
-        };
-
-        approx_dfa.dfa.step(approx_state, suffix_tid)
+        result
     }
 
     fn get_or_create_next_state(
@@ -1050,7 +1081,8 @@ impl<'r> Precomputer1<'r> {
         approx_state: usize,
         next_level_assoc: &mut BTreeMap<DfsKey, NWAStateID>,
     ) -> NWAStateID {
-        match next_level_assoc.entry(DfsKey::new(tokenizer_state, approx_state)) {
+        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let result = match next_level_assoc.entry(DfsKey::new(tokenizer_state, approx_state)) {
             std::collections::btree_map::Entry::Occupied(o) => *o.get(),
             std::collections::btree_map::Entry::Vacant(v) => {
                 // NOTE: The previous state reuse optimization was removed because it
@@ -1062,7 +1094,12 @@ impl<'r> Precomputer1<'r> {
                 v.insert(t);
                 t
             }
+        };
+        if let Some(start) = start {
+            self.dfs_profile.next_level_assoc_calls += 1;
+            self.dfs_profile.next_level_assoc_time_us += start.elapsed().as_micros() as u64;
         }
+        result
     }
 
     /// Create an expanded weight from a single token ID.
@@ -1382,10 +1419,15 @@ impl<'r> Precomputer1<'r> {
 
             // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
             let mut pending: BTreeMap<usize, BTreeMap<DfsKey, NWAStateID>> = BTreeMap::new();
+            let segment_setup_start = self.dfs_profile_enabled.then(std::time::Instant::now);
             pending.insert(0, assoc_by_state.clone());
 
             let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
+            if let Some(start) = segment_setup_start {
+                self.dfs_profile.segment_setup_calls += 1;
+                self.dfs_profile.segment_setup_time_us += start.elapsed().as_micros() as u64;
+            }
 
             // Caches possible matches for end states to prune edge_bv
             let mut possible_matches_at_end_cache: HashMap<
@@ -1394,7 +1436,15 @@ impl<'r> Precomputer1<'r> {
             > = HashMap::new();
 
             let mut segment_pending_iters = 0usize;
-            while let Some((pos, states_at_pos)) = pending.pop_first() {
+            loop {
+                let pop_start = self.dfs_profile_enabled.then(std::time::Instant::now);
+                let Some((pos, states_at_pos)) = pending.pop_first() else {
+                    break;
+                };
+                if let Some(start) = pop_start {
+                    self.dfs_profile.pending_pop_calls += 1;
+                    self.dfs_profile.pending_pop_time_us += start.elapsed().as_micros() as u64;
+                }
                 segment_pending_iters += 1;
                 total_pending_iters += 1;
                 crate::debug!(7, "--- Position {} (segment len={}) ---", pos, segment_bytes.len());
@@ -1476,6 +1526,7 @@ impl<'r> Precomputer1<'r> {
 
                         // Continuation logic
                         // Avoid cloning if we don't need to modify the bitset
+                        let edge_bv_start = self.dfs_profile_enabled.then(std::time::Instant::now);
                         let final_bv: std::borrow::Cow<RangeSetBlaze<usize>> = if next_pos == segment_bytes.len() {
                             let mut edge_bv = child_reachable.clone();
                             edge_bv.remove(child_token_id);
@@ -1489,13 +1540,22 @@ impl<'r> Precomputer1<'r> {
                             crate::debug!(7, "      Continuation (not end): using child_reachable={:?}", child_reachable.iter().collect::<Vec<_>>());
                             std::borrow::Cow::Borrowed(child_reachable)
                         };
+                        if let Some(start) = edge_bv_start {
+                            self.dfs_profile.edge_bv_calls += 1;
+                            self.dfs_profile.edge_bv_time_us += start.elapsed().as_micros() as u64;
+                        }
 
                         if final_bv.is_empty() {
                             crate::debug!(7, "      -> Skip continuation (empty edge_bv)");
                             continue;
                         }
 
+                        let pending_entry_start = self.dfs_profile_enabled.then(std::time::Instant::now);
                         let dest_map = pending.entry(next_pos).or_default();
+                        if let Some(start) = pending_entry_start {
+                            self.dfs_profile.pending_entry_calls += 1;
+                            self.dfs_profile.pending_entry_time_us += start.elapsed().as_micros() as u64;
+                        }
 
                         let initial_tsid = self.tokenizer.initial_state_id();
                         // Use expanded weight from rsb
@@ -1506,6 +1566,7 @@ impl<'r> Precomputer1<'r> {
                             std::borrow::Cow::Owned(rsb) => self.expanded_weight_from_rsb_owned(rsb),
                         };
 
+                        let target_entry_start = self.dfs_profile_enabled.then(std::time::Instant::now);
                         let target_entry = dest_map.entry(DfsKey::new(initial_tsid, next_approx_state));
                         let target = match target_entry {
                             std::collections::btree_map::Entry::Occupied(o) => {
@@ -1519,6 +1580,10 @@ impl<'r> Precomputer1<'r> {
                                 t
                             }
                         };
+                        if let Some(start) = target_entry_start {
+                            self.dfs_profile.pending_target_entry_calls += 1;
+                            self.dfs_profile.pending_target_entry_time_us += start.elapsed().as_micros() as u64;
+                        }
 
                         crate::debug!(7, "      -> CONT transition: {} --{}--> {}, weight={:?}", 
                             src_node, terminal_id.0, target, weight);
