@@ -95,35 +95,35 @@ def generate_diff_grammar(source_path: str) -> str:
     grammar_parts = []
 
     # --- 1. Preamble and Top-Level Rules ---
-    grammar_parts.append("root ::= DIFF;")
-    grammar_parts.append("DIFF ::= FILE_HEADER? ( HUNK_HEADER S0 )? EOF;")
-    grammar_parts.append("FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;")
+    grammar_parts.append("root ::= diff;")
+    grammar_parts.append("diff ::= file_header? ( HUNK_HEADER s0 )? EOF;")
+    grammar_parts.append("file_header ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;")
     grammar_parts.append("EOF  ::= '<|EOF|>';")  # Ensure this matches your tokenizer's EOF
     grammar_parts.append("")
 
-    # --- 2. 'S' Rules (Search for Hunk Start) ---
-    grammar_parts.append("// 'S' rules: Find the start of a hunk")
+    # --- 2. 's' Rules (Search for Hunk Start) ---
+    grammar_parts.append("// 's' rules: Find the start of a hunk")
     for i in range(num_lines):
         # Try to match line i, or skip and try line i+1
-        grammar_parts.append(f"S{i} ::= LINE{i} | S{i+1};")
+        grammar_parts.append(f"s{i} ::= line{i} | s{i+1};")
 
     # If we reach the end of the file, we only allow trailing additions
-    grammar_parts.append(f"S{num_lines} ::= PLUS_LINE*;")
+    grammar_parts.append(f"s{num_lines} ::= PLUS_LINE*;")
     grammar_parts.append("")
 
-    # --- 3. 'LINE' Rules (Match Context/Deletion) ---
-    grammar_parts.append("// 'LINE' rules: Match content exactly, then continue or new hunk")
+    # --- 3. 'line' Rules (Match Context/Deletion) ---
+    grammar_parts.append("// 'line' rules: Match content exactly, then continue or new hunk")
     for i in range(num_lines):
         # After matching line i, we can:
         # 1. Continue immediately to line i+1
         # 2. Have some additions, then a Hunk Header, skipping to i+1
         if i < num_lines - 1:
-            continuation = f"( LINE{i+1} | PLUS_LINE* HUNK_HEADER S{i+1} )?"
+            continuation = f"( line{i+1} | PLUS_LINE* HUNK_HEADER s{i+1} )?"
         else:
-            continuation = f"( PLUS_LINE* HUNK_HEADER S{num_lines} )?"
+            continuation = f"( PLUS_LINE* HUNK_HEADER s{num_lines} )?"
 
         # NOTE: PLUS_LINE* allows insertions *before* the context/deletion line
-        grammar_parts.append(f"LINE{i} ::= PLUS_LINE* CONTENT{i} {continuation};")
+        grammar_parts.append(f"line{i} ::= PLUS_LINE* content{i} {continuation};")
     grammar_parts.append("")
 
     # --- 4. Terminal Definitions ---
@@ -140,17 +140,28 @@ def generate_diff_grammar(source_path: str) -> str:
     grammar_parts.append("")
 
     # --- 5. Content Lines ---
+    # Use lowercase rule names so line content is parsed, not treated as a terminal regex.
     grammar_parts.append("// Context-line terminals")
     for i, line in enumerate(lines):
         content = line.rstrip('\r\n')
 
         if not content:
             # Strict diffs require a space or minus even for empty lines
-            grammar_parts.append(f"CONTENT{i} ::= ( ' ' | '-' ) NEWLINE;")
+            grammar_parts.append(f"content{i} ::= ( ' ' | '-' ) NEWLINE;")
         else:
-            # Escape backslashes and quotes for the EBNF string literal
-            escaped_content = content.replace('\\', '\\\\').replace('"', '\\"')
-            grammar_parts.append(f'CONTENT{i} ::= ( " " | "-" ) "{escaped_content}" NEWLINE;')
+            # Emit per-character literals to keep the terminal set small.
+            escaped_chars = []
+            for ch in content:
+                if ch == "\\":
+                    escaped_chars.append("\\\\")
+                elif ch == '"':
+                    escaped_chars.append("\\\"")
+                else:
+                    escaped_chars.append(ch)
+            char_terms = " ".join(f'"{ch}"' for ch in escaped_chars)
+            grammar_parts.append(
+                f"content{i} ::= ( \" \" | \"-\" ) {char_terms} NEWLINE;"
+            )
 
     return '\n'.join(grammar_parts)
 
@@ -271,12 +282,10 @@ def main():
         parse_time = time.time() - start
         print(f"   Grammar parsing: {parse_time*1000:.1f}ms")
         
-        # Step 5: Optimize grammar
-        print("\n5. Optimizing grammar...")
-        start = time.time()
-        grammar_def.optimize()
-        optimize_time = time.time() - start
-        print(f"   Optimization: {optimize_time*1000:.1f}ms")
+        # Step 5: Optimize grammar (skip for diff grammars — collapses to a
+        # single massive regex terminal that explodes NFA/DFA state count)
+        print("\n5. Optimizing grammar... (skipped)")
+        optimize_time = 0.0
         
         # Step 6: Compile to GLR parser
         print("\n6. Compiling grammar...")
