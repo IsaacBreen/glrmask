@@ -1758,6 +1758,7 @@ fn generate_glr_parser_with_maps(
     let mut detected_ignore = HashSet::new();
 
     const MAX_OPTIMIZATION_PASSES: usize = usize::MAX;
+    let normalization_start = std::time::Instant::now();
     for pass in 0..MAX_OPTIMIZATION_PASSES {
         crate::debug!(4, "Grammar optimization pass {}", pass + 1);
         let initial_productions = productions.clone();
@@ -1843,6 +1844,7 @@ fn generate_glr_parser_with_maps(
 
         if right_recursion_remaining.is_empty() && productions == initial_productions {
             crate::debug!(4, "Grammar optimization converged after {} passes", pass + 1);
+            eprintln!("TIMING: glr_normalization_loop {:?} ({} passes, {} prods)", normalization_start.elapsed(), pass + 1, productions.len());
             break;
         }
 
@@ -1861,7 +1863,9 @@ fn generate_glr_parser_with_maps(
     // inline_null_productions now guarantees elimination of ALL
     // epsilon productions by inlining into the start production as well.
     crate::debug!(4, "Final epsilon production elimination");
+    let t_eps = std::time::Instant::now();
     productions = inline_null_productions(&productions);
+    eprintln!("TIMING: glr_final_epsilon {:?}", t_eps.elapsed());
     print_memory_usage("After final epsilon elimination");
     
     // ============================================================
@@ -1916,6 +1920,7 @@ fn generate_glr_parser_with_maps(
     // Extract common prefixes from productions with the same LHS.
     // If A → α β and A → α γ, create A → α A' and A' → β | γ.
     // This preserves the language but reduces LR states.
+    let t_left_factor = std::time::Instant::now();
     let nonterminals_for_naming: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut left_factor_name_gen = create_unique_name_generator(&nonterminals_for_naming);
     let (factored_productions, new_nts) = left_factor_grammar(&productions, &mut left_factor_name_gen);
@@ -1927,6 +1932,7 @@ fn generate_glr_parser_with_maps(
             factored_productions.len());
     }
     productions = factored_productions;
+    eprintln!("TIMING: glr_left_factoring {:?}", t_left_factor.elapsed());
     print_memory_usage("After left factoring");
 
     // ============================================================
@@ -1934,9 +1940,11 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // If two nonterminals have exactly the same set of productions,
     // merge them into one to reduce grammar size and parser states.
+    let t_merge = std::time::Instant::now();
     let start_nt_for_merge = productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
     let before_merge = productions.len();
     productions = merge_identical_nonterminals(&productions, &start_nt_for_merge);
+    eprintln!("TIMING: glr_merge_identical {:?}", t_merge.elapsed());
     if productions.len() < before_merge {
         crate::debug!(4, "Phase 7: Merged identical nonterminals ({} → {} productions)",
             before_merge,
@@ -1949,6 +1957,7 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // Minimize grammar by eliminating unit productions (A → B → X becomes A → X).
     // This reduces parser construction time but doesn't affect correctness.
+    let t_unit = std::time::Instant::now();
     let start_nt = &productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
     const MAX_SUBSTITUTION_RHS_LEN: usize = 1;
     let (minimized_with_defs, substituted_nts) = substitute_single_productions_and_report(
@@ -1965,6 +1974,7 @@ fn generate_glr_parser_with_maps(
             minimized_productions.len());
     }
     productions = minimized_productions;
+    eprintln!("TIMING: glr_unit_elim {:?} ({} prods)", t_unit.elapsed(), productions.len());
     print_memory_usage("After unit production elimination");
 
     // ============================================================
@@ -2241,11 +2251,14 @@ fn generate_glr_parser_with_maps(
     let start_nt_id = lhs_ids[0];
 
     crate::debug!(4, "Stage 1 (LR(0) Automaton)");
+    let t_stage1 = std::time::Instant::now();
     let (stage_1_table, item_set_map) =
         stage_1(&light_productions, &lhs_ids, num_terminals, num_nonterminals);
+    eprintln!("TIMING: glr_stage1_lr0 {:?} ({} states)", t_stage1.elapsed(), stage_1_table.len());
     print_memory_usage("After Stage 1");
 
     crate::debug!(4, "Computing First/Follow Sets");
+    let t_ff = std::time::Instant::now();
     let first_sets = compute_first_sets_ids_with_lhs(
         &light_productions,
         &lhs_ids,
@@ -2262,9 +2275,11 @@ fn generate_glr_parser_with_maps(
         num_nonterminals,
         start_nt_id,
     );
+    eprintln!("TIMING: glr_first_follow {:?}", t_ff.elapsed());
     print_memory_usage("After First/Follow");
 
     crate::debug!(4, "Computing Final Table (Merging Stages 2-8)");
+    let t_final = std::time::Instant::now();
     let (final_table_map, start_state_id, substring_state_id) = compute_final_table(
         stage_1_table,
         &item_set_map,
@@ -2273,15 +2288,18 @@ fn generate_glr_parser_with_maps(
         &follow_sets,
         num_terminals,
     );
+    eprintln!("TIMING: glr_final_table {:?} ({} states)", t_final.elapsed(), final_table_map.len());
     print_memory_usage("After Final Table");
 
     // Post-construction table optimization
     crate::debug!(4, "Optimizing Table (state reduction)");
+    let t_opt = std::time::Instant::now();
     let (final_table_map, start_state_id, substring_state_id) = optimize_table(
         final_table_map,
         start_state_id,
         substring_state_id,
     );
+    eprintln!("TIMING: glr_table_opt {:?} ({} states)", t_opt.elapsed(), final_table_map.len());
     print_memory_usage("After Table Optimization");
 
     let mut item_set_map_bi = BiBTreeMap::new();

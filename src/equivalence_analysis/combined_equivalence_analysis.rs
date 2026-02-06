@@ -46,8 +46,12 @@ pub fn compute_combined_equivalence(
     tokens: &[Vec<u8>],
     initial_states: &[usize],
 ) -> CombinedEquivalenceResult {
-    // Threshold for applying state equivalence analysis
-    let state_reduction_threshold = 50;
+    // State equivalence analysis threshold.
+    // Only apply when we have enough states that the O(states*tokens) cost
+    // of analysis is recovered by reduced vocab analysis cost.
+    // Empirically: state equiv with 2881 states costs ~550ms but only saves ~150ms
+    // on vocab analysis (12% reduction). Need >50% reduction to break even.
+    let state_reduction_threshold = 5000;
 
     let start = std::time::Instant::now();
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
