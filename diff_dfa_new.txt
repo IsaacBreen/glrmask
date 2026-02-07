@@ -1,0 +1,5 @@
+Skipping maturin compilation (SKIP_MATURIN is set)
+SOURCE_FILE="testdata/finite_automata.rs" .venv/bin/python scripts/test_diff.py
+TIMING: build_tokenizer 31.401161s
+TIMING: build_glr_parser 3.28125ms
+make: *** [test-diff-dfa] Terminated: 15

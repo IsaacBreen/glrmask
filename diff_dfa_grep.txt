@@ -1,0 +1,14 @@
+TIMING: build_tokenizer 32.748328s
+TIMING: build_glr_parser 4.051709ms
+TIMING: setup_combined 12.596326959s
+TIMING: build_tokenizer 32.556762375s
+TIMING: build_glr_parser 1.252292ms
+TIMING: build_approximate_suffix_dfa 32.558529625s
+TIMING: build_tokenizer 31.026542583s
+TIMING: build_glr_parser 218.333µs
+TIMING: terminal_nwa_suffix_prune 31.073495708s
+TIMING: run_precompute1 172.763405042s
+TIMING: build_tokenizer 31.500920333s
+TIMING: build_glr_parser 246.875µs
+TIMING: suffix_prune 31.523204125s
+TIMING: parser_dwa::pass1_precompute 146.75µs

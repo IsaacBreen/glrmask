@@ -1,0 +1,500 @@
+SKIP_SERIALIZATION=1 timeout 300 python scripts/compile.py \
+		--grammar src/js.ebnf \
+		--format ebnf \
+		--output .cache/test_vocabs/constraint_js.json.gz \
+		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+		
+   Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+    Finished `release` profile [optimized] target(s) in 1m 14s
+
+[1;36mGrammar Constraint Compiler[0m
+[2m─────────────────────────────────────────[0m
+
+[1mLoading grammar...[0m
+│ [2m  Parsing grammar file...[0m [35m+39µs[0m
+│ [2m  Augmented start_production_name: "start__aug"[0m [35m+20ms[0m
+│ • Removing 0 always-null terminals
+│ • Processing 0 may-be-null terminals
+│ [2m  Creating GrammarDefinition struct with 343 productions[0m [35m+2µs[0m
+│ [2m  Ignore terminal set, about to optimize (should_optimize=false)[0m [35m+1µs[0m
+│ [2m  Optimization complete, returning[0m [35m+13µs[0m
+│ • Grammar stats: 343 prods, 159 nonterminals, 109 terminals (11 regex, 98 literal, 0 external)
+│ [2m  Grammar parsed[0m [35m+77µs[0m
+TIMING: grammar_definition 21.075666ms
+[1m└─ 343 productions, 109 terminals [35m(21ms)[0m[0m
+[1mLoading vocabulary...[0m
+TIMING: load_vocabulary 36.831167ms
+[1m└─ 50256 tokens [35m(36ms)[0m[0m
+
+[1mBuilding constraint...[0m
+│ Building tokenizer from definition
+│ [2m  Expr Stats: Nodes: 323, Depth: 11, Seq: 32, Choice: 29, Quant: 22, Shared: 57 (unique: 31, inlineable: 13), U8Seq: 167, U8Class: 16, Eps: 0[0m [35m+97µs[0m
+│ • Optimizing expression
+│ [2m  Optimized expression in 110.54µs[0m [35m+111µs[0m
+│ • Building NFA
+│ • Expr stats: Nodes: 317, Depth: 12, Seq: 34, Choice: 19, Quant: 27, Shared: 65 (unique: 44, inlineable: 22), U8Seq: 129, U8Class: 43, Eps: 0
+│ [2m  Built NFA with 577 states in 70.25µs[0m [35m+61µs[0m
+│ [2m  Condensed NFA 577 → 577 states in 12.21µs[0m [35m+15µs[0m
+│ • Converting NFA to DFA
+│ • Computed 65 input equivalence classes in 61.08µs
+│ [2m  CompactNFA: 577 states, 223 epsilon transitions[0m [35m+54µs[0m
+│ [2m  Epsilon structure: 55 states have outgoing epsilons, max out-degree 109[0m [35m+6µs[0m
+│ [2m    High out-degree states: 109:1[0m [35m+39µs[0m
+│ [2m  Epsilon density: 55 states with eps, 223 total transitions (0x states)[0m [35m+16µs[0m
+│ [2m  Precomputed 1 high-degree closures (avg size 137) in 19.63µs[0m [35m+22µs[0m
+│ [2m    └─ Timing breakdown (total ns):[0m [35m+4ms[0m
+│ [2m        - Collect: 0ms[0m [35m+8µs[0m
+│ [2m        - Closure: 0ms[0m [35m+1µs[0m
+│ [2m        - Compress: 0ms[0m [35m+1µs[0m
+│ [2m        - Lookup: 0ms[0m [35m+0µs[0m
+│ [2m        - Insert: 0ms[0m [35m+0µs[0m
+│ • NFA → DFA: 577 → 350 states (6.91ms)
+│ [2m    └─ Class computation: 61.08µs[0m [35m+15µs[0m
+│ [2m    └─ Remap transitions: 35.50µs[0m [35m+4µs[0m
+│ [2m    └─ Main loop: 4.74ms[0m [35m+19µs[0m
+│ [2m    └─ Metadata: 1.87ms[0m [35m+3µs[0m
+│ [2m    └─ Input classes processed: 21539, cache hits: 21190, misses: 349[0m [35m+1µs[0m
+│ [2m    └─ Cache hit rate: 98.4%[0m [35m+2µs[0m
+│ [2m  Converted NFA to DFA in 7.04ms[0m [35m+86µs[0m
+│ • Minimizing DFA
+│ Minimized DFA 350 → 331 states in 9.85ms
+│ [2m  Minimized DFA in 9.87ms[0m [35m+16µs[0m
+TIMING: build_tokenizer 17.263542ms
+│ Building GLR parser from definition
+│ [2m  Number of productions: 343[0m [35m+218µs[0m
+│ [2m  Mem: 21 MB (Start of parser generation)[0m [35m+6µs[0m
+│ • Validating initial grammar
+│ [2m  Computing nullable non-terminals[0m [35m+638µs[0m
+│ [2m  Computed nullable non-terminals in 348.17µs[0m [35m+354µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+178µs[0m
+│ [2m  Computed nullable non-terminals in 268.50µs[0m [35m+271µs[0m
+│ [2m  Mem: 22 MB (After validation)[0m [35m+33µs[0m
+│ • Removing productions with undefined non-terminals
+│ [2m  Mem: 22 MB (After removing undefined)[0m [35m+107µs[0m
+│ [2m  Start nonterminal: start__aug[0m [35m+9µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+1µs[0m
+│ [2m  Computed nullable non-terminals in 255.58µs[0m [35m+256µs[0m
+│ • Grammar is nullable: false
+│ [2m  Mem: 22 MB (After nullable wrapper minimization)[0m [35m+59µs[0m
+│ • Grammar optimization pass 1
+│ [2m    Phase 2: Inlining null productions[0m [35m+36µs[0m
+│ •     Null inlining complete: 343 input → 572 output productions
+│ [2m  Computing nullable non-terminals[0m [35m+73µs[0m
+│ [2m  Computed nullable non-terminals in 297.63µs[0m [35m+301µs[0m
+│ [2m    Phase 3: Eliminating 18 right recursion patterns[0m [35m+135µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+96µs[0m
+│ [2m  Computed nullable non-terminals in 285.25µs[0m [35m+288µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+169µs[0m
+│ [2m  Computed nullable non-terminals in 277.21µs[0m [35m+280µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+178µs[0m
+│ [2m  Computed nullable non-terminals in 275.25µs[0m [35m+278µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+171µs[0m
+│ [2m  Computed nullable non-terminals in 271.79µs[0m [35m+274µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+179µs[0m
+│ [2m  Computed nullable non-terminals in 269.92µs[0m [35m+273µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+178µs[0m
+│ [2m  Computed nullable non-terminals in 270.00µs[0m [35m+273µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+181µs[0m
+│ [2m  Computed nullable non-terminals in 283.25µs[0m [35m+286µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+185µs[0m
+│ [2m  Computed nullable non-terminals in 276.75µs[0m [35m+279µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+181µs[0m
+│ [2m  Computed nullable non-terminals in 272.83µs[0m [35m+275µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+177µs[0m
+│ [2m  Computed nullable non-terminals in 270.08µs[0m [35m+273µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+201µs[0m
+│ [2m  Computed nullable non-terminals in 288.08µs[0m [35m+291µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+199µs[0m
+│ [2m  Computed nullable non-terminals in 287.17µs[0m [35m+290µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+207µs[0m
+│ [2m  Computed nullable non-terminals in 294.63µs[0m [35m+297µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+205µs[0m
+│ [2m  Computed nullable non-terminals in 289.00µs[0m [35m+293µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+211µs[0m
+│ [2m  Computed nullable non-terminals in 286.46µs[0m [35m+289µs[0m
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+580µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+6µs[0m
+│ [2m  Computed nullable non-terminals in 436.46µs[0m [35m+438µs[0m
+│ [2m  Iteration 1: 30 cyclic nonterminals[0m [35m+90µs[0m
+│ • No more hidden left recursion to eliminate after 1 iterations
+│ [2m  Computing nullable non-terminals[0m [35m+681µs[0m
+│ [2m  Computed nullable non-terminals in 368.58µs[0m [35m+372µs[0m
+│ • Grammar optimization pass 2
+│ [2m    Phase 2: Inlining null productions[0m [35m+75µs[0m
+│ •     Null inlining complete: 584 input → 584 output productions
+│ [2m  Computing nullable non-terminals[0m [35m+105µs[0m
+│ [2m  Computed nullable non-terminals in 343.75µs[0m [35m+347µs[0m
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+106µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+2µs[0m
+│ [2m  Computed nullable non-terminals in 348.33µs[0m [35m+349µs[0m
+│ [2m  Iteration 1: 30 cyclic nonterminals[0m [35m+132µs[0m
+│ • No more hidden left recursion to eliminate after 1 iterations
+│ [2m  Computing nullable non-terminals[0m [35m+585µs[0m
+│ [2m  Computed nullable non-terminals in 344.79µs[0m [35m+348µs[0m
+│ • Grammar optimization converged after 2 passes
+│ [2m  Mem: 22 MB (After grammar normalization loop)[0m [35m+56µs[0m
+│ • Final epsilon production elimination
+│ •     Null inlining complete: 584 input → 584 output productions
+│ [2m  Mem: 22 MB (After final epsilon elimination)[0m [35m+109µs[0m
+│ • Eliminated 32 unreachable productions (584 → 552)
+│ [2m  Mem: 22 MB (After unreachable elimination)[0m [35m+3µs[0m
+│ • Using 1 ignore terminals (1 explicit, 0 auto-detected)
+│ • Phase 6: Left factoring created 118 new nonterminals (552 → 670 productions)
+│ [2m  Mem: 22 MB (After left factoring)[0m [35m+47µs[0m
+│ • Phase 7: Merged identical nonterminals (670 → 547 productions)
+│ [2m  Mem: 23 MB (After merge identical nonterminals)[0m [35m+4µs[0m
+│ • Phase 8: Eliminated 13 unit productions (547 → 534)
+│ [2m  Mem: 23 MB (After unit production elimination)[0m [35m+48µs[0m
+│ • Validating critical grammar invariants
+│ • Validating grammar after transformations
+│ [2m  Computing nullable non-terminals[0m [35m+1µs[0m
+│ [2m  Computed nullable non-terminals in 329.58µs[0m [35m+331µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+107µs[0m
+│ [2m  Computed nullable non-terminals in 295.83µs[0m [35m+297µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+7µs[0m
+│ [2m  Computed nullable non-terminals in 377.42µs[0m [35m+378µs[0m
+│ [2m  HLR check: 0 nullable nonterminals[0m [35m+4µs[0m
+│ [2m  HLR check: 0 cyclic nonterminals in left-reachability graph[0m [35m+5µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+3µs[0m
+│ [2m  Computed nullable non-terminals in 363.50µs[0m [35m+368µs[0m
+│ [2m  Number of productions: 534[0m [35m+202µs[0m
+│ [2m  Mem: 23 MB (Before Stage 1)[0m [35m+6µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+119µs[0m
+│ [2m  Computed nullable non-terminals in 307.79µs[0m [35m+312µs[0m
+│ • Stage 1 (LR(0) Automaton)
+│ [2m  Mem: 24 MB (After Stage 1)[0m [35m+1ms[0m
+│ • Computing First/Follow Sets
+│ [2m  Mem: 24 MB (After First/Follow)[0m [35m+797µs[0m
+│ • Computing Final Table (Merging Stages 2-8)
+│ [2m  Mem: 30 MB (After Final Table)[0m [35m+4ms[0m
+│ • Optimizing Table (state reduction)
+│ [2m  Mem: 33 MB (After Table Optimization)[0m [35m+4ms[0m
+│ • GLR Parser generation complete. 894 states.
+TIMING: build_glr_parser 35.118459ms
+│ [2m  GLR terminal equivalence: 109 terminals → 109 equivalence classes[0m [35m+4ms[0m
+│ [2m  GrammarConstraint build_with_config_inner: start[0m [35m+696µs[0m
+│ [2m  setup_combined: start[0m [35m+24µs[0m
+│ [2m  DFA stats: 331 states, 302 with finalizers (91.2%)[0m [35m+2ms[0m
+│ • State equiv phase 1: 235 groups (217 singletons, 114 ambiguous) in 390.388917ms (50256 tokens) [35m+390ms[0m
+│ State equivalence analysis took 390.41ms. Reduced 331 states to 235 (phase 1 complete).
+│ Combined equiv: state reduction 331 -> 235 states in 390.501584ms
+│ • Precomputing DFA with 331 states
+│ fast vocab equivalence: num_states=235 num_groups=109 precompute=135.875µs
+│ •   Iterative refinement: 50256 tokens, 235 states, batch_size=235
+│ [2m      Batch 1: 48286 active tokens, 2306 classes, compute=370.375708ms[0m [35m+371ms[0m
+│ •   Timing: refine=671.584µs
+│ •   Computed 2306 vocab equivalence classes in 1 batches
+│ Combined equiv: vocab analysis 50256 tokens -> 2306 classes in 371.9545ms
+[1mCombined equivalence analysis complete: 2306 vocab classes, 235 representative states (total 762.460459ms)[0m
+│ Vocab equivalence analysis: 235 initial states, 50256 tokens
+│ Combined Equivalence Analysis: 50256 tokens -> 2306 mask classes
+│ • internal_llm_token_map has 2306 representative entries (was 50256 total) - built in combined pass
+TIMING: setup_combined 768.037833ms
+│ [2m  setup_combined: end[0m [35m+508µs[0m
+│ • Building internal_to_original_map
+│ [2m  build_internal_to_original_map: start[0m [35m+4µs[0m
+TIMING: build_internal_to_original_map 2.714ms
+│ [2m  build_internal_to_original_map: end[0m [35m+2ms[0m
+│ • Building internal vocab prefix tree
+│ [2m  build_internal_vocab_tree: start[0m [35m+1µs[0m
+│ [2m  Building vocab prefix tree (fast builder)[0m [35m+77µs[0m
+│ [2m  Computing reachable IDs (fast path)[0m [35m+687µs[0m
+│ [2m  Done computing reachable IDs in 383.958µs[0m [35m+389µs[0m
+TIMING: build_internal_vocab_tree 1.160916ms
+│ [2m  build_internal_vocab_tree: end[0m [35m+9µs[0m
+│ • Done building internal vocab prefix tree
+│ • Using precomputed state equivalence: 235 representative states
+│ • Computing maps and possible_matches (fast parallel pass)
+│ [2m  build_maps_and_possible_matches: start[0m [35m+0µs[0m
+│ • build_maps_and_matches_for_reps: num_states=331, num_reps=235, num_terminals=109
+│ • build_maps_and_matches_for_reps: completed in 24.027208ms
+│ [2m  build_maps_and_matches_for_reps breakdown: fast_dfa=116.084µs, dfs=23.847042ms, assemble=51.042µs, unaccounted=30.248µs[0m [35m+16µs[0m
+TIMING: build_maps_and_possible_matches 24.156375ms
+│ [2m  build_maps_and_possible_matches: end[0m [35m+76µs[0m
+│ • Computing terminal follow sets
+│ [2m  compute_terminal_follow_sets: start[0m [35m+8µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+2µs[0m
+│ [2m  Computed nullable non-terminals in 359.25µs[0m [35m+360µs[0m
+│ [2m  Computing first sets for non-terminals[0m [35m+2µs[0m
+│ [2m  Computed first sets in 775.42µs[0m [35m+776µs[0m
+│ [2m  Computing follow sets for non-terminals[0m [35m+42µs[0m
+│ [2m  Computed follow sets in 8.67ms[0m [35m+8ms[0m
+TIMING: compute_terminal_follow_sets 11.241625ms
+│ [2m  compute_terminal_follow_sets: end[0m [35m+1ms[0m
+│ • Done computing terminal follow sets
+│ • set_global_dims: max_llm_token=2305, num_tsids=331
+│ • Building approximate parser DFA (lazy, all-states initial) for precompute1...
+│ • Approximate DFA: building lazy DFA from parser with 894 states
+│ [2m  Approximate DFA NFA stats: states=894, labels=31448, avg_labels_per_state=35.18, avg_targets_per_label=2.10, max_labels_state=102, max_targets_label=35[0m [35m+28ms[0m
+│ [2m  Approximate DFA NFA reduce-cache entries: 548[0m [35m+13µs[0m
+│ [2m  Approximate DFA NFA: top terminals by target set size:[0m [35m+185µs[0m
+│ [2m    tid=0 (BIGINT_LITERAL) ignored=false transitions=526, avg_targets=2.00, max_targets=35[0m [35m+8µs[0m
+│ [2m    tid=1 (BOOLEAN_LITERAL) ignored=false transitions=526, avg_targets=2.00, max_targets=35[0m [35m+2µs[0m
+│ [2m    tid=2 (ELISION) ignored=false transitions=262, avg_targets=2.24, max_targets=35[0m [35m+3µs[0m
+│ [2m    tid=3 (EOF) ignored=false transitions=335, avg_targets=2.35, max_targets=35[0m [35m+1µs[0m
+│ [2m    tid=4 (IDENTIFIER) ignored=false transitions=658, avg_targets=1.90, max_targets=35[0m [35m+1µs[0m
+│ [2m    tid=6 (NULL_LITERAL) ignored=false transitions=526, avg_targets=2.00, max_targets=35[0m [35m+1µs[0m
+│ [2m    tid=7 (NUMERIC_LITERAL) ignored=false transitions=583, avg_targets=2.00, max_targets=35[0m [35m+3µs[0m
+│ [2m    tid=8 (REGULAR_EXPRESSION_LITERAL) ignored=false transitions=526, avg_targets=2.00, max_targets=35[0m [35m+3µs[0m
+│ [2m    tid=9 (STRING_LITERAL) ignored=false transitions=586, avg_targets=1.99, max_targets=35[0m [35m+1µs[0m
+│ [2m    tid=11 (';') ignored=false transitions=326, avg_targets=2.16, max_targets=35[0m [35m+1µs[0m
+│ [2m  Approximate DFA NFA: tid=43 name='throw' ignored=false transitions=377 max_targets=35[0m [35m+39µs[0m
+│ [2m  Approximate DFA NFA: tid=43 sample targets (first 20)=[26, 92, 92, 87, 92, 92, 92, 92, 26, 26, 58, 295, 59, 296, 60, 297, 62, 299, 87, 87][0m [35m+25µs[0m
+│ [2m  Approximate DFA NFA: tid=44 name='debugger' ignored=false transitions=377 max_targets=35[0m [35m+8µs[0m
+│ [2m  Approximate DFA NFA: tid=44 sample targets (first 20)=[27, 92, 92, 87, 92, 92, 92, 92, 27, 27, 58, 295, 59, 296, 60, 297, 62, 299, 87, 87][0m [35m+6µs[0m
+│ [2m  Approximate DFA NFA: top reduce lengths by below-set size:[0m [35m+5µs[0m
+│ [2m    len=3 count=4064, avg_below_size=15.65, max_below_size=112[0m [35m+4µs[0m
+│ [2m    len=1 count=12078, avg_below_size=30.71, max_below_size=108[0m [35m+2µs[0m
+│ [2m    len=2 count=11829, avg_below_size=20.80, max_below_size=108[0m [35m+2µs[0m
+│ [2m    len=4 count=472, avg_below_size=8.41, max_below_size=79[0m [35m+22µs[0m
+│ [2m    len=6 count=142, avg_below_size=8.10, max_below_size=12[0m [35m+2µs[0m
+│ [2m    len=7 count=100, avg_below_size=6.00, max_below_size=11[0m [35m+5µs[0m
+│ [2m    len=5 count=92, avg_below_size=1.09, max_below_size=5[0m [35m+3µs[0m
+│ [2m  Approximate DFA: NFA has 65957 transitions (avg 73.78 per state)[0m [35m+309µs[0m
+TIMING: build_approximate_parser_dfa 29.136458ms
+│ • Approximate parser DFA built (lazy), start_state=0
+│ • Running precompute1 (weight_heavy=true, num_tsids=331)...
+│ [2m  run_precompute1: start[0m [35m+0µs[0m
+│ • set_global_dims: max_llm_token=2305, num_tsids=331
+Precompute1 tokens: internal_llm_token_map entries=2306, internal_max_llm_token=2305, num_tsids=331
+│ [2m  Building vocab prefix tree (fast builder)[0m [35m+654µs[0m
+│ [2m  Computing reachable IDs (fast path)[0m [35m+527µs[0m
+│ [2m  Done computing reachable IDs in 574.667µs[0m [35m+576µs[0m
+Created trie1 roots (235 states for 331 total tsids)
+Starting precompute DFS for 235 tokenizer states
+Vocab tree has 2307 nodes
+│ [2m  Precomputation complete[0m [35m+1.02s[0m
+│ • Precompute1 finish: flushed pending transitions/epsilons in 24.88125ms
+│ • Precompute1 start-state breakdown: group_build=23.542µs, mask_build=413.589µs, add_epsilon=8.044µs, groups=235, tsids=331
+│ • Precompute1 finish: added start state transitions in 465.75µs
+│ Terminal NWA: states=73364, transitions=174608, unique_state_pairs=154101, ranges=400452, ranges_interned=4217, num_tsids=331
+│ • NWA_SUFFIX_PRUNE set but missing grammar definition or terminal map; skipping
+│ [2m  precompute1::determinize_and_minimize start[0m [35m+2µs[0m
+│ [2m  Determinize and minimize initial stats: states=73364, transitions=174608, unique_state_pairs=154101, ranges=400452, ranges_interned=4217[0m [35m+31ms[0m
+TIMING: NWA pass RmEpsilon 6.903806083s
+TIMING: NWA pass CompressTransitions 14.075417ms
+TIMING: NWA passes total 6.917921292s
+│ [2m  NWA minimization: states=73364, transitions=85374, unique_state_pairs=58472, ranges=177785, ranges_interned=5480[0m [35m+6.93s[0m
+│ Determinizing acyclic NWA: precomputing state sets...
+│ • set_global_dims: max_llm_token=2305, num_tsids=331
+TIMING: determinize_acyclic::eps_closure_sizes avg=1.00 p50=1 p90=1 p99=1 max=1
+│ Acyclic determinize stats: dwa_states=20504, avg_unweighted_closure_size=1.74, transition_cache_total=43927 [35m+65ms[0m
+MERGE_STATS: or_ops=71516 updates=71516 final_cells=35753 ratio=2.00
+│ Acyclic determinize closures: unweighted=20504, weighted=20504, unique_weighted=20504 [35m+548ms[0m
+│ Acyclic determinize start_id=0 seen_start_id=0
+│ Found 20504 DWA states to process
+TIMING: determinize_acyclic::precompute_eps_unweighted 2.476583ms
+TIMING: determinize_acyclic::precompute_eps_weighted 49.159584ms
+TIMING: determinize_acyclic::precompute_loop 13.935334ms
+TIMING: determinize_acyclic::materialize_weighted_closures 546.311ms
+TIMING: determinize_acyclic::materialize_parallel 750ns
+TIMING: determinize_acyclic::materialize_merge 83ns
+TIMING: determinize_acyclic::materialize_collect 1.696457292s
+TIMING: determinize_acyclic::materialize_expand 1.523300853s
+TIMING: determinize_acyclic::materialize_normalize 1.720339628s
+TIMING: determinize_acyclic::materialize_weight_and 1.953519317s ops=148126
+TIMING: determinize_acyclic::materialize_weight_or 1.297276475s ops=296252
+TIMING: determinize_acyclic::materialize_counts calls=20504 labels=43927
+TIMING: determinize_acyclic::materialize_stats avg_closure_size=1.74 avg_transitions_per_state=1.84 avg_targets_per_transition=1.16
+TIMING: determinize_acyclic::materialize_or_ops collect=153220 expand=71516 normalize=71516 total=296252 all_or_ops=296252
+TIMING: determinize_acyclic::materialize_blocks closure_lookup=671.326µs transition_iter=4.977786702s pending_insert=4.242463ms
+TIMING: determinize_acyclic::eps_expand_ratio avg=1.00 p50=1.00 p90=1.00 p99=1.00 max=1.00
+TIMING: determinize_acyclic::weighted_update_ratio total_updates=71516 final_cells=35753 ratio=2.00
+TIMING: determinize_acyclic::weight_density total=35753 all=0 (0.0%) empty=0 (0.0%)
+TIMING: determinize_acyclic::op_cache_or hits=93102 misses=6674 rate=93.3%
+TIMING: determinize_acyclic::op_cache_or_miss_time 191.051862ms misses=6674 avg_us=28.6
+TIMING: determinize_acyclic::op_cache_or_miss_prep 46.883011ms avg_us=7.0
+TIMING: determinize_acyclic::op_cache_or_miss_union_asym 724.792µs count=185 avg_us=3.9
+TIMING: determinize_acyclic::op_cache_or_miss_merge 141.567178ms count=6485 avg_us=21.8
+TIMING: determinize_acyclic::op_cache_or_miss_intern 28.245623ms avg_us=4.2
+TIMING: determinize_acyclic::op_cache_or_miss_ranges avg_left=2.2 avg_right=3.4
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_union 72.499683ms count=15110 avg_us=4.8
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_sizes avg_left=1.5 avg_right=2.4
+TIMING: determinize_acyclic::op_cache_or_miss_segments total=32486 both=15110 (46.5%) left_only=1628 (5.0%) right_only=7102 (21.9%) none=8646 (26.6%)
+TIMING: determinize_acyclic::l1_op_cache_or hits=3 misses=23 rate=11.5%
+TIMING: determinize_acyclic::bitor_assign_noop total=56258 noop=0 rate=0.0%
+TIMING: determinize_acyclic::bitor_assign_noop_sample total=129 noop=27 rate=20.9%
+TIMING: determinize_acyclic::finalize_weighted_closures 1.752833ms
+TIMING: determinize_acyclic::total 623.739875ms
+TIMING: determinize_acyclic::counters dwa_states=20504 total_transitions=43927 avg_unweighted_closure_size=1.74
+│ [2m  Determinization: states=20504, transitions=43927, unique_state_pairs=39505, ranges=133427, ranges_interned=6450, transition_multiplicity_hist={1: 38617, 2: 470, 3: 138, 4: 46, 5: 35, 6: 52, 7: 11, 8: 16, 9: 5, 10: 7, 11: 6, 12: 6, 13: 4, 14: 1, 15: 3, 17: 2, 18: 24, 19: 2, 20: 1, 21: 1, 22: 2, 26: 1, 27: 6, 28: 1, 29: 2, 30: 3, 31: 1, 33: 1, 34: 1, 36: 1, 37: 5, 38: 5, 39: 4, 40: 4, 41: 16, 44: 1, 48: 1, 54: 1, 68: 2} in 632.48ms[0m [35m+21ms[0m
+TIMING: NWA::determinize 637.783833ms
+TIMING: DWA pre_minimize states=20504 transitions=43927
+│ • minimize_states_colpack: is_cyclic=false, 20504 states before
+│ [2m  push_weights_acyclic breakdown: topo=377.625µs, reachable=28.410167ms, push=5.530208ms[0m [35m+34ms[0m
+│ [2m  push_weights_acyclic ops: reachable_clone=574.613µs, reachable_and=7.100649ms, reachable_or=17.196742ms, push_and=4.158263ms[0m [35m+11µs[0m
+│ [2m  push_weights_acyclic: 34.335041ms (changed=true)[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 0 start (tighten_weights)[0m [35m+176µs[0m
+│ [2m  tighten_weights: topo_order computed in 537µs[0m [35m+540µs[0m
+│ [2m  forward_reachable breakdown: init=60.375µs, loop_outer=67.008514ms, clone=418.789µs, and=20.745222ms, or=40.539221ms[0m [35m+67ms[0m
+│ [2m  forward_reachable counts: transitions=41423, clones=18938, ands=39800, ors=18938[0m [35m+8µs[0m
+│ [2m  tighten_weights: forward_reachable computed in 68.020458ms[0m [35m+320µs[0m
+│ [2m  tighten_weights: new DWA built in 12.993417ms[0m [35m+12ms[0m
+│ [2m  Acyclic minimize step 0 end (tighten_weights): 81.729583ms[0m [35m+170µs[0m
+│ [2m  Acyclic minimize step 0 (tighten_weights): 81.733833ms[0m [35m+3µs[0m
+│ [2m  Acyclic minimize step 1 start (topo_order)[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 1 end (topo_order): 640.791µs[0m [35m+641µs[0m
+│ [2m  Acyclic minimize step 1 (topo_order): 643.833µs[0m [35m+2µs[0m
+│ [2m  Acyclic minimize step 2 start (needed_sets)[0m [35m+1µs[0m
+│ [2m  compute_needed_sets breakdown: total=37.742667ms, loop=37.17438ms, loop_other=4.386266ms, final_clone=532.529µs, weight_lookup=1.067198ms, and=11.839392ms, or=19.348995ms, transitions=39794[0m [35m+37ms[0m
+│ [2m  Acyclic minimize step 2 end (needed_sets): 45.521625ms[0m [35m+7ms[0m
+│ [2m  Acyclic minimize step 2 (needed_sets): 45.529292ms[0m [35m+6µs[0m
+│ [2m  Acyclic minimize step 3a (compute_heights): 267.958µs[0m [35m+269µs[0m
+│ [2m  Acyclic minimize step 3b (states_by_height): 98µs, max_height=65, largest_level=1003[0m [35m+101µs[0m
+│ [2m  Acyclic minimize step 3 (heights): 373.458µs[0m [35m+3µs[0m
+│ [2m    0 new_states (targets) available[0m [35m+8µs[0m
+Height 0: graph construction start candidates=348
+│ [2m  Incomp graph (h=0): 348 candidates, 34 signature groups, 12676 comparisons, 37001 skipped by footprint, 12676 edges, 3.3985ms[0m [35m+3ms[0m
+│ [2m  Incomp graph (h=0) breakdown: footprint_overlap=1.238038ms, pair_overlap=1.62683ms, unaccounted=533.632µs[0m [35m+3µs[0m
+Height 0: graph constructed in 3.410833ms (nodes=348, edges=12676)
+EXPORT CHECK: height=0 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=25µs, graph=3.410833ms, coloring=346.5µs, unaccounted=34.501µs[0m [35m+371µs[0m
+│ [2m  height 0 coloring: candidates=348, path=graph_exact, colors=3[0m [35m+5µs[0m
+TIMING: height 0 compute_height_coloring 7.199292ms
+│ [2m    3 new_states (targets) available[0m [35m+4ms[0m
+Height 1: graph construction start candidates=1003
+│ [2m  Incomp graph: 1003 candidates, 284 sig groups, 489229 comparisons, 32649 edges, 196.177875ms[0m [35m+198ms[0m
+│ [2m  Incomp graph breakdown: compare=183.547034ms, unaccounted=12.630841ms[0m [35m+7µs[0m
+Height 1: graph constructed in 196.201166ms (nodes=1003, edges=32649)
+EXPORT CHECK: height=1 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=2.431417ms, graph=196.201166ms, coloring=484.708µs, unaccounted=16.208µs[0m [35m+505µs[0m
+│ [2m  height 1 coloring: candidates=1003, path=graph_exact, colors=9[0m [35m+3µs[0m
+TIMING: height 1 compute_height_coloring 227.062417ms
+│ [2m    12 new_states (targets) available[0m [35m+44ms[0m
+Height 2: graph construction start candidates=899
+│ [2m  Incomp graph: 899 candidates, 179 sig groups, 391201 comparisons, 62110 edges, 163.969125ms[0m [35m+169ms[0m
+│ [2m  Incomp graph breakdown: compare=153.173761ms, unaccounted=10.795364ms[0m [35m+6µs[0m
+Height 2: graph constructed in 163.99425ms (nodes=899, edges=62110)
+EXPORT CHECK: height=2 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=5.826625ms, graph=163.99425ms, coloring=852.084µs, unaccounted=22.332µs[0m [35m+876µs[0m
+│ [2m  height 2 coloring: candidates=899, path=graph_exact, colors=22[0m [35m+9µs[0m
+TIMING: height 2 compute_height_coloring 176.81175ms
+│ [2m    34 new_states (targets) available[0m [35m+20ms[0m
+Height 3: graph construction start candidates=844
+│ [2m  Incomp graph: 844 candidates, 104 sig groups, 341298 comparisons, 75590 edges, 114.760083ms[0m [35m+115ms[0m
+│ [2m  Incomp graph breakdown: compare=105.702927ms, unaccounted=9.057156ms[0m [35m+7µs[0m
+Height 3: graph constructed in 114.781708ms (nodes=844, edges=75590)
+EXPORT CHECK: height=3 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=1.190916ms, graph=114.781708ms, coloring=967.916µs, unaccounted=40.794µs[0m [35m+1ms[0m
+│ [2m  height 3 coloring: candidates=844, path=graph_exact, colors=29[0m [35m+4µs[0m
+TIMING: height 3 compute_height_coloring 121.644791ms
+│ [2m    63 new_states (targets) available[0m [35m+7ms[0m
+Height 4: graph construction start candidates=839
+│ [2m  Incomp graph: 839 candidates, 89 sig groups, 335614 comparisons, 78914 edges, 93.567916ms[0m [35m+94ms[0m
+│ [2m  Incomp graph breakdown: compare=84.645393ms, unaccounted=8.922523ms[0m [35m+6µs[0m
+Height 4: graph constructed in 93.587791ms (nodes=839, edges=78914)
+EXPORT CHECK: height=4 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=446.833µs, graph=93.587791ms, coloring=991.458µs, unaccounted=24.751µs[0m [35m+1ms[0m
+│ [2m  height 4 coloring: candidates=839, path=graph_exact, colors=25[0m [35m+4µs[0m
+TIMING: height 4 compute_height_coloring 98.865ms
+│ [2m    88 new_states (targets) available[0m [35m+5ms[0m
+Height 5: graph construction start candidates=842
+│ [2m  Incomp graph: 842 candidates, 83 sig groups, 337175 comparisons, 82460 edges, 91.04525ms[0m [35m+91ms[0m
+│ [2m  Incomp graph breakdown: compare=82.091102ms, unaccounted=8.954148ms[0m [35m+9µs[0m
+Height 5: graph constructed in 91.072208ms (nodes=842, edges=82460)
+EXPORT CHECK: height=5 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=371.709µs, graph=91.072208ms, coloring=880.542µs, unaccounted=20.584µs[0m [35m+898µs[0m
+│ [2m  height 5 coloring: candidates=842, path=graph_exact, colors=26[0m [35m+2µs[0m
+TIMING: height 5 compute_height_coloring 96.425625ms
+│ [2m    114 new_states (targets) available[0m [35m+5ms[0m
+Height 6: graph construction start candidates=829
+│ [2m  Incomp graph: 829 candidates, 82 sig groups, 327609 comparisons, 78925 edges, 91.765292ms[0m [35m+92ms[0m
+│ [2m  Incomp graph breakdown: compare=82.861295ms, unaccounted=8.903997ms[0m [35m+8µs[0m
+Height 6: graph constructed in 91.786167ms (nodes=829, edges=78925)
+EXPORT CHECK: height=6 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=572.541µs, graph=91.786167ms, coloring=854.917µs, unaccounted=20.625µs[0m [35m+871µs[0m
+│ [2m  height 6 coloring: candidates=829, path=graph_exact, colors=28[0m [35m+4µs[0m
+TIMING: height 6 compute_height_coloring 97.114667ms
+│ [2m    142 new_states (targets) available[0m [35m+5ms[0m
+Height 7: graph construction start candidates=902
+│ [2m  Incomp graph: 902 candidates, 102 sig groups, 392674 comparisons, 108141 edges, 111.72125ms[0m [35m+112ms[0m
+│ [2m  Incomp graph breakdown: compare=101.26999ms, unaccounted=10.45126ms[0m [35m+10µs[0m
+Height 7: graph constructed in 111.745417ms (nodes=902, edges=108141)
+EXPORT CHECK: height=7 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=709.292µs, graph=111.745417ms, coloring=1.117083ms, unaccounted=31.916µs[0m [35m+1ms[0m
+│ [2m  height 7 coloring: candidates=902, path=graph_exact, colors=33[0m [35m+4µs[0m
+TIMING: height 7 compute_height_coloring 119.044583ms
+│ [2m    175 new_states (targets) available[0m [35m+7ms[0m
+Height 8: graph construction start candidates=815
+│ [2m  Incomp graph: 815 candidates, 106 sig groups, 319698 comparisons, 80226 edges, 92.63275ms[0m [35m+93ms[0m
+│ [2m  Incomp graph breakdown: compare=84.048638ms, unaccounted=8.584112ms[0m [35m+8µs[0m
+Height 8: graph constructed in 92.656208ms (nodes=815, edges=80226)
+EXPORT CHECK: height=8 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=480.5µs, graph=92.656208ms, coloring=869.833µs, unaccounted=29.959µs[0m [35m+899µs[0m
+│ [2m  height 8 coloring: candidates=815, path=graph_exact, colors=36[0m [35m+3µs[0m
+TIMING: height 8 compute_height_coloring 99.935416ms
+│ [2m    211 new_states (targets) available[0m [35m+7ms[0m
+Height 9: graph construction start candidates=760
+│ [2m  Incomp graph: 760 candidates, 104 sig groups, 276567 comparisons, 64270 edges, 74.2725ms[0m [35m+74ms[0m
+│ [2m  Incomp graph breakdown: compare=66.999513ms, unaccounted=7.272987ms[0m [35m+8µs[0m
+Height 9: graph constructed in 74.292459ms (nodes=760, edges=64270)
+EXPORT CHECK: height=9 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=445.916µs, graph=74.292459ms, coloring=766.416µs, unaccounted=19.459µs[0m [35m+784µs[0m
+│ [2m  height 9 coloring: candidates=760, path=graph_exact, colors=47[0m [35m+5µs[0m
+TIMING: height 9 compute_height_coloring 80.130708ms
+│ [2m    258 new_states (targets) available[0m [35m+5ms[0m
+Height 10: graph construction start candidates=747
+│ [2m  Incomp graph: 747 candidates, 110 sig groups, 267070 comparisons, 61734 edges, 74.470916ms[0m [35m+74ms[0m
+│ [2m  Incomp graph breakdown: compare=67.276937ms, unaccounted=7.193979ms[0m [35m+7µs[0m
+Height 10: graph constructed in 74.491ms (nodes=747, edges=61734)
+EXPORT CHECK: height=10 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=410.792µs, graph=74.491ms, coloring=694.208µs, unaccounted=16.209µs[0m [35m+711µs[0m
+│ [2m  height 10 coloring: candidates=747, path=graph_exact, colors=45[0m [35m+5µs[0m
+TIMING: height 10 compute_height_coloring 80.876792ms
+│ [2m    303 new_states (targets) available[0m [35m+6ms[0m
+Height 11: graph construction start candidates=696
+│ [2m  Incomp graph: 696 candidates, 109 sig groups, 230746 comparisons, 54887 edges, 64.667125ms[0m [35m+65ms[0m
+│ [2m  Incomp graph breakdown: compare=58.449036ms, unaccounted=6.218089ms[0m [35m+7µs[0m
+Height 11: graph constructed in 64.686ms (nodes=696, edges=54887)
+EXPORT CHECK: height=11 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=427.708µs, graph=64.686ms, coloring=628.375µs, unaccounted=34.125µs[0m [35m+661µs[0m
+│ [2m  height 11 coloring: candidates=696, path=graph_exact, colors=50[0m [35m+5µs[0m
+TIMING: height 11 compute_height_coloring 68.86925ms
+│ [2m    353 new_states (targets) available[0m [35m+4ms[0m
+Height 12: graph construction start candidates=649
+│ [2m  Incomp graph: 649 candidates, 85 sig groups, 199669 comparisons, 45591 edges, 54.449583ms[0m [35m+54ms[0m
+│ [2m  Incomp graph breakdown: compare=49.126197ms, unaccounted=5.323386ms[0m [35m+8µs[0m
+Height 12: graph constructed in 54.469875ms (nodes=649, edges=45591)
+EXPORT CHECK: height=12 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=306.417µs, graph=54.469875ms, coloring=577.959µs, unaccounted=35.582µs[0m [35m+612µs[0m
+│ [2m  height 12 coloring: candidates=649, path=graph_exact, colors=47[0m [35m+8µs[0m
+TIMING: height 12 compute_height_coloring 57.959375ms
+│ [2m    400 new_states (targets) available[0m [35m+3ms[0m
+Height 13: graph construction start candidates=644
+│ [2m  Incomp graph: 644 candidates, 88 sig groups, 197018 comparisons, 45324 edges, 52.849375ms[0m [35m+53ms[0m
+│ [2m  Incomp graph breakdown: compare=47.516615ms, unaccounted=5.33276ms[0m [35m+8µs[0m
+Height 13: graph constructed in 52.870125ms (nodes=644, edges=45324)
+EXPORT CHECK: height=13 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=323.625µs, graph=52.870125ms, coloring=525.083µs, unaccounted=19.584µs[0m [35m+542µs[0m
+│ [2m  height 13 coloring: candidates=644, path=graph_exact, colors=44[0m [35m+4µs[0m
+TIMING: height 13 compute_height_coloring 56.174584ms
+│ [2m    444 new_states (targets) available[0m [35m+3ms[0m
+Height 14: graph construction start candidates=597
+│ [2m  Incomp graph: 597 candidates, 80 sig groups, 168700 comparisons, 36707 edges, 49.551166ms[0m [35m+49ms[0m
+│ [2m  Incomp graph breakdown: compare=44.755652ms, unaccounted=4.795514ms[0m [35m+7µs[0m
+Height 14: graph constructed in 49.570125ms (nodes=597, edges=36707)
+EXPORT CHECK: height=14 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=340.834µs, graph=49.570125ms, coloring=484.375µs, unaccounted=16.791µs[0m [35m+499µs[0m
+│ [2m  height 14 coloring: candidates=597, path=graph_exact, colors=39[0m [35m+6µs[0m
+TIMING: height 14 compute_height_coloring 52.906791ms
+│ [2m    483 new_states (targets) available[0m [35m+3ms[0m
+Height 15: graph construction start candidates=574
+│ [2m  Incomp graph: 574 candidates, 92 sig groups, 157781 comparisons, 35323 edges, 51.200042ms[0m [35m+51ms[0m
+│ [2m  Incomp graph breakdown: compare=46.659145ms, unaccounted=4.540897ms[0m [35m+6µs[0m
+Height 15: graph constructed in 51.219208ms (nodes=574, edges=35323)
+EXPORT CHECK: height=15 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=625.833µs, graph=51.219208ms, coloring=509.125µs, unaccounted=24.125µs[0m [35m+531µs[0m
+│ [2m  height 15 coloring: candidates=574, path=graph_exact, colors=38[0m [35m+7µs[0m
+TIMING: height 15 compute_height_coloring 55.029375ms
+│ [2m    521 new_states (targets) available[0m [35m+4ms[0m
+Height 16: graph construction start candidates=504
+│ [2m  Incomp graph: 504 candidates, 91 sig groups, 120735 comparisons, 26269 edges, 37.593834ms[0m [35m+38ms[0m
+│ [2m  Incomp graph breakdown: compare=34.232848ms, unaccounted=3.360986ms[0m [35m+6µs[0m
+Height 16: graph constructed in 37.6135ms (nodes=504, edges=26269)
+EXPORT CHECK: height=16 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=426.875µs, graph=37.6135ms, coloring=347.167µs, unaccounted=18.458µs[0m [35m+362µs[0m
+│ [2m  height 16 coloring: candidates=504, path=graph_exact, colors=31[0m [35m+4µs[0m
+TIMING: height 16 compute_height_coloring 41.920583ms
+│ [2m    552 new_states (targets) available[0m [35m+4ms[0m
+Height 17: graph construction start candidates=461
+│ [2m  Incomp graph: 461 candidates, 88 sig groups, 100849 comparisons, 22215 edges, 29.53575ms[0m [35m+29ms[0m

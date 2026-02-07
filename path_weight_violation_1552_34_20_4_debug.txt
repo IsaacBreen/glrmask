@@ -1,0 +1,19 @@
+RUN token=1552 labels=34,20,4
+DEBUG_PATH_WEIGHT stage=nwa_initial token=1552 labels=[34, 20, 4] contains=false weight_len=1 ignore_final=false
+DEBUG_PATH_WEIGHT stage=nwa_post_passes token=1552 labels=[34, 20, 4] contains=false weight_len=1 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_determinize token=1552 labels=[34, 20, 4] contains=false weight_len=1 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_hook token=1552 labels=[34, 20, 4] contains=false weight_len=1 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_minimize token=1552 labels=[34, 20, 4] contains=false weight_len=1 ignore_final=false
+DEBUG_PATH_WEIGHT stage=terminal_dwa_final token=1552 labels=[34, 20, 4] contains=false weight_len=1 ignore_final=false
+DEBUG_PATH_WEIGHT stage=nwa_initial token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=nwa_post_passes token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_determinize token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_hook token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_minimize token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=nwa_initial token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=nwa_post_passes token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_determinize token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_hook token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DEBUG_PATH_WEIGHT stage=dwa_post_minimize token=1552 labels=[34, 20, 4] contains=false weight_len=0 ignore_final=false
+DONE token=1552 labels=34,20,4
+---

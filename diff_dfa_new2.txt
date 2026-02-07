@@ -1,0 +1,110 @@
+Skipping maturin compilation (SKIP_MATURIN is set)
+SOURCE_FILE="testdata/finite_automata.rs" .venv/bin/python scripts/test_diff.py
+TIMING: build_tokenizer 33.63883025s
+TIMING: build_glr_parser 25.474875ms
+TIMING: setup_combined 10.936038084s
+TIMING: build_internal_to_original_map 2.272375ms
+TIMING: build_internal_vocab_tree 1.55425ms
+TIMING: build_maps_and_possible_matches 16.562042ms
+TIMING: compute_terminal_follow_sets 293.208µs
+TIMING: build_tokenizer 33.300604666s
+TIMING: build_glr_parser 19.224667ms
+TIMING: build_approximate_suffix_dfa 33.32022625s
+TIMING: build_tokenizer 32.876907833s
+TIMING: build_glr_parser 16.227458ms
+TIMING: terminal_nwa_suffix_prune 32.935970959s
+TIMING: NWA pass RmEpsilon 7.41730925s
+TIMING: NWA pass CompressTransitions 7.35025ms
+TIMING: NWA passes total 7.424715375s
+TIMING: NWA::determinize 39.794292ms
+TIMING: DWA pre_minimize states=2 transitions=1
+TIMING: DWA pass ColPackMinimize 12.911417ms
+TIMING: DWA pass TrimWeights 337.292µs
+TIMING: DWA passes total 13.266917ms
+TIMING: DWA post_minimize states=2 transitions=1
+TIMING: NWA::determinize_and_minimize_with_config total 7.479109834s
+TIMING: run_precompute1 173.5795155s
+TIMING: build_tokenizer 33.049593791s
+TIMING: build_glr_parser 21.298541ms
+TIMING: suffix_prune 33.091902458s
+TIMING: terminal_nwa_from_dwa 5.375µs
+TIMING: parser_dwa::build_template_dwas 2.351666ms
+TIMING: parser_dwa::build_ignore_terminal_dwa 750ns
+TIMING: parser_dwa::reverse_nwa 30.417µs
+TIMING: parser_dwa::compute_traversal_data 143.042µs
+TIMING: parser_dwa::pass1_precompute 144.584µs
+TIMING: parser_dwa::simple_signatures 971.417µs
+TIMING: parser_dwa::pass2_profile process_total=8µs, canonicalize=1µs, cache_lookup=0ns, cache_insert=0ns, dynamic_derive=0ns, instantiate=5µs, cancellations=0ns, finality_fixpoint=0ns, remove_negative=0ns, union=0ns, tsid_collect=0ns, final_collect=0ns, other=2µs, templates=3
+TIMING: parser_dwa::batch_negatives cancellations=78.125µs, finality_fixpoint=4.542µs, remove_negative=708ns
+TIMING: parser_dwa::combine_bodies 375ns
+TIMING: parser_dwa::finalize::subtract_final_weights_from_outgoing 917ns
+TIMING: parser_dwa::finalize::prune_dead_ends 8µs
+TIMING: parser_dwa::finalize::prune_unreachable 5.292µs
+TIMING: NWA pass PruneDeadEnds 2.125µs
+TIMING: NWA pass PruneUnreachable 458ns
+TIMING: NWA pass RmEpsilon 34.625µs
+TIMING: NWA pass PushFinalWeights 1.5µs
+TIMING: NWA pass PushWeightsToInitial 13.495042ms
+TIMING: NWA pass Minimize 3.083µs
+TIMING: NWA passes total 13.573916ms
+TIMING: NWA::determinize 119.917µs
+TIMING: DWA pre_minimize states=2 transitions=1
+TIMING: DWA pass PruneDeadEnds 2.666µs
+TIMING: DWA pass FastMinimize 66.458µs
+TIMING: DWA pass TrimWeights 542.542µs
+TIMING: DWA passes total 625.75µs
+TIMING: DWA post_minimize states=2 transitions=1
+TIMING: NWA::determinize_and_minimize_with_config total 15.36375ms
+TIMING: parser_dwa::finalize::determinize_and_minimize 15.369542ms
+TIMING: parser_dwa::finalize_and_determinize 16.078666ms
+TIMING: build_parser_dwa 20.390875ms
+TIMING: parser_dwa_trim_weights 747.333µs
+TIMING: build_internal_to_original_sparse_matrix 1.370958ms
+TIMING: build_vocab_trie 3.599292ms
+Testing diff grammar for: testdata/finite_automata.rs
+============================================================
+
+1. Generating diff grammar...
+Reading source file: testdata/finite_automata.rs
+   Grammar generation: 18.9ms (1035226 chars)
+   Grammar has 10466 lines
+   First 10 lines:
+      root ::= diff;
+      diff ::= file_header? ( HUNK_HEADER s0 )? EOF;
+      file_header ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;
+      EOF  ::= '<|EOF|>';
+      
+      // 's' rules: Find the start of a hunk
+      s0 ::= line0 | s1;
+      s1 ::= line1 | s2;
+      s2 ::= line2 | s3;
+      s3 ::= line3 | s4;
+      ...
+
+2. Loading vocabulary...
+   tiktoken not found, falling back to vocab.json download...
+   Vocab download/parse: 1666.6ms
+
+3. Cache disabled (NO_CACHE=1)
+
+4. Parsing EBNF to GrammarDefinition...
+   Grammar parsing: 453994.1ms
+
+5. Optimizing grammar...
+   Optimization: 397.1ms
+
+6. Compiling grammar...
+   Grammar compilation: 33665.8ms
+
+7. Creating constraint with vocabulary...
+   Constraint creation: 251390.3ms
+
+9. Testing constraint...
+   Initial state active: True
+   Testing minimal input: '<|EOF|>'
+   Initial mask has 8 allowed tokens
+
+============================================================
+=== Grammar Compile Time (GCT): 739466.2ms ===
+=== Total time (incl. vocab): 741132.8ms ===
+SUCCESS: Diff grammar constraint created!

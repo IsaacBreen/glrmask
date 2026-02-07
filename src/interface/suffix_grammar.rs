@@ -237,7 +237,7 @@ pub fn validate_terminal_dwa_paths_verbose(
     verbose: bool,
 ) -> f64 {
     use crate::interface::CompiledGrammar;
-    use crate::glr::table::TerminalID;
+    use crate::glr::table::{NonTerminalID, StateID, TerminalID};
     use rand::Rng;
     
     if verbose {
@@ -379,7 +379,7 @@ pub fn prune_dwa_with_suffix_grammar(
     terminals_count: usize,
 ) -> (usize, usize) {
     use crate::interface::CompiledGrammar;
-    use crate::glr::table::TerminalID;
+    use crate::glr::table::{NonTerminalID, StateID, TerminalID};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     
     crate::debug!(4, "Starting suffix grammar DWA pruning");
@@ -419,6 +419,96 @@ pub fn prune_dwa_with_suffix_grammar(
         }
     }
     crate::debug!(4, "    Terminal mapping: {} of {} terminals mapped", orig_to_suffix_tid.len(), terminal_map.len());
+
+    // Precompute a conservative mapping of NonTerminalID -> possible GOTO states.
+    // This is used to approximate successor states when we see reduce actions with len > 0.
+    let mut reduce_goto_states_by_nt: BTreeMap<NonTerminalID, BTreeSet<StateID>> = BTreeMap::new();
+    for (_state_id, row) in crate::glr::table::iter_rows(&suffix_parser.table) {
+        for (nt_id, goto) in row.get_gotos() {
+            if let Some(goto_state) = goto.state_id {
+                reduce_goto_states_by_nt
+                    .entry(*nt_id)
+                    .or_default()
+                    .insert(goto_state);
+            }
+        }
+    }
+
+    // Precompute which nonterminals can be reduced (len > 0) from each parser state,
+    // ignoring lookahead. This helps build a conservative closure for parser states.
+    let mut reduce_nts_by_state: BTreeMap<StateID, BTreeSet<NonTerminalID>> = BTreeMap::new();
+    for (state_id, row) in crate::glr::table::iter_rows(&suffix_parser.table) {
+        let mut nts: BTreeSet<NonTerminalID> = BTreeSet::new();
+        for (_term, action) in row.get_shifts_and_reduces_map() {
+            use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+            match action {
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                    if len > 0 {
+                        nts.insert(nonterminal_id);
+                    }
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+                    for (&reduce_len, nonterminals) in reduces.iter() {
+                        if reduce_len > 0 {
+                            for nt_id in nonterminals.keys() {
+                                nts.insert(*nt_id);
+                            }
+                        }
+                    }
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {}
+            }
+        }
+        if let Some(default_reduce) = &row.default_reduce {
+            use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } = default_reduce {
+                if *len > 0 {
+                    nts.insert(*nonterminal_id);
+                }
+            }
+        }
+        if !nts.is_empty() {
+            reduce_nts_by_state.insert(*state_id, nts);
+        }
+    }
+
+    let expand_parser_states = |states: &BTreeSet<StateID>| -> BTreeSet<StateID> {
+        let mut expanded = states.clone();
+        let mut queue: VecDeque<StateID> = states.iter().copied().collect();
+        while let Some(state_id) = queue.pop_front() {
+            if let Some(nts) = reduce_nts_by_state.get(&state_id) {
+                for nt_id in nts {
+                    if let Some(gotos) = reduce_goto_states_by_nt.get(nt_id) {
+                        for &goto_state in gotos {
+                            if expanded.insert(goto_state) {
+                                queue.push_back(goto_state);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        expanded
+    };
+
+    let debug_suffix_prune = std::env::var("DEBUG_SUFFIX_PRUNE_JSON").is_ok();
+    let mut debug_label_ids: BTreeSet<usize> = BTreeSet::new();
+    if debug_suffix_prune {
+        let debug_terms = [
+            Terminal::RegexName("MINUS".to_string()),
+            Terminal::RegexName("QUOTE".to_string()),
+            Terminal::Literal(vec![b']']),
+            Terminal::Literal(vec![b',']),
+            Terminal::Literal(vec![b':']),
+        ];
+        for term in debug_terms.iter() {
+            if let Some(tid) = terminal_map.get_by_left(term) {
+                debug_label_ids.insert(tid.0);
+                eprintln!("DEBUG_SUFFIX_PRUNE_JSON label {} => {:?}", tid.0, term);
+            }
+        }
+        eprintln!("DEBUG_SUFFIX_PRUNE_JSON labels: {:?}", debug_label_ids);
+    }
     
     // Track which suffix parser states are reachable at each DWA state
     // Key: DWA state ID, Value: Set of GLR parser state IDs
@@ -441,9 +531,25 @@ pub fn prune_dwa_with_suffix_grammar(
     
     while let Some(dwa_state) = queue.pop_front() {
         in_queue.remove(&dwa_state);
-        let parser_states = dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default();
+        let mut parser_states = dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default();
+        let expanded = expand_parser_states(&parser_states);
+        if expanded.len() > parser_states.len() {
+            dwa_to_parser_states.insert(dwa_state, expanded.clone());
+            parser_states = expanded;
+        }
         crate::debug!(6, "  BFS: DWA state {} with parser_states {:?}", dwa_state, parser_states);
         
+        let mut fallback_reduce_goto_states: BTreeSet<StateID> = BTreeSet::new();
+        for state_id in parser_states.iter() {
+            if let Some(nts) = reduce_nts_by_state.get(state_id) {
+                for nt_id in nts {
+                    if let Some(gotos) = reduce_goto_states_by_nt.get(nt_id) {
+                        fallback_reduce_goto_states.extend(gotos.iter().copied());
+                    }
+                }
+            }
+        }
+
         // For each transition from this DWA state
         let transitions: Vec<(i32, usize)> = dwa.states[dwa_state].transitions.iter()
             .map(|(&label, &dest)| (label, dest))
@@ -484,6 +590,7 @@ pub fn prune_dwa_with_suffix_grammar(
                 // Track if we found any valid action (including reduces we can't fully simulate)
                 // If there's a reduce with len>0, we can't compute successors but the terminal IS valid
                 let mut has_reduce_with_len_gt_0 = false;
+                let mut reduce_goto_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
                 
                 // Process parser states iteratively to handle ε-reduction chains
                 // ε-reductions (len=0) don't consume input, so after the reduce+GOTO,
@@ -520,6 +627,9 @@ pub fn prune_dwa_with_suffix_grammar(
                                         // but this terminal IS valid as a lookahead.
                                         // Mark that we should keep this transition.
                                         has_reduce_with_len_gt_0 = true;
+                                        if let Some(states) = reduce_goto_states_by_nt.get(&nonterminal_id) {
+                                            reduce_goto_states.extend(states.iter().copied());
+                                        }
                                         crate::debug!(6, "          -> Reduce len>0, marking as valid");
                                     }
                                 }
@@ -542,6 +652,11 @@ pub fn prune_dwa_with_suffix_grammar(
                                         } else {
                                             // Reduce with len > 0: valid lookahead
                                             has_reduce_with_len_gt_0 = true;
+                                            for nt_id in nonterminals.keys() {
+                                                if let Some(states) = reduce_goto_states_by_nt.get(nt_id) {
+                                                    reduce_goto_states.extend(states.iter().copied());
+                                                }
+                                            }
                                             crate::debug!(6, "          -> Split reduce len>0, marking as valid");
                                         }
                                     }
@@ -551,6 +666,10 @@ pub fn prune_dwa_with_suffix_grammar(
                             crate::debug!(6, "          No action for terminal {} from state {}", suffix_tid.0, parser_state_id.0);
                         }
                     }
+                }
+
+                if !reduce_goto_states.is_empty() {
+                    successor_states.extend(reduce_goto_states.iter().copied());
                 }
                 
                 if !successor_states.is_empty() {
@@ -573,6 +692,15 @@ pub fn prune_dwa_with_suffix_grammar(
                     // Initialize the dest state's parser states with the suffix parser start state
                     // This is conservative - after reduces, we could end up anywhere
                     dest_states.insert(initial_parser_state_id);
+                    if dest_states.len() > before_len && in_queue.insert(dest_dwa_state) {
+                        queue.push_back(dest_dwa_state);
+                    }
+                } else if !fallback_reduce_goto_states.is_empty() {
+                    // Fallback: treat any len>0 reduce in the current parser state set as a valid
+                    // lookahead for this terminal, and propagate the corresponding goto states.
+                    let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
+                    let before_len = dest_states.len();
+                    dest_states.extend(fallback_reduce_goto_states.iter().copied());
                     if dest_states.len() > before_len && in_queue.insert(dest_dwa_state) {
                         queue.push_back(dest_dwa_state);
                     }
@@ -599,7 +727,19 @@ pub fn prune_dwa_with_suffix_grammar(
     let mut kept_count = 0usize;
 
     for dwa_state in 0..dwa.states.len() {
-        let parser_states = dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default();
+        let parser_states = expand_parser_states(
+            &dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default(),
+        );
+        let mut fallback_reduce_goto_states: BTreeSet<StateID> = BTreeSet::new();
+        for state_id in parser_states.iter() {
+            if let Some(nts) = reduce_nts_by_state.get(state_id) {
+                for nt_id in nts {
+                    if let Some(gotos) = reduce_goto_states_by_nt.get(nt_id) {
+                        fallback_reduce_goto_states.extend(gotos.iter().copied());
+                    }
+                }
+            }
+        }
         let transitions: Vec<(i32, usize)> = dwa.states[dwa_state].transitions.iter()
             .map(|(&label, &dest)| (label, dest))
             .collect();
@@ -622,6 +762,7 @@ pub fn prune_dwa_with_suffix_grammar(
             if let Some(&suffix_tid) = orig_to_suffix_tid.get(&label_usize) {
                 let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
                 let mut has_reduce_with_len_gt_0 = false;
+                let mut reduce_goto_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
 
                 let mut states_to_process: VecDeque<crate::glr::table::StateID> = parser_states.iter().copied().collect();
                 let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
@@ -647,6 +788,9 @@ pub fn prune_dwa_with_suffix_grammar(
                                         }
                                     } else {
                                         has_reduce_with_len_gt_0 = true;
+                                        if let Some(states) = reduce_goto_states_by_nt.get(&nonterminal_id) {
+                                            reduce_goto_states.extend(states.iter().copied());
+                                        }
                                     }
                                 }
                                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -664,6 +808,11 @@ pub fn prune_dwa_with_suffix_grammar(
                                             }
                                         } else {
                                             has_reduce_with_len_gt_0 = true;
+                                            for nt_id in nonterminals.keys() {
+                                                if let Some(states) = reduce_goto_states_by_nt.get(nt_id) {
+                                                    reduce_goto_states.extend(states.iter().copied());
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -672,9 +821,41 @@ pub fn prune_dwa_with_suffix_grammar(
                     }
                 }
 
+                if !reduce_goto_states.is_empty() {
+                    successor_states.extend(reduce_goto_states.iter().copied());
+                }
+
                 if !successor_states.is_empty() || has_reduce_with_len_gt_0 {
+                    if debug_suffix_prune && debug_label_ids.contains(&label_usize) {
+                        eprintln!(
+                            "DEBUG_SUFFIX_PRUNE_JSON KEEP state={} label={} parser_states={:?} succ_count={} reduce_len_gt_0={}",
+                            dwa_state,
+                            label_usize,
+                            parser_states,
+                            successor_states.len(),
+                            has_reduce_with_len_gt_0
+                        );
+                    }
+                    kept_count += 1;
+                } else if !fallback_reduce_goto_states.is_empty() {
+                    if debug_suffix_prune && debug_label_ids.contains(&label_usize) {
+                        eprintln!(
+                            "DEBUG_SUFFIX_PRUNE_JSON KEEP_FALLBACK state={} label={} parser_states={:?}",
+                            dwa_state,
+                            label_usize,
+                            parser_states
+                        );
+                    }
                     kept_count += 1;
                 } else {
+                    if debug_suffix_prune && debug_label_ids.contains(&label_usize) {
+                        eprintln!(
+                            "DEBUG_SUFFIX_PRUNE_JSON PRUNE state={} label={} parser_states={:?}",
+                            dwa_state,
+                            label_usize,
+                            parser_states
+                        );
+                    }
                     transitions_to_remove.push((dwa_state, label));
                     pruned_count += 1;
                 }

@@ -3459,6 +3459,8 @@ fn test_suffix_dfa_prunes_tilde_equals() {
         dfa: approx_dfa,
         orig_to_suffix_tid,
         ignored_terminals,
+        reduce_fallback_terminals_by_state:
+            crate::constraint_precompute::build_reduce_fallback_terminals_by_state(&suffix_parser),
     };
 
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
@@ -3569,6 +3571,8 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
         dfa: approx_dfa,
         orig_to_suffix_tid,
         ignored_terminals,
+        reduce_fallback_terminals_by_state:
+            crate::constraint_precompute::build_reduce_fallback_terminals_by_state(&suffix_parser),
     };
 
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
@@ -3686,6 +3690,8 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
         dfa: approx_dfa,
         orig_to_suffix_tid,
         ignored_terminals,
+        reduce_fallback_terminals_by_state:
+            crate::constraint_precompute::build_reduce_fallback_terminals_by_state(&suffix_parser),
     };
 
     let terminal_dwa = run_precompute1(

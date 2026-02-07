@@ -298,6 +298,61 @@ pub struct ApproximateDfaPruner {
     pub dfa: LazyApproximateDFA,
     pub orig_to_suffix_tid: Vec<Option<crate::types::TerminalID>>,
     pub ignored_terminals: Vec<bool>,
+    pub reduce_fallback_terminals_by_state: Vec<Vec<usize>>,
+}
+
+pub fn build_reduce_fallback_terminals_by_state(
+    parser: &crate::glr::parser::GLRParser,
+) -> Vec<Vec<usize>> {
+    use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+
+    let num_terminals = parser.terminal_map.len();
+    let num_states = parser.table.keys().map(|s| s.0).max().unwrap_or(0) + 1;
+    let mut fallback_by_state: Vec<Vec<usize>> = vec![Vec::new(); num_states];
+
+    for (_state_id, row) in parser.table.iter() {
+        let state_idx = _state_id.0;
+        let mut terms: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        for (term_id, action) in row.get_shifts_and_reduces_map() {
+            match action {
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
+                    if len > 0 {
+                        terms.insert(term_id.0);
+                    }
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+                    if reduces.keys().any(|len| *len > 0) {
+                        terms.insert(term_id.0);
+                    }
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {}
+            }
+        }
+
+        if let Some(default_reduce) = &row.default_reduce {
+            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } = default_reduce {
+                if *len > 0 {
+                    if let Some(lookaheads) = &row.default_reduce_lookaheads {
+                        for term_id in lookaheads {
+                            if term_id.0 < num_terminals {
+                                terms.insert(term_id.0);
+                            }
+                        }
+                    } else {
+                        for term_idx in 0..num_terminals {
+                            terms.insert(term_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !terms.is_empty() {
+            fallback_by_state[state_idx] = terms.into_iter().collect();
+        }
+    }
+
+    fallback_by_state
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,7 +1086,83 @@ impl<'r> Precomputer1<'r> {
             {
                 Some(approx_state)
             } else if let Some(suffix_tid) = approx_dfa.orig_to_suffix_tid.get(term_idx).copied().flatten() {
-                approx_dfa.dfa.step(approx_state, suffix_tid)
+                match approx_dfa.dfa.step(approx_state, suffix_tid) {
+                    Some(next) => Some(next),
+                    None => {
+                        // The DFA step failed for this terminal. This can happen
+                        // when a reduce should have fired at a PREVIOUS step
+                        // but the DFA doesn't model reduce-then-goto within
+                        // its state transitions.
+                        //
+                        // If any parser state in the state set has ANY reduce
+                        // with len>0 (for any terminal), then the parser might
+                        // have reduced at a previous step, popping below the
+                        // bottom of the stack. After reducing below bottom,
+                        // any state is possible, so we transition to the
+                        // start state (which represents all possible parser
+                        // states) and try stepping from there.
+                        //
+                        // We check for ANY reduce (not just one matching this
+                        // terminal) because the reduce fires on a PREVIOUS
+                        // terminal in the lookahead, not the current one.
+                        let mut has_any_reduce = false;
+                        if let Some(state_set) = approx_dfa.dfa.state_set(approx_state) {
+                            for state_id in state_set.iter() {
+                                if let Some(terms) = approx_dfa.reduce_fallback_terminals_by_state.get(state_id) {
+                                    if !terms.is_empty() {
+                                        has_any_reduce = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if has_any_reduce {
+                            // Reduce below bottom -> "all possible states" = start state.
+                            // Try stepping from start to see if this terminal is valid.
+                            let start = approx_dfa.dfa.start_state;
+                            let result = approx_dfa.dfa.step(start, suffix_tid);
+                            if result.is_some() {
+                                return result;
+                            }
+                        }
+                        if std::env::var("DEBUG_APPROX_STEP").is_ok() {
+                            let mut should_log = true;
+                            if let Ok(filter) = std::env::var("DEBUG_APPROX_STEP_TERMS") {
+                                let mut hits = false;
+                                for part in filter.split(',') {
+                                    if let Ok(val) = part.trim().parse::<usize>() {
+                                        if val == suffix_tid.0 {
+                                            hits = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                should_log = hits;
+                            }
+                            if should_log {
+                                eprintln!(
+                                    "DEBUG_APPROX_STEP PRUNE state={} term_idx={} suffix_tid={} state_set={:?}",
+                                    approx_state,
+                                    term_idx,
+                                    suffix_tid.0,
+                                    approx_dfa.dfa.state_set(approx_state)
+                                );
+                                if let Some(state_set) = approx_dfa.dfa.state_set(approx_state) {
+                                    for state_id in state_set.iter() {
+                                        if let Some(terms) = approx_dfa.reduce_fallback_terminals_by_state.get(state_id) {
+                                            eprintln!(
+                                                "  state {} reduce_terms={:?}",
+                                                state_id,
+                                                terms
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    }
+                }
             } else {
                 Some(approx_state)
             }

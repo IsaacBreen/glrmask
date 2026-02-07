@@ -1,0 +1,2060 @@
+🔗 Found pyo3 bindings
+🐍 Found CPython 3.12 at /Users/isaacbreen/miniforge3/envs/py312/bin/python
+📡 Using build options features from pyproject.toml
+    Finished `release` profile [optimized] target(s) in 0.30s
+📦 Built wheel for CPython 3.12 to /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/.tmpyRmCyD/python-0.1.0-cp312-cp312-macosx_11_0_arm64.whl
+✏️  Setting installed package as editable
+🛠 Installed python-0.1.0
+SOURCE_FILE="testdata/finite_automata.rs" .venv/bin/python scripts/test_diff.py
+│ [2m  Augmented start_production_name: "start__aug"[0m
+│ • Removing 0 always-null terminals
+│ • Processing 0 may-be-null terminals
+│ [2m  Creating GrammarDefinition struct with 2 productions[0m [35m+0µs[0m
+│ [2m  Ignore terminal set, about to optimize (should_optimize=false)[0m [35m+1µs[0m
+│ [2m  Optimization complete, returning[0m [35m+0µs[0m
+│ • Grammar stats: 2 prods, 2 nonterminals, 1 terminals (1 regex, 0 literal, 0 external)
+│ • Starting grammar optimization with 2 productions
+│ • Built 2 equations in 18.375µs
+│ • Found 0 cyclic NTs in 27.459µs
+│ • Computed elimination order (1 NTs) in 6.667µs
+│ [2m  Solutions: 1 NTs, total size 1, max size 1[0m [35m+6µs[0m
+│ • Phase 1: solved 1 NTs, failed 0 in 6.667µs (solve=1.5µs)
+│ • Phase 2a: solved start NT symbolically in 167ns
+│ [2m  Start term size before expansion: 1[0m [35m+0µs[0m
+│ • Phase 2b: expanded start NT in 3.041µs
+│ [2m  Converted to Expr in 2.333µs[0m [35m+2µs[0m
+│ [2m  Minimized expr in 6.900458ms[0m [35m+6ms[0m
+│ • Grammar optimization complete in 7.010416ms
+│ [2m  optimize iter=100000 seq=8625 choice=8617 stack=4577 values=1831 elapsed=6.97ms[0m [35m+10ms[0m
+│ Building tokenizer from definition
+│ [2m  Expr Stats: Nodes: 65855, Depth: 13940, Seq: 10455, Choice: 6964, Quant: 10456, RepeatBounded: 0, Shared: 31353 (unique: 10457, inlineable: 0), U8Seq: 3138, U8Class: 3489, Eps: 0[0m [35m+907µs[0m
+│ • Optimizing expression
+│ [2m  optimize iter=100000 seq=10003 choice=6664 stack=457 values=4 elapsed=5.89ms[0m [35m+5ms[0m
+│ [2m  Optimized expression in 6.19ms[0m [35m+302µs[0m
+│ • Building NFA
+│ • Expr stats: Nodes: 65855, Depth: 6975, Seq: 10455, Choice: 6964, Quant: 10456, RepeatBounded: 0, Shared: 31353 (unique: 10457, inlineable: 0), U8Seq: 3138, U8Class: 3489, Eps: 0
+│ • Factored out common prefix in NFA construction
+│ [2m  Built NFA with 242625 states in 16.35ms[0m [35m+15ms[0m
+│ [2m  Condensed NFA 242625 → 242625 states in 4.96ms[0m [35m+4ms[0m
+│ • Converting NFA to DFA
+│ • Computed 105 input equivalence classes in 6.41ms
+│ [2m  CompactNFA: 242625 states, 83598 epsilon transitions[0m [35m+16ms[0m
+│ [2m  Epsilon structure: 41800 states have outgoing epsilons, max out-degree 2[0m [35m+458µs[0m
+│ [2m  Epsilon density: 41800 states with eps, 83598 total transitions (0x states)[0m [35m+997µs[0m
+│ [2m  Precomputed 0 high-degree closures (avg size 0) in 924.08µs[0m [35m+929µs[0m
+│ [2m  DFA progress: 1001 states, worklist 199, subset size 1 (max 17345), elapsed 83.18ms[0m [35m+58ms[0m
+│ [2m  DFA progress: 2000 states, worklist 346, subset size 1 (max 17345), elapsed 85.30ms[0m [35m+2ms[0m
+│ [2m  DFA progress: 3001 states, worklist 345, subset size 55 (max 17345), elapsed 88.10ms[0m [35m+2ms[0m
+│ [2m  DFA progress: 4000 states, worklist 311, subset size 1 (max 17345), elapsed 92.21ms[0m [35m+4ms[0m
+│ [2m  DFA progress: 5000 states, worklist 313, subset size 1 (max 17345), elapsed 96.50ms[0m [35m+4ms[0m
+│ [2m  DFA progress: 6000 states, worklist 306, subset size 5 (max 17345), elapsed 102.19ms[0m [35m+5ms[0m
+│ [2m  DFA progress: 7000 states, worklist 372, subset size 78 (max 17345), elapsed 105.72ms[0m [35m+3ms[0m
+│ [2m  DFA progress: 8000 states, worklist 354, subset size 1 (max 17345), elapsed 113.50ms[0m [35m+7ms[0m
+│ [2m  DFA progress: 9000 states, worklist 362, subset size 515 (max 17345), elapsed 121.36ms[0m [35m+7ms[0m
+│ [2m  DFA progress: 10002 states, worklist 340, subset size 9 (max 17345), elapsed 134.10ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 11000 states, worklist 320, subset size 639 (max 17345), elapsed 147.24ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 12000 states, worklist 294, subset size 1 (max 17345), elapsed 159.86ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 13000 states, worklist 281, subset size 103 (max 17345), elapsed 171.85ms[0m [35m+11ms[0m
+│ [2m  DFA progress: 14000 states, worklist 314, subset size 1 (max 17345), elapsed 184.11ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 15000 states, worklist 291, subset size 1 (max 17345), elapsed 197.04ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 16000 states, worklist 281, subset size 2 (max 17345), elapsed 211.76ms[0m [35m+14ms[0m
+│ [2m  DFA progress: 17000 states, worklist 262, subset size 1 (max 17345), elapsed 224.56ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 18000 states, worklist 258, subset size 1 (max 17345), elapsed 242.65ms[0m [35m+18ms[0m
+│ [2m  DFA progress: 19000 states, worklist 246, subset size 1 (max 17345), elapsed 254.90ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 20000 states, worklist 279, subset size 1 (max 17345), elapsed 277.15ms[0m [35m+22ms[0m
+│ [2m  DFA progress: 21000 states, worklist 249, subset size 439 (max 17345), elapsed 306.30ms[0m [35m+29ms[0m
+│ [2m  DFA progress: 22000 states, worklist 261, subset size 3 (max 17345), elapsed 327.87ms[0m [35m+21ms[0m
+│ [2m  DFA progress: 23000 states, worklist 252, subset size 2 (max 17345), elapsed 355.22ms[0m [35m+27ms[0m
+│ [2m  DFA progress: 24002 states, worklist 262, subset size 6 (max 17345), elapsed 375.37ms[0m [35m+20ms[0m
+│ [2m  DFA progress: 25000 states, worklist 255, subset size 1 (max 17345), elapsed 398.03ms[0m [35m+22ms[0m
+│ [2m  DFA progress: 26000 states, worklist 253, subset size 9 (max 17345), elapsed 420.79ms[0m [35m+22ms[0m
+│ [2m  DFA progress: 27000 states, worklist 278, subset size 1 (max 17345), elapsed 444.84ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 28000 states, worklist 242, subset size 1 (max 17345), elapsed 471.40ms[0m [35m+26ms[0m
+│ [2m  DFA progress: 29000 states, worklist 227, subset size 2 (max 17345), elapsed 496.21ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 30000 states, worklist 264, subset size 1 (max 17345), elapsed 521.14ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 31000 states, worklist 261, subset size 1 (max 17345), elapsed 543.98ms[0m [35m+22ms[0m
+│ [2m  DFA progress: 32000 states, worklist 275, subset size 1859 (max 17345), elapsed 567.12ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 33000 states, worklist 227, subset size 1 (max 17345), elapsed 592.68ms[0m [35m+25ms[0m
+│ [2m  DFA progress: 34000 states, worklist 199, subset size 630 (max 17345), elapsed 621.32ms[0m [35m+28ms[0m
+│ [2m  DFA progress: 35000 states, worklist 303, subset size 1 (max 17345), elapsed 645.28ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 36000 states, worklist 282, subset size 1 (max 17345), elapsed 679.99ms[0m [35m+34ms[0m
+│ [2m  DFA progress: 37000 states, worklist 295, subset size 693 (max 17345), elapsed 717.86ms[0m [35m+37ms[0m
+│ [2m  DFA progress: 38000 states, worklist 292, subset size 1 (max 17345), elapsed 751.17ms[0m [35m+33ms[0m
+│ [2m  DFA progress: 39000 states, worklist 345, subset size 1 (max 17345), elapsed 773.97ms[0m [35m+22ms[0m
+│ [2m  DFA progress: 40000 states, worklist 322, subset size 1 (max 17345), elapsed 808.82ms[0m [35m+34ms[0m
+│ [2m  DFA progress: 41000 states, worklist 292, subset size 503 (max 17345), elapsed 846.30ms[0m [35m+37ms[0m
+│ [2m  DFA progress: 42000 states, worklist 254, subset size 2 (max 17345), elapsed 884.23ms[0m [35m+37ms[0m
+│ [2m  DFA progress: 43000 states, worklist 305, subset size 1 (max 17345), elapsed 913.70ms[0m [35m+29ms[0m
+│ [2m  DFA progress: 44000 states, worklist 265, subset size 1 (max 17345), elapsed 955.80ms[0m [35m+42ms[0m
+│ [2m  DFA progress: 45000 states, worklist 253, subset size 1 (max 17345), elapsed 989.49ms[0m [35m+33ms[0m
+│ [2m  DFA progress: 46000 states, worklist 258, subset size 9 (max 17345), elapsed 1.04s[0m [35m+50ms[0m
+│ [2m  DFA progress: 47000 states, worklist 284, subset size 1 (max 17345), elapsed 1.07s[0m [35m+31ms[0m
+│ [2m  DFA progress: 48000 states, worklist 260, subset size 6 (max 17345), elapsed 1.11s[0m [35m+43ms[0m
+│ [2m  DFA progress: 49000 states, worklist 243, subset size 1 (max 17345), elapsed 1.15s[0m [35m+39ms[0m
+│ [2m  DFA progress: 50000 states, worklist 270, subset size 4 (max 17345), elapsed 1.19s[0m [35m+38ms[0m
+│ [2m  DFA progress: 51000 states, worklist 294, subset size 511 (max 17345), elapsed 1.23s[0m [35m+36ms[0m
+│ [2m  DFA progress: 52000 states, worklist 280, subset size 2 (max 17345), elapsed 1.27s[0m [35m+44ms[0m
+│ [2m  DFA progress: 53000 states, worklist 257, subset size 559 (max 17345), elapsed 1.32s[0m [35m+41ms[0m
+│ [2m  DFA progress: 54000 states, worklist 269, subset size 324 (max 17345), elapsed 1.36s[0m [35m+45ms[0m
+│ [2m  DFA progress: 55001 states, worklist 254, subset size 2340 (max 17345), elapsed 1.40s[0m [35m+36ms[0m
+│ [2m  DFA progress: 56001 states, worklist 251, subset size 22 (max 17345), elapsed 1.45s[0m [35m+56ms[0m
+│ [2m  DFA progress: 57000 states, worklist 264, subset size 19 (max 17345), elapsed 1.51s[0m [35m+53ms[0m
+│ [2m  DFA progress: 58001 states, worklist 256, subset size 1 (max 17345), elapsed 1.56s[0m [35m+49ms[0m
+│ [2m  DFA progress: 59000 states, worklist 233, subset size 1 (max 17345), elapsed 1.61s[0m [35m+52ms[0m
+│ [2m  DFA progress: 60000 states, worklist 330, subset size 1 (max 17345), elapsed 1.66s[0m [35m+46ms[0m
+│ [2m  DFA progress: 61000 states, worklist 353, subset size 4 (max 17345), elapsed 1.69s[0m [35m+29ms[0m
+│ [2m  DFA progress: 62001 states, worklist 327, subset size 6 (max 17345), elapsed 1.73s[0m [35m+47ms[0m
+│ [2m  DFA progress: 63000 states, worklist 326, subset size 2 (max 17345), elapsed 1.79s[0m [35m+52ms[0m
+│ [2m  DFA progress: 64001 states, worklist 318, subset size 870 (max 17345), elapsed 1.83s[0m [35m+43ms[0m
+│ [2m  DFA progress: 65000 states, worklist 397, subset size 1 (max 17345), elapsed 1.86s[0m [35m+27ms[0m
+│ [2m  DFA progress: 66000 states, worklist 401, subset size 1 (max 17345), elapsed 1.91s[0m [35m+52ms[0m
+│ [2m  DFA progress: 67003 states, worklist 405, subset size 1 (max 17345), elapsed 1.95s[0m [35m+44ms[0m
+│ [2m  DFA progress: 68000 states, worklist 434, subset size 1 (max 17345), elapsed 1.98s[0m [35m+28ms[0m
+│ [2m  DFA progress: 69000 states, worklist 418, subset size 1 (max 17345), elapsed 2.03s[0m [35m+42ms[0m
+│ [2m  DFA progress: 70000 states, worklist 386, subset size 2 (max 17345), elapsed 2.06s[0m [35m+39ms[0m
+│ [2m  DFA progress: 71000 states, worklist 375, subset size 833 (max 17345), elapsed 2.12s[0m [35m+56ms[0m
+│ [2m  DFA progress: 72000 states, worklist 388, subset size 1 (max 17345), elapsed 2.15s[0m [35m+32ms[0m
+│ [2m  DFA progress: 73001 states, worklist 357, subset size 16 (max 17345), elapsed 2.19s[0m [35m+36ms[0m
+│ [2m  DFA progress: 74000 states, worklist 382, subset size 1 (max 17345), elapsed 2.23s[0m [35m+39ms[0m
+│ [2m  DFA progress: 75000 states, worklist 364, subset size 27 (max 17345), elapsed 2.26s[0m [35m+33ms[0m
+│ [2m  DFA progress: 76000 states, worklist 314, subset size 902 (max 17345), elapsed 2.31s[0m [35m+46ms[0m
+│ [2m  DFA progress: 77000 states, worklist 341, subset size 6 (max 17345), elapsed 2.36s[0m [35m+47ms[0m
+│ [2m  DFA progress: 78000 states, worklist 344, subset size 1 (max 17345), elapsed 2.40s[0m [35m+43ms[0m
+│ [2m  DFA progress: 79000 states, worklist 310, subset size 1 (max 17345), elapsed 2.45s[0m [35m+48ms[0m
+│ [2m  DFA progress: 80000 states, worklist 300, subset size 1 (max 17345), elapsed 2.50s[0m [35m+48ms[0m
+│ [2m  DFA progress: 81002 states, worklist 295, subset size 1 (max 17345), elapsed 2.57s[0m [35m+67ms[0m
+│ [2m  DFA progress: 82000 states, worklist 295, subset size 1 (max 17345), elapsed 2.62s[0m [35m+54ms[0m
+│ [2m  DFA progress: 83000 states, worklist 315, subset size 9 (max 17345), elapsed 2.69s[0m [35m+71ms[0m
+│ [2m  DFA progress: 84000 states, worklist 326, subset size 961 (max 17345), elapsed 2.75s[0m [35m+58ms[0m
+│ [2m  DFA progress: 85001 states, worklist 333, subset size 1 (max 17345), elapsed 2.82s[0m [35m+71ms[0m
+│ [2m  DFA progress: 86000 states, worklist 270, subset size 1 (max 17345), elapsed 2.87s[0m [35m+49ms[0m
+│ [2m  DFA progress: 87000 states, worklist 306, subset size 1 (max 17345), elapsed 2.94s[0m [35m+64ms[0m
+│ [2m  DFA progress: 88000 states, worklist 307, subset size 1 (max 17345), elapsed 3.00s[0m [35m+59ms[0m
+│ [2m  DFA progress: 89000 states, worklist 301, subset size 1 (max 17345), elapsed 3.06s[0m [35m+61ms[0m
+│ [2m  DFA progress: 90000 states, worklist 275, subset size 2 (max 17345), elapsed 3.10s[0m [35m+41ms[0m
+│ [2m  DFA progress: 91000 states, worklist 244, subset size 1 (max 17345), elapsed 3.17s[0m [35m+67ms[0m
+│ [2m  DFA progress: 92000 states, worklist 252, subset size 1 (max 17345), elapsed 3.23s[0m [35m+65ms[0m
+│ [2m  DFA progress: 93000 states, worklist 286, subset size 1 (max 17345), elapsed 3.29s[0m [35m+61ms[0m
+│ [2m  DFA progress: 94000 states, worklist 267, subset size 1064 (max 17345), elapsed 3.37s[0m [35m+77ms[0m
+│ [2m  DFA progress: 95000 states, worklist 256, subset size 1 (max 17345), elapsed 3.44s[0m [35m+70ms[0m
+│ [2m  DFA progress: 96000 states, worklist 261, subset size 973 (max 17345), elapsed 3.49s[0m [35m+53ms[0m
+│ [2m  DFA progress: 97000 states, worklist 283, subset size 1 (max 17345), elapsed 3.57s[0m [35m+78ms[0m
+│ [2m  DFA progress: 98000 states, worklist 229, subset size 5083 (max 17345), elapsed 3.66s[0m [35m+84ms[0m
+│ [2m  DFA progress: 99000 states, worklist 205, subset size 1 (max 17345), elapsed 3.74s[0m [35m+83ms[0m
+│ [2m  DFA progress: 100001 states, worklist 276, subset size 915 (max 17345), elapsed 3.79s[0m [35m+47ms[0m
+│ [2m  DFA progress: 101000 states, worklist 269, subset size 649 (max 17345), elapsed 3.89s[0m [35m+97ms[0m
+│ [2m  DFA progress: 102000 states, worklist 275, subset size 387 (max 17345), elapsed 3.96s[0m [35m+79ms[0m
+│ [2m  DFA progress: 103000 states, worklist 271, subset size 288 (max 17345), elapsed 4.04s[0m [35m+73ms[0m
+│ [2m  DFA progress: 104000 states, worklist 245, subset size 1 (max 17345), elapsed 4.14s[0m [35m+100ms[0m
+│ [2m  DFA progress: 105000 states, worklist 255, subset size 35 (max 17345), elapsed 4.22s[0m [35m+83ms[0m
+│ [2m  DFA progress: 106001 states, worklist 271, subset size 6 (max 17345), elapsed 4.30s[0m [35m+82ms[0m
+│ [2m  DFA progress: 107001 states, worklist 280, subset size 1 (max 17345), elapsed 4.40s[0m [35m+93ms[0m
+│ [2m  DFA progress: 108000 states, worklist 273, subset size 2 (max 17345), elapsed 4.47s[0m [35m+68ms[0m
+│ [2m  DFA progress: 109000 states, worklist 283, subset size 1 (max 17345), elapsed 4.53s[0m [35m+66ms[0m
+│ [2m  DFA progress: 110000 states, worklist 239, subset size 1 (max 17345), elapsed 4.58s[0m [35m+46ms[0m
+│ [2m  DFA progress: 111000 states, worklist 245, subset size 3 (max 17345), elapsed 4.66s[0m [35m+84ms[0m
+│ [2m  DFA progress: 112000 states, worklist 232, subset size 1 (max 17345), elapsed 4.74s[0m [35m+74ms[0m
+│ [2m  DFA progress: 113000 states, worklist 215, subset size 2 (max 17345), elapsed 4.81s[0m [35m+68ms[0m
+│ [2m  DFA progress: 114001 states, worklist 276, subset size 1770 (max 17345), elapsed 4.88s[0m [35m+75ms[0m
+│ [2m  DFA progress: 115000 states, worklist 254, subset size 2 (max 17345), elapsed 4.96s[0m [35m+82ms[0m
+│ [2m  DFA progress: 116000 states, worklist 226, subset size 1 (max 17345), elapsed 5.04s[0m [35m+74ms[0m
+│ [2m  DFA progress: 117000 states, worklist 273, subset size 1303 (max 17345), elapsed 5.11s[0m [35m+74ms[0m
+│ [2m  DFA progress: 118000 states, worklist 218, subset size 6 (max 17345), elapsed 5.20s[0m [35m+84ms[0m
+│ [2m  DFA progress: 119000 states, worklist 228, subset size 1 (max 17345), elapsed 5.25s[0m [35m+55ms[0m
+│ [2m  DFA progress: 120001 states, worklist 214, subset size 1853 (max 17345), elapsed 5.34s[0m [35m+82ms[0m
+│ [2m  DFA progress: 121000 states, worklist 237, subset size 1 (max 17345), elapsed 5.39s[0m [35m+59ms[0m
+│ [2m  DFA progress: 122000 states, worklist 258, subset size 429 (max 17345), elapsed 5.50s[0m [35m+107ms[0m
+│ [2m  DFA progress: 123000 states, worklist 240, subset size 1 (max 17345), elapsed 5.61s[0m [35m+106ms[0m
+│ [2m  DFA progress: 124000 states, worklist 203, subset size 32 (max 17345), elapsed 5.71s[0m [35m+103ms[0m
+│ [2m  DFA progress: 125000 states, worklist 265, subset size 439 (max 17345), elapsed 5.79s[0m [35m+74ms[0m
+│ [2m  DFA progress: 126000 states, worklist 258, subset size 8 (max 17345), elapsed 5.87s[0m [35m+83ms[0m
+│ [2m  DFA progress: 127000 states, worklist 236, subset size 1 (max 17345), elapsed 5.97s[0m [35m+101ms[0m
+│ [2m  DFA progress: 128000 states, worklist 208, subset size 1 (max 17345), elapsed 6.10s[0m [35m+126ms[0m
+│ [2m  DFA progress: 129000 states, worklist 260, subset size 1995 (max 17345), elapsed 6.15s[0m [35m+46ms[0m
+│ [2m  DFA progress: 130000 states, worklist 252, subset size 186 (max 17345), elapsed 6.23s[0m [35m+88ms[0m
+│ [2m  DFA progress: 131000 states, worklist 294, subset size 1 (max 17345), elapsed 6.31s[0m [35m+77ms[0m
+│ [2m  DFA progress: 132000 states, worklist 301, subset size 3 (max 17345), elapsed 6.39s[0m [35m+81ms[0m
+│ [2m  DFA progress: 133000 states, worklist 281, subset size 103 (max 17345), elapsed 6.47s[0m [35m+76ms[0m
+│ [2m  DFA progress: 134000 states, worklist 320, subset size 1 (max 17345), elapsed 6.54s[0m [35m+74ms[0m
+│ [2m  DFA progress: 135000 states, worklist 307, subset size 47 (max 17345), elapsed 6.62s[0m [35m+75ms[0m
+│ [2m  DFA progress: 136000 states, worklist 293, subset size 1 (max 17345), elapsed 6.70s[0m [35m+76ms[0m
+│ [2m  DFA progress: 137000 states, worklist 255, subset size 1 (max 17345), elapsed 6.78s[0m [35m+86ms[0m
+│ [2m  DFA progress: 138000 states, worklist 229, subset size 1 (max 17345), elapsed 6.88s[0m [35m+98ms[0m
+│ [2m  DFA progress: 139000 states, worklist 219, subset size 1 (max 17345), elapsed 6.97s[0m [35m+85ms[0m
+│ [2m  DFA progress: 140000 states, worklist 214, subset size 1 (max 17345), elapsed 7.07s[0m [35m+102ms[0m
+│ [2m  DFA progress: 141000 states, worklist 206, subset size 1 (max 17345), elapsed 7.15s[0m [35m+80ms[0m
+│ [2m  DFA progress: 142000 states, worklist 200, subset size 5 (max 17345), elapsed 7.23s[0m [35m+80ms[0m
+│ [2m  DFA progress: 143000 states, worklist 230, subset size 1 (max 17345), elapsed 7.34s[0m [35m+104ms[0m
+│ [2m  DFA progress: 144001 states, worklist 205, subset size 9 (max 17345), elapsed 7.45s[0m [35m+113ms[0m
+│ [2m  DFA progress: 145000 states, worklist 184, subset size 1 (max 17345), elapsed 7.53s[0m [35m+84ms[0m
+│ [2m  DFA progress: 146000 states, worklist 187, subset size 1 (max 17345), elapsed 7.68s[0m [35m+142ms[0m
+│ [2m  DFA progress: 147002 states, worklist 154, subset size 6 (max 17345), elapsed 7.82s[0m [35m+142ms[0m
+│ [2m  DFA progress: 148000 states, worklist 163, subset size 1 (max 17345), elapsed 7.91s[0m [35m+94ms[0m
+│ [2m  DFA progress: 149000 states, worklist 137, subset size 42 (max 17345), elapsed 8.02s[0m [35m+109ms[0m
+│ [2m  DFA progress: 150001 states, worklist 198, subset size 1900 (max 17345), elapsed 8.15s[0m [35m+126ms[0m
+│ [2m  DFA progress: 151000 states, worklist 246, subset size 1 (max 17345), elapsed 8.29s[0m [35m+139ms[0m
+│ [2m  DFA progress: 152001 states, worklist 225, subset size 9 (max 17345), elapsed 8.43s[0m [35m+141ms[0m
+│ [2m  DFA progress: 153000 states, worklist 216, subset size 1 (max 17345), elapsed 8.58s[0m [35m+147ms[0m
+│ [2m  DFA progress: 154000 states, worklist 271, subset size 1 (max 17345), elapsed 8.72s[0m [35m+139ms[0m
+│ [2m  DFA progress: 155000 states, worklist 278, subset size 1 (max 17345), elapsed 8.82s[0m [35m+108ms[0m
+│ [2m  DFA progress: 156000 states, worklist 257, subset size 17 (max 17345), elapsed 8.97s[0m [35m+140ms[0m
+│ [2m  DFA progress: 157002 states, worklist 273, subset size 1 (max 17345), elapsed 9.11s[0m [35m+145ms[0m
+│ [2m  DFA progress: 158000 states, worklist 274, subset size 1 (max 17345), elapsed 9.24s[0m [35m+132ms[0m
+│ [2m  DFA progress: 159000 states, worklist 250, subset size 1 (max 17345), elapsed 9.39s[0m [35m+143ms[0m
+│ [2m  DFA progress: 160000 states, worklist 327, subset size 1 (max 17345), elapsed 9.46s[0m [35m+72ms[0m
+│ [2m  DFA progress: 161000 states, worklist 323, subset size 4 (max 17345), elapsed 9.58s[0m [35m+121ms[0m
+│ [2m  DFA progress: 162000 states, worklist 350, subset size 376 (max 17345), elapsed 9.65s[0m [35m+66ms[0m
+│ [2m  DFA progress: 163000 states, worklist 334, subset size 3 (max 17345), elapsed 9.73s[0m [35m+85ms[0m
+│ [2m  DFA progress: 164000 states, worklist 316, subset size 1 (max 17345), elapsed 9.80s[0m [35m+71ms[0m
+│ [2m  DFA progress: 165000 states, worklist 335, subset size 100 (max 17345), elapsed 9.88s[0m [35m+80ms[0m
+│ [2m  DFA progress: 166000 states, worklist 341, subset size 1 (max 17345), elapsed 9.98s[0m [35m+91ms[0m
+│ [2m  DFA progress: 167000 states, worklist 340, subset size 3 (max 17345), elapsed 10.06s[0m [35m+81ms[0m
+│ [2m  DFA progress: 168000 states, worklist 331, subset size 1 (max 17345), elapsed 10.14s[0m [35m+85ms[0m
+│ [2m  DFA progress: 169000 states, worklist 338, subset size 6180 (max 17345), elapsed 10.17s[0m [35m+24ms[0m
+│ [2m  DFA progress: 170000 states, worklist 325, subset size 4 (max 17345), elapsed 10.23s[0m [35m+61ms[0m
+│ [2m  DFA progress: 171000 states, worklist 313, subset size 10 (max 17345), elapsed 10.30s[0m [35m+72ms[0m
+│ [2m  DFA progress: 172000 states, worklist 309, subset size 9 (max 17345), elapsed 10.41s[0m [35m+106ms[0m
+│ [2m  DFA progress: 173000 states, worklist 311, subset size 1 (max 17345), elapsed 10.52s[0m [35m+116ms[0m
+│ [2m  DFA progress: 174000 states, worklist 292, subset size 1 (max 17345), elapsed 10.62s[0m [35m+92ms[0m
+│ [2m  DFA progress: 175000 states, worklist 281, subset size 688 (max 17345), elapsed 10.72s[0m [35m+107ms[0m
+│ [2m  DFA progress: 176000 states, worklist 259, subset size 1 (max 17345), elapsed 10.81s[0m [35m+85ms[0m
+│ [2m  DFA progress: 177000 states, worklist 247, subset size 1 (max 17345), elapsed 10.95s[0m [35m+145ms[0m
+│ [2m  DFA progress: 178002 states, worklist 219, subset size 1 (max 17345), elapsed 11.09s[0m [35m+135ms[0m
+│ [2m  DFA progress: 179000 states, worklist 268, subset size 1 (max 17345), elapsed 11.24s[0m [35m+150ms[0m
+│ [2m  DFA progress: 180000 states, worklist 272, subset size 1921 (max 17345), elapsed 11.36s[0m [35m+124ms[0m
+│ [2m  DFA progress: 181000 states, worklist 262, subset size 1 (max 17345), elapsed 11.47s[0m [35m+110ms[0m
+│ [2m  DFA progress: 182000 states, worklist 260, subset size 1 (max 17345), elapsed 11.55s[0m [35m+80ms[0m
+│ [2m  DFA progress: 183001 states, worklist 239, subset size 6 (max 17345), elapsed 11.67s[0m [35m+117ms[0m
+│ [2m  DFA progress: 184000 states, worklist 251, subset size 1 (max 17345), elapsed 11.83s[0m [35m+157ms[0m
+│ [2m  DFA progress: 185001 states, worklist 323, subset size 6 (max 17345), elapsed 11.94s[0m [35m+109ms[0m
+│ [2m  DFA progress: 186000 states, worklist 311, subset size 1 (max 17345), elapsed 12.04s[0m [35m+101ms[0m
+│ [2m  DFA progress: 187000 states, worklist 311, subset size 1 (max 17345), elapsed 12.13s[0m [35m+87ms[0m
+│ [2m  DFA progress: 188000 states, worklist 294, subset size 9043 (max 17345), elapsed 12.19s[0m [35m+57ms[0m
+│ [2m  DFA progress: 189000 states, worklist 318, subset size 1 (max 17345), elapsed 12.30s[0m [35m+116ms[0m
+│ [2m  DFA progress: 190000 states, worklist 289, subset size 6 (max 17345), elapsed 12.42s[0m [35m+118ms[0m
+│ [2m  DFA progress: 191001 states, worklist 307, subset size 6 (max 17345), elapsed 12.55s[0m [35m+129ms[0m
+│ [2m  DFA progress: 192001 states, worklist 306, subset size 9123 (max 17345), elapsed 12.62s[0m [35m+71ms[0m
+│ [2m  DFA progress: 193002 states, worklist 300, subset size 1 (max 17345), elapsed 12.71s[0m [35m+92ms[0m
+│ [2m  DFA progress: 194000 states, worklist 295, subset size 1 (max 17345), elapsed 12.81s[0m [35m+95ms[0m
+│ [2m  DFA progress: 195000 states, worklist 307, subset size 134 (max 17345), elapsed 12.89s[0m [35m+77ms[0m
+│ [2m  DFA progress: 196000 states, worklist 292, subset size 3 (max 17345), elapsed 12.98s[0m [35m+95ms[0m
+│ [2m  DFA progress: 197000 states, worklist 310, subset size 1 (max 17345), elapsed 13.07s[0m [35m+90ms[0m
+│ [2m  DFA progress: 198000 states, worklist 299, subset size 850 (max 17345), elapsed 13.16s[0m [35m+84ms[0m
+│ [2m  DFA progress: 199000 states, worklist 293, subset size 422 (max 17345), elapsed 13.22s[0m [35m+60ms[0m
+│ [2m  DFA progress: 200000 states, worklist 302, subset size 5 (max 17345), elapsed 13.32s[0m [35m+105ms[0m
+│ [2m  DFA progress: 201000 states, worklist 300, subset size 17 (max 17345), elapsed 13.40s[0m [35m+74ms[0m
+│ [2m  DFA progress: 202000 states, worklist 284, subset size 2 (max 17345), elapsed 13.41s[0m [35m+13ms[0m
+│ [2m  DFA progress: 203000 states, worklist 304, subset size 5 (max 17345), elapsed 13.49s[0m [35m+81ms[0m
+│ [2m  DFA progress: 204000 states, worklist 297, subset size 6 (max 17345), elapsed 13.60s[0m [35m+110ms[0m
+│ [2m  DFA progress: 205000 states, worklist 271, subset size 26 (max 17345), elapsed 13.65s[0m [35m+44ms[0m
+│ [2m  DFA progress: 206000 states, worklist 292, subset size 1 (max 17345), elapsed 13.76s[0m [35m+111ms[0m
+│ [2m  DFA progress: 207000 states, worklist 358, subset size 450 (max 17345), elapsed 13.85s[0m [35m+89ms[0m
+│ [2m  DFA progress: 208000 states, worklist 352, subset size 316 (max 17345), elapsed 13.97s[0m [35m+117ms[0m
+│ [2m  DFA progress: 209000 states, worklist 333, subset size 1 (max 17345), elapsed 14.04s[0m [35m+68ms[0m
+│ [2m  DFA progress: 210000 states, worklist 298, subset size 1 (max 17345), elapsed 14.10s[0m [35m+68ms[0m
+│ [2m  DFA progress: 211000 states, worklist 312, subset size 1 (max 17345), elapsed 14.21s[0m [35m+106ms[0m
+│ [2m  DFA progress: 212000 states, worklist 299, subset size 1 (max 17345), elapsed 14.33s[0m [35m+121ms[0m
+│ [2m  DFA progress: 213002 states, worklist 283, subset size 1 (max 17345), elapsed 14.47s[0m [35m+136ms[0m
+│ [2m  DFA progress: 214000 states, worklist 237, subset size 1 (max 17345), elapsed 14.69s[0m [35m+218ms[0m
+│ [2m  DFA progress: 215000 states, worklist 228, subset size 2931 (max 17345), elapsed 14.87s[0m [35m+180ms[0m
+│ [2m  DFA progress: 216000 states, worklist 237, subset size 1 (max 17345), elapsed 15.05s[0m [35m+182ms[0m
+│ [2m  DFA progress: 217000 states, worklist 220, subset size 2058 (max 17345), elapsed 15.21s[0m [35m+159ms[0m
+│ [2m  DFA progress: 218000 states, worklist 209, subset size 1 (max 17345), elapsed 15.44s[0m [35m+234ms[0m
+│ [2m  DFA progress: 219000 states, worklist 168, subset size 2 (max 17345), elapsed 15.62s[0m [35m+175ms[0m
+│ [2m  DFA progress: 220000 states, worklist 259, subset size 1 (max 17345), elapsed 15.77s[0m [35m+153ms[0m
+│ [2m  DFA progress: 221000 states, worklist 247, subset size 3025 (max 17345), elapsed 15.91s[0m [35m+134ms[0m
+│ [2m  DFA progress: 222000 states, worklist 226, subset size 6 (max 17345), elapsed 16.12s[0m [35m+209ms[0m
+│ [2m  DFA progress: 223000 states, worklist 209, subset size 1 (max 17345), elapsed 16.34s[0m [35m+218ms[0m
+│ [2m  DFA progress: 224000 states, worklist 208, subset size 2307 (max 17345), elapsed 16.44s[0m [35m+107ms[0m
+│ [2m  DFA progress: 225001 states, worklist 196, subset size 9 (max 17345), elapsed 16.62s[0m [35m+175ms[0m
+│ [2m  DFA progress: 226000 states, worklist 174, subset size 1 (max 17345), elapsed 16.78s[0m [35m+161ms[0m
+│ [2m  DFA progress: 227000 states, worklist 164, subset size 1 (max 17345), elapsed 17.03s[0m [35m+245ms[0m
+│ [2m  DFA progress: 228000 states, worklist 190, subset size 1 (max 17345), elapsed 17.19s[0m [35m+161ms[0m
+│ [2m  DFA progress: 229000 states, worklist 187, subset size 2 (max 17345), elapsed 17.38s[0m [35m+194ms[0m
+│ [2m  DFA progress: 230002 states, worklist 161, subset size 3 (max 17345), elapsed 17.57s[0m [35m+186ms[0m
+│ [2m  DFA progress: 231000 states, worklist 159, subset size 2 (max 17345), elapsed 17.74s[0m [35m+170ms[0m
+│ [2m  DFA progress: 232000 states, worklist 168, subset size 1 (max 17345), elapsed 17.89s[0m [35m+154ms[0m
+│ [2m  DFA progress: 233000 states, worklist 119, subset size 4 (max 17345), elapsed 18.12s[0m [35m+222ms[0m
+│ [2m  DFA progress: 234000 states, worklist 104, subset size 3 (max 17345), elapsed 18.34s[0m [35m+223ms[0m
+│ [2m  DFA progress: 235004 states, worklist 159, subset size 6 (max 17345), elapsed 18.56s[0m [35m+223ms[0m
+│ [2m  DFA progress: 236000 states, worklist 136, subset size 1 (max 17345), elapsed 18.86s[0m [35m+296ms[0m
+│ [2m  DFA progress: 237000 states, worklist 121, subset size 3 (max 17345), elapsed 19.20s[0m [35m+345ms[0m
+│ [2m  DFA progress: 238002 states, worklist 191, subset size 1 (max 17345), elapsed 19.38s[0m [35m+177ms[0m
+│ [2m  DFA progress: 239000 states, worklist 172, subset size 1 (max 17345), elapsed 19.63s[0m [35m+250ms[0m
+│ [2m  DFA progress: 240001 states, worklist 228, subset size 11219 (max 17345), elapsed 19.80s[0m [35m+163ms[0m
+│ [2m  DFA progress: 241000 states, worklist 225, subset size 749 (max 17345), elapsed 19.94s[0m [35m+145ms[0m
+│ [2m  DFA progress: 242000 states, worklist 249, subset size 2450 (max 17345), elapsed 20.07s[0m [35m+133ms[0m
+│ [2m  DFA progress: 243000 states, worklist 217, subset size 1 (max 17345), elapsed 20.26s[0m [35m+184ms[0m
+│ [2m  DFA progress: 244001 states, worklist 161, subset size 20 (max 17345), elapsed 20.42s[0m [35m+162ms[0m
+│ [2m  DFA progress: 245000 states, worklist 163, subset size 1 (max 17345), elapsed 20.65s[0m [35m+232ms[0m
+│ [2m  DFA progress: 246000 states, worklist 174, subset size 1 (max 17345), elapsed 20.87s[0m [35m+215ms[0m
+│ [2m  DFA progress: 247001 states, worklist 126, subset size 1 (max 17345), elapsed 21.18s[0m [35m+312ms[0m
+│ [2m  DFA progress: 248000 states, worklist 127, subset size 1 (max 17345), elapsed 21.37s[0m [35m+184ms[0m
+│ [2m  DFA progress: 249000 states, worklist 88, subset size 2687 (max 17345), elapsed 21.61s[0m [35m+243ms[0m
+│ [2m  DFA progress: 250000 states, worklist 160, subset size 1 (max 17345), elapsed 21.83s[0m [35m+221ms[0m
+│ [2m  DFA progress: 251000 states, worklist 162, subset size 5 (max 17345), elapsed 22.12s[0m [35m+286ms[0m
+│ [2m  DFA progress: 252001 states, worklist 156, subset size 8952 (max 17345), elapsed 22.42s[0m [35m+299ms[0m
+│ [2m  DFA progress: 253000 states, worklist 155, subset size 1594 (max 17345), elapsed 22.70s[0m [35m+284ms[0m
+│ [2m  DFA progress: 254000 states, worklist 142, subset size 1 (max 17345), elapsed 22.91s[0m [35m+205ms[0m
+│ [2m  DFA progress: 255000 states, worklist 140, subset size 23 (max 17345), elapsed 23.08s[0m [35m+176ms[0m
+│ [2m  DFA progress: 256000 states, worklist 169, subset size 7 (max 17345), elapsed 23.24s[0m [35m+157ms[0m
+│ [2m  DFA progress: 257001 states, worklist 163, subset size 3664 (max 17345), elapsed 23.42s[0m [35m+182ms[0m
+│ [2m  DFA progress: 258001 states, worklist 166, subset size 12211 (max 17345), elapsed 23.60s[0m [35m+179ms[0m
+│ [2m  DFA progress: 259000 states, worklist 135, subset size 1689 (max 17345), elapsed 23.82s[0m [35m+214ms[0m
+│ [2m  DFA progress: 260000 states, worklist 117, subset size 30 (max 17345), elapsed 24.00s[0m [35m+185ms[0m
+│ [2m  DFA progress: 261000 states, worklist 128, subset size 1 (max 17345), elapsed 24.23s[0m [35m+225ms[0m
+│ [2m  DFA progress: 262000 states, worklist 71, subset size 1 (max 17345), elapsed 24.44s[0m [35m+210ms[0m
+│ [2m  DFA progress: 263000 states, worklist 84, subset size 12 (max 17345), elapsed 24.70s[0m [35m+265ms[0m
+│ [2m  DFA progress: 264000 states, worklist 56, subset size 1 (max 17345), elapsed 24.96s[0m [35m+257ms[0m
+│ [2m  DFA progress: 265000 states, worklist 117, subset size 1 (max 17345), elapsed 25.16s[0m [35m+193ms[0m
+│ [2m  DFA progress: 266000 states, worklist 122, subset size 9 (max 17345), elapsed 25.36s[0m [35m+206ms[0m
+│ [2m  DFA progress: 267001 states, worklist 182, subset size 3830 (max 17345), elapsed 25.55s[0m [35m+188ms[0m
+│ [2m  DFA progress: 268000 states, worklist 161, subset size 1 (max 17345), elapsed 25.86s[0m [35m+313ms[0m
+│ [2m  DFA progress: 269000 states, worklist 159, subset size 2462 (max 17345), elapsed 26.07s[0m [35m+209ms[0m
+│ [2m  DFA progress: 270000 states, worklist 175, subset size 1 (max 17345), elapsed 26.29s[0m [35m+217ms[0m
+│ [2m  DFA progress: 271001 states, worklist 158, subset size 6 (max 17345), elapsed 26.53s[0m [35m+235ms[0m
+│ [2m  DFA progress: 272001 states, worklist 145, subset size 42 (max 17345), elapsed 26.77s[0m [35m+238ms[0m
+│ [2m  DFA progress: 273000 states, worklist 166, subset size 1 (max 17345), elapsed 26.93s[0m [35m+166ms[0m
+│ [2m  DFA progress: 274000 states, worklist 138, subset size 2801 (max 17345), elapsed 27.18s[0m [35m+244ms[0m
+│ [2m  DFA progress: 275000 states, worklist 116, subset size 19 (max 17345), elapsed 27.38s[0m [35m+205ms[0m
+│ [2m  DFA progress: 276001 states, worklist 125, subset size 489 (max 17345), elapsed 27.65s[0m [35m+263ms[0m
+│ [2m  DFA progress: 277000 states, worklist 134, subset size 1 (max 17345), elapsed 27.83s[0m [35m+184ms[0m
+│ [2m  DFA progress: 278000 states, worklist 138, subset size 1 (max 17345), elapsed 28.08s[0m [35m+246ms[0m
+│ [2m  DFA progress: 279000 states, worklist 102, subset size 1 (max 17345), elapsed 28.47s[0m [35m+392ms[0m
+│ [2m  DFA progress: 280000 states, worklist 113, subset size 10092 (max 17345), elapsed 28.67s[0m [35m+200ms[0m
+│ [2m  DFA progress: 281000 states, worklist 78, subset size 1 (max 17345), elapsed 28.86s[0m [35m+187ms[0m
+│ [2m  DFA progress: 282000 states, worklist 87, subset size 5 (max 17345), elapsed 29.05s[0m [35m+190ms[0m
+│ [2m  DFA progress: 283002 states, worklist 97, subset size 15 (max 17345), elapsed 29.24s[0m [35m+188ms[0m
+│ [2m  DFA progress: 284000 states, worklist 94, subset size 1 (max 17345), elapsed 29.52s[0m [35m+279ms[0m
+│ [2m  DFA progress: 285000 states, worklist 103, subset size 4104 (max 17345), elapsed 29.74s[0m [35m+219ms[0m
+│ [2m  DFA progress: 286000 states, worklist 83, subset size 1 (max 17345), elapsed 29.95s[0m [35m+210ms[0m
+│ [2m  DFA progress: 287000 states, worklist 48, subset size 1 (max 17345), elapsed 30.23s[0m [35m+289ms[0m
+│ [2m  DFA progress: 288000 states, worklist 39, subset size 2 (max 17345), elapsed 30.49s[0m [35m+259ms[0m
+│ [2m  DFA progress: 289000 states, worklist 12, subset size 5 (max 17410), elapsed 30.74s[0m [35m+245ms[0m
+│ [2m    └─ Timing breakdown (total ns):[0m [35m+25ms[0m
+│ [2m        - Collect: 9408ms[0m [35m+8µs[0m
+│ [2m        - Closure: 12549ms[0m [35m+0µs[0m
+│ [2m        - Compress: 5588ms[0m [35m+0µs[0m
+│ [2m        - Lookup: 526ms[0m [35m+0µs[0m
+│ [2m        - Insert: 1913ms[0m [35m+0µs[0m
+│ • NFA → DFA: 242625 → 289093 states (30.93s) [35m+168ms[0m
+│ [2m    └─ Class computation: 6.41ms[0m [35m+14µs[0m
+│ [2m    └─ Remap transitions: 14.82ms[0m [35m+1µs[0m
+│ [2m    └─ Main loop: 30.74s[0m [35m+2µs[0m
+│ [2m    └─ Metadata: 167.62ms[0m [35m+1µs[0m
+│ [2m    └─ Input classes processed: 2160550, cache hits: 1871458, misses: 289092[0m [35m+1µs[0m
+│ [2m    └─ Cache hit rate: 86.6%[0m [35m+2µs[0m
+│ [2m  Converted NFA to DFA in 31.25s[0m [35m+321ms[0m
+│ • Minimizing DFA
+│ Minimized DFA 289093 → 272425 states in 2.01s [35m+2.01s[0m
+│ [2m  Minimized DFA in 2.01s[0m [35m+4ms[0m
+TIMING: build_tokenizer 33.292505834s
+│ Building GLR parser from definition
+│ [2m  Number of productions: 1[0m [35m+36µs[0m
+│ [2m  Mem: 1581 MB (Start of parser generation)[0m [35m+14µs[0m
+│ • Validating initial grammar
+│ [2m  Mem: 1582 MB (After validation)[0m [35m+31µs[0m
+│ • Removing productions with undefined non-terminals
+│ [2m  Mem: 1582 MB (After removing undefined)[0m [35m+4µs[0m
+│ [2m  Start nonterminal: start__aug[0m [35m+1µs[0m
+│ • Grammar is nullable: false
+│ [2m  Mem: 1582 MB (After nullable wrapper minimization)[0m [35m+27µs[0m
+│ • Grammar optimization pass 1
+│ [2m    Phase 2: Inlining null productions[0m [35m+0µs[0m
+│ •     Null inlining complete: 1 input → 1 output productions
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+8µs[0m
+│ • Hidden left recursion eliminated after 1 iterations
+│ • Grammar optimization converged after 1 passes
+│ [2m  Mem: 1582 MB (After grammar normalization loop)[0m [35m+2µs[0m
+│ • Final epsilon production elimination
+│ •     Null inlining complete: 1 input → 1 output productions
+│ [2m  Mem: 1582 MB (After final epsilon elimination)[0m [35m+2µs[0m
+│ [2m  Mem: 1582 MB (After unreachable elimination)[0m [35m+3µs[0m
+│ [2m  Mem: 1582 MB (After left factoring)[0m [35m+17µs[0m
+│ [2m  Mem: 1582 MB (After merge identical nonterminals)[0m [35m+7µs[0m
+│ [2m  Mem: 1582 MB (After unit production elimination)[0m [35m+6µs[0m
+│ • Validating critical grammar invariants
+│ • Validating grammar after transformations
+│ [2m  HLR check: 0 nullable nonterminals[0m [35m+2µs[0m
+│ [2m  HLR check: 0 cyclic nonterminals in left-reachability graph[0m [35m+1µs[0m
+│ [2m  Number of productions: 1[0m [35m+1µs[0m
+│ [2m  Mem: 1582 MB (Before Stage 1)[0m [35m+4µs[0m
+│ • Stage 1 (LR(0) Automaton)
+│ [2m  Mem: 1582 MB (After Stage 1)[0m [35m+6µs[0m
+│ • Computing First/Follow Sets
+│ [2m  Mem: 1582 MB (After First/Follow)[0m [35m+3µs[0m
+│ • Computing Final Table (Merging Stages 2-8)
+│ [2m  Mem: 1582 MB (After Final Table)[0m [35m+6µs[0m
+│ • Optimizing Table (state reduction)
+│ [2m  Mem: 1582 MB (After Table Optimization)[0m [35m+13µs[0m
+│ • GLR Parser generation complete. 2 states.
+TIMING: build_glr_parser 254.25µs
+│ [2m  GLR terminal equivalence: 1 terminals → 1 equivalence classes[0m [35m+9µs[0m
+│ [2m  GrammarConstraint build_with_config_inner: start[0m [35m+151ms[0m
+│ [2m  setup_combined: start[0m [35m+14µs[0m
+│ [2m  DFA stats: 272425 states, 1 with finalizers (0.0%)[0m [35m+57ms[0m
+│ • State equiv phase 1: 5053 groups (2099 singletons, 270326 ambiguous) in 12.469221333s (50257 tokens) [35m+12.42s[0m
+│ State equivalence analysis took 12.47s. Reduced 272425 states to 5053 (phase 1 complete).
+│ Combined equiv: state reduction 272425 -> 5053 states in 12.506044125s
+│ • Precomputing DFA with 272425 states
+│ fast vocab equivalence: num_states=5053 num_groups=1 precompute=30.627083ms
+│ State transition analysis: avg_transitions=4.3, sparse_states=4427/5053 (87.6%)
+│ •   Iterative refinement: 50257 tokens, 5053 states, batch_size=2048
+│ [2m      Batch 1: 49586 active tokens, 916 classes, compute=228.462541ms[0m [35m+229ms[0m
+│ [2m      Batch 2: 48981 active tokens, 1658 classes, compute=330.369833ms[0m [35m+331ms[0m
+│ [2m      Batch 3: 48402 active tokens, 2221 classes, compute=194.69375ms[0m [35m+195ms[0m
+│ •   Timing: refine=1.673958ms
+│ •   Computed 2221 vocab equivalence classes in 3 batches
+│ Combined equiv: vocab analysis 50257 tokens -> 2221 classes in 788.38375ms
+[1mCombined equivalence analysis complete: 2221 vocab classes, 5053 representative states (total 13.294447667s)[0m
+│ Vocab equivalence analysis: 5053 initial states, 50257 tokens
+│ Combined Equivalence Analysis: 50257 tokens -> 2221 mask classes
+│ • internal_llm_token_map has 2221 representative entries (was 50257 total) - built in combined pass
+TIMING: setup_combined 13.330747458s
+│ [2m  setup_combined: end[0m [35m+1ms[0m
+│ • DFA state reorder disabled (set ENABLE_DFA_STATE_REORDER=1 to enable)
+│ • Building internal_to_original_map
+│ [2m  build_internal_to_original_map: start[0m [35m+3µs[0m
+TIMING: build_internal_to_original_map 2.257916ms
+│ [2m  build_internal_to_original_map: end[0m [35m+2ms[0m
+│ • Building internal vocab prefix tree
+│ [2m  build_internal_vocab_tree: start[0m [35m+0µs[0m
+│ [2m  Building vocab prefix tree (fast builder)[0m [35m+67µs[0m
+│ [2m  Computing reachable IDs (fast path)[0m [35m+654µs[0m
+│ [2m  Done computing reachable IDs in 320.167µs[0m [35m+326µs[0m
+TIMING: build_internal_vocab_tree 1.054542ms
+│ [2m  build_internal_vocab_tree: end[0m [35m+10µs[0m
+│ • Done building internal vocab prefix tree
+│ • Using precomputed state equivalence: 5053 representative states
+│ • Computing maps and possible_matches (fast parallel pass)
+│ [2m  build_maps_and_possible_matches: start[0m [35m+0µs[0m
+│ • build_maps_and_matches_for_reps: num_states=272425, num_reps=5053, num_terminals=1
+│ • build_maps_and_matches_for_reps: completed in 15.521916ms
+│ [2m  build_maps_and_matches_for_reps breakdown: fast_dfa=12.323417ms, dfs=3.068958ms, assemble=1.125µs, unaccounted=137µs[0m [35m+8µs[0m
+TIMING: build_maps_and_possible_matches 17.632166ms
+│ [2m  build_maps_and_possible_matches: end[0m [35m+2ms[0m
+│ • Computing terminal follow sets
+│ [2m  compute_terminal_follow_sets: start[0m [35m+1µs[0m
+│ [2m  Computing first sets for non-terminals[0m [35m+13µs[0m
+│ [2m  Computed first sets in 26.67µs[0m [35m+28µs[0m
+│ [2m  Computing follow sets for non-terminals[0m [35m+4µs[0m
+│ [2m  Computed follow sets in 4.13µs[0m [35m+4µs[0m
+TIMING: compute_terminal_follow_sets 52.334µs
+│ [2m  compute_terminal_follow_sets: end[0m [35m+5µs[0m
+│ • Done computing terminal follow sets
+│ • set_global_dims: max_llm_token=2220, num_tsids=272425
+│ • Building approximate suffix DFA (lazy, start-state initial) for precompute1...
+│ Building tokenizer from definition
+│ [2m  Expr Stats: Nodes: 65855, Depth: 13940, Seq: 10455, Choice: 6964, Quant: 10456, RepeatBounded: 0, Shared: 31353 (unique: 10457, inlineable: 0), U8Seq: 3138, U8Class: 3489, Eps: 0[0m [35m+2ms[0m
+│ • Optimizing expression
+│ [2m  optimize iter=100000 seq=10003 choice=6664 stack=457 values=4 elapsed=7.27ms[0m [35m+7ms[0m
+│ [2m  Optimized expression in 7.65ms[0m [35m+349µs[0m
+│ • Building NFA
+│ • Expr stats: Nodes: 65855, Depth: 6975, Seq: 10455, Choice: 6964, Quant: 10456, RepeatBounded: 0, Shared: 31353 (unique: 10457, inlineable: 0), U8Seq: 3138, U8Class: 3489, Eps: 0
+│ • Factored out common prefix in NFA construction
+│ [2m  Built NFA with 242625 states in 22.27ms[0m [35m+21ms[0m
+│ [2m  Condensed NFA 242625 → 242625 states in 4.87ms[0m [35m+4ms[0m
+│ • Converting NFA to DFA
+│ • Computed 105 input equivalence classes in 6.69ms
+│ [2m  CompactNFA: 242625 states, 83598 epsilon transitions[0m [35m+16ms[0m
+│ [2m  Epsilon structure: 41800 states have outgoing epsilons, max out-degree 2[0m [35m+369µs[0m
+│ [2m  Epsilon density: 41800 states with eps, 83598 total transitions (0x states)[0m [35m+968µs[0m
+│ [2m  Precomputed 0 high-degree closures (avg size 0) in 333.25µs[0m [35m+338µs[0m
+│ [2m  DFA progress: 1001 states, worklist 199, subset size 1 (max 17345), elapsed 95.75ms[0m [35m+70ms[0m
+│ [2m  DFA progress: 2000 states, worklist 346, subset size 1 (max 17345), elapsed 97.76ms[0m [35m+2ms[0m
+│ [2m  DFA progress: 3001 states, worklist 345, subset size 55 (max 17345), elapsed 100.29ms[0m [35m+2ms[0m
+│ [2m  DFA progress: 4000 states, worklist 311, subset size 1 (max 17345), elapsed 105.81ms[0m [35m+5ms[0m
+│ [2m  DFA progress: 5000 states, worklist 313, subset size 1 (max 17345), elapsed 110.62ms[0m [35m+4ms[0m
+│ [2m  DFA progress: 6000 states, worklist 306, subset size 5 (max 17345), elapsed 117.07ms[0m [35m+6ms[0m
+│ [2m  DFA progress: 7000 states, worklist 372, subset size 78 (max 17345), elapsed 121.01ms[0m [35m+3ms[0m
+│ [2m  DFA progress: 8000 states, worklist 354, subset size 1 (max 17345), elapsed 129.62ms[0m [35m+8ms[0m
+│ [2m  DFA progress: 9000 states, worklist 362, subset size 515 (max 17345), elapsed 139.08ms[0m [35m+9ms[0m
+│ [2m  DFA progress: 10002 states, worklist 340, subset size 9 (max 17345), elapsed 153.83ms[0m [35m+14ms[0m
+│ [2m  DFA progress: 11000 states, worklist 320, subset size 639 (max 17345), elapsed 168.73ms[0m [35m+14ms[0m
+│ [2m  DFA progress: 12000 states, worklist 294, subset size 1 (max 17345), elapsed 186.80ms[0m [35m+18ms[0m
+│ [2m  DFA progress: 13000 states, worklist 281, subset size 103 (max 17345), elapsed 204.01ms[0m [35m+17ms[0m
+│ [2m  DFA progress: 14000 states, worklist 314, subset size 1 (max 17345), elapsed 220.46ms[0m [35m+16ms[0m
+│ [2m  DFA progress: 15000 states, worklist 291, subset size 1 (max 17345), elapsed 236.92ms[0m [35m+16ms[0m
+│ [2m  DFA progress: 16000 states, worklist 281, subset size 2 (max 17345), elapsed 254.87ms[0m [35m+17ms[0m
+│ [2m  DFA progress: 17000 states, worklist 262, subset size 1 (max 17345), elapsed 270.47ms[0m [35m+15ms[0m
+│ [2m  DFA progress: 18000 states, worklist 258, subset size 1 (max 17345), elapsed 292.29ms[0m [35m+21ms[0m
+│ [2m  DFA progress: 19000 states, worklist 246, subset size 1 (max 17345), elapsed 306.63ms[0m [35m+14ms[0m
+│ [2m  DFA progress: 20000 states, worklist 279, subset size 1 (max 17345), elapsed 330.69ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 21000 states, worklist 249, subset size 439 (max 17345), elapsed 367.21ms[0m [35m+36ms[0m
+│ [2m  DFA progress: 22000 states, worklist 261, subset size 3 (max 17345), elapsed 391.70ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 23000 states, worklist 252, subset size 2 (max 17345), elapsed 421.69ms[0m [35m+29ms[0m
+│ [2m  DFA progress: 24002 states, worklist 262, subset size 6 (max 17345), elapsed 445.88ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 25000 states, worklist 255, subset size 1 (max 17345), elapsed 479.39ms[0m [35m+33ms[0m
+│ [2m  DFA progress: 26000 states, worklist 253, subset size 9 (max 17345), elapsed 509.14ms[0m [35m+29ms[0m
+│ [2m  DFA progress: 27000 states, worklist 278, subset size 1 (max 17345), elapsed 537.72ms[0m [35m+28ms[0m
+│ [2m  DFA progress: 28000 states, worklist 242, subset size 1 (max 17345), elapsed 566.99ms[0m [35m+29ms[0m
+│ [2m  DFA progress: 29000 states, worklist 227, subset size 2 (max 17345), elapsed 592.81ms[0m [35m+25ms[0m
+│ [2m  DFA progress: 30000 states, worklist 264, subset size 1 (max 17345), elapsed 618.68ms[0m [35m+25ms[0m
+│ [2m  DFA progress: 31000 states, worklist 261, subset size 1 (max 17345), elapsed 643.09ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 32000 states, worklist 275, subset size 1859 (max 17345), elapsed 666.30ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 33000 states, worklist 227, subset size 1 (max 17345), elapsed 692.73ms[0m [35m+26ms[0m
+│ [2m  DFA progress: 34000 states, worklist 199, subset size 630 (max 17345), elapsed 722.96ms[0m [35m+30ms[0m
+│ [2m  DFA progress: 35000 states, worklist 303, subset size 1 (max 17345), elapsed 749.31ms[0m [35m+26ms[0m
+│ [2m  DFA progress: 36000 states, worklist 282, subset size 1 (max 17345), elapsed 787.02ms[0m [35m+37ms[0m
+│ [2m  DFA progress: 37000 states, worklist 295, subset size 693 (max 17345), elapsed 826.11ms[0m [35m+39ms[0m
+│ [2m  DFA progress: 38000 states, worklist 292, subset size 1 (max 17345), elapsed 861.03ms[0m [35m+34ms[0m
+│ [2m  DFA progress: 39000 states, worklist 345, subset size 1 (max 17345), elapsed 885.74ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 40000 states, worklist 322, subset size 1 (max 17345), elapsed 922.64ms[0m [35m+36ms[0m
+│ [2m  DFA progress: 41000 states, worklist 292, subset size 503 (max 17345), elapsed 961.84ms[0m [35m+39ms[0m
+│ [2m  DFA progress: 42000 states, worklist 254, subset size 2 (max 17345), elapsed 1.00s[0m [35m+39ms[0m
+│ [2m  DFA progress: 43000 states, worklist 305, subset size 1 (max 17345), elapsed 1.04s[0m [35m+33ms[0m
+│ [2m  DFA progress: 44000 states, worklist 265, subset size 1 (max 17345), elapsed 1.08s[0m [35m+45ms[0m
+│ [2m  DFA progress: 45000 states, worklist 253, subset size 1 (max 17345), elapsed 1.12s[0m [35m+35ms[0m
+│ [2m  DFA progress: 46000 states, worklist 258, subset size 9 (max 17345), elapsed 1.17s[0m [35m+51ms[0m
+│ [2m  DFA progress: 47000 states, worklist 284, subset size 1 (max 17345), elapsed 1.20s[0m [35m+32ms[0m
+│ [2m  DFA progress: 48000 states, worklist 260, subset size 6 (max 17345), elapsed 1.25s[0m [35m+47ms[0m
+│ [2m  DFA progress: 49000 states, worklist 243, subset size 1 (max 17345), elapsed 1.29s[0m [35m+47ms[0m
+│ [2m  DFA progress: 50000 states, worklist 270, subset size 4 (max 17345), elapsed 1.33s[0m [35m+40ms[0m
+│ [2m  DFA progress: 51000 states, worklist 294, subset size 511 (max 17345), elapsed 1.37s[0m [35m+39ms[0m
+│ [2m  DFA progress: 52000 states, worklist 280, subset size 2 (max 17345), elapsed 1.42s[0m [35m+46ms[0m
+│ [2m  DFA progress: 53000 states, worklist 257, subset size 559 (max 17345), elapsed 1.46s[0m [35m+41ms[0m
+│ [2m  DFA progress: 54000 states, worklist 269, subset size 324 (max 17345), elapsed 1.51s[0m [35m+45ms[0m
+│ [2m  DFA progress: 55001 states, worklist 254, subset size 2340 (max 17345), elapsed 1.55s[0m [35m+38ms[0m
+│ [2m  DFA progress: 56001 states, worklist 251, subset size 22 (max 17345), elapsed 1.61s[0m [35m+64ms[0m
+│ [2m  DFA progress: 57000 states, worklist 264, subset size 19 (max 17345), elapsed 1.68s[0m [35m+64ms[0m
+│ [2m  DFA progress: 58001 states, worklist 256, subset size 1 (max 17345), elapsed 1.75s[0m [35m+72ms[0m
+│ [2m  DFA progress: 59000 states, worklist 233, subset size 1 (max 17345), elapsed 1.82s[0m [35m+75ms[0m
+│ [2m  DFA progress: 60000 states, worklist 330, subset size 1 (max 17345), elapsed 1.89s[0m [35m+63ms[0m
+│ [2m  DFA progress: 61000 states, worklist 353, subset size 4 (max 17345), elapsed 1.93s[0m [35m+40ms[0m
+│ [2m  DFA progress: 62001 states, worklist 327, subset size 6 (max 17345), elapsed 2.00s[0m [35m+73ms[0m
+│ [2m  DFA progress: 63000 states, worklist 326, subset size 2 (max 17345), elapsed 2.08s[0m [35m+74ms[0m
+│ [2m  DFA progress: 64001 states, worklist 318, subset size 870 (max 17345), elapsed 2.13s[0m [35m+51ms[0m
+│ [2m  DFA progress: 65000 states, worklist 397, subset size 1 (max 17345), elapsed 2.17s[0m [35m+42ms[0m
+│ [2m  DFA progress: 66000 states, worklist 401, subset size 1 (max 17345), elapsed 2.24s[0m [35m+66ms[0m
+│ [2m  DFA progress: 67003 states, worklist 405, subset size 1 (max 17345), elapsed 2.31s[0m [35m+70ms[0m
+│ [2m  DFA progress: 68000 states, worklist 434, subset size 1 (max 17345), elapsed 2.34s[0m [35m+32ms[0m
+│ [2m  DFA progress: 69000 states, worklist 418, subset size 1 (max 17345), elapsed 2.39s[0m [35m+50ms[0m
+│ [2m  DFA progress: 70000 states, worklist 386, subset size 2 (max 17345), elapsed 2.46s[0m [35m+70ms[0m
+│ [2m  DFA progress: 71000 states, worklist 375, subset size 833 (max 17345), elapsed 2.54s[0m [35m+75ms[0m
+│ [2m  DFA progress: 72000 states, worklist 388, subset size 1 (max 17345), elapsed 2.58s[0m [35m+45ms[0m
+│ [2m  DFA progress: 73001 states, worklist 357, subset size 16 (max 17345), elapsed 2.66s[0m [35m+73ms[0m
+│ [2m  DFA progress: 74000 states, worklist 382, subset size 1 (max 17345), elapsed 2.72s[0m [35m+62ms[0m
+│ [2m  DFA progress: 75000 states, worklist 364, subset size 27 (max 17345), elapsed 2.77s[0m [35m+52ms[0m
+│ [2m  DFA progress: 76000 states, worklist 314, subset size 902 (max 17345), elapsed 2.84s[0m [35m+62ms[0m
+│ [2m  DFA progress: 77000 states, worklist 341, subset size 6 (max 17345), elapsed 2.89s[0m [35m+54ms[0m
+│ [2m  DFA progress: 78000 states, worklist 344, subset size 1 (max 17345), elapsed 2.95s[0m [35m+62ms[0m
+│ [2m  DFA progress: 79000 states, worklist 310, subset size 1 (max 17345), elapsed 3.01s[0m [35m+56ms[0m
+│ [2m  DFA progress: 80000 states, worklist 300, subset size 1 (max 17345), elapsed 3.06s[0m [35m+53ms[0m
+│ [2m  DFA progress: 81002 states, worklist 295, subset size 1 (max 17345), elapsed 3.14s[0m [35m+77ms[0m
+│ [2m  DFA progress: 82000 states, worklist 295, subset size 1 (max 17345), elapsed 3.20s[0m [35m+59ms[0m
+│ [2m  DFA progress: 83000 states, worklist 315, subset size 9 (max 17345), elapsed 3.28s[0m [35m+81ms[0m
+│ [2m  DFA progress: 84000 states, worklist 326, subset size 961 (max 17345), elapsed 3.36s[0m [35m+78ms[0m
+│ [2m  DFA progress: 85001 states, worklist 333, subset size 1 (max 17345), elapsed 3.45s[0m [35m+91ms[0m
+│ [2m  DFA progress: 86000 states, worklist 270, subset size 1 (max 17345), elapsed 3.52s[0m [35m+66ms[0m
+│ [2m  DFA progress: 87000 states, worklist 306, subset size 1 (max 17345), elapsed 3.60s[0m [35m+87ms[0m
+│ [2m  DFA progress: 88000 states, worklist 307, subset size 1 (max 17345), elapsed 3.69s[0m [35m+83ms[0m
+│ [2m  DFA progress: 89000 states, worklist 301, subset size 1 (max 17345), elapsed 3.77s[0m [35m+79ms[0m
+│ [2m  DFA progress: 90000 states, worklist 275, subset size 2 (max 17345), elapsed 3.82s[0m [35m+54ms[0m
+│ [2m  DFA progress: 91000 states, worklist 244, subset size 1 (max 17345), elapsed 3.92s[0m [35m+98ms[0m
+│ [2m  DFA progress: 92000 states, worklist 252, subset size 1 (max 17345), elapsed 4.02s[0m [35m+95ms[0m
+│ [2m  DFA progress: 93000 states, worklist 286, subset size 1 (max 17345), elapsed 4.09s[0m [35m+73ms[0m
+│ [2m  DFA progress: 94000 states, worklist 267, subset size 1064 (max 17345), elapsed 4.20s[0m [35m+104ms[0m
+│ [2m  DFA progress: 95000 states, worklist 256, subset size 1 (max 17345), elapsed 4.27s[0m [35m+78ms[0m
+│ [2m  DFA progress: 96000 states, worklist 261, subset size 973 (max 17345), elapsed 4.33s[0m [35m+57ms[0m
+│ [2m  DFA progress: 97000 states, worklist 283, subset size 1 (max 17345), elapsed 4.43s[0m [35m+93ms[0m
+│ [2m  DFA progress: 98000 states, worklist 229, subset size 5083 (max 17345), elapsed 4.55s[0m [35m+126ms[0m
+│ [2m  DFA progress: 99000 states, worklist 205, subset size 1 (max 17345), elapsed 4.65s[0m [35m+94ms[0m
+│ [2m  DFA progress: 100001 states, worklist 276, subset size 915 (max 17345), elapsed 4.70s[0m [35m+57ms[0m
+│ [2m  DFA progress: 101000 states, worklist 269, subset size 649 (max 17345), elapsed 4.83s[0m [35m+126ms[0m
+│ [2m  DFA progress: 102000 states, worklist 275, subset size 387 (max 17345), elapsed 4.92s[0m [35m+93ms[0m
+│ [2m  DFA progress: 103000 states, worklist 271, subset size 288 (max 17345), elapsed 5.03s[0m [35m+110ms[0m
+│ [2m  DFA progress: 104000 states, worklist 245, subset size 1 (max 17345), elapsed 5.16s[0m [35m+122ms[0m
+│ [2m  DFA progress: 105000 states, worklist 255, subset size 35 (max 17345), elapsed 5.25s[0m [35m+88ms[0m
+│ [2m  DFA progress: 106001 states, worklist 271, subset size 6 (max 17345), elapsed 5.33s[0m [35m+86ms[0m
+│ [2m  DFA progress: 107001 states, worklist 280, subset size 1 (max 17345), elapsed 5.44s[0m [35m+112ms[0m
+│ [2m  DFA progress: 108000 states, worklist 273, subset size 2 (max 17345), elapsed 5.52s[0m [35m+72ms[0m
+│ [2m  DFA progress: 109000 states, worklist 283, subset size 1 (max 17345), elapsed 5.59s[0m [35m+72ms[0m
+│ [2m  DFA progress: 110000 states, worklist 239, subset size 1 (max 17345), elapsed 5.64s[0m [35m+54ms[0m
+│ [2m  DFA progress: 111000 states, worklist 245, subset size 3 (max 17345), elapsed 5.75s[0m [35m+107ms[0m
+│ [2m  DFA progress: 112000 states, worklist 232, subset size 1 (max 17345), elapsed 5.83s[0m [35m+81ms[0m
+│ [2m  DFA progress: 113000 states, worklist 215, subset size 2 (max 17345), elapsed 5.87s[0m [35m+39ms[0m
+│ [2m  DFA progress: 114001 states, worklist 276, subset size 1770 (max 17345), elapsed 5.95s[0m [35m+81ms[0m
+│ [2m  DFA progress: 115000 states, worklist 254, subset size 2 (max 17345), elapsed 6.09s[0m [35m+135ms[0m
+│ [2m  DFA progress: 116000 states, worklist 226, subset size 1 (max 17345), elapsed 6.20s[0m [35m+115ms[0m
+│ [2m  DFA progress: 117000 states, worklist 273, subset size 1303 (max 17345), elapsed 6.31s[0m [35m+105ms[0m
+│ [2m  DFA progress: 118000 states, worklist 218, subset size 6 (max 17345), elapsed 6.44s[0m [35m+128ms[0m
+│ [2m  DFA progress: 119000 states, worklist 228, subset size 1 (max 17345), elapsed 6.53s[0m [35m+86ms[0m
+│ [2m  DFA progress: 120001 states, worklist 214, subset size 1853 (max 17345), elapsed 6.62s[0m [35m+95ms[0m
+│ [2m  DFA progress: 121000 states, worklist 237, subset size 1 (max 17345), elapsed 6.69s[0m [35m+69ms[0m
+│ [2m  DFA progress: 122000 states, worklist 258, subset size 429 (max 17345), elapsed 6.78s[0m [35m+89ms[0m
+│ [2m  DFA progress: 123000 states, worklist 240, subset size 1 (max 17345), elapsed 6.90s[0m [35m+121ms[0m
+│ [2m  DFA progress: 124000 states, worklist 203, subset size 32 (max 17345), elapsed 7.04s[0m [35m+135ms[0m
+│ [2m  DFA progress: 125000 states, worklist 265, subset size 439 (max 17345), elapsed 7.13s[0m [35m+90ms[0m
+│ [2m  DFA progress: 126000 states, worklist 258, subset size 8 (max 17345), elapsed 7.25s[0m [35m+127ms[0m
+│ [2m  DFA progress: 127000 states, worklist 236, subset size 1 (max 17345), elapsed 7.39s[0m [35m+137ms[0m
+│ [2m  DFA progress: 128000 states, worklist 208, subset size 1 (max 17345), elapsed 7.55s[0m [35m+162ms[0m
+│ [2m  DFA progress: 129000 states, worklist 260, subset size 1995 (max 17345), elapsed 7.62s[0m [35m+63ms[0m
+│ [2m  DFA progress: 130000 states, worklist 252, subset size 186 (max 17345), elapsed 7.72s[0m [35m+105ms[0m
+│ [2m  DFA progress: 131000 states, worklist 294, subset size 1 (max 17345), elapsed 7.83s[0m [35m+108ms[0m
+│ [2m  DFA progress: 132000 states, worklist 301, subset size 3 (max 17345), elapsed 7.96s[0m [35m+125ms[0m
+│ [2m  DFA progress: 133000 states, worklist 281, subset size 103 (max 17345), elapsed 8.07s[0m [35m+118ms[0m
+│ [2m  DFA progress: 134000 states, worklist 320, subset size 1 (max 17345), elapsed 8.18s[0m [35m+100ms[0m
+│ [2m  DFA progress: 135000 states, worklist 307, subset size 47 (max 17345), elapsed 8.27s[0m [35m+91ms[0m
+│ [2m  DFA progress: 136000 states, worklist 293, subset size 1 (max 17345), elapsed 8.37s[0m [35m+102ms[0m
+│ [2m  DFA progress: 137000 states, worklist 255, subset size 1 (max 17345), elapsed 8.49s[0m [35m+123ms[0m
+│ [2m  DFA progress: 138000 states, worklist 229, subset size 1 (max 17345), elapsed 8.61s[0m [35m+120ms[0m
+│ [2m  DFA progress: 139000 states, worklist 219, subset size 1 (max 17345), elapsed 8.80s[0m [35m+182ms[0m
+│ [2m  DFA progress: 140000 states, worklist 214, subset size 1 (max 17345), elapsed 8.94s[0m [35m+144ms[0m
+│ [2m  DFA progress: 141000 states, worklist 206, subset size 1 (max 17345), elapsed 9.03s[0m [35m+89ms[0m
+│ [2m  DFA progress: 142000 states, worklist 200, subset size 5 (max 17345), elapsed 9.15s[0m [35m+121ms[0m
+│ [2m  DFA progress: 143000 states, worklist 230, subset size 1 (max 17345), elapsed 9.33s[0m [35m+176ms[0m
+│ [2m  DFA progress: 144001 states, worklist 205, subset size 9 (max 17345), elapsed 9.49s[0m [35m+163ms[0m
+│ [2m  DFA progress: 145000 states, worklist 184, subset size 1 (max 17345), elapsed 9.59s[0m [35m+97ms[0m
+│ [2m  DFA progress: 146000 states, worklist 187, subset size 1 (max 17345), elapsed 9.79s[0m [35m+196ms[0m
+│ [2m  DFA progress: 147002 states, worklist 154, subset size 6 (max 17345), elapsed 9.94s[0m [35m+151ms[0m
+│ [2m  DFA progress: 148000 states, worklist 163, subset size 1 (max 17345), elapsed 10.06s[0m [35m+125ms[0m
+│ [2m  DFA progress: 149000 states, worklist 137, subset size 42 (max 17345), elapsed 10.20s[0m [35m+138ms[0m
+│ [2m  DFA progress: 150001 states, worklist 198, subset size 1900 (max 17345), elapsed 10.32s[0m [35m+123ms[0m
+│ [2m  DFA progress: 151000 states, worklist 246, subset size 1 (max 17345), elapsed 10.46s[0m [35m+136ms[0m
+│ [2m  DFA progress: 152001 states, worklist 225, subset size 9 (max 17345), elapsed 10.60s[0m [35m+145ms[0m
+│ [2m  DFA progress: 153000 states, worklist 216, subset size 1 (max 17345), elapsed 10.76s[0m [35m+154ms[0m
+│ [2m  DFA progress: 154000 states, worklist 271, subset size 1 (max 17345), elapsed 10.91s[0m [35m+149ms[0m
+│ [2m  DFA progress: 155000 states, worklist 278, subset size 1 (max 17345), elapsed 11.02s[0m [35m+111ms[0m
+│ [2m  DFA progress: 156000 states, worklist 257, subset size 17 (max 17345), elapsed 11.17s[0m [35m+149ms[0m
+│ [2m  DFA progress: 157002 states, worklist 273, subset size 1 (max 17345), elapsed 11.32s[0m [35m+149ms[0m
+│ [2m  DFA progress: 158000 states, worklist 274, subset size 1 (max 17345), elapsed 11.46s[0m [35m+139ms[0m
+│ [2m  DFA progress: 159000 states, worklist 250, subset size 1 (max 17345), elapsed 11.61s[0m [35m+148ms[0m
+│ [2m  DFA progress: 160000 states, worklist 327, subset size 1 (max 17345), elapsed 11.68s[0m [35m+76ms[0m
+│ [2m  DFA progress: 161000 states, worklist 323, subset size 4 (max 17345), elapsed 11.81s[0m [35m+125ms[0m
+│ [2m  DFA progress: 162000 states, worklist 350, subset size 376 (max 17345), elapsed 11.88s[0m [35m+70ms[0m
+│ [2m  DFA progress: 163000 states, worklist 334, subset size 3 (max 17345), elapsed 11.97s[0m [35m+91ms[0m
+│ [2m  DFA progress: 164000 states, worklist 316, subset size 1 (max 17345), elapsed 12.04s[0m [35m+73ms[0m
+│ [2m  DFA progress: 165000 states, worklist 335, subset size 100 (max 17345), elapsed 12.13s[0m [35m+84ms[0m
+│ [2m  DFA progress: 166000 states, worklist 341, subset size 1 (max 17345), elapsed 12.23s[0m [35m+99ms[0m
+│ [2m  DFA progress: 167000 states, worklist 340, subset size 3 (max 17345), elapsed 12.32s[0m [35m+87ms[0m
+│ [2m  DFA progress: 168000 states, worklist 331, subset size 1 (max 17345), elapsed 12.40s[0m [35m+85ms[0m
+│ [2m  DFA progress: 169000 states, worklist 338, subset size 6180 (max 17345), elapsed 12.43s[0m [35m+26ms[0m
+│ [2m  DFA progress: 170000 states, worklist 325, subset size 4 (max 17345), elapsed 12.49s[0m [35m+65ms[0m
+│ [2m  DFA progress: 171000 states, worklist 313, subset size 10 (max 17345), elapsed 12.57s[0m [35m+75ms[0m
+│ [2m  DFA progress: 172000 states, worklist 309, subset size 9 (max 17345), elapsed 12.68s[0m [35m+111ms[0m
+│ [2m  DFA progress: 173000 states, worklist 311, subset size 1 (max 17345), elapsed 12.80s[0m [35m+119ms[0m
+│ [2m  DFA progress: 174000 states, worklist 292, subset size 1 (max 17345), elapsed 12.89s[0m [35m+92ms[0m
+│ [2m  DFA progress: 175000 states, worklist 281, subset size 688 (max 17345), elapsed 13.00s[0m [35m+105ms[0m
+│ [2m  DFA progress: 176000 states, worklist 259, subset size 1 (max 17345), elapsed 13.09s[0m [35m+86ms[0m
+│ [2m  DFA progress: 177000 states, worklist 247, subset size 1 (max 17345), elapsed 13.23s[0m [35m+143ms[0m
+│ [2m  DFA progress: 178002 states, worklist 219, subset size 1 (max 17345), elapsed 13.36s[0m [35m+131ms[0m
+│ [2m  DFA progress: 179000 states, worklist 268, subset size 1 (max 17345), elapsed 13.50s[0m [35m+142ms[0m
+│ [2m  DFA progress: 180000 states, worklist 272, subset size 1921 (max 17345), elapsed 13.62s[0m [35m+117ms[0m
+│ [2m  DFA progress: 181000 states, worklist 262, subset size 1 (max 17345), elapsed 13.73s[0m [35m+105ms[0m
+│ [2m  DFA progress: 182000 states, worklist 260, subset size 1 (max 17345), elapsed 13.80s[0m [35m+75ms[0m
+│ [2m  DFA progress: 183001 states, worklist 239, subset size 6 (max 17345), elapsed 13.92s[0m [35m+114ms[0m
+│ [2m  DFA progress: 184000 states, worklist 251, subset size 1 (max 17345), elapsed 14.07s[0m [35m+151ms[0m
+│ [2m  DFA progress: 185001 states, worklist 323, subset size 6 (max 17345), elapsed 14.17s[0m [35m+98ms[0m
+│ [2m  DFA progress: 186000 states, worklist 311, subset size 1 (max 17345), elapsed 14.27s[0m [35m+99ms[0m
+│ [2m  DFA progress: 187000 states, worklist 311, subset size 1 (max 17345), elapsed 14.35s[0m [35m+83ms[0m
+│ [2m  DFA progress: 188000 states, worklist 294, subset size 9043 (max 17345), elapsed 14.41s[0m [35m+57ms[0m
+│ [2m  DFA progress: 189000 states, worklist 318, subset size 1 (max 17345), elapsed 14.52s[0m [35m+113ms[0m
+│ [2m  DFA progress: 190000 states, worklist 289, subset size 6 (max 17345), elapsed 14.64s[0m [35m+121ms[0m
+│ [2m  DFA progress: 191001 states, worklist 307, subset size 6 (max 17345), elapsed 14.78s[0m [35m+135ms[0m
+│ [2m  DFA progress: 192001 states, worklist 306, subset size 9123 (max 17345), elapsed 14.85s[0m [35m+74ms[0m
+│ [2m  DFA progress: 193002 states, worklist 300, subset size 1 (max 17345), elapsed 14.94s[0m [35m+93ms[0m
+│ [2m  DFA progress: 194000 states, worklist 295, subset size 1 (max 17345), elapsed 15.05s[0m [35m+101ms[0m
+│ [2m  DFA progress: 195000 states, worklist 307, subset size 134 (max 17345), elapsed 15.13s[0m [35m+79ms[0m
+│ [2m  DFA progress: 196000 states, worklist 292, subset size 3 (max 17345), elapsed 15.22s[0m [35m+95ms[0m
+│ [2m  DFA progress: 197000 states, worklist 310, subset size 1 (max 17345), elapsed 15.31s[0m [35m+92ms[0m
+│ [2m  DFA progress: 198000 states, worklist 299, subset size 850 (max 17345), elapsed 15.40s[0m [35m+85ms[0m
+│ [2m  DFA progress: 199000 states, worklist 293, subset size 422 (max 17345), elapsed 15.46s[0m [35m+65ms[0m
+│ [2m  DFA progress: 200000 states, worklist 302, subset size 5 (max 17345), elapsed 15.57s[0m [35m+106ms[0m
+│ [2m  DFA progress: 201000 states, worklist 300, subset size 17 (max 17345), elapsed 15.65s[0m [35m+76ms[0m
+│ [2m  DFA progress: 202000 states, worklist 284, subset size 2 (max 17345), elapsed 15.66s[0m [35m+14ms[0m
+│ [2m  DFA progress: 203000 states, worklist 304, subset size 5 (max 17345), elapsed 15.75s[0m [35m+84ms[0m
+│ [2m  DFA progress: 204000 states, worklist 297, subset size 6 (max 17345), elapsed 15.87s[0m [35m+120ms[0m
+│ [2m  DFA progress: 205000 states, worklist 271, subset size 26 (max 17345), elapsed 15.91s[0m [35m+47ms[0m
+│ [2m  DFA progress: 206000 states, worklist 292, subset size 1 (max 17345), elapsed 16.03s[0m [35m+116ms[0m
+│ [2m  DFA progress: 207000 states, worklist 358, subset size 450 (max 17345), elapsed 16.13s[0m [35m+97ms[0m
+│ [2m  DFA progress: 208000 states, worklist 352, subset size 316 (max 17345), elapsed 16.24s[0m [35m+117ms[0m
+│ [2m  DFA progress: 209000 states, worklist 333, subset size 1 (max 17345), elapsed 16.32s[0m [35m+71ms[0m
+│ [2m  DFA progress: 210000 states, worklist 298, subset size 1 (max 17345), elapsed 16.39s[0m [35m+71ms[0m
+│ [2m  DFA progress: 211000 states, worklist 312, subset size 1 (max 17345), elapsed 16.50s[0m [35m+112ms[0m
+│ [2m  DFA progress: 212000 states, worklist 299, subset size 1 (max 17345), elapsed 16.63s[0m [35m+129ms[0m
+│ [2m  DFA progress: 213002 states, worklist 283, subset size 1 (max 17345), elapsed 16.77s[0m [35m+140ms[0m
+│ [2m  DFA progress: 214000 states, worklist 237, subset size 1 (max 17345), elapsed 17.00s[0m [35m+224ms[0m
+│ [2m  DFA progress: 215000 states, worklist 228, subset size 2931 (max 17345), elapsed 17.17s[0m [35m+178ms[0m
+│ [2m  DFA progress: 216000 states, worklist 237, subset size 1 (max 17345), elapsed 17.35s[0m [35m+179ms[0m
+│ [2m  DFA progress: 217000 states, worklist 220, subset size 2058 (max 17345), elapsed 17.51s[0m [35m+159ms[0m
+│ [2m  DFA progress: 218000 states, worklist 209, subset size 1 (max 17345), elapsed 17.75s[0m [35m+232ms[0m
+│ [2m  DFA progress: 219000 states, worklist 168, subset size 2 (max 17345), elapsed 17.92s[0m [35m+177ms[0m
+│ [2m  DFA progress: 220000 states, worklist 259, subset size 1 (max 17345), elapsed 18.08s[0m [35m+156ms[0m
+│ [2m  DFA progress: 221000 states, worklist 247, subset size 3025 (max 17345), elapsed 18.27s[0m [35m+185ms[0m
+│ [2m  DFA progress: 222000 states, worklist 226, subset size 6 (max 17345), elapsed 18.48s[0m [35m+214ms[0m
+│ [2m  DFA progress: 223000 states, worklist 209, subset size 1 (max 17345), elapsed 18.71s[0m [35m+226ms[0m
+│ [2m  DFA progress: 224000 states, worklist 208, subset size 2307 (max 17345), elapsed 18.82s[0m [35m+109ms[0m
+│ [2m  DFA progress: 225001 states, worklist 196, subset size 9 (max 17345), elapsed 19.04s[0m [35m+226ms[0m
+│ [2m  DFA progress: 226000 states, worklist 174, subset size 1 (max 17345), elapsed 19.21s[0m [35m+166ms[0m
+│ [2m  DFA progress: 227000 states, worklist 164, subset size 1 (max 17345), elapsed 19.46s[0m [35m+251ms[0m
+│ [2m  DFA progress: 228000 states, worklist 190, subset size 1 (max 17345), elapsed 19.62s[0m [35m+163ms[0m
+│ [2m  DFA progress: 229000 states, worklist 187, subset size 2 (max 17345), elapsed 19.82s[0m [35m+197ms[0m
+│ [2m  DFA progress: 230002 states, worklist 161, subset size 3 (max 17345), elapsed 20.00s[0m [35m+183ms[0m
+│ [2m  DFA progress: 231000 states, worklist 159, subset size 2 (max 17345), elapsed 20.18s[0m [35m+176ms[0m
+│ [2m  DFA progress: 232000 states, worklist 168, subset size 1 (max 17345), elapsed 20.34s[0m [35m+159ms[0m
+│ [2m  DFA progress: 233000 states, worklist 119, subset size 4 (max 17345), elapsed 20.57s[0m [35m+233ms[0m
+│ [2m  DFA progress: 234000 states, worklist 104, subset size 3 (max 17345), elapsed 20.81s[0m [35m+235ms[0m
+│ [2m  DFA progress: 235004 states, worklist 159, subset size 6 (max 17345), elapsed 21.04s[0m [35m+235ms[0m
+│ [2m  DFA progress: 236000 states, worklist 136, subset size 1 (max 17345), elapsed 21.33s[0m [35m+286ms[0m
+│ [2m  DFA progress: 237000 states, worklist 121, subset size 3 (max 17345), elapsed 21.62s[0m [35m+292ms[0m
+│ [2m  DFA progress: 238002 states, worklist 191, subset size 1 (max 17345), elapsed 21.79s[0m [35m+167ms[0m
+│ [2m  DFA progress: 239000 states, worklist 172, subset size 1 (max 17345), elapsed 22.03s[0m [35m+241ms[0m
+│ [2m  DFA progress: 240001 states, worklist 228, subset size 11219 (max 17345), elapsed 22.19s[0m [35m+164ms[0m
+│ [2m  DFA progress: 241000 states, worklist 225, subset size 749 (max 17345), elapsed 22.33s[0m [35m+136ms[0m
+│ [2m  DFA progress: 242000 states, worklist 249, subset size 2450 (max 17345), elapsed 22.46s[0m [35m+127ms[0m
+│ [2m  DFA progress: 243000 states, worklist 217, subset size 1 (max 17345), elapsed 22.64s[0m [35m+180ms[0m
+│ [2m  DFA progress: 244001 states, worklist 161, subset size 20 (max 17345), elapsed 22.80s[0m [35m+156ms[0m
+│ [2m  DFA progress: 245000 states, worklist 163, subset size 1 (max 17345), elapsed 23.02s[0m [35m+222ms[0m
+│ [2m  DFA progress: 246000 states, worklist 174, subset size 1 (max 17345), elapsed 23.24s[0m [35m+217ms[0m
+│ [2m  DFA progress: 247001 states, worklist 126, subset size 1 (max 17345), elapsed 23.54s[0m [35m+299ms[0m
+│ [2m  DFA progress: 248000 states, worklist 127, subset size 1 (max 17345), elapsed 23.72s[0m [35m+181ms[0m
+│ [2m  DFA progress: 249000 states, worklist 88, subset size 2687 (max 17345), elapsed 23.96s[0m [35m+246ms[0m
+│ [2m  DFA progress: 250000 states, worklist 160, subset size 1 (max 17345), elapsed 24.19s[0m [35m+227ms[0m
+│ [2m  DFA progress: 251000 states, worklist 162, subset size 5 (max 17345), elapsed 24.48s[0m [35m+286ms[0m
+│ [2m  DFA progress: 252001 states, worklist 156, subset size 8952 (max 17345), elapsed 24.78s[0m [35m+306ms[0m
+│ [2m  DFA progress: 253000 states, worklist 155, subset size 1594 (max 17345), elapsed 25.07s[0m [35m+284ms[0m
+│ [2m  DFA progress: 254000 states, worklist 142, subset size 1 (max 17345), elapsed 25.29s[0m [35m+217ms[0m
+│ [2m  DFA progress: 255000 states, worklist 140, subset size 23 (max 17345), elapsed 25.48s[0m [35m+199ms[0m
+│ [2m  DFA progress: 256000 states, worklist 169, subset size 7 (max 17345), elapsed 25.65s[0m [35m+169ms[0m
+│ [2m  DFA progress: 257001 states, worklist 163, subset size 3664 (max 17345), elapsed 25.86s[0m [35m+207ms[0m
+│ [2m  DFA progress: 258001 states, worklist 166, subset size 12211 (max 17345), elapsed 26.04s[0m [35m+182ms[0m
+│ [2m  DFA progress: 259000 states, worklist 135, subset size 1689 (max 17345), elapsed 26.24s[0m [35m+197ms[0m
+│ [2m  DFA progress: 260000 states, worklist 117, subset size 30 (max 17345), elapsed 26.41s[0m [35m+169ms[0m
+│ [2m  DFA progress: 261000 states, worklist 128, subset size 1 (max 17345), elapsed 26.63s[0m [35m+214ms[0m
+│ [2m  DFA progress: 262000 states, worklist 71, subset size 1 (max 17345), elapsed 26.81s[0m [35m+187ms[0m
+│ [2m  DFA progress: 263000 states, worklist 84, subset size 12 (max 17345), elapsed 27.07s[0m [35m+253ms[0m
+│ [2m  DFA progress: 264000 states, worklist 56, subset size 1 (max 17345), elapsed 27.33s[0m [35m+264ms[0m
+│ [2m  DFA progress: 265000 states, worklist 117, subset size 1 (max 17345), elapsed 27.55s[0m [35m+223ms[0m
+│ [2m  DFA progress: 266000 states, worklist 122, subset size 9 (max 17345), elapsed 27.79s[0m [35m+230ms[0m
+│ [2m  DFA progress: 267001 states, worklist 182, subset size 3830 (max 17345), elapsed 28.01s[0m [35m+229ms[0m
+│ [2m  DFA progress: 268000 states, worklist 161, subset size 1 (max 17345), elapsed 28.34s[0m [35m+322ms[0m
+│ [2m  DFA progress: 269000 states, worklist 159, subset size 2462 (max 17345), elapsed 28.55s[0m [35m+208ms[0m
+│ [2m  DFA progress: 270000 states, worklist 175, subset size 1 (max 17345), elapsed 28.78s[0m [35m+230ms[0m
+│ [2m  DFA progress: 271001 states, worklist 158, subset size 6 (max 17345), elapsed 29.04s[0m [35m+259ms[0m
+│ [2m  DFA progress: 272001 states, worklist 145, subset size 42 (max 17345), elapsed 29.30s[0m [35m+268ms[0m
+│ [2m  DFA progress: 273000 states, worklist 166, subset size 1 (max 17345), elapsed 29.48s[0m [35m+174ms[0m
+│ [2m  DFA progress: 274000 states, worklist 138, subset size 2801 (max 17345), elapsed 29.74s[0m [35m+260ms[0m
+│ [2m  DFA progress: 275000 states, worklist 116, subset size 19 (max 17345), elapsed 29.95s[0m [35m+207ms[0m
+│ [2m  DFA progress: 276001 states, worklist 125, subset size 489 (max 17345), elapsed 30.22s[0m [35m+268ms[0m
+│ [2m  DFA progress: 277000 states, worklist 134, subset size 1 (max 17345), elapsed 30.41s[0m [35m+195ms[0m
+│ [2m  DFA progress: 278000 states, worklist 138, subset size 1 (max 17345), elapsed 30.66s[0m [35m+248ms[0m
+│ [2m  DFA progress: 279000 states, worklist 102, subset size 1 (max 17345), elapsed 31.06s[0m [35m+396ms[0m
+│ [2m  DFA progress: 280000 states, worklist 113, subset size 10092 (max 17345), elapsed 31.26s[0m [35m+205ms[0m
+│ [2m  DFA progress: 281000 states, worklist 78, subset size 1 (max 17345), elapsed 31.45s[0m [35m+186ms[0m
+│ [2m  DFA progress: 282000 states, worklist 87, subset size 5 (max 17345), elapsed 31.64s[0m [35m+191ms[0m
+│ [2m  DFA progress: 283002 states, worklist 97, subset size 15 (max 17345), elapsed 31.83s[0m [35m+186ms[0m
+│ [2m  DFA progress: 284000 states, worklist 94, subset size 1 (max 17345), elapsed 32.08s[0m [35m+256ms[0m
+│ [2m  DFA progress: 285000 states, worklist 103, subset size 4104 (max 17345), elapsed 32.30s[0m [35m+217ms[0m
+│ [2m  DFA progress: 286000 states, worklist 83, subset size 1 (max 17345), elapsed 32.51s[0m [35m+209ms[0m
+│ [2m  DFA progress: 287000 states, worklist 48, subset size 1 (max 17345), elapsed 32.79s[0m [35m+282ms[0m
+│ [2m  DFA progress: 288000 states, worklist 39, subset size 2 (max 17345), elapsed 33.05s[0m [35m+257ms[0m
+│ [2m  DFA progress: 289000 states, worklist 12, subset size 5 (max 17410), elapsed 33.29s[0m [35m+243ms[0m
+│ [2m    └─ Timing breakdown (total ns):[0m [35m+25ms[0m
+│ [2m        - Collect: 10238ms[0m [35m+9µs[0m
+│ [2m        - Closure: 13426ms[0m [35m+1µs[0m
+│ [2m        - Compress: 5976ms[0m [35m+0µs[0m
+│ [2m        - Lookup: 588ms[0m [35m+0µs[0m
+│ [2m        - Insert: 2215ms[0m [35m+0µs[0m
+│ • NFA → DFA: 242625 → 289093 states (33.44s) [35m+124ms[0m
+│ [2m    └─ Class computation: 6.69ms[0m [35m+9µs[0m
+│ [2m    └─ Remap transitions: 15.38ms[0m [35m+1µs[0m
+│ [2m    └─ Main loop: 33.29s[0m [35m+6µs[0m
+│ [2m    └─ Metadata: 123.99ms[0m [35m+0µs[0m
+│ [2m    └─ Input classes processed: 2160550, cache hits: 1871458, misses: 289092[0m [35m+1µs[0m
+│ [2m    └─ Cache hit rate: 86.6%[0m [35m+2µs[0m
+│ [2m  Converted NFA to DFA in 33.66s[0m [35m+215ms[0m
+│ • Minimizing DFA
+│ Minimized DFA 289093 → 272425 states in 2.00s [35m+2.00s[0m
+│ [2m  Minimized DFA in 2.01s[0m [35m+5ms[0m
+TIMING: build_tokenizer 35.700705042s
+│ Building GLR parser from definition
+│ [2m  Number of productions: 4[0m [35m+35µs[0m
+│ [2m  Mem: 1744 MB (Start of parser generation)[0m [35m+10µs[0m
+│ • Validating initial grammar
+│ [2m  Mem: 1744 MB (After validation)[0m [35m+26µs[0m
+│ • Removing productions with undefined non-terminals
+│ [2m  Mem: 1744 MB (After removing undefined)[0m [35m+5µs[0m
+│ [2m  Start nonterminal: start__aug_suffix[0m [35m+1µs[0m
+│ • Grammar is nullable: true
+│ [2m  Mem: 1744 MB (After nullable wrapper minimization)[0m [35m+28µs[0m
+│ • Grammar optimization pass 1
+│ [2m    Phase 2: Inlining null productions[0m [35m+1µs[0m
+│ •     Null inlining complete: 4 input → 5 output productions
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+15µs[0m
+│ • Hidden left recursion eliminated after 1 iterations
+│ • Grammar optimization pass 2
+│ [2m    Phase 2: Inlining null productions[0m [35m+2µs[0m
+│ •     Null inlining complete: 3 input → 3 output productions
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+3µs[0m
+│ • Hidden left recursion eliminated after 1 iterations
+│ • Grammar optimization converged after 2 passes
+│ [2m  Mem: 1744 MB (After grammar normalization loop)[0m [35m+3µs[0m
+│ • Final epsilon production elimination
+│ •     Null inlining complete: 3 input → 3 output productions
+│ [2m  Mem: 1744 MB (After final epsilon elimination)[0m [35m+2µs[0m
+│ • Eliminated 1 unreachable productions (3 → 2)
+│ [2m  Mem: 1744 MB (After unreachable elimination)[0m [35m+2µs[0m
+│ [2m  Mem: 1744 MB (After left factoring)[0m [35m+7µs[0m
+│ [2m  Mem: 1744 MB (After merge identical nonterminals)[0m [35m+6µs[0m
+│ • Phase 8: Eliminated 1 unit productions (2 → 1)
+│ [2m  Mem: 1744 MB (After unit production elimination)[0m [35m+3µs[0m
+│ • Phase 9: Re-introducing nullability
+│ • Phase 9: Creating final unique start production
+│ • Validating critical grammar invariants
+│ • Validating grammar after transformations
+│ [2m  HLR check: 2 nullable nonterminals[0m [35m+8µs[0m
+│ [2m  HLR check: 0 cyclic nonterminals in left-reachability graph[0m [35m+2µs[0m
+│ [2m  Number of productions: 4[0m [35m+4µs[0m
+│ [2m  Mem: 1744 MB (Before Stage 1)[0m [35m+1µs[0m
+│ • Stage 1 (LR(0) Automaton)
+│ [2m  Mem: 1744 MB (After Stage 1)[0m [35m+7µs[0m
+│ • Computing First/Follow Sets
+│ [2m  Mem: 1744 MB (After First/Follow)[0m [35m+4µs[0m
+│ • Computing Final Table (Merging Stages 2-8)
+│ [2m  Mem: 1744 MB (After Final Table)[0m [35m+8µs[0m
+│ • Optimizing Table (state reduction)
+│ [2m  Mem: 1744 MB (After Table Optimization)[0m [35m+11µs[0m
+│ • GLR Parser generation complete. 4 states.
+TIMING: build_glr_parser 293.917µs
+│ [2m  GLR terminal equivalence: 1 terminals → 1 equivalence classes[0m [35m+8µs[0m
+│ • Approximate DFA: building lazy DFA from parser with 4 states
+│ [2m  Approximate DFA NFA stats: states=4, labels=1, avg_labels_per_state=0.25, avg_targets_per_label=2.00, max_labels_state=1, max_targets_label=2[0m [35m+8µs[0m
+│ [2m  Approximate DFA NFA reduce-cache entries: 1[0m [35m+3µs[0m
+│ [2m  Approximate DFA NFA: top terminals by target set size:[0m [35m+1µs[0m
+│ [2m    tid=0 (__optimized_terminal__) ignored=false transitions=1, avg_targets=2.00, max_targets=2[0m [35m+1µs[0m
+│ [2m  Approximate DFA NFA: top reduce lengths by below-set size:[0m [35m+1µs[0m
+│ [2m    len=0 count=1, avg_below_size=1.00, max_below_size=1[0m [35m+1µs[0m
+│ [2m  Approximate DFA: NFA has 2 transitions (avg 0.50 per state)[0m [35m+1µs[0m
+TIMING: build_approximate_suffix_dfa 35.701061375s
+│ • Approximate suffix DFA built (lazy), start_state=0
+│ • Running precompute1 (weight_heavy=true, num_tsids=272425)...
+│ [2m  run_precompute1: start[0m [35m+8µs[0m
+│ • set_global_dims: max_llm_token=2220, num_tsids=272425
+Precompute1 tokens: internal_llm_token_map entries=2221, internal_max_llm_token=2220, num_tsids=272425
+│ [2m  Building vocab prefix tree (fast builder)[0m [35m+665µs[0m
+│ [2m  Computing reachable IDs (fast path)[0m [35m+499µs[0m
+│ [2m  Done computing reachable IDs in 296.167µs[0m [35m+299µs[0m
+Created trie1 roots (5053 states for 272425 total tsids)
+Starting precompute DFS for 5053 tokenizer states
+Vocab tree has 2222 nodes
+│ [2m  Precomputation complete[0m [35m+2.3m[0m
+│ • Precompute1 finish: flushed pending transitions/epsilons in 8.210417ms
+│ • Precompute1 start-state breakdown: group_build=9.899083ms, mask_build=10.260411ms, add_epsilon=333.289µs, groups=5053, tsids=272425
+│ • Precompute1 finish: added start state transitions in 21.317291ms
+│ Terminal NWA: states=27409, transitions=61738, unique_state_pairs=61738, ranges=141441, ranges_interned=13716, num_tsids=272425
+│ • Terminal NWA (before suffix pruning): states=27409, transitions=61738, unique_state_pairs=61738, ranges=141441, ranges_interned=13716
+│ • Starting suffix grammar NWA pruning
+│ •   Ignored terminal IDs: {}
+│ •   Building suffix grammar...
+│ •   Suffix grammar: 4 productions
+│ •   Compiling suffix grammar...
+│ Building tokenizer from definition
+│ [2m  Expr Stats: Nodes: 65855, Depth: 13940, Seq: 10455, Choice: 6964, Quant: 10456, RepeatBounded: 0, Shared: 31353 (unique: 10457, inlineable: 0), U8Seq: 3138, U8Class: 3489, Eps: 0[0m [35m+1ms[0m
+│ • Optimizing expression
+│ [2m  optimize iter=100000 seq=10003 choice=6664 stack=457 values=4 elapsed=7.90ms[0m [35m+7ms[0m
+│ [2m  Optimized expression in 8.38ms[0m [35m+453µs[0m
+│ • Building NFA
+│ • Expr stats: Nodes: 65855, Depth: 6975, Seq: 10455, Choice: 6964, Quant: 10456, RepeatBounded: 0, Shared: 31353 (unique: 10457, inlineable: 0), U8Seq: 3138, U8Class: 3489, Eps: 0
+│ • Factored out common prefix in NFA construction
+│ [2m  Built NFA with 242625 states in 26.71ms[0m [35m+25ms[0m
+│ [2m  Condensed NFA 242625 → 242625 states in 4.95ms[0m [35m+4ms[0m
+│ • Converting NFA to DFA
+│ • Computed 105 input equivalence classes in 6.05ms
+│ [2m  CompactNFA: 242625 states, 83598 epsilon transitions[0m [35m+16ms[0m
+│ [2m  Epsilon structure: 41800 states have outgoing epsilons, max out-degree 2[0m [35m+351µs[0m
+│ [2m  Epsilon density: 41800 states with eps, 83598 total transitions (0x states)[0m [35m+928µs[0m
+│ [2m  Precomputed 0 high-degree closures (avg size 0) in 847.29µs[0m [35m+852µs[0m
+│ [2m  DFA progress: 1001 states, worklist 199, subset size 1 (max 17345), elapsed 81.51ms[0m [35m+56ms[0m
+│ [2m  DFA progress: 2000 states, worklist 346, subset size 1 (max 17345), elapsed 84.80ms[0m [35m+3ms[0m
+│ [2m  DFA progress: 3001 states, worklist 345, subset size 55 (max 17345), elapsed 87.52ms[0m [35m+2ms[0m
+│ [2m  DFA progress: 4000 states, worklist 311, subset size 1 (max 17345), elapsed 91.52ms[0m [35m+3ms[0m
+│ [2m  DFA progress: 5000 states, worklist 313, subset size 1 (max 17345), elapsed 95.98ms[0m [35m+4ms[0m
+│ [2m  DFA progress: 6000 states, worklist 306, subset size 5 (max 17345), elapsed 101.76ms[0m [35m+5ms[0m
+│ [2m  DFA progress: 7000 states, worklist 372, subset size 78 (max 17345), elapsed 105.22ms[0m [35m+3ms[0m
+│ [2m  DFA progress: 8000 states, worklist 354, subset size 1 (max 17345), elapsed 113.23ms[0m [35m+8ms[0m
+│ [2m  DFA progress: 9000 states, worklist 362, subset size 515 (max 17345), elapsed 121.55ms[0m [35m+8ms[0m
+│ [2m  DFA progress: 10002 states, worklist 340, subset size 9 (max 17345), elapsed 134.85ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 11000 states, worklist 320, subset size 639 (max 17345), elapsed 148.31ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 12000 states, worklist 294, subset size 1 (max 17345), elapsed 161.59ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 13000 states, worklist 281, subset size 103 (max 17345), elapsed 174.11ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 14000 states, worklist 314, subset size 1 (max 17345), elapsed 187.05ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 15000 states, worklist 291, subset size 1 (max 17345), elapsed 200.73ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 16000 states, worklist 281, subset size 2 (max 17345), elapsed 216.38ms[0m [35m+15ms[0m
+│ [2m  DFA progress: 17000 states, worklist 262, subset size 1 (max 17345), elapsed 229.91ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 18000 states, worklist 258, subset size 1 (max 17345), elapsed 249.01ms[0m [35m+19ms[0m
+│ [2m  DFA progress: 19000 states, worklist 246, subset size 1 (max 17345), elapsed 262.02ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 20000 states, worklist 279, subset size 1 (max 17345), elapsed 285.58ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 21000 states, worklist 249, subset size 439 (max 17345), elapsed 314.83ms[0m [35m+29ms[0m
+│ [2m  DFA progress: 22000 states, worklist 261, subset size 3 (max 17345), elapsed 337.39ms[0m [35m+22ms[0m
+│ [2m  DFA progress: 23000 states, worklist 252, subset size 2 (max 17345), elapsed 365.97ms[0m [35m+28ms[0m
+│ [2m  DFA progress: 24002 states, worklist 262, subset size 6 (max 17345), elapsed 386.77ms[0m [35m+20ms[0m
+│ [2m  DFA progress: 25000 states, worklist 255, subset size 1 (max 17345), elapsed 410.42ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 26000 states, worklist 253, subset size 9 (max 17345), elapsed 434.34ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 27000 states, worklist 278, subset size 1 (max 17345), elapsed 460.12ms[0m [35m+25ms[0m
+│ [2m  DFA progress: 28000 states, worklist 242, subset size 1 (max 17345), elapsed 488.34ms[0m [35m+28ms[0m
+│ [2m  DFA progress: 29000 states, worklist 227, subset size 2 (max 17345), elapsed 513.05ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 30000 states, worklist 264, subset size 1 (max 17345), elapsed 537.92ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 31000 states, worklist 261, subset size 1 (max 17345), elapsed 561.16ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 32000 states, worklist 275, subset size 1859 (max 17345), elapsed 584.62ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 33000 states, worklist 227, subset size 1 (max 17345), elapsed 610.67ms[0m [35m+26ms[0m
+│ [2m  DFA progress: 34000 states, worklist 199, subset size 630 (max 17345), elapsed 640.99ms[0m [35m+30ms[0m
+│ [2m  DFA progress: 35000 states, worklist 303, subset size 1 (max 17345), elapsed 666.93ms[0m [35m+25ms[0m
+│ [2m  DFA progress: 36000 states, worklist 282, subset size 1 (max 17345), elapsed 705.29ms[0m [35m+38ms[0m
+│ [2m  DFA progress: 37000 states, worklist 295, subset size 693 (max 17345), elapsed 746.22ms[0m [35m+40ms[0m
+│ [2m  DFA progress: 38000 states, worklist 292, subset size 1 (max 17345), elapsed 781.17ms[0m [35m+34ms[0m
+│ [2m  DFA progress: 39000 states, worklist 345, subset size 1 (max 17345), elapsed 805.95ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 40000 states, worklist 322, subset size 1 (max 17345), elapsed 843.60ms[0m [35m+37ms[0m
+│ [2m  DFA progress: 41000 states, worklist 292, subset size 503 (max 17345), elapsed 884.28ms[0m [35m+40ms[0m
+│ [2m  DFA progress: 42000 states, worklist 254, subset size 2 (max 17345), elapsed 923.88ms[0m [35m+39ms[0m
+│ [2m  DFA progress: 43000 states, worklist 305, subset size 1 (max 17345), elapsed 955.85ms[0m [35m+31ms[0m
+│ [2m  DFA progress: 44000 states, worklist 265, subset size 1 (max 17345), elapsed 1.00s[0m [35m+45ms[0m
+│ [2m  DFA progress: 45000 states, worklist 253, subset size 1 (max 17345), elapsed 1.04s[0m [35m+36ms[0m
+│ [2m  DFA progress: 46000 states, worklist 258, subset size 9 (max 17345), elapsed 1.09s[0m [35m+51ms[0m
+│ [2m  DFA progress: 47000 states, worklist 284, subset size 1 (max 17345), elapsed 1.12s[0m [35m+34ms[0m
+│ [2m  DFA progress: 48000 states, worklist 260, subset size 6 (max 17345), elapsed 1.17s[0m [35m+45ms[0m
+│ [2m  DFA progress: 49000 states, worklist 243, subset size 1 (max 17345), elapsed 1.21s[0m [35m+42ms[0m
+│ [2m  DFA progress: 50000 states, worklist 270, subset size 4 (max 17345), elapsed 1.25s[0m [35m+41ms[0m
+│ [2m  DFA progress: 51000 states, worklist 294, subset size 511 (max 17345), elapsed 1.29s[0m [35m+38ms[0m
+│ [2m  DFA progress: 52000 states, worklist 280, subset size 2 (max 17345), elapsed 1.34s[0m [35m+45ms[0m
+│ [2m  DFA progress: 53000 states, worklist 257, subset size 559 (max 17345), elapsed 1.38s[0m [35m+42ms[0m
+│ [2m  DFA progress: 54000 states, worklist 269, subset size 324 (max 17345), elapsed 1.42s[0m [35m+45ms[0m
+│ [2m  DFA progress: 55001 states, worklist 254, subset size 2340 (max 17345), elapsed 1.46s[0m [35m+37ms[0m
+│ [2m  DFA progress: 56001 states, worklist 251, subset size 22 (max 17345), elapsed 1.52s[0m [35m+56ms[0m
+│ [2m  DFA progress: 57000 states, worklist 264, subset size 19 (max 17345), elapsed 1.58s[0m [35m+57ms[0m
+│ [2m  DFA progress: 58001 states, worklist 256, subset size 1 (max 17345), elapsed 1.63s[0m [35m+51ms[0m
+│ [2m  DFA progress: 59000 states, worklist 233, subset size 1 (max 17345), elapsed 1.68s[0m [35m+55ms[0m
+│ [2m  DFA progress: 60000 states, worklist 330, subset size 1 (max 17345), elapsed 1.73s[0m [35m+50ms[0m
+│ [2m  DFA progress: 61000 states, worklist 353, subset size 4 (max 17345), elapsed 1.76s[0m [35m+31ms[0m
+│ [2m  DFA progress: 62001 states, worklist 327, subset size 6 (max 17345), elapsed 1.81s[0m [35m+48ms[0m
+│ [2m  DFA progress: 63000 states, worklist 326, subset size 2 (max 17345), elapsed 1.87s[0m [35m+55ms[0m
+│ [2m  DFA progress: 64001 states, worklist 318, subset size 870 (max 17345), elapsed 1.91s[0m [35m+45ms[0m
+│ [2m  DFA progress: 65000 states, worklist 397, subset size 1 (max 17345), elapsed 1.95s[0m [35m+31ms[0m
+│ [2m  DFA progress: 66000 states, worklist 401, subset size 1 (max 17345), elapsed 2.00s[0m [35m+55ms[0m
+│ [2m  DFA progress: 67003 states, worklist 405, subset size 1 (max 17345), elapsed 2.05s[0m [35m+48ms[0m
+│ [2m  DFA progress: 68000 states, worklist 434, subset size 1 (max 17345), elapsed 2.08s[0m [35m+25ms[0m
+│ [2m  DFA progress: 69000 states, worklist 418, subset size 1 (max 17345), elapsed 2.12s[0m [35m+40ms[0m
+│ [2m  DFA progress: 70000 states, worklist 386, subset size 2 (max 17345), elapsed 2.16s[0m [35m+41ms[0m
+│ [2m  DFA progress: 71000 states, worklist 375, subset size 833 (max 17345), elapsed 2.22s[0m [35m+59ms[0m
+│ [2m  DFA progress: 72000 states, worklist 388, subset size 1 (max 17345), elapsed 2.26s[0m [35m+37ms[0m
+│ [2m  DFA progress: 73001 states, worklist 357, subset size 16 (max 17345), elapsed 2.30s[0m [35m+39ms[0m
+│ [2m  DFA progress: 74000 states, worklist 382, subset size 1 (max 17345), elapsed 2.34s[0m [35m+42ms[0m
+│ [2m  DFA progress: 75000 states, worklist 364, subset size 27 (max 17345), elapsed 2.38s[0m [35m+37ms[0m
+│ [2m  DFA progress: 76000 states, worklist 314, subset size 902 (max 17345), elapsed 2.43s[0m [35m+49ms[0m
+│ [2m  DFA progress: 77000 states, worklist 341, subset size 6 (max 17345), elapsed 2.47s[0m [35m+48ms[0m
+│ [2m  DFA progress: 78000 states, worklist 344, subset size 1 (max 17345), elapsed 2.52s[0m [35m+46ms[0m
+│ [2m  DFA progress: 79000 states, worklist 310, subset size 1 (max 17345), elapsed 2.57s[0m [35m+52ms[0m
+│ [2m  DFA progress: 80000 states, worklist 300, subset size 1 (max 17345), elapsed 2.62s[0m [35m+50ms[0m
+│ [2m  DFA progress: 81002 states, worklist 295, subset size 1 (max 17345), elapsed 2.69s[0m [35m+71ms[0m
+│ [2m  DFA progress: 82000 states, worklist 295, subset size 1 (max 17345), elapsed 2.75s[0m [35m+55ms[0m
+│ [2m  DFA progress: 83000 states, worklist 315, subset size 9 (max 17345), elapsed 2.82s[0m [35m+67ms[0m
+│ [2m  DFA progress: 84000 states, worklist 326, subset size 961 (max 17345), elapsed 2.87s[0m [35m+57ms[0m
+│ [2m  DFA progress: 85001 states, worklist 333, subset size 1 (max 17345), elapsed 2.94s[0m [35m+70ms[0m
+│ [2m  DFA progress: 86000 states, worklist 270, subset size 1 (max 17345), elapsed 2.99s[0m [35m+49ms[0m
+│ [2m  DFA progress: 87000 states, worklist 306, subset size 1 (max 17345), elapsed 3.06s[0m [35m+63ms[0m
+│ [2m  DFA progress: 88000 states, worklist 307, subset size 1 (max 17345), elapsed 3.12s[0m [35m+60ms[0m
+│ [2m  DFA progress: 89000 states, worklist 301, subset size 1 (max 17345), elapsed 3.18s[0m [35m+59ms[0m
+│ [2m  DFA progress: 90000 states, worklist 275, subset size 2 (max 17345), elapsed 3.21s[0m [35m+38ms[0m
+│ [2m  DFA progress: 91000 states, worklist 244, subset size 1 (max 17345), elapsed 3.28s[0m [35m+68ms[0m
+│ [2m  DFA progress: 92000 states, worklist 252, subset size 1 (max 17345), elapsed 3.35s[0m [35m+66ms[0m
+│ [2m  DFA progress: 93000 states, worklist 286, subset size 1 (max 17345), elapsed 3.41s[0m [35m+60ms[0m
+│ [2m  DFA progress: 94000 states, worklist 267, subset size 1064 (max 17345), elapsed 3.48s[0m [35m+74ms[0m
+│ [2m  DFA progress: 95000 states, worklist 256, subset size 1 (max 17345), elapsed 3.56s[0m [35m+71ms[0m
+│ [2m  DFA progress: 96000 states, worklist 261, subset size 973 (max 17345), elapsed 3.61s[0m [35m+53ms[0m
+│ [2m  DFA progress: 97000 states, worklist 283, subset size 1 (max 17345), elapsed 3.69s[0m [35m+75ms[0m
+│ [2m  DFA progress: 98000 states, worklist 229, subset size 5083 (max 17345), elapsed 3.77s[0m [35m+83ms[0m
+│ [2m  DFA progress: 99000 states, worklist 205, subset size 1 (max 17345), elapsed 3.85s[0m [35m+80ms[0m
+│ [2m  DFA progress: 100001 states, worklist 276, subset size 915 (max 17345), elapsed 3.90s[0m [35m+49ms[0m
+│ [2m  DFA progress: 101000 states, worklist 269, subset size 649 (max 17345), elapsed 4.00s[0m [35m+99ms[0m
+│ [2m  DFA progress: 102000 states, worklist 275, subset size 387 (max 17345), elapsed 4.07s[0m [35m+73ms[0m
+│ [2m  DFA progress: 103000 states, worklist 271, subset size 288 (max 17345), elapsed 4.14s[0m [35m+72ms[0m
+│ [2m  DFA progress: 104000 states, worklist 245, subset size 1 (max 17345), elapsed 4.24s[0m [35m+97ms[0m
+│ [2m  DFA progress: 105000 states, worklist 255, subset size 35 (max 17345), elapsed 4.33s[0m [35m+84ms[0m
+│ [2m  DFA progress: 106001 states, worklist 271, subset size 6 (max 17345), elapsed 4.41s[0m [35m+83ms[0m
+│ [2m  DFA progress: 107001 states, worklist 280, subset size 1 (max 17345), elapsed 4.50s[0m [35m+93ms[0m
+│ [2m  DFA progress: 108000 states, worklist 273, subset size 2 (max 17345), elapsed 4.57s[0m [35m+63ms[0m
+│ [2m  DFA progress: 109000 states, worklist 283, subset size 1 (max 17345), elapsed 4.63s[0m [35m+66ms[0m
+│ [2m  DFA progress: 110000 states, worklist 239, subset size 1 (max 17345), elapsed 4.68s[0m [35m+45ms[0m
+│ [2m  DFA progress: 111000 states, worklist 245, subset size 3 (max 17345), elapsed 4.76s[0m [35m+81ms[0m
+│ [2m  DFA progress: 112000 states, worklist 232, subset size 1 (max 17345), elapsed 4.83s[0m [35m+72ms[0m
+│ [2m  DFA progress: 113000 states, worklist 215, subset size 2 (max 17345), elapsed 4.87s[0m [35m+36ms[0m
+│ [2m  DFA progress: 114001 states, worklist 276, subset size 1770 (max 17345), elapsed 4.94s[0m [35m+73ms[0m
+│ [2m  DFA progress: 115000 states, worklist 254, subset size 2 (max 17345), elapsed 5.03s[0m [35m+88ms[0m
+│ [2m  DFA progress: 116000 states, worklist 226, subset size 1 (max 17345), elapsed 5.11s[0m [35m+80ms[0m
+│ [2m  DFA progress: 117000 states, worklist 273, subset size 1303 (max 17345), elapsed 5.19s[0m [35m+80ms[0m
+│ [2m  DFA progress: 118000 states, worklist 218, subset size 6 (max 17345), elapsed 5.28s[0m [35m+89ms[0m
+│ [2m  DFA progress: 119000 states, worklist 228, subset size 1 (max 17345), elapsed 5.34s[0m [35m+59ms[0m
+│ [2m  DFA progress: 120001 states, worklist 214, subset size 1853 (max 17345), elapsed 5.43s[0m [35m+87ms[0m
+│ [2m  DFA progress: 121000 states, worklist 237, subset size 1 (max 17345), elapsed 5.49s[0m [35m+62ms[0m
+│ [2m  DFA progress: 122000 states, worklist 258, subset size 429 (max 17345), elapsed 5.58s[0m [35m+83ms[0m
+│ [2m  DFA progress: 123000 states, worklist 240, subset size 1 (max 17345), elapsed 5.69s[0m [35m+112ms[0m
+│ [2m  DFA progress: 124000 states, worklist 203, subset size 32 (max 17345), elapsed 5.80s[0m [35m+110ms[0m
+│ [2m  DFA progress: 125000 states, worklist 265, subset size 439 (max 17345), elapsed 5.88s[0m [35m+78ms[0m
+│ [2m  DFA progress: 126000 states, worklist 258, subset size 8 (max 17345), elapsed 5.96s[0m [35m+84ms[0m
+│ [2m  DFA progress: 127000 states, worklist 236, subset size 1 (max 17345), elapsed 6.07s[0m [35m+109ms[0m
+│ [2m  DFA progress: 128000 states, worklist 208, subset size 1 (max 17345), elapsed 6.21s[0m [35m+136ms[0m
+│ [2m  DFA progress: 129000 states, worklist 260, subset size 1995 (max 17345), elapsed 6.25s[0m [35m+47ms[0m
+│ [2m  DFA progress: 130000 states, worklist 252, subset size 186 (max 17345), elapsed 6.35s[0m [35m+94ms[0m
+│ [2m  DFA progress: 131000 states, worklist 294, subset size 1 (max 17345), elapsed 6.43s[0m [35m+83ms[0m
+│ [2m  DFA progress: 132000 states, worklist 301, subset size 3 (max 17345), elapsed 6.52s[0m [35m+83ms[0m
+│ [2m  DFA progress: 133000 states, worklist 281, subset size 103 (max 17345), elapsed 6.60s[0m [35m+82ms[0m
+│ [2m  DFA progress: 134000 states, worklist 320, subset size 1 (max 17345), elapsed 6.68s[0m [35m+82ms[0m
+│ [2m  DFA progress: 135000 states, worklist 307, subset size 47 (max 17345), elapsed 6.76s[0m [35m+81ms[0m
+│ [2m  DFA progress: 136000 states, worklist 293, subset size 1 (max 17345), elapsed 6.85s[0m [35m+86ms[0m
+│ [2m  DFA progress: 137000 states, worklist 255, subset size 1 (max 17345), elapsed 6.94s[0m [35m+94ms[0m
+│ [2m  DFA progress: 138000 states, worklist 229, subset size 1 (max 17345), elapsed 7.05s[0m [35m+102ms[0m
+│ [2m  DFA progress: 139000 states, worklist 219, subset size 1 (max 17345), elapsed 7.14s[0m [35m+92ms[0m
+│ [2m  DFA progress: 140000 states, worklist 214, subset size 1 (max 17345), elapsed 7.24s[0m [35m+104ms[0m
+│ [2m  DFA progress: 141000 states, worklist 206, subset size 1 (max 17345), elapsed 7.32s[0m [35m+80ms[0m
+│ [2m  DFA progress: 142000 states, worklist 200, subset size 5 (max 17345), elapsed 7.40s[0m [35m+79ms[0m
+│ [2m  DFA progress: 143000 states, worklist 230, subset size 1 (max 17345), elapsed 7.51s[0m [35m+101ms[0m
+│ [2m  DFA progress: 144001 states, worklist 205, subset size 9 (max 17345), elapsed 7.62s[0m [35m+110ms[0m
+│ [2m  DFA progress: 145000 states, worklist 184, subset size 1 (max 17345), elapsed 7.70s[0m [35m+83ms[0m
+│ [2m  DFA progress: 146000 states, worklist 187, subset size 1 (max 17345), elapsed 7.83s[0m [35m+134ms[0m
+│ [2m  DFA progress: 147002 states, worklist 154, subset size 6 (max 17345), elapsed 7.98s[0m [35m+145ms[0m
+│ [2m  DFA progress: 148000 states, worklist 163, subset size 1 (max 17345), elapsed 8.08s[0m [35m+98ms[0m
+│ [2m  DFA progress: 149000 states, worklist 137, subset size 42 (max 17345), elapsed 8.19s[0m [35m+114ms[0m
+│ [2m  DFA progress: 150001 states, worklist 198, subset size 1900 (max 17345), elapsed 8.32s[0m [35m+124ms[0m
+│ [2m  DFA progress: 151000 states, worklist 246, subset size 1 (max 17345), elapsed 8.46s[0m [35m+138ms[0m
+│ [2m  DFA progress: 152001 states, worklist 225, subset size 9 (max 17345), elapsed 8.60s[0m [35m+140ms[0m
+│ [2m  DFA progress: 153000 states, worklist 216, subset size 1 (max 17345), elapsed 8.74s[0m [35m+148ms[0m
+│ [2m  DFA progress: 154000 states, worklist 271, subset size 1 (max 17345), elapsed 8.88s[0m [35m+137ms[0m
+│ [2m  DFA progress: 155000 states, worklist 278, subset size 1 (max 17345), elapsed 8.99s[0m [35m+106ms[0m
+│ [2m  DFA progress: 156000 states, worklist 257, subset size 17 (max 17345), elapsed 9.13s[0m [35m+139ms[0m
+│ [2m  DFA progress: 157002 states, worklist 273, subset size 1 (max 17345), elapsed 9.27s[0m [35m+141ms[0m
+│ [2m  DFA progress: 158000 states, worklist 274, subset size 1 (max 17345), elapsed 9.40s[0m [35m+131ms[0m
+│ [2m  DFA progress: 159000 states, worklist 250, subset size 1 (max 17345), elapsed 9.54s[0m [35m+140ms[0m
+│ [2m  DFA progress: 160000 states, worklist 327, subset size 1 (max 17345), elapsed 9.61s[0m [35m+70ms[0m
+│ [2m  DFA progress: 161000 states, worklist 323, subset size 4 (max 17345), elapsed 9.73s[0m [35m+119ms[0m
+│ [2m  DFA progress: 162000 states, worklist 350, subset size 376 (max 17345), elapsed 9.80s[0m [35m+68ms[0m
+│ [2m  DFA progress: 163000 states, worklist 334, subset size 3 (max 17345), elapsed 9.88s[0m [35m+83ms[0m
+│ [2m  DFA progress: 164000 states, worklist 316, subset size 1 (max 17345), elapsed 9.95s[0m [35m+69ms[0m
+│ [2m  DFA progress: 165000 states, worklist 335, subset size 100 (max 17345), elapsed 10.03s[0m [35m+78ms[0m
+│ [2m  DFA progress: 166000 states, worklist 341, subset size 1 (max 17345), elapsed 10.13s[0m [35m+93ms[0m
+│ [2m  DFA progress: 167000 states, worklist 340, subset size 3 (max 17345), elapsed 10.21s[0m [35m+83ms[0m
+│ [2m  DFA progress: 168000 states, worklist 331, subset size 1 (max 17345), elapsed 10.29s[0m [35m+82ms[0m
+│ [2m  DFA progress: 169000 states, worklist 338, subset size 6180 (max 17345), elapsed 10.32s[0m [35m+24ms[0m
+│ [2m  DFA progress: 170000 states, worklist 325, subset size 4 (max 17345), elapsed 10.38s[0m [35m+62ms[0m
+│ [2m  DFA progress: 171000 states, worklist 313, subset size 10 (max 17345), elapsed 10.45s[0m [35m+71ms[0m
+│ [2m  DFA progress: 172000 states, worklist 309, subset size 9 (max 17345), elapsed 10.56s[0m [35m+106ms[0m
+│ [2m  DFA progress: 173000 states, worklist 311, subset size 1 (max 17345), elapsed 10.67s[0m [35m+114ms[0m
+│ [2m  DFA progress: 174000 states, worklist 292, subset size 1 (max 17345), elapsed 10.76s[0m [35m+91ms[0m
+│ [2m  DFA progress: 175000 states, worklist 281, subset size 688 (max 17345), elapsed 10.87s[0m [35m+106ms[0m
+│ [2m  DFA progress: 176000 states, worklist 259, subset size 1 (max 17345), elapsed 10.96s[0m [35m+85ms[0m
+│ [2m  DFA progress: 177000 states, worklist 247, subset size 1 (max 17345), elapsed 11.10s[0m [35m+143ms[0m
+│ [2m  DFA progress: 178002 states, worklist 219, subset size 1 (max 17345), elapsed 11.23s[0m [35m+134ms[0m
+│ [2m  DFA progress: 179000 states, worklist 268, subset size 1 (max 17345), elapsed 11.38s[0m [35m+148ms[0m
+│ [2m  DFA progress: 180000 states, worklist 272, subset size 1921 (max 17345), elapsed 11.50s[0m [35m+122ms[0m
+│ [2m  DFA progress: 181000 states, worklist 262, subset size 1 (max 17345), elapsed 11.61s[0m [35m+108ms[0m
+│ [2m  DFA progress: 182000 states, worklist 260, subset size 1 (max 17345), elapsed 11.69s[0m [35m+79ms[0m
+│ [2m  DFA progress: 183001 states, worklist 239, subset size 6 (max 17345), elapsed 11.81s[0m [35m+119ms[0m
+│ [2m  DFA progress: 184000 states, worklist 251, subset size 1 (max 17345), elapsed 11.97s[0m [35m+158ms[0m
+│ [2m  DFA progress: 185001 states, worklist 323, subset size 6 (max 17345), elapsed 12.08s[0m [35m+105ms[0m
+│ [2m  DFA progress: 186000 states, worklist 311, subset size 1 (max 17345), elapsed 12.18s[0m [35m+101ms[0m
+│ [2m  DFA progress: 187000 states, worklist 311, subset size 1 (max 17345), elapsed 12.26s[0m [35m+81ms[0m
+│ [2m  DFA progress: 188000 states, worklist 294, subset size 9043 (max 17345), elapsed 12.32s[0m [35m+57ms[0m
+│ [2m  DFA progress: 189000 states, worklist 318, subset size 1 (max 17345), elapsed 12.43s[0m [35m+113ms[0m
+│ [2m  DFA progress: 190000 states, worklist 289, subset size 6 (max 17345), elapsed 12.55s[0m [35m+118ms[0m
+│ [2m  DFA progress: 191001 states, worklist 307, subset size 6 (max 17345), elapsed 12.68s[0m [35m+129ms[0m
+│ [2m  DFA progress: 192001 states, worklist 306, subset size 9123 (max 17345), elapsed 12.75s[0m [35m+70ms[0m
+│ [2m  DFA progress: 193002 states, worklist 300, subset size 1 (max 17345), elapsed 12.84s[0m [35m+94ms[0m
+│ [2m  DFA progress: 194000 states, worklist 295, subset size 1 (max 17345), elapsed 12.94s[0m [35m+97ms[0m
+│ [2m  DFA progress: 195000 states, worklist 307, subset size 134 (max 17345), elapsed 13.02s[0m [35m+78ms[0m
+│ [2m  DFA progress: 196000 states, worklist 292, subset size 3 (max 17345), elapsed 13.11s[0m [35m+91ms[0m
+│ [2m  DFA progress: 197000 states, worklist 310, subset size 1 (max 17345), elapsed 13.20s[0m [35m+89ms[0m
+│ [2m  DFA progress: 198000 states, worklist 299, subset size 850 (max 17345), elapsed 13.28s[0m [35m+84ms[0m
+│ [2m  DFA progress: 199000 states, worklist 293, subset size 422 (max 17345), elapsed 13.35s[0m [35m+60ms[0m
+│ [2m  DFA progress: 200000 states, worklist 302, subset size 5 (max 17345), elapsed 13.44s[0m [35m+99ms[0m
+│ [2m  DFA progress: 201000 states, worklist 300, subset size 17 (max 17345), elapsed 13.52s[0m [35m+74ms[0m
+│ [2m  DFA progress: 202000 states, worklist 284, subset size 2 (max 17345), elapsed 13.53s[0m [35m+13ms[0m
+│ [2m  DFA progress: 203000 states, worklist 304, subset size 5 (max 17345), elapsed 13.61s[0m [35m+79ms[0m
+│ [2m  DFA progress: 204000 states, worklist 297, subset size 6 (max 17345), elapsed 13.72s[0m [35m+112ms[0m
+│ [2m  DFA progress: 205000 states, worklist 271, subset size 26 (max 17345), elapsed 13.77s[0m [35m+45ms[0m
+│ [2m  DFA progress: 206000 states, worklist 292, subset size 1 (max 17345), elapsed 13.88s[0m [35m+111ms[0m
+│ [2m  DFA progress: 207000 states, worklist 358, subset size 450 (max 17345), elapsed 13.97s[0m [35m+90ms[0m
+│ [2m  DFA progress: 208000 states, worklist 352, subset size 316 (max 17345), elapsed 14.09s[0m [35m+116ms[0m
+│ [2m  DFA progress: 209000 states, worklist 333, subset size 1 (max 17345), elapsed 14.16s[0m [35m+67ms[0m
+│ [2m  DFA progress: 210000 states, worklist 298, subset size 1 (max 17345), elapsed 14.23s[0m [35m+72ms[0m
+│ [2m  DFA progress: 211000 states, worklist 312, subset size 1 (max 17345), elapsed 14.33s[0m [35m+106ms[0m
+│ [2m  DFA progress: 212000 states, worklist 299, subset size 1 (max 17345), elapsed 14.46s[0m [35m+127ms[0m
+│ [2m  DFA progress: 213002 states, worklist 283, subset size 1 (max 17345), elapsed 14.60s[0m [35m+138ms[0m
+│ [2m  DFA progress: 214000 states, worklist 237, subset size 1 (max 17345), elapsed 14.88s[0m [35m+283ms[0m
+│ [2m  DFA progress: 215000 states, worklist 228, subset size 2931 (max 17345), elapsed 15.17s[0m [35m+287ms[0m
+│ [2m  DFA progress: 216000 states, worklist 237, subset size 1 (max 17345), elapsed 15.38s[0m [35m+210ms[0m
+│ [2m  DFA progress: 217000 states, worklist 220, subset size 2058 (max 17345), elapsed 15.54s[0m [35m+158ms[0m
+│ [2m  DFA progress: 218000 states, worklist 209, subset size 1 (max 17345), elapsed 15.77s[0m [35m+231ms[0m
+│ [2m  DFA progress: 219000 states, worklist 168, subset size 2 (max 17345), elapsed 15.95s[0m [35m+177ms[0m
+│ [2m  DFA progress: 220000 states, worklist 259, subset size 1 (max 17345), elapsed 16.10s[0m [35m+155ms[0m
+│ [2m  DFA progress: 221000 states, worklist 247, subset size 3025 (max 17345), elapsed 16.24s[0m [35m+139ms[0m
+│ [2m  DFA progress: 222000 states, worklist 226, subset size 6 (max 17345), elapsed 16.46s[0m [35m+213ms[0m
+│ [2m  DFA progress: 223000 states, worklist 209, subset size 1 (max 17345), elapsed 16.69s[0m [35m+232ms[0m
+│ [2m  DFA progress: 224000 states, worklist 208, subset size 2307 (max 17345), elapsed 16.80s[0m [35m+109ms[0m
+│ [2m  DFA progress: 225001 states, worklist 196, subset size 9 (max 17345), elapsed 16.99s[0m [35m+187ms[0m
+│ [2m  DFA progress: 226000 states, worklist 174, subset size 1 (max 17345), elapsed 17.15s[0m [35m+164ms[0m
+│ [2m  DFA progress: 227000 states, worklist 164, subset size 1 (max 17345), elapsed 17.41s[0m [35m+261ms[0m
+│ [2m  DFA progress: 228000 states, worklist 190, subset size 1 (max 17345), elapsed 17.58s[0m [35m+162ms[0m
+│ [2m  DFA progress: 229000 states, worklist 187, subset size 2 (max 17345), elapsed 17.78s[0m [35m+207ms[0m
+│ [2m  DFA progress: 230002 states, worklist 161, subset size 3 (max 17345), elapsed 18.04s[0m [35m+259ms[0m
+│ [2m  DFA progress: 231000 states, worklist 159, subset size 2 (max 17345), elapsed 18.22s[0m [35m+179ms[0m
+│ [2m  DFA progress: 232000 states, worklist 168, subset size 1 (max 17345), elapsed 18.39s[0m [35m+165ms[0m
+│ [2m  DFA progress: 233000 states, worklist 119, subset size 4 (max 17345), elapsed 18.62s[0m [35m+228ms[0m
+│ [2m  DFA progress: 234000 states, worklist 104, subset size 3 (max 17345), elapsed 18.93s[0m [35m+315ms[0m
+│ [2m  DFA progress: 235004 states, worklist 159, subset size 6 (max 17345), elapsed 19.16s[0m [35m+228ms[0m
+│ [2m  DFA progress: 236000 states, worklist 136, subset size 1 (max 17345), elapsed 19.44s[0m [35m+282ms[0m
+│ [2m  DFA progress: 237000 states, worklist 121, subset size 3 (max 17345), elapsed 19.83s[0m [35m+390ms[0m
+│ [2m  DFA progress: 238002 states, worklist 191, subset size 1 (max 17345), elapsed 20.08s[0m [35m+248ms[0m
+│ [2m  DFA progress: 239000 states, worklist 172, subset size 1 (max 17345), elapsed 20.37s[0m [35m+285ms[0m
+│ [2m  DFA progress: 240001 states, worklist 228, subset size 11219 (max 17345), elapsed 20.54s[0m [35m+173ms[0m
+│ [2m  DFA progress: 241000 states, worklist 225, subset size 749 (max 17345), elapsed 20.69s[0m [35m+153ms[0m
+│ [2m  DFA progress: 242000 states, worklist 249, subset size 2450 (max 17345), elapsed 20.83s[0m [35m+139ms[0m
+│ [2m  DFA progress: 243000 states, worklist 217, subset size 1 (max 17345), elapsed 21.03s[0m [35m+195ms[0m
+│ [2m  DFA progress: 244001 states, worklist 161, subset size 20 (max 17345), elapsed 21.21s[0m [35m+176ms[0m
+│ [2m  DFA progress: 245000 states, worklist 163, subset size 1 (max 17345), elapsed 21.44s[0m [35m+236ms[0m
+│ [2m  DFA progress: 246000 states, worklist 174, subset size 1 (max 17345), elapsed 21.65s[0m [35m+210ms[0m
+│ [2m  DFA progress: 247001 states, worklist 126, subset size 1 (max 17345), elapsed 21.96s[0m [35m+305ms[0m
+│ [2m  DFA progress: 248000 states, worklist 127, subset size 1 (max 17345), elapsed 22.14s[0m [35m+180ms[0m
+│ [2m  DFA progress: 249000 states, worklist 88, subset size 2687 (max 17345), elapsed 22.38s[0m [35m+238ms[0m
+│ [2m  DFA progress: 250000 states, worklist 160, subset size 1 (max 17345), elapsed 22.60s[0m [35m+220ms[0m
+│ [2m  DFA progress: 251000 states, worklist 162, subset size 5 (max 17345), elapsed 22.87s[0m [35m+275ms[0m
+│ [2m  DFA progress: 252001 states, worklist 156, subset size 8952 (max 17345), elapsed 23.17s[0m [35m+294ms[0m
+│ [2m  DFA progress: 253000 states, worklist 155, subset size 1594 (max 17345), elapsed 23.44s[0m [35m+274ms[0m
+│ [2m  DFA progress: 254000 states, worklist 142, subset size 1 (max 17345), elapsed 23.65s[0m [35m+202ms[0m
+│ [2m  DFA progress: 255000 states, worklist 140, subset size 23 (max 17345), elapsed 23.82s[0m [35m+173ms[0m
+│ [2m  DFA progress: 256000 states, worklist 169, subset size 7 (max 17345), elapsed 23.97s[0m [35m+152ms[0m
+│ [2m  DFA progress: 257001 states, worklist 163, subset size 3664 (max 17345), elapsed 24.15s[0m [35m+176ms[0m
+│ [2m  DFA progress: 258001 states, worklist 166, subset size 12211 (max 17345), elapsed 24.33s[0m [35m+178ms[0m
+│ [2m  DFA progress: 259000 states, worklist 135, subset size 1689 (max 17345), elapsed 24.53s[0m [35m+199ms[0m
+│ [2m  DFA progress: 260000 states, worklist 117, subset size 30 (max 17345), elapsed 24.78s[0m [35m+250ms[0m
+│ [2m  DFA progress: 261000 states, worklist 128, subset size 1 (max 17345), elapsed 25.07s[0m [35m+294ms[0m
+│ [2m  DFA progress: 262000 states, worklist 71, subset size 1 (max 17345), elapsed 25.26s[0m [35m+188ms[0m
+│ [2m  DFA progress: 263000 states, worklist 84, subset size 12 (max 17345), elapsed 25.51s[0m [35m+253ms[0m
+│ [2m  DFA progress: 264000 states, worklist 56, subset size 1 (max 17345), elapsed 25.77s[0m [35m+253ms[0m
+│ [2m  DFA progress: 265000 states, worklist 117, subset size 1 (max 17345), elapsed 25.96s[0m [35m+189ms[0m
+│ [2m  DFA progress: 266000 states, worklist 122, subset size 9 (max 17345), elapsed 26.16s[0m [35m+202ms[0m
+│ [2m  DFA progress: 267001 states, worklist 182, subset size 3830 (max 17345), elapsed 26.34s[0m [35m+182ms[0m
+│ [2m  DFA progress: 268000 states, worklist 161, subset size 1 (max 17345), elapsed 26.64s[0m [35m+295ms[0m
+│ [2m  DFA progress: 269000 states, worklist 159, subset size 2462 (max 17345), elapsed 26.83s[0m [35m+193ms[0m
+│ [2m  DFA progress: 270000 states, worklist 175, subset size 1 (max 17345), elapsed 27.03s[0m [35m+201ms[0m
+│ [2m  DFA progress: 271001 states, worklist 158, subset size 6 (max 17345), elapsed 27.26s[0m [35m+230ms[0m
+│ [2m  DFA progress: 272001 states, worklist 145, subset size 42 (max 17345), elapsed 27.49s[0m [35m+232ms[0m
+│ [2m  DFA progress: 273000 states, worklist 166, subset size 1 (max 17345), elapsed 27.65s[0m [35m+159ms[0m
+│ [2m  DFA progress: 274000 states, worklist 138, subset size 2801 (max 17345), elapsed 27.89s[0m [35m+241ms[0m
+│ [2m  DFA progress: 275000 states, worklist 116, subset size 19 (max 17345), elapsed 28.09s[0m [35m+199ms[0m
+│ [2m  DFA progress: 276001 states, worklist 125, subset size 489 (max 17345), elapsed 28.34s[0m [35m+248ms[0m
+│ [2m  DFA progress: 277000 states, worklist 134, subset size 1 (max 17345), elapsed 28.52s[0m [35m+175ms[0m
+│ [2m  DFA progress: 278000 states, worklist 138, subset size 1 (max 17345), elapsed 28.75s[0m [35m+231ms[0m
+│ [2m  DFA progress: 279000 states, worklist 102, subset size 1 (max 17345), elapsed 29.13s[0m [35m+378ms[0m
+│ [2m  DFA progress: 280000 states, worklist 113, subset size 10092 (max 17345), elapsed 29.32s[0m [35m+197ms[0m
+│ [2m  DFA progress: 281000 states, worklist 78, subset size 1 (max 17345), elapsed 29.51s[0m [35m+183ms[0m
+│ [2m  DFA progress: 282000 states, worklist 87, subset size 5 (max 17345), elapsed 29.69s[0m [35m+179ms[0m
+│ [2m  DFA progress: 283002 states, worklist 97, subset size 15 (max 17345), elapsed 29.86s[0m [35m+176ms[0m
+│ [2m  DFA progress: 284000 states, worklist 94, subset size 1 (max 17345), elapsed 30.12s[0m [35m+255ms[0m
+│ [2m  DFA progress: 285000 states, worklist 103, subset size 4104 (max 17345), elapsed 30.34s[0m [35m+218ms[0m
+│ [2m  DFA progress: 286000 states, worklist 83, subset size 1 (max 17345), elapsed 30.55s[0m [35m+207ms[0m
+│ [2m  DFA progress: 287000 states, worklist 48, subset size 1 (max 17345), elapsed 30.83s[0m [35m+284ms[0m
+│ [2m  DFA progress: 288000 states, worklist 39, subset size 2 (max 17345), elapsed 31.08s[0m [35m+253ms[0m
+│ [2m  DFA progress: 289000 states, worklist 12, subset size 5 (max 17410), elapsed 31.32s[0m [35m+237ms[0m
+│ [2m    └─ Timing breakdown (total ns):[0m [35m+24ms[0m
+│ [2m        - Collect: 9653ms[0m [35m+31µs[0m
+│ [2m        - Closure: 12833ms[0m [35m+6µs[0m
+│ [2m        - Compress: 5631ms[0m [35m+1µs[0m
+│ [2m        - Lookup: 530ms[0m [35m+0µs[0m
+│ [2m        - Insert: 1919ms[0m [35m+0µs[0m
+│ • NFA → DFA: 242625 → 289093 states (31.45s) [35m+105ms[0m
+│ [2m    └─ Class computation: 6.05ms[0m [35m+13µs[0m
+│ [2m    └─ Remap transitions: 15.71ms[0m [35m+1µs[0m
+│ [2m    └─ Main loop: 31.32s[0m [35m+1µs[0m
+│ [2m    └─ Metadata: 105.24ms[0m [35m+1µs[0m
+│ [2m    └─ Input classes processed: 2160550, cache hits: 1871458, misses: 289092[0m [35m+1µs[0m
+│ [2m    └─ Cache hit rate: 86.6%[0m [35m+7µs[0m
+│ [2m  Converted NFA to DFA in 31.66s[0m [35m+212ms[0m
+│ • Minimizing DFA
+│ Minimized DFA 289093 → 272425 states in 1.87s [35m+1.87s[0m
+│ [2m  Minimized DFA in 1.88s[0m [35m+4ms[0m
+TIMING: build_tokenizer 33.583205084s
+│ Building GLR parser from definition
+│ [2m  Number of productions: 4[0m [35m+36µs[0m
+│ [2m  Mem: 1720 MB (Start of parser generation)[0m [35m+9µs[0m
+│ • Validating initial grammar
+│ [2m  Mem: 1720 MB (After validation)[0m [35m+34µs[0m
+│ • Removing productions with undefined non-terminals
+│ [2m  Mem: 1720 MB (After removing undefined)[0m [35m+6µs[0m
+│ [2m  Start nonterminal: start__aug_suffix[0m [35m+1µs[0m
+│ • Grammar is nullable: true
+│ [2m  Mem: 1720 MB (After nullable wrapper minimization)[0m [35m+32µs[0m
+│ • Grammar optimization pass 1
+│ [2m    Phase 2: Inlining null productions[0m [35m+1µs[0m
+│ •     Null inlining complete: 4 input → 5 output productions
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+11µs[0m
+│ • Hidden left recursion eliminated after 1 iterations
+│ • Grammar optimization pass 2
+│ [2m    Phase 2: Inlining null productions[0m [35m+1µs[0m
+│ •     Null inlining complete: 3 input → 3 output productions
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+2µs[0m
+│ • Hidden left recursion eliminated after 1 iterations
+│ • Grammar optimization converged after 2 passes
+│ [2m  Mem: 1720 MB (After grammar normalization loop)[0m [35m+2µs[0m
+│ • Final epsilon production elimination
+│ •     Null inlining complete: 3 input → 3 output productions
+│ [2m  Mem: 1720 MB (After final epsilon elimination)[0m [35m+2µs[0m
+│ • Eliminated 1 unreachable productions (3 → 2)
+│ [2m  Mem: 1720 MB (After unreachable elimination)[0m [35m+1µs[0m
+│ [2m  Mem: 1720 MB (After left factoring)[0m [35m+14µs[0m
+│ [2m  Mem: 1720 MB (After merge identical nonterminals)[0m [35m+8µs[0m
+│ • Phase 8: Eliminated 1 unit productions (2 → 1)
+│ [2m  Mem: 1720 MB (After unit production elimination)[0m [35m+2µs[0m
+│ • Phase 9: Re-introducing nullability
+│ • Phase 9: Creating final unique start production
+│ • Validating critical grammar invariants
+│ • Validating grammar after transformations
+│ [2m  HLR check: 2 nullable nonterminals[0m [35m+33µs[0m
+│ [2m  HLR check: 0 cyclic nonterminals in left-reachability graph[0m [35m+2µs[0m
+│ [2m  Number of productions: 4[0m [35m+4µs[0m
+│ [2m  Mem: 1720 MB (Before Stage 1)[0m [35m+2µs[0m
+│ • Stage 1 (LR(0) Automaton)
+│ [2m  Mem: 1720 MB (After Stage 1)[0m [35m+10µs[0m
+│ • Computing First/Follow Sets
+│ [2m  Mem: 1720 MB (After First/Follow)[0m [35m+4µs[0m
+│ • Computing Final Table (Merging Stages 2-8)
+│ [2m  Mem: 1720 MB (After Final Table)[0m [35m+9µs[0m
+│ • Optimizing Table (state reduction)
+│ [2m  Mem: 1720 MB (After Table Optimization)[0m [35m+19µs[0m
+│ • GLR Parser generation complete. 4 states.
+TIMING: build_glr_parser 344.791µs
+│ [2m  GLR terminal equivalence: 1 terminals → 1 equivalence classes[0m [35m+9µs[0m
+│ •   Suffix grammar compiled
+│ •     Terminal mapping: 1 of 1 terminals mapped
+│ • Suffix grammar NWA pruning: kept=18787, pruned=0
+│ • Terminal NWA suffix pruning complete. Kept=18787, pruned=0
+│ • Terminal NWA (after suffix pruning): states=27409, transitions=61738, unique_state_pairs=61738, ranges=141441, ranges_interned=13716
+TIMING: terminal_nwa_suffix_prune 33.645445542s
+│ [2m  precompute1::determinize_and_minimize start[0m [35m+27µs[0m
+│ [2m  Determinize and minimize initial stats: states=27409, transitions=61738, unique_state_pairs=61738, ranges=141441, ranges_interned=13716[0m [35m+11ms[0m
+TIMING: NWA pass RmEpsilon 7.654734125s
+TIMING: NWA pass CompressTransitions 5.359209ms
+TIMING: NWA passes total 7.660179334s
+│ [2m  NWA minimization: states=27409, transitions=18789, unique_state_pairs=18789, ranges=164726, ranges_interned=67196[0m [35m+7.67s[0m
+│ Determinizing acyclic NWA: precomputing state sets...
+│ • set_global_dims: max_llm_token=2220, num_tsids=272425
+TIMING: determinize_acyclic::eps_closure_sizes avg=1.00 p50=1 p90=1 p99=1 max=1
+│ Acyclic determinize stats: dwa_states=2, avg_unweighted_closure_size=1.50, transition_cache_total=1
+MERGE_STATS: or_ops=2 updates=2 final_cells=3 ratio=0.67
+│ [2m  Acyclic determinize closures: unweighted=2, weighted=2, unique_weighted=2[0m [35m+21ms[0m
+│ [2m  Acyclic determinize start_id=0 seen_start_id=0[0m [35m+3µs[0m
+│ [2m  Found 2 DWA states to process[0m [35m+1µs[0m
+TIMING: determinize_acyclic::precompute_eps_unweighted 585.417µs
+TIMING: determinize_acyclic::precompute_eps_weighted 18.918083ms
+TIMING: determinize_acyclic::precompute_loop 4.291µs
+TIMING: determinize_acyclic::materialize_weighted_closures 21.123625ms
+TIMING: determinize_acyclic::materialize_parallel 2.916µs
+TIMING: determinize_acyclic::materialize_merge 83ns
+TIMING: determinize_acyclic::materialize_collect 8.128541ms
+TIMING: determinize_acyclic::materialize_expand 1.558375ms
+TIMING: determinize_acyclic::materialize_normalize 11.330041ms
+TIMING: determinize_acyclic::materialize_weight_and 7.560625ms ops=4
+TIMING: determinize_acyclic::materialize_weight_or 5.279333ms ops=8
+TIMING: determinize_acyclic::materialize_counts calls=2 labels=1
+TIMING: determinize_acyclic::materialize_stats avg_closure_size=1.50 avg_transitions_per_state=0.33 avg_targets_per_transition=2.00
+TIMING: determinize_acyclic::materialize_or_ops collect=4 expand=2 normalize=2 total=8 all_or_ops=8
+TIMING: determinize_acyclic::materialize_blocks closure_lookup=83ns transition_iter=21.028ms pending_insert=2µs
+TIMING: determinize_acyclic::eps_expand_ratio avg=1.00 p50=1.00 p90=1.00 p99=1.00 max=1.00
+TIMING: determinize_acyclic::weighted_update_ratio total_updates=2 final_cells=3 ratio=0.67
+TIMING: determinize_acyclic::weight_density total=3 all=0 (0.0%) empty=0 (0.0%)
+TIMING: determinize_acyclic::op_cache_or hits=0 misses=3 rate=0.0%
+TIMING: determinize_acyclic::op_cache_or_miss_time 5.261542ms misses=3 avg_us=1753.8
+TIMING: determinize_acyclic::op_cache_or_miss_prep 4.333µs avg_us=1.4
+TIMING: determinize_acyclic::op_cache_or_miss_union_asym 120.917µs count=2 avg_us=60.5
+TIMING: determinize_acyclic::op_cache_or_miss_merge 4.228792ms count=1 avg_us=4228.8
+TIMING: determinize_acyclic::op_cache_or_miss_intern 2.792µs avg_us=0.9
+TIMING: determinize_acyclic::op_cache_or_miss_ranges avg_left=1684.7 avg_right=5052.0
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_union 3.486945ms count=5051 avg_us=0.7
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_sizes avg_left=11.7 avg_right=12.7
+TIMING: determinize_acyclic::op_cache_or_miss_segments total=5054 both=5051 (99.9%) left_only=1 (0.0%) right_only=1 (0.0%) none=1 (0.0%)
+TIMING: determinize_acyclic::l1_op_cache_or hits=5 misses=929 rate=0.5%
+TIMING: determinize_acyclic::bitor_assign_noop total=1 noop=0 rate=0.0%
+TIMING: determinize_acyclic::bitor_assign_noop_sample total=0 noop=0 rate=0.0%
+TIMING: determinize_acyclic::finalize_weighted_closures 23.709µs
+TIMING: determinize_acyclic::total 41.141833ms
+TIMING: determinize_acyclic::counters dwa_states=2 total_transitions=1 avg_unweighted_closure_size=1.50
+│ [2m  Determinization: states=2, transitions=1, unique_state_pairs=1, ranges=64373, ranges_interned=58502, transition_multiplicity_hist={1: 1} in 42.66ms[0m [35m+1ms[0m
+TIMING: NWA::determinize 43.179792ms
+TIMING: DWA pre_minimize states=2 transitions=1
+│ • minimize_states_colpack: is_cyclic=false, 2 states before
+│ [2m  push_weights_acyclic breakdown: topo=1.959µs, reachable=6.97075ms, push=958ns[0m [35m+6ms[0m
+│ [2m  push_weights_acyclic ops: reachable_clone=84ns, reachable_and=6.968417ms, reachable_or=166ns, push_and=584ns[0m [35m+6µs[0m
+│ [2m  push_weights_acyclic: 6.986541ms (changed=true)[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 0 start (tighten_weights)[0m [35m+11µs[0m
+│ [2m  tighten_weights: topo_order computed in 208ns[0m [35m+1µs[0m
+│ [2m  forward_reachable breakdown: init=7.459µs, loop_outer=353.209µs, clone=84ns, and=0ns, or=349.25µs[0m [35m+404µs[0m
+│ [2m  forward_reachable counts: transitions=1, clones=1, ands=0, ors=1[0m [35m+20µs[0m
+│ [2m  tighten_weights: forward_reachable computed in 398.334µs[0m [35m+1µs[0m
+│ [2m  tighten_weights: new DWA built in 6.647291ms[0m [35m+6ms[0m
+│ [2m  Acyclic minimize step 0 end (tighten_weights): 7.081292ms[0m [35m+5µs[0m
+│ [2m  Acyclic minimize step 0 (tighten_weights): 7.082583ms[0m [35m+0µs[0m
+│ [2m  Acyclic minimize step 1 start (topo_order)[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 1 end (topo_order): 541ns[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 1 (topo_order): 1.375µs[0m [35m+0µs[0m
+│ [2m  Acyclic minimize step 2 start (needed_sets)[0m [35m+0µs[0m
+│ [2m  compute_needed_sets breakdown: total=2µs, loop=1µs, loop_other=417ns, final_clone=166ns, weight_lookup=0ns, and=250ns, or=167ns, transitions=1[0m [35m+4µs[0m
+│ [2m  Acyclic minimize step 2 end (needed_sets): 8.125µs[0m [35m+4µs[0m
+│ [2m  Acyclic minimize step 2 (needed_sets): 9.083µs[0m [35m+0µs[0m
+│ [2m  Acyclic minimize step 3a (compute_heights): 167ns[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 3b (states_by_height): 1.542µs, max_height=1, largest_level=1[0m [35m+28µs[0m
+│ [2m  Acyclic minimize step 3 (heights): 31.792µs[0m [35m+14µs[0m
+Height 0: graph construction start candidates=1
+Height 0: graph constructed in 3.166µs (nodes=1, edges=0)
+EXPORT CHECK: height=0 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=1.958µs, graph=3.166µs, coloring=1.101375ms, unaccounted=11.458µs[0m [35m+1ms[0m
+│ [2m  height 0 coloring: candidates=1, path=graph_exact, colors=1[0m [35m+3µs[0m
+TIMING: height 0 compute_height_coloring 1.130584ms
+Height 1: graph construction start candidates=1
+Height 1: graph constructed in 2.667µs (nodes=1, edges=0)
+EXPORT CHECK: height=1 dwa_type=terminal enabled=false
+│ [2m  Coloring breakdown: signature=1µs, graph=2.667µs, coloring=17.875µs, unaccounted=9.083µs[0m [35m+39µs[0m
+│ [2m  height 1 coloring: candidates=1, path=graph_exact, colors=1[0m [35m+1µs[0m
+TIMING: height 1 compute_height_coloring 35.542µs
+│ [2m  Acyclic minimize step 4 breakdown: coloring=1.166126ms, insert=207ns, extend=1.167µs, merge=55.416µs, merge_and_time=0ns[0m [35m+60µs[0m
+│ [2m  Acyclic minimize step 5 (reconstruct): 12.375µs[0m [35m+14µs[0m
+TIMING SUMMARY: compute_height_coloring total 1.163208ms over 2 calls (avg 581.604µs)
+TIMING SUMMARY: scan_colors total 0ns over 0 calls (avg 0ns)
+TIMING SUMMARY: are_compatible total 0ns over 0 calls (avg 0ns)
+TIMING SUMMARY: build_incompatibility_graph total 583ns over 2 calls (avg 291ns)
+TIMING: DWA pass ColPackMinimize 15.417292ms
+TIMING: DWA pass TrimWeights 579.083µs
+TIMING: DWA passes total 16.008916ms
+│ [2m  DWA minimization: states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499, transition_multiplicity_hist={1: 1}[0m [35m+1ms[0m
+TIMING: DWA post_minimize states=2 transitions=1
+TIMING: NWA::determinize_and_minimize_with_config total 7.742255375s
+│ [2m  precompute1::determinize_and_minimize end[0m [35m+1ms[0m
+│ • Terminal DWA (before suffix pruning): states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499, transition_multiplicity_hist={1: 1}
+TIMING: run_precompute1 176.612934375s
+│ [2m  run_precompute1: end[0m [35m+7ms[0m
+│ • Done precompute1. Terminal DWA (before pruning): states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499, transition_multiplicity_hist={1: 1}
+│ • Checking suffix prune conditions: grammar_def=true, env_disabled=false
+│ • Pruning terminal DWA with suffix grammar...
+│ • Starting suffix grammar DWA pruning
+│ •   Ignored terminal IDs: {}
+│ •   Building suffix grammar...
+│ •   Suffix grammar: 4 productions
+│ •   Compiling suffix grammar...
+│ Building tokenizer from definition
+│ [2m  Expr Stats: Nodes: 65855, Depth: 13940, Seq: 10455, Choice: 6964, Quant: 10456, RepeatBounded: 0, Shared: 31353 (unique: 10457, inlineable: 0), U8Seq: 3138, U8Class: 3489, Eps: 0[0m [35m+1ms[0m
+│ • Optimizing expression
+│ [2m  optimize iter=100000 seq=10003 choice=6664 stack=457 values=4 elapsed=6.23ms[0m [35m+6ms[0m
+│ [2m  Optimized expression in 6.55ms[0m [35m+307µs[0m
+│ • Building NFA
+│ • Expr stats: Nodes: 65855, Depth: 6975, Seq: 10455, Choice: 6964, Quant: 10456, RepeatBounded: 0, Shared: 31353 (unique: 10457, inlineable: 0), U8Seq: 3138, U8Class: 3489, Eps: 0
+│ • Factored out common prefix in NFA construction
+│ [2m  Built NFA with 242625 states in 25.69ms[0m [35m+24ms[0m
+│ [2m  Condensed NFA 242625 → 242625 states in 4.49ms[0m [35m+4ms[0m
+│ • Converting NFA to DFA
+│ • Computed 105 input equivalence classes in 6.82ms
+│ [2m  CompactNFA: 242625 states, 83598 epsilon transitions[0m [35m+16ms[0m
+│ [2m  Epsilon structure: 41800 states have outgoing epsilons, max out-degree 2[0m [35m+365µs[0m
+│ [2m  Epsilon density: 41800 states with eps, 83598 total transitions (0x states)[0m [35m+931µs[0m
+│ [2m  Precomputed 0 high-degree closures (avg size 0) in 1.19ms[0m [35m+1ms[0m
+│ [2m  DFA progress: 1001 states, worklist 199, subset size 1 (max 17345), elapsed 85.36ms[0m [35m+59ms[0m
+│ [2m  DFA progress: 2000 states, worklist 346, subset size 1 (max 17345), elapsed 87.59ms[0m [35m+2ms[0m
+│ [2m  DFA progress: 3001 states, worklist 345, subset size 55 (max 17345), elapsed 90.15ms[0m [35m+2ms[0m
+│ [2m  DFA progress: 4000 states, worklist 311, subset size 1 (max 17345), elapsed 94.15ms[0m [35m+4ms[0m
+│ [2m  DFA progress: 5000 states, worklist 313, subset size 1 (max 17345), elapsed 98.54ms[0m [35m+4ms[0m
+│ [2m  DFA progress: 6000 states, worklist 306, subset size 5 (max 17345), elapsed 104.55ms[0m [35m+6ms[0m
+│ [2m  DFA progress: 7000 states, worklist 372, subset size 78 (max 17345), elapsed 108.18ms[0m [35m+3ms[0m
+│ [2m  DFA progress: 8000 states, worklist 354, subset size 1 (max 17345), elapsed 116.72ms[0m [35m+8ms[0m
+│ [2m  DFA progress: 9000 states, worklist 362, subset size 515 (max 17345), elapsed 124.76ms[0m [35m+8ms[0m
+│ [2m  DFA progress: 10002 states, worklist 340, subset size 9 (max 17345), elapsed 137.71ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 11000 states, worklist 320, subset size 639 (max 17345), elapsed 152.25ms[0m [35m+14ms[0m
+│ [2m  DFA progress: 12000 states, worklist 294, subset size 1 (max 17345), elapsed 165.59ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 13000 states, worklist 281, subset size 103 (max 17345), elapsed 178.50ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 14000 states, worklist 314, subset size 1 (max 17345), elapsed 192.90ms[0m [35m+14ms[0m
+│ [2m  DFA progress: 15000 states, worklist 291, subset size 1 (max 17345), elapsed 207.11ms[0m [35m+14ms[0m
+│ [2m  DFA progress: 16000 states, worklist 281, subset size 2 (max 17345), elapsed 222.72ms[0m [35m+15ms[0m
+│ [2m  DFA progress: 17000 states, worklist 262, subset size 1 (max 17345), elapsed 236.29ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 18000 states, worklist 258, subset size 1 (max 17345), elapsed 256.13ms[0m [35m+19ms[0m
+│ [2m  DFA progress: 19000 states, worklist 246, subset size 1 (max 17345), elapsed 269.42ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 20000 states, worklist 279, subset size 1 (max 17345), elapsed 294.02ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 21000 states, worklist 249, subset size 439 (max 17345), elapsed 324.29ms[0m [35m+30ms[0m
+│ [2m  DFA progress: 22000 states, worklist 261, subset size 3 (max 17345), elapsed 347.91ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 23000 states, worklist 252, subset size 2 (max 17345), elapsed 377.87ms[0m [35m+29ms[0m
+│ [2m  DFA progress: 24002 states, worklist 262, subset size 6 (max 17345), elapsed 399.82ms[0m [35m+21ms[0m
+│ [2m  DFA progress: 25000 states, worklist 255, subset size 1 (max 17345), elapsed 423.96ms[0m [35m+24ms[0m
+│ [2m  DFA progress: 26000 states, worklist 253, subset size 9 (max 17345), elapsed 447.67ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 27000 states, worklist 278, subset size 1 (max 17345), elapsed 473.82ms[0m [35m+26ms[0m
+│ [2m  DFA progress: 28000 states, worklist 242, subset size 1 (max 17345), elapsed 502.80ms[0m [35m+28ms[0m
+│ [2m  DFA progress: 29000 states, worklist 227, subset size 2 (max 17345), elapsed 530.33ms[0m [35m+27ms[0m
+│ [2m  DFA progress: 30000 states, worklist 264, subset size 1 (max 17345), elapsed 556.08ms[0m [35m+25ms[0m
+│ [2m  DFA progress: 31000 states, worklist 261, subset size 1 (max 17345), elapsed 579.57ms[0m [35m+23ms[0m
+│ [2m  DFA progress: 32000 states, worklist 275, subset size 1859 (max 17345), elapsed 602.47ms[0m [35m+22ms[0m
+│ [2m  DFA progress: 33000 states, worklist 227, subset size 1 (max 17345), elapsed 628.25ms[0m [35m+25ms[0m
+│ [2m  DFA progress: 34000 states, worklist 199, subset size 630 (max 17345), elapsed 658.59ms[0m [35m+30ms[0m
+│ [2m  DFA progress: 35000 states, worklist 303, subset size 1 (max 17345), elapsed 684.76ms[0m [35m+26ms[0m
+│ [2m  DFA progress: 36000 states, worklist 282, subset size 1 (max 17345), elapsed 724.01ms[0m [35m+39ms[0m
+│ [2m  DFA progress: 37000 states, worklist 295, subset size 693 (max 17345), elapsed 764.96ms[0m [35m+40ms[0m
+│ [2m  DFA progress: 38000 states, worklist 292, subset size 1 (max 17345), elapsed 829.43ms[0m [35m+64ms[0m
+│ [2m  DFA progress: 39000 states, worklist 345, subset size 1 (max 17345), elapsed 854.44ms[0m [35m+25ms[0m
+│ [2m  DFA progress: 40000 states, worklist 322, subset size 1 (max 17345), elapsed 892.51ms[0m [35m+38ms[0m
+│ [2m  DFA progress: 41000 states, worklist 292, subset size 503 (max 17345), elapsed 933.41ms[0m [35m+40ms[0m
+│ [2m  DFA progress: 42000 states, worklist 254, subset size 2 (max 17345), elapsed 974.55ms[0m [35m+41ms[0m
+│ [2m  DFA progress: 43000 states, worklist 305, subset size 1 (max 17345), elapsed 1.01s[0m [35m+32ms[0m
+│ [2m  DFA progress: 44000 states, worklist 265, subset size 1 (max 17345), elapsed 1.05s[0m [35m+45ms[0m
+│ [2m  DFA progress: 45000 states, worklist 253, subset size 1 (max 17345), elapsed 1.09s[0m [35m+36ms[0m
+│ [2m  DFA progress: 46000 states, worklist 258, subset size 9 (max 17345), elapsed 1.14s[0m [35m+51ms[0m
+│ [2m  DFA progress: 47000 states, worklist 284, subset size 1 (max 17345), elapsed 1.17s[0m [35m+33ms[0m
+│ [2m  DFA progress: 48000 states, worklist 260, subset size 6 (max 17345), elapsed 1.22s[0m [35m+48ms[0m
+│ [2m  DFA progress: 49000 states, worklist 243, subset size 1 (max 17345), elapsed 1.26s[0m [35m+40ms[0m
+│ [2m  DFA progress: 50000 states, worklist 270, subset size 4 (max 17345), elapsed 1.30s[0m [35m+41ms[0m
+│ [2m  DFA progress: 51000 states, worklist 294, subset size 511 (max 17345), elapsed 1.34s[0m [35m+39ms[0m
+│ [2m  DFA progress: 52000 states, worklist 280, subset size 2 (max 17345), elapsed 1.39s[0m [35m+45ms[0m
+│ [2m  DFA progress: 53000 states, worklist 257, subset size 559 (max 17345), elapsed 1.43s[0m [35m+40ms[0m
+│ [2m  DFA progress: 54000 states, worklist 269, subset size 324 (max 17345), elapsed 1.48s[0m [35m+46ms[0m
+│ [2m  DFA progress: 55001 states, worklist 254, subset size 2340 (max 17345), elapsed 1.51s[0m [35m+37ms[0m
+│ [2m  DFA progress: 56001 states, worklist 251, subset size 22 (max 17345), elapsed 1.57s[0m [35m+56ms[0m
+│ [2m  DFA progress: 57000 states, worklist 264, subset size 19 (max 17345), elapsed 1.63s[0m [35m+57ms[0m
+│ [2m  DFA progress: 58001 states, worklist 256, subset size 1 (max 17345), elapsed 1.68s[0m [35m+53ms[0m
+│ [2m  DFA progress: 59000 states, worklist 233, subset size 1 (max 17345), elapsed 1.74s[0m [35m+59ms[0m
+│ [2m  DFA progress: 60000 states, worklist 330, subset size 1 (max 17345), elapsed 1.79s[0m [35m+50ms[0m
+│ [2m  DFA progress: 61000 states, worklist 353, subset size 4 (max 17345), elapsed 1.82s[0m [35m+29ms[0m
+│ [2m  DFA progress: 62001 states, worklist 327, subset size 6 (max 17345), elapsed 1.87s[0m [35m+48ms[0m
+│ [2m  DFA progress: 63000 states, worklist 326, subset size 2 (max 17345), elapsed 1.92s[0m [35m+54ms[0m
+│ [2m  DFA progress: 64001 states, worklist 318, subset size 870 (max 17345), elapsed 1.97s[0m [35m+46ms[0m
+│ [2m  DFA progress: 65000 states, worklist 397, subset size 1 (max 17345), elapsed 2.00s[0m [35m+31ms[0m
+│ [2m  DFA progress: 66000 states, worklist 401, subset size 1 (max 17345), elapsed 2.06s[0m [35m+54ms[0m
+│ [2m  DFA progress: 67003 states, worklist 405, subset size 1 (max 17345), elapsed 2.10s[0m [35m+48ms[0m
+│ [2m  DFA progress: 68000 states, worklist 434, subset size 1 (max 17345), elapsed 2.13s[0m [35m+26ms[0m
+│ [2m  DFA progress: 69000 states, worklist 418, subset size 1 (max 17345), elapsed 2.17s[0m [35m+40ms[0m
+│ [2m  DFA progress: 70000 states, worklist 386, subset size 2 (max 17345), elapsed 2.21s[0m [35m+41ms[0m
+│ [2m  DFA progress: 71000 states, worklist 375, subset size 833 (max 17345), elapsed 2.28s[0m [35m+63ms[0m
+│ [2m  DFA progress: 72000 states, worklist 388, subset size 1 (max 17345), elapsed 2.31s[0m [35m+38ms[0m
+│ [2m  DFA progress: 73001 states, worklist 357, subset size 16 (max 17345), elapsed 2.35s[0m [35m+39ms[0m
+│ [2m  DFA progress: 74000 states, worklist 382, subset size 1 (max 17345), elapsed 2.40s[0m [35m+43ms[0m
+│ [2m  DFA progress: 75000 states, worklist 364, subset size 27 (max 17345), elapsed 2.44s[0m [35m+37ms[0m
+│ [2m  DFA progress: 76000 states, worklist 314, subset size 902 (max 17345), elapsed 2.49s[0m [35m+49ms[0m
+│ [2m  DFA progress: 77000 states, worklist 341, subset size 6 (max 17345), elapsed 2.54s[0m [35m+50ms[0m
+│ [2m  DFA progress: 78000 states, worklist 344, subset size 1 (max 17345), elapsed 2.58s[0m [35m+48ms[0m
+│ [2m  DFA progress: 79000 states, worklist 310, subset size 1 (max 17345), elapsed 2.64s[0m [35m+51ms[0m
+│ [2m  DFA progress: 80000 states, worklist 300, subset size 1 (max 17345), elapsed 2.70s[0m [35m+58ms[0m
+│ [2m  DFA progress: 81002 states, worklist 295, subset size 1 (max 17345), elapsed 2.77s[0m [35m+72ms[0m
+│ [2m  DFA progress: 82000 states, worklist 295, subset size 1 (max 17345), elapsed 2.82s[0m [35m+55ms[0m
+│ [2m  DFA progress: 83000 states, worklist 315, subset size 9 (max 17345), elapsed 2.89s[0m [35m+66ms[0m
+│ [2m  DFA progress: 84000 states, worklist 326, subset size 961 (max 17345), elapsed 2.95s[0m [35m+59ms[0m
+│ [2m  DFA progress: 85001 states, worklist 333, subset size 1 (max 17345), elapsed 3.02s[0m [35m+72ms[0m
+│ [2m  DFA progress: 86000 states, worklist 270, subset size 1 (max 17345), elapsed 3.07s[0m [35m+49ms[0m
+│ [2m  DFA progress: 87000 states, worklist 306, subset size 1 (max 17345), elapsed 3.14s[0m [35m+66ms[0m
+│ [2m  DFA progress: 88000 states, worklist 307, subset size 1 (max 17345), elapsed 3.20s[0m [35m+58ms[0m
+│ [2m  DFA progress: 89000 states, worklist 301, subset size 1 (max 17345), elapsed 3.25s[0m [35m+57ms[0m
+│ [2m  DFA progress: 90000 states, worklist 275, subset size 2 (max 17345), elapsed 3.30s[0m [35m+41ms[0m
+│ [2m  DFA progress: 91000 states, worklist 244, subset size 1 (max 17345), elapsed 3.36s[0m [35m+68ms[0m
+│ [2m  DFA progress: 92000 states, worklist 252, subset size 1 (max 17345), elapsed 3.43s[0m [35m+64ms[0m
+│ [2m  DFA progress: 93000 states, worklist 286, subset size 1 (max 17345), elapsed 3.49s[0m [35m+60ms[0m
+│ [2m  DFA progress: 94000 states, worklist 267, subset size 1064 (max 17345), elapsed 3.57s[0m [35m+78ms[0m
+│ [2m  DFA progress: 95000 states, worklist 256, subset size 1 (max 17345), elapsed 3.64s[0m [35m+69ms[0m
+│ [2m  DFA progress: 96000 states, worklist 261, subset size 973 (max 17345), elapsed 3.69s[0m [35m+54ms[0m
+│ [2m  DFA progress: 97000 states, worklist 283, subset size 1 (max 17345), elapsed 3.77s[0m [35m+75ms[0m
+│ [2m  DFA progress: 98000 states, worklist 229, subset size 5083 (max 17345), elapsed 3.85s[0m [35m+83ms[0m
+│ [2m  DFA progress: 99000 states, worklist 205, subset size 1 (max 17345), elapsed 3.93s[0m [35m+80ms[0m
+│ [2m  DFA progress: 100001 states, worklist 276, subset size 915 (max 17345), elapsed 3.98s[0m [35m+49ms[0m
+│ [2m  DFA progress: 101000 states, worklist 269, subset size 649 (max 17345), elapsed 4.08s[0m [35m+99ms[0m
+│ [2m  DFA progress: 102000 states, worklist 275, subset size 387 (max 17345), elapsed 4.16s[0m [35m+74ms[0m
+│ [2m  DFA progress: 103000 states, worklist 271, subset size 288 (max 17345), elapsed 4.23s[0m [35m+72ms[0m
+│ [2m  DFA progress: 104000 states, worklist 245, subset size 1 (max 17345), elapsed 4.33s[0m [35m+99ms[0m
+│ [2m  DFA progress: 105000 states, worklist 255, subset size 35 (max 17345), elapsed 4.41s[0m [35m+82ms[0m
+│ [2m  DFA progress: 106001 states, worklist 271, subset size 6 (max 17345), elapsed 4.50s[0m [35m+84ms[0m
+│ [2m  DFA progress: 107001 states, worklist 280, subset size 1 (max 17345), elapsed 4.59s[0m [35m+96ms[0m
+│ [2m  DFA progress: 108000 states, worklist 273, subset size 2 (max 17345), elapsed 4.66s[0m [35m+66ms[0m
+│ [2m  DFA progress: 109000 states, worklist 283, subset size 1 (max 17345), elapsed 4.72s[0m [35m+67ms[0m
+│ [2m  DFA progress: 110000 states, worklist 239, subset size 1 (max 17345), elapsed 4.77s[0m [35m+44ms[0m
+│ [2m  DFA progress: 111000 states, worklist 245, subset size 3 (max 17345), elapsed 4.85s[0m [35m+81ms[0m
+│ [2m  DFA progress: 112000 states, worklist 232, subset size 1 (max 17345), elapsed 4.93s[0m [35m+75ms[0m
+│ [2m  DFA progress: 113000 states, worklist 215, subset size 2 (max 17345), elapsed 4.96s[0m [35m+36ms[0m
+│ [2m  DFA progress: 114001 states, worklist 276, subset size 1770 (max 17345), elapsed 5.04s[0m [35m+75ms[0m
+│ [2m  DFA progress: 115000 states, worklist 254, subset size 2 (max 17345), elapsed 5.13s[0m [35m+92ms[0m
+│ [2m  DFA progress: 116000 states, worklist 226, subset size 1 (max 17345), elapsed 5.21s[0m [35m+78ms[0m
+│ [2m  DFA progress: 117000 states, worklist 273, subset size 1303 (max 17345), elapsed 5.29s[0m [35m+82ms[0m
+│ [2m  DFA progress: 118000 states, worklist 218, subset size 6 (max 17345), elapsed 5.38s[0m [35m+90ms[0m
+│ [2m  DFA progress: 119000 states, worklist 228, subset size 1 (max 17345), elapsed 5.44s[0m [35m+60ms[0m
+│ [2m  DFA progress: 120001 states, worklist 214, subset size 1853 (max 17345), elapsed 5.54s[0m [35m+90ms[0m
+│ [2m  DFA progress: 121000 states, worklist 237, subset size 1 (max 17345), elapsed 5.60s[0m [35m+63ms[0m
+│ [2m  DFA progress: 122000 states, worklist 258, subset size 429 (max 17345), elapsed 5.69s[0m [35m+88ms[0m
+│ [2m  DFA progress: 123000 states, worklist 240, subset size 1 (max 17345), elapsed 5.80s[0m [35m+117ms[0m
+│ [2m  DFA progress: 124000 states, worklist 203, subset size 32 (max 17345), elapsed 5.92s[0m [35m+113ms[0m
+│ [2m  DFA progress: 125000 states, worklist 265, subset size 439 (max 17345), elapsed 6.00s[0m [35m+80ms[0m
+│ [2m  DFA progress: 126000 states, worklist 258, subset size 8 (max 17345), elapsed 6.09s[0m [35m+86ms[0m
+│ [2m  DFA progress: 127000 states, worklist 236, subset size 1 (max 17345), elapsed 6.19s[0m [35m+109ms[0m
+│ [2m  DFA progress: 128000 states, worklist 208, subset size 1 (max 17345), elapsed 6.33s[0m [35m+133ms[0m
+│ [2m  DFA progress: 129000 states, worklist 260, subset size 1995 (max 17345), elapsed 6.38s[0m [35m+47ms[0m
+│ [2m  DFA progress: 130000 states, worklist 252, subset size 186 (max 17345), elapsed 6.47s[0m [35m+94ms[0m
+│ [2m  DFA progress: 131000 states, worklist 294, subset size 1 (max 17345), elapsed 6.56s[0m [35m+86ms[0m
+│ [2m  DFA progress: 132000 states, worklist 301, subset size 3 (max 17345), elapsed 6.64s[0m [35m+86ms[0m
+│ [2m  DFA progress: 133000 states, worklist 281, subset size 103 (max 17345), elapsed 6.72s[0m [35m+81ms[0m
+│ [2m  DFA progress: 134000 states, worklist 320, subset size 1 (max 17345), elapsed 6.81s[0m [35m+82ms[0m
+│ [2m  DFA progress: 135000 states, worklist 307, subset size 47 (max 17345), elapsed 6.89s[0m [35m+81ms[0m
+│ [2m  DFA progress: 136000 states, worklist 293, subset size 1 (max 17345), elapsed 6.97s[0m [35m+84ms[0m
+│ [2m  DFA progress: 137000 states, worklist 255, subset size 1 (max 17345), elapsed 7.06s[0m [35m+92ms[0m
+│ [2m  DFA progress: 138000 states, worklist 229, subset size 1 (max 17345), elapsed 7.17s[0m [35m+102ms[0m
+│ [2m  DFA progress: 139000 states, worklist 219, subset size 1 (max 17345), elapsed 7.26s[0m [35m+93ms[0m
+│ [2m  DFA progress: 140000 states, worklist 214, subset size 1 (max 17345), elapsed 7.36s[0m [35m+102ms[0m
+│ [2m  DFA progress: 141000 states, worklist 206, subset size 1 (max 17345), elapsed 7.44s[0m [35m+80ms[0m
+│ [2m  DFA progress: 142000 states, worklist 200, subset size 5 (max 17345), elapsed 7.52s[0m [35m+78ms[0m
+│ [2m  DFA progress: 143000 states, worklist 230, subset size 1 (max 17345), elapsed 7.63s[0m [35m+103ms[0m
+│ [2m  DFA progress: 144001 states, worklist 205, subset size 9 (max 17345), elapsed 7.74s[0m [35m+111ms[0m
+│ [2m  DFA progress: 145000 states, worklist 184, subset size 1 (max 17345), elapsed 7.82s[0m [35m+83ms[0m
+│ [2m  DFA progress: 146000 states, worklist 187, subset size 1 (max 17345), elapsed 7.96s[0m [35m+142ms[0m
+│ [2m  DFA progress: 147002 states, worklist 154, subset size 6 (max 17345), elapsed 8.11s[0m [35m+147ms[0m
+│ [2m  DFA progress: 148000 states, worklist 163, subset size 1 (max 17345), elapsed 8.21s[0m [35m+97ms[0m
+│ [2m  DFA progress: 149000 states, worklist 137, subset size 42 (max 17345), elapsed 8.32s[0m [35m+113ms[0m
+│ [2m  DFA progress: 150001 states, worklist 198, subset size 1900 (max 17345), elapsed 8.45s[0m [35m+123ms[0m
+│ [2m  DFA progress: 151000 states, worklist 246, subset size 1 (max 17345), elapsed 8.58s[0m [35m+138ms[0m
+│ [2m  DFA progress: 152001 states, worklist 225, subset size 9 (max 17345), elapsed 8.72s[0m [35m+139ms[0m
+│ [2m  DFA progress: 153000 states, worklist 216, subset size 1 (max 17345), elapsed 8.87s[0m [35m+147ms[0m
+│ [2m  DFA progress: 154000 states, worklist 271, subset size 1 (max 17345), elapsed 9.01s[0m [35m+138ms[0m
+│ [2m  DFA progress: 155000 states, worklist 278, subset size 1 (max 17345), elapsed 9.12s[0m [35m+107ms[0m
+│ [2m  DFA progress: 156000 states, worklist 257, subset size 17 (max 17345), elapsed 9.26s[0m [35m+139ms[0m
+│ [2m  DFA progress: 157002 states, worklist 273, subset size 1 (max 17345), elapsed 9.40s[0m [35m+140ms[0m
+│ [2m  DFA progress: 158000 states, worklist 274, subset size 1 (max 17345), elapsed 9.53s[0m [35m+131ms[0m
+│ [2m  DFA progress: 159000 states, worklist 250, subset size 1 (max 17345), elapsed 9.67s[0m [35m+140ms[0m
+│ [2m  DFA progress: 160000 states, worklist 327, subset size 1 (max 17345), elapsed 9.74s[0m [35m+75ms[0m
+│ [2m  DFA progress: 161000 states, worklist 323, subset size 4 (max 17345), elapsed 9.86s[0m [35m+119ms[0m
+│ [2m  DFA progress: 162000 states, worklist 350, subset size 376 (max 17345), elapsed 9.93s[0m [35m+69ms[0m
+│ [2m  DFA progress: 163000 states, worklist 334, subset size 3 (max 17345), elapsed 10.02s[0m [35m+85ms[0m
+│ [2m  DFA progress: 164000 states, worklist 316, subset size 1 (max 17345), elapsed 10.09s[0m [35m+69ms[0m
+│ [2m  DFA progress: 165000 states, worklist 335, subset size 100 (max 17345), elapsed 10.17s[0m [35m+77ms[0m
+│ [2m  DFA progress: 166000 states, worklist 341, subset size 1 (max 17345), elapsed 10.26s[0m [35m+92ms[0m
+│ [2m  DFA progress: 167000 states, worklist 340, subset size 3 (max 17345), elapsed 10.34s[0m [35m+83ms[0m
+│ [2m  DFA progress: 168000 states, worklist 331, subset size 1 (max 17345), elapsed 10.42s[0m [35m+82ms[0m
+│ [2m  DFA progress: 169000 states, worklist 338, subset size 6180 (max 17345), elapsed 10.45s[0m [35m+24ms[0m
+│ [2m  DFA progress: 170000 states, worklist 325, subset size 4 (max 17345), elapsed 10.51s[0m [35m+62ms[0m
+│ [2m  DFA progress: 171000 states, worklist 313, subset size 10 (max 17345), elapsed 10.58s[0m [35m+71ms[0m
+│ [2m  DFA progress: 172000 states, worklist 309, subset size 9 (max 17345), elapsed 10.69s[0m [35m+106ms[0m
+│ [2m  DFA progress: 173000 states, worklist 311, subset size 1 (max 17345), elapsed 10.85s[0m [35m+156ms[0m
+│ [2m  DFA progress: 174000 states, worklist 292, subset size 1 (max 17345), elapsed 10.94s[0m [35m+93ms[0m
+│ [2m  DFA progress: 175000 states, worklist 281, subset size 688 (max 17345), elapsed 11.05s[0m [35m+105ms[0m
+│ [2m  DFA progress: 176000 states, worklist 259, subset size 1 (max 17345), elapsed 11.14s[0m [35m+95ms[0m
+│ [2m  DFA progress: 177000 states, worklist 247, subset size 1 (max 17345), elapsed 11.29s[0m [35m+148ms[0m
+│ [2m  DFA progress: 178002 states, worklist 219, subset size 1 (max 17345), elapsed 11.42s[0m [35m+134ms[0m
+│ [2m  DFA progress: 179000 states, worklist 268, subset size 1 (max 17345), elapsed 11.57s[0m [35m+145ms[0m
+│ [2m  DFA progress: 180000 states, worklist 272, subset size 1921 (max 17345), elapsed 11.69s[0m [35m+120ms[0m
+│ [2m  DFA progress: 181000 states, worklist 262, subset size 1 (max 17345), elapsed 11.80s[0m [35m+108ms[0m
+│ [2m  DFA progress: 182000 states, worklist 260, subset size 1 (max 17345), elapsed 11.88s[0m [35m+77ms[0m
+│ [2m  DFA progress: 183001 states, worklist 239, subset size 6 (max 17345), elapsed 11.99s[0m [35m+116ms[0m
+│ [2m  DFA progress: 184000 states, worklist 251, subset size 1 (max 17345), elapsed 12.15s[0m [35m+155ms[0m
+│ [2m  DFA progress: 185001 states, worklist 323, subset size 6 (max 17345), elapsed 12.25s[0m [35m+100ms[0m
+│ [2m  DFA progress: 186000 states, worklist 311, subset size 1 (max 17345), elapsed 12.35s[0m [35m+101ms[0m
+│ [2m  DFA progress: 187000 states, worklist 311, subset size 1 (max 17345), elapsed 12.43s[0m [35m+80ms[0m
+│ [2m  DFA progress: 188000 states, worklist 294, subset size 9043 (max 17345), elapsed 12.49s[0m [35m+57ms[0m
+│ [2m  DFA progress: 189000 states, worklist 318, subset size 1 (max 17345), elapsed 12.60s[0m [35m+112ms[0m
+│ [2m  DFA progress: 190000 states, worklist 289, subset size 6 (max 17345), elapsed 12.72s[0m [35m+117ms[0m
+│ [2m  DFA progress: 191001 states, worklist 307, subset size 6 (max 17345), elapsed 12.85s[0m [35m+127ms[0m
+│ [2m  DFA progress: 192001 states, worklist 306, subset size 9123 (max 17345), elapsed 12.92s[0m [35m+71ms[0m
+│ [2m  DFA progress: 193002 states, worklist 300, subset size 1 (max 17345), elapsed 13.01s[0m [35m+93ms[0m
+│ [2m  DFA progress: 194000 states, worklist 295, subset size 1 (max 17345), elapsed 13.11s[0m [35m+97ms[0m
+│ [2m  DFA progress: 195000 states, worklist 307, subset size 134 (max 17345), elapsed 13.19s[0m [35m+79ms[0m
+│ [2m  DFA progress: 196000 states, worklist 292, subset size 3 (max 17345), elapsed 13.28s[0m [35m+93ms[0m
+│ [2m  DFA progress: 197000 states, worklist 310, subset size 1 (max 17345), elapsed 13.37s[0m [35m+89ms[0m
+│ [2m  DFA progress: 198000 states, worklist 299, subset size 850 (max 17345), elapsed 13.45s[0m [35m+83ms[0m
+│ [2m  DFA progress: 199000 states, worklist 293, subset size 422 (max 17345), elapsed 13.51s[0m [35m+60ms[0m
+│ [2m  DFA progress: 200000 states, worklist 302, subset size 5 (max 17345), elapsed 13.61s[0m [35m+100ms[0m
+│ [2m  DFA progress: 201000 states, worklist 300, subset size 17 (max 17345), elapsed 13.69s[0m [35m+74ms[0m
+│ [2m  DFA progress: 202000 states, worklist 284, subset size 2 (max 17345), elapsed 13.70s[0m [35m+13ms[0m
+│ [2m  DFA progress: 203000 states, worklist 304, subset size 5 (max 17345), elapsed 13.78s[0m [35m+79ms[0m
+│ [2m  DFA progress: 204000 states, worklist 297, subset size 6 (max 17345), elapsed 13.89s[0m [35m+108ms[0m
+│ [2m  DFA progress: 205000 states, worklist 271, subset size 26 (max 17345), elapsed 13.94s[0m [35m+45ms[0m
+│ [2m  DFA progress: 206000 states, worklist 292, subset size 1 (max 17345), elapsed 14.05s[0m [35m+109ms[0m
+│ [2m  DFA progress: 207000 states, worklist 358, subset size 450 (max 17345), elapsed 14.13s[0m [35m+87ms[0m
+│ [2m  DFA progress: 208000 states, worklist 352, subset size 316 (max 17345), elapsed 14.25s[0m [35m+112ms[0m
+│ [2m  DFA progress: 209000 states, worklist 333, subset size 1 (max 17345), elapsed 14.31s[0m [35m+67ms[0m
+│ [2m  DFA progress: 210000 states, worklist 298, subset size 1 (max 17345), elapsed 14.38s[0m [35m+69ms[0m
+│ [2m  DFA progress: 211000 states, worklist 312, subset size 1 (max 17345), elapsed 14.49s[0m [35m+107ms[0m
+│ [2m  DFA progress: 212000 states, worklist 299, subset size 1 (max 17345), elapsed 14.61s[0m [35m+121ms[0m
+│ [2m  DFA progress: 213002 states, worklist 283, subset size 1 (max 17345), elapsed 14.75s[0m [35m+135ms[0m
+│ [2m  DFA progress: 214000 states, worklist 237, subset size 1 (max 17345), elapsed 14.96s[0m [35m+216ms[0m
+│ [2m  DFA progress: 215000 states, worklist 228, subset size 2931 (max 17345), elapsed 15.14s[0m [35m+177ms[0m
+│ [2m  DFA progress: 216000 states, worklist 237, subset size 1 (max 17345), elapsed 15.32s[0m [35m+175ms[0m
+│ [2m  DFA progress: 217000 states, worklist 220, subset size 2058 (max 17345), elapsed 15.48s[0m [35m+158ms[0m
+│ [2m  DFA progress: 218000 states, worklist 209, subset size 1 (max 17345), elapsed 15.71s[0m [35m+229ms[0m
+│ [2m  DFA progress: 219000 states, worklist 168, subset size 2 (max 17345), elapsed 15.88s[0m [35m+175ms[0m
+│ [2m  DFA progress: 220000 states, worklist 259, subset size 1 (max 17345), elapsed 16.03s[0m [35m+151ms[0m
+│ [2m  DFA progress: 221000 states, worklist 247, subset size 3025 (max 17345), elapsed 16.16s[0m [35m+131ms[0m
+│ [2m  DFA progress: 222000 states, worklist 226, subset size 6 (max 17345), elapsed 16.37s[0m [35m+201ms[0m
+│ [2m  DFA progress: 223000 states, worklist 209, subset size 1 (max 17345), elapsed 16.58s[0m [35m+215ms[0m
+│ [2m  DFA progress: 224000 states, worklist 208, subset size 2307 (max 17345), elapsed 16.69s[0m [35m+104ms[0m
+│ [2m  DFA progress: 225001 states, worklist 196, subset size 9 (max 17345), elapsed 16.86s[0m [35m+173ms[0m
+│ [2m  DFA progress: 226000 states, worklist 174, subset size 1 (max 17345), elapsed 17.02s[0m [35m+159ms[0m
+│ [2m  DFA progress: 227000 states, worklist 164, subset size 1 (max 17345), elapsed 17.26s[0m [35m+243ms[0m
+│ [2m  DFA progress: 228000 states, worklist 190, subset size 1 (max 17345), elapsed 17.42s[0m [35m+158ms[0m
+│ [2m  DFA progress: 229000 states, worklist 187, subset size 2 (max 17345), elapsed 17.61s[0m [35m+193ms[0m
+│ [2m  DFA progress: 230002 states, worklist 161, subset size 3 (max 17345), elapsed 17.80s[0m [35m+180ms[0m
+│ [2m  DFA progress: 231000 states, worklist 159, subset size 2 (max 17345), elapsed 17.97s[0m [35m+172ms[0m
+│ [2m  DFA progress: 232000 states, worklist 168, subset size 1 (max 17345), elapsed 18.12s[0m [35m+156ms[0m
+│ [2m  DFA progress: 233000 states, worklist 119, subset size 4 (max 17345), elapsed 18.35s[0m [35m+224ms[0m
+│ [2m  DFA progress: 234000 states, worklist 104, subset size 3 (max 17345), elapsed 18.57s[0m [35m+222ms[0m
+│ [2m  DFA progress: 235004 states, worklist 159, subset size 6 (max 17345), elapsed 18.79s[0m [35m+220ms[0m
+│ [2m  DFA progress: 236000 states, worklist 136, subset size 1 (max 17345), elapsed 19.07s[0m [35m+283ms[0m
+│ [2m  DFA progress: 237000 states, worklist 121, subset size 3 (max 17345), elapsed 19.37s[0m [35m+294ms[0m
+│ [2m  DFA progress: 238002 states, worklist 191, subset size 1 (max 17345), elapsed 19.54s[0m [35m+169ms[0m
+│ [2m  DFA progress: 239000 states, worklist 172, subset size 1 (max 17345), elapsed 19.78s[0m [35m+239ms[0m
+│ [2m  DFA progress: 240001 states, worklist 228, subset size 11219 (max 17345), elapsed 19.94s[0m [35m+160ms[0m
+│ [2m  DFA progress: 241000 states, worklist 225, subset size 749 (max 17345), elapsed 20.08s[0m [35m+138ms[0m
+│ [2m  DFA progress: 242000 states, worklist 249, subset size 2450 (max 17345), elapsed 20.21s[0m [35m+128ms[0m
+│ [2m  DFA progress: 243000 states, worklist 217, subset size 1 (max 17345), elapsed 20.39s[0m [35m+180ms[0m
+│ [2m  DFA progress: 244001 states, worklist 161, subset size 20 (max 17345), elapsed 20.55s[0m [35m+158ms[0m
+│ [2m  DFA progress: 245000 states, worklist 163, subset size 1 (max 17345), elapsed 20.77s[0m [35m+226ms[0m
+│ [2m  DFA progress: 246000 states, worklist 174, subset size 1 (max 17345), elapsed 21.01s[0m [35m+238ms[0m
+│ [2m  DFA progress: 247001 states, worklist 126, subset size 1 (max 17345), elapsed 21.32s[0m [35m+310ms[0m
+│ [2m  DFA progress: 248000 states, worklist 127, subset size 1 (max 17345), elapsed 21.50s[0m [35m+178ms[0m
+│ [2m  DFA progress: 249000 states, worklist 88, subset size 2687 (max 17345), elapsed 21.74s[0m [35m+235ms[0m
+│ [2m  DFA progress: 250000 states, worklist 160, subset size 1 (max 17345), elapsed 21.95s[0m [35m+216ms[0m
+│ [2m  DFA progress: 251000 states, worklist 162, subset size 5 (max 17345), elapsed 22.23s[0m [35m+273ms[0m
+│ [2m  DFA progress: 252001 states, worklist 156, subset size 8952 (max 17345), elapsed 22.52s[0m [35m+295ms[0m
+│ [2m  DFA progress: 253000 states, worklist 155, subset size 1594 (max 17345), elapsed 22.80s[0m [35m+280ms[0m
+│ [2m  DFA progress: 254000 states, worklist 142, subset size 1 (max 17345), elapsed 23.01s[0m [35m+204ms[0m
+│ [2m  DFA progress: 255000 states, worklist 140, subset size 23 (max 17345), elapsed 23.18s[0m [35m+174ms[0m
+│ [2m  DFA progress: 256000 states, worklist 169, subset size 7 (max 17345), elapsed 23.33s[0m [35m+153ms[0m
+│ [2m  DFA progress: 257001 states, worklist 163, subset size 3664 (max 17345), elapsed 23.51s[0m [35m+174ms[0m
+│ [2m  DFA progress: 258001 states, worklist 166, subset size 12211 (max 17345), elapsed 23.68s[0m [35m+173ms[0m
+│ [2m  DFA progress: 259000 states, worklist 135, subset size 1689 (max 17345), elapsed 23.88s[0m [35m+198ms[0m
+│ [2m  DFA progress: 260000 states, worklist 117, subset size 30 (max 17345), elapsed 24.05s[0m [35m+171ms[0m
+│ [2m  DFA progress: 261000 states, worklist 128, subset size 1 (max 17345), elapsed 24.26s[0m [35m+208ms[0m
+│ [2m  DFA progress: 262000 states, worklist 71, subset size 1 (max 17345), elapsed 24.45s[0m [35m+186ms[0m
+│ [2m  DFA progress: 263000 states, worklist 84, subset size 12 (max 17345), elapsed 24.70s[0m [35m+251ms[0m
+│ [2m  DFA progress: 264000 states, worklist 56, subset size 1 (max 17345), elapsed 24.95s[0m [35m+251ms[0m
+│ [2m  DFA progress: 265000 states, worklist 117, subset size 1 (max 17345), elapsed 25.14s[0m [35m+187ms[0m
+│ [2m  DFA progress: 266000 states, worklist 122, subset size 9 (max 17345), elapsed 25.34s[0m [35m+204ms[0m
+│ [2m  DFA progress: 267001 states, worklist 182, subset size 3830 (max 17345), elapsed 25.52s[0m [35m+181ms[0m
+│ [2m  DFA progress: 268000 states, worklist 161, subset size 1 (max 17345), elapsed 25.82s[0m [35m+298ms[0m
+│ [2m  DFA progress: 269000 states, worklist 159, subset size 2462 (max 17345), elapsed 26.02s[0m [35m+194ms[0m
+│ [2m  DFA progress: 270000 states, worklist 175, subset size 1 (max 17345), elapsed 26.21s[0m [35m+198ms[0m
+│ [2m  DFA progress: 271001 states, worklist 158, subset size 6 (max 17345), elapsed 26.44s[0m [35m+228ms[0m
+│ [2m  DFA progress: 272001 states, worklist 145, subset size 42 (max 17345), elapsed 26.67s[0m [35m+231ms[0m
+│ [2m  DFA progress: 273000 states, worklist 166, subset size 1 (max 17345), elapsed 26.83s[0m [35m+160ms[0m
+│ [2m  DFA progress: 274000 states, worklist 138, subset size 2801 (max 17345), elapsed 27.07s[0m [35m+239ms[0m
+│ [2m  DFA progress: 275000 states, worklist 116, subset size 19 (max 17345), elapsed 27.27s[0m [35m+194ms[0m
+│ [2m  DFA progress: 276001 states, worklist 125, subset size 489 (max 17345), elapsed 27.52s[0m [35m+246ms[0m
+│ [2m  DFA progress: 277000 states, worklist 134, subset size 1 (max 17345), elapsed 27.69s[0m [35m+175ms[0m
+│ [2m  DFA progress: 278000 states, worklist 138, subset size 1 (max 17345), elapsed 27.92s[0m [35m+233ms[0m
+│ [2m  DFA progress: 279000 states, worklist 102, subset size 1 (max 17345), elapsed 28.30s[0m [35m+377ms[0m
+│ [2m  DFA progress: 280000 states, worklist 113, subset size 10092 (max 17345), elapsed 28.50s[0m [35m+194ms[0m
+│ [2m  DFA progress: 281000 states, worklist 78, subset size 1 (max 17345), elapsed 28.68s[0m [35m+183ms[0m
+│ [2m  DFA progress: 282000 states, worklist 87, subset size 5 (max 17345), elapsed 28.86s[0m [35m+178ms[0m
+│ [2m  DFA progress: 283002 states, worklist 97, subset size 15 (max 17345), elapsed 29.03s[0m [35m+176ms[0m
+│ [2m  DFA progress: 284000 states, worklist 94, subset size 1 (max 17345), elapsed 29.29s[0m [35m+250ms[0m
+│ [2m  DFA progress: 285000 states, worklist 103, subset size 4104 (max 17345), elapsed 29.50s[0m [35m+215ms[0m
+│ [2m  DFA progress: 286000 states, worklist 83, subset size 1 (max 17345), elapsed 29.71s[0m [35m+206ms[0m
+│ [2m  DFA progress: 287000 states, worklist 48, subset size 1 (max 17345), elapsed 29.99s[0m [35m+280ms[0m
+│ [2m  DFA progress: 288000 states, worklist 39, subset size 2 (max 17345), elapsed 30.24s[0m [35m+252ms[0m
+│ [2m  DFA progress: 289000 states, worklist 12, subset size 5 (max 17410), elapsed 30.48s[0m [35m+237ms[0m
+│ [2m    └─ Timing breakdown (total ns):[0m [35m+24ms[0m
+│ [2m        - Collect: 9327ms[0m [35m+8µs[0m
+│ [2m        - Closure: 12294ms[0m [35m+1µs[0m
+│ [2m        - Compress: 5523ms[0m [35m+0µs[0m
+│ [2m        - Lookup: 522ms[0m [35m+0µs[0m
+│ [2m        - Insert: 1972ms[0m [35m+0µs[0m
+│ • NFA → DFA: 242625 → 289093 states (30.61s) [35m+108ms[0m
+│ [2m    └─ Class computation: 6.82ms[0m [35m+10µs[0m
+│ [2m    └─ Remap transitions: 15.55ms[0m [35m+1µs[0m
+│ [2m    └─ Main loop: 30.47s[0m [35m+3µs[0m
+│ [2m    └─ Metadata: 108.00ms[0m [35m+0µs[0m
+│ [2m    └─ Input classes processed: 2160550, cache hits: 1871458, misses: 289092[0m [35m+1µs[0m
+│ [2m    └─ Cache hit rate: 86.6%[0m [35m+2µs[0m
+│ [2m  Converted NFA to DFA in 30.75s[0m [35m+141ms[0m
+│ • Minimizing DFA
+│ Minimized DFA 289093 → 272425 states in 1.86s [35m+1.86s[0m
+│ [2m  Minimized DFA in 1.87s[0m [35m+5ms[0m
+TIMING: build_tokenizer 32.655316s
+│ Building GLR parser from definition
+│ [2m  Number of productions: 4[0m [35m+34µs[0m
+│ [2m  Mem: 1657 MB (Start of parser generation)[0m [35m+11µs[0m
+│ • Validating initial grammar
+│ [2m  Mem: 1657 MB (After validation)[0m [35m+29µs[0m
+│ • Removing productions with undefined non-terminals
+│ [2m  Mem: 1657 MB (After removing undefined)[0m [35m+5µs[0m
+│ [2m  Start nonterminal: start__aug_suffix[0m [35m+1µs[0m
+│ • Grammar is nullable: true
+│ [2m  Mem: 1657 MB (After nullable wrapper minimization)[0m [35m+24µs[0m
+│ • Grammar optimization pass 1
+│ [2m    Phase 2: Inlining null productions[0m [35m+1µs[0m
+│ •     Null inlining complete: 4 input → 5 output productions
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+15µs[0m
+│ • Hidden left recursion eliminated after 1 iterations
+│ • Grammar optimization pass 2
+│ [2m    Phase 2: Inlining null productions[0m [35m+1µs[0m
+│ •     Null inlining complete: 3 input → 3 output productions
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+2µs[0m
+│ • Hidden left recursion eliminated after 1 iterations
+│ • Grammar optimization converged after 2 passes
+│ [2m  Mem: 1657 MB (After grammar normalization loop)[0m [35m+2µs[0m
+│ • Final epsilon production elimination
+│ •     Null inlining complete: 3 input → 3 output productions
+│ [2m  Mem: 1657 MB (After final epsilon elimination)[0m [35m+2µs[0m
+│ • Eliminated 1 unreachable productions (3 → 2)
+│ [2m  Mem: 1657 MB (After unreachable elimination)[0m [35m+1µs[0m
+│ [2m  Mem: 1657 MB (After left factoring)[0m [35m+6µs[0m
+│ [2m  Mem: 1657 MB (After merge identical nonterminals)[0m [35m+6µs[0m
+│ • Phase 8: Eliminated 1 unit productions (2 → 1)
+│ [2m  Mem: 1657 MB (After unit production elimination)[0m [35m+1µs[0m
+│ • Phase 9: Re-introducing nullability
+│ • Phase 9: Creating final unique start production
+│ • Validating critical grammar invariants
+│ • Validating grammar after transformations
+│ [2m  HLR check: 2 nullable nonterminals[0m [35m+9µs[0m
+│ [2m  HLR check: 0 cyclic nonterminals in left-reachability graph[0m [35m+2µs[0m
+│ [2m  Number of productions: 4[0m [35m+4µs[0m
+│ [2m  Mem: 1657 MB (Before Stage 1)[0m [35m+1µs[0m
+│ • Stage 1 (LR(0) Automaton)
+│ [2m  Mem: 1657 MB (After Stage 1)[0m [35m+8µs[0m
+│ • Computing First/Follow Sets
+│ [2m  Mem: 1657 MB (After First/Follow)[0m [35m+5µs[0m
+│ • Computing Final Table (Merging Stages 2-8)
+│ [2m  Mem: 1657 MB (After Final Table)[0m [35m+8µs[0m
+│ • Optimizing Table (state reduction)
+│ [2m  Mem: 1657 MB (After Table Optimization)[0m [35m+10µs[0m
+│ • GLR Parser generation complete. 4 states.
+TIMING: build_glr_parser 283.792µs
+│ [2m  GLR terminal equivalence: 1 terminals → 1 equivalence classes[0m [35m+8µs[0m
+│ •   Suffix grammar compiled
+│ •     Terminal mapping: 1 of 1 terminals mapped
+│ • Suffix grammar DWA pruning: kept=1, pruned=0
+│ [2m  Suffix grammar pruning in 32.677610625s[0m [35m+21ms[0m
+TIMING: suffix_prune 32.67762725s
+│ • Suffix grammar pruning complete. Kept=1, pruned=0
+│ Terminal DWA (final): states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499, transition_multiplicity_hist={1: 1}
+│ [2m  Terminal DWA weight complexity (unique): total_ranges_unique=58499 (total_ranges_all=128736)[0m [35m+11ms[0m
+│ • Terminal DWA: 1 paths (count_paths)
+│ • Terminal DWA average path length (exact): 1.00
+│ • Terminal DWA: total_paths=1, total_length=1, avg=1.00 (debug)
+│ • Terminal DWA sample (n=100): min=1, max=1, avg=1.00
+│ • Terminal DWA average path length (estimated, 10k samples): 1.00
+│ • Terminal DWA start state: 1 transitions to 1 unique targets
+│ [2m  Terminal DWA sample paths (n=1, non-empty weights):[0m [35m+605µs[0m
+│ [2m    Path 0: __optimized_terminal__ (len=1, weight_len=21437585, tokens_sample=[0:'!', 1:'7', 2:'"'])[0m [35m+5ms[0m
+│ [2m    (collected 1 non-empty paths after 10 attempts)[0m [35m+134µs[0m
+│ Building Parser DWA
+│ [2m  terminal_nwa_from_dwa: start[0m [35m+1µs[0m
+TIMING: terminal_nwa_from_dwa 2.25µs
+│ [2m  terminal_nwa_from_dwa: end[0m [35m+6µs[0m
+│ [2m  build_parser_dwa: start[0m [35m+0µs[0m
+│ [2m  build_parser_dwa: start[0m [35m+182µs[0m
+│ Starting Parser DWA construction. Input terminal_nwa: states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499
+│ [2m  Computed terminal characterizations for 1 terminals[0m [35m+198µs[0m
+│ [2m  Found 1 unique characterizations (sharing DFAs for 0 groups)[0m [35m+5µs[0m
+TIMING: parser_dwa::build_template_dwas 2.35075ms
+TIMING: parser_dwa::build_ignore_terminal_dwa 667ns
+│ [2m  Input terminal NWA: states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499, start_states=[1][0m [35m+2ms[0m
+TIMING: parser_dwa::reverse_nwa 31.208µs
+│ [2m  Reversed NWA: states=3, transitions=2, unique_state_pairs=2, ranges=128738, ranges_interned=58499, start_states=[2][0m [35m+394µs[0m
+TIMING: parser_dwa::compute_traversal_data 197.709µs
+TIMING: parser_dwa::pass1_precompute 179.958µs
+│ • Pass 1: Tokens & Signatures (2 sigs, 184.38µs)
+│ • Optimization: 2 simple signatures (direct build), 0 complex signatures (derivation)
+│ [2m  [NWA::minimize] pass PruneUnreachable[0m [35m+30µs[0m
+│ [2m  [NWA::minimize] pass CompressTransitions[0m [35m+4µs[0m
+│ [2m  [NWA::minimize] pass PushFinalWeights[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PushFinalWeights[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PushWeightsToInitial[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PruneDeadEnds[0m [35m+12µs[0m
+│ [2m  [NWA::minimize] pass Minimize[0m [35m+2µs[0m
+│ [2m  [NWA::minimize] iteration done[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PruneUnreachable[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass CompressTransitions[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PushFinalWeights[0m [35m+0µs[0m
+│ [2m  [NWA::minimize] pass PushFinalWeights[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PushWeightsToInitial[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PruneDeadEnds[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass Minimize[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] iteration done[0m [35m+0µs[0m
+│ [2m  Simple signature NWA minimize in 38.5µs[0m [35m+1µs[0m
+│ Determinizing acyclic NWA: precomputing state sets...
+│ • set_global_dims: max_llm_token=2220, num_tsids=272425
+TIMING: determinize_acyclic::eps_closure_sizes avg=1.00 p50=1 p90=1 p99=1 max=1
+│ Acyclic determinize stats: dwa_states=1, avg_unweighted_closure_size=1.00, transition_cache_total=0
+MERGE_STATS: or_ops=0 updates=0 final_cells=1 ratio=0.00
+│ [2m  Acyclic determinize closures: unweighted=1, weighted=1, unique_weighted=1[0m [35m+15µs[0m
+│ [2m  Acyclic determinize start_id=0 seen_start_id=0[0m [35m+1µs[0m
+│ [2m  Found 1 DWA states to process[0m [35m+1µs[0m
+TIMING: determinize_acyclic::precompute_eps_unweighted 541ns
+TIMING: determinize_acyclic::precompute_eps_weighted 13.583µs
+TIMING: determinize_acyclic::precompute_loop 875ns
+TIMING: determinize_acyclic::materialize_weighted_closures 9.167µs
+TIMING: determinize_acyclic::materialize_parallel 3.667µs
+TIMING: determinize_acyclic::materialize_merge 542ns
+TIMING: determinize_acyclic::materialize_collect 750ns
+TIMING: determinize_acyclic::materialize_expand 0ns
+TIMING: determinize_acyclic::materialize_normalize 0ns
+TIMING: determinize_acyclic::materialize_weight_and 0ns ops=0
+TIMING: determinize_acyclic::materialize_weight_or 0ns ops=0
+TIMING: determinize_acyclic::materialize_counts calls=1 labels=0
+TIMING: determinize_acyclic::materialize_stats avg_closure_size=1.00 avg_transitions_per_state=0.00 avg_targets_per_transition=0.00
+TIMING: determinize_acyclic::materialize_or_ops collect=0 expand=0 normalize=0 total=0 all_or_ops=0
+TIMING: determinize_acyclic::materialize_blocks closure_lookup=42ns transition_iter=1.625µs pending_insert=209ns
+TIMING: determinize_acyclic::eps_expand_ratio avg=0.00 p50=0.00 p90=0.00 p99=0.00 max=0.00
+TIMING: determinize_acyclic::weighted_update_ratio total_updates=0 final_cells=1 ratio=0.00
+TIMING: determinize_acyclic::weight_density total=1 all=0 (0.0%) empty=0 (0.0%)
+TIMING: determinize_acyclic::op_cache_or hits=0 misses=0 rate=0.0%
+TIMING: determinize_acyclic::op_cache_or_miss_time 0ns misses=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_prep 0ns avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_union_asym 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_merge 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_intern 0ns avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_ranges avg_left=0.0 avg_right=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_union 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_sizes avg_left=0.0 avg_right=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_segments total=0 both=0 (0.0%) left_only=0 (0.0%) right_only=0 (0.0%) none=0 (0.0%)
+TIMING: determinize_acyclic::l1_op_cache_or hits=0 misses=0 rate=0.0%
+TIMING: determinize_acyclic::bitor_assign_noop total=0 noop=0 rate=0.0%
+TIMING: determinize_acyclic::bitor_assign_noop_sample total=0 noop=0 rate=0.0%
+TIMING: determinize_acyclic::finalize_weighted_closures 1.042µs
+TIMING: determinize_acyclic::total 267.667µs
+TIMING: determinize_acyclic::counters dwa_states=1 total_transitions=0 avg_unweighted_closure_size=1.00
+│ [2m  [NWA::minimize] pass PruneUnreachable[0m [35m+443µs[0m
+│ [2m  [NWA::minimize] pass CompressTransitions[0m [35m+2µs[0m
+│ [2m  [NWA::minimize] pass PushFinalWeights[0m [35m+12µs[0m
+│ [2m  [NWA::minimize] pass PushFinalWeights[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PushWeightsToInitial[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PruneDeadEnds[0m [35m+122µs[0m
+│ [2m  [NWA::minimize] pass Minimize[0m [35m+2µs[0m
+│ [2m  [NWA::minimize] iteration done[0m [35m+4µs[0m
+│ [2m  [NWA::minimize] pass PruneUnreachable[0m [35m+0µs[0m
+│ [2m  [NWA::minimize] pass CompressTransitions[0m [35m+0µs[0m
+│ [2m  [NWA::minimize] pass PushFinalWeights[0m [35m+1µs[0m
+│ [2m  [NWA::minimize] pass PushFinalWeights[0m [35m+0µs[0m
+│ [2m  [NWA::minimize] pass PushWeightsToInitial[0m [35m+5µs[0m
+│ [2m  [NWA::minimize] pass PruneDeadEnds[0m [35m+5µs[0m
+│ [2m  [NWA::minimize] pass Minimize[0m [35m+2µs[0m
+│ [2m  [NWA::minimize] iteration done[0m [35m+3µs[0m
+│ [2m  Simple signature NWA minimize in 171.208µs[0m [35m+1µs[0m
+│ Determinizing acyclic NWA: precomputing state sets...
+│ • set_global_dims: max_llm_token=2220, num_tsids=272425
+TIMING: determinize_acyclic::eps_closure_sizes avg=1.00 p50=1 p90=1 p99=1 max=1
+│ Acyclic determinize stats: dwa_states=4, avg_unweighted_closure_size=1.00, transition_cache_total=3
+MERGE_STATS: or_ops=3 updates=3 final_cells=4 ratio=0.75
+│ [2m  Acyclic determinize closures: unweighted=4, weighted=4, unique_weighted=4[0m [35m+21µs[0m
+│ [2m  Acyclic determinize start_id=0 seen_start_id=0[0m [35m+1µs[0m
+│ [2m  Found 4 DWA states to process[0m [35m+0µs[0m
+TIMING: determinize_acyclic::precompute_eps_unweighted 709ns
+TIMING: determinize_acyclic::precompute_eps_weighted 25.916µs
+TIMING: determinize_acyclic::precompute_loop 1.833µs
+TIMING: determinize_acyclic::materialize_weighted_closures 19.291µs
+TIMING: determinize_acyclic::materialize_parallel 458ns
+TIMING: determinize_acyclic::materialize_merge 125ns
+TIMING: determinize_acyclic::materialize_collect 4.126µs
+TIMING: determinize_acyclic::materialize_expand 1.668µs
+TIMING: determinize_acyclic::materialize_normalize 2.25µs
+TIMING: determinize_acyclic::materialize_weight_and 210ns ops=6
+TIMING: determinize_acyclic::materialize_weight_or 624ns ops=12
+TIMING: determinize_acyclic::materialize_counts calls=4 labels=3
+TIMING: determinize_acyclic::materialize_stats avg_closure_size=1.00 avg_transitions_per_state=0.75 avg_targets_per_transition=1.00
+TIMING: determinize_acyclic::materialize_or_ops collect=6 expand=3 normalize=3 total=12 all_or_ops=12
+TIMING: determinize_acyclic::materialize_blocks closure_lookup=124ns transition_iter=9.291µs pending_insert=583ns
+TIMING: determinize_acyclic::eps_expand_ratio avg=1.00 p50=1.00 p90=1.00 p99=1.00 max=1.00
+TIMING: determinize_acyclic::weighted_update_ratio total_updates=3 final_cells=4 ratio=0.75
+TIMING: determinize_acyclic::weight_density total=4 all=0 (0.0%) empty=0 (0.0%)
+TIMING: determinize_acyclic::op_cache_or hits=0 misses=0 rate=0.0%
+TIMING: determinize_acyclic::op_cache_or_miss_time 0ns misses=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_prep 0ns avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_union_asym 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_merge 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_intern 0ns avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_ranges avg_left=0.0 avg_right=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_union 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_sizes avg_left=0.0 avg_right=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_segments total=0 both=0 (0.0%) left_only=0 (0.0%) right_only=0 (0.0%) none=0 (0.0%)
+TIMING: determinize_acyclic::l1_op_cache_or hits=0 misses=0 rate=0.0%
+TIMING: determinize_acyclic::bitor_assign_noop total=0 noop=0 rate=0.0%
+TIMING: determinize_acyclic::bitor_assign_noop_sample total=0 noop=0 rate=0.0%
+TIMING: determinize_acyclic::finalize_weighted_closures 459ns
+TIMING: determinize_acyclic::total 345.958µs
+TIMING: determinize_acyclic::counters dwa_states=4 total_transitions=3 avg_unweighted_closure_size=1.00
+TIMING: parser_dwa::simple_signatures 1.18025ms
+│ • Template cache: 2 templates, 5 total states, max=4, avg=2.5
+│ • Finished DWA specialization
+│ • Beginning NWA traversal
+│ • Process callback #0, instantiate count: 0, total_states: 0
+│ • Template instantiation #0: 1 total states so far, template size 1, bodies_count: 1
+│ • Pass2 profile: process_total=7µs (3 calls), templates=3, canonicalize=0ns, cache_lookup=0ns, cache_insert=0ns, dynamic_derive=0ns, instantiate=4µs, cancellations=0ns, finality_fixpoint=0ns, remove_negative=0ns, union=0ns, tsid_collect=0ns, final_collect=0ns, other=3µs
+TIMING: parser_dwa::pass2_profile process_total=7µs, canonicalize=0ns, cache_lookup=0ns, cache_insert=0ns, dynamic_derive=0ns, instantiate=4µs, cancellations=0ns, finality_fixpoint=0ns, remove_negative=0ns, union=0ns, tsid_collect=0ns, final_collect=0ns, other=3µs, templates=3
+│ • Pass 2 (nwa_special_map) in 200.25µs
+│ • Finished Pass 2
+TIMING: parser_dwa::batch_negatives cancellations=52.333µs, finality_fixpoint=4.75µs, remove_negative=709ns
+│ • Collected 1 final bodies, 0 tsid bodies, states_arena has 7 states (avg 7 states/body)
+TIMING: parser_dwa::combine_bodies 291ns
+│ • Parser NWA weight dims OK: expected_num_tsids=272425, total_weights=11, rangeset_weights=0
+│ Combined NWA before determinization: states=8, transitions=5, unique_state_pairs=5, ranges=514950, ranges_interned=58499, is_symbol_heavy=false
+│ • Pruning continuations from final states for NWA with states=8, transitions=5, unique_state_pairs=5, ranges=514950, ranges_interned=58499...
+│ [2m  subtract_final_weights_from_outgoing in 1.708µs[0m [35m+3µs[0m
+TIMING: parser_dwa::finalize::subtract_final_weights_from_outgoing 2.875µs
+│ • Pruned continuations from final states. NWA now states=8, transitions=5, unique_state_pairs=5, ranges=386212, ranges_interned=58499.
+TIMING: parser_dwa::finalize::prune_dead_ends 1µs
+TIMING: parser_dwa::finalize::prune_unreachable 2.25µs
+│ [2m  prune_dead_ends in 1µs, prune_unreachable in 2.25µs[0m [35m+665µs[0m
+│ • After pruning dead ends: NWA states=8, transitions=5, unique_state_pairs=5, ranges=386212, ranges_interned=58499 -> states=3, transitions=2, unique_state_pairs=2, ranges=193104, ranges_interned=58499
+│ • Running parser DWA minimize
+│ [2m  Determinize and minimize initial stats: states=3, transitions=2, unique_state_pairs=2, ranges=193104, ranges_interned=58499[0m [35m+396µs[0m
+TIMING: NWA pass PruneDeadEnds 708ns
+TIMING: NWA pass PruneUnreachable 250ns
+TIMING: NWA pass RmEpsilon 18.833µs
+TIMING: NWA pass PushFinalWeights 917ns
+TIMING: NWA pass PushWeightsToInitial 15.675625ms
+TIMING: NWA pass Minimize 4.417µs
+TIMING: NWA passes total 15.753625ms
+│ [2m  NWA minimization: states=3, transitions=2, unique_state_pairs=2, ranges=64372, ranges_interned=58499[0m [35m+15ms[0m
+│ Determinizing acyclic NWA: precomputing state sets...
+│ • set_global_dims: max_llm_token=2220, num_tsids=272425
+TIMING: determinize_acyclic::eps_closure_sizes avg=1.00 p50=1 p90=1 p99=1 max=1
+│ Determinize precompute complete: processed=2, discovered=2, elapsed=2.083µs
+│ Acyclic determinize stats: dwa_states=2, avg_unweighted_closure_size=1.00, transition_cache_total=1
+MERGE_STATS: or_ops=1 updates=1 final_cells=2 ratio=0.50
+│ [2m  Acyclic determinize closures: unweighted=2, weighted=2, unique_weighted=2[0m [35m+34µs[0m
+│ [2m  Acyclic determinize start_id=0 seen_start_id=0[0m [35m+1µs[0m
+│ [2m  Found 2 DWA states to process[0m [35m+1µs[0m
+│ Determinizing: 100% (2/2)
+│ Determinizing: 100% (2/2) in 259.542µs
+TIMING: determinize_acyclic::precompute_eps_unweighted 1.541µs
+TIMING: determinize_acyclic::precompute_eps_weighted 18.708µs
+TIMING: determinize_acyclic::precompute_loop 2.042µs
+TIMING: determinize_acyclic::materialize_weighted_closures 30.167µs
+TIMING: determinize_acyclic::materialize_parallel 500ns
+TIMING: determinize_acyclic::materialize_merge 84ns
+TIMING: determinize_acyclic::materialize_collect 6.042µs
+TIMING: determinize_acyclic::materialize_expand 1.833µs
+TIMING: determinize_acyclic::materialize_normalize 1.625µs
+TIMING: determinize_acyclic::materialize_weight_and 1.958µs ops=2
+TIMING: determinize_acyclic::materialize_weight_or 791ns ops=4
+TIMING: determinize_acyclic::materialize_counts calls=2 labels=1
+TIMING: determinize_acyclic::materialize_stats avg_closure_size=1.00 avg_transitions_per_state=0.50 avg_targets_per_transition=1.00
+TIMING: determinize_acyclic::materialize_or_ops collect=2 expand=1 normalize=1 total=4 all_or_ops=4
+TIMING: determinize_acyclic::materialize_blocks closure_lookup=42ns transition_iter=11.251µs pending_insert=1.292µs
+TIMING: determinize_acyclic::eps_expand_ratio avg=1.00 p50=1.00 p90=1.00 p99=1.00 max=1.00
+TIMING: determinize_acyclic::weighted_update_ratio total_updates=1 final_cells=2 ratio=0.50
+TIMING: determinize_acyclic::weight_density total=2 all=0 (0.0%) empty=0 (0.0%)
+TIMING: determinize_acyclic::op_cache_or hits=1 misses=0 rate=100.0%
+TIMING: determinize_acyclic::op_cache_or_miss_time 0ns misses=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_prep 0ns avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_union_asym 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_merge 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_intern 0ns avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_ranges avg_left=0.0 avg_right=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_union 0ns count=0 avg_us=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_rangeset_sizes avg_left=0.0 avg_right=0.0
+TIMING: determinize_acyclic::op_cache_or_miss_segments total=0 both=0 (0.0%) left_only=0 (0.0%) right_only=0 (0.0%) none=0 (0.0%)
+TIMING: determinize_acyclic::l1_op_cache_or hits=0 misses=0 rate=0.0%
+TIMING: determinize_acyclic::bitor_assign_noop total=0 noop=0 rate=0.0%
+TIMING: determinize_acyclic::bitor_assign_noop_sample total=0 noop=0 rate=0.0%
+TIMING: determinize_acyclic::finalize_weighted_closures 1.083µs
+TIMING: determinize_acyclic::total 398.709µs
+TIMING: determinize_acyclic::counters dwa_states=2 total_transitions=1 avg_unweighted_closure_size=1.00
+│ [2m  Determinization: states=2, transitions=1, unique_state_pairs=1, ranges=64370, ranges_interned=58499, transition_multiplicity_hist={1: 1} in 427.17µs[0m [35m+602µs[0m
+TIMING: NWA::determinize 876.166µs
+TIMING: DWA pre_minimize states=2 transitions=1
+TIMING: DWA pass PruneDeadEnds 833ns
+│ [2m  minimize_states_fast: dwa_type=parser, is_cyclic=false, 2 states before[0m [35m+528µs[0m
+│ [2m  push_weights_acyclic breakdown: topo=708ns, reachable=2.208µs, push=542ns[0m [35m+5µs[0m
+│ [2m  push_weights_acyclic ops: reachable_clone=83ns, reachable_and=666ns, reachable_or=83ns, push_and=167ns[0m [35m+1µs[0m
+│ [2m  push_weights_acyclic: 6.042µs (changed=false)[0m [35m+0µs[0m
+│ [2m  Acyclic minimize step 0 start (tighten_weights)[0m [35m+1µs[0m
+│ [2m  tighten_weights: topo_order computed in 500ns[0m [35m+1µs[0m
+│ [2m  forward_reachable breakdown: init=1.875µs, loop_outer=1.125µs, clone=42ns, and=0ns, or=375ns[0m [35m+5µs[0m
+│ [2m  forward_reachable counts: transitions=1, clones=1, ands=0, ors=1[0m [35m+1µs[0m
+│ [2m  tighten_weights: forward_reachable computed in 6.208µs[0m [35m+1µs[0m
+│ [2m  tighten_weights: new DWA built in 1.167µs[0m [35m+2µs[0m
+│ [2m  Acyclic minimize step 0 end (tighten_weights): 10.875µs[0m [35m+0µs[0m
+│ [2m  Acyclic minimize step 0 (tighten_weights): 11.709µs[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 1 start (topo_order)[0m [35m+0µs[0m
+│ [2m  Acyclic minimize step 1 end (topo_order): 125ns[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 1 (topo_order): 917ns[0m [35m+0µs[0m
+│ [2m  Acyclic minimize step 2 start (needed_sets)[0m [35m+0µs[0m
+│ [2m  compute_needed_sets breakdown: total=833ns, loop=666ns, loop_other=499ns, final_clone=84ns, weight_lookup=0ns, and=41ns, or=42ns, transitions=1[0m [35m+2µs[0m
+│ [2m  Acyclic minimize step 2 end (needed_sets): 3.792µs[0m [35m+2µs[0m
+│ [2m  Acyclic minimize step 2 (needed_sets): 4.584µs[0m [35m+0µs[0m
+│ [2m  Acyclic minimize step 3a (compute_heights): 375ns[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 3b (states_by_height): 208ns, max_height=1, largest_level=1[0m [35m+1µs[0m
+│ [2m  Acyclic minimize step 3 (heights): 2.458µs[0m [35m+0µs[0m
+│ [2m  Greedy fast path: 1 sig groups / 1 candidates (100.0% coverage) -> using signatures as colors[0m [35m+6µs[0m
+│ [2m  Greedy fast path breakdown: signature=1.166µs, grouping=1.167µs, assign=1.5µs, unaccounted=1.75µs[0m [35m+3µs[0m
+│ [2m  height 0 coloring: candidates=1, path=greedy_no_graph, colors=1[0m [35m+1µs[0m
+TIMING: height 0 compute_height_coloring 11.208µs
+│ [2m  Greedy fast path: 1 sig groups / 1 candidates (100.0% coverage) -> using signatures as colors[0m [35m+7µs[0m
+│ [2m  Greedy fast path breakdown: signature=500ns, grouping=83ns, assign=84ns, unaccounted=1.541µs[0m [35m+1µs[0m
+│ [2m  height 1 coloring: candidates=1, path=greedy_no_graph, colors=1[0m [35m+0µs[0m
+TIMING: height 1 compute_height_coloring 5.75µs
+│ [2m  Acyclic minimize step 4 breakdown: coloring=16.958µs, insert=84ns, extend=333ns, merge=34.042µs, merge_and_time=0ns[0m [35m+42µs[0m
+│ [2m  Acyclic minimize step 5 (reconstruct): 4.958µs[0m [35m+6µs[0m
+TIMING SUMMARY: compute_height_coloring total 15.749µs over 2 calls (avg 7.874µs)
+TIMING SUMMARY: scan_colors total 0ns over 0 calls (avg 0ns)
+TIMING SUMMARY: are_compatible total 0ns over 0 calls (avg 0ns)
+TIMING SUMMARY: build_incompatibility_graph total 0ns over 0 calls (avg 0ns)
+TIMING: DWA pass FastMinimize 126.25µs
+TIMING: DWA pass TrimWeights 700.125µs
+TIMING: DWA passes total 842.208µs
+│ [2m  DWA minimization: states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499, transition_multiplicity_hist={1: 1}[0m [35m+1ms[0m
+TIMING: DWA post_minimize states=2 transitions=1
+TIMING: NWA::determinize_and_minimize_with_config total 19.920334ms
+│ [2m  determinize_and_minimize(Parser) in 19.926542ms[0m [35m+648µs[0m
+TIMING: parser_dwa::finalize::determinize_and_minimize 19.926542ms
+│ • Parser DWA minimization complete. states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499, transition_multiplicity_hist={1: 1}
+TIMING: parser_dwa::finalize_and_determinize 23.058375ms
+│ • Parser DWA construction complete. Stats: states=2, transitions=1, unique_state_pairs=1, ranges=128736, ranges_interned=58499, transition_multiplicity_hist={1: 1}
+│ • Parser DWA average path length: 1.00
+│ [2m  build_parser_dwa: end[0m [35m+0µs[0m
+TIMING: build_parser_dwa 30.052167ms
+│ [2m  build_parser_dwa: end[0m [35m+14µs[0m
+│ [2m  parser_dwa.trim_weights_to_domain: start[0m [35m+456µs[0m
+TIMING: parser_dwa_trim_weights 1.764459ms
+│ [2m  parser_dwa.trim_weights_to_domain: end[0m [35m+1ms[0m
+│ [2m  Parser DWA weight complexity (unique): total_ranges_unique=58499 (total_ranges_all=128736)[0m [35m+541µs[0m
+│ [2m  build_internal_to_original_sparse_matrix: start[0m [35m+3µs[0m
+TIMING: build_internal_to_original_sparse_matrix 1.203125ms
+│ [2m  build_internal_to_original_sparse_matrix: end[0m [35m+1ms[0m
+│ [2m  LLMVocabTrie::from_token_map: start[0m [35m+1µs[0m
+TIMING: build_vocab_trie 2.645333ms
+│ [2m  LLMVocabTrie::from_token_map: end[0m [35m+2ms[0m
+│ [2m  GrammarConstraint build_with_config_inner: end[0m [35m+1µs[0m
+│ • Profiler build_with_config_inner total: 0.000s
+│ • Profiler run_precompute1 total: 0.000s
+Testing diff grammar for: testdata/finite_automata.rs
+============================================================
+
+1. Generating diff grammar...
+Reading source file: testdata/finite_automata.rs
+   Grammar generation: 4.5ms (651352 chars)
+   Grammar has 10466 lines
+   First 10 lines:
+      root ::= DIFF;
+      DIFF ::= FILE_HEADER? ( HUNK_HEADER S0 )? EOF;
+      FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;
+      EOF  ::= '<|EOF|>';
+      
+      // 'S' rules: Find the start of a hunk
+      S0 ::= LINE0 | S1;
+      S1 ::= LINE1 | S2;
+      S2 ::= LINE2 | S3;
+      S3 ::= LINE3 | S4;
+      ...
+
+2. Loading vocabulary...
+   tiktoken not found, falling back to vocab.json download...
+   Vocab download/parse: 423.9ms
+
+3. Cache disabled (NO_CACHE=1)
+
+4. Parsing EBNF to GrammarDefinition...
+   Grammar parsing: 70041.3ms
+
+5. Optimizing grammar...
+   Optimization: 19.4ms
+
+6. Compiling grammar...
+   Grammar compilation: 33292.8ms
+
+7. Creating constraint with vocabulary...
+   Constraint creation: 258826.9ms
+
+9. Testing constraint...
+   Initial state active: True
+   Testing minimal input: '<|EOF|>'
+   Initial mask has 8 allowed tokens
+
+============================================================
+=== Grammar Compile Time (GCT): 362185.0ms ===
+=== Total time (incl. vocab): 362608.8ms ===
+SUCCESS: Diff grammar constraint created!
+pile Time (GCT): 370022.2ms ===
+=== Total time (incl. vocab): 371378.0ms ===
+SUCCESS: Diff grammar constraint created!

@@ -1,0 +1,496 @@
+   Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+    Finished `release` profile [optimized] target(s) in 2m 40s
+     Running unittests src/lib.rs (target/release/deps/sep1-d30ae365610b4741)
+
+running 451 tests
+test datastructures::abstract_weight::tests::test_weight_dimensions_domain_size ... ok
+test datastructures::abstract_weight::tests::test_weight_dimensions_encoding ... ok
+test datastructures::abstract_weight::tests::test_backend_ranges_and_len ... ok
+test datastructures::abstract_weight::tests::test_backend_min_max ... ok
+test datastructures::bitset::tests::test_bitwise_ops ... ok
+test datastructures::abstract_weight::tests::test_backend_set_ops_and_complement ... ok
+test datastructures::bitset::tests::test_insert_and_contains ... ok
+test datastructures::bitset::tests::test_iter ... ok
+test datastructures::abstract_weight::tests::test_factorized_set_ops_match_rsb ... ok
+test datastructures::bitset::tests::test_len_and_is_empty ... ok
+test datastructures::abstract_weight::tests::test_abstract_weight_basic ... ok
+test datastructures::abstract_weight::tests::test_abstract_weight_all ... ok
+test datastructures::bitset::tests::test_ones ... ok
+test datastructures::bitset::tests::test_remove ... ok
+test datastructures::abstract_weight::tests::test_factorized_expand_roundtrip ... ok
+test datastructures::abstract_weight::tests::test_abstract_weight_union ... ok
+test datastructures::abstract_weight::tests::test_abstract_weight_intersection ... ok
+test datastructures::frozenset::tests::test_contains ... ok
+test datastructures::frozenset::tests::test_empty_set ... ok
+test datastructures::frozenset::tests::test_freeze_BTreeSet ... ok
+test datastructures::frozenset::tests::test_freeze_btreeset ... ok
+test datastructures::frozenset::tests::test_from_iter ... ok
+test datastructures::frozenset::tests::test_json_roundtrip ... ok
+test datastructures::hybrid_bitset::tests::test_assign_ops_ref ... ok
+test datastructures::hybrid_bitset::tests::test_clear ... ok
+test datastructures::hybrid_bitset::tests::test_assign_ops ... ok
+test datastructures::hybrid_bitset::tests::test_constraint ... ok
+test datastructures::hybrid_bitset::tests::test_dense_dense_edge_cases ... ok
+test datastructures::hybrid_bitset::tests::test_equality_and_hash ... ok
+test datastructures::hybrid_bitset::tests::test_find_good_permutation ... ignored
+test datastructures::hybrid_bitset::tests::test_display_format ... ok
+test datastructures::hybrid_bitset::tests::test_from_iterator_trait ... ok
+test datastructures::hybrid_bitset::tests::test_extend ... ok
+test datastructures::hybrid_bitset::tests::test_insert_basic ... ok
+test datastructures::hybrid_bitset::tests::test_into_iteration ... ok
+test datastructures::hybrid_bitset::tests::test_iteration ... ok
+test datastructures::hybrid_bitset::tests::test_iter_bits ... ok
+test datastructures::hybrid_bitset::tests::test_large_index ... ok
+test datastructures::hybrid_bitset::tests::test_new_empty_len ... ok
+test datastructures::hybrid_bitset::tests::test_ones ... ok
+test datastructures::hybrid_bitset::tests::test_remove_basic ... ok
+test datastructures::hybrid_bitset::tests::test_set_ops_dense_dense ... ok
+test datastructures::hybrid_bitset::tests::test_set_ops_sparse_sparse ... ok
+test datastructures::hybrid_bitset::tests::test_set_ops_mixed ... ok
+test datastructures::hybrid_bitset::tests::test_sub_is_intersection_with_inverted ... ok
+test datastructures::leveled_gss::tests::test_isolate_preserves_ptr_on_noop ... ok
+test datastructures::leveled_gss::tests::test_isolate_many_preserves_ptr_on_noop ... ok
+test datastructures::leveled_gss::tests::test_filter_by_length_preserves_ptr_on_noop ... ok
+test datastructures::leveled_gss::tests::test_parallel_push_identity_empty ... ok
+test datastructures::leveled_gss::tests::test_parallel_push_identity_one ... ok
+test datastructures::leveled_gss::tests::test_parallel_push_identity_two ... ok
+test datastructures::leveled_gss::tests::test_accs_by_depth ... ok
+test datastructures::leveled_gss::tests::test_pop_preserves_child_node_sharing ... ok
+test datastructures::leveled_gss::tests::test_pop_sharing_and_determinism ... ok
+test datastructures::leveled_gss::tests::test_popn_with_underflow_all_underflow ... ok
+test datastructures::leveled_gss::tests::test_popn_with_underflow_basic ... ok
+test datastructures::leveled_gss::tests::test_popn_with_underflow_n_zero ... ok
+test datastructures::leveled_gss::tests::test_popn_with_underflow_no_underflow ... ok
+test datastructures::leveled_gss::tests::test_prune_preserves_ptr_on_noop ... ok
+test datastructures::leveled_gss::tests::test_push_pop_identity ... ok
+test datastructures::leveled_gss::tests::test_push_pop_identity_from_empty ... ok
+test datastructures::u8set::tests::test_u8set_basic_ops ... ok
+test datastructures::leveled_gss::tests::test_normalization_sharing_factor_regression ... ok
+test datastructures::u8set::tests::test_u8set_display_and_debug ... ok
+test datastructures::u8set::tests::test_u8set_json_serialization ... ok
+test datastructures::u8set::tests::test_u8set_json_serialization_ranges ... ok
+test datastructures::leveled_gss::tests::test_split_at_depth ... ok
+test datastructures::vocab_prefix_tree::tests::test_children_iteration ... ok
+test datastructures::vocab_prefix_tree::tests::test_complex_case ... ok
+test datastructures::vocab_prefix_tree::tests::test_duplicate_token_bytes ... ok
+test datastructures::vocab_prefix_tree::tests::test_empty_string_token ... ok
+test datastructures::vocab_prefix_tree::tests::test_empty_string_token_with_id_zero ... ok
+test datastructures::vocab_prefix_tree::tests::test_empty_tree ... ok
+test datastructures::vocab_prefix_tree::tests::test_find_longest_prefix_token ... ok
+test datastructures::vocab_prefix_tree::tests::test_multiple_prefixes ... ok
+test datastructures::vocab_prefix_tree::tests::test_shared_prefix_branching_where_prefix_is_not_token ... ok
+test datastructures::vocab_prefix_tree::tests::test_shared_prefix_branching_where_prefix_is_token ... ok
+test datastructures::vocab_prefix_tree::tests::test_simple_prefix ... ok
+test datastructures::vocab_prefix_tree::tests::test_single_token ... ok
+test dfa_i32::dfa::tests::test_dfa_basic ... ok
+test dfa_i32::dfa::tests::test_dfa_to_dwa ... ok
+test dfa_i32::nfa::tests::test_nfa_basic ... ok
+test dfa_i32::nfa::tests::test_nfa_union ... ok
+test dfa_u8::string_utils::tests::test_escape_char_for_char_class ... ok
+test dfa_i32::dfa::tests::test_dfa_minimize ... ok
+test dfa_u8::string_utils::tests::test_escape_string_for_json ... ok
+test dwa_i32::factored_weight::tests::test_factored_weight_expand ... ok
+test dwa_i32::factored_weight::tests::test_factored_weight_contains ... ok
+test dwa_i32::factored_weight::tests::test_from_1d_ranges_multi_row ... ok
+test dfa_i32::nfa::tests::test_nfa_with_epsilons ... ok
+test dfa_i32::nfa::tests::test_nfa_determinize ... ok
+test dwa_i32::factored_weight::tests::test_from_1d_ranges_single_row ... ok
+test dwa_i32::factored_weight::tests::test_intersection ... ok
+test dwa_i32::factored_weight::tests::test_roundtrip ... ok
+test dwa_i32::factored_weight::tests::test_union_same_profile ... ok
+test dwa_i32::heavy_weight::tests::test_dimensions ... ok
+test dwa_i32::heavy_weight::tests::test_from_point ... ok
+test dwa_i32::heavy_weight::tests::test_from_rect ... ok
+test dwa_i32::heavy_weight::tests::test_iter_points ... ok
+test dwa_i32::heavy_weight::tests::test_complement ... ok
+test dwa_i32::heavy_weight::tests::test_projection ... ok
+test dwa_i32::heavy_weight::tests::test_rangeset_conversion ... ok
+test dwa_i32::heavy_weight::tests::test_zeros_and_all ... ok
+test dwa_i32::heavy_weight::tests::test_intersection ... ok
+test dwa_i32::minimization::dwa_acyclic::partition_minimize::tests::test_partition_minimize_empty ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_exact_empty ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_exact_bipartite ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_exact_single ... ok
+test dwa_i32::minimization::dwa_acyclic::partition_minimize::tests::test_partition_minimize_basic ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_exact_triangle ... ok
+test dwa_i32::minimization::dwa_acyclic::partition_minimize::tests::test_minimize_idempotent ... ok
+test dwa_i32::heavy_weight::tests::test_union ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_exact_two_incompatible ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_greedy_empty ... ok
+test dwa_i32::minimization::dwa_acyclic::partition_minimize::tests::test_two_pass_greedy_then_exact ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_greedy_single ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_greedy_triangle ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_greedy_two_compatible ... ok
+test dwa_i32::minimization::graph_coloring::tests::test_greedy_two_incompatible ... ok
+test dwa_i32::shared_bdd::tests::test_apply_and ... ok
+test dwa_i32::shared_bdd::tests::test_apply_or ... ok
+test dwa_i32::shared_bdd::tests::test_bdd_mk_reduction ... ok
+test dwa_i32::shared_bdd::tests::test_bdd_mk_sharing ... ok
+test dwa_i32::shared_bdd::tests::test_bdd_terminal ... ok
+test dwa_i32::shared_bdd::tests::test_from_1d_ranges ... ok
+test dwa_i32::shared_bdd::tests::test_interval_full ... ok
+test dwa_i32::shared_bdd::tests::test_interval_range ... ok
+test dwa_i32::shared_bdd::tests::test_interval_simple ... ok
+test dwa_i32::shared_bdd::tests::test_node_sharing ... ok
+test dwa_i32::shared_bdd::tests::test_rect_simple ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_empty_nwa ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_empty_nwa_rustfst ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_accepts_empty_word_rustfst ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_rustfst_simple_char ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_union_of_chars_rustfst ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_simple_char ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_accepts_empty_word ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_nondeterminism_on_char_rustfst ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_union_of_chars ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_nondeterminism_on_char ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_determinize_minimal_failing_nwa ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_determinize_complex_nwa_from_template ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_minimize_failing_nwa ... ignored
+test dwa_i32::test_weighted_automata::test_add_transition_out_of_bounds ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_weight_partitioning ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_determinize_minimal_failing_nwa_repro ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_determinize_minimal_failing_nwa_rustfst ... ok
+test dwa_i32::test_weighted_automata::test_apply_weight ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_determinize_minimal_failing_nwa_repro_rustfst ... ok
+test dwa_i32::heavy_weight::tests::test_dimension_mismatch - should panic ... ok
+test dwa_i32::test_weighted_automata::test_concatenate_default_path_to_final ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_determinize_complex_nwa_from_template_rustfst ... ok
+test dwa_i32::test_weighted_automata::test_concatenate_disjoint_weights ... ok
+test dwa_i32::test_weighted_automata::test_count_paths_cyclic_returns_none ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_weight_partitioning_rustfst ... ok
+test dwa_i32::test_weighted_automata::test_count_paths_simple ... ok
+test dwa_i32::test_weighted_automata::test_dwa_builder ... ok
+test dwa_i32::test_weighted_automata::test_average_path_length_exact_vs_estimated ... ok
+test dwa_i32::test_weighted_automata::test_concatenate_left_start_is_final ... ok
+test dwa_i32::test_weighted_automata::test_estimate_average_path_length ... ok
+test dwa_i32::test_weighted_automata::test_dwa_roundtrip_minimal_repro ... ok
+test dwa_i32::test_weighted_automata::test_concatenate_simple ... ok
+test dwa_i32::test_weighted_automata::test_minimize ... ok
+test dwa_i32::test_weighted_automata::test_minimize_cross_height_merge_opportunity ... ok
+test dwa_i32::test_weighted_automata::test_minimize_cross_height_via_relaxed_conditions ... ok
+test dwa_i32::test_weighted_automata::test_diamond_structure ... ok
+test dwa_i32::test_weighted_automata::test_minimize_no_false_merge_when_targets_differ ... ok
+test dwa_i32::test_weighted_automata::test_minimize_disjoint_paths_merge ... ok
+test dwa_i32::test_weighted_automata::test_minimize_redundant_states ... ok
+test dwa_i32::test_weighted_automata::test_minimize_complex_dwa_from_attachment ... ok
+test dwa_i32::test_weighted_automata::test_prune_unreachable_with_default_chain ... ok
+test dwa_i32::test_weighted_automata::test_sample_paths_linear ... ok
+test dwa_i32::test_weighted_automata::test_sample_paths_panics_on_cyclic - should panic ... ok
+test dwa_i32::test_weighted_automata::test_sample_paths_start_final ... ok
+test dwa_i32::test_weighted_automata::test_concatenate_complex_from_attachment ... ok
+test dwa_i32::test_weighted_automata::test_minimize_propagates_future_weights ... ok
+test dwa_i32::test_weighted_automata::test_simple_bitset_iter_up_to_all ... ok
+test dwa_i32::test_weighted_automata::test_simple_bitset_ops ... ok
+test dwa_i32::test_weighted_automata::test_minimize_relaxed_merge_conditions ... ok
+test dwa_i32::test_weighted_automata::test_sample_paths_uniform_distribution ... ok
+test dwa_i32::test_weighted_automata::test_dwa_to_nwa_to_dwa_roundtrip ... ok
+test dwa_i32::test_weighted_automata::test_union_from_debug_log_minimized1 ... ok
+test dwa_i32::test_weighted_automata::test_union_from_debug_log_minimized2 ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_accepts_nothing ... ok
+test dwa_i32::test_weighted_automata::determinization_tests::test_det_accepts_nothing_rustfst ... ok
+test dwa_i32::test_weighted_automata::test_union_from_debug_log_minimized2_with_minimization_trick ... ok
+test dwa_i32::test_weighted_automata::test_union_identical_cyclic ... ok
+test dwa_i32::test_weighted_automata::test_union_from_debug_log ... ok
+test dwa_i32::test_weighted_automata::test_union_overlapping ... ok
+test dwa_i32::test_weighted_automata::test_union_simple ... ok
+test dwa_i32::tests::test_determinization::test_determinize_hypercube_catastrophe ... ignored
+test dwa_i32::tests::test_determinization::test_determinize_simple_divergence - should panic ... ok
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_different_alphabets ... ignored
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_diverging_patterns ... ok
+test dwa_i32::test_weighted_automata::test_union_complex_from_attachment_simpified ... ok
+test dwa_i32::test_weighted_automata::test_union_from_debug_log_minimized3 ... ok
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_many_sources_same_label ... ok
+test dwa_i32::test_weighted_automata::test_union_from_panicked_log ... ok
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_many_sources_with_continuation ... ok
+test dwa_i32::test_weighted_automata::test_concatenate_from_debug_log ... ok
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_minimal ... ok
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_shared_second_hop ... ok
+test dwa_i32::tests::test_minimization::test_minimization_889 ... ignored
+test dwa_i32::tests::test_minimization::test_minimization_with_weight_loosening ... ignored
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_overlapping_alphabet ... ok
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_paths_through_shared ... ok
+test dwa_i32::tests::test_nwa_pipeline::test_nwa_minimize_determinize_minimize ... ignored, slow test - takes too long for CI
+test dwa_i32::tests::test_push::test_field_name_optimization ... ignored, This test requires weight pushing optimization which redistributes weights across the DWA. Our current minimization is more conservative and only merges states with identical outputs.
+test dwa_i32::tests::test_push::test_merge_branches ... ignored, This test requires weight pushing optimization which redistributes weights across the DWA. Our current minimization is more conservative and only merges states with identical outputs.
+test dwa_i32::tests::test_repro::tests::test_repro_and_minimize ... ignored
+test dwa_i32::tests::test_rm_epsilon_effect::test_rm_epsilon_effect ... ignored, slow test - takes too long for CI
+test dwa_i32::tests::test_weight_loosening::test_weight_loosening_loosens_unreachable ... ok
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_shared_then_diverge ... ok
+test dwa_i32::tests::test_weight_loosening::test_weight_loosening_skips_cyclic ... ok
+test dwa_i32::weight_expansion::tests::test_collapse_weight ... ok
+test dwa_i32::weight_expansion::tests::test_create_tsid_mask ... ok
+test dwa_i32::weight_expansion::tests::test_create_tsid_set_mask ... ok
+test dwa_i32::weight_expansion::tests::test_expand_and_intersect_example ... ok
+test dwa_i32::weight_expansion::tests::test_expand_weight ... ok
+test dwa_i32::tests::test_minimization_failure::test_minimization_failure::test_rm_epsilon_effect_on_weights ... ok
+test fill_benchmark::tests::benchmark_fill_strategies ... ignored
+test equivalence_analysis::vocab_equivalence_analysis_fast_reference::tests::test_mix64 ... ok
+test dwa_i32::test_weighted_automata::test_union_complex_from_attachment ... ok
+test glr::tests::test_ambiguous_dangling_else ... ok
+test glr::tests::test_explain_stack ... ignored
+test glr::tests::test_ambiguous_arithmetic ... ok
+test glr::tests::test_epsilon_rules_ambiguity ... ok
+test glr::tests::test_filter_productions_selectivity ... ok
+test glr::tests::test_hidden_left_recursion ... ok
+test dwa_i32::tests::test_weight_loosening::test_weight_loosening_preserves_semantics ... ok
+test glr::tests::test_lr1_not_lalr1_grammar ... ignored
+test dwa_i32::tests::test_minimization_failure::test_minimization_failure::test_weight_fragmentation_complex ... ok
+test glr::tests::test_parser_stats_conflicts ... ignored, Direct left recursion resolution avoids this shift/reduce conflict.
+test glr::tests::test_hidden_right_recursion ... ok
+test glr::tests::test_remove_undefined_empty_input ... ok
+test glr::tests::test_expression_parse_table_generation_and_parse ... ok
+test glr::tests::test_nullable_nonterminal_before_terminal ... ok
+test glr::tests::test_reduce_reduce_conflict ... ok
+test glr::tests::test_highly_ambiguous_potentially_slow ... ok
+test glr::tests::test_remove_undefined_iterative ... ok
+test glr::tests::test_remove_undefined_no_change ... ok
+test glr::tests::test_remove_undefined_simple ... ok
+test glr::tests::test_resolve_right_recursion ... ignored
+test glr::tests::test_repetition_no_eof_2 ... ok
+test glr::tests::test_repetition_no_eof_1 ... ok
+test glr::tests::test_single_terminal_production ... ok
+test glr::tests::test_super_simple_grammar ... ok
+test glr::tests::test_right_recursive_grammar_parse ... ok
+test glr::tests::validation_fails_direct_length_1_recursion ... ok
+test glr::tests::test_simple_parse_table_generation_and_parse ... ok
+test glr::tests::validation_fails_indirect_length_1_recursion ... ok
+test glr::tests::validation_fails_direct_length_1_recursion_nullable_prefix ... ok
+test glr::tests::validation_fails_indirect_length_1_recursion_nullable_prefix ... ok
+test glr::tests::test_unit_production_elimination ... ok
+test glr::tests::test_standard_expression_grammar_parse ... ok
+test glr::tests::validation_fails_left_nullable_left_recursion ... ok
+test glr::tests::validation_fails_missing_nonterminal ... ok
+test glr::tests::validation_passes_complex_unit_rules_no_cycle ... ok
+test glr::tests::validation_passes_non_unit_recursion ... ok
+test interface::json_schema::convert::tests::test_convert_primitive ... ok
+test interface::json_schema::convert::tests::test_convert_enum ... ok
+test interface::json_schema::convert::tests::test_convert_simple_object ... ok
+test interface::json_schema::emit::tests::test_emit_literal ... ok
+test interface::json_schema::emit::tests::test_emit_sequence ... ok
+test interface::json_schema::parser::tests::test_parse_any_of ... ok
+test interface::json_schema::parser::tests::test_parse_array ... ok
+test interface::json_schema::parser::tests::test_parse_enum ... ok
+test interface::json_schema::parser::tests::test_parse_multi_type ... ok
+test interface::json_schema::parser::tests::test_parse_object ... ok
+test interface::json_schema::parser::tests::test_parse_primitive_types ... ok
+test interface::ebnf::tests::test_ebnf_parser_simple ... ok
+test interface::json_schema::parser::tests::test_parse_ref ... ok
+test interface::json_schema::tests::tests::test_conversion_enum ... ok
+test interface::json_schema::tests::tests::test_conversion_any_of ... ok
+test interface::ebnf::tests::test_ebnf_parser_error_with_span - should panic ... ok
+test interface::json_schema::tests::tests::test_conversion_ref ... ok
+test interface::json_schema::tests::tests::test_conversion_simple_object ... ok
+test dwa_i32::tests::test_determinization::test_epsilon_explosion_json_like ... ok
+test interface::json_schema::tests::tests::test_ebnf_ws_nullable ... ok
+test dwa_i32::test_weighted_automata::test_equivalence_via_minimization ... ok
+test dwa_i32::test_weighted_automata::test_json_roundtrip_complex ... ok
+test dwa_i32::test_weighted_automata::test_union_transition_weight_union ... ok
+test interface::json_schema::tests::tests::test_ebnf_object_member_after_brace ... ok
+test interface::json_schema::tests::tests::test_multibyte_tokens_additional_properties_true ... ok
+test interface::json_schema::tests::tests::test_multibyte_tokens_simple_object ... ok
+test interface::json_schema::tests::tests::test_object_schema_rejects_quote_at_empty_prefix ... ok
+test interface::json_schema::tests::tests::test_schema_additional_properties_schema ... ok
+test interface::json_schema::tests::tests::test_schema_additional_properties_true ... ok
+test interface::json_schema::tests::tests::test_schema_simple_object_weight_heavy ... ignored
+test interface::json_schema::tests::tests::test_schema_anyof ... ok
+test interface::json_schema::types::tests::test_grammar_type_flattening ... ok
+test interface::json_schema::types::tests::test_schema_type_construction ... ok
+test interface::lark::tests::test_lark_ignore_directive ... ok
+test interface::lark::tests::test_lark_parser_simple ... ok
+test interface::optimization::tests::test_complex_nesting ... ok
+test interface::optimization::tests::test_converts_leaf_nt_to_terminal ... ok
+test interface::optimization::tests::test_diff_grammar_optimization_correctness ... ok
+test interface::optimization::tests::test_diff_grammar_optimization_performance ... ignored
+test interface::optimization::tests::test_diff_grammar_structure ... ok
+test interface::optimization::tests::test_fuzz_regex_to_grammar_optimization ... ok
+test interface::optimization::tests::test_literal_choice_in_cyclic_dependent_nt ... ok
+test interface::optimization::tests::test_merge_adjacent_terminals ... ok
+test interface::optimization::tests::test_partial_terminal_conversion_in_method_definition ... ok
+test interface::optimization::tests::test_rolls_up_chain_of_regular_rules ... ok
+test interface::optimization::tests::test_simple_recursion_optimization ... ok
+test interface::optimization::tests::test_two_alternative_literal_choice ... ok
+test interface::optimization::tests::test_x_semicolon_x ... ok
+test interface::suffix_grammar::tests::test_suffix_grammar_alternation ... ok
+test interface::suffix_grammar::tests::test_suffix_grammar_recursive ... ignored
+test interface::suffix_grammar::tests::test_suffix_grammar_sequence ... ok
+test interface::suffix_grammar::tests::test_suffix_grammar_simple ... ok
+test interface::suffix_grammar::tests::test_suffix_grammar_terminal_helpers ... ok
+test interface::json_schema::tests::tests::test_schema_array ... ok
+test interface::json_schema::tests::tests::test_schema_const ... ok
+test interface::json_schema::tests::tests::test_schema_const2 ... ok
+test interface::json_schema::tests::tests::test_schema_dependencies ... ok
+test interface::json_schema::tests::tests::test_schema_enum ... ok
+test interface::json_schema::tests::tests::test_schema_nested_objects ... ok
+test interface::json_schema::tests::tests::test_schema_simple_object ... ok
+test json_serialization::tests::test_btreemap_serialization ... ok
+test json_serialization::tests::test_generic_struct_serialization ... ok
+test json_serialization::tests::test_generic_struct_with_custom_type ... ok
+test json_serialization::tests::test_json_string_conversion ... ok
+test json_serialization::tests::test_large_numbers ... ok
+test json_serialization::tests::test_my_struct_optional_none ... ok
+test json_serialization::tests::test_my_struct_serialization_deserialization ... ok
+test json_serialization::tests::test_non_finite_float_serialization ... ok
+test json_serialization::tests::test_streaming_btreemap ... ok
+test json_serialization::tests::test_streaming_serialization_deserialization ... ok
+test json_serialization::tests::test_streaming_vec ... ok
+test json_serialization::tests::test_tuple_serialization ... ok
+test json_serialization::tests::test_unit_struct_serialization ... ok
+test json_serialization::tests::test_vec_u8_specialization ... ok
+test pipeline::tests::test_pipeline_build_compiled ... ok
+test pipeline::tests::test_pipeline_config_default ... ok
+test pipeline::tests::test_pipeline_config_no_optimization ... ok
+test pipeline::tests::test_pipeline_from_ebnf ... ok
+test interface::json_schema::tests::tests::test_small_vocab_only_brace_valid_at_start ... ok
+test interface::tests::tests::test_incremental_parser_simple ... ok
+test interface::tests::tests::test_minimal_python_example_with_compiled_grammar ... ok
+test interface::tests::tests::test_nullability_handling_in_from_exprs ... ok
+test interface::tests::tests::test_precompute_for_python_name_token_with_names ... ok
+test interface::tests::tests::test_python_reported_bug_def_rep_space_f ... ok
+test interface::tests::tests::test_sentence_grammar_from_prompt ... ok
+test interface::tests::tests::test_sentence_grammar_from_prompt_minimized ... ok
+test precompute4::test_resolve_negatives::test_resolve_negatives_from_debug_log ... ok
+test precompute4::test_resolve_negatives::test_resolve_negatives_from_intermediate_debug_log ... ok
+test test_constraint_basic::test_constraint_expression ... ignored
+test precompute4::test_resolve_negatives::test_resolve_negatives_from_large_nwa_log ... ok
+test test_constraint_basic::test_constraint_expression_minimized_06_11_25 ... ok
+test precompute4::test_resolve_negatives::test_resolve_negatives_long_cancellation_chain ... ok
+test precompute4::test_resolve_negatives::test_resolve_negatives_minimal_loop_with_default ... ok
+test precompute4::test_resolve_negatives::test_resolve_negatives_simple_cancellation ... ok
+test test_constraint_basic::test_a_plus_commit_equivalence ... ok
+test test_constraint_basic::test_aborted_tokenizer_restart_equivalence ... ok
+test test_constraint_basic::test_ambiguous_tokenizer_no_gss_explosion ... ok
+test test_constraint_basic::test_constraint_expression_cycle ... ok
+test precompute4::test_resolve_negatives::test_resolve_negatives_from_nwa_log_2 ... ok
+test test_constraint_basic::test_constraint_expression_no_parens ... ok
+test test_constraint_basic::test_constraint_expression_no_plus_times ... ok
+test test_constraint_basic::test_constraint_expression_no_times ... ok
+test test_constraint_basic::test_constraint_expression_no_times_parens ... ok
+test test_constraint_basic::test_constraint_simple ... ignored
+test test_constraint_basic::test_constraint_expression_split_token ... ok
+test test_constraint_basic::test_constraint_expression_trivial_direct ... ok
+test test_constraint_basic::test_constraint_expression_trivial_direct_limited_vocab ... ok
+test test_constraint_basic::test_constraint_expression_trivial_indirect ... ok
+test test_constraint_basic::test_constraint_expression_unbalanced_parens ... ok
+test test_constraint_basic::test_constraint_expression_unbalanced_parens2 ... ok
+test test_constraint_basic::test_js_full_grammar_gss_explosion ... ignored
+test test_constraint_basic::test_constraint_indirect_recursion_minimized ... ok
+test test_constraint_basic::test_constraint_repetition_a ... ok
+test test_constraint_basic::test_constraint_simple_minimized ... ok
+test test_constraint_basic::test_ebnf_grammar_initial_mask ... ok
+test test_constraint_basic::test_ebnf_grammar_initial_mask_mandatory_pass ... ok
+test test_constraint_basic::test_ebnf_ignore_directive_with_partial_match ... ok
+test test_constraint_basic::test_hideous_ambiguity ... ok
+test test_constraint_basic::test_ignore_token ... ok
+test test_constraint_basic::test_precompute_a_plus_tokenizer ... ignored
+test test_constraint_basic::test_js_if_statement_gss_explosion ... ok
+test test_constraint_basic::test_js_like_grammar_initial_mask ... ok
+test test_constraint_basic::test_js_like_grammar_initial_mask_minimized ... ok
+test test_constraint_basic::test_precompute_x_eq ... ignored
+test test_constraint_basic::test_js_minimized_ebnf_string ... ok
+test test_constraint_basic::test_json_gpt2_initial_mask_bruteforce ... ok
+test test_constraint_basic::test_tokenizer_vocab_to_terminal_dwa_aa ... ignored
+test test_constraint_basic::test_json_schema_gpt2_real_vocab ... ok
+test test_constraint_basic::test_json_schema_mask_generation ... ok
+test test_equivalence_analysis::tests::test_json_schema_equivalence_classes ... ok
+test test_equivalence_analysis::tests::test_json_schema_equivalence_classes_simpler ... ok
+test test_finite_automata::complex_tests::test_complex_choice ... ok
+test test_finite_automata::complex_tests::test_complex_epsilon ... ok
+test test_finite_automata::complex_tests::test_complex_pattern ... ok
+test test_finite_automata::complex_tests::test_complex_seq_with_quantifiers ... ok
+test test_finite_automata::complex_tests::test_nested_quantifiers ... ok
+test test_finite_automata::even_more_complex_tests::test_choice_with_empty_option ... ok
+test test_finite_automata::even_more_complex_tests::test_complex_pattern_with_overlapping_quantifiers ... ok
+test test_finite_automata::even_more_complex_tests::test_greedy_matching ... ok
+test test_constraint_basic::test_multi_commit_aborted_tokenizer_restart_equivalence ... ok
+test test_constraint_basic::test_precompute_explosion ... ok
+test test_finite_automata::even_more_complex_tests::test_matching_at_different_positions ... ok
+test test_finite_automata::even_more_complex_tests::test_multiple_finalizers ... ok
+test test_finite_automata::even_more_complex_tests::test_multiple_finalizers_greedy ... ok
+test test_finite_automata::even_more_complex_tests::test_nested_seqs_with_quantifiers ... ok
+test test_finite_automata::even_more_complex_tests::test_non_greedy_matching ... ok
+test test_constraint_basic::test_precompute_for_python_name_token ... ok
+test test_finite_automata::even_more_complex_tests::test_overlapping_u8_classes ... ok
+test test_constraint_basic::test_precompute_self_loop_from_shared_states ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_compute_group_id_to_u8set_multiple_groups ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_compute_group_id_to_u8set_overlapping_groups ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_compute_group_id_to_u8set_single_group ... ok
+test test_finite_automata::even_more_complex_tests::test_lots_of_words ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_get_u8set_for_group_existing_group ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_get_u8set_for_group_after_transition ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_get_u8set_for_group_nonexistent_group ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_get_u8set_for_group_multiple_transitions ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_group_id_to_u8set_after_consuming_all ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_group_id_to_u8set_after_multiple_transitions ... ok
+test test_finite_automata::group_u8set_tests::test_get_u8set_for_group ... ok
+test test_finite_automata::even_more_complex_tests::test_triple_quoted_string ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_group_id_to_u8set_nonexistent_group ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_group_id_to_u8set_overlapping_groups ... ok
+test test_finite_automata::group_id_to_u8set_tests::test_group_id_to_u8set_nested_groups ... ok
+test test_finite_automata::possible_future_group_ids_tests::test_possible_future_group_ids_excludes_current_state ... ok
+test test_finite_automata::reproduction_tests::test_double_star_repro ... ok
+test test_finite_automata::reproduction_tests::test_js_nested_blocks_pattern ... ok
+test test_finite_automata::reproduction_tests::test_minimal_dfa_explosion ... ignored, Documents inherent DFA explosion - the pattern genuinely requires O(3^n) states
+test test_finite_automata::reproduction_tests::test_js_whitespace_pattern ... ok
+test test_finite_automata::reproduction_tests::test_js_complex_whitespace_pattern ... ok
+test test_finite_automata::reproduction_tests::test_optimize_nested_quantifiers ... ok
+test test_finite_automata::slow_dfa_build_tests::test_apollo_router_dfa_build_time ... ignored
+test test_finite_automata::test_python::test_full_python_tokenizer_recognizes_name ... ignored
+test test_finite_automata::possible_future_group_ids_tests::test_possible_future_group_ids ... ok
+test test_finite_automata::tests::test_0 ... ok
+test test_finite_automata::tests::test_choice ... ok
+test test_finite_automata::tests::test_epsilon ... ok
+test test_finite_automata::tests::test_literal ... ok
+test test_finite_automata::tests::test_opt ... ok
+test test_finite_automata::tests::test_quantifier ... ok
+test test_finite_automata::reproduction_tests::test_multi_group_dfa_explosion ... ok
+test test_finite_automata::tests::test_seq ... ok
+test test_finite_automata::tests_nov_24::test_eat_u8 ... ok
+test test_finite_automata::tests::test_u8seq ... ok
+test test_finite_automata::tests_nov_24::test_reasonable_number_of_states ... ok
+test test_finite_automata::reproduction_tests::test_diff_grammar_exponential_blowup ... ok
+test test_constraint_basic::test_simple_def_match_non_zero_llm_id ... ok
+test test_constraint_basic::test_suffix_grammar_validation ... ok
+test test_constraint_basic::test_trivial ... ok
+test test_finite_automata::reproduction_tests::test_rustfst_can_minimize_further ... ok
+test test_constraint_basic::test_x_semicolon_x ... ok
+test dwa_i32::tests::test_debug_min::tests::test_trace_minimal_nwa ... ok
+
+test result: ok. 423 passed; 0 failed; 28 ignored; 0 measured; 0 filtered out; finished in 4.14s
+
+     Running unittests src/bin/dump_full_pipeline.rs (target/release/deps/dump_full_pipeline-4a98f22793d41dea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/grammar_compiler.rs (target/release/deps/grammar_compiler-e6ed85faec6796db)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/inference_cli.rs (target/release/deps/grammar_inference-100d85c129bd04dd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/repro_rangeset.rs (target/release/deps/repro_rangeset-df8e6c953c446d7c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sep1
+
+running 7 tests
+test src/dwa_i32/heavy_weight.rs - dwa_i32::heavy_weight (line 22) ... ignored
+test src/interface/json_schema/mod.rs - interface::json_schema (line 26) ... ignored
+test src/pipeline.rs - pipeline (line 17) ... ignored
+test src/pipeline.rs - pipeline (line 37) ... ignored
+test src/pipeline.rs - pipeline::GrammarConstraint::from_ebnf_and_vocab (line 279) ... ignored
+test src/profiler.rs - profiler::hit (line 585) ... ignored
+test src/profiler.rs - profiler::time (line 557) ... ignored
+
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

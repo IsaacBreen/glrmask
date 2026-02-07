@@ -98,6 +98,10 @@ impl LazyApproximateDFA {
         self.transitions[state].insert(terminal, next_dfa_state);
         Some(next_dfa_state)
     }
+
+    pub fn state_set(&self, state: usize) -> Option<&Bitset> {
+        self.dfa_state_sets.get(state)
+    }
 }
 
 #[derive(Default)]

@@ -44,7 +44,11 @@ use crate::dwa_i32::{DWA, NWA};
 use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 
 pub use crate::constraint_vocab::*;
-use crate::constraint_precompute::{run_precompute1, ApproximateDfaPruner};
+use crate::constraint_precompute::{
+    build_reduce_fallback_terminals_by_state,
+    run_precompute1,
+    ApproximateDfaPruner,
+};
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
 
@@ -1583,12 +1587,15 @@ impl GrammarConstraint {
                             orig_to_suffix_tid[orig_tid.0] = Some(*suffix_tid);
                         }
                     }
+                    let reduce_fallback_terminals_by_state =
+                        build_reduce_fallback_terminals_by_state(&suffix_parser);
 
                     crate::debug!(4, "Approximate suffix DFA built (lazy), start_state={}", approx_dfa.start_state);
                     Some(ApproximateDfaPruner {
                         dfa: approx_dfa,
                         orig_to_suffix_tid,
                         ignored_terminals,
+                        reduce_fallback_terminals_by_state,
                     })
                 } else {
                     crate::debug!(4, "Approximate suffix DFA requested but missing grammar definition; falling back to parser DFA...");
@@ -1602,12 +1609,15 @@ impl GrammarConstraint {
                             orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
                         }
                     }
+                    let reduce_fallback_terminals_by_state =
+                        build_reduce_fallback_terminals_by_state(&parser);
 
                     crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
                     Some(ApproximateDfaPruner {
                         dfa: approx_dfa,
                         orig_to_suffix_tid,
                         ignored_terminals,
+                        reduce_fallback_terminals_by_state,
                     })
                 }
             } else {
@@ -1622,12 +1632,15 @@ impl GrammarConstraint {
                         orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
                     }
                 }
+                let reduce_fallback_terminals_by_state =
+                    build_reduce_fallback_terminals_by_state(&parser);
 
                 crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
                 Some(ApproximateDfaPruner {
                     dfa: approx_dfa,
                     orig_to_suffix_tid,
                     ignored_terminals,
+                    reduce_fallback_terminals_by_state,
                 })
             }
         } else {

@@ -1,0 +1,7 @@
+RUN token=770 labels=5,91,83
+SKIP_SERIALIZATION=1 timeout 300 python scripts/compile.py \
+		--grammar src/js.ebnf \
+		--format ebnf \
+		--output .cache/test_vocabs/constraint_js.json.gz \
+		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+		
