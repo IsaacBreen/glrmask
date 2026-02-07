@@ -827,8 +827,9 @@ pub fn find_vocab_equivalence_classes(
     }
 
     // Process states in batches for memory efficiency
-    // Use a larger batch size when state count is small, single batch when < 3000 states
-    let batch_size = if num_states < 3000 { num_states } else { 2048 };
+    // Smaller batches improve cache locality for match_positions array
+    // (batch_size * num_groups * 4 bytes per thread) and enable early pruning of singletons.
+    let batch_size = if num_states < 200 { num_states } else { 200 };
 
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition: Vec<usize> = vec![0; num_tokens];
