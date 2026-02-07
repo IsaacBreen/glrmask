@@ -435,16 +435,12 @@ pub fn prune_dwa_with_suffix_grammar(
     
     // BFS to propagate parser states through the DWA
     let mut queue: VecDeque<usize> = VecDeque::new();
-    let mut visited: BTreeSet<usize> = BTreeSet::new();
+    let mut in_queue: BTreeSet<usize> = BTreeSet::new();
     queue.push_back(dwa.body.start_state);
-    visited.insert(dwa.body.start_state);
-    
-    // Track transitions to remove: (from_state, label)
-    let mut transitions_to_remove: Vec<(usize, i32)> = Vec::new();
-    let mut pruned_count = 0;
-    let mut kept_count = 0;
+    in_queue.insert(dwa.body.start_state);
     
     while let Some(dwa_state) = queue.pop_front() {
+        in_queue.remove(&dwa_state);
         let parser_states = dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default();
         crate::debug!(6, "  BFS: DWA state {} with parser_states {:?}", dwa_state, parser_states);
         
@@ -461,28 +457,22 @@ pub fn prune_dwa_with_suffix_grammar(
             if label_usize >= terminals_count {
                 // TSID transition - always keep, parser state propagates unchanged
                 let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
-                for &ps in &parser_states {
-                    dest_states.insert(ps);
-                }
-                if !visited.contains(&dest_dwa_state) {
-                    visited.insert(dest_dwa_state);
+                let before_len = dest_states.len();
+                dest_states.extend(parser_states.iter().copied());
+                if dest_states.len() > before_len && in_queue.insert(dest_dwa_state) {
                     queue.push_back(dest_dwa_state);
                 }
-                kept_count += 1;
                 continue;
             }
             
             // Skip ignored terminals (like IGNORE/whitespace) - they can appear anywhere
             if ignored_tids.contains(&label_usize) {
                 let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
-                for &ps in &parser_states {
-                    dest_states.insert(ps);
-                }
-                if !visited.contains(&dest_dwa_state) {
-                    visited.insert(dest_dwa_state);
+                let before_len = dest_states.len();
+                dest_states.extend(parser_states.iter().copied());
+                if dest_states.len() > before_len && in_queue.insert(dest_dwa_state) {
                     queue.push_back(dest_dwa_state);
                 }
-                kept_count += 1;
                 continue;
             }
             
@@ -567,44 +557,128 @@ pub fn prune_dwa_with_suffix_grammar(
                     // Keep the transition, propagate successor states
                     crate::debug!(6, "      KEEP: successor_states = {:?}", successor_states);
                     let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
+                    let before_len = dest_states.len();
                     dest_states.extend(successor_states);
-                    if !visited.contains(&dest_dwa_state) {
-                        visited.insert(dest_dwa_state);
+                    if dest_states.len() > before_len && in_queue.insert(dest_dwa_state) {
                         queue.push_back(dest_dwa_state);
                     }
-                    kept_count += 1;
                 } else if has_reduce_with_len_gt_0 {
                     // Keep the transition because a reduce action exists for this terminal
                     // We can't compute exact successor states without stack simulation,
                     // but we know the terminal is valid as a lookahead for the reduce.
                     // Don't propagate parser states (we don't know what they'll be after reduce).
                     crate::debug!(6, "      KEEP (reduce lookahead): terminal {} valid from parser_states {:?}", label_usize, parser_states);
-                    if !visited.contains(&dest_dwa_state) {
-                        visited.insert(dest_dwa_state);
-                        queue.push_back(dest_dwa_state);
-                    }
+                    let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
+                    let before_len = dest_states.len();
                     // Initialize the dest state's parser states with the suffix parser start state
                     // This is conservative - after reduces, we could end up anywhere
-                    let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
                     dest_states.insert(initial_parser_state_id);
-                    kept_count += 1;
+                    if dest_states.len() > before_len && in_queue.insert(dest_dwa_state) {
+                        queue.push_back(dest_dwa_state);
+                    }
                 } else {
-                    // No valid actions - prune the transition
-                    crate::debug!(6, "      PRUNE: no successor states for terminal {} from parser_states {:?}", label_usize, parser_states);
-                    transitions_to_remove.push((dwa_state, label));
-                    pruned_count += 1;
+                    // No valid actions - do not propagate; pruning is handled after fixpoint.
+                    crate::debug!(6, "      PRUNE (deferred): no successor states for terminal {} from parser_states {:?}", label_usize, parser_states);
                 }
             } else {
                 // Terminal not found in suffix parser - this shouldn't happen
                 // Keep the transition to be safe
                 let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
-                for &ps in &parser_states {
-                    dest_states.insert(ps);
-                }
-                if !visited.contains(&dest_dwa_state) {
-                    visited.insert(dest_dwa_state);
+                let before_len = dest_states.len();
+                dest_states.extend(parser_states.iter().copied());
+                if dest_states.len() > before_len && in_queue.insert(dest_dwa_state) {
                     queue.push_back(dest_dwa_state);
                 }
+            }
+        }
+    }
+
+    // After fixpoint, decide which transitions to prune based on final parser state sets.
+    let mut transitions_to_remove: Vec<(usize, i32)> = Vec::new();
+    let mut pruned_count = 0usize;
+    let mut kept_count = 0usize;
+
+    for dwa_state in 0..dwa.states.len() {
+        let parser_states = dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default();
+        let transitions: Vec<(i32, usize)> = dwa.states[dwa_state].transitions.iter()
+            .map(|(&label, &dest)| (label, dest))
+            .collect();
+
+        for (label, _dest_dwa_state) in transitions {
+            let label_usize = label as usize;
+
+            // Skip TSID transitions (not grammar terminals)
+            if label_usize >= terminals_count {
+                kept_count += 1;
+                continue;
+            }
+
+            // Skip ignored terminals (like IGNORE/whitespace)
+            if ignored_tids.contains(&label_usize) {
+                kept_count += 1;
+                continue;
+            }
+
+            if let Some(&suffix_tid) = orig_to_suffix_tid.get(&label_usize) {
+                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut has_reduce_with_len_gt_0 = false;
+
+                let mut states_to_process: VecDeque<crate::glr::table::StateID> = parser_states.iter().copied().collect();
+                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+
+                while let Some(parser_state_id) = states_to_process.pop_front() {
+                    if !processed_states.insert(parser_state_id) {
+                        continue;
+                    }
+
+                    if let Some(row) = crate::glr::table::get_row(&suffix_parser.table, parser_state_id) {
+                        if let Some(action) = row.get_shifts_and_reduces_for_terminal(&suffix_tid) {
+                            use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+                            match action {
+                                Stage7ShiftsAndReducesLookaheadValue::Shift(target_state) => {
+                                    successor_states.insert(target_state);
+                                }
+                                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                                    if len == 0 {
+                                        if let Some(goto) = row.get_gotos().get(&nonterminal_id) {
+                                            if let Some(goto_state) = goto.state_id {
+                                                states_to_process.push_back(goto_state);
+                                            }
+                                        }
+                                    } else {
+                                        has_reduce_with_len_gt_0 = true;
+                                    }
+                                }
+                                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                    if let Some(target_state) = shift {
+                                        successor_states.insert(target_state);
+                                    }
+                                    for (&reduce_len, nonterminals) in reduces.iter() {
+                                        if reduce_len == 0 {
+                                            for nt_id in nonterminals.keys() {
+                                                if let Some(goto) = row.get_gotos().get(nt_id) {
+                                                    if let Some(goto_state) = goto.state_id {
+                                                        states_to_process.push_back(goto_state);
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            has_reduce_with_len_gt_0 = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !successor_states.is_empty() || has_reduce_with_len_gt_0 {
+                    kept_count += 1;
+                } else {
+                    transitions_to_remove.push((dwa_state, label));
+                    pruned_count += 1;
+                }
+            } else {
                 kept_count += 1;
             }
         }

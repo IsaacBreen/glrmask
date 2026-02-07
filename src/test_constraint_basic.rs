@@ -86,6 +86,40 @@ fn test_trivial() {
     assert_eq!(mask3, Bitset::from_iter(vec![]));
 }
 
+#[test]
+fn test_dwa_ws_boundary_long_token() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let ebnf_grammar = indoc! {r#"
+        #![ignore(WS)]
+        s ::= STMT;
+        WS ::= [ \t\n]+;
+        STMT ::= [a-z]+;
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b" ".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b" the".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b" that".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"that".to_vec(), LLMTokenID(3));
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(4));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        4, // max_original_llm_token_id
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+
+    assert!(mask.contains(1), "token ' the' should be valid at start");
+    assert!(mask.contains(2), "token ' that' should be valid at start");
+    assert!(mask.contains(3), "token 'that' should be valid at start");
+    assert!(mask.contains(0), "token ' ' should be valid at start");
+}
+
 /// Test that x;x is correctly parsed as two expression statements.
 /// This is a minimal reproduction of a bug where semicolon is not allowed after x.
 #[test]
@@ -4222,6 +4256,88 @@ fn test_json_schema_gpt2_real_vocab() {
     let mask = state.get_mask();
     println!("Real GPT-2 Mask contains 3672? {}", mask.contains(3672));
     assert!(mask.contains(3672), "'name' token (3672) should be allowed in real GPT-2 vocab!");
+}
+
+#[test]
+fn test_assign_ws_suffix_prune_keeps_class_31() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+
+    let lark_grammar = indoc! {r#"
+        start: ws stmt (ws stmt)* ws
+        stmt: name ws "=" ws number ws ";"
+        ws: WS*
+        number: DIGIT+
+        name: letter+
+        letter: LETTER
+        WS: " " | "\n" | "\t"
+        LETTER: "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
+        DIGIT: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+    "#};
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
+        .expect("Failed to parse assign_ws grammar");
+
+    let (llm_token_map, max_id) = match load_gpt2_vocab() {
+        Some(v) => v,
+        None => {
+            println!("Skipping test_assign_ws_suffix_prune_keeps_class_31: vocab.json not found.");
+            println!("To run, download https://huggingface.co/openai-community/gpt2/raw/main/vocab.json to project root.");
+            return;
+        }
+    };
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        max_id,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let weight_contains_internal = |weight: &crate::dwa_i32::Weight, token_id: usize, num_tsids: usize| -> bool {
+        if num_tsids == 0 {
+            return weight.contains(token_id);
+        }
+        let start = token_id.saturating_mul(num_tsids);
+        let end = start.saturating_add(num_tsids.saturating_sub(1));
+        for range in weight.ranges() {
+            let r_start = *range.start();
+            let r_end = *range.end();
+            if r_start > end {
+                break;
+            }
+            if r_end >= start {
+                return true;
+            }
+        }
+        false
+    };
+
+    let mut has_31 = false;
+    let mut has_32 = false;
+    for state in &constraint.parser_dwa.states.0 {
+        if let Some(w) = &state.final_weight {
+            if weight_contains_internal(w, 31, constraint.num_tsids) {
+                has_31 = true;
+            }
+            if weight_contains_internal(w, 32, constraint.num_tsids) {
+                has_32 = true;
+            }
+        }
+        for w in state.trans_weights.values() {
+            if weight_contains_internal(w, 31, constraint.num_tsids) {
+                has_31 = true;
+            }
+            if weight_contains_internal(w, 32, constraint.num_tsids) {
+                has_32 = true;
+            }
+        }
+        if has_31 && has_32 {
+            break;
+        }
+    }
+
+    assert!(has_32, "Internal token class 32 should appear in DWA weights");
+    assert!(has_31, "Internal token class 31 should appear in DWA weights");
 }
 
 /// Test suffix grammar validation of terminal DWA paths.
