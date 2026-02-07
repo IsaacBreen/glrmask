@@ -1412,7 +1412,14 @@ fn compact_default_reduces(mut table: Table) -> Table {
                 }
             });
             
-            row.default_reduce_lookaheads = Some(lookaheads);
+            if lookaheads.is_empty() {
+                // No explicit entries matched the default reduce.
+                // Keep default_reduce_lookaheads as None so the default reduce
+                // continues to apply to all unseen terminals (wildcard behavior).
+                // Setting Some(empty_set) would incorrectly disable the reduce.
+            } else {
+                row.default_reduce_lookaheads = Some(lookaheads);
+            }
         }
     }
     table
