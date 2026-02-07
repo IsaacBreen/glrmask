@@ -189,9 +189,44 @@ impl SchemaToGrammar {
         }
     }
     
+    /// Default cap for bounded repetition in string length constraints.
+    /// If maxLength exceeds this, the constraint is dropped (treated as unbounded).
+    /// This prevents DFA state explosion for large length bounds.
+    /// Set SEP1_UNLIMITED_REPEAT=1 to disable this cap.
+    const DEFAULT_MAX_REPEAT_BOUND: usize = 260;
+    
     fn convert_string(&mut self, constraints: &StringConstraints) -> GrammarType {
         // For unconstrained strings, use the simple JSON_STRING primitive
         if constraints.min_length.is_none() && constraints.max_length.is_none() {
+            return GrammarType::primitive(GrammarPrimitive::JsonString);
+        }
+        
+        // Apply repeat bound cap to prevent DFA state explosion.
+        // If max_length > cap, treat as unbounded. If min_length > cap, treat as 0.
+        let cap = if std::env::var("SEP1_UNLIMITED_REPEAT")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            None // no cap — allow any repeat bound
+        } else {
+            Some(Self::DEFAULT_MAX_REPEAT_BOUND)
+        };
+        
+        let mut min = constraints.min_length.unwrap_or(0) as usize;
+        let mut max = constraints.max_length.map(|m| m as usize);
+        
+        // Cap min and max if they exceed the bound
+        if let Some(c) = cap {
+            if min > c {
+                min = 0;
+            }
+            if max.map_or(false, |m| m > c) {
+                max = None;
+            }
+        }
+        
+        // If capping made the constraint effectively unconstrained, use the simple primitive
+        if min == 0 && max.is_none() {
             return GrammarType::primitive(GrammarPrimitive::JsonString);
         }
         
@@ -201,9 +236,6 @@ impl SchemaToGrammar {
         //
         // The pattern is: '"' (char_or_escape){min,max} '"'
         // where char_or_escape is inlined as [^"\\x00-\x1f] | \\["\\\/bfnrt] | \\uHHHH
-        
-        let min = constraints.min_length.unwrap_or(0) as usize;
-        let max = constraints.max_length.map(|m| m as usize);
         
         // Generate a unique terminal name based on constraints
         let name = match max {
