@@ -40,7 +40,11 @@ paper-open: paper ## Build and open paper
 
 ffi: ## Build the Python FFI binding (required for visualizations)
 	@if [ -z "$(SKIP_MATURIN)" ]; then \
-		cd python && RUSTFLAGS=-Awarnings maturin develop -r; \
+		if [ -d ".venv" ]; then \
+			cd python && unset CONDA_PREFIX && VIRTUAL_ENV=$(CURDIR)/.venv PATH=$(CURDIR)/.venv/bin:$$PATH RUSTFLAGS=-Awarnings maturin develop -r; \
+		else \
+			cd python && RUSTFLAGS=-Awarnings maturin develop -r; \
+		fi; \
 	else \
 		echo "Skipping maturin compilation (SKIP_MATURIN is set)"; \
 	fi
