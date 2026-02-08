@@ -109,109 +109,6 @@ fn transform_nullable_terminals(
     (all_productions, terminal_to_opt_nt)
 }
 
-/// Detect terminals that are "whitespace-like" (always optional).
-/// 
-/// A terminal T is whitespace-like if for every production `A → α T β`,
-/// there exists another production `A → α β`. In other words, T can always
-/// be skipped without changing the grammar's accepted language.
-/// 
-/// These terminals can be treated as "ignore" terminals by the parser,
-/// allowing them to appear anywhere without affecting parsing.
-/// 
-/// Returns the set of terminal IDs that are whitespace-like.
-pub fn detect_whitespace_like_terminals(
-    productions: &[Production],
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-) -> HashSet<TerminalID> {
-    // Collect all terminals that appear in the grammar
-    let mut all_terminals: HashSet<Terminal> = HashSet::new();
-    for prod in productions {
-        for sym in &prod.rhs {
-            if let Symbol::Terminal(t) = sym {
-                all_terminals.insert(t.clone());
-            }
-        }
-    }
-    
-    // For each terminal, check if it's always optional
-    // A terminal T is whitespace-like if for every occurrence of T in a production,
-    // there exists a corresponding production without T at that position
-    let mut whitespace_like: HashSet<TerminalID> = HashSet::new();
-
-    // Terminals are only considered if they appear exclusively inside pure wrapper nonterminals.
-    let mut terminal_nonterminals: HashMap<Terminal, HashSet<NonTerminal>> = HashMap::new();
-    for prod in productions {
-        for sym in &prod.rhs {
-            if let Symbol::Terminal(t) = sym {
-                terminal_nonterminals
-                    .entry(t.clone())
-                    .or_default()
-                    .insert(prod.lhs.clone());
-            }
-        }
-    }
-
-    let mut pure_wrapper_terminals: HashSet<Terminal> = HashSet::new();
-    'terminal_check: for (terminal, nonterminals) in &terminal_nonterminals {
-        for nt in nonterminals {
-            for prod in productions {
-                if prod.lhs != *nt {
-                    continue;
-                }
-                for sym in &prod.rhs {
-                    match sym {
-                        Symbol::Terminal(t) if t == terminal => {}
-                        Symbol::NonTerminal(n) if n == nt => {}
-                        _ => continue 'terminal_check,
-                    }
-                }
-            }
-        }
-        pure_wrapper_terminals.insert(terminal.clone());
-    }
-    
-    // Build a set of all (LHS, RHS) pairs for quick lookup
-    let production_set: HashSet<(NonTerminal, Vec<Symbol>)> = productions
-        .iter()
-        .map(|p| (p.lhs.clone(), p.rhs.clone()))
-        .collect();
-    
-    'terminal_loop: for terminal in &all_terminals {
-        if !pure_wrapper_terminals.contains(terminal) {
-            continue;
-        }
-        let terminal_sym = Symbol::Terminal(terminal.clone());
-        
-        // Check every production to see if this terminal appears
-        for prod in productions {
-            // Find all positions where this terminal appears in this production
-            for (pos, sym) in prod.rhs.iter().enumerate() {
-                if *sym == terminal_sym {
-                    // This terminal appears at position `pos` in production `prod`
-                    // Check if there's a corresponding production without this terminal
-                    let mut rhs_without_terminal = prod.rhs.clone();
-                    rhs_without_terminal.remove(pos);
-                    
-                    // Check if the production A → α β (without T at this position) exists
-                    if !production_set.contains(&(prod.lhs.clone(), rhs_without_terminal)) {
-                        // This terminal is NOT always optional - skip to next terminal
-                        continue 'terminal_loop;
-                    }
-                }
-            }
-        }
-        
-        // If we get here, every occurrence of this terminal has a corresponding
-        // production without it - this terminal is whitespace-like
-        if let Some(tid) = terminal_map.get_by_left(terminal) {
-            whitespace_like.insert(*tid);
-            crate::debug!(5, "Detected whitespace-like terminal: {:?} (ID {})", terminal, tid.0);
-        }
-    }
-    
-    whitespace_like
-}
-
 // --- Fast Hasher & BitSet ---
 
 pub struct FxHasher {
@@ -1531,9 +1428,8 @@ fn print_memory_usage(label: &str) {
 ///    - Simplifies A → B → X into A → X
 ///    - Reduces parser state count but doesn't affect correctness
 ///
-/// 2. **Whitespace Terminal Detection** (currently disabled)
-///    - Auto-detects terminals that are always optional
-///    - Could be used to mark implicit whitespace
+/// 2. **Explicit Ignore Terminals**
+///    - Removes productions containing terminals declared via `%ignore`
 ///
 /// ## Optimization Loop Structure
 ///
@@ -1572,8 +1468,7 @@ fn print_memory_usage(label: &str) {
 ///        ╚═══════════════════════│═══════════════╝
 ///                                ▼
 ///                 ┌─────────────────────────────────┐
-///                 │ Phase 5: Whitespace Detection   │
-///                 │ (DECORATIVE - currently off)    │
+///                 │ Phase 5: Explicit Ignore Filter │
 ///                 └─────────────────────────────────┘
 ///                                │
 ///                                ▼
@@ -1820,9 +1715,6 @@ fn generate_glr_parser_with_maps(
     // - Hidden left recursion elimination may need re-inlining
     //
     // We loop until no more changes occur (fixed point).
-
-    let mut detected_ignore = HashSet::new();
-
     const MAX_OPTIMIZATION_PASSES: usize = usize::MAX;
     let normalization_start = std::time::Instant::now();
     for pass in 0..MAX_OPTIMIZATION_PASSES {
@@ -1870,25 +1762,13 @@ fn generate_glr_parser_with_maps(
         crate::debug!(5, "  Phase 4: Checking for hidden left recursion");
         crate::glr::analyze::eliminate_hidden_left_recursion(&mut productions);
 
-        // Phase 5: DECORATIVE - Whitespace detection and removal
-        // ============================================================
-        // Auto-detect whitespace-like terminals and remove productions using them.
-        // We run this in the loop so it stabilizes with the grammar.
-        let newly_detected = detect_whitespace_like_terminals(&productions, &terminal_map);
-        detected_ignore.extend(newly_detected);
-
-        let all_ignored: HashSet<_> = explicit_ignore_terminal_ids.iter()
-            .chain(detected_ignore.iter())
-            .cloned()
-            .collect();
-
-        // Remove productions that use any ignored terminal
+        // Phase 5: Remove productions with explicit ignore terminals
         let pre_filter_count = productions.len();
         productions.retain(|p| {
             !p.rhs.iter().any(|s| {
                 if let Symbol::Terminal(t) = s {
                     if let Some(tid) = terminal_map.get_by_left(t) {
-                        all_ignored.contains(tid)
+                        explicit_ignore_terminal_ids.contains(tid)
                     } else {
                         false
                     }
@@ -1966,18 +1846,10 @@ fn generate_glr_parser_with_maps(
         }
     }
 
-    let explicit_count = explicit_ignore_terminal_ids.len();
-    let mut ignore_terminal_ids = explicit_ignore_terminal_ids;
-    ignore_terminal_ids.extend(detected_ignore.iter());
+    let ignore_terminal_ids = explicit_ignore_terminal_ids;
 
     if !ignore_terminal_ids.is_empty() {
-        crate::debug!(4, "Using {} ignore terminals ({} explicit, {} auto-detected)",
-            ignore_terminal_ids.len(),
-            explicit_count,
-            detected_ignore.len());
-        for t in &detected_ignore {
-            crate::debug!(5, "  Auto-detected: {}", terminal_map.get_by_right(t).unwrap());
-        }
+        crate::debug!(4, "Using {} explicit ignore terminals", ignore_terminal_ids.len());
     }
 
     // ============================================================
@@ -2388,10 +2260,9 @@ fn generate_glr_parser_with_maps(
     )
 }
 
-/// Generate a GLR parser from productions, with automatic detection of ignore terminals.
+/// Generate a GLR parser from productions, using explicit ignore terminals.
 ///
-/// This function auto-detects whitespace-like terminals (terminals that are always optional)
-/// and adds them to the ignore set. Additional explicit ignore terminals can be provided.
+/// Terminals declared via `%ignore` are treated as ignorable and removed from productions.
 pub fn generate_glr_parser(
     productions: &[Production],
     nullable_terminals: &HashSet<Terminal>,
