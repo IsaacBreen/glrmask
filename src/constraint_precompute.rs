@@ -339,8 +339,15 @@ pub fn build_reduce_fallback_terminals_by_state(
                             }
                         }
                     } else {
-                        for term_idx in 0..num_terminals {
-                            terms.insert(term_idx);
+                        // Wildcard default reduce: we only need to know that a reduce is
+                        // possible for this state. Avoid O(num_terminals) work here since
+                        // downstream only checks for non-empty fallback lists.
+                        if terms.is_empty() {
+                            if num_terminals > 0 {
+                                terms.insert(0);
+                            } else {
+                                terms.insert(usize::MAX);
+                            }
                         }
                     }
                 }
