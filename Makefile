@@ -112,7 +112,7 @@ test-json-schema-o1051: build ## Compile o1051 (Github Hard) schema
 test-tsconfig: ## Compile TSConfig schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
-		python3 scripts/test_json_schema.py
+		$(PYTHON) scripts/test_json_schema.py
 
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 

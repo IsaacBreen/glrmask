@@ -76,6 +76,7 @@ struct PrecomputedDfa {
 struct Pos0Scratch {
     current_states: Vec<usize>,
     done: Vec<bool>,
+    active_indices: Vec<usize>,
     match_positions: Vec<u32>,
     touched_groups: Vec<GroupList>,
     touched_positions: Vec<usize>,
@@ -240,6 +241,7 @@ impl Pos0Scratch {
         Pos0Scratch {
             current_states: vec![0; num_states],
             done: vec![false; num_states],
+            active_indices: Vec::new(),
             match_positions: vec![NONE_POS; num_states.saturating_mul(num_groups)],
             touched_groups: vec![GroupList::new(); num_states],
             touched_positions: Vec::new(),
@@ -267,6 +269,7 @@ impl Pos0Scratch {
 
         self.current_states[..len].clone_from_slice(initial_states);
         self.done.fill(false);
+        self.active_indices.clear();
 
         // Only clear match_positions that were touched in the previous run
         for &idx in &self.touched_positions {
@@ -392,11 +395,16 @@ fn compute_pos0_results<'a>(
 
     let current_states = &mut scratch.current_states;
     let done = &mut scratch.done;
+    let active_indices = &mut scratch.active_indices;
     let match_positions = &mut scratch.match_positions;
     let touched_groups = &mut scratch.touched_groups;
     let touched_positions = &mut scratch.touched_positions;
     let touched_states = &mut scratch.touched_states;
     let base_offsets = &scratch.base_offsets;
+
+    active_indices.clear();
+    let has_bytes = !slice.is_empty();
+    let first_byte = if has_bytes { slice[0] } else { 0 };
 
     // Process initial finalizers
     for (i, &state) in initial_states.iter().enumerate() {
@@ -420,85 +428,104 @@ fn compute_pos0_results<'a>(
         }
         if !pre.has_transitions[state] {
             done[i] = true;
+            continue;
         }
-    }
 
-    // Process each byte of the token
-    for (pos, &byte) in slice.iter().enumerate() {
-        let position = (pos + 1) as u32;
-        let mut any_active = false;
-
-        // SAFETY: All indices are pre-validated:
-        // - i < num_states, and all arrays are sized to num_states
-        // - current_states[i] is always a valid DFA state (< pre.transitions.len())
-        // - byte is u8, so byte as usize < 256 (valid for transition table)
-        // - base + gid is valid because base_offsets and match_positions are properly sized
-        unsafe {
-            for i in 0..num_states {
-                if *done.get_unchecked(i) {
-                    continue;
-                }
-                any_active = true;
-
-                let base = *base_offsets.get_unchecked(i);
-                let current = *current_states.get_unchecked(i);
-                let next_state = *pre.transitions.get_unchecked(current).get_unchecked(byte as usize);
-
-                if next_state != NONE_STATE {
-                    let next_state = next_state as usize;
-                    *current_states.get_unchecked_mut(i) = next_state;
-
-                    for f in pre.finalizers.get_unchecked(next_state) {
-                        let gid = f.gid;
-                        if gid < num_groups {
-                            let idx = base + gid;
-                            let slot = match_positions.get_unchecked_mut(idx);
-                            if f.non_greedy {
-                                if *slot == NONE_POS {
-                                    *slot = position;
-                                }
-                            } else {
-                                *slot = position;
-                            }
-
-                            let groups = touched_groups.get_unchecked_mut(i);
-                            if !groups.contains(&gid) {
-                                if groups.is_empty() {
-                                    touched_states.push(i);
-                                }
-                                groups.push(gid);
-                            }
-                            touched_positions.push(idx);
-                        }
-                    }
-
-                    let terminate = match pre.future_modes.get_unchecked(next_state) {
-                        FutureMode::AlwaysTerminate => true,
-                        FutureMode::AlwaysContinue => false,
-                        FutureMode::Guarded(guard) => {
-                            let mut all_met = true;
-                            for &gid in guard.iter() {
-                                let idx = base + gid;
-                                if *match_positions.get_unchecked(idx) == NONE_POS {
-                                    all_met = false;
-                                    break;
-                                }
-                            }
-                            all_met
-                        }
-                    };
-
-                    if terminate {
-                        *done.get_unchecked_mut(i) = true;
-                    }
-                } else {
-                    *done.get_unchecked_mut(i) = true;
-                }
+        if has_bytes {
+            let next_state = pre.transitions[state][first_byte as usize];
+            if next_state == NONE_STATE {
+                done[i] = true;
+                continue;
             }
         }
 
-        if !any_active {
-            break;
+        active_indices.push(i);
+    }
+
+    // Process each byte of the token
+    if has_bytes && !active_indices.is_empty() {
+        let mut active_len = active_indices.len();
+        for (pos, &byte) in slice.iter().enumerate() {
+            let position = (pos + 1) as u32;
+            let mut next_len = 0usize;
+
+            // SAFETY: All indices are pre-validated:
+            // - i < num_states, and all arrays are sized to num_states
+            // - current_states[i] is always a valid DFA state (< pre.transitions.len())
+            // - byte is u8, so byte as usize < 256 (valid for transition table)
+            // - base + gid is valid because base_offsets and match_positions are properly sized
+            unsafe {
+                for idx in 0..active_len {
+                    let i = *active_indices.get_unchecked(idx);
+                    let base = *base_offsets.get_unchecked(i);
+                    let current = *current_states.get_unchecked(i);
+                    let next_state = *pre
+                        .transitions
+                        .get_unchecked(current)
+                        .get_unchecked(byte as usize);
+
+                    if next_state != NONE_STATE {
+                        let next_state = next_state as usize;
+                        *current_states.get_unchecked_mut(i) = next_state;
+
+                        for f in pre.finalizers.get_unchecked(next_state) {
+                            let gid = f.gid;
+                            if gid < num_groups {
+                                let idx = base + gid;
+                                let slot = match_positions.get_unchecked_mut(idx);
+                                if f.non_greedy {
+                                    if *slot == NONE_POS {
+                                        *slot = position;
+                                    }
+                                } else {
+                                    *slot = position;
+                                }
+
+                                let groups = touched_groups.get_unchecked_mut(i);
+                                if !groups.contains(&gid) {
+                                    if groups.is_empty() {
+                                        touched_states.push(i);
+                                    }
+                                    groups.push(gid);
+                                }
+                                touched_positions.push(idx);
+                            }
+                        }
+
+                        let terminate = match pre.future_modes.get_unchecked(next_state) {
+                            FutureMode::AlwaysTerminate => true,
+                            FutureMode::AlwaysContinue => false,
+                            FutureMode::Guarded(guard) => {
+                                let mut all_met = true;
+                                for &gid in guard.iter() {
+                                    let idx = base + gid;
+                                    if *match_positions.get_unchecked(idx) == NONE_POS {
+                                        all_met = false;
+                                        break;
+                                    }
+                                }
+                                all_met
+                            }
+                        };
+
+                        if terminate {
+                            *done.get_unchecked_mut(i) = true;
+                        }
+                    } else {
+                        *done.get_unchecked_mut(i) = true;
+                    }
+
+                    if !*done.get_unchecked(i) {
+                        *active_indices.get_unchecked_mut(next_len) = i;
+                        next_len += 1;
+                    }
+                }
+            }
+
+            active_len = next_len;
+            if active_len == 0 {
+                break;
+            }
         }
     }
 
