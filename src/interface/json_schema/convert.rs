@@ -255,8 +255,8 @@ impl SchemaToGrammar {
         // We inline the character class and escape sequence patterns to avoid
         // them becoming separate tokenizer groups.
         let char_or_escape = GrammarType::choice(vec![
-            // STRING_CHAR: any printable char except " and \
-            GrammarType::CharClass("[^\"\\\\\\x00-\\x1f]".to_string()),
+            // STRING_CHAR: valid JSON chars (exclude control bytes, " and \\)
+            GrammarType::CharClass(r"[\x20-\x21\x23-\x5B\x5D-\xFF]".to_string()),
             // ESCAPE_SEQ: \x where x is one of the escape chars, or \uHHHH
             GrammarType::seq(vec![
                 GrammarType::lit("\\"),

@@ -171,9 +171,9 @@ impl GrammarEmitter {
             ])
         ))));
         
-        // STRING_CHAR - printable chars except " and \
-        self.rules.push(("STRING_CHAR".to_string(), 
-            GrammarExpr::CharClass("[^\"\\\\\\x00-\\x1f]".to_string())
+        // STRING_CHAR - valid JSON string chars (exclude control bytes, " and \\)
+        self.rules.push(("STRING_CHAR".to_string(),
+            GrammarExpr::CharClass(r"[\x20-\x21\x23-\x5B\x5D-\xFF]".to_string())
         ));
         
         // ESCAPE_SEQ
