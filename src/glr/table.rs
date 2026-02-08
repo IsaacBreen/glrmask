@@ -137,6 +137,38 @@ pub fn detect_whitespace_like_terminals(
     // A terminal T is whitespace-like if for every occurrence of T in a production,
     // there exists a corresponding production without T at that position
     let mut whitespace_like: HashSet<TerminalID> = HashSet::new();
+
+    // Terminals are only considered if they appear exclusively inside pure wrapper nonterminals.
+    let mut terminal_nonterminals: HashMap<Terminal, HashSet<NonTerminal>> = HashMap::new();
+    for prod in productions {
+        for sym in &prod.rhs {
+            if let Symbol::Terminal(t) = sym {
+                terminal_nonterminals
+                    .entry(t.clone())
+                    .or_default()
+                    .insert(prod.lhs.clone());
+            }
+        }
+    }
+
+    let mut pure_wrapper_terminals: HashSet<Terminal> = HashSet::new();
+    'terminal_check: for (terminal, nonterminals) in &terminal_nonterminals {
+        for nt in nonterminals {
+            for prod in productions {
+                if prod.lhs != *nt {
+                    continue;
+                }
+                for sym in &prod.rhs {
+                    match sym {
+                        Symbol::Terminal(t) if t == terminal => {}
+                        Symbol::NonTerminal(n) if n == nt => {}
+                        _ => continue 'terminal_check,
+                    }
+                }
+            }
+        }
+        pure_wrapper_terminals.insert(terminal.clone());
+    }
     
     // Build a set of all (LHS, RHS) pairs for quick lookup
     let production_set: HashSet<(NonTerminal, Vec<Symbol>)> = productions
@@ -145,6 +177,9 @@ pub fn detect_whitespace_like_terminals(
         .collect();
     
     'terminal_loop: for terminal in &all_terminals {
+        if !pure_wrapper_terminals.contains(terminal) {
+            continue;
+        }
         let terminal_sym = Symbol::Terminal(terminal.clone());
         
         // Check every production to see if this terminal appears
