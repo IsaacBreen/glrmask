@@ -724,6 +724,10 @@ fn stage_1(
     let mut worklist: VecDeque<Vec<Item>> = VecDeque::new();
     let mut table: Stage1Table = Vec::new();
 
+    let mut total_closure_items: usize = 0;
+    let mut max_closure_items: usize = 0;
+    let mut closure_state_count: usize = 0;
+
     item_set_map_fast.insert(initial_kernel.clone(), StateID(next_state_id));
     next_state_id += 1;
     worklist.push_back(initial_kernel);
@@ -766,6 +770,13 @@ fn stage_1(
                     }
                 }
             }
+        }
+
+        let closure_len = closure.len();
+        closure_state_count = closure_state_count.saturating_add(1);
+        total_closure_items = total_closure_items.saturating_add(closure_len);
+        if closure_len > max_closure_items {
+            max_closure_items = closure_len;
         }
 
         let mut transitions: BTreeMap<Option<usize>, Vec<Item>> = BTreeMap::new();
@@ -823,6 +834,19 @@ fn stage_1(
 
         table[state_id.0] = row;
     }
+
+    let avg_closure_items = if closure_state_count == 0 {
+        0.0
+    } else {
+        total_closure_items as f64 / closure_state_count as f64
+    };
+    eprintln!(
+        "STATS: glr_stage1_lr0_closure states={} total_items={} max_items={} avg_items={:.2}",
+        closure_state_count,
+        total_closure_items,
+        max_closure_items,
+        avg_closure_items,
+    );
 
     (table, item_set_map_fast)
 }
