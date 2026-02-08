@@ -373,6 +373,20 @@ fn find_state_equivalence_classes_token_based(
         .map(|state| state.finalizers.iter().collect())
         .collect();
 
+    let mut max_gid: Option<usize> = None;
+    for finals in &dfa_finalizers {
+        if let Some(m) = finals.iter().max() {
+            max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
+        }
+    }
+    let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
+    let mut non_greedy_flags = vec![false; num_groups];
+    for &gid in &dfa.non_greedy_finalizers {
+        if gid < num_groups {
+            non_greedy_flags[gid] = true;
+        }
+    }
+
     // Count states with finalizers for optimization insight
     let states_with_finalizers = dfa_finalizers.iter().filter(|f| !f.is_empty()).count();
     crate::debug!(
@@ -408,8 +422,7 @@ fn find_state_equivalence_classes_token_based(
         })
         .collect();
 
-    // Get non-greedy finalizers for proper position tracking
-    let non_greedy_finalizers = &dfa.non_greedy_finalizers;
+    // Precomputed non-greedy flags for proper position tracking
 
     // Process tokens in lexicographic order and reuse prefix simulations per state.
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
@@ -439,11 +452,44 @@ fn find_state_equivalence_classes_token_based(
         prev_token = Some(token);
     }
 
+    let total_tokens = sorted_tokens.len();
+
+    let mut weight_prefix: Vec<u128> = vec![0u128; total_tokens + 1];
+    for i in 0..total_tokens {
+        weight_prefix[i + 1] = weight_prefix[i].wrapping_add(sorted_weights[i]);
+    }
+
+    let mut empty_end = 0usize;
+    while empty_end < total_tokens && sorted_tokens[empty_end].is_empty() {
+        empty_end += 1;
+    }
+    let empty_range = (0usize, empty_end);
+
+    let mut first_byte_ranges: Vec<(usize, usize)> = vec![(0usize, 0usize); 256];
+    let mut idx = empty_end;
+    while idx < total_tokens {
+        let byte = sorted_tokens[idx][0] as usize;
+        let start = idx;
+        idx += 1;
+        while idx < total_tokens
+            && !sorted_tokens[idx].is_empty()
+            && sorted_tokens[idx][0] as usize == byte
+        {
+            idx += 1;
+        }
+        first_byte_ranges[byte] = (start, idx);
+    }
+
+    let dead_hash_depth1 = {
+        let structure = mix_u128(1_u128 ^ 0xDEAD_DEAD_DEAD_DEAD);
+        let end = mix_u128(0xDEADBEEF_u128);
+        end.wrapping_add(structure)
+    };
+
     let early_stop = std::env::var("STATE_EQUIV_EARLY_STOP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let batch_size = 5000usize;
-    let total_tokens = sorted_tokens.len();
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
     let mut next_group_ids: Vec<usize> = vec![0usize; states.len()];
@@ -461,86 +507,194 @@ fn find_state_equivalence_classes_token_based(
             .map(|i| {
                 let state = states[i] as u32;
                 let mut hash_delta: u128 = 0;
-                let mut state_stack: Vec<u32> = vec![state];
+                let state_transitions = &dfa_transitions[state as usize];
 
-                for token_idx in batch_start..batch_end {
-                    let token = sorted_tokens[token_idx];
-                    let mut prefix_len = if token_idx == batch_start {
-                        0
+                let mut dead_weight_sum: u128 = 0;
+                let mut live_ranges: Vec<(usize, usize)> = Vec::new();
+
+                if empty_range.0 < empty_range.1 {
+                    let start = empty_range.0.max(batch_start);
+                    let end = empty_range.1.min(batch_end);
+                    if start < end {
+                        live_ranges.push((start, end));
+                    }
+                }
+
+                for byte in 0usize..256 {
+                    let (range_start, range_end) = first_byte_ranges[byte];
+                    if range_start >= range_end {
+                        continue;
+                    }
+                    let start = range_start.max(batch_start);
+                    let end = range_end.min(batch_end);
+                    if start >= end {
+                        continue;
+                    }
+
+                    if state_transitions[byte] == NONE_STATE {
+                        let weight_sum = weight_prefix[end].wrapping_sub(weight_prefix[start]);
+                        dead_weight_sum = dead_weight_sum.wrapping_add(weight_sum);
                     } else {
-                        lcp_with_prev[token_idx]
-                    };
-                    let max_prefix = state_stack.len().saturating_sub(1);
-                    if prefix_len > max_prefix {
-                        prefix_len = max_prefix;
+                        live_ranges.push((start, end));
                     }
-                    state_stack.truncate(prefix_len + 1);
+                }
 
-                    let mut matches: std::collections::BTreeMap<usize, usize> =
-                        std::collections::BTreeMap::new();
-                    let mut dead_at_depth: Option<usize> = None;
+                if dead_weight_sum != 0 {
+                    hash_delta = hash_delta.wrapping_add(
+                        dead_hash_depth1.wrapping_mul(dead_weight_sum),
+                    );
+                }
 
-                    for depth in 1..=prefix_len {
-                        let current = state_stack[depth];
-                        if current == NONE_STATE {
-                            dead_at_depth = Some(depth);
-                            break;
-                        }
-                        let position = depth;
-                        for &gid in &dfa_finalizers[current as usize] {
-                            if non_greedy_finalizers.contains(&gid) {
-                                matches.entry(gid).or_insert(position);
-                            } else {
-                                matches.insert(gid, position);
-                            }
-                        }
+                let mut state_stack: Vec<u32> = Vec::new();
+                let mut dead_depth_stack: Vec<Option<usize>> = Vec::new();
+                let mut depth_marks: Vec<usize> = Vec::new();
+                let mut matches_len: usize = 0;
+                let mut matches_hash_sum: u128 = 0;
+                let mut positions: Vec<i32> = vec![-1; num_groups];
+                let mut changes: Vec<(usize, i32)> = Vec::new();
+
+                for (range_start, range_end) in live_ranges {
+                    if range_start >= range_end {
+                        continue;
                     }
 
-                    if dead_at_depth.is_none() {
-                        let mut current = *state_stack.last().unwrap();
-                        for (offset, &byte) in token[prefix_len..].iter().enumerate() {
-                            if current == NONE_STATE {
-                                dead_at_depth = Some(prefix_len + offset);
-                                break;
-                            }
-                            let next = dfa_transitions[current as usize][byte as usize];
-                            if next == NONE_STATE {
-                                dead_at_depth = Some(prefix_len + offset + 1);
-                                state_stack.push(NONE_STATE);
-                                current = NONE_STATE;
-                                break;
-                            }
-                            current = next;
-                            state_stack.push(current);
-                            let position = prefix_len + offset + 1;
-                            for &gid in &dfa_finalizers[current as usize] {
-                                if non_greedy_finalizers.contains(&gid) {
-                                    matches.entry(gid).or_insert(position);
+                    state_stack.clear();
+                    state_stack.push(state);
+                    dead_depth_stack.clear();
+                    dead_depth_stack.push(None);
+                    depth_marks.clear();
+                    depth_marks.push(0);
+                    if num_groups > 0 {
+                        positions.fill(-1);
+                    }
+                    changes.clear();
+                    matches_len = 0;
+                    matches_hash_sum = 0;
+
+                    for token_idx in range_start..range_end {
+                        let token = sorted_tokens[token_idx];
+                        let mut prefix_len = if token_idx == range_start {
+                            0
+                        } else {
+                            lcp_with_prev[token_idx]
+                        };
+                        let max_prefix = state_stack.len().saturating_sub(1);
+                        if prefix_len > max_prefix {
+                            prefix_len = max_prefix;
+                        }
+
+                        if state_stack.len() > prefix_len + 1 {
+                            let target_mark = depth_marks[prefix_len];
+                            while changes.len() > target_mark {
+                                let (gid, prev_pos) = changes.pop().unwrap();
+                                let cur_pos = positions[gid];
+                                if cur_pos >= 0 {
+                                    let cur_pos_u = cur_pos as u32;
+                                    matches_hash_sum = matches_hash_sum.wrapping_sub(mix_u128(
+                                        (gid as u128) | ((cur_pos_u as u128) << 32),
+                                    ));
+                                    if prev_pos < 0 {
+                                        matches_len -= 1;
+                                        positions[gid] = -1;
+                                    } else {
+                                        let prev_pos_u = prev_pos as u32;
+                                        matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
+                                            (gid as u128) | ((prev_pos_u as u128) << 32),
+                                        ));
+                                        positions[gid] = prev_pos;
+                                    }
                                 } else {
-                                    matches.insert(gid, position);
+                                    positions[gid] = prev_pos;
                                 }
                             }
+
+                            state_stack.truncate(prefix_len + 1);
+                            dead_depth_stack.truncate(prefix_len + 1);
+                            depth_marks.truncate(prefix_len + 1);
                         }
+
+                        let mut dead_at_depth = dead_depth_stack[prefix_len];
+
+                        if dead_at_depth.is_none() {
+                            let mut current = *state_stack.last().unwrap();
+                            for (offset, &byte) in token[prefix_len..].iter().enumerate() {
+                                if current == NONE_STATE {
+                                    dead_at_depth = Some(prefix_len + offset);
+                                    break;
+                                }
+                                let next = dfa_transitions[current as usize][byte as usize];
+                                if next == NONE_STATE {
+                                    dead_at_depth = Some(prefix_len + offset + 1);
+                                    state_stack.push(NONE_STATE);
+                                    dead_depth_stack.push(dead_at_depth);
+                                    depth_marks.push(changes.len());
+                                    break;
+                                }
+                                current = next;
+                                state_stack.push(current);
+                                let position = prefix_len + offset + 1;
+
+                                if num_groups > 0 {
+                                    for &gid in &dfa_finalizers[current as usize] {
+                                        if gid >= num_groups {
+                                            continue;
+                                        }
+                                        let pos_i32 = position as i32;
+                                        if non_greedy_flags[gid] {
+                                            if positions[gid] < 0 {
+                                                positions[gid] = pos_i32;
+                                                matches_len += 1;
+                                                matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
+                                                    (gid as u128) | ((position as u128) << 32),
+                                                ));
+                                                changes.push((gid, -1));
+                                            }
+                                        } else {
+                                            let prev = positions[gid];
+                                            if prev != pos_i32 {
+                                                if prev < 0 {
+                                                    matches_len += 1;
+                                                    matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
+                                                        (gid as u128) | ((position as u128) << 32),
+                                                    ));
+                                                    changes.push((gid, -1));
+                                                } else {
+                                                    matches_hash_sum = matches_hash_sum.wrapping_sub(mix_u128(
+                                                        (gid as u128) | ((prev as u128) << 32),
+                                                    ));
+                                                    matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
+                                                        (gid as u128) | ((position as u128) << 32),
+                                                    ));
+                                                    changes.push((gid, prev));
+                                                }
+                                                positions[gid] = pos_i32;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                dead_depth_stack.push(dead_at_depth);
+                                depth_marks.push(changes.len());
+                            }
+                        }
+
+                        let (structure_hash, end_hash) = if let Some(dead_depth) = dead_at_depth {
+                            (
+                                mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD),
+                                mix_u128(0xDEADBEEF_u128),
+                            )
+                        } else {
+                            let sh = mix_u128(matches_len as u128 | (1u128 << 48))
+                                .wrapping_add(matches_hash_sum);
+                            let current = *state_stack.last().unwrap();
+                            (sh, end_state_hashes[current as usize])
+                        };
+
+                        let token_hash = end_hash.wrapping_add(structure_hash);
+                        hash_delta = hash_delta.wrapping_add(
+                            token_hash.wrapping_mul(sorted_weights[token_idx]),
+                        );
                     }
-
-                    let (structure_hash, end_hash) = if let Some(dead_depth) = dead_at_depth {
-                        (
-                            mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD),
-                            mix_u128(0xDEADBEEF_u128),
-                        )
-                    } else {
-                        let mut sh = mix_u128(matches.len() as u128 | (1u128 << 48));
-                        for (&gid, &pos) in &matches {
-                            sh = sh.wrapping_add(mix_u128((gid as u128) | ((pos as u128) << 32)));
-                        }
-                        let current = *state_stack.last().unwrap();
-                        (sh, end_state_hashes[current as usize])
-                    };
-
-                    let token_hash = end_hash.wrapping_add(structure_hash);
-                    hash_delta = hash_delta.wrapping_add(
-                        token_hash.wrapping_mul(sorted_weights[token_idx]),
-                    );
                 }
 
                 hash_delta
