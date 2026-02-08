@@ -7,7 +7,7 @@ use sep1::json_serialization::JSONConvertible;
 use sep1::dfa_u8::{LLMTokenID, LLMTokenMap};
 use sep1::r#macro::{colors::*, is_debug_level_enabled, format_duration};
 use sep1::datastructures::flush_weight_dump;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufWriter, Write, Read};
 use std::path::PathBuf;
@@ -75,6 +75,36 @@ fn parse_len_ranges(ranges: &[String]) -> Result<(std::collections::HashSet<usiz
         }
     }
     Ok((allowed, min_unbounded))
+}
+
+fn build_gpt2_byte_decoder() -> HashMap<char, u8> {
+    let mut byte_decoder: HashMap<char, u8> = HashMap::new();
+
+    for b in b'!'..=b'~' {
+        byte_decoder.insert(b as char, b);
+    }
+    for b in 0xa1u8..=0xac {
+        byte_decoder.insert(b as char, b);
+    }
+    for b in 0xaeu8..=0xff {
+        byte_decoder.insert(b as char, b);
+    }
+
+    let mut n: u32 = 0;
+    for b in 0u8..=255 {
+        if !byte_decoder.values().any(|&v| v == b) {
+            byte_decoder.insert(char::from_u32(256 + n).unwrap(), b);
+            n += 1;
+        }
+    }
+    byte_decoder
+}
+
+fn gpt2_bpe_decode(token_str: &str, byte_decoder: &HashMap<char, u8>) -> Vec<u8> {
+    token_str
+        .chars()
+        .map(|c| *byte_decoder.get(&c).unwrap_or(&(c as u8)))
+        .collect()
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -197,14 +227,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(false);
     let mut filtered_grammar_tokens: usize = 0;
 
+    let byte_decoder = build_gpt2_byte_decoder();
     for (token_str, token_id) in vocab {
-        let processed_token_str = token_str
-            .replace("Ġ", " ")
-            .replace("ą", "\n")
-            .replace("Ċ", "\n")
-            .replace("ĉ", "\t")
-            .replace("č", "\r");
-        let token_bytes = processed_token_str.as_bytes().to_vec();
+        let token_bytes = gpt2_bpe_decode(&token_str, &byte_decoder);
 
         if has_filter {
             let len = token_bytes.len();

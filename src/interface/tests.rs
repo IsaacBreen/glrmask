@@ -35,6 +35,25 @@ mod tests {
     }
 
     #[test]
+    fn test_char_class_excludes_control_bytes() {
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let ebnf = r#"
+            root ::= STRING_CHAR ;
+            STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF] ;
+        "#;
+
+        let grammar_def = GrammarDefinition::from_ebnf(ebnf).expect("EBNF should parse");
+        let compiled = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
+        let tokenizer = compiled.tokenizer();
+
+        let res_control = tokenizer.execute_from_state(&[0x00], tokenizer.initial_state_id());
+        assert!(res_control.matches.is_empty(), "control byte 0x00 should not match");
+
+        let res_space = tokenizer.execute_from_state(&[0x20], tokenizer.initial_state_id());
+        assert!(!res_space.matches.is_empty(), "space 0x20 should match");
+    }
+
+    #[test]
     fn test_precompute_for_python_name_token_with_names() {
         let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let ignore_expr = repeat0_fast(choice_fast!(
