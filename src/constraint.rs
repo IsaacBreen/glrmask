@@ -4154,17 +4154,15 @@ impl<'a> GrammarConstraintState<'a> {
 
             for (state_id, paths) in &heads {
                 if let Some(row) = get_row(table, *state_id) {
-                    // Only consider default reduces that apply to all lookaheads (EOF-like).
                     let mut reduces: Vec<(NonTerminalID, usize)> = Vec::new();
-                    if row.default_reduce_lookaheads.is_none() {
-                        if let Some(default) = &row.default_reduce {
-                            Self::collect_reduces(default, &mut reduces);
-                        }
+                    if let Some(default) = &row.default_reduce {
+                        Self::collect_reduces(default, &mut reduces);
                     }
 
                     if reduces.is_empty() {
                         continue;
                     }
+
                     reduces.sort();
                     reduces.dedup();
 

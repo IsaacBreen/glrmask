@@ -349,6 +349,8 @@ impl<'a> GrammarConstraintState<'a> {
         };
         let mut mask = self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal);
         if let Some(eos_id) = self.parent.eos_token_id {
+            // Treat EOS as a reserved token: only allow it when the parse is complete.
+            mask.remove(eos_id);
             if self.is_complete() {
                 mask.insert(eos_id);
             }
@@ -378,10 +380,11 @@ impl<'a> GrammarConstraintState<'a> {
         };
         self.parent.parser_dwa_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
         if let Some(eos_id) = self.parent.eos_token_id {
-            if self.is_complete() {
-                let word_idx = eos_id / 32;
-                let bit_idx = eos_id % 32;
-                if word_idx < out.len() {
+            let word_idx = eos_id / 32;
+            let bit_idx = eos_id % 32;
+            if word_idx < out.len() {
+                out[word_idx] &= !(1i32 << bit_idx);
+                if self.is_complete() {
                     out[word_idx] |= 1i32 << bit_idx;
                 }
             }
