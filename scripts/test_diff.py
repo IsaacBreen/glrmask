@@ -93,27 +93,79 @@ def generate_diff_grammar(source_path: str) -> str:
 
     num_lines = len(lines)
     grammar_parts = []
+    use_balanced_tree = os.environ.get("DIFF_BALANCED_TREE") == "1"
+    balanced_no_hunk = os.environ.get("DIFF_BALANCED_NO_HUNK") == "1"
+    use_one_big_terminal = os.environ.get("DIFF_ONE_BIG_TERMINAL") == "1"
+    seg_root = f"seg0_{num_lines - 1}" if num_lines > 0 else "seg_empty"
 
     # --- 1. Preamble and Top-Level Rules ---
     grammar_parts.append("root ::= diff;")
-    grammar_parts.append("diff ::= file_header? ( HUNK_HEADER s0 )? EOF;")
+    if use_one_big_terminal:
+        if balanced_no_hunk:
+            grammar_parts.append("diff ::= file_header? diff_body? EOF;")
+        else:
+            grammar_parts.append("diff ::= file_header? ( HUNK_HEADER diff_body )? EOF;")
+        grammar_parts.append("diff_body ::= ( PLUS_LINE | VALID_LINE )*;")
+    elif use_balanced_tree:
+        if balanced_no_hunk:
+            grammar_parts.append(f"diff ::= file_header? {seg_root}? EOF;")
+        else:
+            grammar_parts.append(f"diff ::= file_header? ( HUNK_HEADER {seg_root} )? EOF;")
+    else:
+        grammar_parts.append("diff ::= file_header? ( HUNK_HEADER s0 )? EOF;")
     grammar_parts.append("file_header ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;")
     grammar_parts.append("EOF  ::= '<|EOF|>';")  # Ensure this matches your tokenizer's EOF
     grammar_parts.append("")
 
     # --- 2. 's' Rules (Search for Hunk Start) ---
-    grammar_parts.append("// 's' rules: Find the start of a hunk")
-    for i in range(num_lines):
-        # Try to match line i, or skip and try line i+1
-        grammar_parts.append(f"s{i} ::= line{i} | s{i+1};")
+    if use_one_big_terminal:
+        grammar_parts.append("// 's' rules skipped: one-big-terminal mode")
+        grammar_parts.append("")
+    elif use_balanced_tree:
+        grammar_parts.append("// 'seg' rules: Balanced tree for line subsequences")
+        seen_segments = set()
 
-    # If we reach the end of the file, we only allow trailing additions
-    grammar_parts.append(f"s{num_lines} ::= PLUS_LINE*;")
-    grammar_parts.append("")
+        def emit_segment(start: int, end: int) -> str:
+            name = f"seg{start}_{end}"
+            if (start, end) in seen_segments:
+                return name
+            seen_segments.add((start, end))
+
+            if start > end:
+                grammar_parts.append(f"{name} ::= PLUS_LINE*;")
+                return name
+            if start == end:
+                grammar_parts.append(f"{name} ::= line{start}?;")
+                return name
+
+            mid = (start + end) // 2
+            left = emit_segment(start, mid)
+            right = emit_segment(mid + 1, end)
+            grammar_parts.append(f"{name} ::= {left} {right}?;")
+            return name
+
+        emit_segment(0, num_lines - 1)
+        grammar_parts.append("")
+    else:
+        grammar_parts.append("// 's' rules: Find the start of a hunk")
+        for i in range(num_lines):
+            # Try to match line i, or skip and try line i+1
+            grammar_parts.append(f"s{i} ::= line{i} | s{i+1};")
+
+        # If we reach the end of the file, we only allow trailing additions
+        grammar_parts.append(f"s{num_lines} ::= PLUS_LINE*;")
+        grammar_parts.append("")
 
     # --- 3. 'line' Rules (Match Context/Deletion) ---
     grammar_parts.append("// 'line' rules: Match content exactly, then continue or new hunk")
     for i in range(num_lines):
+        if use_one_big_terminal:
+            continue
+        if use_balanced_tree:
+            # Balanced tree mode: keep line rule minimal for sequencing via segments.
+            grammar_parts.append(f"line{i} ::= PLUS_LINE* content{i} PLUS_LINE*;")
+            continue
+
         # After matching line i, we can:
         # 1. Continue immediately to line i+1
         # 2. Have some additions, then a Hunk Header, skipping to i+1
@@ -140,28 +192,52 @@ def generate_diff_grammar(source_path: str) -> str:
     grammar_parts.append("")
 
     # --- 5. Content Lines ---
-    # Use lowercase rule names so line content is parsed, not treated as a terminal regex.
     grammar_parts.append("// Context-line terminals")
-    for i, line in enumerate(lines):
-        content = line.rstrip('\r\n')
+    if use_one_big_terminal:
+        non_empty_lines = []
+        has_empty = False
+        for line in lines:
+            content = line.rstrip('\r\n')
+            if not content:
+                has_empty = True
+                continue
+            escaped = content.replace("\\", "\\\\").replace('"', "\\\"")
+            non_empty_lines.append(f'"{escaped}"')
 
-        if not content:
-            # Strict diffs require a space or minus even for empty lines
-            grammar_parts.append(f"content{i} ::= ( ' ' | '-' ) NEWLINE;")
+        if non_empty_lines:
+            body = " | ".join(non_empty_lines)
+            if has_empty:
+                grammar_parts.append(
+                    f"VALID_LINE ::= ( \" \" | \"-\" ) ( NEWLINE | ( {body} ) NEWLINE );"
+                )
+            else:
+                grammar_parts.append(
+                    f"VALID_LINE ::= ( \" \" | \"-\" ) ( {body} ) NEWLINE;"
+                )
         else:
-            # Emit per-character literals to keep the terminal set small.
-            escaped_chars = []
-            for ch in content:
-                if ch == "\\":
-                    escaped_chars.append("\\\\")
-                elif ch == '"':
-                    escaped_chars.append("\\\"")
-                else:
-                    escaped_chars.append(ch)
-            char_terms = " ".join(f'"{ch}"' for ch in escaped_chars)
-            grammar_parts.append(
-                f"content{i} ::= ( \" \" | \"-\" ) {char_terms} NEWLINE;"
-            )
+            grammar_parts.append("VALID_LINE ::= ( \" \" | \"-\" ) NEWLINE;")
+    else:
+        # Use lowercase rule names so line content is parsed, not treated as a terminal regex.
+        for i, line in enumerate(lines):
+            content = line.rstrip('\r\n')
+
+            if not content:
+                # Strict diffs require a space or minus even for empty lines
+                grammar_parts.append(f"content{i} ::= ( ' ' | '-' ) NEWLINE;")
+            else:
+                # Emit per-character literals to keep the terminal set small.
+                escaped_chars = []
+                for ch in content:
+                    if ch == "\\":
+                        escaped_chars.append("\\\\")
+                    elif ch == '"':
+                        escaped_chars.append("\\\"")
+                    else:
+                        escaped_chars.append(ch)
+                char_terms = " ".join(f'"{ch}"' for ch in escaped_chars)
+                grammar_parts.append(
+                    f"content{i} ::= ( \" \" | \"-\" ) {char_terms} NEWLINE;"
+                )
 
     return '\n'.join(grammar_parts)
 
