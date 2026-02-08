@@ -40,6 +40,7 @@ use crate::{
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::TerminalsDisallowed;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
+use crate::glr::table::{get_row, Stage7ShiftsAndReducesLookaheadValue, StateID as TableStateID, NonTerminalID};
 use crate::dwa_i32::{DWA, NWA};
 use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 
@@ -184,6 +185,14 @@ impl GrammarConstraintConfig {
     pub fn off() -> Self { Self::default() }
 }
 
+const EOS_TOKEN_BYTES: &[u8] = b"<|endoftext|>";
+
+fn find_eos_token_id(vocab_trie: &LLMVocabTrie) -> Option<usize> {
+    vocab_trie
+        .iter()
+        .find_map(|(id, bytes)| if bytes == EOS_TOKEN_BYTES { Some(id) } else { None })
+}
+
 // ---------------------------------------------------------------------------
 // Main structure
 // ---------------------------------------------------------------------------
@@ -214,6 +223,9 @@ pub struct GrammarConstraint {
 
     /// Vocabulary mappings for the Parser DWA stage.
     pub parser_dwa_vocab: StageVocab,
+
+    /// Optional EOS token id derived from the vocab bytes.
+    pub eos_token_id: Option<usize>,
     
     /// Number of tokenizer states (M in weight-heavy encoding).
     /// When representative compression is enabled, this becomes the number of rep states.
@@ -252,6 +264,7 @@ impl GrammarConstraint {
         assert_eq!(self.possible_matches, other.possible_matches);
         assert_eq!(self.parser_dwa_vocab, other.parser_dwa_vocab);
         assert_eq!(self.vocab_trie, other.vocab_trie);
+        assert_eq!(self.eos_token_id, other.eos_token_id);
         assert_eq!(self.num_tsids, other.num_tsids);
         assert_eq!(self.tsid_offset_map, other.tsid_offset_map);
     }
@@ -518,6 +531,8 @@ impl JSONConvertible for GrammarConstraint {
             num_tsids_for_dims,
         );
 
+        let eos_token_id = find_eos_token_id(&vocab_trie);
+
         #[allow(deprecated)]
         Ok(GrammarConstraint {
             tokenizer,
@@ -528,6 +543,7 @@ impl JSONConvertible for GrammarConstraint {
             token_name_map: intermediate.token_name_map,
             possible_matches,
             parser_dwa_vocab: intermediate.vocab,
+            eos_token_id,
             num_tsids: intermediate.num_tsids,
             tsid_offset_map: if intermediate.num_tsids > 0 {
                 intermediate
@@ -3321,6 +3337,7 @@ impl GrammarConstraint {
             vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
 
             let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
+            let eos_token_id = find_eos_token_id(&vocab_trie);
 
             #[allow(deprecated)]
             return GrammarConstraint {
@@ -3332,6 +3349,7 @@ impl GrammarConstraint {
                 commit_vocab,
                 token_name_map,
                 parser_dwa_vocab: vocab,
+                eos_token_id,
                 num_tsids,
                 tsid_offset_map,
             };
@@ -3532,6 +3550,7 @@ impl GrammarConstraint {
         }));
         eprintln!("TIMING: build_vocab_trie {:?}", vocab_trie_start.elapsed());
         crate::debug!(5, "LLMVocabTrie::from_token_map: end");
+        let eos_token_id = find_eos_token_id(&vocab_trie);
         
         crate::debug!(5, "GrammarConstraint build_with_config_inner: end");
         #[allow(deprecated)]
@@ -3544,6 +3563,7 @@ impl GrammarConstraint {
             commit_vocab,
             token_name_map,
             parser_dwa_vocab: vocab,
+            eos_token_id,
             num_tsids,
             tsid_offset_map,
         }
@@ -4100,5 +4120,105 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
         &self.state
+    }
+
+    /// Check if the current state represents a complete valid parse.
+    /// Returns true if the generated text so far is a complete valid string
+    /// in the grammar, meaning EOS should be a valid token.
+    pub fn is_complete(&self) -> bool {
+        let initial_tsid = self.parent.tokenizer.initial_state_id();
+        let parser_state = match self.state.get(&initial_tsid) {
+            Some(ps) => ps,
+            None => return false,
+        };
+
+        if parser_state.stack.is_empty() {
+            return false;
+        }
+
+        let table = &self.parent.parser.table;
+
+        // Collect stack top states into a worklist
+        let mut heads: BTreeMap<TableStateID, Vec<Vec<ParseStateEdgeContent>>> = BTreeMap::new();
+        for (path, _acc) in parser_state.stack.to_stacks() {
+            if let Some(top) = path.last() {
+                heads.entry(top.state_id).or_default().push(path);
+            }
+        }
+
+        // Worklist: try all possible reduces exhaustively to find acceptance
+        let max_iterations = 200;
+        for _ in 0..max_iterations {
+            let mut new_heads: BTreeMap<TableStateID, Vec<Vec<ParseStateEdgeContent>>> = BTreeMap::new();
+            let mut found_acceptance = false;
+
+            for (state_id, paths) in &heads {
+                if let Some(row) = get_row(table, *state_id) {
+                    // Only consider default reduces that apply to all lookaheads (EOF-like).
+                    let mut reduces: Vec<(NonTerminalID, usize)> = Vec::new();
+                    if row.default_reduce_lookaheads.is_none() {
+                        if let Some(default) = &row.default_reduce {
+                            Self::collect_reduces(default, &mut reduces);
+                        }
+                    }
+
+                    if reduces.is_empty() {
+                        continue;
+                    }
+                    reduces.sort();
+                    reduces.dedup();
+
+                    for (nt_id, len) in &reduces {
+                        for path in paths {
+                            if path.len() < *len + 1 {
+                                continue; // Not enough stack elements to pop
+                            }
+                            // After popping `len` elements, the exposed state is at position path.len() - len - 1
+                            let exposed_idx = path.len() - *len - 1;
+                            let from_state = path[exposed_idx].state_id;
+
+                            if let Some(row2) = get_row(table, from_state) {
+                                if let Some(goto) = row2.gotos.get(nt_id) {
+                                    if goto.accept {
+                                        found_acceptance = true;
+                                    }
+                                    if let Some(next_id) = goto.state_id {
+                                        let mut new_path = path[..=exposed_idx].to_vec();
+                                        new_path.push(ParseStateEdgeContent { state_id: next_id });
+                                        new_heads.entry(next_id).or_default().push(new_path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if found_acceptance {
+                return true;
+            }
+            if new_heads.is_empty() {
+                return false;
+            }
+            heads = new_heads;
+        }
+
+        false
+    }
+
+    fn collect_reduces(action: &Stage7ShiftsAndReducesLookaheadValue, reduces: &mut Vec<(NonTerminalID, usize)>) {
+        match action {
+            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                reduces.push((*nonterminal_id, *len));
+            }
+            Stage7ShiftsAndReducesLookaheadValue::Split { reduces: split_reduces, .. } => {
+                for (len, nts) in split_reduces {
+                    for (nt_id, _) in nts {
+                        reduces.push((*nt_id, *len));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }

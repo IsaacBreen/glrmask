@@ -36,16 +36,18 @@ impl<'a> GrammarConstraintState<'a> {
     /// Expose compute_internal_mask for testing/debugging.
     #[cfg(test)]
     pub fn compute_internal_mask_debug(&self) -> RangeSet {
-        self.compute_internal_mask()
+        let (mask, _) = self.compute_internal_mask();
+        mask
     }
     
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
     /// This is the core computation shared by get_mask and fill_mask_i32.
-    fn compute_internal_mask(&self) -> RangeSet {
+    fn compute_internal_mask(&self) -> (RangeSet, bool) {
         let mut final_mask_internal = RangeSet::zeros();
+        let mut has_accepting = false;
         if self.state.is_empty() {
             crate::debug!(7, "compute_internal_mask: state is empty");
-            return final_mask_internal;
+            return (final_mask_internal, has_accepting);
         }
 
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
@@ -124,6 +126,7 @@ impl<'a> GrammarConstraintState<'a> {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let final_tokens = &reduced_acc & &final_weight.to_rsb_allow_expansion();
                         if !final_tokens.is_empty() {
+                            has_accepting = true;
                             crate::debug!(7, "Adding {} tokens from final state {}", final_tokens.ranges_len(), current_wa_state_id);
                             final_mask_internal |= RangeSet::from(final_tokens);
                         }
@@ -178,7 +181,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        final_mask_internal
+        (final_mask_internal, has_accepting)
     }
 
     /// Compute the internal mask using weight-heavy encoding.
@@ -188,13 +191,14 @@ impl<'a> GrammarConstraintState<'a> {
     /// - Weights are in N×M space where position = llm_token * M + tsid
     /// - No tsid transitions at DWA start (replaced with epsilon transitions)
     /// - We seed directly at the start state, applying tsid masks to weights
-    fn compute_internal_mask_weight_heavy(&self) -> RangeSet {
+    fn compute_internal_mask_weight_heavy(&self) -> (RangeSet, bool) {
         let num_tsids = self.parent.num_tsids;
         let max_llm_token = self.parent.parser_dwa_vocab.internal_max_llm_token;
         
         let mut final_mask_internal = RangeSet::zeros();
+        let mut has_accepting = false;
         if self.state.is_empty() {
-            return final_mask_internal;
+            return (final_mask_internal, has_accepting);
         }
 
         let dwa = &self.parent.parser_dwa;
@@ -269,6 +273,7 @@ impl<'a> GrammarConstraintState<'a> {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let final_tokens = &reduced_acc & &final_weight.to_rsb_allow_expansion();
                         if !final_tokens.is_empty() {
+                            has_accepting = true;
                             // Collapse from N×M to N before adding to result
                             let collapsed = collapse_weight_rsb(&final_tokens, num_tsids);
                             final_mask_internal |= RangeSet::from(collapsed);
@@ -324,7 +329,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        final_mask_internal
+        (final_mask_internal, has_accepting)
     }
 
     /// Get the allowed token mask as a dense bitvector.
@@ -335,14 +340,20 @@ impl<'a> GrammarConstraintState<'a> {
     ///
     /// For zero-allocation mask filling, see `fill_mask_i32` and `fill_mask_i32_ptr`.
     pub fn get_mask(&self) -> Bitset {
-        let final_mask_internal = if self.parent.num_tsids > 0 {
+        let (final_mask_internal, _has_accepting) = if self.parent.num_tsids > 0 {
             // Weight-heavy mode: tsid encoded in N×M weights
             self.compute_internal_mask_weight_heavy()
         } else {
             // Symbol-heavy mode: tsid as initial transition labels
             self.compute_internal_mask()
         };
-        self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal)
+        let mut mask = self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal);
+        if let Some(eos_id) = self.parent.eos_token_id {
+            if self.is_complete() {
+                mask.insert(eos_id);
+            }
+        }
+        mask
     }
 
     /// Fill an i32 slice with the token mask (compatible with llguidance format).
@@ -360,12 +371,21 @@ impl<'a> GrammarConstraintState<'a> {
             None
         };
         
-        let final_mask_internal = if self.parent.num_tsids > 0 {
+        let (final_mask_internal, _has_accepting) = if self.parent.num_tsids > 0 {
             self.compute_internal_mask_weight_heavy()
         } else {
             self.compute_internal_mask()
         };
         self.parent.parser_dwa_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
+        if let Some(eos_id) = self.parent.eos_token_id {
+            if self.is_complete() {
+                let word_idx = eos_id / 32;
+                let bit_idx = eos_id % 32;
+                if word_idx < out.len() {
+                    out[word_idx] |= 1i32 << bit_idx;
+                }
+            }
+        }
         
         if let Some(start) = start {
             LAST_MASK_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
