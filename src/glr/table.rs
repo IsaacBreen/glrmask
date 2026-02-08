@@ -123,6 +123,21 @@ pub fn detect_whitespace_like_terminals(
     productions: &[Production],
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
 ) -> HashSet<TerminalID> {
+    fn is_whitespace_like_terminal(terminal: &Terminal) -> bool {
+        match terminal {
+            Terminal::Literal(bytes) => bytes.iter().all(|b| b.is_ascii_whitespace()),
+            Terminal::RegexName(name) => {
+                let name = name.to_ascii_lowercase();
+                name == "ws"
+                    || name == "whitespace"
+                    || name == "space"
+                    || name == "ignore"
+                    || name == "ignored"
+                    || name.contains("ws")
+            }
+        }
+    }
+
     // Collect all terminals that appear in the grammar
     let mut all_terminals: HashSet<Terminal> = HashSet::new();
     for prod in productions {
@@ -145,6 +160,9 @@ pub fn detect_whitespace_like_terminals(
         .collect();
     
     'terminal_loop: for terminal in &all_terminals {
+        if !is_whitespace_like_terminal(terminal) {
+            continue;
+        }
         let terminal_sym = Symbol::Terminal(terminal.clone());
         
         // Check every production to see if this terminal appears
