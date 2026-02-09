@@ -964,7 +964,6 @@ fn test_precompute_a_plus_tokenizer() {
         None,
         None,
         None,
-        None,
     );
 
     // --- Verification ---
@@ -1049,7 +1048,6 @@ fn test_precompute_x_eq() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         None,
@@ -3047,7 +3045,6 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         None,
         None,
         None,
-        None,
     );
     
     println!("Actual Terminal DWA:\n{}", terminal_dwa);
@@ -3114,7 +3111,6 @@ fn test_terminal_dwa_short_token_path_length_violation() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         None,
@@ -3327,7 +3323,6 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
         None,
         None,
         None,
-        None,
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3465,7 +3460,6 @@ fn test_terminal_dwa_tilde_sequence_weights() {
         (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
-        None,
         Some(Arc::new(HashSet::from([tilde_label]))),
     );
 
@@ -3545,7 +3539,6 @@ start ::= '~'+ ;
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         Some(Arc::new(HashSet::from([tilde_label]))),
@@ -3662,7 +3655,6 @@ fn test_suffix_dfa_prunes_tilde_equals() {
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
         Some(approx_pruner),
-        None,
         None,
         None,
     );
@@ -3782,7 +3774,6 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
         Some(approx_pruner),
         None,
         None,
-        None,
     );
 
     let w_pow_assign_tilde_eq_tilde = crate::debug_path_weight::check_dwa_path_weight(
@@ -3864,6 +3855,11 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
             crate::constraint_precompute::build_reduce_fallback_terminals_by_state(&suffix_parser),
     };
 
+    let suffix_prune_cache = Arc::new(crate::interface::build_suffix_parser_cache(
+        &grammar_definition,
+        &parser.terminal_map,
+    ));
+
     let terminal_dwa = run_precompute1(
         &tokenizer,
         &internal_llm_token_map,
@@ -3872,8 +3868,7 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
         Some(approx_pruner),
-        Some(Arc::new(grammar_definition)),
-        Some(parser.terminal_map.clone()),
+        Some(suffix_prune_cache),
         None,
     );
 
@@ -3952,7 +3947,6 @@ fn test_weight_overapprox_simple() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         None,
@@ -4092,7 +4086,6 @@ fn test_terminal_nwa_vs_dwa_overapprox_js() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         None,
@@ -4760,7 +4753,6 @@ fn test_suffix_grammar_validation() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         None,

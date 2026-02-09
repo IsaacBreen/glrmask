@@ -13,7 +13,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
-use bimap::BiBTreeMap;
 use range_set_blaze::RangeSetBlaze;
 use profiler_macro::{time_it, timeit};
 
@@ -22,14 +21,12 @@ use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::dfa_u8::{Tokenizer, Regex};
 use crate::glr::approximate_dfa::LazyApproximateDFA;
-use crate::glr::grammar::Terminal;
-use crate::glr::table::TerminalID;
 use crate::glr::parser::GLRParser;
 use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
 use crate::dwa_i32::{DeterminizeAndMinimizeProfile, DWA, NWA, NWAStateID, Weight};
 use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask_with_offset_map};
 use crate::profiler::{self};
-use crate::interface::{GrammarDefinition, prune_dwa_with_suffix_grammar, prune_nwa_with_suffix_grammar};
+use crate::interface::{prune_dwa_with_suffix_cache, prune_nwa_with_suffix_cache, SuffixParserCache};
 
 use crate::dfa_u8::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
@@ -404,8 +401,7 @@ pub(crate) struct Precomputer1<'r> {
     approx_dfa: Option<ApproximateDfaPruner>,
     approx_start_state: usize,
     direct_insert: bool,
-    suffix_prune_grammar: Option<Arc<GrammarDefinition>>,
-    suffix_prune_terminal_map: Option<BiBTreeMap<Terminal, TerminalID>>,
+    suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
 }
 
@@ -419,8 +415,7 @@ impl<'r> Precomputer1<'r> {
         num_tsids: usize,
         tsid_offset_map: Vec<usize>,
         approx_dfa: Option<ApproximateDfaPruner>,
-        suffix_prune_grammar: Option<Arc<GrammarDefinition>>,
-        suffix_prune_terminal_map: Option<BiBTreeMap<Terminal, TerminalID>>,
+        suffix_prune_cache: Option<Arc<SuffixParserCache>>,
         self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
@@ -521,8 +516,7 @@ impl<'r> Precomputer1<'r> {
             approx_dfa,
             approx_start_state,
             direct_insert,
-            suffix_prune_grammar,
-            suffix_prune_terminal_map,
+            suffix_prune_cache,
             self_extending_labels_for_collapse,
         }
     }
@@ -903,23 +897,19 @@ impl<'r> Precomputer1<'r> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if do_nwa_suffix_prune {
-            match (&self.suffix_prune_grammar, &self.suffix_prune_terminal_map) {
-                (Some(grammar_def), Some(terminal_map)) => {
-                    crate::debug!(4, "Terminal NWA (before suffix pruning): {}", self.nwa.stats());
-                    let prune_start = std::time::Instant::now();
-                    let (kept, pruned) = prune_nwa_with_suffix_grammar(
-                        &mut self.nwa,
-                        grammar_def,
-                        terminal_map,
-                        self.terminals_count,
-                    );
-                    crate::debug!(4, "Terminal NWA suffix pruning complete. Kept={}, pruned={}", kept, pruned);
-                    crate::debug!(4, "Terminal NWA (after suffix pruning): {}", self.nwa.stats());
-                    eprintln!("TIMING: terminal_nwa_suffix_prune {:?}", prune_start.elapsed());
-                }
-                _ => {
-                    crate::debug!(4, "NWA_SUFFIX_PRUNE set but missing grammar definition or terminal map; skipping");
-                }
+            if let Some(cache) = self.suffix_prune_cache.as_ref() {
+                crate::debug!(4, "Terminal NWA (before suffix pruning): {}", self.nwa.stats());
+                let prune_start = std::time::Instant::now();
+                let (kept, pruned) = prune_nwa_with_suffix_cache(
+                    &mut self.nwa,
+                    cache,
+                    self.terminals_count,
+                );
+                crate::debug!(4, "Terminal NWA suffix pruning complete. Kept={}, pruned={}", kept, pruned);
+                crate::debug!(4, "Terminal NWA (after suffix pruning): {}", self.nwa.stats());
+                eprintln!("TIMING: terminal_nwa_suffix_prune {:?}", prune_start.elapsed());
+            } else {
+                crate::debug!(4, "NWA_SUFFIX_PRUNE set but missing suffix parser cache; skipping");
             }
         }
 
@@ -927,27 +917,22 @@ impl<'r> Precomputer1<'r> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let pre_dwa_suffix_prune = if do_dwa_suffix_prune {
-            let suffix_prune_grammar = self.suffix_prune_grammar.clone();
-            let suffix_prune_terminal_map = self.suffix_prune_terminal_map.clone();
+            let suffix_prune_cache = self.suffix_prune_cache.clone();
             let terminals_count = self.terminals_count;
             Some(move |dwa: &mut DWA| {
-                match (&suffix_prune_grammar, &suffix_prune_terminal_map) {
-                    (Some(grammar_def), Some(terminal_map)) => {
-                        crate::debug!(4, "Terminal DWA (before pre-min suffix pruning): {}", dwa.stats());
-                        let prune_start = std::time::Instant::now();
-                        let (kept, pruned) = prune_dwa_with_suffix_grammar(
-                            dwa,
-                            grammar_def,
-                            terminal_map,
-                            terminals_count,
-                        );
-                        crate::debug!(4, "Terminal DWA pre-min suffix pruning complete. Kept={}, pruned={}", kept, pruned);
-                        crate::debug!(4, "Terminal DWA (after pre-min suffix pruning): {}", dwa.stats());
-                        eprintln!("TIMING: terminal_dwa_suffix_prune_pre_min {:?}", prune_start.elapsed());
-                    }
-                    _ => {
-                        crate::debug!(4, "DWA_SUFFIX_PRUNE set but missing grammar definition or terminal map; skipping");
-                    }
+                if let Some(cache) = suffix_prune_cache.as_ref() {
+                    crate::debug!(4, "Terminal DWA (before pre-min suffix pruning): {}", dwa.stats());
+                    let prune_start = std::time::Instant::now();
+                    let (kept, pruned) = prune_dwa_with_suffix_cache(
+                        dwa,
+                        cache,
+                        terminals_count,
+                    );
+                    crate::debug!(4, "Terminal DWA pre-min suffix pruning complete. Kept={}, pruned={}", kept, pruned);
+                    crate::debug!(4, "Terminal DWA (after pre-min suffix pruning): {}", dwa.stats());
+                    eprintln!("TIMING: terminal_dwa_suffix_prune_pre_min {:?}", prune_start.elapsed());
+                } else {
+                    crate::debug!(4, "DWA_SUFFIX_PRUNE set but missing suffix parser cache; skipping");
                 }
             })
         } else {
@@ -1772,8 +1757,7 @@ pub fn run_precompute1(
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     tsid_offset_map: Vec<usize>,
     approx_dfa: Option<ApproximateDfaPruner>,
-    suffix_prune_grammar: Option<Arc<GrammarDefinition>>,
-    suffix_prune_terminal_map: Option<BiBTreeMap<Terminal, TerminalID>>,
+    suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
 ) -> DWA {
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
@@ -1815,8 +1799,7 @@ pub fn run_precompute1(
             num_tsids,
             tsid_offset_map,
             approx_dfa,
-            suffix_prune_grammar,
-            suffix_prune_terminal_map,
+            suffix_prune_cache,
             self_extending_labels_for_collapse,
         )
     });
@@ -1869,7 +1852,6 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         num_tsids,
         tsid_offset_map,
         approx_dfa,
-        None,
         None,
         None,
     );

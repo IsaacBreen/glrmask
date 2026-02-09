@@ -205,6 +205,76 @@ pub fn grammar_to_suffix_grammar(grammar: &GrammarDefinition) -> GrammarDefiniti
     }
 }
 
+pub struct SuffixParserCache {
+    pub parser: crate::glr::parser::GLRParser,
+    pub orig_to_suffix_tid: Vec<Option<crate::glr::table::TerminalID>>,
+    pub ignored_terminals: Vec<bool>,
+    pub debug_label_ids: Option<BTreeSet<usize>>,
+}
+
+pub fn build_suffix_parser_cache(
+    grammar: &GrammarDefinition,
+    terminal_map: &BiBTreeMap<Terminal, crate::glr::table::TerminalID>,
+) -> SuffixParserCache {
+    use crate::interface::CompiledGrammar;
+
+    crate::debug!(4, "Building suffix grammar...");
+    let suffix_grammar = grammar_to_suffix_grammar(grammar);
+    crate::debug!(4, "  Suffix grammar: {} productions", suffix_grammar.productions.len());
+
+    for (i, prod) in suffix_grammar.productions.iter().enumerate() {
+        crate::debug!(6, "    Suffix prod {}: {} -> {:?}", i, prod.lhs.0, prod.rhs);
+    }
+
+    crate::debug!(4, "  Compiling suffix grammar...");
+    let suffix_parser = CompiledGrammar::glr_parser_from_definition(&suffix_grammar);
+    crate::debug!(4, "  Suffix grammar compiled");
+
+    let mut orig_to_suffix_tid = vec![None; terminal_map.len()];
+    for (term, orig_tid) in terminal_map.iter() {
+        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
+            if orig_tid.0 < orig_to_suffix_tid.len() {
+                orig_to_suffix_tid[orig_tid.0] = Some(*suffix_tid);
+            }
+        }
+    }
+
+    let mut ignored_terminals = vec![false; terminal_map.len()];
+    for tid in &grammar.ignore_terminal_ids {
+        if tid.0 < ignored_terminals.len() {
+            ignored_terminals[tid.0] = true;
+        }
+    }
+
+    let debug_label_ids = if std::env::var("DEBUG_SUFFIX_PRUNE_JSON").is_ok() {
+        let debug_terms = [
+            Terminal::RegexName("MINUS".to_string()),
+            Terminal::RegexName("QUOTE".to_string()),
+            Terminal::Literal(vec![b']']),
+            Terminal::Literal(vec![b',']),
+            Terminal::Literal(vec![b':']),
+        ];
+        let mut ids: BTreeSet<usize> = BTreeSet::new();
+        for term in debug_terms.iter() {
+            if let Some(tid) = terminal_map.get_by_left(term) {
+                ids.insert(tid.0);
+                eprintln!("DEBUG_SUFFIX_PRUNE_JSON label {} => {:?}", tid.0, term);
+            }
+        }
+        eprintln!("DEBUG_SUFFIX_PRUNE_JSON labels: {:?}", ids);
+        Some(ids)
+    } else {
+        None
+    };
+
+    SuffixParserCache {
+        parser: suffix_parser,
+        orig_to_suffix_tid,
+        ignored_terminals,
+        debug_label_ids,
+    }
+}
+
 /// Validate terminal DWA paths against the suffix grammar.
 /// 
 /// Samples paths from the terminal DWA and checks what proportion are accepted
@@ -378,47 +448,39 @@ pub fn prune_dwa_with_suffix_grammar(
     terminal_map: &bimap::BiBTreeMap<Terminal, crate::glr::table::TerminalID>,
     terminals_count: usize,
 ) -> (usize, usize) {
-    use crate::interface::CompiledGrammar;
+    let cache = build_suffix_parser_cache(grammar, terminal_map);
+    prune_dwa_with_suffix_cache(dwa, &cache, terminals_count)
+}
+
+/// Prune a terminal DWA using a cached suffix parser.
+pub fn prune_dwa_with_suffix_cache(
+    dwa: &mut crate::dwa_i32::DWA,
+    cache: &SuffixParserCache,
+    terminals_count: usize,
+) -> (usize, usize) {
     use crate::glr::table::{NonTerminalID, StateID, TerminalID};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
-    
+
     crate::debug!(4, "Starting suffix grammar DWA pruning");
-    
-    // Collect ignored terminal IDs - these should not be pruned
-    let ignored_tids: BTreeSet<usize> = grammar.ignore_terminal_ids.iter()
-        .map(|tid| tid.0)
-        .collect();
-    crate::debug!(4, "  Ignored terminal IDs: {:?}", ignored_tids);
-    
-    // Build suffix grammar
-    crate::debug!(4, "  Building suffix grammar...");
-    let suffix_grammar = grammar_to_suffix_grammar(grammar);
-    crate::debug!(4, "  Suffix grammar: {} productions", suffix_grammar.productions.len());
-    
-    // Print suffix grammar productions at debug level 6 (level 5 is already very noisy).
-    for (i, prod) in suffix_grammar.productions.iter().enumerate() {
-        crate::debug!(6, "    Suffix prod {}: {} -> {:?}", i, prod.lhs.0, prod.rhs);
+
+    let ignored_tids = &cache.ignored_terminals;
+    if crate::r#macro::is_debug_level_enabled(4) {
+        let ignored_ids: Vec<usize> = ignored_tids
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ignored)| if *ignored { Some(idx) } else { None })
+            .collect();
+        crate::debug!(4, "  Ignored terminal IDs: {:?}", ignored_ids);
     }
-    
-    // NOTE: Previously had a limit on suffix grammar size (MAX_SUFFIX_PRODUCTIONS = 1250)
-    // that would skip suffix pruning for complex grammars. This limit has been removed
-    // because we need to handle all grammars without skipping. If compilation is slow,
-    // we need to optimize the suffix grammar construction itself rather than skip.
-    
-    crate::debug!(4, "  Compiling suffix grammar...");
-    let suffix_parser = CompiledGrammar::glr_parser_from_definition(&suffix_grammar);
-    crate::debug!(4, "  Suffix grammar compiled");
-    
-    // Build mapping from original terminal IDs to suffix parser terminal IDs
-    // The suffix parser may have different terminal IDs
-    let mut orig_to_suffix_tid: BTreeMap<usize, TerminalID> = BTreeMap::new();
-    for (term, orig_tid) in terminal_map.iter() {
-        // Look up the same terminal in the suffix parser
-        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
-            orig_to_suffix_tid.insert(orig_tid.0, *suffix_tid);
-        }
-    }
-    crate::debug!(4, "    Terminal mapping: {} of {} terminals mapped", orig_to_suffix_tid.len(), terminal_map.len());
+
+    let suffix_parser = &cache.parser;
+    let orig_to_suffix_tid = &cache.orig_to_suffix_tid;
+    crate::debug!(
+        4,
+        "    Terminal mapping: {} of {} terminals mapped",
+        orig_to_suffix_tid.iter().filter(|v| v.is_some()).count(),
+        orig_to_suffix_tid.len()
+    );
 
     // Precompute a conservative mapping of NonTerminalID -> possible GOTO states.
     // This is used to approximate successor states when we see reduce actions with len > 0.
@@ -492,23 +554,7 @@ pub fn prune_dwa_with_suffix_grammar(
     };
 
     let debug_suffix_prune = std::env::var("DEBUG_SUFFIX_PRUNE_JSON").is_ok();
-    let mut debug_label_ids: BTreeSet<usize> = BTreeSet::new();
-    if debug_suffix_prune {
-        let debug_terms = [
-            Terminal::RegexName("MINUS".to_string()),
-            Terminal::RegexName("QUOTE".to_string()),
-            Terminal::Literal(vec![b']']),
-            Terminal::Literal(vec![b',']),
-            Terminal::Literal(vec![b':']),
-        ];
-        for term in debug_terms.iter() {
-            if let Some(tid) = terminal_map.get_by_left(term) {
-                debug_label_ids.insert(tid.0);
-                eprintln!("DEBUG_SUFFIX_PRUNE_JSON label {} => {:?}", tid.0, term);
-            }
-        }
-        eprintln!("DEBUG_SUFFIX_PRUNE_JSON labels: {:?}", debug_label_ids);
-    }
+    let debug_label_ids = cache.debug_label_ids.as_ref();
     
     // Track which suffix parser states are reachable at each DWA state
     // Key: DWA state ID, Value: Set of GLR parser state IDs
@@ -572,7 +618,7 @@ pub fn prune_dwa_with_suffix_grammar(
             }
             
             // Skip ignored terminals (like IGNORE/whitespace) - they can appear anywhere
-            if ignored_tids.contains(&label_usize) {
+            if ignored_tids.get(label_usize).copied().unwrap_or(false) {
                 let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
                 let before_len = dest_states.len();
                 dest_states.extend(parser_states.iter().copied());
@@ -583,7 +629,7 @@ pub fn prune_dwa_with_suffix_grammar(
             }
             
             // Terminal transition - check if suffix parser can accept it
-            if let Some(&suffix_tid) = orig_to_suffix_tid.get(&label_usize) {
+            if let Some(Some(suffix_tid)) = orig_to_suffix_tid.get(label_usize) {
                 // Check if ANY parser state can accept this terminal and compute successor states
                 let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
                 
@@ -754,12 +800,12 @@ pub fn prune_dwa_with_suffix_grammar(
             }
 
             // Skip ignored terminals (like IGNORE/whitespace)
-            if ignored_tids.contains(&label_usize) {
+            if ignored_tids.get(label_usize).copied().unwrap_or(false) {
                 kept_count += 1;
                 continue;
             }
 
-            if let Some(&suffix_tid) = orig_to_suffix_tid.get(&label_usize) {
+            if let Some(Some(suffix_tid)) = orig_to_suffix_tid.get(label_usize) {
                 let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
                 let mut has_reduce_with_len_gt_0 = false;
                 let mut reduce_goto_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
@@ -826,7 +872,7 @@ pub fn prune_dwa_with_suffix_grammar(
                 }
 
                 if !successor_states.is_empty() || has_reduce_with_len_gt_0 {
-                    if debug_suffix_prune && debug_label_ids.contains(&label_usize) {
+                    if debug_suffix_prune && debug_label_ids.map_or(false, |ids| ids.contains(&label_usize)) {
                         eprintln!(
                             "DEBUG_SUFFIX_PRUNE_JSON KEEP state={} label={} parser_states={:?} succ_count={} reduce_len_gt_0={}",
                             dwa_state,
@@ -838,7 +884,7 @@ pub fn prune_dwa_with_suffix_grammar(
                     }
                     kept_count += 1;
                 } else if !fallback_reduce_goto_states.is_empty() {
-                    if debug_suffix_prune && debug_label_ids.contains(&label_usize) {
+                    if debug_suffix_prune && debug_label_ids.map_or(false, |ids| ids.contains(&label_usize)) {
                         eprintln!(
                             "DEBUG_SUFFIX_PRUNE_JSON KEEP_FALLBACK state={} label={} parser_states={:?}",
                             dwa_state,
@@ -848,7 +894,7 @@ pub fn prune_dwa_with_suffix_grammar(
                     }
                     kept_count += 1;
                 } else {
-                    if debug_suffix_prune && debug_label_ids.contains(&label_usize) {
+                    if debug_suffix_prune && debug_label_ids.map_or(false, |ids| ids.contains(&label_usize)) {
                         eprintln!(
                             "DEBUG_SUFFIX_PRUNE_JSON PRUNE state={} label={} parser_states={:?}",
                             dwa_state,
@@ -894,41 +940,38 @@ pub fn prune_nwa_with_suffix_grammar(
     terminal_map: &bimap::BiBTreeMap<Terminal, crate::glr::table::TerminalID>,
     terminals_count: usize,
 ) -> (usize, usize) {
-    use crate::interface::CompiledGrammar;
-    use crate::glr::table::TerminalID;
+    let cache = build_suffix_parser_cache(grammar, terminal_map);
+    prune_nwa_with_suffix_cache(nwa, &cache, terminals_count)
+}
+
+/// Prune a terminal NWA using a cached suffix parser.
+pub fn prune_nwa_with_suffix_cache(
+    nwa: &mut crate::dwa_i32::NWA,
+    cache: &SuffixParserCache,
+    terminals_count: usize,
+) -> (usize, usize) {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
     crate::debug!(4, "Starting suffix grammar NWA pruning");
 
-    // Collect ignored terminal IDs - these should not be pruned
-    let ignored_tids: BTreeSet<usize> = grammar
-        .ignore_terminal_ids
-        .iter()
-        .map(|tid| tid.0)
-        .collect();
-    crate::debug!(4, "  Ignored terminal IDs: {:?}", ignored_tids);
-
-    // Build suffix grammar
-    crate::debug!(4, "  Building suffix grammar...");
-    let suffix_grammar = grammar_to_suffix_grammar(grammar);
-    crate::debug!(4, "  Suffix grammar: {} productions", suffix_grammar.productions.len());
-
-    for (i, prod) in suffix_grammar.productions.iter().enumerate() {
-        crate::debug!(6, "    Suffix prod {}: {} -> {:?}", i, prod.lhs.0, prod.rhs);
+    let ignored_tids = &cache.ignored_terminals;
+    if crate::r#macro::is_debug_level_enabled(4) {
+        let ignored_ids: Vec<usize> = ignored_tids
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ignored)| if *ignored { Some(idx) } else { None })
+            .collect();
+        crate::debug!(4, "  Ignored terminal IDs: {:?}", ignored_ids);
     }
 
-    crate::debug!(4, "  Compiling suffix grammar...");
-    let suffix_parser = CompiledGrammar::glr_parser_from_definition(&suffix_grammar);
-    crate::debug!(4, "  Suffix grammar compiled");
-
-    // Build mapping from original terminal IDs to suffix parser terminal IDs
-    let mut orig_to_suffix_tid: BTreeMap<usize, TerminalID> = BTreeMap::new();
-    for (term, orig_tid) in terminal_map.iter() {
-        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
-            orig_to_suffix_tid.insert(orig_tid.0, *suffix_tid);
-        }
-    }
-    crate::debug!(4, "    Terminal mapping: {} of {} terminals mapped", orig_to_suffix_tid.len(), terminal_map.len());
+    let suffix_parser = &cache.parser;
+    let orig_to_suffix_tid = &cache.orig_to_suffix_tid;
+    crate::debug!(
+        4,
+        "    Terminal mapping: {} of {} terminals mapped",
+        orig_to_suffix_tid.iter().filter(|v| v.is_some()).count(),
+        orig_to_suffix_tid.len()
+    );
 
     type ParserStateSet = BTreeSet<crate::glr::table::StateID>;
     let mut nwa_to_parser_states: BTreeMap<usize, ParserStateSet> = BTreeMap::new();
@@ -997,7 +1040,7 @@ pub fn prune_nwa_with_suffix_grammar(
                 continue;
             }
 
-            if ignored_tids.contains(&label_usize) {
+            if ignored_tids.get(label_usize).copied().unwrap_or(false) {
                 for dest_state in dest_states_list {
                     let dest_states = nwa_to_parser_states.entry(dest_state).or_default();
                     for &ps in &parser_states {
@@ -1011,7 +1054,7 @@ pub fn prune_nwa_with_suffix_grammar(
                 continue;
             }
 
-            if let Some(&suffix_tid) = orig_to_suffix_tid.get(&label_usize) {
+            if let Some(Some(suffix_tid)) = orig_to_suffix_tid.get(label_usize) {
                 let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
                 let mut has_reduce_with_len_gt_0 = false;
 
