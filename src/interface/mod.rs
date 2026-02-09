@@ -12,7 +12,7 @@ pub mod suffix_grammar;
 pub mod json_schema;
 
 pub use ebnf::*;
-pub use interface::{choice, display_productions, literal, optional, r#ref, repeat, sequence, CompiledGrammar, GrammarDefinition, GrammarExpr, IncrementalParser, ExprNullability, get_expr_nullability};
+pub use interface::{choice, display_productions, literal, optional, r#ref, repeat, repeat_bounded, sequence, CompiledGrammar, GrammarDefinition, GrammarExpr, IncrementalParser, ExprNullability, get_expr_nullability};
 pub use tokenizer_combinators::*;
 pub use json_schema::json_schema_to_ebnf;
 pub use suffix_grammar::{grammar_to_suffix_grammar, validate_terminal_dwa_paths, prune_dwa_with_suffix_grammar, prune_nwa_with_suffix_grammar};

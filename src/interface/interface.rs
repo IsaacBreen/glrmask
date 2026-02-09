@@ -224,6 +224,13 @@ pub fn optional(expr: GrammarExpr) -> GrammarExpr {
 pub fn repeat(expr: GrammarExpr) -> GrammarExpr {
     GrammarExpr::Repeat(Box::new(expr))
 }
+pub fn repeat_bounded(expr: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
+    GrammarExpr::RepeatBounded {
+        min,
+        max,
+        inner: Box::new(expr),
+    }
+}
 pub fn literal(bytes: Vec<u8>) -> GrammarExpr {
     GrammarExpr::Literal(bytes)
 }

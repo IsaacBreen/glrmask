@@ -11,7 +11,7 @@
 //! - Start rule: `start` is the default start rule name
 //! - Terminals: UPPERCASE names are terminals (convention, not enforced)
 
-use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
+use crate::interface::{choice, literal, optional, r#ref, repeat, repeat_bounded, sequence, GrammarExpr};
 use crate::interface::GrammarExpr::CharClass;
 use regex::Regex;
 use std::collections::HashSet;
@@ -114,6 +114,7 @@ impl From<LarkParseError> for String {
 #[derive(Debug, Clone, PartialEq)]
 enum LarkTokenKind {
     Ident(String),
+    Number(String),
     Literal(String),
     CharClass(String),  // [...] character class
     RegexLiteral(String), // /.../ regex
@@ -133,7 +134,7 @@ fn get_lark_token_regex() -> &'static Regex {
     LARK_TOKEN_REGEX.get_or_init(|| {
         // Note: Not using (?x) mode because it ignores unescaped spaces
         Regex::new(
-            r#"(?P<ws>[ \t]+)|(?P<comment>//[^\r\n]*|#[^\r\n]*)|(?P<directive>%[a-zA-Z_]+)|(?P<regex>/([^/\\]|\\.)+/)|(?P<ident>[a-zA-Z_][a-zA-Z0-9_]*)|(?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*')|(?P<charclass>\[([^\]\[\(\)\{\}\\]|\\.)*\])|(?P<op>:|\?|\*|\+|\||\(|\)|\.\.|\~)|(?P<newline>\r?\n)|(?P<error>.)"#,
+            r#"(?P<ws>[ \t]+)|(?P<comment>//[^\r\n]*|#[^\r\n]*)|(?P<directive>%[a-zA-Z_]+)|(?P<regex>/([^/\\]|\\.)+/)|(?P<number>[0-9]+)|(?P<ident>[a-zA-Z_][a-zA-Z0-9_]*)|(?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*')|(?P<charclass>\[([^\]\[\(\)\{\}\\]|\\.)*\])|(?P<op>:|\?|\*|\+|\||\(|\)|\.\.|\~)|(?P<newline>\r?\n)|(?P<error>.)"#,
         )
         .unwrap()
     })
@@ -153,6 +154,11 @@ fn tokenize_lark(source: &str) -> Result<Vec<LarkToken>, LarkParseError> {
             let regex_content = &s[1..s.len() - 1]; // Strip the slashes
             tokens.push(LarkToken {
                 kind: LarkTokenKind::RegexLiteral(regex_content.to_string()),
+                span: Span { start: m.start(), end: m.end() },
+            });
+        } else if let Some(m) = cap.name("number") {
+            tokens.push(LarkToken {
+                kind: LarkTokenKind::Number(m.as_str().to_string()),
                 span: Span { start: m.start(), end: m.end() },
             });
         } else if let Some(m) = cap.name("ident") {
@@ -387,20 +393,24 @@ impl<'a> LarkParser<'a> {
             Ok(sequence(vec![factor.clone(), repeat(factor)]))
         } else if self.peek_op("~") {
             // Lark repeat syntax: ~n or ~n..m
-            // For now, treat ~n as exactly n repetitions (approximate with +)
             self.consume_op("~")?;
-            // Skip the number(s) - this is a minimization
-            while let Some(LarkToken { kind: LarkTokenKind::Ident(_), .. }) = self.tokens.peek() {
-                self.tokens.next();
-            }
-            if self.peek_op("..") {
+            let min = self.parse_repeat_number()?;
+            let max = if self.peek_op("..") {
                 self.consume_op("..")?;
-                while let Some(LarkToken { kind: LarkTokenKind::Ident(_), .. }) = self.tokens.peek() {
-                    self.tokens.next();
+                Some(self.parse_repeat_number()?)
+            } else {
+                Some(min)
+            };
+            if let Some(max) = max {
+                if max < min {
+                    return Err(LarkParseError::new(
+                        self.source,
+                        self.eof_span(),
+                        format!("Repeat upper bound {} is less than lower bound {}", max, min),
+                    ));
                 }
             }
-            // Approximate with one-or-more
-            Ok(sequence(vec![factor.clone(), repeat(factor)]))
+            Ok(repeat_bounded(factor, min, max))
         } else {
             Ok(factor)
         }
@@ -532,6 +542,36 @@ impl<'a> LarkParser<'a> {
         }
     }
 
+    fn parse_repeat_number(&mut self) -> Result<usize, LarkParseError> {
+        match self.tokens.next() {
+            Some(LarkToken { kind: LarkTokenKind::Number(num), span }) => num
+                .parse::<usize>()
+                .map_err(|_| LarkParseError::new(self.source, span, "Invalid repeat count")),
+            Some(LarkToken { kind: LarkTokenKind::Ident(id), span }) => {
+                if id.chars().all(|ch| ch.is_ascii_digit()) {
+                    id.parse::<usize>()
+                        .map_err(|_| LarkParseError::new(self.source, span, "Invalid repeat count"))
+                } else {
+                    Err(LarkParseError::new(
+                        self.source,
+                        span,
+                        format!("Expected repeat count, found identifier {}", id),
+                    ))
+                }
+            }
+            Some(other) => Err(LarkParseError::new(
+                self.source,
+                other.span,
+                format!("Expected repeat count, found {:?}", other.kind),
+            )),
+            None => Err(LarkParseError::new(
+                self.source,
+                self.eof_span(),
+                "Expected repeat count, found end of input".to_string(),
+            )),
+        }
+    }
+
     /// Check if we're at the start of a new rule definition (ident followed by :)
     fn is_at_rule_start(&mut self) -> bool {
         let tokens: Vec<_> = self.tokens.clone().take(2).collect();
@@ -582,5 +622,25 @@ WS: /\s+/
         let result = parser.parse().unwrap();
 
         assert_eq!(result.ignore_symbol_name, Some("WS".to_string()));
+    }
+
+    #[test]
+    fn test_lark_repeat_bounded() {
+        let lark = r#"
+start: STR_CHAR~3..5
+STR_CHAR: "a"
+"#;
+        let mut parser = LarkParser::new(lark).unwrap();
+        let result = parser.parse().unwrap();
+
+        assert_eq!(result.grammar_rules[0].0, "start");
+        assert_eq!(
+            result.grammar_rules[0].1,
+            GrammarExpr::RepeatBounded {
+                min: 3,
+                max: Some(5),
+                inner: Box::new(GrammarExpr::Ref("STR_CHAR".to_string())),
+            }
+        );
     }
 }
