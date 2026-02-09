@@ -4371,6 +4371,201 @@ fn test_json_schema_mask_generation() {
 }
 
 #[test]
+fn test_json_schema_name_prefix_disallows_quote_colon_minus() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+
+    let ebnf = r#"#![ignore(WS)]
+root ::= '{' '\"name\"' ':' JSON_STRING '}' ;
+WS ::= ( ( ' ' | '\t' | '\n' | '\r' ) )* ;
+JSON_STRING ::= '"' STRING_CHARS '"' ;
+STRING_CHARS ::= ( STRING_CHAR )* ;
+STRING_CHAR ::= [a-zA-Z] ;
+"#;
+
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf).unwrap();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"\"".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"name".to_vec(), LLMTokenID(3));
+    llm_token_map.insert(b"\":-".to_vec(), LLMTokenID(4));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        10,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(LLMTokenID(1)).expect("Commit {");
+    state.commit(LLMTokenID(2)).expect("Commit \"");
+    state.commit(LLMTokenID(3)).expect("Commit name");
+
+    let mask = state.get_mask();
+    assert!(!mask.contains(4), "Token '\":-' should not be allowed after key prefix '\"name'");
+}
+
+#[test]
+fn test_newsletter_schema_disallows_quote_colon_minus() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+
+    let schema_json = r#"{
+        "type": "object",
+        "title": "Newsletter Subscription",
+        "properties": {
+            "name": {"type": "string", "minLength": 8, "maxLength": 80},
+            "email": {"type": "string", "maxLength": 120},
+            "lists": {"type": "string", "enum": ["Daily New", "Promotion"]}
+        },
+        "additionalProperties": false,
+        "required": ["name", "email", "lists"],
+        "x-guidance": {
+            "item_separator": ", ",
+            "key_separator": ": ",
+            "whitespace_flexible": false,
+            "whitespace_pattern": null,
+            "coerce_one_of": false,
+            "lenient": false
+        }
+    }"#;
+
+    let ebnf = json_schema_to_ebnf(schema_json).unwrap();
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).unwrap();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"\"".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"name".to_vec(), LLMTokenID(3));
+    llm_token_map.insert(b"\":-".to_vec(), LLMTokenID(4));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        10,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(LLMTokenID(1)).expect("Commit {");
+    state.commit(LLMTokenID(2)).expect("Commit \"");
+    state.commit(LLMTokenID(3)).expect("Commit name");
+
+    let mask = state.get_mask();
+    assert!(!mask.contains(4), "Token '\":-' should not be allowed after key prefix '\"name'");
+}
+
+#[test]
+#[ignore]
+fn debug_newsletter_nwa_path_for_quote_colon_minus() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+
+    let lark_grammar = r###"start: ws object ws
+object: "{" ws pairs_0 ws "}"
+pairs_0: name_pair ws "," ws pairs_1
+pairs_1: email_pair ws "," ws pairs_2
+pairs_2: lists_pair
+name_pair: QUOTE "name" QUOTE ws ":" ws name_val
+email_pair: QUOTE "email" QUOTE ws ":" ws email_val
+lists_pair: QUOTE "lists" QUOTE ws ":" ws lists_val
+name_val: QUOTE name_chars QUOTE
+name_chars: STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR*
+email_val: QUOTE email_chars QUOTE
+email_chars: STR_CHAR*
+lists_val: QUOTE LISTS_S0 QUOTE | QUOTE LISTS_S1 QUOTE
+LISTS_S0: "Daily New"
+LISTS_S1: "Promotion"
+QUOTE: "\""
+ws: WS*
+WS: " " | "\n" | "\t" | "\r"
+BOOL: "true" | "false"
+STR_CHAR: " " | "!" | "#" | "$" | "%" | "&" | "'" | "(" | ")" | "*" | "+" | "," | "-" | "." | "/" | "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | ":" | ";" | "<" | "=" | ">" | "?" | "@" | "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" | "[" | "]" | "^" | "_" | "`" | "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" | "{" | "|" | "}" | "~"
+"###;
+
+    let grammar_definition = Arc::new(GrammarDefinition::from_lark(lark_grammar).unwrap());
+
+    let (llm_token_map, max_id) = load_gpt2_vocab()
+        .expect("No valid GPT-2 vocab found for debug trace");
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::clone(&grammar_definition),
+        llm_token_map.clone(),
+        max_id,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let original_id = 48219usize; // token bytes are '\":-'
+    let internal_id = *constraint
+        .parser_dwa_vocab
+        .original_to_internal
+        .get(&original_id)
+        .expect("Expected internal mapping for token 48219");
+
+    let token_bytes = llm_token_map
+        .iter()
+        .find(|(_, id)| id.0 == original_id)
+        .map(|(bytes, _)| bytes.clone())
+        .unwrap_or_default();
+
+    eprintln!("DEBUG_NWA original_id={}, internal_id={}, bytes={:?}",
+        original_id,
+        internal_id,
+        String::from_utf8_lossy(&token_bytes),
+    );
+
+    for tid in [0usize, 1, 2, 3] {
+        if let Some(terminal) = constraint.parser.terminal_map.get_by_right(&TerminalID(tid)) {
+            eprintln!("DEBUG_NWA terminal_id={} maps to {:?}", tid, terminal);
+        }
+    }
+
+    std::env::set_var("DEBUG_PRECOMPUTE1_NWA_TOKEN", internal_id.to_string());
+    std::env::set_var("DEBUG_PRECOMPUTE1_NWA_TOKEN_LEN", "0");
+
+    let _constraint_with_debug = GrammarConstraint::new_from_grammar_definition(
+        grammar_definition,
+        llm_token_map,
+        max_id,
+        &GrammarConstraintConfig::default(),
+    );
+}
+
+#[test]
+#[ignore]
+fn debug_lark_quote_colon_charclass_suffix() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+
+    let lark_grammar = r#"start: key ":" value
+key: QUOTE "name" QUOTE
+value: QUOTE STR_CHAR STR_CHAR* QUOTE
+QUOTE: "\""
+STR_CHAR: /[a-z]/
+"#;
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar).unwrap();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"\"".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"name".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"\":a".to_vec(), LLMTokenID(3));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        10,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(LLMTokenID(1)).expect("Commit \"");
+    state.commit(LLMTokenID(2)).expect("Commit name");
+
+    let mask = state.get_mask();
+    eprintln!("DEBUG mask contains token 3: {}", mask.contains(3));
+    assert!(!mask.contains(3), "Token '\":a' should not be allowed after prefix '\"name'");
+}
+
+#[test]
 fn test_json_schema_gpt2_real_vocab() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Define minimal JSON schema
