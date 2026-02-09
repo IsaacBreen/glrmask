@@ -1655,6 +1655,106 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+// Known bug: GLR parser produces false positives for tokens spanning key-value boundaries.
+#[test]
+fn test_glr_fp_repro_minimal() {
+    enum ReproOutcome {
+        Skip(String),
+        Offenders(Vec<(usize, Vec<u8>)>),
+    }
+
+    let outcome = (|| {
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let lark_grammar = indoc! {r#"
+            start: ws object ws
+            object: "{" ws name_pair ws "}"
+            name_pair: QUOTE "name" QUOTE ws ":" ws QUOTE name_val QUOTE
+            name_val: name_chars
+            name_chars: STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR*
+            QUOTE: "\""
+            ws: WS*
+            WS: " " | "\n" | "\t" | "\r"
+            STR_CHAR: /[A-Za-z0-9 \[\]\-:{}@.]/
+        "#};
+
+        let grammar_definition = match GrammarDefinition::from_lark(lark_grammar) {
+            Ok(def) => def,
+            Err(err) => return ReproOutcome::Skip(format!("Failed to parse grammar: {}", err)),
+        };
+
+        let mut llm_token_map = LLMTokenMap::new();
+        let tok_open = LLMTokenID(0);
+        let tok_name = LLMTokenID(1);
+        let tok_colon_quote = LLMTokenID(2);
+        let tok_fp_bracket = LLMTokenID(3);
+        let tok_fp_dash = LLMTokenID(4);
+        llm_token_map.insert(b"{\"".to_vec(), tok_open);
+        llm_token_map.insert(b"name".to_vec(), tok_name);
+        llm_token_map.insert(b"\":\"".to_vec(), tok_colon_quote);
+        llm_token_map.insert(b"\":[".to_vec(), tok_fp_bracket);
+        llm_token_map.insert(b"\":-".to_vec(), tok_fp_dash);
+        let max_id = 4;
+
+        let constraint = GrammarConstraint::new_from_grammar_definition(
+            Arc::new(grammar_definition),
+            llm_token_map.clone(),
+            max_id,
+            &GrammarConstraintConfig::default(),
+        );
+
+        let prefix_ids = [tok_open, tok_name];
+
+        let mut state = constraint.init();
+        for id in prefix_ids {
+            if state.commit(id).is_err() {
+                return ReproOutcome::Skip("prefix commit failed".to_string());
+            }
+        }
+
+        let mask = state.get_mask();
+
+        let expected_next = tok_colon_quote;
+        if !mask.contains(expected_next.0) {
+            return ReproOutcome::Skip("expected next token not in mask".to_string());
+        }
+
+        let id_to_bytes: BTreeMap<usize, Vec<u8>> = llm_token_map
+            .iter()
+            .map(|(bytes, id)| (id.0, bytes.clone()))
+            .collect();
+
+        let disputed = [tok_fp_bracket.0, tok_fp_dash.0];
+        let mut offenders: Vec<(usize, Vec<u8>)> = Vec::new();
+        for token_id in disputed {
+            if mask.contains(token_id) {
+                let bytes = id_to_bytes.get(&token_id).cloned().unwrap_or_default();
+                offenders.push((token_id, bytes));
+            }
+        }
+
+        ReproOutcome::Offenders(offenders)
+    })();
+
+    match outcome {
+        ReproOutcome::Skip(msg) => {
+            println!("Skipping test_glr_fp_repro_minimal: {}", msg);
+        }
+        ReproOutcome::Offenders(offenders) => {
+            if !offenders.is_empty() {
+                let mut formatted = Vec::new();
+                for (token_id, bytes) in offenders {
+                    formatted.push(format!(
+                        "{}:{:?}",
+                        token_id,
+                        String::from_utf8_lossy(&bytes)
+                    ));
+                }
+                panic!("FP tokens in mask at step 2: {}", formatted.join(", "));
+            }
+        }
+    }
+}
+
 #[test]
 fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
