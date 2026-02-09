@@ -11,6 +11,8 @@ use profiler_macro::{time_it, timeit};
 
 
 use crate::glr::parser::{ExpectElse, GLRParser};
+use crate::glr::table::{NonTerminalID, StateID as ParserStateID};
+use crate::precompute4::characterize::{compute_all_characterizations, TerminalCharacterization};
 use crate::precompute4::resolve_negatives::{
     apply_cancellations, apply_finality_fixpoint, remove_negative_transitions,
     // Note: remove_redundant_default_transitions is only run in a global pass,
@@ -18,8 +20,8 @@ use crate::precompute4::resolve_negatives::{
 };
 use crate::precompute4::template_dfa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::dwa_i32::{
-    common::Label, determinization_rustfst::determinize_nwa_to_dwa, dwa::DWAStats, DeterminizeAndMinimizeProfile, DwaOptimizeConfig,
-    DWA, NWA, NWABody, NWAStateID, NWAStates, StateID, Weight,
+    common::Label, DeterminizeAndMinimizeProfile, DWA, NWA, NWABody, NWAStateID, NWAStates,
+    StateID, Weight,
 };
 use crate::dfa_u8::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
@@ -112,6 +114,65 @@ pub type ParserDWA = DWA;
 pub type Precomputed4 = DWA;
 
 pub type Signature = Vec<Vec<Option<TerminalID>>>;
+
+#[derive(Default)]
+struct GroupedCharacterization {
+    initial_shifts: BTreeMap<(ParserStateID, ParserStateID), BTreeSet<TerminalID>>,
+    initial_reduces: BTreeMap<(ParserStateID, usize, NonTerminalID), BTreeSet<TerminalID>>,
+    per_nt: BTreeMap<NonTerminalID, GroupedNTCharacterization>,
+}
+
+#[derive(Default)]
+struct GroupedNTCharacterization {
+    escape_shifts: BTreeMap<(ParserStateID, ParserStateID, ParserStateID), BTreeSet<TerminalID>>,
+    reveal_and_rereduces: BTreeMap<(ParserStateID, usize, NonTerminalID), BTreeSet<TerminalID>>,
+}
+
+impl GroupedCharacterization {
+    fn from_terminals(
+        chars: &BTreeMap<TerminalID, TerminalCharacterization>,
+        used_terms: &BTreeSet<TerminalID>,
+    ) -> Self {
+        let mut grouped = GroupedCharacterization::default();
+        for (term, tc) in chars {
+            if !used_terms.contains(term) {
+                continue;
+            }
+            for &(state, shift_state) in &tc.initial_shifts {
+                grouped
+                    .initial_shifts
+                    .entry((state, shift_state))
+                    .or_default()
+                    .insert(*term);
+            }
+            for &(state, len, nt) in &tc.initial_reduces {
+                grouped
+                    .initial_reduces
+                    .entry((state, len, nt))
+                    .or_default()
+                    .insert(*term);
+            }
+            for (nt, rc) in &tc.reduce_characterizations {
+                let nt_group = grouped.per_nt.entry(*nt).or_default();
+                for &(revealed, goto, shift) in &rc.reveal_goto_shift_escapes {
+                    nt_group
+                        .escape_shifts
+                        .entry((revealed, goto, shift))
+                        .or_default()
+                        .insert(*term);
+                }
+                for &(revealed, remaining_len, target_nt) in &rc.reveal_and_rereduces {
+                    nt_group
+                        .reveal_and_rereduces
+                        .entry((revealed, remaining_len, target_nt))
+                        .or_default()
+                        .insert(*term);
+                }
+            }
+        }
+        grouped
+    }
+}
 
 struct Pass2Profile {
     process_total_us: AtomicU64,
@@ -624,6 +685,240 @@ fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weigh
     }
 }
 
+fn weight_from_terminals(
+    terminals: &BTreeSet<TerminalID>,
+    term_to_bit: &BTreeMap<Option<TerminalID>, usize>,
+) -> Weight {
+    let mut w = Weight::zeros();
+    for term in terminals {
+        if let Some(bit) = term_to_bit.get(&Some(*term)) {
+            w.set(*bit, true);
+        }
+    }
+    w
+}
+
+fn ensure_nt_stack_state(
+    nwa: &mut NWA,
+    nt_stacks: &mut BTreeMap<NonTerminalID, Vec<StateID>>,
+    nt: NonTerminalID,
+    depth: usize,
+) -> Result<StateID, FullDWABuildError> {
+    let stack = nt_stacks.get_mut(&nt).expect("nt stack must exist");
+    while stack.len() <= depth {
+        let new_state = nwa.add_state();
+        let prev_state = *stack.last().expect("stack must be non-empty");
+        nwa.add_transition(
+            new_state,
+            crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL,
+            prev_state,
+            Weight::all(),
+        )?;
+        stack.push(new_state);
+    }
+    Ok(stack[depth])
+}
+
+fn add_shift_chain(
+    nwa: &mut NWA,
+    end: StateID,
+    from: StateID,
+    pop_state: ParserStateID,
+    push_state: ParserStateID,
+    push_shift: ParserStateID,
+    weight: Weight,
+) -> Result<(), FullDWABuildError> {
+    let pop_label = crate::precompute4::utils::encode_symbol_i16(pop_state)?;
+    let push_label_state = crate::precompute4::utils::encode_negative_i16(push_state)?;
+    let push_label_shift = crate::precompute4::utils::encode_negative_i16(push_shift)?;
+    let s1 = nwa.add_state();
+    let s2 = nwa.add_state();
+    nwa.add_transition(from, pop_label, s1, weight.clone())?;
+    nwa.add_transition(s1, push_label_state, s2, weight.clone())?;
+    nwa.add_transition(s2, push_label_shift, end, weight)?;
+    Ok(())
+}
+
+fn add_escape_shift_chain(
+    nwa: &mut NWA,
+    end: StateID,
+    from: StateID,
+    revealed: ParserStateID,
+    goto: ParserStateID,
+    shift: ParserStateID,
+    weight: Weight,
+) -> Result<(), FullDWABuildError> {
+    let pop_label = crate::precompute4::utils::encode_symbol_i16(revealed)?;
+    let push_revealed = crate::precompute4::utils::encode_negative_i16(revealed)?;
+    let push_goto = crate::precompute4::utils::encode_negative_i16(goto)?;
+    let push_shift = crate::precompute4::utils::encode_negative_i16(shift)?;
+    let s1 = nwa.add_state();
+    let s2 = nwa.add_state();
+    let s3 = nwa.add_state();
+    nwa.add_transition(from, pop_label, s1, weight.clone())?;
+    nwa.add_transition(s1, push_revealed, s2, weight.clone())?;
+    nwa.add_transition(s2, push_goto, s3, weight.clone())?;
+    nwa.add_transition(s3, push_shift, end, weight)?;
+    Ok(())
+}
+
+fn build_super_nwa_from_grouped(
+    grouped: &GroupedCharacterization,
+    all_nts: &BTreeSet<NonTerminalID>,
+    term_to_bit: &BTreeMap<Option<TerminalID>, usize>,
+    ignore_terms: &BTreeSet<TerminalID>,
+) -> Result<NWA, FullDWABuildError> {
+    let mut nwa = NWA::new_empty();
+    let start = nwa.add_state();
+    let end = nwa.add_state();
+    nwa.body.start_states = vec![start];
+    nwa.states[end].final_weight = Some(Weight::all());
+
+    let mut nt_states: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
+    let mut nt_stacks: BTreeMap<NonTerminalID, Vec<StateID>> = BTreeMap::new();
+    for nt in all_nts {
+        let state = nwa.add_state();
+        nt_states.insert(*nt, state);
+        nt_stacks.insert(*nt, vec![state]);
+    }
+
+    // None + ignore terminals: allow epsilon from start to end.
+    let mut epsilon_weight = Weight::zeros();
+    epsilon_weight.set(0, true);
+    for term in ignore_terms {
+        if let Some(bit) = term_to_bit.get(&Some(*term)) {
+            epsilon_weight.set(*bit, true);
+        }
+    }
+    if !epsilon_weight.is_empty() {
+        nwa.add_epsilon(start, end, epsilon_weight);
+    }
+
+    for ((state, shift_state), terminals) in &grouped.initial_shifts {
+        let weight = weight_from_terminals(terminals, term_to_bit);
+        if weight.is_empty() {
+            continue;
+        }
+        add_shift_chain(&mut nwa, end, start, *state, *state, *shift_state, weight)?;
+    }
+
+    for ((state, len, nt), terminals) in &grouped.initial_reduces {
+        let weight = weight_from_terminals(terminals, term_to_bit);
+        if weight.is_empty() {
+            continue;
+        }
+        let pop_label = crate::precompute4::utils::encode_symbol_i16(*state)?;
+        let target = ensure_nt_stack_state(&mut nwa, &mut nt_stacks, *nt, *len)?;
+        nwa.add_transition(start, pop_label, target, weight)?;
+    }
+
+    for (nt, nt_group) in &grouped.per_nt {
+        let nt_state = *nt_states.get(nt).expect("nt state must exist");
+
+        for ((revealed, goto, shift), terminals) in &nt_group.escape_shifts {
+            let weight = weight_from_terminals(terminals, term_to_bit);
+            if weight.is_empty() {
+                continue;
+            }
+            add_escape_shift_chain(&mut nwa, end, nt_state, *revealed, *goto, *shift, weight)?;
+        }
+
+        for ((revealed, remaining_len, target_nt), terminals) in &nt_group.reveal_and_rereduces {
+            let weight = weight_from_terminals(terminals, term_to_bit);
+            if weight.is_empty() {
+                continue;
+            }
+            let pop_label = crate::precompute4::utils::encode_symbol_i16(*revealed)?;
+            let target = ensure_nt_stack_state(&mut nwa, &mut nt_stacks, *target_nt, *remaining_len)?;
+            nwa.add_transition(nt_state, pop_label, target, weight)?;
+        }
+    }
+
+    Ok(nwa)
+}
+
+fn collect_nwa_unique_weights(nwa: &NWA) -> Vec<Weight> {
+    let mut weights = HashSet::new();
+    for state in &nwa.states.0 {
+        if let Some(w) = &state.final_weight {
+            weights.insert(w.clone());
+        }
+        for targets in state.transitions.values() {
+            for (_, w) in targets {
+                weights.insert(w.clone());
+            }
+        }
+        for (_, w) in &state.epsilons {
+            weights.insert(w.clone());
+        }
+    }
+    weights.into_iter().collect()
+}
+
+fn build_weight_map_for_signature(
+    super_weights: &[Weight],
+    sig_index: &SignatureIndex,
+    bit_to_term: &[Option<TerminalID>],
+) -> HashMap<Weight, Weight> {
+    super_weights
+        .iter()
+        .map(|w| {
+            if w.is_all_fast() {
+                return (w.clone(), Weight::all());
+            }
+            let mut accumulator = Weight::zeros();
+            for bit in w.iter_up_to_allow_expansion(bit_to_term.len()) {
+                if let Some(term) = bit_to_term.get(bit) {
+                    if let Some(group_idx) = sig_index.get_group(term) {
+                        accumulator.set(group_idx, true);
+                    }
+                }
+            }
+            (w.clone(), accumulator)
+        })
+        .collect()
+}
+
+fn specialize_nwa_with_map(parent_nwa: &NWA, weight_map: &HashMap<Weight, Weight>) -> NWA {
+    let mut nwa = NWA::new_empty();
+    for _ in 0..parent_nwa.states.len() {
+        nwa.add_state();
+    }
+    nwa.body = parent_nwa.body.clone();
+
+    for (idx, state) in parent_nwa.states.0.iter().enumerate() {
+        if let Some(fw) = &state.final_weight {
+            if let Some(new_fw) = weight_map.get(fw).cloned() {
+                if !new_fw.is_empty() {
+                    nwa.states[idx].final_weight = Some(new_fw);
+                }
+            }
+        }
+        for (label, targets) in &state.transitions {
+            for (dest, w) in targets {
+                if let Some(new_w) = weight_map.get(w).cloned() {
+                    if !new_w.is_empty() {
+                        nwa.states[idx]
+                            .transitions
+                            .entry(*label)
+                            .or_default()
+                            .push((*dest, new_w));
+                    }
+                }
+            }
+        }
+        for (dest, w) in &state.epsilons {
+            if let Some(new_w) = weight_map.get(w).cloned() {
+                if !new_w.is_empty() {
+                    nwa.states[idx].epsilons.push((*dest, new_w));
+                }
+            }
+        }
+    }
+
+    nwa
+}
+
 pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -> (Signature, Vec<Weight>) {
     let mut weight_groups: HashMap<Weight, Vec<Option<TerminalID>>> = HashMap::new();
     for (term, weight) in terminal_map {
@@ -669,6 +964,19 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         }
     });
     eprintln!("TIMING: parser_dwa::build_template_dwas {:?}", template_dwas_start.elapsed());
+
+    let trace_sig_quote = parser
+        .terminal_map
+        .get_by_left(&crate::glr::grammar::Terminal::RegexName("QUOTE".to_string()))
+        .copied();
+    let trace_sig_str_char = parser
+        .terminal_map
+        .get_by_left(&crate::glr::grammar::Terminal::RegexName("STR_CHAR".to_string()))
+        .copied();
+    let trace_sig_colon = parser
+        .terminal_map
+        .get_by_left(&crate::glr::grammar::Terminal::Literal(b":".to_vec()))
+        .copied();
     let ignore_dwa_start = Instant::now();
     let ignore_dwa = timeit!("build_ignore_terminal_dwa", {
         build_ignore_terminal_dwa()
@@ -731,6 +1039,41 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         reversed_nwa.compute_traversal_data()
     });
     eprintln!("TIMING: parser_dwa::compute_traversal_data {:?}", traversal_start.elapsed());
+
+    if std::env::var("GLR_FP_TRACE").is_ok() {
+        dump_reversed_nwa_with_terminals("reversed_terminal_nwa", &reversed_nwa, parser);
+        eprintln!("TRACE traversal topo: {:?}", traversal_data.topo);
+        eprintln!("TRACE traversal sccs: {:?}", traversal_data.sccs);
+        eprintln!("TRACE traversal comp_id: {:?}", traversal_data.comp_id);
+
+        let num_tsids = crate::datastructures::get_num_tsids();
+        if let Some(quote_tid) = parser
+            .terminal_map
+            .get_by_left(&crate::glr::grammar::Terminal::RegexName("QUOTE".to_string()))
+        {
+            trace_reversed_edge_tokens(
+                &reversed_nwa,
+                0,
+                quote_tid.0 as Label,
+                1,
+                num_tsids,
+                "TRACE reversed state0 QUOTE->1",
+            );
+        }
+        if let Some(str_char_tid) = parser
+            .terminal_map
+            .get_by_left(&crate::glr::grammar::Terminal::RegexName("STR_CHAR".to_string()))
+        {
+            trace_reversed_edge_tokens(
+                &reversed_nwa,
+                0,
+                str_char_tid.0 as Label,
+                1,
+                num_tsids,
+                "TRACE reversed state0 STR_CHAR->1",
+            );
+        }
+    }
     
     // In symbol-heavy mode, build a map of OUTGOING tsid-labeled edges FROM each root state
     // In the reversed NWA, root --[tsid_label]--> original_start
@@ -788,9 +1131,40 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         }
     }
 
-    let mut super_dwa_opt: Option<DWA> = None;
-    let mut super_signature_opt: Option<Signature> = None;
-    let mut super_dwa_unique_weights_opt: Option<Vec<Weight>> = None;
+    if std::env::var("GLR_FP_TRACE").is_ok() {
+        for (node_id, tokens) in &node_tokens {
+            let state = &reversed_nwa.states[*node_id];
+            let mut bundles_by_dest: HashMap<StateID, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
+            for (label, targets) in &state.transitions {
+                let term = Some(TerminalID(*label as usize));
+                for (v, w) in targets {
+                    let combined = tokens & w;
+                    if !combined.is_empty() {
+                        bundles_by_dest.entry(*v).or_default().insert(term, w.clone());
+                    }
+                }
+            }
+            for (v, w) in &state.epsilons {
+                let combined = tokens & w;
+                if !combined.is_empty() {
+                    bundles_by_dest.entry(*v).or_default().insert(None, w.clone());
+                }
+            }
+            for (dest, bundle) in bundles_by_dest {
+                let (sig, _) = canonicalize_bundle(bundle);
+                eprintln!(
+                    "TRACE pass1 signature node={} dest={} sig={}",
+                    node_id,
+                    dest,
+                    format_signature(&sig, parser),
+                );
+            }
+        }
+    }
+
+    let mut super_nwa_opt: Option<Arc<NWA>> = None;
+    let mut super_bit_to_term_opt: Option<Vec<Option<TerminalID>>> = None;
+    let mut super_nwa_unique_weights_opt: Option<Vec<Weight>> = None;
 
     let template_cache: RefCell<FxHashMap<Signature, Arc<NWA>>> = RefCell::new(FxHashMap::default());
 
@@ -858,268 +1232,96 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     });
     eprintln!("TIMING: parser_dwa::simple_signatures {:?}", simple_signatures_start.elapsed());
 
-    // 2. SLOW PATH: Handle complex signatures via Super DWA
-    // Only run this logic if we actually have complex signatures.
+    // 2. SLOW PATH: Handle complex signatures via Super NWA (no det/min).
     if !complex_signatures.is_empty() {
         let complex_signatures_start = Instant::now();
         timeit!("parser_dwa::complex_signatures", {
-            crate::debug!(4, "Building Super DWA for {} complex signatures", complex_signatures.len());
+            crate::debug!(4, "Building Super NWA for {} complex signatures", complex_signatures.len());
 
-        let mut used_terminals: BTreeSet<TerminalID> = BTreeSet::new();
-        for sig in &complex_signatures {
-            for group in sig {
-                for term in group { if let Some(term) = term { used_terminals.insert(*term); } }
-            }
-        }
-        crate::debug!(5, "  Used terminals: {}", used_terminals.len());
-
-        let mut term_to_bit = BTreeMap::new();
-        let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
-        // We ONLY include terminals relevant to the complex signatures to keep bitvectors small
-        let mut all_terminals: BTreeSet<TerminalID> = used_terminals;
-
-        // Note: Unlike original code, we don't force ALL template_dwas keys into the Super DWA,
-        // only those needed for the complex pool. This makes the Super DWA smaller.
-
-        term_to_bit.insert(None, 0);
-        bit_to_term.push(None);
-        for (i, term_id) in all_terminals.iter().enumerate() {
-            term_to_bit.insert(Some(*term_id), i + 1);
-            bit_to_term.push(Some(*term_id));
-        }
-
-        let _rangeset_backend = WeightBackendOverride::new("rangeset");
-        let tls_snapshot = WeightTlsSnapshot::capture();
-        let template_dwas_rsb = match build_template_dwas(parser) {
-            Ok(m) => m,
-            Err(e) => panic!("Failed to build template DWAs for Super DWA: {:?}", e),
-        };
-        let ignore_dwa_rsb = build_ignore_terminal_dwa();
-        crate::debug!(5, "  Built {} template DWAs with rangeset backend", template_dwas_rsb.len());
-
-        let super_nwa_start = Instant::now();
-        let mut super_nwa = timeit!("parser_dwa::super_nwa_build", {
-            let start_super_nwa = std::time::Instant::now();
-            let mut super_nwa = NWA::new_empty();
-            for (term_id_opt, bit) in &term_to_bit {
-                let mut weight = Weight::zeros();
-                weight.set(*bit, true);
-                let term_dwa = match term_id_opt {
-                    Some(term_id) => {
-                        if parser.ignore_terminal_ids.contains(term_id) {
-                            &ignore_dwa_rsb
-                        } else {
-                            template_dwas_rsb.get(term_id).unwrap_or(&ignore_dwa_rsb)
+            let mut used_terminals: BTreeSet<TerminalID> = BTreeSet::new();
+            for sig in &complex_signatures {
+                for group in sig {
+                    for term in group {
+                        if let Some(term) = term {
+                            used_terminals.insert(*term);
                         }
                     }
-                    None => &ignore_dwa_rsb,
-                };
-                let mut weighted_dwa = term_dwa.clone();
-                weighted_dwa.apply_weight_inplace(&weight);
-                NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
-            }
-            crate::debug!(5, "  Super NWA construction: {:?}, {}", 
-                start_super_nwa.elapsed(), super_nwa.stats());
-            super_nwa
-        });
-        eprintln!("TIMING: parser_dwa::super_nwa_build {:?}", super_nwa_start.elapsed());
-
-        // OPTIMIZATION: Use lightweight minimization for super DWA construction.
-        // Full minimization is expensive and not critical for intermediate results.
-        let super_dwa_start = Instant::now();
-        let super_dwa = timeit!("parser_dwa::super_dwa_det_min", {
-            let start_det = std::time::Instant::now();
-            let super_dwa = super_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Super);
-            crate::debug!(5, "  Super DWA det+min: {:?}, {}", start_det.elapsed(), super_dwa.stats());
-            super_dwa
-        });
-        eprintln!("TIMING: parser_dwa::super_dwa_det_min {:?}", super_dwa_start.elapsed());
-
-        let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
-        
-        // Collect all unique weights from super_dwa once
-        let super_weights_start = Instant::now();
-        let super_dwa_unique_weights: Vec<Weight> = timeit!("parser_dwa::super_dwa_collect_weights", {
-            let start_weights = std::time::Instant::now();
-            let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
-                .map_init(
-                    move || {
-                        tls_snapshot.apply();
-                    },
-                    |_, s| s,
-                )
-                .fold(HashSet::new, |mut acc, s| {
-                     if let Some(w) = &s.final_weight { acc.insert(w.clone()); }
-                     for w in s.trans_weights.values() { acc.insert(w.clone()); }
-                     acc
-                })
-                .reduce(HashSet::new, |mut a, b| {
-                    for w in b { a.insert(w); }
-                    a
-                })
-                .into_iter().collect();
-            crate::debug!(5, "  Collected {} unique weights in {:?}", super_dwa_unique_weights.len(), start_weights.elapsed());
-            super_dwa_unique_weights
-        });
-        eprintln!("TIMING: parser_dwa::super_dwa_collect_weights {:?}", super_weights_start.elapsed());
-
-        // PRE-COMPUTE: Build all weight mappings for all complex signatures upfront
-        // This avoids redundant computation inside specialize_dwa_relative, which was creating
-        // a new weight_map HashMap for each of the 199 complex signatures.
-        let mappings_start = Instant::now();
-        let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = timeit!(
-            "parser_dwa::weight_mappings",
-            {
-                let start_mappings = std::time::Instant::now();
-                let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = complex_signatures
-                    .par_iter()
-                    .map_init(
-                        move || {
-                            tls_snapshot.apply();
-                        },
-                        |_, target_sig| {
-                    let target_idx = SignatureIndex::new(target_sig);
-                    let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
-                    
-                    // Pre-compute the weight mapping for this target signature
-                    let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights.iter()
-                        .map(|w| {
-                            let mut accumulator = Weight::zeros();
-                            let mut is_all = false;
-
-                            for bit in w.iter_up_to_allow_expansion(mapping.len()) {
-                                if let Some(target_w) = mapping.get(bit) {
-                                    if target_w.is_all_fast() {
-                                        is_all = true;
-                                        break;
-                                    }
-                                    accumulator |= target_w;
-                                }
-                            }
-
-                            let new_w = if is_all {
-                                Weight::all()
-                            } else {
-                                accumulator
-                            };
-                            (w.clone(), new_w)
-                        })
-                        .collect();
-                    
-                    (target_sig.clone(), mapping, weight_map)
-                })
-                    .collect();
-                crate::debug!(5, "  Weight mappings: {:?}", start_mappings.elapsed());
-                all_mappings
-            }
-        );
-        eprintln!("TIMING: parser_dwa::weight_mappings {:?}", mappings_start.elapsed());
-
-        // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
-        let specialize_start = Instant::now();
-        let results: Vec<(Signature, NWA, DWAStats, DWAStats, std::time::Duration, std::time::Duration, std::time::Duration, std::time::Duration)> = timeit!(
-            "parser_dwa::specialize_dw_as",
-            {
-                let start_specialize = std::time::Instant::now();
-                let results: Vec<(Signature, NWA, DWAStats, DWAStats, std::time::Duration, std::time::Duration, std::time::Duration, std::time::Duration)> = all_mappings
-                    .par_iter()
-                    .map_init(
-                        move || {
-                            tls_snapshot.apply();
-                        },
-                        |_, (target_sig, _mapping, weight_map)| {
-                    let specialize_dwa_start = Instant::now();
-                    let remap_start = Instant::now();
-                    let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
-                    let remap_elapsed = remap_start.elapsed();
-                    let before_stats = derived_dwa.stats();
-                    let optimize_start = Instant::now();
-                    derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
-                    let optimize_elapsed = optimize_start.elapsed();
-                    let after_stats = derived_dwa.stats();
-                    let nwa_start = Instant::now();
-                    let nwa = NWA::from_dwa(&derived_dwa);
-                    let nwa_elapsed = nwa_start.elapsed();
-                    let specialize_dwa_elapsed = specialize_dwa_start.elapsed();
-                    (target_sig.clone(), nwa, before_stats, after_stats, specialize_dwa_elapsed, remap_elapsed, optimize_elapsed, nwa_elapsed)
-                })
-                    .collect();
-                let mut before_total_stats = DWAStats {
-                    states: 0,
-                    transitions: 0,
-                    unique_state_pairs: 0,
-                    ranges: 0,
-                    ranges_interned: 0,
-                    transition_multiplicity_hist: BTreeMap::new(),
-                };
-                let mut after_total_stats = DWAStats {
-                    states: 0,
-                    transitions: 0,
-                    unique_state_pairs: 0,
-                    ranges: 0,
-                    ranges_interned: 0,
-                    transition_multiplicity_hist: BTreeMap::new(),
-                };
-                let mut reduced_count = 0usize;
-                let mut max_state_delta = 0usize;
-                let mut max_transition_delta = 0usize;
-                let mut accumulate_stats = |total: &mut DWAStats, stats: &DWAStats| {
-                    total.states += stats.states;
-                    total.transitions += stats.transitions;
-                    total.unique_state_pairs += stats.unique_state_pairs;
-                    total.ranges += stats.ranges;
-                    total.ranges_interned += stats.ranges_interned;
-                    for (k, v) in &stats.transition_multiplicity_hist {
-                        *total.transition_multiplicity_hist.entry(*k).or_insert(0) += v;
-                    }
-                };
-                for (_, _, before_stats, after_stats, _, _, _, _) in &results {
-                    accumulate_stats(&mut before_total_stats, before_stats);
-                    accumulate_stats(&mut after_total_stats, after_stats);
-                    let state_delta = before_stats.states.saturating_sub(after_stats.states);
-                    let transition_delta = before_stats.transitions.saturating_sub(after_stats.transitions);
-                    if state_delta > 0 || transition_delta > 0 {
-                        reduced_count += 1;
-                    }
-                    if state_delta > max_state_delta {
-                        max_state_delta = state_delta;
-                    }
-                    if transition_delta > max_transition_delta {
-                        max_transition_delta = transition_delta;
-                    }
                 }
-                let total_state_delta = before_total_stats.states.saturating_sub(after_total_stats.states);
-                let total_transition_delta = before_total_stats.transitions.saturating_sub(after_total_stats.transitions);
-                let reduction_pct = if before_total_stats.states == 0 {
-                    0.0
-                } else {
-                    100.0 * (1.0 - after_total_stats.states as f64 / before_total_stats.states as f64)
-                };
-                crate::debug!(5, "  Specialization ({} DWAs): {:?}, before={}, after={} ({:.1}% reduction)", 
-                    results.len(), start_specialize.elapsed(), before_total_stats, after_total_stats, reduction_pct);
-                crate::debug!(5, "  Specialization reduction: reduced_dw_as={}/{}, total_state_delta={}, total_transition_delta={}, max_state_delta={}, max_transition_delta={}",
-                    reduced_count,
-                    results.len(),
-                    total_state_delta,
-                    total_transition_delta,
-                    max_state_delta,
-                    max_transition_delta,
+            }
+            crate::debug!(5, "  Used terminals: {}", used_terminals.len());
+
+            let ignore_terms: BTreeSet<TerminalID> = used_terminals
+                .iter()
+                .filter(|term| parser.ignore_terminal_ids.contains(term))
+                .cloned()
+                .collect();
+            let used_nonignore_terms: BTreeSet<TerminalID> = used_terminals
+                .difference(&ignore_terms)
+                .cloned()
+                .collect();
+
+            let mut term_to_bit = BTreeMap::new();
+            let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
+            term_to_bit.insert(None, 0);
+            bit_to_term.push(None);
+            for (i, term_id) in used_terminals.iter().enumerate() {
+                term_to_bit.insert(Some(*term_id), i + 1);
+                bit_to_term.push(Some(*term_id));
+            }
+
+            let _rangeset_backend = WeightBackendOverride::new("rangeset");
+
+            let all_chars = compute_all_characterizations(parser);
+            let grouped = GroupedCharacterization::from_terminals(&all_chars, &used_nonignore_terms);
+            let all_nts: BTreeSet<NonTerminalID> =
+                parser.non_terminal_map.right_values().cloned().collect();
+
+            let super_nwa = build_super_nwa_from_grouped(
+                &grouped,
+                &all_nts,
+                &term_to_bit,
+                &ignore_terms,
+            )
+                .expect("Failed to build Super NWA");
+            crate::debug!(5, "  Super NWA: {}", super_nwa.stats());
+
+            let super_nwa_unique_weights = collect_nwa_unique_weights(&super_nwa);
+            let super_nwa = Arc::new(super_nwa);
+            let super_nwa_ref = super_nwa.as_ref();
+
+            let mut results = Vec::new();
+            for sig in &complex_signatures {
+                let sig_index = SignatureIndex::new(sig);
+                let weight_map = build_weight_map_for_signature(
+                    &super_nwa_unique_weights,
+                    &sig_index,
+                    &bit_to_term,
                 );
-                for (idx, (_, _, before_stats, after_stats, specialize_dwa_elapsed, remap_elapsed, optimize_elapsed, nwa_elapsed)) in results.iter().enumerate() {
-                    crate::debug!(6, "  Specialized DWA #{}: time={:?} (remap={:?}, optimize={:?}, nwa={:?}), before={}, after={}", idx, specialize_dwa_elapsed, remap_elapsed, optimize_elapsed, nwa_elapsed, before_stats, after_stats);
-                }
-                results
+                let nwa = specialize_nwa_with_map(super_nwa_ref, &weight_map);
+                results.push((sig.clone(), nwa));
             }
-        );
-        eprintln!("TIMING: parser_dwa::specialize_dw_as {:?}", specialize_start.elapsed());
 
-        for (sig, nwa, _, _, _, _, _, _) in results {
-            template_cache.borrow_mut().insert(sig, Arc::new(nwa));
-        }
+            for (sig, nwa) in results {
+                if std::env::var("GLR_FP_TRACE").is_ok() {
+                    if sig.len() == 2 {
+                        if let (Some(quote_tid), Some(str_tid)) = (trace_sig_quote, trace_sig_str_char) {
+                            if signature_contains(&sig, quote_tid) && signature_contains(&sig, str_tid) {
+                                dump_nwa_decoded_with_bits("template_nwa QUOTE+STR_CHAR", &sig, parser, &nwa);
+                            }
+                        }
+                        if let (Some(str_tid), Some(colon_tid)) = (trace_sig_str_char, trace_sig_colon) {
+                            if signature_contains(&sig, str_tid) && signature_contains(&sig, colon_tid) {
+                                dump_nwa_decoded_with_bits("template_nwa STR_CHAR+':'", &sig, parser, &nwa);
+                            }
+                        }
+                    }
+                }
+                template_cache.borrow_mut().insert(sig, Arc::new(nwa));
+            }
 
-        super_dwa_opt = Some(super_dwa);
-        super_signature_opt = Some(super_signature);
-        super_dwa_unique_weights_opt = Some(super_dwa_unique_weights);
+            super_nwa_opt = Some(Arc::clone(&super_nwa));
+            super_bit_to_term_opt = Some(bit_to_term);
+            super_nwa_unique_weights_opt = Some(super_nwa_unique_weights);
         });
         eprintln!("TIMING: parser_dwa::complex_signatures {:?}", complex_signatures_start.elapsed());
     }
@@ -1158,6 +1360,18 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
     crate::debug!(4, "Beginning NWA traversal");
 
+    let trace = std::env::var("GLR_FP_TRACE").is_ok();
+    let trace_token_id = std::env::var("GLR_FP_TRACE_TOKEN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1);
+    let trace_min_depths = if trace {
+        let num_tsids = crate::datastructures::get_num_tsids();
+        Some(Arc::new(compute_min_depths_for_token_nwa(&reversed_nwa, trace_token_id, num_tsids, 12)))
+    } else {
+        None
+    };
+
     let pass2_start = Instant::now();
     let pass2_profile = Arc::new(Pass2Profile::new());
     let pass2_traversal_profile_enabled = std::env::var("PROFILE_PARSER_DWA_PASS2_TRAVERSAL")
@@ -1170,9 +1384,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let tsid_bodies_for_process = tsid_bodies_arc.clone();
     let pass2_profile_for_process = pass2_profile.clone();
     let template_cache_ref = &template_cache;
-    let super_dwa_opt_ref = &super_dwa_opt;
-    let super_signature_opt_ref = &super_signature_opt;
-    let super_dwa_unique_weights_opt_ref = &super_dwa_unique_weights_opt;
+    let super_nwa_opt_ref = &super_nwa_opt;
+    let super_bit_to_term_opt_ref = &super_bit_to_term_opt;
+    let super_nwa_unique_weights_opt_ref = &super_nwa_unique_weights_opt;
     let states_arena_ref = &states_arena;
 
     timeit!("parser_dwa::pass2_traversal", {
@@ -1255,6 +1469,14 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         .fetch_add(canon_us, Ordering::Relaxed);
                     accounted_us = accounted_us.saturating_add(canon_us);
 
+                    if trace {
+                        eprintln!(
+                            "TRACE pass2 node={} signature={}",
+                            node_id,
+                            format_signature(&signature, parser),
+                        );
+                    }
+
                     let cached_nwa = {
                         let cache_lookup_start = Instant::now();
                         let cached = template_cache_ref.borrow().get(&signature).cloned();
@@ -1269,44 +1491,24 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         let _rangeset_backend = WeightBackendOverride::new("rangeset");
                         crate::debug!(5, "Dynamic derivation for signature {:?}", signature);
 
-                        let super_dwa = super_dwa_opt_ref
+                        let super_nwa = super_nwa_opt_ref
                             .as_ref()
-                            .expect("Super DWA missing for dynamic derivation");
-                        let super_signature = super_signature_opt_ref
+                            .expect("Super NWA missing for dynamic derivation");
+                        let bit_to_term = super_bit_to_term_opt_ref
                             .as_ref()
-                            .expect("Super signature missing for dynamic derivation");
-                        let super_dwa_unique_weights = super_dwa_unique_weights_opt_ref
+                            .expect("Super NWA bit mapping missing for dynamic derivation");
+                        let super_nwa_unique_weights = super_nwa_unique_weights_opt_ref
                             .as_ref()
-                            .expect("Super DWA weights missing for dynamic derivation");
+                            .expect("Super NWA weights missing for dynamic derivation");
 
-                        let target_idx = SignatureIndex::new(&signature);
-                        let mapping = can_derive(super_signature, &target_idx)
-                            .expect("Super signature must derive target");
+                        let sig_index = SignatureIndex::new(&signature);
+                        let weight_map = build_weight_map_for_signature(
+                            super_nwa_unique_weights,
+                            &sig_index,
+                            bit_to_term,
+                        );
 
-                        let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights
-                            .iter()
-                            .map(|w| {
-                                let mut accumulator = Weight::zeros();
-                                let mut is_all = false;
-
-                                for bit in w.iter_up_to_allow_expansion(mapping.len()) {
-                                    if let Some(target_w) = mapping.get(bit) {
-                                        if target_w.is_all_fast() {
-                                            is_all = true;
-                                            break;
-                                        }
-                                        accumulator |= target_w;
-                                    }
-                                }
-
-                                let new_w = if is_all { Weight::all() } else { accumulator };
-                                (w.clone(), new_w)
-                            })
-                            .collect();
-
-                        let mut derived_dwa = specialize_dwa_relative_with_map(super_dwa, &weight_map);
-                        derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
-                        let nwa = Arc::new(NWA::from_dwa(&derived_dwa));
+                        let nwa = Arc::new(specialize_nwa_with_map(super_nwa.as_ref(), &weight_map));
                         let dynamic_us = dynamic_start.elapsed().as_micros() as u64;
                         pass2_profile_for_process.dynamic_derive_us.fetch_add(
                             dynamic_us,
@@ -1327,6 +1529,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         }
                     };
                     let cached_nwa = cached_nwa.as_ref();
+
 
                     pass2_profile_for_process
                         .template_count
@@ -1403,6 +1606,21 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         crate::debug!(7, "Final body candidate: node_id={}, tokens_len={}, tokens_ranges={}, fw_len={}, fw_ranges={}, intersection_len={}, intersection_ranges={}", 
                             node_id, tokens.len(), tokens.ranges_len(), fw.len(), fw.ranges_len(), intersection_w.len(), intersection_w.ranges_len());
                         if !intersection_w.is_empty() {
+                            if trace {
+                                let num_tsids = crate::datastructures::get_num_tsids();
+                                if crate::debug_path_weight::weight_contains_token(&intersection_w, trace_token_id, num_tsids) {
+                                    let depth = trace_min_depths
+                                        .as_ref()
+                                        .and_then(|depths| depths.get(node_id).copied())
+                                        .unwrap_or(None);
+                                    eprintln!(
+                                        "TRACE parser_nwa final_body node={} min_depth={:?} weight_len={}",
+                                        node_id,
+                                        depth,
+                                        intersection_w.len(),
+                                    );
+                                }
+                            }
                             let final_w = intersection_w;
                             let final_collect_start = Instant::now();
                             let mut fb = final_bodies_arc.lock().unwrap();
@@ -1465,6 +1683,33 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
         crate::debug!(4, "Finished Pass 2");
     });
+
+    if trace {
+        let num_tsids = crate::datastructures::get_num_tsids();
+        let fb = final_bodies_arc.lock().unwrap();
+        let min_len = min_label_len_from_final_bodies(
+            &states_arena.borrow(),
+            &fb,
+            trace_token_id,
+            num_tsids,
+            12,
+        );
+        eprintln!(
+            "TRACE parser_nwa stage=pre_neg min_label_len={}",
+            min_len.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
+        );
+
+        let pre_cancel = build_combined_nwa_for_dump(&states_arena.borrow(), &fb);
+        dump_nwa_decoded("parser_nwa_pre_cancel", &pre_cancel);
+        trace_combined_edge_tokens(&pre_cancel, 43, 22, 17, num_tsids, "TRACE pre_cancel state43 POP(22)->17");
+        trace_combined_edge_tokens(&pre_cancel, 145, 13, 150, num_tsids, "TRACE pre_cancel state145 POP(13)->150");
+        let push13 = crate::precompute4::utils::encode_negative_i16(crate::glr::table::StateID(13))
+            .unwrap_or(Label::MIN);
+        let push19 = crate::precompute4::utils::encode_negative_i16(crate::glr::table::StateID(19))
+            .unwrap_or(Label::MIN);
+        trace_combined_edge_tokens(&pre_cancel, 150, push13, 164, num_tsids, "TRACE pre_cancel state150 PUSH(13)->164");
+        trace_combined_edge_tokens(&pre_cancel, 164, push19, 170, num_tsids, "TRACE pre_cancel state164 PUSH(19)->170");
+    }
     // Batch negative resolution across all accumulated states (after pass 2).
     {
         let mut states = states_arena.borrow_mut();
@@ -1473,12 +1718,165 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             let cancel_start = Instant::now();
             apply_cancellations(&mut states, &all_states);
             let cancel_elapsed = cancel_start.elapsed();
+            if trace {
+                let num_tsids = crate::datastructures::get_num_tsids();
+                let fb = final_bodies_arc.lock().unwrap();
+                let min_len = min_label_len_from_final_bodies(
+                    &states,
+                    &fb,
+                    trace_token_id,
+                    num_tsids,
+                    12,
+                );
+                eprintln!(
+                    "TRACE parser_nwa stage=post_cancel min_label_len={}",
+                    min_len.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
+                );
+
+                if let Some(path) = shortest_labeled_path_from_final_bodies(
+                    &states,
+                    &fb,
+                    trace_token_id,
+                    num_tsids,
+                    12,
+                ) {
+                    eprintln!(
+                        "TRACE parser_nwa stage=post_cancel shortest_path_len={} steps={}",
+                        path.len(),
+                        path.len(),
+                    );
+                    for (idx, (label, weight)) in path.iter().enumerate() {
+                        let kind = if *label == crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL {
+                            "POP_ANY".to_string()
+                        } else if *label < 0 {
+                            let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                                .unwrap_or((false, crate::glr::table::StateID(usize::MAX)));
+                            format!("PUSH({})", st.0)
+                        } else {
+                            let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                                .unwrap_or((true, crate::glr::table::StateID(usize::MAX)));
+                            format!("POP({})", st.0)
+                        };
+                        eprintln!(
+                            "TRACE parser_nwa stage=post_cancel step={} label={} kind={} weight_len={}",
+                            idx,
+                            label,
+                            kind,
+                            weight.len(),
+                        );
+                    }
+                }
+
+                let post_cancel = build_combined_nwa_for_dump(&states, &fb);
+                dump_nwa_decoded("parser_nwa_post_cancel", &post_cancel);
+            }
+
             let finality_start = Instant::now();
             apply_finality_fixpoint(&mut states, &all_states);
             let finality_elapsed = finality_start.elapsed();
+            if trace {
+                let num_tsids = crate::datastructures::get_num_tsids();
+                let fb = final_bodies_arc.lock().unwrap();
+                let min_len = min_label_len_from_final_bodies(
+                    &states,
+                    &fb,
+                    trace_token_id,
+                    num_tsids,
+                    12,
+                );
+                eprintln!(
+                    "TRACE parser_nwa stage=post_finality min_label_len={}",
+                    min_len.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
+                );
+
+                if let Some(path) = shortest_labeled_path_from_final_bodies(
+                    &states,
+                    &fb,
+                    trace_token_id,
+                    num_tsids,
+                    12,
+                ) {
+                    eprintln!(
+                        "TRACE parser_nwa stage=post_finality shortest_path_len={} steps={}",
+                        path.len(),
+                        path.len(),
+                    );
+                    for (idx, (label, weight)) in path.iter().enumerate() {
+                        let kind = if *label == crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL {
+                            "POP_ANY".to_string()
+                        } else if *label < 0 {
+                            let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                                .unwrap_or((false, crate::glr::table::StateID(usize::MAX)));
+                            format!("PUSH({})", st.0)
+                        } else {
+                            let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                                .unwrap_or((true, crate::glr::table::StateID(usize::MAX)));
+                            format!("POP({})", st.0)
+                        };
+                        eprintln!(
+                            "TRACE parser_nwa stage=post_finality step={} label={} kind={} weight_len={}",
+                            idx,
+                            label,
+                            kind,
+                            weight.len(),
+                        );
+                    }
+                }
+            }
+
             let remove_start = Instant::now();
             remove_negative_transitions(&mut states, &all_states);
             let remove_elapsed = remove_start.elapsed();
+            if trace {
+                let num_tsids = crate::datastructures::get_num_tsids();
+                let fb = final_bodies_arc.lock().unwrap();
+                let min_len = min_label_len_from_final_bodies(
+                    &states,
+                    &fb,
+                    trace_token_id,
+                    num_tsids,
+                    12,
+                );
+                eprintln!(
+                    "TRACE parser_nwa stage=post_remove min_label_len={}",
+                    min_len.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
+                );
+
+                if let Some(path) = shortest_labeled_path_from_final_bodies(
+                    &states,
+                    &fb,
+                    trace_token_id,
+                    num_tsids,
+                    12,
+                ) {
+                    eprintln!(
+                        "TRACE parser_nwa stage=post_remove shortest_path_len={} steps={}",
+                        path.len(),
+                        path.len(),
+                    );
+                    for (idx, (label, weight)) in path.iter().enumerate() {
+                        let kind = if *label == crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL {
+                            "POP_ANY".to_string()
+                        } else if *label < 0 {
+                            let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                                .unwrap_or((false, crate::glr::table::StateID(usize::MAX)));
+                            format!("PUSH({})", st.0)
+                        } else {
+                            let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                                .unwrap_or((true, crate::glr::table::StateID(usize::MAX)));
+                            format!("POP({})", st.0)
+                        };
+                        eprintln!(
+                            "TRACE parser_nwa stage=post_remove step={} label={} kind={} weight_len={}",
+                            idx,
+                            label,
+                            kind,
+                            weight.len(),
+                        );
+                    }
+                }
+            }
+
             eprintln!(
                 "TIMING: parser_dwa::batch_negatives cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}",
                 cancel_elapsed, finality_elapsed, remove_elapsed,
@@ -1519,6 +1917,22 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } }
     });
     eprintln!("TIMING: parser_dwa::combine_bodies {:?}", combine_bodies_start.elapsed());
+
+    if std::env::var("GLR_FP_TRACE").is_ok() {
+        let token_id = std::env::var("GLR_FP_TRACE_TOKEN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1);
+        let num_tsids = crate::datastructures::get_num_tsids();
+        let max_len = max_labeled_path_len_for_token_nwa(&combined_nwa, token_id, num_tsids, 8);
+        let min_len = min_labeled_path_len_for_token_nwa(&combined_nwa, token_id, num_tsids, 8);
+        eprintln!(
+            "TRACE parser_nwa pre-det token={} min_label_len={} max_label_len={}",
+            token_id,
+            min_len.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
+            max_len
+        );
+    }
     let macro_level = std::env::var("MACRO_DEBUG_LEVEL")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
@@ -1666,6 +2080,610 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     crate::debug!(4, "Parser DWA minimization complete. {}", dwa.stats());
     dwa
 }
+
+fn max_labeled_path_len_for_token_nwa(
+    nwa: &NWA,
+    token_id: usize,
+    num_tsids: usize,
+    max_depth: usize,
+) -> usize {
+    use crate::debug_path_weight::weight_contains_token;
+    use std::collections::VecDeque;
+
+    let mut best = 0usize;
+    let mut best_seen: Vec<Option<usize>> = vec![None; nwa.states.len()];
+    let mut queue: VecDeque<(NWAStateID, usize)> = VecDeque::new();
+
+    for &start in &nwa.body.start_states {
+        queue.push_back((start, 0));
+    }
+
+    while let Some((state, len)) = queue.pop_front() {
+        if len > max_depth {
+            continue;
+        }
+        if let Some(prev) = best_seen[state] {
+            if prev >= len {
+                continue;
+            }
+        }
+        best_seen[state] = Some(len);
+        if len > best {
+            best = len;
+        }
+
+        let st = &nwa.states[state];
+        for (next_state, w) in &st.epsilons {
+            if weight_contains_token(w, token_id, num_tsids) {
+                queue.push_back((*next_state, len));
+            }
+        }
+
+        for targets in st.transitions.values() {
+            for (next_state, w) in targets {
+                if weight_contains_token(w, token_id, num_tsids) {
+                    queue.push_back((*next_state, len.saturating_add(1)));
+                }
+            }
+        }
+    }
+
+    best
+}
+
+fn min_labeled_path_len_for_token_nwa(
+    nwa: &NWA,
+    token_id: usize,
+    num_tsids: usize,
+    max_depth: usize,
+) -> Option<usize> {
+    use crate::debug_path_weight::weight_contains_token;
+    use std::collections::VecDeque;
+
+    let mut best: Vec<Option<usize>> = vec![None; nwa.states.len()];
+    let mut deque: VecDeque<(NWAStateID, usize)> = VecDeque::new();
+    for &start in &nwa.body.start_states {
+        deque.push_back((start, 0));
+    }
+
+    while let Some((state, cost)) = deque.pop_front() {
+        if cost > max_depth {
+            continue;
+        }
+        if let Some(prev) = best[state] {
+            if prev <= cost {
+                continue;
+            }
+        }
+        best[state] = Some(cost);
+
+        if let Some(fw) = &nwa.states[state].final_weight {
+            if weight_contains_token(fw, token_id, num_tsids) {
+                return Some(cost);
+            }
+        }
+
+        let st = &nwa.states[state];
+        for (next_state, w) in &st.epsilons {
+            if weight_contains_token(w, token_id, num_tsids) {
+                deque.push_front((*next_state, cost));
+            }
+        }
+
+        for targets in st.transitions.values() {
+            for (next_state, w) in targets {
+                if weight_contains_token(w, token_id, num_tsids) {
+                    deque.push_back((*next_state, cost.saturating_add(1)));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn compute_min_depths_for_token_nwa(
+    nwa: &NWA,
+    token_id: usize,
+    num_tsids: usize,
+    max_depth: usize,
+) -> Vec<Option<usize>> {
+    use crate::debug_path_weight::weight_contains_token;
+    use std::collections::VecDeque;
+
+    let mut best: Vec<Option<usize>> = vec![None; nwa.states.len()];
+    let mut deque: VecDeque<(NWAStateID, usize)> = VecDeque::new();
+    for &start in &nwa.body.start_states {
+        deque.push_back((start, 0));
+    }
+
+    while let Some((state, cost)) = deque.pop_front() {
+        if cost > max_depth {
+            continue;
+        }
+        if let Some(prev) = best[state] {
+            if prev <= cost {
+                continue;
+            }
+        }
+        best[state] = Some(cost);
+
+        let st = &nwa.states[state];
+        for (next_state, w) in &st.epsilons {
+            if weight_contains_token(w, token_id, num_tsids) {
+                deque.push_front((*next_state, cost));
+            }
+        }
+        for targets in st.transitions.values() {
+            for (next_state, w) in targets {
+                if weight_contains_token(w, token_id, num_tsids) {
+                    deque.push_back((*next_state, cost.saturating_add(1)));
+                }
+            }
+        }
+    }
+
+    best
+}
+
+fn min_label_len_from_final_bodies(
+    states: &NWAStates,
+    final_bodies: &[(NWABody, Weight, StateID)],
+    token_id: usize,
+    num_tsids: usize,
+    max_depth: usize,
+) -> Option<usize> {
+    use crate::debug_path_weight::weight_contains_token;
+    use std::collections::VecDeque;
+
+    let mut best: Vec<Option<usize>> = vec![None; states.len()];
+    let mut deque: VecDeque<(NWAStateID, usize)> = VecDeque::new();
+
+    for (body, weight, _node_id) in final_bodies {
+        if !weight_contains_token(weight, token_id, num_tsids) {
+            continue;
+        }
+        for &start in &body.start_states {
+            deque.push_back((start, 0));
+        }
+    }
+
+    while let Some((state, cost)) = deque.pop_front() {
+        if cost > max_depth {
+            continue;
+        }
+        if let Some(prev) = best[state] {
+            if prev <= cost {
+                continue;
+            }
+        }
+        best[state] = Some(cost);
+
+        if let Some(fw) = &states[state].final_weight {
+            if weight_contains_token(fw, token_id, num_tsids) {
+                return Some(cost);
+            }
+        }
+
+        for (next_state, w) in &states[state].epsilons {
+            if weight_contains_token(w, token_id, num_tsids) {
+                deque.push_front((*next_state, cost));
+            }
+        }
+        for targets in states[state].transitions.values() {
+            for (next_state, w) in targets {
+                if weight_contains_token(w, token_id, num_tsids) {
+                    deque.push_back((*next_state, cost.saturating_add(1)));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn shortest_labeled_path_from_final_bodies(
+    states: &NWAStates,
+    final_bodies: &[(NWABody, Weight, StateID)],
+    token_id: usize,
+    num_tsids: usize,
+    max_depth: usize,
+) -> Option<Vec<(Label, Weight)>> {
+    use crate::debug_path_weight::weight_contains_token;
+    use std::collections::VecDeque;
+
+    #[derive(Clone)]
+    struct Pred {
+        prev: NWAStateID,
+        label: Option<Label>,
+        weight: Option<Weight>,
+    }
+
+    let n = states.len();
+    let mut dist: Vec<Option<usize>> = vec![None; n];
+    let mut pred: Vec<Option<Pred>> = vec![None; n];
+    let mut deque: VecDeque<NWAStateID> = VecDeque::new();
+
+    for (body, weight, _node_id) in final_bodies {
+        if !weight_contains_token(weight, token_id, num_tsids) {
+            continue;
+        }
+        for &start in &body.start_states {
+            if dist[start].map(|v| v <= 0).unwrap_or(false) {
+                continue;
+            }
+            dist[start] = Some(0);
+            deque.push_back(start);
+        }
+    }
+
+    let mut final_state: Option<NWAStateID> = None;
+
+    while let Some(state) = deque.pop_front() {
+        let cost = dist[state].unwrap_or(0);
+        if cost > max_depth {
+            continue;
+        }
+
+        if let Some(fw) = &states[state].final_weight {
+            if weight_contains_token(fw, token_id, num_tsids) {
+                final_state = Some(state);
+                break;
+            }
+        }
+
+        for (next_state, w) in &states[state].epsilons {
+            if !weight_contains_token(w, token_id, num_tsids) {
+                continue;
+            }
+            if dist[*next_state].map(|v| v <= cost).unwrap_or(false) {
+                continue;
+            }
+            dist[*next_state] = Some(cost);
+            pred[*next_state] = Some(Pred { prev: state, label: None, weight: None });
+            deque.push_front(*next_state);
+        }
+
+        for (&label, targets) in &states[state].transitions {
+            for (next_state, w) in targets {
+                if !weight_contains_token(w, token_id, num_tsids) {
+                    continue;
+                }
+                let next_cost = cost.saturating_add(1);
+                if next_cost > max_depth {
+                    continue;
+                }
+                if dist[*next_state].map(|v| v <= next_cost).unwrap_or(false) {
+                    continue;
+                }
+                dist[*next_state] = Some(next_cost);
+                pred[*next_state] = Some(Pred {
+                    prev: state,
+                    label: Some(label),
+                    weight: Some(w.clone()),
+                });
+                deque.push_back(*next_state);
+            }
+        }
+    }
+
+    let Some(mut cur) = final_state else { return None; };
+    let mut out: Vec<(Label, Weight)> = Vec::new();
+    while let Some(p) = pred[cur].take() {
+        if let (Some(label), Some(weight)) = (p.label, p.weight) {
+            out.push((label, weight));
+        }
+        cur = p.prev;
+    }
+    out.reverse();
+    Some(out)
+}
+
+fn build_combined_nwa_for_dump(
+    states: &NWAStates,
+    final_bodies: &[(NWABody, Weight, StateID)],
+) -> NWA {
+    let mut new_states = states.clone();
+    let start = new_states.add_state();
+    for (body, weight, _node_id) in final_bodies {
+        for &s in &body.start_states {
+            new_states.add_epsilon(start, s, weight.clone());
+        }
+    }
+    NWA {
+        states: new_states,
+        body: NWABody {
+            start_states: vec![start],
+        },
+    }
+}
+
+fn dump_nwa_decoded(tag: &str, nwa: &NWA) {
+    eprintln!("--- {} ---", tag);
+    eprintln!("start_states={:?}", nwa.body.start_states);
+    for (sid, state) in nwa.states.0.iter().enumerate() {
+        let final_len = state.final_weight.as_ref().map(|w| w.len());
+        eprintln!("  State {}: final_weight_len={:?}", sid, final_len);
+        if !state.epsilons.is_empty() {
+            for (target, w) in &state.epsilons {
+                eprintln!("    eps -> {} (weight_len={})", target, w.len());
+            }
+        }
+        for (label, targets) in &state.transitions {
+            let decoded = if *label == crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL {
+                "POP_ANY".to_string()
+            } else if *label < 0 {
+                let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                    .unwrap_or((false, crate::glr::table::StateID(usize::MAX)));
+                format!("PUSH({})", st.0)
+            } else {
+                let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                    .unwrap_or((true, crate::glr::table::StateID(usize::MAX)));
+                format!("POP({})", st.0)
+            };
+            for (target, w) in targets {
+                eprintln!(
+                    "    {} -> {} (label={}, weight_len={})",
+                    decoded,
+                    target,
+                    label,
+                    w.len(),
+                );
+            }
+        }
+    }
+}
+
+fn format_weight_bits_for_sig(weight: &Weight, sig_len: usize) -> String {
+    if sig_len == 0 {
+        return "bits{}".to_string();
+    }
+    let bits: Vec<usize> = if weight.is_all_fast() {
+        (0..sig_len).collect()
+    } else {
+        let max_bit = sig_len.saturating_sub(1);
+        weight.iter_up_to_allow_expansion(max_bit).collect()
+    };
+    if bits.is_empty() {
+        return "bits{}".to_string();
+    }
+    let bits_str = bits
+        .iter()
+        .map(|b| b.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("bits{{{}}}", bits_str)
+}
+
+fn dump_nwa_decoded_with_bits(tag: &str, sig: &Signature, parser: &GLRParser, nwa: &NWA) {
+    eprintln!("--- {} ---", tag);
+    eprintln!("signature={}", format_signature(sig, parser));
+    for (idx, group) in sig.iter().enumerate() {
+        eprintln!("  sig_bit{}={}", idx, format_signature_group(group, parser));
+    }
+    eprintln!("start_states={:?}", nwa.body.start_states);
+    let sig_len = sig.len();
+    for (sid, state) in nwa.states.0.iter().enumerate() {
+        let final_len = state.final_weight.as_ref().map(|w| w.len());
+        let final_bits = state
+            .final_weight
+            .as_ref()
+            .map(|w| format_weight_bits_for_sig(w, sig_len));
+        eprintln!(
+            "  State {}: final_weight_len={:?} final_weight_bits={:?}",
+            sid, final_len, final_bits
+        );
+        if !state.epsilons.is_empty() {
+            for (target, w) in &state.epsilons {
+                eprintln!(
+                    "    eps -> {} (weight_len={}, weight_bits={})",
+                    target,
+                    w.len(),
+                    format_weight_bits_for_sig(w, sig_len),
+                );
+            }
+        }
+        for (label, targets) in &state.transitions {
+            let decoded = if *label == crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL {
+                "POP_ANY".to_string()
+            } else if *label < 0 {
+                let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                    .unwrap_or((false, crate::glr::table::StateID(usize::MAX)));
+                format!("PUSH({})", st.0)
+            } else {
+                let (_, st) = crate::precompute4::utils::decode_symbol_i16(*label)
+                    .unwrap_or((true, crate::glr::table::StateID(usize::MAX)));
+                format!("POP({})", st.0)
+            };
+            for (target, w) in targets {
+                eprintln!(
+                    "    {} -> {} (label={}, weight_len={}, weight_bits={})",
+                    decoded,
+                    target,
+                    label,
+                    w.len(),
+                    format_weight_bits_for_sig(w, sig_len),
+                );
+            }
+        }
+    }
+}
+
+fn dump_dwa_decoded_filtered(tag: &str, dwa: &DWA, labels: &[Label]) {
+    eprintln!("--- {} ---", tag);
+    eprintln!("start_state={}", dwa.body.start_state);
+    for (sid, state) in dwa.states.0.iter().enumerate() {
+        let mut has_label = false;
+        for &label in labels {
+            if state.transitions.contains_key(&label) {
+                has_label = true;
+                break;
+            }
+        }
+        if !has_label {
+            continue;
+        }
+        let final_len = state.final_weight.as_ref().map(|w| w.len());
+        eprintln!("  State {}: final_weight_len={:?}", sid, final_len);
+        for (&label, &dst) in &state.transitions {
+            let decoded = if label == crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL {
+                "POP_ANY".to_string()
+            } else if label < 0 {
+                let (_, st) = crate::precompute4::utils::decode_symbol_i16(label)
+                    .unwrap_or((false, crate::glr::table::StateID(usize::MAX)));
+                format!("PUSH({})", st.0)
+            } else {
+                let (_, st) = crate::precompute4::utils::decode_symbol_i16(label)
+                    .unwrap_or((true, crate::glr::table::StateID(usize::MAX)));
+                format!("POP({})", st.0)
+            };
+            let w_len = state
+                .trans_weights
+                .get(&label)
+                .map(|w| w.len())
+                .unwrap_or(0);
+            eprintln!(
+                "    {} -> {} (label={}, weight_len={})",
+                decoded,
+                dst,
+                label,
+                w_len,
+            );
+        }
+    }
+}
+
+fn dump_reversed_nwa_with_terminals(tag: &str, nwa: &NWA, parser: &GLRParser) {
+    eprintln!("--- {} ---", tag);
+    eprintln!("start_states={:?}", nwa.body.start_states);
+    for (sid, state) in nwa.states.0.iter().enumerate() {
+        let final_len = state.final_weight.as_ref().map(|w| w.len());
+        eprintln!("  State {}: final_weight_len={:?}", sid, final_len);
+        if !state.epsilons.is_empty() {
+            for (target, w) in &state.epsilons {
+                eprintln!("    eps -> {} (weight_len={})", target, w.len());
+            }
+        }
+        for (label, targets) in &state.transitions {
+            let tid = TerminalID(*label as usize);
+            let term = parser
+                .terminal_map
+                .get_by_right(&tid)
+                .map(|t| format!("{}", t))
+                .unwrap_or_else(|| format!("T{}", label));
+            for (target, w) in targets {
+                eprintln!(
+                    "    {} -> {} (label={}, weight_len={})",
+                    term,
+                    target,
+                    label,
+                    w.len(),
+                );
+            }
+        }
+    }
+}
+
+fn format_signature_group(group: &[Option<TerminalID>], parser: &GLRParser) -> String {
+    let mut names = Vec::new();
+    for term in group {
+        match term {
+            Some(tid) => {
+                let name = parser
+                    .terminal_map
+                    .get_by_right(tid)
+                    .map(|t| format!("{}", t))
+                    .unwrap_or_else(|| format!("T{}", tid.0));
+                names.push(name);
+            }
+            None => names.push("None".to_string()),
+        }
+    }
+    format!("[{}]", names.join(", "))
+}
+
+fn format_signature(sig: &Signature, parser: &GLRParser) -> String {
+    let groups: Vec<String> = sig
+        .iter()
+        .map(|group| format_signature_group(group, parser))
+        .collect();
+    format!("{}", groups.join(" | "))
+}
+
+fn signature_contains(sig: &Signature, tid: TerminalID) -> bool {
+    for group in sig {
+        for term in group {
+            if let Some(t) = term {
+                if *t == tid {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn reweight_dwa(dwa: &DWA, weight: &Weight) -> DWA {
+    let mut out = dwa.clone();
+    for state in &mut out.states.0 {
+        if state.final_weight.is_some() {
+            state.final_weight = Some(weight.clone());
+        }
+        for w in state.trans_weights.values_mut() {
+            *w = weight.clone();
+        }
+    }
+    out
+}
+
+fn weight_token_ids(weight: &Weight, num_tsids: usize) -> Vec<usize> {
+    let rsb = crate::dwa_i32::weight_expansion::collapse_weight_rsb(
+        &weight.to_rsb_allow_expansion(),
+        num_tsids,
+    );
+    rsb.iter().collect()
+}
+
+fn trace_reversed_edge_tokens(
+    nwa: &NWA,
+    src: NWAStateID,
+    label: Label,
+    target: NWAStateID,
+    num_tsids: usize,
+    tag: &str,
+) {
+    if let Some(state) = nwa.states.0.get(src) {
+        if let Some(targets) = state.transitions.get(&label) {
+            for (dst, w) in targets {
+                if *dst == target {
+                    let tokens = weight_token_ids(w, num_tsids);
+                    eprintln!("{} label={} tokens={:?}", tag, label, tokens);
+                }
+            }
+        }
+    }
+}
+
+fn trace_combined_edge_tokens(
+    nwa: &NWA,
+    src: NWAStateID,
+    label: Label,
+    target: NWAStateID,
+    num_tsids: usize,
+    tag: &str,
+) {
+    if let Some(state) = nwa.states.0.get(src) {
+        if let Some(targets) = state.transitions.get(&label) {
+            for (dst, w) in targets {
+                if *dst == target {
+                    let tokens = weight_token_ids(w, num_tsids);
+                    eprintln!("{} label={} tokens={:?}", tag, label, tokens);
+                }
+            }
+        }
+    }
+}
+
 
 pub fn instantiate_nwa_template_into(
     template: &NWA,

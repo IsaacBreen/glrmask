@@ -53,6 +53,7 @@ impl<'a> GrammarConstraintState<'a> {
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
+        let trace = std::env::var("GLR_FP_TRACE").is_ok();
 
         crate::debug!(5, "compute_internal_mask: {} tokenizer states in self.state", self.state.len());
         for (&tsid, glr_state) in &self.state {
@@ -117,9 +118,20 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         // 2. Main worklist loop
-        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+        while let Some((depth, states_at_depth)) = queue.pop_last() {
+            if trace {
+                eprintln!("TRACE walk depth={} states={}", depth, states_at_depth.len());
+            }
             for (current_wa_state_id, gss) in states_at_depth {
                 let dwa_state = &dwa.states[current_wa_state_id];
+                if trace {
+                    eprintln!(
+                        "TRACE walk state depth={} dwa_state={} gss_depth={}",
+                        depth,
+                        current_wa_state_id,
+                        gss.max_depth()
+                    );
+                }
 
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
@@ -136,7 +148,27 @@ impl<'a> GrammarConstraintState<'a> {
                 // Process transitions
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
+                    if trace {
+                        eprintln!(
+                            "TRACE walk edge depth={} dwa_state={} parser_state={}",
+                            depth,
+                            current_wa_state_id,
+                            parser_state_id
+                        );
+                    }
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+                        if trace {
+                            let is_final = dwa.states[target_wa_state_id].final_weight.is_some();
+                            eprintln!(
+                                "TRACE walk trans depth={} dwa_state={} parser_state={} -> target={} final={} weight_len={}",
+                                depth,
+                                current_wa_state_id,
+                                parser_state_id,
+                                target_wa_state_id,
+                                is_final,
+                                trans_weight.len(),
+                            );
+                        }
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
@@ -158,6 +190,18 @@ impl<'a> GrammarConstraintState<'a> {
                     }
 
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
+                        if trace {
+                            let is_final = dwa.states[target_wa_state_id].final_weight.is_some();
+                            eprintln!(
+                                "TRACE walk default depth={} dwa_state={} parser_state={} -> target={} final={} weight_len={}",
+                                depth,
+                                current_wa_state_id,
+                                parser_state_id,
+                                target_wa_state_id,
+                                is_final,
+                                trans_weight.len(),
+                            );
+                        }
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
@@ -194,6 +238,39 @@ impl<'a> GrammarConstraintState<'a> {
     fn compute_internal_mask_weight_heavy(&self) -> (RangeSet, bool) {
         let num_tsids = self.parent.num_tsids;
         let max_llm_token = self.parent.parser_dwa_vocab.internal_max_llm_token;
+        let trace = std::env::var("GLR_FP_TRACE").is_ok();
+        let debug_tokens_n = |label: &str, rsb: &RangeSetBlaze<usize>| {
+            if !trace {
+                return;
+            }
+            let mut present = Vec::new();
+            for id in 0..=4 {
+                if rsb.contains(id) {
+                    present.push(id);
+                }
+            }
+            eprintln!("TRACE {} tokens(N): {:?}", label, present);
+        };
+        let debug_tokens_nm = |label: &str, rsb: &RangeSetBlaze<usize>| {
+            if !trace {
+                return;
+            }
+            let mut present = Vec::new();
+            for id in 0..=4 {
+                let mut found = false;
+                for ts in 0..num_tsids {
+                    let pos = id * num_tsids + ts;
+                    if rsb.contains(pos) {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    present.push(id);
+                }
+            }
+            eprintln!("TRACE {} tokens(NxM): {:?}", label, present);
+        };
         
         let mut final_mask_internal = RangeSet::zeros();
         let mut has_accepting = false;
@@ -224,6 +301,7 @@ impl<'a> GrammarConstraintState<'a> {
                     Some(self.parent.tsid_offset_map.as_slice())
                 },
             );
+            debug_tokens_nm("seed tsid_mask", &tsid_mask);
             
             let gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
@@ -232,6 +310,7 @@ impl<'a> GrammarConstraintState<'a> {
             let f = |terminals_disallowed: &TerminalsDisallowed| {
                 // Start with all LLM tokens in N-space
                 let mut allowed_n: RangeSetBlaze<usize> = RangeSetBlaze::from_iter([0..=max_llm_token]);
+                debug_tokens_n("seed allowed_n start", &allowed_n);
                 
                 // Subtract forbidden tokens based on disallowed terminals
                 for (&ts_id, disallowed_in_state) in terminals_disallowed {
@@ -244,11 +323,14 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
                 }
+                debug_tokens_n("seed allowed_n after disallowed", &allowed_n);
                 
                 // Expand the LLM token set to N×M and intersect with tsid mask
                 // This creates weights where only positions i*M + tsid are set
                 let expanded = crate::dwa_i32::weight_expansion::expand_rsb(&allowed_n, num_tsids);
+                debug_tokens_nm("seed expanded", &expanded);
                 let masked = &expanded & &tsid_mask;
+                debug_tokens_nm("seed masked", &masked);
                 if masked.is_empty() { None } else { Some(masked) }
             };
             let weighted_gss = gss.apply_and_prune(f);
@@ -264,14 +346,28 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         // 2. Main worklist loop (same structure as symbol-heavy)
-        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+        while let Some((depth, states_at_depth)) = queue.pop_last() {
+            if trace {
+                eprintln!("TRACE walk depth={} states={}", depth, states_at_depth.len());
+            }
             for (current_wa_state_id, gss) in states_at_depth {
                 let dwa_state = &dwa.states[current_wa_state_id];
+                if trace {
+                    eprintln!(
+                        "TRACE walk state depth={} dwa_state={} gss_depth={}",
+                        depth,
+                        current_wa_state_id,
+                        gss.max_depth()
+                    );
+                }
 
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
+                        debug_tokens_nm("final weight", &final_weight.to_rsb_allow_expansion());
+                        debug_tokens_nm("final acc", &reduced_acc);
                         let final_tokens = &reduced_acc & &final_weight.to_rsb_allow_expansion();
+                        debug_tokens_nm("final tokens", &final_tokens);
                         if !final_tokens.is_empty() {
                             has_accepting = true;
                             // Collapse from N×M to N before adding to result
@@ -284,13 +380,36 @@ impl<'a> GrammarConstraintState<'a> {
                 // Process transitions (same as symbol-heavy)
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
+                    if trace {
+                        eprintln!(
+                            "TRACE walk edge depth={} dwa_state={} parser_state={}",
+                            depth,
+                            current_wa_state_id,
+                            parser_state_id
+                        );
+                    }
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+                        if trace {
+                            let is_final = dwa.states[target_wa_state_id].final_weight.is_some();
+                            eprintln!(
+                                "TRACE walk trans depth={} dwa_state={} parser_state={} -> target={} final={} weight_len={}",
+                                depth,
+                                current_wa_state_id,
+                                parser_state_id,
+                                target_wa_state_id,
+                                is_final,
+                                trans_weight.len(),
+                            );
+                        }
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
                         let f = |rsb: &RangeSetBlaze<usize>| {
+                            debug_tokens_nm("trans weight", &trans_weight.to_rsb_allow_expansion());
+                            debug_tokens_nm("acc before", rsb);
                             let new_rsb = rsb & &trans_weight.to_rsb_allow_expansion();
+                            debug_tokens_nm("acc after", &new_rsb);
                             if new_rsb.is_empty() { None } else { Some(new_rsb) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
@@ -306,12 +425,27 @@ impl<'a> GrammarConstraintState<'a> {
                     }
 
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
+                        if trace {
+                            let is_final = dwa.states[target_wa_state_id].final_weight.is_some();
+                            eprintln!(
+                                "TRACE walk default depth={} dwa_state={} parser_state={} -> target={} final={} weight_len={}",
+                                depth,
+                                current_wa_state_id,
+                                parser_state_id,
+                                target_wa_state_id,
+                                is_final,
+                                trans_weight.len(),
+                            );
+                        }
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
                         let f = |rsb: &RangeSetBlaze<usize>| {
+                            debug_tokens_nm("default trans weight", &trans_weight.to_rsb_allow_expansion());
+                            debug_tokens_nm("default acc before", rsb);
                             let new_rsb = rsb & &trans_weight.to_rsb_allow_expansion();
+                            debug_tokens_nm("default acc after", &new_rsb);
                             if new_rsb.is_empty() { None } else { Some(new_rsb) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);

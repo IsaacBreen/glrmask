@@ -1755,6 +1755,76 @@ fn test_glr_fp_repro_minimal() {
     }
 }
 
+// Minimal repro: Super DWA specialization admits a token that skips a required literal.
+// - Why it fails: cross-template state merging from complex signatures in Super DWA.
+// - Minimal conditions: key literal overlaps STR_CHAR and a fixed delimiter surrounds STR_CHAR.
+#[test]
+fn test_super_dwa_fp_minimal() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let lark_grammar = indoc! {r#"
+        start: "a" ":" "x" STR_CHAR STR_CHAR "x"
+        STR_CHAR: "a" | ":" | "-"
+    "#};
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
+        .expect("Failed to parse minimal grammar");
+
+    if std::env::var("GLR_FP_TRACE").is_ok() {
+        if let Some(group_id) = grammar_definition
+            .regex_name_to_group_id
+            .get_by_left(&"STR_CHAR".to_string())
+        {
+            if let Some(expr) = grammar_definition.group_id_to_expr.get(group_id) {
+                match expr {
+                    crate::dfa_u8::Expr::U8Class(set) => {
+                        let bytes: Vec<u8> = set.iter().collect();
+                        let chars: Vec<String> = bytes
+                            .iter()
+                            .map(|b| (*b as char).to_string())
+                            .collect();
+                        eprintln!("TRACE STR_CHAR u8set bytes={:?} chars={:?}", bytes, chars);
+                    }
+                    other => {
+                        eprintln!("TRACE STR_CHAR expr={:?}", other);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut llm_token_map = LLMTokenMap::new();
+    let tok_prefix = LLMTokenID(0);
+    let tok_valid = LLMTokenID(1);
+    let tok_fp = LLMTokenID(2);
+    // Prefix consumes the key `a`. Next valid token is `:x`; `:-` skips the required `x`.
+    llm_token_map.insert(b"a".to_vec(), tok_prefix);
+    llm_token_map.insert(b":x".to_vec(), tok_valid);
+    llm_token_map.insert(b":-".to_vec(), tok_fp);
+    let max_id = 2;
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        max_id,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(tok_prefix).expect("prefix commit failed");
+
+    let mask = state.get_mask();
+    assert!(
+        mask.contains(tok_valid.0),
+        "Expected valid token in mask: token {}",
+        tok_valid.0,
+    );
+    assert!(
+        !mask.contains(tok_fp.0),
+        "False positive token in mask: token {}",
+        tok_fp.0,
+    );
+}
+
 #[test]
 fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
