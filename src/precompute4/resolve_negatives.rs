@@ -49,7 +49,7 @@ pub fn log_cancellations_range_profile() {
 }
 
 #[inline]
-fn is_negative_symbol(label: Code) -> bool { label < 0 && label != DEFAULT_TRANSITION_SYMBOL }
+pub fn is_negative_symbol(label: Code) -> bool { label < 0 && label != DEFAULT_TRANSITION_SYMBOL }
 
 fn progress_step(_step: u64, msg: &str) {
     crate::debug!(5, "{}", msg);
@@ -100,6 +100,43 @@ pub fn apply_cancellations_range(states: &mut NWAStates, range: std::ops::Range<
     crate::debug!(8, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
         states.add_epsilon(from, to, w);
+    }
+}
+
+/// Parallel per-range cancellation: runs each range's cancellation independently
+/// using rayon, then applies all results. Each range is processed on the unmodified
+/// arena (no intermediate epsilons from other ranges), producing the same result
+/// as sequential per-range processing because cancellation epsilons don't cross
+/// between template ranges.
+pub fn apply_cancellations_multi_range(states: &mut NWAStates, ranges: &[std::ops::Range<NWAStateID>]) {
+    use rayon::prelude::*;
+    
+    if ranges.is_empty() {
+        return;
+    }
+    let start = Instant::now();
+    
+    // Run all cancellations in parallel on the immutable arena.
+    // Each range's cancellation is independent — cancellation epsilons go from
+    // template states to right_body/template states, and template ranges don't
+    // overlap or interact.
+    let all_epsilons: Vec<Vec<(NWAStateID, NWAStateID, Weight)>> = ranges
+        .par_iter()
+        .map(|range| compute_cancellations_range(states, range.clone()))
+        .collect();
+    
+    let total_eps: usize = all_epsilons.iter().map(|v| v.len()).sum();
+    let elapsed = start.elapsed();
+    eprintln!(
+        "TIMING: apply_cancellations_multi_range ranges={} epsilons={} {:?}",
+        ranges.len(), total_eps, elapsed
+    );
+    
+    // Apply all epsilons to the arena
+    for eps_batch in all_epsilons {
+        for (from, to, w) in eps_batch {
+            states.add_epsilon(from, to, w);
+        }
     }
 }
 
@@ -678,10 +715,13 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
         return Vec::new();
     }
 
-    let max_steps = std::env::var("NWA_PASS2_CANCELLATIONS_MAX_STEPS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
+    static MAX_STEPS: Lazy<usize> = Lazy::new(|| {
+        std::env::var("NWA_PASS2_CANCELLATIONS_MAX_STEPS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0)
+    });
+    let max_steps = *MAX_STEPS;
     let mut steps = 0usize;
 
     while let Some((s, a, c)) = worklist.pop_front() {
@@ -788,9 +828,9 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
     }
 
     let mut result = Vec::new();
-    for (from, targets) in new_eps_from {
-        for (to, w) in targets {
-            result.push((from, to, w));
+    for (from, targets) in &new_eps_from {
+        for (_to, _w) in targets {
+            result.push((*from, *_to, _w.clone()));
         }
     }
     result

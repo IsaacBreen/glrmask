@@ -14,7 +14,8 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID};
 use crate::precompute4::characterize::{compute_all_characterizations, TerminalCharacterization};
 use crate::precompute4::resolve_negatives::{
     apply_cancellations, apply_finality_fixpoint, remove_negative_transitions,
-    apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range,
+    apply_cancellations_range, apply_cancellations_multi_range,
+    apply_finality_fixpoint_range, remove_negative_transitions_range,
     // Note: remove_redundant_default_transitions is only run in a global pass,
     // not per-range here, since it requires a global pass over all states.
 };
@@ -1018,6 +1019,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Super NWA ready for template bundling");
 
     let states_arena = RefCell::new(NWAStates::default());
+    let template_ranges: RefCell<Vec<std::ops::Range<usize>>> = RefCell::new(Vec::new());
     let initial_body = {
         let mut states = states_arena.borrow_mut();
         let start = states.add_state();
@@ -1190,8 +1192,13 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     }
 
                     let mut states = states_arena.borrow_mut();
+                    let template_offset = states.len();
                     let composed_body = states.concatenate_in_place(template_nwa, right_body);
-                    // Batch negative resolution runs after pass2 completes.
+                    let template_end = template_offset + template_nwa.states.len();
+                    // Collect template range for deferred multi-range cancellation.
+                    // Cancellation is done as a single batch after pass2 for efficiency.
+                    template_ranges.borrow_mut().push(template_offset..template_end);
+
                     let union_start = Instant::now();
                     nwa_body = NWABody::union(&nwa_body, &composed_body);
                     let union_us = union_start.elapsed().as_micros() as u64;
@@ -1321,31 +1328,27 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     eprintln!("TIMING: parser_dwa::pass2_traversal {:?}", pass2_start.elapsed());
 
     // Batch negative resolution over the full arena after pass2 completes.
+    // Multi-range cancellation: seeds from all template ranges in a single call.
     let batch_negatives_start = Instant::now();
     {
         let mut states = states_arena.borrow_mut();
         let arena_len = states.len();
-        if arena_len > 0 {
-            let cancel_start = Instant::now();
-            apply_cancellations_range(&mut states, 0..arena_len);
-            let cancel_us = cancel_start.elapsed().as_micros() as u64;
-            pass2_profile
-                .apply_cancellations_us
-                .fetch_add(cancel_us, Ordering::Relaxed);
+        let ranges = template_ranges.into_inner();
+        eprintln!("TIMING: parser_dwa::batch_negative_resolution arena_len={} template_ranges={}", arena_len, ranges.len());
 
+        if arena_len > 0 {
+            // Multi-range cancellation: seeds from template ranges only (not right_body).
+            // More efficient than per-template calls due to single allocation.
+            apply_cancellations_multi_range(&mut states, &ranges);
+
+            // Finality fixpoint needs negatives present for correct propagation.
             let finality_start = Instant::now();
             apply_finality_fixpoint_range(&mut states, 0..arena_len);
-            let finality_us = finality_start.elapsed().as_micros() as u64;
-            pass2_profile
-                .apply_finality_us
-                .fetch_add(finality_us, Ordering::Relaxed);
+            eprintln!("TIMING: parser_dwa::apply_finality_fixpoint {:?}", finality_start.elapsed());
 
             let remove_start = Instant::now();
             remove_negative_transitions_range(&mut states, 0..arena_len);
-            let remove_us = remove_start.elapsed().as_micros() as u64;
-            pass2_profile
-                .remove_negative_us
-                .fetch_add(remove_us, Ordering::Relaxed);
+            eprintln!("TIMING: parser_dwa::remove_negative_transitions {:?}", remove_start.elapsed());
         }
     }
     eprintln!(
