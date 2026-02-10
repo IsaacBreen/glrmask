@@ -208,12 +208,14 @@ pub(crate) fn collapse_always_allowed(
         }
 
         for (dst, w) in &state.epsilons {
-            if domain[*dst].is_subset_of(&state_domain) {
+            let mut contrib = state_domain.clone();
+            contrib &= w;
+            if contrib.is_subset_of(&domain[*dst]) {
                 let src_labels: Vec<Label> = incoming[state_id].iter().copied().collect();
                 incoming[*dst].extend(src_labels);
                 continue;
             }
-            domain[*dst] |= &state_domain;
+            domain[*dst] |= &contrib;
             let src_labels: Vec<Label> = incoming[state_id].iter().copied().collect();
             incoming[*dst].extend(src_labels);
             if !in_queue[*dst] {
