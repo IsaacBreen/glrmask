@@ -1226,50 +1226,64 @@ impl GrammarConstraint {
             }
         }
 
-        let collapse_self_extending_enabled = std::env::var("ENABLE_TERMINAL_SELF_EXT_CHAIN_COLLAPSE")
+        let mut allowed_follows_by_label: Vec<Vec<crate::dwa_i32::Label>> =
+            vec![Vec::new(); parser.terminal_map.len()];
+        for (tid, follows) in &terminal_follow_map {
+            let idx = tid.0;
+            if idx < allowed_follows_by_label.len() {
+                let entry = &mut allowed_follows_by_label[idx];
+                for follow in follows {
+                    entry.push(follow.0 as crate::dwa_i32::Label);
+                }
+            }
+        }
+        let allowed_follows_by_label = Arc::new(allowed_follows_by_label);
+
+        let mut labels: HashSet<crate::dwa_i32::Label> = compute_self_extending_terminals(&parser)
+            .into_iter()
+            .map(|tid| tid.0 as crate::dwa_i32::Label)
+            .collect();
+        let always_allowed = compute_always_allowed_terminal_follows(&parser.productions);
+        for (term, follows) in &always_allowed {
+            crate::debug!(5, "TERMINAL_ALWAYS_ALLOWED_FOLLOW: {:?} -> {:?}", term, follows);
+        }
+        let mut always_allowed_by_label: Vec<Vec<crate::dwa_i32::Label>> =
+            vec![Vec::new(); parser.terminal_map.len()];
+        for (term, follows) in &always_allowed {
+            if let Some(tid) = parser.terminal_map.get_by_left(term) {
+                let entry = &mut always_allowed_by_label[tid.0];
+                for follow in follows {
+                    if let Some(fid) = parser.terminal_map.get_by_left(follow) {
+                        entry.push(fid.0 as crate::dwa_i32::Label);
+                    }
+                }
+            }
+        }
+        let always_allowed_by_label = Arc::new(always_allowed_by_label);
+        if std::env::var("DEBUG_TERMINAL_ALWAYS_ALLOWED_FOLLOW_MAP")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .unwrap_or(false)
+        {
+            let total_terminals = parser.terminal_map.len();
+            let mut non_empty = 0usize;
+            let mut self_follow = 0usize;
+            for (term, follows) in &always_allowed {
+                if !follows.is_empty() {
+                    non_empty += 1;
+                }
+                if follows.contains(term) {
+                    self_follow += 1;
+                }
+            }
+            eprintln!(
+                "TERMINAL_ALWAYS_ALLOWED_FOLLOW: total_terminals={}, non_empty_entries={}, self_follow_entries={}",
+                total_terminals,
+                non_empty,
+                self_follow,
+            );
+        }
         let self_extending_labels_for_collapse: Option<Arc<HashSet<crate::dwa_i32::Label>>> =
-            if collapse_self_extending_enabled {
-                let mut labels: HashSet<crate::dwa_i32::Label> =
-                    compute_self_extending_terminals(&parser)
-                        .into_iter()
-                        .map(|tid| tid.0 as crate::dwa_i32::Label)
-                        .collect();
-                let always_allowed = compute_always_allowed_terminal_follows(&parser.productions);
-                if std::env::var("DEBUG_TERMINAL_ALWAYS_ALLOWED_FOLLOW_MAP")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false)
-                {
-                    let total_terminals = parser.terminal_map.len();
-                    let mut non_empty = 0usize;
-                    let mut self_follow = 0usize;
-                    for (term, follows) in &always_allowed {
-                        if !follows.is_empty() {
-                            non_empty += 1;
-                        }
-                        if follows.contains(term) {
-                            self_follow += 1;
-                        }
-                    }
-                    eprintln!(
-                        "TERMINAL_ALWAYS_ALLOWED_FOLLOW: total_terminals={}, non_empty_entries={}, self_follow_entries={}",
-                        total_terminals,
-                        non_empty,
-                        self_follow,
-                    );
-                }
-                for (term, follows) in always_allowed {
-                    if follows.contains(&term) {
-                        if let Some(tid) = parser.terminal_map.get_by_left(&term) {
-                            labels.insert(tid.0 as crate::dwa_i32::Label);
-                        }
-                    }
-                }
-                Some(Arc::new(labels))
-            } else {
-                None
-            };
+            Some(Arc::new(labels));
 
         if std::env::var("DEBUG_TERMINAL_FOLLOW_MAP")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1609,27 +1623,28 @@ impl GrammarConstraint {
             None
         };
 
-        let approx_dfa = if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
-            let mut ignored_terminals = if let Some(cache) = suffix_parser_cache.as_ref() {
-                cache.ignored_terminals.clone()
-            } else {
-                let mut ignored = vec![false; parser.terminal_map.len()];
-                if let Some(ref grammar_def) = grammar_definition {
-                    for tid in &grammar_def.ignore_terminal_ids {
-                        if tid.0 < ignored.len() {
-                            ignored[tid.0] = true;
-                        }
-                    }
-                } else {
-                    for tid in &parser.ignore_terminal_ids {
-                        if tid.0 < ignored.len() {
-                            ignored[tid.0] = true;
-                        }
+        let ignored_terminals = if let Some(cache) = suffix_parser_cache.as_ref() {
+            cache.ignored_terminals.clone()
+        } else {
+            let mut ignored = vec![false; parser.terminal_map.len()];
+            if let Some(ref grammar_def) = grammar_definition {
+                for tid in &grammar_def.ignore_terminal_ids {
+                    if tid.0 < ignored.len() {
+                        ignored[tid.0] = true;
                     }
                 }
-                ignored
-            };
+            } else {
+                for tid in &parser.ignore_terminal_ids {
+                    if tid.0 < ignored.len() {
+                        ignored[tid.0] = true;
+                    }
+                }
+            }
+            ignored
+        };
 
+        let approx_dfa = if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
+            let ignored_terminals = ignored_terminals.clone();
             if do_nwa_suffix_prune {
                 if let Some(cache) = suffix_parser_cache.as_ref() {
                     crate::debug!(4, "Building approximate suffix DFA (lazy, start-state initial) for precompute1...");
@@ -1699,6 +1714,7 @@ impl GrammarConstraint {
         } else {
             None
         };
+        let ignored_terminals = Arc::new(ignored_terminals);
         
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         crate::debug!(5, "run_precompute1: start");
@@ -1714,6 +1730,9 @@ impl GrammarConstraint {
                 approx_dfa,
                 suffix_parser_cache.clone(),
                 self_extending_labels_for_collapse.clone(),
+                ignored_terminals.clone(),
+                allowed_follows_by_label.clone(),
+                always_allowed_by_label.clone(),
             )
         });
         eprintln!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());

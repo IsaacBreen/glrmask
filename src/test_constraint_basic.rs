@@ -964,6 +964,9 @@ fn test_precompute_a_plus_tokenizer() {
         None,
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     // --- Verification ---
@@ -1051,6 +1054,9 @@ fn test_precompute_x_eq() {
         None,
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     // --- Verification (weight-heavy mode) ---
@@ -3045,6 +3051,9 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         None,
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
     
     println!("Actual Terminal DWA:\n{}", terminal_dwa);
@@ -3114,6 +3123,9 @@ fn test_terminal_dwa_short_token_path_length_violation() {
         None,
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3323,6 +3335,9 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
         None,
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3461,6 +3476,9 @@ fn test_terminal_dwa_tilde_sequence_weights() {
         None,
         None,
         Some(Arc::new(HashSet::from([tilde_label]))),
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3542,6 +3560,9 @@ start ::= '~'+ ;
         None,
         None,
         Some(Arc::new(HashSet::from([tilde_label]))),
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3657,6 +3678,9 @@ fn test_suffix_dfa_prunes_tilde_equals() {
         Some(approx_pruner),
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3774,6 +3798,9 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
         Some(approx_pruner),
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let w_pow_assign_tilde_eq_tilde = crate::debug_path_weight::check_dwa_path_weight(
@@ -3870,6 +3897,9 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
         Some(approx_pruner),
         Some(suffix_prune_cache),
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3950,6 +3980,9 @@ fn test_weight_overapprox_simple() {
         None,
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -4089,6 +4122,9 @@ fn test_terminal_nwa_vs_dwa_overapprox_js() {
         None,
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -4756,6 +4792,9 @@ fn test_suffix_grammar_validation() {
         None,
         None,
         None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
     );
     
     // Validate paths against suffix grammar (verbose)

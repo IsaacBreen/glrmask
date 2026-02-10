@@ -10,7 +10,7 @@
 //! how each terminal type interacts with the parser stack.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
 use range_set_blaze::RangeSetBlaze;
@@ -39,6 +39,12 @@ pub(crate) struct ChainCollapseStats {
     pub(crate) blocked_repeat_transitions: usize,
     pub(crate) pruned_states: usize,
     pub(crate) iterations: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct AllowedFollowsPruneStats {
+    pub(crate) pruned_transitions: usize,
+    pub(crate) pruned_states: usize,
 }
 
 pub(crate) fn collapse_self_extending_chains(
@@ -162,6 +168,275 @@ pub(crate) fn collapse_self_extending_chains(
     let before = dwa.states.len();
     if dwa.prune_unreachable() {
         let after = dwa.states.len();
+        if after < before {
+            stats.pruned_states += before - after;
+        }
+    }
+
+    stats
+}
+
+fn compute_incoming_terminal_labels(nwa: &NWA, terminals_count: usize) -> Vec<HashSet<Label>> {
+    let mut incoming: Vec<HashSet<Label>> = vec![HashSet::new(); nwa.states.len()];
+    let mut worklist: VecDeque<NWAStateID> = VecDeque::new();
+
+    for state in &nwa.states.0 {
+        for (&label, targets) in &state.transitions {
+            if (label as usize) >= terminals_count {
+                continue;
+            }
+            for (dst, _) in targets {
+                if incoming[*dst].insert(label) {
+                    worklist.push_back(*dst);
+                }
+            }
+        }
+    }
+
+    while let Some(state_id) = worklist.pop_front() {
+        let labels = incoming[state_id].clone();
+        for (dst, _) in &nwa.states[state_id].epsilons {
+            let mut changed = false;
+            let dest_set = &mut incoming[*dst];
+            for label in &labels {
+                if dest_set.insert(*label) {
+                    changed = true;
+                }
+            }
+            if changed {
+                worklist.push_back(*dst);
+            }
+        }
+    }
+
+    incoming
+}
+
+fn prune_disallowed_follows_stats(
+    nwa: &mut NWA,
+    allowed_follows_by_label: &[Vec<Label>],
+    terminals_count: usize,
+) -> AllowedFollowsPruneStats {
+    let mut stats = AllowedFollowsPruneStats::default();
+    if allowed_follows_by_label.is_empty() || allowed_follows_by_label.len() < terminals_count {
+        return stats;
+    }
+
+    let incoming = compute_incoming_terminal_labels(nwa, terminals_count);
+    for (state_id, state) in nwa.states.0.iter_mut().enumerate() {
+        let incoming_labels = &incoming[state_id];
+        if incoming_labels.is_empty() {
+            continue;
+        }
+
+        let mut allowed: HashSet<Label> = HashSet::new();
+        for label in incoming_labels {
+            if let Some(follows) = allowed_follows_by_label.get(*label as usize) {
+                for follow in follows {
+                    allowed.insert(*follow);
+                }
+            }
+        }
+
+        let mut to_remove: Vec<Label> = Vec::new();
+        for (&label, targets) in &state.transitions {
+            if (label as usize) >= terminals_count {
+                continue;
+            }
+            if !allowed.contains(&label) {
+                stats.pruned_transitions += targets.len();
+                to_remove.push(label);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            stats.pruned_states += 1;
+            for label in to_remove {
+                state.transitions.remove(&label);
+            }
+        }
+    }
+
+    let before = nwa.states.len();
+    if nwa.prune_unreachable() {
+        let after = nwa.states.len();
+        if after < before {
+            stats.pruned_states += before - after;
+        }
+    }
+
+    stats
+}
+
+pub(crate) fn prune_disallowed_follows(
+    nwa: &mut NWA,
+    allowed_follows_by_label: &[Vec<Label>],
+    terminals_count: usize,
+) -> bool {
+    let stats = prune_disallowed_follows_stats(nwa, allowed_follows_by_label, terminals_count);
+    stats.pruned_transitions > 0 || stats.pruned_states > 0
+}
+
+pub(crate) fn collapse_always_allowed(
+    nwa: &mut NWA,
+    always_allowed_by_label: &[Vec<Label>],
+) -> bool {
+    if always_allowed_by_label.is_empty() {
+        return false;
+    }
+    let mut labels: HashSet<Label> = HashSet::new();
+    for (label_idx, follows) in always_allowed_by_label.iter().enumerate() {
+        let label = label_idx as Label;
+        if follows.iter().any(|&f| f == label) {
+            labels.insert(label);
+        }
+    }
+    if labels.is_empty() {
+        return false;
+    }
+    let stats = collapse_self_extending_chains_nwa(nwa, &labels);
+    stats.collapsed_states > 0
+        || stats.rewired_transitions > 0
+        || stats.blocked_repeat_transitions > 0
+        || stats.pruned_states > 0
+}
+
+pub(crate) fn collapse_self_extending_chains_nwa(
+    nwa: &mut NWA,
+    self_extending_labels: &HashSet<Label>,
+) -> ChainCollapseStats {
+    let mut stats = ChainCollapseStats::default();
+
+    loop {
+        let num_states = nwa.states.len();
+        if num_states == 0 {
+            break;
+        }
+
+        let mut incoming_total = vec![0usize; num_states];
+        let mut incoming_by_label: HashMap<(usize, Label), usize> = HashMap::new();
+        let mut incoming_sources: HashMap<(usize, Label), Vec<(usize, usize)>> = HashMap::new();
+        let mut incoming_eps = vec![0usize; num_states];
+
+        for (src, state) in nwa.states.0.iter().enumerate() {
+            for (&label, targets) in &state.transitions {
+                for (idx, (dst, _)) in targets.iter().enumerate() {
+                    incoming_total[*dst] += 1;
+                    *incoming_by_label.entry((*dst, label)).or_insert(0) += 1;
+                    incoming_sources
+                        .entry((*dst, label))
+                        .or_default()
+                        .push((src, idx));
+                }
+            }
+            for (dst, _) in &state.epsilons {
+                incoming_eps[*dst] += 1;
+            }
+        }
+
+        let mut changed = false;
+        for b in 0..num_states {
+            if nwa.body.start_states.contains(&b) {
+                continue;
+            }
+            let (label, c, w_out, final_weight_b) = {
+                let state_b = &nwa.states[b];
+                if state_b.transitions.len() != 1 {
+                    continue;
+                }
+                if state_b.epsilons.len() > 0 {
+                    continue;
+                }
+                let (&label, targets) = match state_b.transitions.iter().next() {
+                    Some(entry) => entry,
+                    None => continue,
+                };
+                if !self_extending_labels.contains(&label) {
+                    continue;
+                }
+                if targets.len() != 1 {
+                    continue;
+                }
+                let (c, w_out) = targets[0].clone();
+                (label, c, w_out, state_b.final_weight.clone())
+            };
+
+            if c == b {
+                continue;
+            }
+
+            if incoming_eps[b] > 0 {
+                continue;
+            }
+            let incoming_label = incoming_by_label.get(&(b, label)).copied().unwrap_or(0);
+            if incoming_label == 0 || incoming_total[b] != incoming_label {
+                continue;
+            }
+
+            let preds = incoming_sources.get(&(b, label)).cloned().unwrap_or_default();
+            if preds.is_empty() {
+                continue;
+            }
+
+            for (p, idx) in preds {
+                if let Some(targets) = nwa.states[p].transitions.get_mut(&label) {
+                    if let Some((dst, w_in)) = targets.get_mut(idx) {
+                        *dst = c;
+                        *w_in |= &w_out;
+                        stats.rewired_transitions += 1;
+                    }
+                }
+            }
+
+            if let Some(fw_b) = final_weight_b {
+                let fw_c = nwa.states[c]
+                    .final_weight
+                    .get_or_insert_with(Weight::zeros);
+                *fw_c |= &fw_b;
+            }
+
+            let state_b_mut = &mut nwa.states[b];
+            state_b_mut.transitions.clear();
+            state_b_mut.epsilons.clear();
+            state_b_mut.final_weight = None;
+
+            stats.collapsed_states += 1;
+            changed = true;
+        }
+
+        stats.iterations += 1;
+        if !changed {
+            break;
+        }
+    }
+
+    if !self_extending_labels.is_empty() && !nwa.states.0.is_empty() {
+        let mut incoming_label: HashSet<(usize, Label)> = HashSet::new();
+        for state in &nwa.states.0 {
+            for (&label, targets) in &state.transitions {
+                if self_extending_labels.contains(&label) {
+                    for (dst, _) in targets {
+                        incoming_label.insert((*dst, label));
+                    }
+                }
+            }
+        }
+
+        for (dst, label) in incoming_label {
+            if nwa.body.start_states.contains(&dst) {
+                continue;
+            }
+            if let Some(state) = nwa.states.0.get_mut(dst) {
+                if state.transitions.remove(&label).is_some() {
+                    stats.blocked_repeat_transitions += 1;
+                }
+            }
+        }
+    }
+
+    let before = nwa.states.len();
+    if nwa.prune_unreachable() {
+        let after = nwa.states.len();
         if after < before {
             stats.pruned_states += before - after;
         }
@@ -403,6 +678,9 @@ pub(crate) struct Precomputer1<'r> {
     direct_insert: bool,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
+    ignored_terminals: Arc<Vec<bool>>,
+    allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
+    always_allowed_by_label: Arc<Vec<Vec<Label>>>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -417,6 +695,9 @@ impl<'r> Precomputer1<'r> {
         approx_dfa: Option<ApproximateDfaPruner>,
         suffix_prune_cache: Option<Arc<SuffixParserCache>>,
         self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
+        ignored_terminals: Arc<Vec<bool>>,
+        allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
+        always_allowed_by_label: Arc<Vec<Vec<Label>>>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -518,6 +799,9 @@ impl<'r> Precomputer1<'r> {
             direct_insert,
             suffix_prune_cache,
             self_extending_labels_for_collapse,
+            ignored_terminals,
+            allowed_follows_by_label,
+            always_allowed_by_label,
         }
     }
 
@@ -891,6 +1175,37 @@ impl<'r> Precomputer1<'r> {
             crate::debug!(5, "Dumping NWA to nwa_dump.json");
             let json = serde_json::to_string(&self.nwa).unwrap();
             std::fs::write("nwa_dump.json", json).unwrap();
+        }
+
+        if !self.allowed_follows_by_label.is_empty() || !self.always_allowed_by_label.is_empty() {
+            let prune_start = std::time::Instant::now();
+            let mut iterations = 0usize;
+            loop {
+                let mut changed = false;
+
+                if collapse_always_allowed(&mut self.nwa, &self.always_allowed_by_label) {
+                    changed = true;
+                }
+                if prune_disallowed_follows(
+                    &mut self.nwa,
+                    &self.allowed_follows_by_label,
+                    self.terminals_count,
+                ) {
+                    changed = true;
+                }
+
+                iterations += 1;
+                if !changed {
+                    break;
+                }
+            }
+
+            crate::debug!(
+                4,
+                "Terminal NWA always-allowed collapse + disallowed-follows prune: iterations={}",
+                iterations,
+            );
+            eprintln!("TIMING: terminal_nwa_allowed_follows_collapse {:?}", prune_start.elapsed());
         }
 
         let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
@@ -1409,6 +1724,14 @@ impl<'r> Precomputer1<'r> {
         weight
     }
 
+    #[inline]
+    fn is_ignored_terminal(&self, terminal_id: GrammarTokenID) -> bool {
+        self.ignored_terminals
+            .get(terminal_id.0)
+            .copied()
+            .unwrap_or(false)
+    }
+
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
         let start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if self.direct_insert {
@@ -1594,9 +1917,15 @@ impl<'r> Precomputer1<'r> {
                             let leaf = self.leaf_state;
                             // Use expanded weight from single token
                             let weight = self.expanded_weight_from_item(child_token_id);
-                            crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
-                                src_node, terminal_id.0, leaf, weight);
-                            self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
+                            if self.is_ignored_terminal(terminal_id) {
+                                crate::debug!(7, "      -> LEAF epsilon (ignored): {} --eps--> {} (leaf_state), weight={:?}",
+                                    src_node, leaf, weight);
+                                self.add_pending_epsilon(src_node, leaf, weight);
+                            } else {
+                                crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
+                                    src_node, terminal_id.0, leaf, weight);
+                                self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
+                            }
                         }
 
                         // Continuation logic
@@ -1645,9 +1974,15 @@ impl<'r> Precomputer1<'r> {
                             }
                         };
 
-                        crate::debug!(7, "      -> CONT transition: {} --{}--> {}, weight={:?}", 
-                            src_node, terminal_id.0, target, weight);
-                        self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
+                        if self.is_ignored_terminal(terminal_id) {
+                            crate::debug!(7, "      -> CONT epsilon (ignored): {} --eps--> {}, weight={:?}",
+                                src_node, target, weight);
+                            self.add_pending_epsilon(src_node, target, weight);
+                        } else {
+                            crate::debug!(7, "      -> CONT transition: {} --{}--> {}, weight={:?}", 
+                                src_node, terminal_id.0, target, weight);
+                            self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
+                        }
                     }
 
                     // 2. Handle End State -> Continuation
@@ -1682,14 +2017,24 @@ impl<'r> Precomputer1<'r> {
                                 crate::debug!(7, "    -> Skip END_STATE terminal {} (no approx DFA transition)", terminal_id.0);
                                 continue;
                             };
-                            crate::debug!(7, "    -> END_STATE transition: {} --{}--> {} (leaf_state), weight={:?}",
-                                src_node, terminal_id.0, end_idx, single_token_weight);
-                            self.add_pending_transition(
+                            if self.is_ignored_terminal(*terminal_id) {
+                                crate::debug!(7, "    -> END_STATE epsilon (ignored): {} --eps--> {} (leaf_state), weight={:?}",
+                                    src_node, end_idx, single_token_weight);
+                                self.add_pending_epsilon(
+                                    src_node,
+                                    end_idx,
+                                    single_token_weight.clone(),
+                                );
+                            } else {
+                                crate::debug!(7, "    -> END_STATE transition: {} --{}--> {} (leaf_state), weight={:?}",
+                                    src_node, terminal_id.0, end_idx, single_token_weight);
+                                self.add_pending_transition(
                                     src_node,
                                     terminal_id.0 as Label,
                                     end_idx,
                                     single_token_weight.clone(),
                                 );
+                            }
                         }
 
                         let next = self.get_or_create_next_state(
@@ -1759,6 +2104,9 @@ pub fn run_precompute1(
     approx_dfa: Option<ApproximateDfaPruner>,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
+    ignored_terminals: Arc<Vec<bool>>,
+    allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
+    always_allowed_by_label: Arc<Vec<Vec<Label>>>,
 ) -> DWA {
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
     let num_tsids = if is_weight_heavy_enabled() {
@@ -1801,6 +2149,9 @@ pub fn run_precompute1(
             approx_dfa,
             suffix_prune_cache,
             self_extending_labels_for_collapse,
+            ignored_terminals,
+            allowed_follows_by_label,
+            always_allowed_by_label,
         )
     });
 
@@ -1843,6 +2194,10 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         }
     }
 
+    let ignored_terminals = Arc::new(vec![false; terminals_count]);
+    let allowed_follows_by_label = Arc::new(Vec::new());
+    let always_allowed_by_label = Arc::new(Vec::new());
+
     let mut helper = Precomputer1::new(
         tokenizer,
         &representative_llm_token_map,
@@ -1854,6 +2209,9 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         approx_dfa,
         None,
         None,
+        ignored_terminals,
+        allowed_follows_by_label,
+        always_allowed_by_label,
     );
 
     helper.run_dfs();

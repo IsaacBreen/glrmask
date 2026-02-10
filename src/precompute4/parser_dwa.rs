@@ -1319,27 +1319,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         Ordering::Relaxed,
                     );
                     accounted_us = accounted_us.saturating_add(instantiate_us);
-                    // Per-template negative resolution (incremental, not batched).
-                    // Only call if the template range actually has negative transitions,
-                    // since the _range functions allocate O(arena_size) vecs internally.
-                    let arena_end = states.len();
-                    if arena_end > arena_start {
-                        let has_negatives = (arena_start..arena_end).any(|sid| {
-                            states[sid].transitions.keys().any(|&label| label < 0 && label != crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL)
-                        });
-                        if has_negatives {
-                            let cancel_start = Instant::now();
-                            apply_cancellations_range(&mut states, arena_start..arena_end);
-                            apply_finality_fixpoint_range(&mut states, arena_start..arena_end);
-                            remove_negative_transitions_range(&mut states, arena_start..arena_end);
-                            let cancel_us = cancel_start.elapsed().as_micros() as u64;
-                            pass2_profile_for_process.apply_cancellations_us.fetch_add(
-                                cancel_us,
-                                Ordering::Relaxed,
-                            );
-                            accounted_us = accounted_us.saturating_add(cancel_us);
-                        }
-                    }
+                    // Batch negative resolution runs after pass2 completes.
                     let union_start = Instant::now();
                     nwa_body = NWABody::union(&nwa_body, &composed_body);
                     let union_us = union_start.elapsed().as_micros() as u64;
@@ -1457,8 +1437,46 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     });
     eprintln!("TIMING: parser_dwa::pass2_traversal {:?}", pass2_start.elapsed());
 
-    // Batch negative resolution disabled — per-template incremental resolution above is sufficient.
-    // The _range variants handle each template's states independently during pass2.
+    // Batch negative resolution over the full arena after pass2 completes.
+    let batch_negatives_start = Instant::now();
+    {
+        let mut states = states_arena.borrow_mut();
+        let arena_len = states.len();
+        if arena_len > 0 {
+            let has_negatives = states.0.iter().any(|state| {
+                state
+                    .transitions
+                    .keys()
+                    .any(|&label| label < 0 && label != crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL)
+            });
+            if has_negatives {
+                let cancel_start = Instant::now();
+                apply_cancellations_range(&mut states, 0..arena_len);
+                let cancel_us = cancel_start.elapsed().as_micros() as u64;
+                pass2_profile
+                    .apply_cancellations_us
+                    .fetch_add(cancel_us, Ordering::Relaxed);
+
+                let finality_start = Instant::now();
+                apply_finality_fixpoint_range(&mut states, 0..arena_len);
+                let finality_us = finality_start.elapsed().as_micros() as u64;
+                pass2_profile
+                    .apply_finality_us
+                    .fetch_add(finality_us, Ordering::Relaxed);
+
+                let remove_start = Instant::now();
+                remove_negative_transitions_range(&mut states, 0..arena_len);
+                let remove_us = remove_start.elapsed().as_micros() as u64;
+                pass2_profile
+                    .remove_negative_us
+                    .fetch_add(remove_us, Ordering::Relaxed);
+            }
+        }
+    }
+    eprintln!(
+        "TIMING: parser_dwa::batch_negative_resolution {:?}",
+        batch_negatives_start.elapsed()
+    );
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let tsid_bodies = Arc::try_unwrap(tsid_bodies_arc).unwrap().into_inner().unwrap();
     let avg_template_size = states_arena.borrow().len() as f64 / (final_bodies.len() + tsid_bodies.len()).max(1) as f64;

@@ -477,3 +477,4 @@ compare_*.txt
 dwa_*.txt
 third_party/
 temp/
+*.txt
