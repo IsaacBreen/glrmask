@@ -368,9 +368,9 @@ impl DeterminizeAndMinimizeConfig {
             DeterminizeAndMinimizeProfile::SpecializedSuper => DeterminizeAndMinimizeConfig {
                 // Specialized DWAs derived from Super by weight mapping.
                 // These are instantiated many times in the combined NWA, so minimization pays off.
-                // Using full minimize but no NWA passes since these are already DWAs.
-                nwa_passes: vec![],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::ColPackMinimize],
+                // Match manual pipeline: minimize NWA, determinize, then prune.
+                nwa_passes: vec![NwaPass::Minimize],
+                dwa_passes: vec![DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
                 use_rustfst_determinize: false,
             },
             DeterminizeAndMinimizeProfile::Parser => {

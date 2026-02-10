@@ -630,12 +630,12 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
     let profile = cancellations_range_profile_enabled();
     let mut seed_count: u64 = 0;
 
-    let mut queries: Vec<FxHashMap<QueryKey, Weight>> = Vec::with_capacity(n);
-    queries.resize_with(n, FxHashMap::default);
+    // Use HashMaps instead of Vec to avoid O(arena_size) allocations.
+    // Only states that actually receive queries/epsilons take memory.
+    let mut queries: FxHashMap<NWAStateID, FxHashMap<QueryKey, Weight>> = FxHashMap::default();
     let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code)> = VecDeque::new();
     let mut in_queue: FxHashSet<(NWAStateID, NWAStateID, Code)> = FxHashSet::default();
-    let mut new_eps_from: Vec<FxHashMap<NWAStateID, Weight>> = Vec::with_capacity(n);
-    new_eps_from.resize_with(n, FxHashMap::default);
+    let mut new_eps_from: FxHashMap<NWAStateID, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
     let mut enqueue = |worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code)>,
                        in_queue: &mut FxHashSet<(NWAStateID, NWAStateID, Code)>,
                        s: NWAStateID,
@@ -659,7 +659,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                     continue;
                 }
                 let query_key: QueryKey = (a, c);
-                let query_weight = queries[*b].entry(query_key).or_default();
+                let query_weight = queries.entry(*b).or_default().entry(query_key).or_default();
                 if !w_ab.is_subset_of(query_weight) {
                     *query_weight |= w_ab;
                     enqueue(&mut worklist, &mut in_queue, *b, a, c);
@@ -691,98 +691,80 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             break;
         }
         steps += 1;
-        let w_as = match queries.get(s).and_then(|m| m.get(&(a, c))) {
+        let w_as = match queries.get(&s).and_then(|m| m.get(&(a, c))) {
             Some(w) => w.clone(),
             None => continue,
         };
-        let epsilons_from_s = &new_eps_from[s];
-        if !epsilons_from_s.is_empty() {
-            for (&target, eps_w) in epsilons_from_s {
-                let prop_w = &w_as & eps_w;
-                if prop_w.is_empty() {
-                    continue;
-                }
-                let query_key: QueryKey = (a, c);
-                let query_weight = queries[target].entry(query_key).or_default();
-                if !prop_w.is_subset_of(query_weight) {
-                    *query_weight |= &prop_w;
-                    enqueue(&mut worklist, &mut in_queue, target, a, c);
+        
+        // Propagate through existing cancellation epsilons from s
+        if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+            if !epsilons_from_s.is_empty() {
+                let propagations: Vec<(NWAStateID, Weight)> = epsilons_from_s.iter()
+                    .filter_map(|(&target, eps_w)| {
+                        let prop_w = &w_as & eps_w;
+                        if prop_w.is_empty() { None } else { Some((target, prop_w)) }
+                    })
+                    .collect();
+                for (target, prop_w) in propagations {
+                    let query_key: QueryKey = (a, c);
+                    let query_weight = queries.entry(target).or_default().entry(query_key).or_default();
+                    if !prop_w.is_subset_of(query_weight) {
+                        *query_weight |= &prop_w;
+                        enqueue(&mut worklist, &mut in_queue, target, a, c);
+                    }
                 }
             }
         }
 
-        let mut check_cancellations = |target: NWAStateID,
-                           w_st: &Weight,
-                           worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code)>,
-                           in_queue: &mut FxHashSet<(NWAStateID, NWAStateID, Code)>,
-                           enqueue: &mut dyn FnMut(&mut VecDeque<(NWAStateID, NWAStateID, Code)>, &mut FxHashSet<(NWAStateID, NWAStateID, Code)>, NWAStateID, NWAStateID, Code)| {
-            let new_eps_w = &w_as & w_st;
-            if new_eps_w.is_empty() {
-                return;
-            }
-
-            let eps_from_a = &mut new_eps_from[a];
-            let eps_weight = eps_from_a.entry(target).or_default();
-            if !new_eps_w.is_subset_of(eps_weight) {
-                *eps_weight |= &new_eps_w;
-
-                if !queries[a].is_empty() {
-                    if a == target {
-                        let entries: Vec<(QueryKey, Weight)> = queries[a]
-                            .iter()
-                            .map(|(k, v)| (*k, v.clone()))
-                            .collect();
-                        let queries_target = &mut queries[target];
-                        for (query_key, w_a_prime_a) in entries {
-                            let prop_w = w_a_prime_a & &*eps_weight;
-                            if prop_w.is_empty() {
-                                continue;
-                            }
-                            let query_weight = queries_target.entry(query_key).or_default();
-                            if !prop_w.is_subset_of(query_weight) {
-                                *query_weight |= &prop_w;
-                                let (a_prime, c_prime) = query_key;
-                                enqueue(worklist, in_queue, target, a_prime, c_prime);
-                            }
-                        }
-                    } else {
-                        let (queries_a, queries_target) = if a < target {
-                            let (left, right) = queries.split_at_mut(target);
-                            (&left[a], &mut right[0])
-                        } else {
-                            let (left, right) = queries.split_at_mut(a);
-                            (&right[0], &mut left[target])
-                        };
-                        for (&(a_prime, c_prime), w_a_prime_a) in queries_a.iter() {
-                            let prop_w = w_a_prime_a & &*eps_weight;
-                            if prop_w.is_empty() {
-                                continue;
-                            }
-                            let query_key: QueryKey = (a_prime, c_prime);
-                            let query_weight = queries_target.entry(query_key).or_default();
-                            if !prop_w.is_subset_of(query_weight) {
-                                *query_weight |= &prop_w;
-                                enqueue(worklist, in_queue, target, a_prime, c_prime);
-                            }
-                        }
-                    }
-                }
-            }
-        };
+        // Collect cancellation targets, then apply mutations
+        let mut cancellation_updates: Vec<(NWAStateID, Weight)> = Vec::new();
 
         if let Some(pos_targets) = states[s].transitions.get(&c) {
             for (t, w_st) in pos_targets {
                 if *t < n {
-                    check_cancellations(*t, w_st, &mut worklist, &mut in_queue, &mut enqueue);
+                    let new_eps_w = &w_as & w_st;
+                    if !new_eps_w.is_empty() {
+                        cancellation_updates.push((*t, new_eps_w));
+                    }
                 }
             }
         }
         if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
             for (target, weight) in default_targets {
-                check_cancellations(*target, weight, &mut worklist, &mut in_queue, &mut enqueue);
+                let new_eps_w = &w_as & weight;
+                if !new_eps_w.is_empty() {
+                    cancellation_updates.push((*target, new_eps_w));
+                }
             }
         }
 
+        // Apply cancellation updates
+        for (target, new_eps_w) in cancellation_updates {
+            let eps_from_a = new_eps_from.entry(a).or_default();
+            let eps_weight = eps_from_a.entry(target).or_default();
+            if !new_eps_w.is_subset_of(eps_weight) {
+                *eps_weight |= &new_eps_w;
+                let combined_eps_w = eps_weight.clone();
+
+                // Propagate existing queries at `a` through the new/updated epsilon
+                let queries_at_a: Vec<(QueryKey, Weight)> = queries.get(&a)
+                    .map(|m| m.iter().map(|(k, v)| (*k, v.clone())).collect())
+                    .unwrap_or_default();
+                for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
+                    let prop_w = w_a_prime_a & &combined_eps_w;
+                    if prop_w.is_empty() {
+                        continue;
+                    }
+                    let query_weight = queries.entry(target).or_default().entry((a_prime, c_prime)).or_default();
+                    if !prop_w.is_subset_of(query_weight) {
+                        *query_weight |= &prop_w;
+                        enqueue(&mut worklist, &mut in_queue, target, a_prime, c_prime);
+                    }
+                }
+            }
+        }
+
+        // Propagate through epsilon transitions from s
         for (t, w_st) in &states[s].epsilons {
             if *t >= n {
                 continue;
@@ -792,7 +774,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 continue;
             }
             let query_key: QueryKey = (a, c);
-            let query_weight = queries[*t].entry(query_key).or_default();
+            let query_weight = queries.entry(*t).or_default().entry(query_key).or_default();
             if !prop_w.is_subset_of(query_weight) {
                 *query_weight |= &prop_w;
                 enqueue(&mut worklist, &mut in_queue, *t, a, c);
@@ -806,11 +788,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
     }
 
     let mut result = Vec::new();
-    for (from, targets) in new_eps_from.into_iter().enumerate() {
-        if targets.is_empty() {
-            continue;
-        }
-        let from = from as NWAStateID;
+    for (from, targets) in new_eps_from {
         for (to, w) in targets {
             result.push((from, to, w));
         }
@@ -1039,7 +1017,7 @@ fn compute_finality_fixpoint_range(
         Default { from: NWAStateID, trans_idx: usize },
     }
 
-    let mut visited = vec![false; n];
+    let mut visited: FxHashSet<NWAStateID> = FxHashSet::default();
     let mut queue: VecDeque<NWAStateID> = VecDeque::new();
     let mut reachable_states: Vec<NWAStateID> = Vec::new();
     let mut preds: FxHashMap<NWAStateID, Vec<PredEdge>> = FxHashMap::default();
@@ -1049,8 +1027,7 @@ fn compute_finality_fixpoint_range(
         if a >= n {
             continue;
         }
-        if !visited[a] {
-            visited[a] = true;
+        if visited.insert(a) {
             queue.push_back(a);
             reachable_states.push(a);
         }
@@ -1067,8 +1044,7 @@ fn compute_finality_fixpoint_range(
                 .entry(target)
                 .or_insert_with(Vec::new)
                 .push(PredEdge::Epsilon { from: s, eps_idx });
-            if !visited[target] {
-                visited[target] = true;
+            if visited.insert(target) {
                 queue.push_back(target);
                 reachable_states.push(target);
             }
@@ -1092,8 +1068,7 @@ fn compute_finality_fixpoint_range(
                             label,
                             trans_idx,
                         });
-                    if !visited[target] {
-                        visited[target] = true;
+                    if visited.insert(target) {
                         queue.push_back(target);
                         reachable_states.push(target);
                     }
@@ -1111,8 +1086,7 @@ fn compute_finality_fixpoint_range(
                     .entry(target)
                     .or_insert_with(Vec::new)
                     .push(PredEdge::Default { from: s, trans_idx });
-                if !visited[target] {
-                    visited[target] = true;
+                if visited.insert(target) {
                     queue.push_back(target);
                     reachable_states.push(target);
                 }

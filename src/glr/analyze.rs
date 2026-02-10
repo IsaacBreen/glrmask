@@ -855,6 +855,89 @@ pub fn compute_terminal_follow_sets(
 
     terminal_follows
 }
+/// Computes, for each terminal T, the set of terminals that are ALWAYS allowed to
+/// follow T regardless of context.
+///
+/// This is stricter than a normal FOLLOW set: for a terminal t, we look at each
+/// occurrence of t in every production and compute the set of terminals that can
+/// follow t at that specific occurrence (using FIRST/FOLLOW of the suffix).
+/// The "always-allowed" set for t is the intersection across all of its occurrences.
+pub fn compute_always_allowed_terminal_follows(
+    productions: &[Production],
+) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let first_sets = compute_first_sets_for_nonterminals(productions, &nullable_nonterminals);
+    let nonterminal_follow_sets =
+        compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+    // None means "no occurrences yet"; Some(set) is the running intersection.
+    let mut always_map: BTreeMap<Terminal, Option<BTreeSet<Terminal>>> = BTreeMap::new();
+
+    for production in productions {
+        let lhs = &production.lhs;
+        let rhs = &production.rhs;
+
+        for (i, symbol) in rhs.iter().enumerate() {
+            if let Symbol::Terminal(t) = symbol {
+                let mut occ_follows: BTreeSet<Terminal> = BTreeSet::new();
+                let mut suffix_is_nullable = true;
+
+                // Compute FIRST of the suffix after this occurrence.
+                for next_symbol in &rhs[i + 1..] {
+                    match next_symbol {
+                        Symbol::Terminal(next_t) => {
+                            occ_follows.insert(next_t.clone());
+                            suffix_is_nullable = false;
+                            break;
+                        }
+                        Symbol::NonTerminal(next_nt) => {
+                            if let Some(first_next) = first_sets.get(next_nt) {
+                                occ_follows.extend(first_next.iter().cloned());
+                            }
+                            if !nullable_nonterminals.contains(next_nt) {
+                                suffix_is_nullable = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // If suffix is nullable (or empty), include FOLLOW(lhs) terminals.
+                if suffix_is_nullable {
+                    if let Some(follow_lhs) = nonterminal_follow_sets.get(lhs) {
+                        for opt_t in follow_lhs {
+                            if let Some(tt) = opt_t.clone() {
+                                occ_follows.insert(tt);
+                            }
+                        }
+                    }
+                }
+
+                always_map
+                    .entry(t.clone())
+                    .and_modify(|maybe_set| {
+                        match maybe_set {
+                            Some(existing) => {
+                                let inter: BTreeSet<_> =
+                                    existing.intersection(&occ_follows).cloned().collect();
+                                *existing = inter;
+                            }
+                            None => *maybe_set = Some(occ_follows.clone()),
+                        }
+                    })
+                    .or_insert_with(|| Some(occ_follows));
+            }
+        }
+    }
+
+    let mut result = BTreeMap::new();
+    for (t, maybe_set) in always_map {
+        if let Some(set) = maybe_set {
+            result.insert(t, set);
+        }
+    }
+    result
+}
 
 /// Compute a conservative "always-follow" relation for terminals.
 ///

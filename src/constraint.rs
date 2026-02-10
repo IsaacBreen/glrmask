@@ -26,7 +26,10 @@ use crate::{
     },
     dfa_u8::{Regex, Tokenizer},
     glr::{
-        analyze::{compute_always_follow_sets, compute_self_extending_terminals, compute_terminal_follow_sets},
+        analyze::{
+            compute_always_allowed_terminal_follows, compute_always_follow_sets,
+            compute_self_extending_terminals, compute_terminal_follow_sets,
+        },
         grammar::Terminal,
         parser::{GLRParser, GLRParserState},
     },
@@ -1228,12 +1231,42 @@ impl GrammarConstraint {
             .unwrap_or(false);
         let self_extending_labels_for_collapse: Option<Arc<HashSet<crate::dwa_i32::Label>>> =
             if collapse_self_extending_enabled {
-                Some(Arc::new(
+                let mut labels: HashSet<crate::dwa_i32::Label> =
                     compute_self_extending_terminals(&parser)
                         .into_iter()
                         .map(|tid| tid.0 as crate::dwa_i32::Label)
-                        .collect(),
-                ))
+                        .collect();
+                let always_allowed = compute_always_allowed_terminal_follows(&parser.productions);
+                if std::env::var("DEBUG_TERMINAL_ALWAYS_ALLOWED_FOLLOW_MAP")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    let total_terminals = parser.terminal_map.len();
+                    let mut non_empty = 0usize;
+                    let mut self_follow = 0usize;
+                    for (term, follows) in &always_allowed {
+                        if !follows.is_empty() {
+                            non_empty += 1;
+                        }
+                        if follows.contains(term) {
+                            self_follow += 1;
+                        }
+                    }
+                    eprintln!(
+                        "TERMINAL_ALWAYS_ALLOWED_FOLLOW: total_terminals={}, non_empty_entries={}, self_follow_entries={}",
+                        total_terminals,
+                        non_empty,
+                        self_follow,
+                    );
+                }
+                for (term, follows) in always_allowed {
+                    if follows.contains(&term) {
+                        if let Some(tid) = parser.terminal_map.get_by_left(&term) {
+                            labels.insert(tid.0 as crate::dwa_i32::Label);
+                        }
+                    }
+                }
+                Some(Arc::new(labels))
             } else {
                 None
             };
