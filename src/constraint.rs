@@ -1519,8 +1519,8 @@ impl GrammarConstraint {
         };
 
         let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
         let need_suffix_cache = grammar_definition.is_some()
             && (do_nwa_suffix_prune
                 || std::env::var("DWA_SUFFIX_PRUNE").is_ok()

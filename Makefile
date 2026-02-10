@@ -91,7 +91,7 @@ test-release: ## Run all crate tests in release profile + test_nwa_minimize_dete
 	RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 cargo test --color=always --package sep1 --lib --release -- test_nwa_minimize_determinize_minimize --nocapture --include-ignored
 
 test-js: ## Compile the JavaScript grammar (verifies it compiles)
-	NWA_SUFFIX_PRUNE=1 SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) timeout $(TEST_TIMEOUT) python scripts/compile.py \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) timeout $(TEST_TIMEOUT) python scripts/compile.py \
 		--grammar src/js.ebnf \
 		--format ebnf \
 		--output .cache/test_vocabs/constraint_js.json.gz \
