@@ -367,8 +367,7 @@ impl DeterminizeAndMinimizeConfig {
             },
             DeterminizeAndMinimizeProfile::SpecializedSuper => DeterminizeAndMinimizeConfig {
                 // Specialized DWAs derived from Super by weight mapping.
-                // These are instantiated many times in the combined NWA, so minimization pays off.
-                // Match manual pipeline: minimize NWA, determinize, then minimize DWA.
+                // Det/min is valid after vocab-space instantiation.
                 nwa_passes: vec![NwaPass::Minimize],
                 dwa_passes: vec![
                     DwaPass::PruneUnreachable,

@@ -751,7 +751,10 @@ fn build_weight_map_for_signature(
         .collect()
 }
 
-fn specialize_nwa_with_map(parent_nwa: &NWA, weight_map: &HashMap<Weight, Weight>) -> NWA {
+fn specialize_super_nwa_terminal_space(
+    parent_nwa: &NWA,
+    weight_map: &HashMap<Weight, Weight>,
+) -> NWA {
     let mut nwa = NWA::new_empty();
     for _ in 0..parent_nwa.states.len() {
         nwa.add_state();
@@ -1093,11 +1096,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     &sig_index,
                     &bit_to_term,
                 );
-                let nwa = specialize_nwa_with_map(super_nwa_ref, &weight_map);
-                let dwa = nwa.determinize_and_minimize(
-                    DeterminizeAndMinimizeProfile::SpecializedSuper,
-                );
-                let nwa = NWA::from_dwa(&dwa);
+                let mut nwa = specialize_super_nwa_terminal_space(super_nwa_ref, &weight_map);
+                // Terminal-space specialization: prune only (no state merging).
+                nwa.prune_dead_ends();
+                nwa.prune_unreachable();
                 results.push((sig.clone(), nwa));
             }
 
@@ -1123,7 +1125,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         template_cache_snapshot.len(), total_template_states, max_template, avg_template);
     drop(template_cache_snapshot);
 
-    crate::debug!(4, "Finished DWA specialization");
+    crate::debug!(4, "Finished terminal-space NWA specialization");
 
     let states_arena = RefCell::new(NWAStates::default());
     let initial_body = {
@@ -1274,7 +1276,11 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                             bit_to_term,
                         );
 
-                        let nwa = Arc::new(specialize_nwa_with_map(super_nwa.as_ref(), &weight_map));
+                        let mut nwa = specialize_super_nwa_terminal_space(super_nwa.as_ref(), &weight_map);
+                        // Terminal-space specialization: prune only (no state merging).
+                        nwa.prune_dead_ends();
+                        nwa.prune_unreachable();
+                        let nwa = Arc::new(nwa);
                         let dynamic_us = dynamic_start.elapsed().as_micros() as u64;
                         pass2_profile_for_process.dynamic_derive_us.fetch_add(
                             dynamic_us,
@@ -1309,10 +1315,16 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                             count, TOTAL_TEMPLATE_STATES.load(std::sync::atomic::Ordering::Relaxed), template_size, bodies_count);
                     }
                     
-                    let mut states = states_arena.borrow_mut();
-                    let arena_start = states.len();
                     let instantiate_start = Instant::now();
-                    let composed_body = instantiate_nwa_template_into(cached_nwa, &concrete_weights, &mut states, right_body);
+                    let instantiated_nwa = instantiate_nwa_template_to_vocab_space(
+                        cached_nwa,
+                        &concrete_weights,
+                    );
+                    let minimized_dwa = instantiated_nwa
+                        .determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
+                    let minimized_nwa = NWA::from_dwa(&minimized_dwa);
+                    let mut states = states_arena.borrow_mut();
+                    let composed_body = states.concatenate_in_place(&minimized_nwa, right_body);
                     let instantiate_us = instantiate_start.elapsed().as_micros() as u64;
                     pass2_profile_for_process.instantiate_us.fetch_add(
                         instantiate_us,
@@ -1443,34 +1455,26 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         let mut states = states_arena.borrow_mut();
         let arena_len = states.len();
         if arena_len > 0 {
-            let has_negatives = states.0.iter().any(|state| {
-                state
-                    .transitions
-                    .keys()
-                    .any(|&label| label < 0 && label != crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL)
-            });
-            if has_negatives {
-                let cancel_start = Instant::now();
-                apply_cancellations_range(&mut states, 0..arena_len);
-                let cancel_us = cancel_start.elapsed().as_micros() as u64;
-                pass2_profile
-                    .apply_cancellations_us
-                    .fetch_add(cancel_us, Ordering::Relaxed);
+            let cancel_start = Instant::now();
+            apply_cancellations_range(&mut states, 0..arena_len);
+            let cancel_us = cancel_start.elapsed().as_micros() as u64;
+            pass2_profile
+                .apply_cancellations_us
+                .fetch_add(cancel_us, Ordering::Relaxed);
 
-                let finality_start = Instant::now();
-                apply_finality_fixpoint_range(&mut states, 0..arena_len);
-                let finality_us = finality_start.elapsed().as_micros() as u64;
-                pass2_profile
-                    .apply_finality_us
-                    .fetch_add(finality_us, Ordering::Relaxed);
+            let finality_start = Instant::now();
+            apply_finality_fixpoint_range(&mut states, 0..arena_len);
+            let finality_us = finality_start.elapsed().as_micros() as u64;
+            pass2_profile
+                .apply_finality_us
+                .fetch_add(finality_us, Ordering::Relaxed);
 
-                let remove_start = Instant::now();
-                remove_negative_transitions_range(&mut states, 0..arena_len);
-                let remove_us = remove_start.elapsed().as_micros() as u64;
-                pass2_profile
-                    .remove_negative_us
-                    .fetch_add(remove_us, Ordering::Relaxed);
-            }
+            let remove_start = Instant::now();
+            remove_negative_transitions_range(&mut states, 0..arena_len);
+            let remove_us = remove_start.elapsed().as_micros() as u64;
+            pass2_profile
+                .remove_negative_us
+                .fetch_add(remove_us, Ordering::Relaxed);
         }
     }
     eprintln!(
@@ -1660,14 +1664,13 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     dwa
 }
 
-pub fn instantiate_nwa_template_into(
+pub fn instantiate_nwa_template_to_vocab_space(
     template: &NWA,
     ordered_weights: &[Weight],
-    states: &mut NWAStates,
-    right_body: &NWABody,
-) -> NWABody {
-    let offset = states.len();
-    states.0.reserve(template.states.len());
+) -> NWA {
+    let mut nwa = NWA::new_empty();
+    nwa.body = template.body.clone();
+    nwa.states.0.reserve(template.states.len());
 
     let mut union_cache: HashMap<Weight, Weight> = HashMap::new();
     let mut map_abstract_weight = |w: &Weight| -> Weight {
@@ -1699,7 +1702,7 @@ pub fn instantiate_nwa_template_into(
             for (target, w) in targets {
                 let concrete = map_abstract_weight(w);
                 if !concrete.is_empty() {
-                    new_targets.push((*target + offset, concrete));
+                    new_targets.push((*target, concrete));
                 }
             }
             if !new_targets.is_empty() {
@@ -1711,26 +1714,22 @@ pub fn instantiate_nwa_template_into(
         for (target, w) in &old_state.epsilons {
             let concrete = map_abstract_weight(w);
             if !concrete.is_empty() {
-                new_state.epsilons.push((*target + offset, concrete));
+                new_state.epsilons.push((*target, concrete));
             }
         }
 
-        // Final Weight -> Epsilon to right_body starts
+        // Final weight stays on the instantiated template NWA.
         if let Some(fw) = &old_state.final_weight {
             let concrete = map_abstract_weight(fw);
             if !concrete.is_empty() {
-                for &r_start in &right_body.start_states {
-                    new_state.epsilons.push((r_start, concrete.clone()));
-                }
+                new_state.final_weight = Some(concrete);
             }
         }
 
-        states.0.push(new_state);
+        nwa.states.0.push(new_state);
     }
 
-    NWABody {
-        start_states: template.body.start_states.iter().map(|s| s + offset).collect()
-    }
+    nwa
 }
 
 fn minimize_remove_epsilon(nwa: &mut NWA) {

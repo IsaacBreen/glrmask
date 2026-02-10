@@ -410,29 +410,8 @@ pub(crate) fn collapse_self_extending_chains_nwa(
         }
     }
 
-    if !self_extending_labels.is_empty() && !nwa.states.0.is_empty() {
-        let mut incoming_label: HashSet<(usize, Label)> = HashSet::new();
-        for state in &nwa.states.0 {
-            for (&label, targets) in &state.transitions {
-                if self_extending_labels.contains(&label) {
-                    for (dst, _) in targets {
-                        incoming_label.insert((*dst, label));
-                    }
-                }
-            }
-        }
-
-        for (dst, label) in incoming_label {
-            if nwa.body.start_states.contains(&dst) {
-                continue;
-            }
-            if let Some(state) = nwa.states.0.get_mut(dst) {
-                if state.transitions.remove(&label).is_some() {
-                    stats.blocked_repeat_transitions += 1;
-                }
-            }
-        }
-    }
+    // Note: the DWA-level collapse removes repeated self-extending transitions.
+    // For NWA, this step is disabled to avoid removing valid transitions.
 
     let before = nwa.states.len();
     if nwa.prune_unreachable() {
@@ -1177,36 +1156,7 @@ impl<'r> Precomputer1<'r> {
             std::fs::write("nwa_dump.json", json).unwrap();
         }
 
-        if !self.allowed_follows_by_label.is_empty() || !self.always_allowed_by_label.is_empty() {
-            let prune_start = std::time::Instant::now();
-            let mut iterations = 0usize;
-            loop {
-                let mut changed = false;
-
-                if collapse_always_allowed(&mut self.nwa, &self.always_allowed_by_label) {
-                    changed = true;
-                }
-                if prune_disallowed_follows(
-                    &mut self.nwa,
-                    &self.allowed_follows_by_label,
-                    self.terminals_count,
-                ) {
-                    changed = true;
-                }
-
-                iterations += 1;
-                if !changed {
-                    break;
-                }
-            }
-
-            crate::debug!(
-                4,
-                "Terminal NWA always-allowed collapse + disallowed-follows prune: iterations={}",
-                iterations,
-            );
-            eprintln!("TIMING: terminal_nwa_allowed_follows_collapse {:?}", prune_start.elapsed());
-        }
+        // NWA-level allowed-follows pruning/collapse disabled: unsafe without parser context.
 
         let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1724,13 +1674,6 @@ impl<'r> Precomputer1<'r> {
         weight
     }
 
-    #[inline]
-    fn is_ignored_terminal(&self, terminal_id: GrammarTokenID) -> bool {
-        self.ignored_terminals
-            .get(terminal_id.0)
-            .copied()
-            .unwrap_or(false)
-    }
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
         let start = self.dfs_profile_enabled.then(std::time::Instant::now);
@@ -1917,15 +1860,9 @@ impl<'r> Precomputer1<'r> {
                             let leaf = self.leaf_state;
                             // Use expanded weight from single token
                             let weight = self.expanded_weight_from_item(child_token_id);
-                            if self.is_ignored_terminal(terminal_id) {
-                                crate::debug!(7, "      -> LEAF epsilon (ignored): {} --eps--> {} (leaf_state), weight={:?}",
-                                    src_node, leaf, weight);
-                                self.add_pending_epsilon(src_node, leaf, weight);
-                            } else {
-                                crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
-                                    src_node, terminal_id.0, leaf, weight);
-                                self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
-                            }
+                            crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
+                                src_node, terminal_id.0, leaf, weight);
+                            self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
                         }
 
                         // Continuation logic
@@ -1974,15 +1911,9 @@ impl<'r> Precomputer1<'r> {
                             }
                         };
 
-                        if self.is_ignored_terminal(terminal_id) {
-                            crate::debug!(7, "      -> CONT epsilon (ignored): {} --eps--> {}, weight={:?}",
-                                src_node, target, weight);
-                            self.add_pending_epsilon(src_node, target, weight);
-                        } else {
-                            crate::debug!(7, "      -> CONT transition: {} --{}--> {}, weight={:?}", 
-                                src_node, terminal_id.0, target, weight);
-                            self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
-                        }
+                        crate::debug!(7, "      -> CONT transition: {} --{}--> {}, weight={:?}", 
+                            src_node, terminal_id.0, target, weight);
+                        self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
                     }
 
                     // 2. Handle End State -> Continuation
@@ -2017,24 +1948,14 @@ impl<'r> Precomputer1<'r> {
                                 crate::debug!(7, "    -> Skip END_STATE terminal {} (no approx DFA transition)", terminal_id.0);
                                 continue;
                             };
-                            if self.is_ignored_terminal(*terminal_id) {
-                                crate::debug!(7, "    -> END_STATE epsilon (ignored): {} --eps--> {} (leaf_state), weight={:?}",
-                                    src_node, end_idx, single_token_weight);
-                                self.add_pending_epsilon(
-                                    src_node,
-                                    end_idx,
-                                    single_token_weight.clone(),
-                                );
-                            } else {
-                                crate::debug!(7, "    -> END_STATE transition: {} --{}--> {} (leaf_state), weight={:?}",
-                                    src_node, terminal_id.0, end_idx, single_token_weight);
-                                self.add_pending_transition(
-                                    src_node,
-                                    terminal_id.0 as Label,
-                                    end_idx,
-                                    single_token_weight.clone(),
-                                );
-                            }
+                            crate::debug!(7, "    -> END_STATE transition: {} --{}--> {} (leaf_state), weight={:?}",
+                                src_node, terminal_id.0, end_idx, single_token_weight);
+                            self.add_pending_transition(
+                                src_node,
+                                terminal_id.0 as Label,
+                                end_idx,
+                                single_token_weight.clone(),
+                            );
                         }
 
                         let next = self.get_or_create_next_state(
