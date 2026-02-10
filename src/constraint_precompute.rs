@@ -41,12 +41,6 @@ pub(crate) struct ChainCollapseStats {
     pub(crate) iterations: usize,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct AllowedFollowsPruneStats {
-    pub(crate) pruned_transitions: usize,
-    pub(crate) pruned_states: usize,
-}
-
 pub(crate) fn collapse_self_extending_chains(
     dwa: &mut DWA,
     self_extending_labels: &HashSet<Label>,
@@ -176,252 +170,195 @@ pub(crate) fn collapse_self_extending_chains(
     stats
 }
 
-fn compute_incoming_terminal_labels(nwa: &NWA, terminals_count: usize) -> Vec<HashSet<Label>> {
-    let mut incoming: Vec<HashSet<Label>> = vec![HashSet::new(); nwa.states.len()];
-    let mut worklist: VecDeque<NWAStateID> = VecDeque::new();
+pub(crate) fn collapse_always_allowed(
+    nwa: &mut NWA,
+    always_allowed_by_label: &[Vec<Label>],
+    terminals_count: usize,
+) -> bool {
+    if always_allowed_by_label.is_empty() || terminals_count == 0 {
+        return false;
+    }
 
-    for state in &nwa.states.0 {
-        for (&label, targets) in &state.transitions {
-            if (label as usize) >= terminals_count {
+    let num_states = nwa.states.len();
+    if num_states == 0 {
+        return false;
+    }
+
+    // Precompute incoming terminal labels and compute exact domains.
+    let mut incoming: Vec<HashSet<Label>> = vec![HashSet::new(); num_states];
+    let mut domain: Vec<Weight> = (0..num_states).map(|_| Weight::zeros()).collect();
+
+    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+    let mut in_queue: Vec<bool> = vec![false; num_states];
+
+    for &start in &nwa.body.start_states {
+        domain[start] = Weight::all();
+        queue.push_back(start);
+        in_queue[start] = true;
+    }
+
+    while let Some(state_id) = queue.pop_front() {
+        in_queue[state_id] = false;
+        let state = &nwa.states[state_id];
+        let state_domain = domain[state_id].clone();
+        let mut domain_empty = state_domain.clone();
+        domain_empty &= Weight::all();
+        if domain_empty.is_subset_of(&Weight::zeros()) {
+            continue;
+        }
+
+        for (dst, w) in &state.epsilons {
+            if domain[*dst].is_subset_of(&state_domain) {
+                let src_labels: Vec<Label> = incoming[state_id].iter().copied().collect();
+                incoming[*dst].extend(src_labels);
                 continue;
             }
-            for (dst, _) in targets {
+            domain[*dst] |= &state_domain;
+            let src_labels: Vec<Label> = incoming[state_id].iter().copied().collect();
+            incoming[*dst].extend(src_labels);
+            if !in_queue[*dst] {
+                in_queue[*dst] = true;
+                queue.push_back(*dst);
+            }
+        }
+
+        for (&label, targets) in &state.transitions {
+            if label < 0 {
+                continue;
+            }
+            let idx = label as usize;
+            if idx >= terminals_count {
+                continue;
+            }
+            for (dst, w) in targets {
+                let mut contrib = state_domain.clone();
+                contrib &= w;
+                if !contrib.is_subset_of(&domain[*dst]) {
+                    domain[*dst] |= &contrib;
+                    if !in_queue[*dst] {
+                        in_queue[*dst] = true;
+                        queue.push_back(*dst);
+                    }
+                }
                 if incoming[*dst].insert(label) {
-                    worklist.push_back(*dst);
+                    if !in_queue[*dst] {
+                        in_queue[*dst] = true;
+                        queue.push_back(*dst);
+                    }
                 }
             }
         }
     }
 
-    while let Some(state_id) = worklist.pop_front() {
-        let labels = incoming[state_id].clone();
-        for (dst, _) in &nwa.states[state_id].epsilons {
-            let mut changed = false;
-            let dest_set = &mut incoming[*dst];
-            for label in &labels {
-                if dest_set.insert(*label) {
-                    changed = true;
-                }
-            }
-            if changed {
-                worklist.push_back(*dst);
+    // Treat start states as having all terminals incoming.
+    let all_labels: Vec<Label> = (0..(terminals_count as Label)).collect();
+    for &start in &nwa.body.start_states {
+        incoming[start].extend(all_labels.iter().copied());
+    }
+    for state_id in 0..num_states {
+        if !nwa.states[state_id].epsilons.is_empty() {
+            for &label in &all_labels {
+                incoming[state_id].insert(label);
             }
         }
     }
 
-    incoming
-}
-
-fn prune_disallowed_follows_stats(
-    nwa: &mut NWA,
-    allowed_follows_by_label: &[Vec<Label>],
-    terminals_count: usize,
-) -> AllowedFollowsPruneStats {
-    let mut stats = AllowedFollowsPruneStats::default();
-    if allowed_follows_by_label.is_empty() || allowed_follows_by_label.len() < terminals_count {
-        return stats;
-    }
-
-    let incoming = compute_incoming_terminal_labels(nwa, terminals_count);
-    for (state_id, state) in nwa.states.0.iter_mut().enumerate() {
+    let mut allowed_by_state: Vec<HashSet<Label>> = vec![HashSet::new(); num_states];
+    for state_id in 0..num_states {
         let incoming_labels = &incoming[state_id];
         if incoming_labels.is_empty() {
             continue;
         }
-
-        let mut allowed: HashSet<Label> = HashSet::new();
-        for label in incoming_labels {
-            if let Some(follows) = allowed_follows_by_label.get(*label as usize) {
-                for follow in follows {
-                    allowed.insert(*follow);
-                }
+        let mut iter = incoming_labels.iter();
+        let Some(&first) = iter.next() else {
+            continue;
+        };
+        let first_idx = first as usize;
+        if first_idx >= always_allowed_by_label.len() {
+            continue;
+        }
+        let mut allowed: HashSet<Label> =
+            always_allowed_by_label[first_idx].iter().copied().collect();
+        for &label in iter {
+            let idx = label as usize;
+            if idx >= always_allowed_by_label.len() {
+                continue;
+            }
+            let follow_set: HashSet<Label> =
+                always_allowed_by_label[idx].iter().copied().collect();
+            allowed.retain(|t| follow_set.contains(t));
+            if allowed.is_empty() {
+                break;
             }
         }
+        allowed_by_state[state_id] = allowed;
+    }
 
-        let mut to_remove: Vec<Label> = Vec::new();
-        for (&label, targets) in &state.transitions {
-            if (label as usize) >= terminals_count {
+    let final_weights: Vec<Option<Weight>> =
+        nwa.states.0.iter().map(|s| s.final_weight.clone()).collect();
+    let mut changed = false;
+
+    for state_id in 0..num_states {
+        let allowed = &allowed_by_state[state_id];
+        if allowed.is_empty() {
+            continue;
+        }
+        let domain_state = &domain[state_id];
+        let mut domain_empty = domain_state.clone();
+        domain_empty &= Weight::all();
+        if domain_empty.is_subset_of(&Weight::zeros()) {
+            continue;
+        }
+
+        let state = &mut nwa.states[state_id];
+        let mut labels_to_remove = Vec::new();
+
+        for (&label, targets) in state.transitions.iter_mut() {
+            if label < 0 {
+                continue;
+            }
+            let idx = label as usize;
+            if idx >= terminals_count {
                 continue;
             }
             if !allowed.contains(&label) {
-                stats.pruned_transitions += targets.len();
-                to_remove.push(label);
-            }
-        }
-
-        if !to_remove.is_empty() {
-            stats.pruned_states += 1;
-            for label in to_remove {
-                state.transitions.remove(&label);
-            }
-        }
-    }
-
-    let before = nwa.states.len();
-    if nwa.prune_unreachable() {
-        let after = nwa.states.len();
-        if after < before {
-            stats.pruned_states += before - after;
-        }
-    }
-
-    stats
-}
-
-pub(crate) fn prune_disallowed_follows(
-    nwa: &mut NWA,
-    allowed_follows_by_label: &[Vec<Label>],
-    terminals_count: usize,
-) -> bool {
-    let stats = prune_disallowed_follows_stats(nwa, allowed_follows_by_label, terminals_count);
-    stats.pruned_transitions > 0 || stats.pruned_states > 0
-}
-
-pub(crate) fn collapse_always_allowed(
-    nwa: &mut NWA,
-    always_allowed_by_label: &[Vec<Label>],
-) -> bool {
-    if always_allowed_by_label.is_empty() {
-        return false;
-    }
-    let mut labels: HashSet<Label> = HashSet::new();
-    for (label_idx, follows) in always_allowed_by_label.iter().enumerate() {
-        let label = label_idx as Label;
-        if follows.iter().any(|&f| f == label) {
-            labels.insert(label);
-        }
-    }
-    if labels.is_empty() {
-        return false;
-    }
-    let stats = collapse_self_extending_chains_nwa(nwa, &labels);
-    stats.collapsed_states > 0
-        || stats.rewired_transitions > 0
-        || stats.blocked_repeat_transitions > 0
-        || stats.pruned_states > 0
-}
-
-pub(crate) fn collapse_self_extending_chains_nwa(
-    nwa: &mut NWA,
-    self_extending_labels: &HashSet<Label>,
-) -> ChainCollapseStats {
-    let mut stats = ChainCollapseStats::default();
-
-    loop {
-        let num_states = nwa.states.len();
-        if num_states == 0 {
-            break;
-        }
-
-        let mut incoming_total = vec![0usize; num_states];
-        let mut incoming_by_label: HashMap<(usize, Label), usize> = HashMap::new();
-        let mut incoming_sources: HashMap<(usize, Label), Vec<(usize, usize)>> = HashMap::new();
-        let mut incoming_eps = vec![0usize; num_states];
-
-        for (src, state) in nwa.states.0.iter().enumerate() {
-            for (&label, targets) in &state.transitions {
-                for (idx, (dst, _)) in targets.iter().enumerate() {
-                    incoming_total[*dst] += 1;
-                    *incoming_by_label.entry((*dst, label)).or_insert(0) += 1;
-                    incoming_sources
-                        .entry((*dst, label))
-                        .or_default()
-                        .push((src, idx));
-                }
-            }
-            for (dst, _) in &state.epsilons {
-                incoming_eps[*dst] += 1;
-            }
-        }
-
-        let mut changed = false;
-        for b in 0..num_states {
-            if nwa.body.start_states.contains(&b) {
-                continue;
-            }
-            let (label, c, w_out, final_weight_b) = {
-                let state_b = &nwa.states[b];
-                if state_b.transitions.len() != 1 {
-                    continue;
-                }
-                if state_b.epsilons.len() > 0 {
-                    continue;
-                }
-                let (&label, targets) = match state_b.transitions.iter().next() {
-                    Some(entry) => entry,
-                    None => continue,
-                };
-                if !self_extending_labels.contains(&label) {
-                    continue;
-                }
-                if targets.len() != 1 {
-                    continue;
-                }
-                let (c, w_out) = targets[0].clone();
-                (label, c, w_out, state_b.final_weight.clone())
-            };
-
-            if c == b {
                 continue;
             }
 
-            if incoming_eps[b] > 0 {
-                continue;
-            }
-            let incoming_label = incoming_by_label.get(&(b, label)).copied().unwrap_or(0);
-            if incoming_label == 0 || incoming_total[b] != incoming_label {
-                continue;
-            }
-
-            let preds = incoming_sources.get(&(b, label)).cloned().unwrap_or_default();
-            if preds.is_empty() {
-                continue;
-            }
-
-            for (p, idx) in preds {
-                if let Some(targets) = nwa.states[p].transitions.get_mut(&label) {
-                    if let Some((dst, w_in)) = targets.get_mut(idx) {
-                        *dst = c;
-                        *w_in |= &w_out;
-                        stats.rewired_transitions += 1;
+            let mut new_targets: Vec<(NWAStateID, Weight)> = Vec::new();
+            for (dst, w) in targets.iter() {
+                if let Some(fw) = final_weights[*dst].as_ref() {
+                    let mut reach = domain_state.clone();
+                    reach &= w;
+                    if reach.is_subset_of(fw) {
+                        let mut contrib = fw.clone();
+                        contrib &= w;
+                        let fw_state = state.final_weight.get_or_insert_with(Weight::zeros);
+                        *fw_state |= &contrib;
+                        changed = true;
+                        continue;
                     }
                 }
+                new_targets.push((*dst, w.clone()));
             }
 
-            if let Some(fw_b) = final_weight_b {
-                let fw_c = nwa.states[c]
-                    .final_weight
-                    .get_or_insert_with(Weight::zeros);
-                *fw_c |= &fw_b;
+            if new_targets.is_empty() {
+                labels_to_remove.push(label);
+            } else {
+                *targets = new_targets;
             }
-
-            let state_b_mut = &mut nwa.states[b];
-            state_b_mut.transitions.clear();
-            state_b_mut.epsilons.clear();
-            state_b_mut.final_weight = None;
-
-            stats.collapsed_states += 1;
-            changed = true;
         }
 
-        stats.iterations += 1;
-        if !changed {
-            break;
+        for label in labels_to_remove {
+            state.transitions.remove(&label);
         }
     }
 
-    // Note: the DWA-level collapse removes repeated self-extending transitions.
-    // For NWA, this step is disabled to avoid removing valid transitions.
-
-    let before = nwa.states.len();
     if nwa.prune_unreachable() {
-        let after = nwa.states.len();
-        if after < before {
-            stats.pruned_states += before - after;
-        }
+        changed = true;
     }
 
-    stats
+    changed
 }
 
 // No-op progress bar replacement
@@ -658,7 +595,6 @@ pub(crate) struct Precomputer1<'r> {
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ignored_terminals: Arc<Vec<bool>>,
-    allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
     always_allowed_by_label: Arc<Vec<Vec<Label>>>,
 }
 
@@ -675,7 +611,6 @@ impl<'r> Precomputer1<'r> {
         suffix_prune_cache: Option<Arc<SuffixParserCache>>,
         self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
         ignored_terminals: Arc<Vec<bool>>,
-        allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
         always_allowed_by_label: Arc<Vec<Vec<Label>>>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
@@ -779,7 +714,6 @@ impl<'r> Precomputer1<'r> {
             suffix_prune_cache,
             self_extending_labels_for_collapse,
             ignored_terminals,
-            allowed_follows_by_label,
             always_allowed_by_label,
         }
     }
@@ -860,6 +794,38 @@ impl<'r> Precomputer1<'r> {
                     state.epsilons.extend(dsts.into_iter());
                 }
                 crate::debug!(4, "Precompute1 finish: flushed pending transitions/epsilons in {:?}", flush_start.elapsed());
+            });
+        }
+
+        // Convert ignored terminal transitions into epsilons.
+        if !self.ignored_terminals.is_empty() && self.terminals_count > 0 {
+            timeit!("precompute1::ignored_to_epsilon", {
+                for state in &mut self.nwa.states.0 {
+                    let mut moved_eps: HashMap<NWAStateID, Weight> = HashMap::new();
+                    let mut labels_to_remove: Vec<Label> = Vec::new();
+                    for (&label, targets) in &state.transitions {
+                        if label >= 0 {
+                            let idx = label as usize;
+                            if idx < self.terminals_count
+                                && self.ignored_terminals.get(idx).copied().unwrap_or(false)
+                            {
+                                labels_to_remove.push(label);
+                                for (dst, w) in targets {
+                                    let entry = moved_eps.entry(*dst).or_insert_with(Weight::zeros);
+                                    if !w.is_subset_of(entry) {
+                                        *entry |= w;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for label in labels_to_remove {
+                        state.transitions.remove(&label);
+                    }
+                    if !moved_eps.is_empty() {
+                        state.epsilons.extend(moved_eps);
+                    }
+                }
             });
         }
 
@@ -1156,7 +1122,24 @@ impl<'r> Precomputer1<'r> {
             std::fs::write("nwa_dump.json", json).unwrap();
         }
 
-        // NWA-level allowed-follows pruning/collapse disabled: unsafe without parser context.
+        // NWA-level always-allowed collapse only (follow pruning removed).
+        if !self.always_allowed_by_label.is_empty() {
+            let collapse_start = std::time::Instant::now();
+            let changed = collapse_always_allowed(
+                &mut self.nwa,
+                &self.always_allowed_by_label,
+                self.terminals_count,
+            );
+            crate::debug!(
+                4,
+                "Terminal NWA always-allowed collapse: changed={}",
+                changed,
+            );
+            eprintln!(
+                "TIMING: terminal_nwa_always_allowed_collapse {:?}",
+                collapse_start.elapsed()
+            );
+        }
 
         let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -2029,6 +2012,8 @@ pub fn run_precompute1(
     allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
     always_allowed_by_label: Arc<Vec<Vec<Label>>>,
 ) -> DWA {
+    let _ = allowed_follows_by_label;
+
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
     let num_tsids = if is_weight_heavy_enabled() {
         tokenizer.dfa().states.len()
@@ -2071,7 +2056,6 @@ pub fn run_precompute1(
             suffix_prune_cache,
             self_extending_labels_for_collapse,
             ignored_terminals,
-            allowed_follows_by_label,
             always_allowed_by_label,
         )
     });
@@ -2116,7 +2100,6 @@ pub(crate) fn run_precompute1_nwa_for_tests(
     }
 
     let ignored_terminals = Arc::new(vec![false; terminals_count]);
-    let allowed_follows_by_label = Arc::new(Vec::new());
     let always_allowed_by_label = Arc::new(Vec::new());
 
     let mut helper = Precomputer1::new(
@@ -2131,7 +2114,6 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         None,
         None,
         ignored_terminals,
-        allowed_follows_by_label,
         always_allowed_by_label,
     );
 

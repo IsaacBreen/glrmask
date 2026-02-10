@@ -3,7 +3,7 @@
 use crate::datastructures::hybrid_bitset::RangeSet;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fmt::{self, Debug, Display, Formatter},
     sync::Arc,
 };
@@ -28,7 +28,7 @@ use crate::{
     glr::{
         analyze::{
             compute_always_allowed_terminal_follows, compute_always_follow_sets,
-            compute_self_extending_terminals, compute_terminal_follow_sets,
+            compute_self_extending_terminals,
         },
         grammar::Terminal,
         parser::{GLRParser, GLRParserState},
@@ -1198,46 +1198,7 @@ impl GrammarConstraint {
         eprintln!("TIMING: build_maps_and_possible_matches {:?}", maps_start.elapsed());
         crate::debug!(5, "build_maps_and_possible_matches: end");
 
-        // Compute terminal follow sets, then map to IDs.
-        crate::debug!(4, "Computing terminal follow sets");
-        crate::debug!(5, "compute_terminal_follow_sets: start");
-        let follow_start = std::time::Instant::now();
-        let terminal_follow_sets_named = timeit!("compute_terminal_follow_sets", {
-            compute_terminal_follow_sets(&parser.productions)
-        });
-        eprintln!("TIMING: compute_terminal_follow_sets {:?}", follow_start.elapsed());
-        crate::debug!(5, "compute_terminal_follow_sets: end");
-        crate::debug!(4, "Done computing terminal follow sets");
-        let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> =
-            BTreeMap::new();
-        for (terminal1, following_terminals) in terminal_follow_sets_named {
-            let t1_id = parser
-                .terminal_map
-                .get_by_left(&terminal1)
-                .unwrap()
-                .clone();
-            let mut following_ids = BTreeSet::new();
-            for t2 in following_terminals {
-                let t2_id = *parser.terminal_map.get_by_left(&t2).unwrap();
-                following_ids.insert(t2_id);
-            }
-            if !following_ids.is_empty() {
-                terminal_follow_map.insert(t1_id, following_ids);
-            }
-        }
-
-        let mut allowed_follows_by_label: Vec<Vec<crate::dwa_i32::Label>> =
-            vec![Vec::new(); parser.terminal_map.len()];
-        for (tid, follows) in &terminal_follow_map {
-            let idx = tid.0;
-            if idx < allowed_follows_by_label.len() {
-                let entry = &mut allowed_follows_by_label[idx];
-                for follow in follows {
-                    entry.push(follow.0 as crate::dwa_i32::Label);
-                }
-            }
-        }
-        let allowed_follows_by_label = Arc::new(allowed_follows_by_label);
+        let allowed_follows_by_label = Arc::new(Vec::new());
 
         let mut labels: HashSet<crate::dwa_i32::Label> = compute_self_extending_terminals(&parser)
             .into_iter()
@@ -1284,54 +1245,6 @@ impl GrammarConstraint {
         }
         let self_extending_labels_for_collapse: Option<Arc<HashSet<crate::dwa_i32::Label>>> =
             Some(Arc::new(labels));
-
-        if std::env::var("DEBUG_TERMINAL_FOLLOW_MAP")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
-            let total_terminals = parser.terminal_map.len();
-            let mut size_counts: BTreeMap<usize, usize> = BTreeMap::new();
-            let mut singleton_pairs: Vec<(GrammarTokenID, GrammarTokenID)> = Vec::new();
-            let mut multi_count = 0usize;
-
-            for (tid, follows) in &terminal_follow_map {
-                let size = follows.len();
-                *size_counts.entry(size).or_insert(0) += 1;
-                if size == 1 {
-                    if let Some(&only) = follows.iter().next() {
-                        singleton_pairs.push((*tid, only));
-                    }
-                } else if size > 1 {
-                    multi_count += 1;
-                }
-            }
-
-            eprintln!(
-                "TERMINAL_FOLLOW_MAP: total_terminals={}, non_empty_entries={}, multi_follow_entries={}, size_counts={:?}",
-                total_terminals,
-                terminal_follow_map.len(),
-                multi_count,
-                size_counts,
-            );
-
-            let print_limit = 40usize;
-            if !singleton_pairs.is_empty() {
-                eprintln!("TERMINAL_FOLLOW_MAP: singleton follows (showing up to {})", print_limit);
-                for (tid, only) in singleton_pairs.iter().take(print_limit) {
-                    let t1 = parser
-                        .terminal_map
-                        .get_by_right(tid)
-                        .map(|t| format!("{:?}", t))
-                        .unwrap_or_else(|| format!("TerminalID({})", tid.0));
-                    let t2 = parser
-                        .terminal_map
-                        .get_by_right(only)
-                        .map(|t| format!("{:?}", t))
-                        .unwrap_or_else(|| format!("TerminalID({})", only.0));
-                    eprintln!("TERMINAL_FOLLOW_MAP: {} -> {}", t1, t2);
-                }
-            }
-        }
 
         if std::env::var("DEBUG_TERMINAL_ALWAYS_FOLLOW_MAP")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

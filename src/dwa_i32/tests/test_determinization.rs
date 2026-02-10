@@ -886,6 +886,7 @@ fn test_epsilon_explosion_different_alphabets() {
 /// 4. Deeper transitions accumulate more subset combinations
 #[test]
 fn test_epsilon_explosion_json_like() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Model the JSON grammar pattern:
     // - root ::= '{' field1 options '}' 
     // - options ::= (',' option)* 
