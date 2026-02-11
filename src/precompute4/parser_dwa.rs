@@ -596,55 +596,55 @@ fn ensure_nt_stack_state(
     Ok(stack[depth])
 }
 
-fn add_shift_chain(
-    nwa: &mut NWA,
-    end: StateID,
-    from: StateID,
-    pop_state: ParserStateID,
-    push_state: ParserStateID,
-    push_shift: ParserStateID,
-    weight: Weight,
-) -> Result<(), FullDWABuildError> {
-    let pop_label = crate::precompute4::utils::encode_symbol_i16(pop_state)?;
-    let push_label_state = crate::precompute4::utils::encode_negative_i16(push_state)?;
-    let push_label_shift = crate::precompute4::utils::encode_negative_i16(push_shift)?;
-    let s1 = nwa.add_state();
-    let s2 = nwa.add_state();
-    nwa.add_transition(from, pop_label, s1, weight.clone())?;
-    nwa.add_transition(s1, push_label_state, s2, weight.clone())?;
-    nwa.add_transition(s2, push_label_shift, end, weight)?;
-    Ok(())
-}
-
-fn add_escape_shift_chain(
-    nwa: &mut NWA,
-    end: StateID,
-    from: StateID,
-    revealed: ParserStateID,
-    goto: ParserStateID,
-    shift: ParserStateID,
-    weight: Weight,
-) -> Result<(), FullDWABuildError> {
-    let pop_label = crate::precompute4::utils::encode_symbol_i16(revealed)?;
-    let push_revealed = crate::precompute4::utils::encode_negative_i16(revealed)?;
-    let push_goto = crate::precompute4::utils::encode_negative_i16(goto)?;
-    let push_shift = crate::precompute4::utils::encode_negative_i16(shift)?;
-    let s1 = nwa.add_state();
-    let s2 = nwa.add_state();
-    let s3 = nwa.add_state();
-    nwa.add_transition(from, pop_label, s1, weight.clone())?;
-    nwa.add_transition(s1, push_revealed, s2, weight.clone())?;
-    nwa.add_transition(s2, push_goto, s3, weight.clone())?;
-    nwa.add_transition(s3, push_shift, end, weight)?;
-    Ok(())
-}
-
 fn build_super_nwa_from_grouped(
     grouped: &GroupedCharacterization,
     all_nts: &BTreeSet<NonTerminalID>,
     term_to_bit: &BTreeMap<Option<TerminalID>, usize>,
     ignore_terms: &BTreeSet<TerminalID>,
 ) -> Result<NWA, FullDWABuildError> {
+    let initial_shift_count = grouped.initial_shifts.len();
+    let initial_shift_prefix_count = grouped
+        .initial_shifts
+        .keys()
+        .map(|(state, _)| *state)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let initial_reduce_count = grouped.initial_reduces.len();
+    let escape_shift_count: usize = grouped.per_nt.values().map(|g| g.escape_shifts.len()).sum();
+    let escape_shift_prefix_count: usize = grouped
+        .per_nt
+        .values()
+        .map(|g| {
+            let mut prefixes = BTreeSet::new();
+            for ((revealed, goto, _), _) in &g.escape_shifts {
+                prefixes.insert((*revealed, *goto));
+            }
+            prefixes.len()
+        })
+        .sum();
+    let rereduce_count: usize = grouped.per_nt.values().map(|g| g.reveal_and_rereduces.len()).sum();
+    let mut max_depth_per_nt: BTreeMap<NonTerminalID, usize> = BTreeMap::new();
+    for ((_, len, nt), _) in &grouped.initial_reduces {
+        max_depth_per_nt
+            .entry(*nt)
+            .and_modify(|d| *d = (*d).max(*len))
+            .or_insert(*len);
+    }
+    for nt_group in grouped.per_nt.values() {
+        for ((_, remaining_len, target_nt), _) in &nt_group.reveal_and_rereduces {
+            max_depth_per_nt
+                .entry(*target_nt)
+                .and_modify(|d| *d = (*d).max(*remaining_len))
+                .or_insert(*remaining_len);
+        }
+    }
+    let nt_stack_extra: usize = max_depth_per_nt.values().copied().sum();
+    let predicted_states = 2
+        + all_nts.len()
+        + nt_stack_extra
+        + 2 * initial_shift_prefix_count
+        + 3 * escape_shift_prefix_count;
+
     let mut nwa = NWA::new_empty();
     let start = nwa.add_state();
     let end = nwa.add_state();
@@ -671,12 +671,37 @@ fn build_super_nwa_from_grouped(
         nwa.add_epsilon(start, end, epsilon_weight);
     }
 
+    let mut initial_shift_edges: Vec<(ParserStateID, ParserStateID, Weight)> = Vec::new();
+    let mut initial_prefix_weights: BTreeMap<ParserStateID, Weight> = BTreeMap::new();
     for ((state, shift_state), terminals) in &grouped.initial_shifts {
         let weight = weight_from_terminals(terminals, term_to_bit);
         if weight.is_empty() {
             continue;
         }
-        add_shift_chain(&mut nwa, end, start, *state, *state, *shift_state, weight)?;
+        initial_shift_edges.push((*state, *shift_state, weight.clone()));
+        if let Some(existing) = initial_prefix_weights.get_mut(state) {
+            *existing |= &weight;
+        } else {
+            initial_prefix_weights.insert(*state, weight.clone());
+        }
+    }
+    let mut initial_prefix_states: BTreeMap<ParserStateID, (StateID, StateID)> = BTreeMap::new();
+    for (state, weight) in &initial_prefix_weights {
+        let pop_label = crate::precompute4::utils::encode_symbol_i16(*state)?;
+        let push_label_state = crate::precompute4::utils::encode_negative_i16(*state)?;
+        let s1 = nwa.add_state();
+        let s2 = nwa.add_state();
+        nwa.add_transition(start, pop_label, s1, weight.clone())?;
+        nwa.add_transition(s1, push_label_state, s2, weight.clone())?;
+        initial_prefix_states.insert(*state, (s1, s2));
+    }
+    for (state, shift_state, weight) in initial_shift_edges {
+        let (_, s2) = initial_prefix_states
+            .get(&state)
+            .copied()
+            .expect("initial shift prefix must exist");
+        let push_label_shift = crate::precompute4::utils::encode_negative_i16(shift_state)?;
+        nwa.add_transition(s2, push_label_shift, end, weight)?;
     }
 
     for ((state, len, nt), terminals) in &grouped.initial_reduces {
@@ -692,12 +717,43 @@ fn build_super_nwa_from_grouped(
     for (nt, nt_group) in &grouped.per_nt {
         let nt_state = *nt_states.get(nt).expect("nt state must exist");
 
+        let mut escape_shift_edges: Vec<(ParserStateID, ParserStateID, ParserStateID, Weight)> = Vec::new();
+        let mut escape_prefix_weights: BTreeMap<(ParserStateID, ParserStateID), Weight> =
+            BTreeMap::new();
         for ((revealed, goto, shift), terminals) in &nt_group.escape_shifts {
             let weight = weight_from_terminals(terminals, term_to_bit);
             if weight.is_empty() {
                 continue;
             }
-            add_escape_shift_chain(&mut nwa, end, nt_state, *revealed, *goto, *shift, weight)?;
+            escape_shift_edges.push((*revealed, *goto, *shift, weight.clone()));
+            let key = (*revealed, *goto);
+            if let Some(existing) = escape_prefix_weights.get_mut(&key) {
+                *existing |= &weight;
+            } else {
+                escape_prefix_weights.insert(key, weight.clone());
+            }
+        }
+        let mut escape_prefix_states: BTreeMap<(ParserStateID, ParserStateID), (StateID, StateID, StateID)> =
+            BTreeMap::new();
+        for ((revealed, goto), weight) in &escape_prefix_weights {
+            let pop_label = crate::precompute4::utils::encode_symbol_i16(*revealed)?;
+            let push_revealed = crate::precompute4::utils::encode_negative_i16(*revealed)?;
+            let push_goto = crate::precompute4::utils::encode_negative_i16(*goto)?;
+            let s1 = nwa.add_state();
+            let s2 = nwa.add_state();
+            let s3 = nwa.add_state();
+            nwa.add_transition(nt_state, pop_label, s1, weight.clone())?;
+            nwa.add_transition(s1, push_revealed, s2, weight.clone())?;
+            nwa.add_transition(s2, push_goto, s3, weight.clone())?;
+            escape_prefix_states.insert((*revealed, *goto), (s1, s2, s3));
+        }
+        for (revealed, goto, shift, weight) in escape_shift_edges {
+            let (_, _, s3) = escape_prefix_states
+                .get(&(revealed, goto))
+                .copied()
+                .expect("escape shift prefix must exist");
+            let push_shift = crate::precompute4::utils::encode_negative_i16(shift)?;
+            nwa.add_transition(s3, push_shift, end, weight)?;
         }
 
         for ((revealed, remaining_len, target_nt), terminals) in &nt_group.reveal_and_rereduces {
@@ -710,6 +766,21 @@ fn build_super_nwa_from_grouped(
             nwa.add_transition(nt_state, pop_label, target, weight)?;
         }
     }
+
+    crate::debug!(
+        5,
+        "Super NWA size breakdown: start_end=2 nt_states={} nt_stack_extra={} initial_shifts={} initial_shift_prefixes={} escape_shifts={} escape_shift_prefixes={} initial_reduces={} reveal_rereduces={} predicted_states={} actual_states={}",
+        all_nts.len(),
+        nt_stack_extra,
+        initial_shift_count,
+        initial_shift_prefix_count,
+        escape_shift_count,
+        escape_shift_prefix_count,
+        initial_reduce_count,
+        rereduce_count,
+        predicted_states,
+        nwa.states.len(),
+    );
 
     Ok(nwa)
 }
