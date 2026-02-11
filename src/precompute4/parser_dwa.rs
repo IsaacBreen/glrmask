@@ -1515,19 +1515,21 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     crate::debug!(4, "Pruned continuations from final states. NWA now {}.", combined_nwa.stats());
     
     // After pruning continuations, some transitions may become empty and states may become unreachable.
-    // Prune dead ends before determinization to reduce the NWA size significantly.
+    // Prune unreachable states first (forward BFS from starts - fast, removes 97% of states).
+    // Then prune dead ends on the much smaller remaining NWA.
     let before_prune = combined_nwa.stats();
-    let prune_start = std::time::Instant::now();
-    combined_nwa.prune_dead_ends();
-    let prune_dead_time = prune_start.elapsed();
-    eprintln!("TIMING: parser_dwa::finalize::prune_dead_ends {:?}", prune_dead_time);
     let prune_unreachable_start = std::time::Instant::now();
-    combined_nwa.prune_unreachable();
+    let unreach_changed = combined_nwa.prune_unreachable();
     let prune_unreachable_time = prune_unreachable_start.elapsed();
-    eprintln!("TIMING: parser_dwa::finalize::prune_unreachable {:?}", prune_unreachable_time);
-    crate::debug!(5, "prune_dead_ends in {:?}, prune_unreachable in {:?}", prune_dead_time, prune_unreachable_time);
-    crate::debug!(4, "After pruning dead ends: NWA {} -> {}", 
-        before_prune, combined_nwa.stats());
+    eprintln!("TIMING: parser_dwa::finalize::prune_unreachable {:?} changed={}", prune_unreachable_time, unreach_changed);
+    let after_unreachable = combined_nwa.stats();
+    let prune_start = std::time::Instant::now();
+    let dead_changed = combined_nwa.prune_dead_ends();
+    let prune_dead_time = prune_start.elapsed();
+    eprintln!("TIMING: parser_dwa::finalize::prune_dead_ends {:?} changed={}", prune_dead_time, dead_changed);
+    crate::debug!(5, "prune_unreachable in {:?}, prune_dead_ends in {:?}", prune_unreachable_time, prune_dead_time);
+    crate::debug!(4, "After pruning: NWA {} -> {} -> {}",
+        before_prune, after_unreachable, combined_nwa.stats());
 
     // Always minimize NWA before determinization.
     
