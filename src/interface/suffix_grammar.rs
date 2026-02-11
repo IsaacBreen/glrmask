@@ -76,7 +76,7 @@ pub fn grammar_to_suffix_grammar(grammar: &GrammarDefinition) -> GrammarDefiniti
     let mut new_group_id_to_expr = grammar.group_id_to_expr.clone();
     
     // Track which terminals we've seen (to create helpers)
-    let mut terminals_seen: BTreeSet<Terminal> = BTreeSet::new();
+    let mut terminals_seen: BTreeSet<Terminal> = BTreeSet::default();
     
     // Collect all terminals from productions
     for prod in &grammar.productions {
@@ -254,7 +254,7 @@ pub fn build_suffix_parser_cache(
             Terminal::Literal(vec![b',']),
             Terminal::Literal(vec![b':']),
         ];
-        let mut ids: BTreeSet<usize> = BTreeSet::new();
+        let mut ids: BTreeSet<usize> = BTreeSet::default();
         for term in debug_terms.iter() {
             if let Some(tid) = terminal_map.get_by_left(term) {
                 ids.insert(tid.0);
@@ -459,7 +459,10 @@ pub fn prune_dwa_with_suffix_cache(
     terminals_count: usize,
 ) -> (usize, usize) {
     use crate::glr::table::{NonTerminalID, StateID, TerminalID};
-    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::collections::VecDeque;
+    use rustc_hash::{FxHashMap, FxHashSet};
+    type BTreeSet<T> = FxHashSet<T>;
+    type BTreeMap<K, V> = FxHashMap<K, V>;
 
     crate::debug!(4, "Starting suffix grammar DWA pruning");
 
@@ -484,7 +487,7 @@ pub fn prune_dwa_with_suffix_cache(
 
     // Precompute a conservative mapping of NonTerminalID -> possible GOTO states.
     // This is used to approximate successor states when we see reduce actions with len > 0.
-    let mut reduce_goto_states_by_nt: BTreeMap<NonTerminalID, BTreeSet<StateID>> = BTreeMap::new();
+    let mut reduce_goto_states_by_nt: BTreeMap<NonTerminalID, BTreeSet<StateID>> = BTreeMap::default();
     for (_state_id, row) in crate::glr::table::iter_rows(&suffix_parser.table) {
         for (nt_id, goto) in row.get_gotos() {
             if let Some(goto_state) = goto.state_id {
@@ -498,9 +501,9 @@ pub fn prune_dwa_with_suffix_cache(
 
     // Precompute which nonterminals can be reduced (len > 0) from each parser state,
     // ignoring lookahead. This helps build a conservative closure for parser states.
-    let mut reduce_nts_by_state: BTreeMap<StateID, BTreeSet<NonTerminalID>> = BTreeMap::new();
+    let mut reduce_nts_by_state: BTreeMap<StateID, BTreeSet<NonTerminalID>> = BTreeMap::default();
     for (state_id, row) in crate::glr::table::iter_rows(&suffix_parser.table) {
-        let mut nts: BTreeSet<NonTerminalID> = BTreeSet::new();
+        let mut nts: BTreeSet<NonTerminalID> = BTreeSet::default();
         for (_term, action) in row.get_shifts_and_reduces_map() {
             use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
             match action {
@@ -559,19 +562,20 @@ pub fn prune_dwa_with_suffix_cache(
     // Track which suffix parser states are reachable at each DWA state
     // Key: DWA state ID, Value: Set of GLR parser state IDs
     type ParserStateSet = BTreeSet<crate::glr::table::StateID>;
-    let mut dwa_to_parser_states: BTreeMap<usize, ParserStateSet> = BTreeMap::new();
+    let mut dwa_to_parser_states: BTreeMap<usize, ParserStateSet> = BTreeMap::default();
     
     // Initialize: start DWA state maps to initial suffix parser state
     let initial_parser_state_id = suffix_parser.start_state_id;
     dwa_to_parser_states.insert(dwa.body.start_state, {
-        let mut set = BTreeSet::new();
+        let mut set = BTreeSet::default();
         set.insert(initial_parser_state_id);
         set
     });
     
     // BFS to propagate parser states through the DWA
     let mut queue: VecDeque<usize> = VecDeque::new();
-    let mut in_queue: BTreeSet<usize> = BTreeSet::new();
+    let mut in_queue: BTreeSet<usize> = BTreeSet::default();
+    let mut deferred_prune_count: usize = 0;
     queue.push_back(dwa.body.start_state);
     in_queue.insert(dwa.body.start_state);
     
@@ -585,7 +589,7 @@ pub fn prune_dwa_with_suffix_cache(
         }
         crate::debug!(6, "  BFS: DWA state {} with parser_states {:?}", dwa_state, parser_states);
         
-        let mut fallback_reduce_goto_states: BTreeSet<StateID> = BTreeSet::new();
+        let mut fallback_reduce_goto_states: BTreeSet<StateID> = BTreeSet::default();
         for state_id in parser_states.iter() {
             if let Some(nts) = reduce_nts_by_state.get(state_id) {
                 for nt_id in nts {
@@ -631,18 +635,18 @@ pub fn prune_dwa_with_suffix_cache(
             // Terminal transition - check if suffix parser can accept it
             if let Some(Some(suffix_tid)) = orig_to_suffix_tid.get(label_usize) {
                 // Check if ANY parser state can accept this terminal and compute successor states
-                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::default();
                 
                 // Track if we found any valid action (including reduces we can't fully simulate)
                 // If there's a reduce with len>0, we can't compute successors but the terminal IS valid
                 let mut has_reduce_with_len_gt_0 = false;
-                let mut reduce_goto_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut reduce_goto_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::default();
                 
                 // Process parser states iteratively to handle ε-reduction chains
                 // ε-reductions (len=0) don't consume input, so after the reduce+GOTO,
                 // we need to check if the new state can handle the terminal
                 let mut states_to_process: VecDeque<crate::glr::table::StateID> = parser_states.iter().copied().collect();
-                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::default();
                 
                 while let Some(parser_state_id) = states_to_process.pop_front() {
                     if !processed_states.insert(parser_state_id) {
@@ -752,6 +756,7 @@ pub fn prune_dwa_with_suffix_cache(
                     }
                 } else {
                     // No valid actions - do not propagate; pruning is handled after fixpoint.
+                    deferred_prune_count += 1;
                     crate::debug!(6, "      PRUNE (deferred): no successor states for terminal {} from parser_states {:?}", label_usize, parser_states);
                 }
             } else {
@@ -767,6 +772,13 @@ pub fn prune_dwa_with_suffix_cache(
         }
     }
 
+    // Fast exit: if BFS found no transitions to potentially prune, skip the expensive phase 2
+    if deferred_prune_count == 0 {
+        let total_transitions: usize = dwa.states.iter().map(|s| s.transitions.len()).sum();
+        crate::debug!(4, "Suffix prune fast exit: all {} transitions have valid successors", total_transitions);
+        return (total_transitions, 0);
+    }
+
     // After fixpoint, decide which transitions to prune based on final parser state sets.
     let mut transitions_to_remove: Vec<(usize, i32)> = Vec::new();
     let mut pruned_count = 0usize;
@@ -776,7 +788,7 @@ pub fn prune_dwa_with_suffix_cache(
         let parser_states = expand_parser_states(
             &dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default(),
         );
-        let mut fallback_reduce_goto_states: BTreeSet<StateID> = BTreeSet::new();
+        let mut fallback_reduce_goto_states: BTreeSet<StateID> = BTreeSet::default();
         for state_id in parser_states.iter() {
             if let Some(nts) = reduce_nts_by_state.get(state_id) {
                 for nt_id in nts {
@@ -806,12 +818,12 @@ pub fn prune_dwa_with_suffix_cache(
             }
 
             if let Some(Some(suffix_tid)) = orig_to_suffix_tid.get(label_usize) {
-                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::default();
                 let mut has_reduce_with_len_gt_0 = false;
-                let mut reduce_goto_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut reduce_goto_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::default();
 
                 let mut states_to_process: VecDeque<crate::glr::table::StateID> = parser_states.iter().copied().collect();
-                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::default();
 
                 while let Some(parser_state_id) = states_to_process.pop_front() {
                     if !processed_states.insert(parser_state_id) {
@@ -974,12 +986,12 @@ pub fn prune_nwa_with_suffix_cache(
     );
 
     type ParserStateSet = BTreeSet<crate::glr::table::StateID>;
-    let mut nwa_to_parser_states: BTreeMap<usize, ParserStateSet> = BTreeMap::new();
+    let mut nwa_to_parser_states: BTreeMap<usize, ParserStateSet> = BTreeMap::default();
 
     let initial_parser_state_id = suffix_parser.start_state_id;
 
     let mut queue: VecDeque<usize> = VecDeque::new();
-    let mut visited: BTreeSet<usize> = BTreeSet::new();
+    let mut visited: BTreeSet<usize> = BTreeSet::default();
     for &start_state in &nwa.body.start_states {
         nwa_to_parser_states
             .entry(start_state)
@@ -1055,11 +1067,11 @@ pub fn prune_nwa_with_suffix_cache(
             }
 
             if let Some(Some(suffix_tid)) = orig_to_suffix_tid.get(label_usize) {
-                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::default();
                 let mut has_reduce_with_len_gt_0 = false;
 
                 let mut states_to_process: VecDeque<crate::glr::table::StateID> = parser_states.iter().copied().collect();
-                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::default();
 
                 while let Some(parser_state_id) = states_to_process.pop_front() {
                     if !processed_states.insert(parser_state_id) {
