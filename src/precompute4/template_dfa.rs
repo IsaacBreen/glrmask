@@ -314,11 +314,17 @@ pub fn build_template_dfas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DF
         })
         .collect();
     
-    // Determinize and minimize serially (memory contention in parallel slows things down)
+    // Determinize and minimize in parallel (thread-local weight caches eliminate contention)
+    let results: Vec<_> = nfas_and_terms
+        .into_par_iter()
+        .map(|(first_term, terms, nfa)| {
+            let dfa = nfa.determinize_and_minimize();
+            (first_term, terms, dfa)
+        })
+        .collect();
+    
     let mut result = BTreeMap::new();
-    for (first_term, terms, nfa) in nfas_and_terms {
-        // Determinize and minimize using the unweighted NFA->DFA path
-        let dfa = nfa.determinize_and_minimize();
+    for (first_term, terms, dfa) in results {
         crate::debug!(6, "Terminal {:?}: {} states after minimize", first_term, dfa.states.len());
         
         // Debug stats at level 6

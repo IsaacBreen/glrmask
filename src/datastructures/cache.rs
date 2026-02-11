@@ -1,9 +1,6 @@
 use crate::datastructures::hybrid_bitset::RangeSet;
 use lru::LruCache;
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
-use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -62,7 +59,13 @@ impl Caches {
     }
 }
 
-static GLOBAL_CACHES: Lazy<Mutex<Caches>> = Lazy::new(|| Mutex::new(Caches::new()));
+// Thread-local caches: eliminates mutex contention for weight operations.
+// Each thread maintains its own cache instance. This trades cross-thread
+// deduplication for contention-free access, enabling parallelism in
+// weight-heavy operations like template bundle computation.
+thread_local! {
+    static THREAD_LOCAL_CACHES: std::cell::RefCell<Caches> = std::cell::RefCell::new(Caches::new());
+}
 
 // --- Heuristics ---
 pub const SIMPLE_BITSET_THRESHOLD: usize = 16;
@@ -72,13 +75,15 @@ pub const SIMPLE_L2_BITSET_THRESHOLD: usize = 8;
 
 // L1 (HybridBitset)
 pub fn intern_l1(rs: RangeSetBlaze<usize>) -> Acc<RangeSetBlaze<usize>> {
-    let mut caches = GLOBAL_CACHES.lock();
-    if let Some(acc) = caches.l1_values.get(&rs) {
-        return acc.clone();
-    }
-    let acc = Acc::new(rs.clone());
-    caches.l1_values.put(rs, acc.clone());
-    acc
+    THREAD_LOCAL_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        if let Some(acc) = caches.l1_values.get(&rs) {
+            return acc.clone();
+        }
+        let acc = Acc::new(rs.clone());
+        caches.l1_values.put(rs, acc.clone());
+        acc
+    })
 }
 
 pub fn get_l1_op_cache(
@@ -86,9 +91,11 @@ pub fn get_l1_op_cache(
     a: &Acc<RangeSetBlaze<usize>>,
     b: &Acc<RangeSetBlaze<usize>>,
 ) -> Option<Acc<RangeSetBlaze<usize>>> {
-    let mut caches = GLOBAL_CACHES.lock();
-    let key = L1OpKey { op, a: a.clone(), b: b.clone() };
-    caches.l1_ops.get(&key).cloned()
+    THREAD_LOCAL_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        let key = L1OpKey { op, a: a.clone(), b: b.clone() };
+        caches.l1_ops.get(&key).cloned()
+    })
 }
 
 pub fn put_l1_op_cache(
@@ -97,22 +104,26 @@ pub fn put_l1_op_cache(
     b: Acc<RangeSetBlaze<usize>>,
     result: Acc<RangeSetBlaze<usize>>,
 ) {
-    let mut caches = GLOBAL_CACHES.lock();
-    let key = L1OpKey { op, a, b };
-    caches.l1_ops.put(key, result);
+    THREAD_LOCAL_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        let key = L1OpKey { op, a, b };
+        caches.l1_ops.put(key, result);
+    })
 }
 
 // L2 (HybridL2Bitset)
 pub fn intern_l2(
     rm: RangeMapBlaze<usize, RangeSet>,
 ) -> Acc<RangeMapBlaze<usize, RangeSet>> {
-    let mut caches = GLOBAL_CACHES.lock();
-    if let Some(acc) = caches.l2_values.get(&rm) {
-        return acc.clone();
-    }
-    let acc = Acc::new(rm.clone());
-    caches.l2_values.put(rm, acc.clone());
-    acc
+    THREAD_LOCAL_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        if let Some(acc) = caches.l2_values.get(&rm) {
+            return acc.clone();
+        }
+        let acc = Acc::new(rm.clone());
+        caches.l2_values.put(rm, acc.clone());
+        acc
+    })
 }
 
 pub fn get_l2_op_cache(
@@ -120,9 +131,11 @@ pub fn get_l2_op_cache(
     a: &Acc<RangeMapBlaze<usize, RangeSet>>,
     b: &Acc<RangeMapBlaze<usize, RangeSet>>,
 ) -> Option<Acc<RangeMapBlaze<usize, RangeSet>>> {
-    let mut caches = GLOBAL_CACHES.lock();
-    let key = L2OpKey { op, a: a.clone(), b: b.clone() };
-    caches.l2_ops.get(&key).cloned()
+    THREAD_LOCAL_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        let key = L2OpKey { op, a: a.clone(), b: b.clone() };
+        caches.l2_ops.get(&key).cloned()
+    })
 }
 
 pub fn put_l2_op_cache(
@@ -131,7 +144,9 @@ pub fn put_l2_op_cache(
     b: Acc<RangeMapBlaze<usize, RangeSet>>,
     result: Acc<RangeMapBlaze<usize, RangeSet>>,
 ) {
-    let mut caches = GLOBAL_CACHES.lock();
-    let key = L2OpKey { op, a, b };
-    caches.l2_ops.put(key, result);
+    THREAD_LOCAL_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        let key = L2OpKey { op, a, b };
+        caches.l2_ops.put(key, result);
+    })
 }
