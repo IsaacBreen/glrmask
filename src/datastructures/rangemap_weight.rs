@@ -563,6 +563,55 @@ impl RangeMapWeight {
         true
     }
 
+    /// Check if self is a subset of other (every position in self is also in other).
+    /// Uses a merge-scan over sorted range maps without materializing the difference.
+    pub(crate) fn is_subset_of(&self, other: &Self) -> bool {
+        if self.map.is_empty() {
+            return true;
+        }
+        if other.map.is_empty() {
+            return false;
+        }
+
+        let mut iter_b = other.map.range_values();
+        let mut b = iter_b.next();
+
+        for (ra, va) in self.map.range_values() {
+            // For each key range in self, find covering range(s) in other
+            let mut pos = *ra.start();
+
+            while pos <= *ra.end() {
+                // Advance b until it could cover pos
+                while let Some((rb, _)) = &b {
+                    if rb.end() >= &pos {
+                        break;
+                    }
+                    b = iter_b.next();
+                }
+
+                match &b {
+                    Some((rb, vb)) if rb.start() <= &pos => {
+                        // b covers pos — check value containment
+                        if !va.is_subset(vb) {
+                            return false;
+                        }
+                        // Advance pos past the covered region
+                        let covered_end = std::cmp::min(*ra.end(), *rb.end());
+                        if covered_end == usize::MAX {
+                            break;
+                        }
+                        pos = covered_end + 1;
+                    }
+                    _ => {
+                        // No range in other covers pos — self has uncovered positions
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     fn to_token_map(&self) -> BTreeMap<usize, RangeSet> {
         let mut out: BTreeMap<usize, RangeSet> = BTreeMap::new();
         for (token_range, tsid_set) in self.map.range_values() {
