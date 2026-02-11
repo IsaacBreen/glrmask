@@ -1549,10 +1549,21 @@ impl<'r> Precomputer1<'r> {
     }
 
 
-    fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
+    #[inline]
+    fn update_live_tokens(&mut self, dst: NWAStateID, weight: &Weight) {
+        *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= weight;
+    }
+
+    #[inline]
+    fn add_pending_transition_no_live(
+        &mut self,
+        src: NWAStateID,
+        label: Label,
+        dst: NWAStateID,
+        weight: Weight,
+    ) {
         if self.direct_insert {
             let state = &mut self.nwa.states[src];
-            *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
             state.transitions.entry(label).or_default().push((dst, weight));
             return;
         }
@@ -1563,14 +1574,18 @@ impl<'r> Precomputer1<'r> {
             .or_default()
             .entry(dst)
             .and_modify(|w| *w |= &weight)
-            .or_insert(weight.clone());
-        *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
+            .or_insert(weight);
+    }
+
+    fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
+        self.update_live_tokens(dst, &weight);
+        self.add_pending_transition_no_live(src, label, dst, weight);
     }
 
     fn add_pending_epsilon(&mut self, src: NWAStateID, dst: NWAStateID, weight: Weight) {
+        self.update_live_tokens(dst, &weight);
         if self.direct_insert {
             let state = &mut self.nwa.states[src];
-            *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
             state.epsilons.push((dst, weight));
             return;
         }
@@ -1579,8 +1594,7 @@ impl<'r> Precomputer1<'r> {
             .or_default()
             .entry(dst)
             .and_modify(|w| *w |= &weight)
-            .or_insert(weight.clone());
-        *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
+            .or_insert(weight);
     }
 
     fn run_dfs(&mut self) {
@@ -1792,9 +1806,13 @@ impl<'r> Precomputer1<'r> {
                         cont_transitions.push((terminal_id.0 as Label, target, weight));
                     }
 
+                    if let Some(weight) = leaf_weight.as_ref() {
+                        self.update_live_tokens(self.leaf_state, weight);
+                    }
+
                     for &src_node in nodes.iter() {
                         for (label, dst, weight) in &leaf_transitions {
-                            self.add_pending_transition(src_node, *label, *dst, weight.clone());
+                            self.add_pending_transition_no_live(src_node, *label, *dst, weight.clone());
                         }
                         for (label, dst, weight) in &cont_transitions {
                             self.add_pending_transition(src_node, *label, *dst, weight.clone());
@@ -1840,14 +1858,17 @@ impl<'r> Precomputer1<'r> {
                             end_labels.push(terminal_id.0 as Label);
                         }
 
-                        for &src_node in nodes.iter() {
-                            for label in &end_labels {
-                                self.add_pending_transition(
-                                    src_node,
-                                    *label,
-                                    end_idx,
-                                    single_token_weight.clone(),
-                                );
+                        if !end_labels.is_empty() {
+                            self.update_live_tokens(end_idx, &single_token_weight);
+                            for &src_node in nodes.iter() {
+                                for label in &end_labels {
+                                    self.add_pending_transition_no_live(
+                                        src_node,
+                                        *label,
+                                        end_idx,
+                                        single_token_weight.clone(),
+                                    );
+                                }
                             }
                         }
 
