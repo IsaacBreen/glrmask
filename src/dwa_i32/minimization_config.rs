@@ -413,10 +413,12 @@ impl DeterminizeAndMinimizeConfig {
             },
             DeterminizeAndMinimizeProfile::Parser => {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
-                // Includes minimize to reduce state count
-                // NOTE: NWA MinimizeRustfst can be memory-intensive for large NWAs (2M+ states).
-                // RustFST minimization relies on division, which is invalid for set-based weights,
-                // so it is disabled by default. Enable explicitly via ENABLE_RUSTFST_MIN=1.
+                // Skip push+minimize by default: these make determinize HARDER
+                // by creating more complex weights (push) without enough NWA size
+                // reduction (minimize) to compensate. Net effect: 29% slower for JS.
+                let enable_push_min = std::env::var("PARSER_PUSH_MIN")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
                 let enable_rustfst_min = std::env::var("ENABLE_RUSTFST_MIN")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
@@ -425,17 +427,19 @@ impl DeterminizeAndMinimizeConfig {
                     NwaPass::PruneUnreachable,
                     NwaPass::RmEpsilon,
                 ];
-                if enable_rustfst_min {
-                    nwa_passes.push(NwaPass::MinimizeRustfst);
+                if enable_push_min {
+                    if enable_rustfst_min {
+                        nwa_passes.push(NwaPass::MinimizeRustfst);
+                    }
+                    nwa_passes.extend([
+                        NwaPass::PushFinalWeights,
+                        NwaPass::PushWeightsToInitial,
+                    ]);
+                    if enable_rustfst_min {
+                        nwa_passes.push(NwaPass::MinimizeRustfst);
+                    }
+                    nwa_passes.push(NwaPass::Minimize);
                 }
-                nwa_passes.extend([
-                    NwaPass::PushFinalWeights,
-                    NwaPass::PushWeightsToInitial,
-                ]);
-                if enable_rustfst_min {
-                    nwa_passes.push(NwaPass::MinimizeRustfst);
-                }
-                nwa_passes.push(NwaPass::Minimize);
                 DeterminizeAndMinimizeConfig {
                     nwa_passes,
                     dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::FastMinimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
