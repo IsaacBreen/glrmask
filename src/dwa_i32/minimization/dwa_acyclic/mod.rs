@@ -2393,6 +2393,85 @@ fn greedy_color_without_graph(
             );
         }
     }
+
+    // For large candidate sets with many unique signatures, build the incompatibility
+    // graph among unique signature representatives in parallel, then color it.
+    // This is equivalent to the sequential greedy but much faster for O(n_unique^2) checks.
+    if num_groups >= 20 && n >= 30 {
+        use rayon::prelude::*;
+
+        let par_start = std::time::Instant::now();
+
+        // Collect one representative per unique signature, sorted by first
+        // candidate index to approximate the sequential greedy ordering
+        let mut unique_reps: Vec<(usize, u128)> = sig_to_group.iter()
+            .map(|(&sig, idxs)| (idxs[0], sig))
+            .collect();
+        unique_reps.sort_by_key(|&(idx, _)| idx);
+        let n_uniq = unique_reps.len();
+
+        // Build pairwise incompatibility in parallel (upper triangle only)
+        // adj[i] contains the set of j > i that are incompatible with i
+        let adj: Vec<Vec<bool>> = (0..n_uniq).into_par_iter()
+            .map(|i| {
+                let cand_i = candidates[unique_reps[i].0];
+                (0..n_uniq).map(|j| {
+                    if j <= i { return false; } // Only upper triangle
+                    let cand_j = candidates[unique_reps[j].0];
+                    !are_compatible(
+                        cand_i, cand_j, dwa, needed, range,
+                        old_to_new, new_states, productive_transitions,
+                    )
+                }).collect()
+            })
+            .collect();
+
+        // Sequential greedy coloring on the small unique-sig graph
+        let mut sig_colors = vec![0usize; n_uniq];
+        let mut num_sig_colors = 1usize; // color 0 always exists
+        for i in 1..n_uniq {
+            let mut used_colors = vec![false; num_sig_colors];
+            for j in 0..i {
+                // Check incompatibility: adj stores upper triangle, so use min/max
+                let incompatible = if j < i { adj[j][i] } else { adj[i][j] };
+                if incompatible {
+                    if sig_colors[j] < used_colors.len() {
+                        used_colors[sig_colors[j]] = true;
+                    }
+                }
+            }
+            // Find first unused color
+            let color = match used_colors.iter().position(|&used| !used) {
+                Some(c) => c,
+                None => {
+                    let c = num_sig_colors;
+                    num_sig_colors += 1;
+                    c
+                }
+            };
+            sig_colors[i] = color;
+        }
+
+        // Map signatures to their color
+        let mut sig_color_map: FxHashMap<u128, usize> = FxHashMap::default();
+        for (k, &(_, sig)) in unique_reps.iter().enumerate() {
+            sig_color_map.insert(sig, sig_colors[k]);
+        }
+
+        // Assign all candidates based on their signature's color
+        let colors: Vec<usize> = signatures.iter()
+            .map(|sig| sig_color_map[sig])
+            .collect();
+
+        let par_time = par_start.elapsed();
+        if !suppress_height_logs {
+            let num_colors = num_sig_colors;
+            crate::debug!(5, "Parallel coloring: {} candidates, {} unique sigs -> {} colors in {:?}",
+                n, n_uniq, num_colors, par_time);
+        }
+
+        return colors;
+    }
     
     let assign_start = std::time::Instant::now();
     let (colors, color_representatives, compare_count, compare_time) = timeit!("greedy_no_graph::assign_colors", {
