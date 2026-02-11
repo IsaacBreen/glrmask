@@ -147,11 +147,12 @@ fn invalidate_l1_op_cache_for_ptr(ptr: usize) {
 }
 
 fn intern_l1_tracked(rs: RangeSetBlaze<usize>) -> Acc<RangeSetBlaze<usize>> {
-    let acc = cache::intern_l1(rs);
-    let ptr = Arc::as_ptr(&acc) as usize;
-    invalidate_l1_op_cache_for_ptr(ptr);
-    L1_INTERNED_PTRS.lock().unwrap().insert(ptr);
-    acc
+    // Use thread-local interning only. The global L1 op cache tracking
+    // (invalidation + pointer set) was pure overhead — profiling shows
+    // 0 L1 cache hits because all RangeSets are "simple" (< 16 ranges)
+    // and bypass the cache. Removing the 3 Mutex locks per interning call
+    // eliminates massive contention during parallel determinize.
+    cache::intern_l1(rs)
 }
 
 fn get_l1_op_cache_tracked(
