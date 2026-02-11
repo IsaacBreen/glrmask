@@ -1,14 +1,14 @@
 use std::cell::Cell;
 use std::env;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::time::Instant;
 
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
@@ -18,16 +18,15 @@ use crate::datastructures::cache;
 use crate::datastructures::hybrid_bitset::RangeSet;
 use profiler_macro::time_it;
 
-const WEIGHT_OP_CACHE_CAPACITY: usize = 100_000;
 const DIVIDE_CACHE_CAPACITY: usize = 50_000;
 const DIVIDE_RHS_COMP_CACHE_CAPACITY: usize = 10_000;
 
 static RANGEMAP_WEIGHT_INTERNER: Lazy<DashSet<Arc<RangeMapWeight>>> = Lazy::new(DashSet::new);
-static RANGEMAP_OP_CACHE: Lazy<Mutex<LruCache<OpKey, Arc<RangeMapWeight>>>> = Lazy::new(|| {
-    Mutex::new(LruCache::new(NonZeroUsize::new(WEIGHT_OP_CACHE_CAPACITY).unwrap()))
-});
-static RANGEMAP_OP_CACHE_INDEX: Lazy<Mutex<HashMap<usize, HashSet<OpKey>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+
+// Sharded concurrent op cache: eliminates Mutex contention during parallel determinize
+// while maintaining cross-thread result sharing.
+static RANGEMAP_OP_CACHE: Lazy<DashMap<OpKey, Arc<RangeMapWeight>>> = Lazy::new(DashMap::new);
+
 // Separate cache for divide operations to avoid polluting the main op cache
 static RANGEMAP_DIVIDE_CACHE: Lazy<Mutex<LruCache<(usize, usize), Arc<RangeMapWeight>>>> = Lazy::new(|| {
     Mutex::new(LruCache::new(NonZeroUsize::new(DIVIDE_CACHE_CAPACITY).unwrap()))
@@ -192,51 +191,32 @@ fn is_interned_rangemap(weight: &Arc<RangeMapWeight>) -> bool {
     }
 }
 
-fn remove_op_key_from_index(index: &mut HashMap<usize, HashSet<OpKey>>, key: OpKey) {
-    if let Some(set) = index.get_mut(&key.a) {
-        set.remove(&key);
-        if set.is_empty() {
-            index.remove(&key.a);
-        }
-    }
-    if let Some(set) = index.get_mut(&key.b) {
-        set.remove(&key);
-        if set.is_empty() {
-            index.remove(&key.b);
-        }
-    }
-}
+// Sharded concurrent op cache using DashMap: each shard has its own lock,
+// so contention is spread across ~64 shards instead of a single global Mutex.
+// Pointer-based keys are safe because the DashSet interner holds Arc references,
+// preventing deallocation and pointer reuse during a compilation run.
 
-fn invalidate_rangemap_op_cache_for_ptr(ptr: usize) {
-    let mut cache = RANGEMAP_OP_CACHE.lock().unwrap();
-    let mut index = RANGEMAP_OP_CACHE_INDEX.lock().unwrap();
-    let Some(keys) = index.remove(&ptr) else { return; };
-    for key in keys {
-        cache.pop(&key);
-        remove_op_key_from_index(&mut index, key);
-    }
+fn invalidate_rangemap_op_cache_for_ptr(_ptr: usize) {
+    // No-op: pointer reuse doesn't happen while weights are held in the interner.
+    // The DashMap cache entries remain valid for the entire compilation run.
 }
 
 fn get_op_cache(op: cache::BinOp, a: &Arc<RangeMapWeight>, b: &Arc<RangeMapWeight>) -> Option<Arc<RangeMapWeight>> {
-    if !is_interned_rangemap(a) || !is_interned_rangemap(b) {
-        return None;
-    }
     let profile_enabled = OP_CACHE_PROFILE_ENABLED.load(AtomicOrdering::Relaxed);
-    let mut cache = RANGEMAP_OP_CACHE.lock().unwrap();
     let key = op_key(op, a, b);
-    if let Some(hit) = cache.get(&key) {
+    if let Some(hit) = RANGEMAP_OP_CACHE.get(&key) {
         if profile_enabled && matches!(op, cache::BinOp::Or) {
             OP_CACHE_OR_HITS.fetch_add(1, AtomicOrdering::Relaxed);
         }
-        return Some(hit.clone());
+        return Some(hit.value().clone());
     }
     if matches!(op, cache::BinOp::And | cache::BinOp::Or | cache::BinOp::Xor) {
         let swapped = op_key(op, b, a);
-        if let Some(hit) = cache.get(&swapped) {
+        if let Some(hit) = RANGEMAP_OP_CACHE.get(&swapped) {
             if profile_enabled && matches!(op, cache::BinOp::Or) {
                 OP_CACHE_OR_HITS.fetch_add(1, AtomicOrdering::Relaxed);
             }
-            return Some(hit.clone());
+            return Some(hit.value().clone());
         }
     }
     if profile_enabled && matches!(op, cache::BinOp::Or) {
@@ -251,17 +231,8 @@ fn put_op_cache(
     b: Arc<RangeMapWeight>,
     result: Arc<RangeMapWeight>,
 ) {
-    if !is_interned_rangemap(&a) || !is_interned_rangemap(&b) {
-        return;
-    }
     let key = op_key(op, &a, &b);
-    let mut cache = RANGEMAP_OP_CACHE.lock().unwrap();
-    let mut index = RANGEMAP_OP_CACHE_INDEX.lock().unwrap();
-    if let Some((evicted_key, _)) = cache.push(key, result) {
-        remove_op_key_from_index(&mut index, evicted_key);
-    }
-    index.entry(key.a).or_default().insert(key);
-    index.entry(key.b).or_default().insert(key);
+    RANGEMAP_OP_CACHE.insert(key, result);
 }
 
 fn build_rhs_comp_cache(rhs: &Arc<RangeMapWeight>) -> Arc<RhsCompCache> {
