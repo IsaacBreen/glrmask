@@ -2328,6 +2328,71 @@ fn greedy_color_without_graph(
         }
         return colors;
     }
+
+    // For height-0 states with many candidates and low signature coverage,
+    // try a witness-based all-compatible check. At height 0, states have no
+    // transitions, so compatibility depends only on final weight agreement
+    // on needed set overlap. The witness accumulates the consensus and
+    // detects conflicts in O(R) time instead of O(R^2/2).
+    let is_height_0 = candidates.iter().all(|&id| dwa.states[id].transitions.is_empty());
+    if is_height_0 && n > 100 {
+        let witness_start = std::time::Instant::now();
+        let mut witness_fw = Weight::zeros();
+        let mut witness_domain = Weight::zeros();
+        let mut all_compatible = true;
+
+        let mut seen_sigs: HashSet<u128> = HashSet::with_capacity(num_groups);
+        for (idx, &sig) in signatures.iter().enumerate() {
+            if !seen_sigs.insert(sig) {
+                continue; // Skip duplicate signatures
+            }
+            let cand = candidates[idx];
+            let needed_c = &needed[cand];
+            let fw_c = dwa.states[cand]
+                .final_weight
+                .as_ref()
+                .map(|w| w & needed_c)
+                .unwrap_or_else(Weight::zeros);
+
+            // Check overlap with witness
+            if !witness_domain.is_empty() {
+                let overlap = &witness_domain & needed_c;
+                if !overlap.is_empty() {
+                    let w_on_overlap = &witness_fw & &overlap;
+                    let c_on_overlap = &fw_c & &overlap;
+                    if w_on_overlap != c_on_overlap {
+                        all_compatible = false;
+                        break;
+                    }
+                }
+            }
+            // Extend witness
+            witness_fw |= &fw_c;
+            witness_domain |= needed_c;
+        }
+
+        if all_compatible {
+            let witness_time = witness_start.elapsed();
+            if !suppress_height_logs {
+                crate::debug!(
+                    5,
+                    "Height-0 witness: {} candidates, {} unique sigs -> all compatible (1 color) in {:?}",
+                    n,
+                    num_groups,
+                    witness_time
+                );
+            }
+            return vec![0; n]; // All in one color
+        }
+        // Witness found conflict - fall through to normal greedy
+        if !suppress_height_logs {
+            crate::debug!(
+                5,
+                "Height-0 witness: conflict detected after {:?}, falling back to greedy",
+                witness_start.elapsed()
+            );
+        }
+    }
     
     let assign_start = std::time::Instant::now();
     let (colors, color_representatives, compare_count, compare_time) = timeit!("greedy_no_graph::assign_colors", {
