@@ -46,7 +46,6 @@ pub fn compute_combined_equivalence(
     tokens: &[Vec<u8>],
     initial_states: &[usize],
 ) -> CombinedEquivalenceResult {
-    // Always run state equivalence analysis; it substantially reduces terminal NWA size.
     let state_reduction_threshold = 0;
 
     let start = std::time::Instant::now();
