@@ -653,7 +653,9 @@ impl<'r> Precomputer1<'r> {
 
     #[time_it("Precompute1::finish")]
     fn finish(mut self) -> DWA {
+        let flush_start = std::time::Instant::now();
         self.flush_pending_token_ids();
+        eprintln!("TIMING: precompute1::flush_pending_token_ids {:?}", flush_start.elapsed());
         let run_debug_scan = std::env::var("PRECOMPUTE1_DEBUG_SCAN")
             .map(|v| v == "1")
             .unwrap_or(false)
@@ -1652,9 +1654,12 @@ impl<'r> Precomputer1<'r> {
             eprintln!("Vocab tree has {} nodes", vocab_node_count);
         }
         
+        let dfs_start = std::time::Instant::now();
         self.dfs(&vocab.root, assoc);
+        let dfs_time = dfs_start.elapsed();
         self.vocab = vocab;
         self.pb.finish();
+        eprintln!("TIMING: precompute1::run_dfs::dfs {:?}", dfs_time);
         crate::debug!(5, "Precomputation complete");
     }
 
