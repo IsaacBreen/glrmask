@@ -650,13 +650,6 @@ fn build_super_nwa_from_grouped(
         }
     }
     let nt_stack_extra: usize = max_depth_per_nt.values().copied().sum();
-    let predicted_states = 2
-        + all_nts.len()
-        + nt_stack_extra
-        + 2 * initial_shift_prefix_count
-        + 2 * escape_revealed_prefix_count
-        + escape_goto_prefix_count;
-
     let mut nwa = NWA::new_empty();
     let start = nwa.add_state();
     let end = nwa.add_state();
@@ -682,6 +675,8 @@ fn build_super_nwa_from_grouped(
     if !epsilon_weight.is_empty() {
         nwa.add_epsilon(start, end, epsilon_weight);
     }
+
+    let mut escape_goto_unique_count = 0usize;
 
     let mut initial_shift_edges: Vec<(ParserStateID, ParserStateID, Weight)> = Vec::new();
     let mut initial_prefix_weights: BTreeMap<ParserStateID, Weight> = BTreeMap::new();
@@ -729,8 +724,8 @@ fn build_super_nwa_from_grouped(
     for (nt, nt_group) in &grouped.per_nt {
         let nt_state = *nt_states.get(nt).expect("nt state must exist");
 
-        let mut escape_shift_edges: Vec<(ParserStateID, ParserStateID, ParserStateID, Weight)> =
-            Vec::new();
+        let mut escape_goto_shift_edges: BTreeMap<(ParserStateID, ParserStateID), BTreeMap<ParserStateID, Weight>> =
+            BTreeMap::new();
         let mut escape_goto_weights: BTreeMap<(ParserStateID, ParserStateID), Weight> =
             BTreeMap::new();
         let mut escape_revealed_weights: BTreeMap<ParserStateID, Weight> = BTreeMap::new();
@@ -739,8 +734,13 @@ fn build_super_nwa_from_grouped(
             if weight.is_empty() {
                 continue;
             }
-            escape_shift_edges.push((*revealed, *goto, *shift, weight.clone()));
             let goto_key = (*revealed, *goto);
+            let shift_map = escape_goto_shift_edges.entry(goto_key).or_default();
+            if let Some(existing) = shift_map.get_mut(shift) {
+                *existing |= &weight;
+            } else {
+                shift_map.insert(*shift, weight.clone());
+            }
             if let Some(existing) = escape_goto_weights.get_mut(&goto_key) {
                 *existing |= &weight;
             } else {
@@ -763,26 +763,37 @@ fn build_super_nwa_from_grouped(
             nwa.add_transition(s1, push_revealed, s2, weight.clone())?;
             escape_revealed_states.insert(*revealed, (s1, s2));
         }
-        let mut escape_goto_states: BTreeMap<(ParserStateID, ParserStateID), StateID> =
-            BTreeMap::new();
-        for ((revealed, goto), weight) in &escape_goto_weights {
+        let mut escape_goto_states: BTreeMap<(ParserStateID, ParserStateID), StateID> = BTreeMap::new();
+        let mut goto_state_cache: HashMap<Vec<(ParserStateID, Weight)>, StateID> = HashMap::new();
+        for ((revealed, goto), shifts) in &escape_goto_shift_edges {
+            let shift_edges: Vec<(ParserStateID, Weight)> = shifts
+                .iter()
+                .map(|(shift, weight)| (*shift, weight.clone()))
+                .collect();
+            let cached_state = goto_state_cache.get(&shift_edges).copied();
+            let s3 = if let Some(existing) = cached_state {
+                existing
+            } else {
+                let new_state = nwa.add_state();
+                for (shift, weight) in &shift_edges {
+                    let push_shift = crate::precompute4::utils::encode_negative_i16(*shift)?;
+                    nwa.add_transition(new_state, push_shift, end, weight.clone())?;
+                }
+                goto_state_cache.insert(shift_edges.clone(), new_state);
+                new_state
+            };
             let (_, s2) = escape_revealed_states
                 .get(revealed)
                 .copied()
                 .expect("escape revealed prefix must exist");
             let push_goto = crate::precompute4::utils::encode_negative_i16(*goto)?;
-            let s3 = nwa.add_state();
+            let weight = escape_goto_weights
+                .get(&(*revealed, *goto))
+                .expect("escape goto weight must exist");
             nwa.add_transition(s2, push_goto, s3, weight.clone())?;
             escape_goto_states.insert((*revealed, *goto), s3);
         }
-        for (revealed, goto, shift, weight) in escape_shift_edges {
-            let s3 = *escape_goto_states
-                .get(&(revealed, goto))
-                .expect("escape goto prefix must exist");
-            let push_shift = crate::precompute4::utils::encode_negative_i16(shift)?;
-            nwa.add_transition(s3, push_shift, end, weight)?;
-        }
-
+        escape_goto_unique_count += goto_state_cache.len();
         for ((revealed, remaining_len, target_nt), terminals) in &nt_group.reveal_and_rereduces {
             let weight = weight_from_terminals(terminals, term_to_bit);
             if weight.is_empty() {
@@ -794,9 +805,16 @@ fn build_super_nwa_from_grouped(
         }
     }
 
+    let predicted_states = 2
+        + all_nts.len()
+        + nt_stack_extra
+        + 2 * initial_shift_prefix_count
+        + 2 * escape_revealed_prefix_count
+        + escape_goto_unique_count;
+
     crate::debug!(
         5,
-        "Super NWA size breakdown: start_end=2 nt_states={} nt_stack_extra={} initial_shifts={} initial_shift_prefixes={} escape_shifts={} escape_revealed_prefixes={} escape_goto_prefixes={} initial_reduces={} reveal_rereduces={} predicted_states={} actual_states={}",
+        "Super NWA size breakdown: start_end=2 nt_states={} nt_stack_extra={} initial_shifts={} initial_shift_prefixes={} escape_shifts={} escape_revealed_prefixes={} escape_goto_prefixes={} escape_goto_unique={} initial_reduces={} reveal_rereduces={} predicted_states={} actual_states={}",
         all_nts.len(),
         nt_stack_extra,
         initial_shift_count,
@@ -804,6 +822,7 @@ fn build_super_nwa_from_grouped(
         escape_shift_count,
         escape_revealed_prefix_count,
         escape_goto_prefix_count,
+        escape_goto_unique_count,
         initial_reduce_count,
         rereduce_count,
         predicted_states,
