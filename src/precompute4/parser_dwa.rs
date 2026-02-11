@@ -575,6 +575,68 @@ fn weight_from_terminals(
     w
 }
 
+fn check_dwa_contamination_free(dwa: &DWA) -> bool {
+    // Contamination-free means: for any specialization map sigma: Terminal -> Weight
+    // and any path p with edge weights w_i, the following holds:
+    //   intersect_i spec_sigma(w_i) == spec_sigma(intersect_i w_i)
+    // where spec_sigma(w) = union_{t in w} sigma(t).
+    //
+    // Theorem: This holds for all sigma iff on every path, some edge weight equals
+    // the intersection of all edge weights on that path: exists j: w_j = intersect_i w_i.
+    //
+    // Proof sketch:
+    // (<=) If w_j subset w_i for all i, then intersect_i w_i = w_j. spec is monotone,
+    //      so intersect_i spec(w_i) = spec(w_j) = spec(intersect_i w_i).
+    // (=>) If no w_j equals the intersection, each w_i has t_i in w_i \ intersect_j w_j.
+    //      Adversarial sigma maps all t_i to the same token and maps terminals in
+    //      intersect_j w_j to empty. Then LHS is non-empty and RHS is empty.
+    //
+    // Algorithm: forward worklist over (state, I, has_witness) where I is the running
+    // intersection of edge weights and has_witness tracks whether some edge weight
+    // equals the current intersection on the path. Any reachable (state, I, false)
+    // means contamination is possible.
+    if dwa.states.0.is_empty() {
+        return true;
+    }
+
+    let mut visited: FxHashSet<(StateID, Weight, bool)> = FxHashSet::default();
+    let mut queue: VecDeque<(StateID, Weight, bool)> = VecDeque::new();
+    let start_entry = (dwa.body.start_state, Weight::all(), true);
+    visited.insert(start_entry.clone());
+    queue.push_back(start_entry);
+
+    while let Some((state_id, intersection, has_witness)) = queue.pop_front() {
+        let state = &dwa.states[state_id];
+        for (label, next_state) in &state.transitions {
+            let w = match state.trans_weights.get(label) {
+                Some(weight) => weight,
+                None => continue,
+            };
+            let next_intersection = intersection.clone() & w;
+            let next_has_witness = if next_intersection == intersection {
+                has_witness || (*w == intersection)
+            } else {
+                *w == next_intersection
+            };
+            if !next_has_witness {
+                crate::debug!(
+                    3,
+                    "Super DWA contamination violation at state {} with intersection {:?}",
+                    next_state,
+                    next_intersection
+                );
+                return false;
+            }
+            let entry = (*next_state, next_intersection, next_has_witness);
+            if visited.insert(entry.clone()) {
+                queue.push_back(entry);
+            }
+        }
+    }
+
+    true
+}
+
 fn ensure_nt_stack_state(
     nwa: &mut NWA,
     nt_stacks: &mut BTreeMap<NonTerminalID, Vec<StateID>>,
@@ -829,6 +891,12 @@ fn build_super_nwa_from_grouped(
         nwa.states.len(),
     );
 
+    let mut nwa_for_detmin = nwa;
+    let dwa = nwa_for_detmin.determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
+    let is_clean = check_dwa_contamination_free(&dwa);
+    crate::debug!(5, "Super DWA: {}", dwa.stats());
+    assert!(is_clean, "Super DWA is not contamination-free");
+    let nwa = NWA::from_dwa(&dwa);
     Ok(nwa)
 }
 
