@@ -369,129 +369,8 @@ impl NoOpPb {
     fn finish(&self) {}
 }
 
-#[derive(Default, Clone)]
-struct DfsProfile {
-    dfs_total_time_us: u64,
-    exec_calls: u64,
-    exec_time_us: u64,
-    rep_time_us: BTreeMap<TokenizerStateID, u64>,
-    possible_matches_calls: u64,
-    possible_matches_time_us: u64,
-    tokens_accessible_calls: u64,
-    tokens_accessible_time_us: u64,
-    expanded_item_calls: u64,
-    expanded_item_time_us: u64,
-    expanded_item_cache_hit_calls: u64,
-    expanded_item_cache_hit_time_us: u64,
-    expanded_item_cache_miss_calls: u64,
-    expanded_item_cache_miss_time_us: u64,
-    expanded_item_build_rsb_time_us: u64,
-    expanded_item_weight_from_rsb_time_us: u64,
-    expanded_item_cache_store_time_us: u64,
-    expanded_rsb_calls: u64,
-    expanded_rsb_time_us: u64,
-    expanded_rsb_cache_hit_calls: u64,
-    expanded_rsb_cache_hit_time_us: u64,
-    expanded_rsb_cache_miss_calls: u64,
-    expanded_rsb_cache_miss_time_us: u64,
-    expanded_rsb_expand_time_us: u64,
-    expanded_rsb_weight_from_rsb_time_us: u64,
-    expanded_rsb_cache_store_time_us: u64,
-    expanded_all_calls: u64,
-    expanded_all_time_us: u64,
-    add_transition_calls: u64,
-    add_transition_time_us: u64,
-    add_epsilon_calls: u64,
-    add_epsilon_time_us: u64,
-}
-
 const EXPANDED_RSB_CACHE_MAX_ENTRIES: usize = 100_000;
 const EXPANDED_RSB_VALUE_CACHE_MAX_ENTRIES: usize = 50_000;
-
-impl DfsProfile {
-    fn print(&self) {
-        let ms = |us: u64| us as f64 / 1000.0;
-        let total_us = self.dfs_total_time_us;
-        let accounted_us = self.exec_time_us
-            + self.possible_matches_time_us
-            + self.tokens_accessible_time_us
-            + self.expanded_item_time_us
-            + self.expanded_rsb_time_us
-            + self.expanded_all_time_us
-            + self.add_transition_time_us
-            + self.add_epsilon_time_us;
-        let weight_build_us = self.expanded_item_time_us
-            + self.expanded_rsb_time_us
-            + self.expanded_all_time_us;
-        let other_us = total_us.saturating_sub(accounted_us);
-        crate::debug!(5, "precompute1 dfs profile: total={:.2}ms", ms(total_us));
-        crate::debug!(5, "precompute1 dfs profile: exec={} calls, {:.2}ms", self.exec_calls, ms(self.exec_time_us));
-        crate::debug!(
-            5,
-            "precompute1 dfs profile: tokenizer_sim={:.2}ms, weight_build={:.2}ms",
-            ms(self.exec_time_us),
-            ms(weight_build_us),
-        );
-        crate::debug!(5, "precompute1 dfs profile: possible_matches={} calls, {:.2}ms", self.possible_matches_calls, ms(self.possible_matches_time_us));
-        crate::debug!(5, "precompute1 dfs profile: tokens_accessible={} calls, {:.2}ms", self.tokens_accessible_calls, ms(self.tokens_accessible_time_us));
-        crate::debug!(5, "precompute1 dfs profile: expanded_item={} calls, {:.2}ms", self.expanded_item_calls, ms(self.expanded_item_time_us));
-        let expanded_item_miss_detail_us = self.expanded_item_build_rsb_time_us
-            + self.expanded_item_weight_from_rsb_time_us
-            + self.expanded_item_cache_store_time_us;
-        let expanded_item_miss_other_us = self
-            .expanded_item_cache_miss_time_us
-            .saturating_sub(expanded_item_miss_detail_us);
-        crate::debug!(
-            5,
-            "precompute1 dfs profile: expanded_item hits={} calls, {:.2}ms; misses={} calls, {:.2}ms (build_rsb {:.2}ms, weight_from_rsb {:.2}ms, cache_store {:.2}ms, other {:.2}ms)",
-            self.expanded_item_cache_hit_calls,
-            ms(self.expanded_item_cache_hit_time_us),
-            self.expanded_item_cache_miss_calls,
-            ms(self.expanded_item_cache_miss_time_us),
-            ms(self.expanded_item_build_rsb_time_us),
-            ms(self.expanded_item_weight_from_rsb_time_us),
-            ms(self.expanded_item_cache_store_time_us),
-            ms(expanded_item_miss_other_us),
-        );
-        crate::debug!(5, "precompute1 dfs profile: expanded_rsb={} calls, {:.2}ms", self.expanded_rsb_calls, ms(self.expanded_rsb_time_us));
-        let expanded_rsb_miss_detail_us = self.expanded_rsb_expand_time_us
-            + self.expanded_rsb_weight_from_rsb_time_us
-            + self.expanded_rsb_cache_store_time_us;
-        let expanded_rsb_miss_other_us = self
-            .expanded_rsb_cache_miss_time_us
-            .saturating_sub(expanded_rsb_miss_detail_us);
-        crate::debug!(
-            5,
-            "precompute1 dfs profile: expanded_rsb hits={} calls, {:.2}ms; misses={} calls, {:.2}ms (expand {:.2}ms, weight_from_rsb {:.2}ms, cache_store {:.2}ms, other {:.2}ms)",
-            self.expanded_rsb_cache_hit_calls,
-            ms(self.expanded_rsb_cache_hit_time_us),
-            self.expanded_rsb_cache_miss_calls,
-            ms(self.expanded_rsb_cache_miss_time_us),
-            ms(self.expanded_rsb_expand_time_us),
-            ms(self.expanded_rsb_weight_from_rsb_time_us),
-            ms(self.expanded_rsb_cache_store_time_us),
-            ms(expanded_rsb_miss_other_us),
-        );
-        crate::debug!(5, "precompute1 dfs profile: expanded_all={} calls, {:.2}ms", self.expanded_all_calls, ms(self.expanded_all_time_us));
-        crate::debug!(5, "precompute1 dfs profile: add_transition={} calls, {:.2}ms", self.add_transition_calls, ms(self.add_transition_time_us));
-        crate::debug!(5, "precompute1 dfs profile: add_epsilon={} calls, {:.2}ms", self.add_epsilon_calls, ms(self.add_epsilon_time_us));
-        if !self.rep_time_us.is_empty() {
-            let mut reps: Vec<(TokenizerStateID, u64)> = self
-                .rep_time_us
-                .iter()
-                .map(|(tsid, time)| (*tsid, *time))
-                .collect();
-            reps.sort_by(|a, b| b.1.cmp(&a.1));
-            let top: Vec<(usize, f64)> = reps
-                .into_iter()
-                .take(10)
-                .map(|(tsid, time)| (tsid.0, ms(time)))
-                .collect();
-            crate::debug!(5, "precompute1 dfs profile: top reps by time (ms): {:?}", top);
-        }
-        crate::debug!(5, "precompute1 dfs profile: other={:.2}ms", ms(other_us));
-    }
-}
 
 type SourceStates = SmallVec<[NWAStateID; 1]>;
 
@@ -614,8 +493,6 @@ pub(crate) struct Precomputer1<'r> {
     /// Optional tsid->offset mapping for weight-heavy encoding (empty = identity).
     pub(crate) tsid_offset_map: Vec<usize>,
     expanded_all_weight: Weight,
-    dfs_profile_enabled: bool,
-    dfs_profile: DfsProfile,
     approx_dfa: Option<ApproximateDfaPruner>,
     approx_start_state: usize,
     direct_insert: bool,
@@ -757,10 +634,6 @@ impl<'r> Precomputer1<'r> {
             internal_max_llm_token,
             tsid_offset_map,
             expanded_all_weight,
-            dfs_profile_enabled: std::env::var("PROFILE_PRECOMPUTE1_DFS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            dfs_profile: DfsProfile::default(),
             approx_dfa,
             approx_start_state,
             direct_insert,
@@ -793,7 +666,6 @@ impl<'r> Precomputer1<'r> {
                     let is_final = state.final_weight.is_some();
                     crate::debug!(7, "State {}: {} transitions, {} epsilons, final={}", i, trans_count, eps_count, is_final);
                 }
-                crate::debug!(7, "Pending transitions:");
                 for (src, labels) in &self.pending_transitions {
                     for (label, dsts) in labels {
                         for (dst, weight) in dsts {
@@ -1571,21 +1443,10 @@ impl<'r> Precomputer1<'r> {
     /// If num_tsids == 0 (symbol-heavy mode), returns the token ID directly in N-space.
     #[inline]
     fn expanded_weight_from_item(&mut self, token_id: usize) -> Weight {
-        let total_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if let Some(Some(cached)) = self.expanded_item_cache.get(token_id) {
-            if let Some(start) = total_start {
-                let elapsed = start.elapsed().as_micros() as u64;
-                self.dfs_profile.expanded_item_calls += 1;
-                self.dfs_profile.expanded_item_time_us += elapsed;
-                self.dfs_profile.expanded_item_cache_hit_calls += 1;
-                self.dfs_profile.expanded_item_cache_hit_time_us += elapsed;
-            }
             return cached.clone();
         }
 
-        let miss_start = self.dfs_profile_enabled.then(std::time::Instant::now);
-
-        let rsb_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         let rsb = if self.num_tsids == 0 {
             // Symbol-heavy mode: just use the token ID directly
             RangeSetBlaze::from_iter([token_id..=token_id])
@@ -1597,32 +1458,9 @@ impl<'r> Precomputer1<'r> {
             // IMPORTANT: Use [start..=end] to create from ONE range, not iterate over all integers!
             RangeSetBlaze::from_iter([start..=end])
         };
-
-        if let Some(start) = rsb_start {
-            self.dfs_profile.expanded_item_build_rsb_time_us += start.elapsed().as_micros() as u64;
-        }
-
-        let weight_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         let weight = Weight::from_rsb(rsb);
-        if let Some(start) = weight_start {
-            self.dfs_profile.expanded_item_weight_from_rsb_time_us += start.elapsed().as_micros() as u64;
-        }
-
         if let Some(slot) = self.expanded_item_cache.get_mut(token_id) {
-            let store_start = self.dfs_profile_enabled.then(std::time::Instant::now);
             *slot = Some(weight.clone());
-            if let Some(start) = store_start {
-                self.dfs_profile.expanded_item_cache_store_time_us += start.elapsed().as_micros() as u64;
-            }
-        }
-
-        if let Some(start) = miss_start {
-            self.dfs_profile.expanded_item_cache_miss_calls += 1;
-            self.dfs_profile.expanded_item_cache_miss_time_us += start.elapsed().as_micros() as u64;
-        }
-        if let Some(start) = total_start {
-            self.dfs_profile.expanded_item_calls += 1;
-            self.dfs_profile.expanded_item_time_us += start.elapsed().as_micros() as u64;
         }
         weight
     }
@@ -1631,73 +1469,27 @@ impl<'r> Precomputer1<'r> {
     /// If num_tsids <= 1 (symbol-heavy or degenerate single-tsid mode), returns the rsb directly.
     #[inline]
     fn expanded_weight_from_rsb(&mut self, rsb: &RangeSetBlaze<usize>, cache_key: Option<usize>) -> Weight {
-        let total_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if rsb.is_empty() {
-            if let Some(start) = total_start {
-                let elapsed = start.elapsed().as_micros() as u64;
-                self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += elapsed;
-                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
-                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
-            }
             return Weight::zeros();
         }
         if std::ptr::eq(rsb, &self.all_llm_tokens) {
-            if let Some(start) = total_start {
-                let elapsed = start.elapsed().as_micros() as u64;
-                self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += elapsed;
-                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
-                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
-            }
             return self.expanded_all_weight.clone();
         }
         if let Some(key) = cache_key {
             if let Some(cached) = self.expanded_rsb_cache.get(&key) {
-                if let Some(start) = total_start {
-                    let elapsed = start.elapsed().as_micros() as u64;
-                    self.dfs_profile.expanded_rsb_calls += 1;
-                    self.dfs_profile.expanded_rsb_time_us += elapsed;
-                    self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
-                    self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
-                }
                 return cached.clone();
             }
         }
-
-        let miss_start = self.dfs_profile_enabled.then(std::time::Instant::now);
-
-        let expand_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         let expanded = if self.num_tsids <= 1 {
             rsb.clone()
         } else {
             expand_rsb(rsb, self.num_tsids)
         };
-        if let Some(start) = expand_start {
-            self.dfs_profile.expanded_rsb_expand_time_us += start.elapsed().as_micros() as u64;
-        }
-
-        let weight_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         let weight = Weight::from_rsb(expanded);
-        if let Some(start) = weight_start {
-            self.dfs_profile.expanded_rsb_weight_from_rsb_time_us += start.elapsed().as_micros() as u64;
-        }
         if let Some(key) = cache_key {
             if self.expanded_rsb_cache.len() < EXPANDED_RSB_CACHE_MAX_ENTRIES {
-                let store_start = self.dfs_profile_enabled.then(std::time::Instant::now);
                 self.expanded_rsb_cache.insert(key, weight.clone());
-                if let Some(start) = store_start {
-                    self.dfs_profile.expanded_rsb_cache_store_time_us += start.elapsed().as_micros() as u64;
-                }
             }
-        }
-        if let Some(start) = miss_start {
-            self.dfs_profile.expanded_rsb_cache_miss_calls += 1;
-            self.dfs_profile.expanded_rsb_cache_miss_time_us += start.elapsed().as_micros() as u64;
-        }
-        if let Some(start) = total_start {
-            self.dfs_profile.expanded_rsb_calls += 1;
-            self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
         }
         weight
     }
@@ -1706,71 +1498,24 @@ impl<'r> Precomputer1<'r> {
     /// Uses a value cache keyed by the full RangeSetBlaze (avoids pointer-only caching).
     #[inline]
     fn expanded_weight_from_rsb_owned(&mut self, rsb: RangeSetBlaze<usize>) -> Weight {
-        let total_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if rsb.is_empty() {
-            if let Some(start) = total_start {
-                let elapsed = start.elapsed().as_micros() as u64;
-                self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += elapsed;
-                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
-                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
-            }
             return Weight::zeros();
         }
         if rsb == self.all_llm_tokens {
-            if let Some(start) = total_start {
-                let elapsed = start.elapsed().as_micros() as u64;
-                self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += elapsed;
-                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
-                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
-            }
             return self.expanded_all_weight.clone();
         }
 
         if let Some(cached) = self.expanded_rsb_value_cache.get(&rsb) {
-            if let Some(start) = total_start {
-                let elapsed = start.elapsed().as_micros() as u64;
-                self.dfs_profile.expanded_rsb_calls += 1;
-                self.dfs_profile.expanded_rsb_time_us += elapsed;
-                self.dfs_profile.expanded_rsb_cache_hit_calls += 1;
-                self.dfs_profile.expanded_rsb_cache_hit_time_us += elapsed;
-            }
             return cached.clone();
         }
-
-        let miss_start = self.dfs_profile_enabled.then(std::time::Instant::now);
-
-        let expand_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         let expanded = if self.num_tsids <= 1 {
             rsb.clone()
         } else {
             expand_rsb(&rsb, self.num_tsids)
         };
-        if let Some(start) = expand_start {
-            self.dfs_profile.expanded_rsb_expand_time_us += start.elapsed().as_micros() as u64;
-        }
-
-        let weight_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         let weight = Weight::from_rsb(expanded);
-        if let Some(start) = weight_start {
-            self.dfs_profile.expanded_rsb_weight_from_rsb_time_us += start.elapsed().as_micros() as u64;
-        }
-
         if self.expanded_rsb_value_cache.len() < EXPANDED_RSB_VALUE_CACHE_MAX_ENTRIES {
-            let store_start = self.dfs_profile_enabled.then(std::time::Instant::now);
             self.expanded_rsb_value_cache.insert(rsb, weight.clone());
-            if let Some(start) = store_start {
-                self.dfs_profile.expanded_rsb_cache_store_time_us += start.elapsed().as_micros() as u64;
-            }
-        }
-        if let Some(start) = miss_start {
-            self.dfs_profile.expanded_rsb_cache_miss_calls += 1;
-            self.dfs_profile.expanded_rsb_cache_miss_time_us += start.elapsed().as_micros() as u64;
-        }
-        if let Some(start) = total_start {
-            self.dfs_profile.expanded_rsb_calls += 1;
-            self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
         }
         weight
     }
@@ -1779,13 +1524,7 @@ impl<'r> Precomputer1<'r> {
     /// If num_tsids == 0 (symbol-heavy mode), returns Weight::all().
     #[inline]
     fn expanded_weight_all(&mut self) -> Weight {
-        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
-        let weight = self.expanded_all_weight.clone();
-        if let Some(start) = start {
-            self.dfs_profile.expanded_all_calls += 1;
-            self.dfs_profile.expanded_all_time_us += start.elapsed().as_micros() as u64;
-        }
-        weight
+        self.expanded_all_weight.clone()
     }
 
     #[inline]
@@ -1811,15 +1550,10 @@ impl<'r> Precomputer1<'r> {
 
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
-        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if self.direct_insert {
             let state = &mut self.nwa.states[src];
             *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
             state.transitions.entry(label).or_default().push((dst, weight));
-            if let Some(start) = start {
-                self.dfs_profile.add_transition_calls += 1;
-                self.dfs_profile.add_transition_time_us += start.elapsed().as_micros() as u64;
-            }
             return;
         }
         self.pending_transitions
@@ -1831,22 +1565,13 @@ impl<'r> Precomputer1<'r> {
             .and_modify(|w| *w |= &weight)
             .or_insert(weight.clone());
         *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
-        if let Some(start) = start {
-            self.dfs_profile.add_transition_calls += 1;
-            self.dfs_profile.add_transition_time_us += start.elapsed().as_micros() as u64;
-        }
     }
 
     fn add_pending_epsilon(&mut self, src: NWAStateID, dst: NWAStateID, weight: Weight) {
-        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
         if self.direct_insert {
             let state = &mut self.nwa.states[src];
             *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
             state.epsilons.push((dst, weight));
-            if let Some(start) = start {
-                self.dfs_profile.add_epsilon_calls += 1;
-                self.dfs_profile.add_epsilon_time_us += start.elapsed().as_micros() as u64;
-            }
             return;
         }
         self.pending_epsilons
@@ -1856,10 +1581,6 @@ impl<'r> Precomputer1<'r> {
             .and_modify(|w| *w |= &weight)
             .or_insert(weight.clone());
         *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
-        if let Some(start) = start {
-            self.dfs_profile.add_epsilon_calls += 1;
-            self.dfs_profile.add_epsilon_time_us += start.elapsed().as_micros() as u64;
-        }
     }
 
     fn run_dfs(&mut self) {
@@ -1875,16 +1596,9 @@ impl<'r> Precomputer1<'r> {
             eprintln!("Vocab tree has {} nodes", vocab_node_count);
         }
         
-        let dfs_start = self.dfs_profile_enabled.then(std::time::Instant::now);
         self.dfs(&vocab.root, assoc);
-        if let Some(start) = dfs_start {
-            self.dfs_profile.dfs_total_time_us = start.elapsed().as_micros() as u64;
-        }
         self.vocab = vocab;
         self.pb.finish();
-        if self.dfs_profile_enabled {
-            self.dfs_profile.print();
-        }
         crate::debug!(5, "Precomputation complete");
     }
 
@@ -1938,35 +1652,31 @@ impl<'r> Precomputer1<'r> {
                 }
 
                 for (state_key, nodes) in states_at_pos {
-                    let rep_start = self.dfs_profile_enabled.then(std::time::Instant::now);
                     let tokenizer_state_id = state_key.tokenizer_state;
                     let approx_state = state_key.approx_state;
-                    for src_node in nodes {
+                    let num_sources = nodes.len();
+
                     let slice = &segment_bytes[pos..];
-                    let exec_start = self.dfs_profile_enabled.then(std::time::Instant::now);
                     let exec_result = self
                         .tokenizer
                         .execute_from_state(slice, tokenizer_state_id);
-                    if let Some(start) = exec_start {
-                        self.dfs_profile.exec_calls += 1;
-                        self.dfs_profile.exec_time_us += start.elapsed().as_micros() as u64;
-                    }
-                    
-                    crate::debug!(7, "  Tokenizer on {:?} from state {:?} (src_node={}): matches={:?}, end_state={:?}",
-                        String::from_utf8_lossy(slice), tokenizer_state_id, src_node, exec_result.matches, exec_result.end_state);
+
+                    crate::debug!(
+                        7,
+                        "  Tokenizer on {:?} from state {:?} (sources={}): matches={:?}, end_state={:?}",
+                        String::from_utf8_lossy(slice),
+                        tokenizer_state_id,
+                        num_sources,
+                        exec_result.matches,
+                        exec_result.end_state,
+                    );
 
                     let possible_matches_at_end = if let Some(end_val) = exec_result.end_state {
                         let ts = TokenizerStateID(end_val);
                         possible_matches_at_end_cache
                             .entry(ts)
                             .or_insert_with(|| {
-                                let start = self.dfs_profile_enabled.then(std::time::Instant::now);
-                                let result = self.possible_matches(child_vocab_node, ts);
-                                if let Some(start) = start {
-                                    self.dfs_profile.possible_matches_calls += 1;
-                                    self.dfs_profile.possible_matches_time_us += start.elapsed().as_micros() as u64;
-                                }
-                                result
+                                self.possible_matches(child_vocab_node, ts)
                             })
                     } else {
                         // Dummy empty map
@@ -1975,7 +1685,11 @@ impl<'r> Precomputer1<'r> {
                             .or_default()
                     };
 
-                    // 1. Handle Matches -> Transitions to Initial State
+                    let mut leaf_transitions: Vec<(Label, NWAStateID, Weight)> = Vec::new();
+                    let mut cont_transitions: Vec<(Label, NWAStateID, Weight)> = Vec::new();
+                    let mut leaf_weight: Option<Weight> = None;
+
+                    // 1. Handle Matches -> Transitions to Initial State (per state_key)
                     for match_info in &exec_result.matches {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let Some(next_approx_state) = self.approx_step(approx_state, terminal_id) else {
@@ -1988,15 +1702,21 @@ impl<'r> Precomputer1<'r> {
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
                             let leaf = self.leaf_state;
-                            // Use expanded weight from single token
-                            let weight = self.expanded_weight_from_item(child_token_id);
-                            crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
-                                src_node, terminal_id.0, leaf, weight);
-                            self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
+                            let weight = leaf_weight
+                                .get_or_insert_with(|| self.expanded_weight_from_item(child_token_id))
+                                .clone();
+                            crate::debug!(
+                                7,
+                                "      -> LEAF transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
+                                num_sources,
+                                terminal_id.0,
+                                leaf,
+                                weight,
+                            );
+                            leaf_transitions.push((terminal_id.0 as Label, leaf, weight));
                         }
 
                         // Continuation logic
-                        // Avoid cloning if we don't need to modify the bitset
                         let final_bv: std::borrow::Cow<RangeSetBlaze<usize>> = if next_pos == segment_bytes.len() {
                             let mut edge_bv = child_reachable.clone();
                             edge_bv.remove(child_token_id);
@@ -2060,66 +1780,81 @@ impl<'r> Precomputer1<'r> {
                             }
                         };
 
-                        crate::debug!(7, "      -> CONT transition: {} --{}--> {}, weight={:?}", 
-                            src_node, terminal_id.0, target, weight);
-                        self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
+
+                        crate::debug!(
+                            7,
+                            "      -> CONT transition ({} sources): --{}--> {}, weight={:?}",
+                            num_sources,
+                            terminal_id.0,
+                            target,
+                            weight,
+                        );
+                        cont_transitions.push((terminal_id.0 as Label, target, weight));
+                    }
+
+                    for &src_node in nodes.iter() {
+                        for (label, dst, weight) in &leaf_transitions {
+                            self.add_pending_transition(src_node, *label, *dst, weight.clone());
+                        }
+                        for (label, dst, weight) in &cont_transitions {
+                            self.add_pending_transition(src_node, *label, *dst, weight.clone());
+                        }
                     }
 
                     // 2. Handle End State -> Continuation
                     crate::debug!(7, "  End state handling: end_state={:?}", exec_result.end_state);
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
-                        
+
                         // Use cached accessible terminals (389 unique states, but called 700k+ times)
                         let accessible_terminals: std::rc::Rc<Vec<GrammarTokenID>> = if let Some(cached) = self.accessible_terminals_cache.get(&final_tokenizer_state) {
                             cached.clone() // Rc clone is cheap
                         } else {
-                            let start = self.dfs_profile_enabled.then(std::time::Instant::now);
                             let result = std::rc::Rc::new(self.tokenizer.tokens_accessible_from_state(final_tokenizer_state)
                                 .into_iter().collect::<Vec<_>>());
-                            if let Some(start) = start {
-                                self.dfs_profile.tokens_accessible_calls += 1;
-                                self.dfs_profile.tokens_accessible_time_us += start.elapsed().as_micros() as u64;
-                            }
                             self.accessible_terminals_cache.insert(final_tokenizer_state, result.clone());
                             result
                         };
-                        
+
                         crate::debug!(7, "    accessible_terminals={:?}", accessible_terminals.as_slice());
 
                         // Create expanded weight once, it's just a single token expanded to N×M space
                         let single_token_weight = self.expanded_weight_from_item(child_token_id);
 
                         let end_idx = self.leaf_state;
-                        
+                        let mut end_labels: Vec<Label> = Vec::new();
+
                         for terminal_id in accessible_terminals.iter() {
                             let Some(_next_approx_state) = self.approx_step(approx_state, *terminal_id) else {
                                 crate::debug!(7, "    -> Skip END_STATE terminal {} (no approx DFA transition)", terminal_id.0);
                                 continue;
                             };
-                            crate::debug!(7, "    -> END_STATE transition: {} --{}--> {} (leaf_state), weight={:?}",
-                                src_node, terminal_id.0, end_idx, single_token_weight);
-                            self.add_pending_transition(
-                                src_node,
-                                terminal_id.0 as Label,
+                            crate::debug!(
+                                7,
+                                "    -> END_STATE transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
+                                num_sources,
+                                terminal_id.0,
                                 end_idx,
-                                single_token_weight.clone(),
+                                single_token_weight,
                             );
+                            end_labels.push(terminal_id.0 as Label);
+                        }
+
+                        for &src_node in nodes.iter() {
+                            for label in &end_labels {
+                                self.add_pending_transition(
+                                    src_node,
+                                    *label,
+                                    end_idx,
+                                    single_token_weight.clone(),
+                                );
+                            }
                         }
 
                         let entry = next_level_assoc
                             .entry(DfsKey::new(final_tokenizer_state, approx_state))
                             .or_insert_with(SmallVec::new);
-                        entry.push(src_node);
-                    }
-                    }
-                    if let Some(start) = rep_start {
-                        let elapsed = start.elapsed().as_micros() as u64;
-                        *self
-                            .dfs_profile
-                            .rep_time_us
-                            .entry(tokenizer_state_id)
-                            .or_insert(0) += elapsed;
+                        entry.extend(nodes);
                     }
                 }
             }
