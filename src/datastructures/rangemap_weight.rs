@@ -527,6 +527,42 @@ impl RangeMapWeight {
         normalize_num_tsids(self.num_tsids)
     }
 
+    /// Check if this weight is disjoint with another (no shared positions).
+    /// Uses a merge-scan over sorted range maps — O(|ranges_a| + |ranges_b|)
+    /// without materializing the full intersection.
+    pub(crate) fn is_disjoint(&self, other: &Self) -> bool {
+        if self.map.is_empty() || other.map.is_empty() {
+            return true;
+        }
+
+        let mut iter_a = self.map.range_values();
+        let mut iter_b = other.map.range_values();
+        let mut a = iter_a.next();
+        let mut b = iter_b.next();
+
+        while let (Some((ra, va)), Some((rb, vb))) = (&a, &b) {
+            if ra.end() < rb.start() {
+                // ra fully before rb
+                a = iter_a.next();
+            } else if rb.end() < ra.start() {
+                // rb fully before ra
+                b = iter_b.next();
+            } else {
+                // Key ranges overlap — check if value sets overlap
+                if !va.is_disjoint(vb) {
+                    return false;
+                }
+                // Advance whichever range ends first
+                if ra.end() <= rb.end() {
+                    a = iter_a.next();
+                } else {
+                    b = iter_b.next();
+                }
+            }
+        }
+        true
+    }
+
     fn to_token_map(&self) -> BTreeMap<usize, RangeSet> {
         let mut out: BTreeMap<usize, RangeSet> = BTreeMap::new();
         for (token_range, tsid_set) in self.map.range_values() {

@@ -938,6 +938,9 @@ impl AbstractWeight {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
                 a.is_disjoint(b)
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                a.is_disjoint(b)
+            }
             _ => {
                 // Fallback: compute intersection and check empty
                 (self & other).is_empty()
