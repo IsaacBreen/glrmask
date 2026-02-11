@@ -478,6 +478,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) terminals_count: usize,
     pub(crate) pending_transitions: HashMap<NWAStateID, HashMap<Label, HashMap<NWAStateID, Weight>>>,
     pub(crate) pending_epsilons: HashMap<NWAStateID, HashMap<NWAStateID, Weight>>,
+    pub(crate) pending_token_ids: HashMap<(NWAStateID, Label, NWAStateID), Vec<usize>>,
     pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
     // Cache for tokens_accessible_from_state - only 389 unique states but called 700k+ times
     accessible_terminals_cache: HashMap<TokenizerStateID, std::rc::Rc<Vec<GrammarTokenID>>>,
@@ -625,6 +626,7 @@ impl<'r> Precomputer1<'r> {
             terminals_count,
             pending_transitions: HashMap::new(),
             pending_epsilons: HashMap::new(),
+            pending_token_ids: HashMap::new(),
             live_tokens: HashMap::new(),
             accessible_terminals_cache: HashMap::new(),
             expanded_item_cache: vec![None; internal_max_llm_token.saturating_add(1)],
@@ -651,6 +653,7 @@ impl<'r> Precomputer1<'r> {
 
     #[time_it("Precompute1::finish")]
     fn finish(mut self) -> DWA {
+        self.flush_pending_token_ids();
         let run_debug_scan = std::env::var("PRECOMPUTE1_DEBUG_SCAN")
             .map(|v| v == "1")
             .unwrap_or(false)
@@ -1555,6 +1558,45 @@ impl<'r> Precomputer1<'r> {
     }
 
     #[inline]
+    fn add_pending_token_id(
+        &mut self,
+        src: NWAStateID,
+        label: Label,
+        dst: NWAStateID,
+        token_id: usize,
+    ) {
+        self.pending_token_ids
+            .entry((src, label, dst))
+            .or_default()
+            .push(token_id);
+    }
+
+    fn flush_pending_token_ids(&mut self) {
+        if self.pending_token_ids.is_empty() {
+            return;
+        }
+        for ((src, label, dst), mut token_ids) in std::mem::take(&mut self.pending_token_ids) {
+            token_ids.sort_unstable();
+            token_ids.dedup();
+            let rsb = RangeSetBlaze::from_iter(token_ids.into_iter().map(|t| t..=t));
+            let weight = self.expanded_weight_from_rsb_owned(rsb);
+            if self.direct_insert {
+                let state = &mut self.nwa.states[src];
+                state.transitions.entry(label).or_default().push((dst, weight));
+                continue;
+            }
+            self.pending_transitions
+                .entry(src)
+                .or_default()
+                .entry(label)
+                .or_default()
+                .entry(dst)
+                .and_modify(|w| *w |= &weight)
+                .or_insert(weight);
+        }
+    }
+
+    #[inline]
     fn add_pending_transition_no_live(
         &mut self,
         src: NWAStateID,
@@ -1699,7 +1741,7 @@ impl<'r> Precomputer1<'r> {
                             .or_default()
                     };
 
-                    let mut leaf_transitions: Vec<(Label, NWAStateID, Weight)> = Vec::new();
+                    let mut leaf_labels: Vec<Label> = Vec::new();
                     let mut cont_transitions: Vec<(Label, NWAStateID, Weight)> = Vec::new();
                     let mut leaf_weight: Option<Weight> = None;
 
@@ -1717,8 +1759,7 @@ impl<'r> Precomputer1<'r> {
                         if next_pos == segment_bytes.len() {
                             let leaf = self.leaf_state;
                             let weight = leaf_weight
-                                .get_or_insert_with(|| self.expanded_weight_from_item(child_token_id))
-                                .clone();
+                                .get_or_insert_with(|| self.expanded_weight_from_item(child_token_id));
                             crate::debug!(
                                 7,
                                 "      -> LEAF transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
@@ -1727,7 +1768,7 @@ impl<'r> Precomputer1<'r> {
                                 leaf,
                                 weight,
                             );
-                            leaf_transitions.push((terminal_id.0 as Label, leaf, weight));
+                            leaf_labels.push(terminal_id.0 as Label);
                         }
 
                         // Continuation logic
@@ -1811,8 +1852,8 @@ impl<'r> Precomputer1<'r> {
                     }
 
                     for &src_node in nodes.iter() {
-                        for (label, dst, weight) in &leaf_transitions {
-                            self.add_pending_transition_no_live(src_node, *label, *dst, weight.clone());
+                        for label in &leaf_labels {
+                            self.add_pending_token_id(src_node, *label, self.leaf_state, child_token_id);
                         }
                         for (label, dst, weight) in &cont_transitions {
                             self.add_pending_transition(src_node, *label, *dst, weight.clone());
@@ -1862,12 +1903,7 @@ impl<'r> Precomputer1<'r> {
                             self.update_live_tokens(end_idx, &single_token_weight);
                             for &src_node in nodes.iter() {
                                 for label in &end_labels {
-                                    self.add_pending_transition_no_live(
-                                        src_node,
-                                        *label,
-                                        end_idx,
-                                        single_token_weight.clone(),
-                                    );
+                                    self.add_pending_token_id(src_node, *label, end_idx, child_token_id);
                                 }
                             }
                         }
@@ -2043,6 +2079,8 @@ pub(crate) fn run_precompute1_nwa_for_tests(
     );
 
     helper.run_dfs();
+
+    helper.flush_pending_token_ids();
 
     if !helper.direct_insert {
         for (src, labels) in std::mem::take(&mut helper.pending_transitions) {
