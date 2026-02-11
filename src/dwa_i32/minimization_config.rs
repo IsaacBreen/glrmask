@@ -282,13 +282,11 @@ impl DeterminizeAndMinimizeConfig {
         match profile {
             DeterminizeAndMinimizeProfile::Terminal => {
                 // Full pipeline for Terminal DWA construction
-                let nwa_passes = if std::env::var("SKIP_RUSTFST_MIN").map_or(false, |v| v == "1") {
-                    vec![NwaPass::CompressTransitions]
+                let include_rm_epsilon = std::env::var("INCLUDE_RM_EPSILON").map_or(false, |v| v == "1");
+                let nwa_passes = if include_rm_epsilon {
+                    vec![NwaPass::RmEpsilon, NwaPass::CompressTransitions]
                 } else {
-                    vec![
-                        NwaPass::RmEpsilon,
-                        NwaPass::CompressTransitions,
-                    ]
+                    vec![NwaPass::CompressTransitions]
                 };
 
                 let skip_minimize_before_suffix = std::env::var("SKIP_TERMINAL_DWA_MINIMIZE_BEFORE_SUFFIX")
