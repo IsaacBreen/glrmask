@@ -12,25 +12,62 @@ impl NWA {
             return false;
         }
 
-        let mut live = vec![false; n];
-        let mut q: VecDeque<NWAStateID> = VecDeque::new();
-        let mut rev: Vec<Vec<NWAStateID>> = vec![vec![]; n];
-
+        // Phase 1: Build reverse graph using flat CSR format.
+        // Two passes over edges: first count, then fill. 
+        // Avoids 1.75M Vec allocations from vec![vec![]; n].
+        let mut rev_count = vec![0u32; n];
         for p in 0..n {
             let st = &self.states[p];
             for &(t, ref w) in &st.epsilons {
                 if t < n && !w.is_empty() {
-                    rev[t].push(p);
+                    rev_count[t] += 1;
                 }
             }
             for (_, targets) in &st.transitions {
                 for &(t, ref w) in targets {
                     if t < n && !w.is_empty() {
-                        rev[t].push(p);
+                        rev_count[t] += 1;
                     }
                 }
             }
         }
+
+        // Compute prefix sums for CSR offsets
+        let mut rev_offset = vec![0u32; n + 1];
+        for i in 0..n {
+            rev_offset[i + 1] = rev_offset[i] + rev_count[i];
+        }
+        let total_rev_edges = rev_offset[n] as usize;
+        
+        // Fill flat reverse edge array
+        let mut rev_edges: Vec<NWAStateID> = vec![0; total_rev_edges];
+        let mut write_pos = vec![0u32; n];
+        
+        for p in 0..n {
+            let st = &self.states[p];
+            for &(t, ref w) in &st.epsilons {
+                if t < n && !w.is_empty() {
+                    let pos = rev_offset[t] as usize + write_pos[t] as usize;
+                    rev_edges[pos] = p;
+                    write_pos[t] += 1;
+                }
+            }
+            for (_, targets) in &st.transitions {
+                for &(t, ref w) in targets {
+                    if t < n && !w.is_empty() {
+                        let pos = rev_offset[t] as usize + write_pos[t] as usize;
+                        rev_edges[pos] = p;
+                        write_pos[t] += 1;
+                    }
+                }
+            }
+        }
+        drop(rev_count);
+        drop(write_pos);
+
+        // Phase 2: BFS backward from final states
+        let mut live = vec![false; n];
+        let mut q: VecDeque<NWAStateID> = VecDeque::new();
 
         for s in 0..n {
             if self.states[s].final_weight.as_ref().map_or(false, |w| !w.is_empty()) {
@@ -42,13 +79,18 @@ impl NWA {
         }
 
         while let Some(v) = q.pop_front() {
-            for &p in &rev[v] {
+            let start = rev_offset[v] as usize;
+            let end = rev_offset[v + 1] as usize;
+            for &p in &rev_edges[start..end] {
                 if !live[p] {
                     live[p] = true;
                     q.push_back(p);
                 }
             }
         }
+
+        drop(rev_edges);
+        drop(rev_offset);
 
         if live.iter().all(|&b| b) {
             return false;
@@ -62,6 +104,7 @@ impl NWA {
              return true;
         }
 
+        // Phase 3: Remap states
         let mut map = vec![usize::MAX; n];
         let mut new_states = NWAStates::default();
 
