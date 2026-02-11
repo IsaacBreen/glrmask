@@ -21,8 +21,8 @@ use crate::precompute4::resolve_negatives::{
 };
 use crate::precompute4::template_dfa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::dwa_i32::{
-    common::Label, DeterminizeAndMinimizeProfile, DWA, NWA, NWABody, NWAStateID, NWAStates,
-    StateID, Weight,
+    common::Label, DeterminizeAndMinimizeProfile, DwaOptimizeConfig, DWA, NWA, NWABody,
+    NWAStateID, NWAStates, StateID, Weight,
 };
 use crate::dfa_u8::TokenizerStateID;
 use crate::types::TerminalID;
@@ -637,6 +637,61 @@ fn check_dwa_contamination_free(dwa: &DWA) -> bool {
     true
 }
 
+fn make_dwa_contamination_free(dwa: &DWA) -> DWA {
+    // Product construction over (state, accumulated_intersection). Each transition
+    // uses the new accumulated intersection as the edge weight, making the DWA
+    // contamination-free by construction.
+    if dwa.states.0.is_empty() {
+        return DWA::new_empty();
+    }
+
+    let mut result = DWA::new();
+    let mut mapping: FxHashMap<(StateID, Weight), StateID> = FxHashMap::default();
+    let mut queue: VecDeque<(StateID, Weight)> = VecDeque::new();
+
+    let start_key = (dwa.body.start_state, Weight::all());
+    mapping.insert(start_key.clone(), result.body.start_state);
+    queue.push_back(start_key);
+
+    while let Some((orig_state, acc)) = queue.pop_front() {
+        let new_state = *mapping
+            .get(&(orig_state, acc.clone()))
+            .expect("state must exist");
+        let state = &dwa.states[orig_state];
+
+        if let Some(fw) = &state.final_weight {
+            let new_fw = &acc & fw;
+            if !new_fw.is_empty() {
+                result.states[new_state].final_weight = Some(new_fw);
+            }
+        }
+
+        for (label, next_state) in &state.transitions {
+            let w = match state.trans_weights.get(label) {
+                Some(weight) => weight,
+                None => continue,
+            };
+            let new_acc = acc.clone() & w;
+            if new_acc.is_empty() {
+                continue;
+            }
+            let key = (*next_state, new_acc.clone());
+            let target_state = if let Some(id) = mapping.get(&key) {
+                *id
+            } else {
+                let id = result.add_state();
+                mapping.insert(key.clone(), id);
+                queue.push_back(key);
+                id
+            };
+            let _ = result.add_transition(new_state, *label, target_state, new_acc);
+        }
+    }
+
+    result.optimize(DwaOptimizeConfig::SpecializedSuper);
+    result
+}
+
 fn ensure_nt_stack_state(
     nwa: &mut NWA,
     nt_stacks: &mut BTreeMap<NonTerminalID, Vec<StateID>>,
@@ -893,8 +948,10 @@ fn build_super_nwa_from_grouped(
 
     let mut nwa_for_detmin = nwa;
     let dwa = nwa_for_detmin.determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
+    crate::debug!(5, "Super DWA before contamination-free transform: {}", dwa.stats());
+    let dwa = make_dwa_contamination_free(&dwa);
+    crate::debug!(5, "Super DWA after contamination-free transform: {}", dwa.stats());
     let is_clean = check_dwa_contamination_free(&dwa);
-    crate::debug!(5, "Super DWA: {}", dwa.stats());
     assert!(is_clean, "Super DWA is not contamination-free");
     let nwa = NWA::from_dwa(&dwa);
     Ok(nwa)
