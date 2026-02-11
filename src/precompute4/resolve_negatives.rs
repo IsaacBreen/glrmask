@@ -1050,6 +1050,10 @@ fn compute_finality_fixpoint_range(
         return FxHashMap::default();
     }
 
+    let phase1_start = std::time::Instant::now();
+
+    // Use packed representation: for each state, store offset+length into a flat edge buffer
+    // This avoids per-state Vec allocations (1.75M vecs) and improves cache locality.
     #[derive(Clone, Copy)]
     enum PredEdge {
         Epsilon { from: NWAStateID, eps_idx: usize },
@@ -1057,76 +1061,63 @@ fn compute_finality_fixpoint_range(
         Default { from: NWAStateID, trans_idx: usize },
     }
 
-    let mut visited: FxHashSet<NWAStateID> = FxHashSet::default();
+    // Phase 1: Build pred graph via BFS from seed range.
+    // Use Vec<bool> for visited (much faster than FxHashSet for dense ranges).
+    let mut visited = vec![false; n];
     let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-    let mut reachable_states: Vec<NWAStateID> = Vec::new();
-    let mut preds: FxHashMap<NWAStateID, Vec<PredEdge>> = FxHashMap::default();
+    // Pre-count edges to allocate pred_edges flat buffer once
+    let mut preds_offset = vec![0u32; n + 1]; // offset into flat pred_edges
+    let mut total_pred_edges: usize = 0;
 
-    // Seed BFS from the range
+    // First pass: BFS to find reachable states and count pred edges
+    let mut reachable_states: Vec<NWAStateID> = Vec::new();
+    
     for a in range.clone() {
-        if a >= n {
-            continue;
-        }
-        if visited.insert(a) {
+        if a < n && !visited[a] {
+            visited[a] = true;
             queue.push_back(a);
             reachable_states.push(a);
         }
     }
 
+    // BFS to discover reachable states and count pred edges per target
     while let Some(s) = queue.pop_front() {
         let state = &states[s];
 
-        for (eps_idx, &(target, ref w)) in state.epsilons.iter().enumerate() {
-            if target >= n || w.is_empty() {
-                continue;
-            }
-            preds
-                .entry(target)
-                .or_insert_with(Vec::new)
-                .push(PredEdge::Epsilon { from: s, eps_idx });
-            if visited.insert(target) {
+        for &(target, ref w) in &state.epsilons {
+            if target >= n || w.is_empty() { continue; }
+            preds_offset[target + 1] += 1;
+            total_pred_edges += 1;
+            if !visited[target] {
+                visited[target] = true;
                 queue.push_back(target);
                 reachable_states.push(target);
             }
         }
 
-        // Negative transitions only from states in the range
         if range.contains(&s) {
             for (&label, targets) in &state.transitions {
-                if !is_negative_symbol(label) {
-                    continue;
-                }
-                for (trans_idx, &(target, ref w)) in targets.iter().enumerate() {
-                    if target >= n || w.is_empty() {
-                        continue;
-                    }
-                    preds
-                        .entry(target)
-                        .or_insert_with(Vec::new)
-                        .push(PredEdge::Negative {
-                            from: s,
-                            label,
-                            trans_idx,
-                        });
-                    if visited.insert(target) {
+                if !is_negative_symbol(label) { continue; }
+                for &(target, ref w) in targets {
+                    if target >= n || w.is_empty() { continue; }
+                    preds_offset[target + 1] += 1;
+                    total_pred_edges += 1;
+                    if !visited[target] {
+                        visited[target] = true;
                         queue.push_back(target);
                         reachable_states.push(target);
                     }
                 }
             }
         }
-        
-        // Default transitions can be shortcut
+
         if let Some(default_targets) = state.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
-            for (trans_idx, &(target, ref w)) in default_targets.iter().enumerate() {
-                if target >= n || w.is_empty() {
-                    continue;
-                }
-                preds
-                    .entry(target)
-                    .or_insert_with(Vec::new)
-                    .push(PredEdge::Default { from: s, trans_idx });
-                if visited.insert(target) {
+            for &(target, ref w) in default_targets {
+                if target >= n || w.is_empty() { continue; }
+                preds_offset[target + 1] += 1;
+                total_pred_edges += 1;
+                if !visited[target] {
+                    visited[target] = true;
                     queue.push_back(target);
                     reachable_states.push(target);
                 }
@@ -1134,13 +1125,87 @@ fn compute_finality_fixpoint_range(
         }
     }
 
-    let mut future_final_all: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
+    // Compute prefix sums for flat pred edge storage
+    for i in 1..=n {
+        preds_offset[i] += preds_offset[i - 1];
+    }
+    debug_assert_eq!(preds_offset[n] as usize, total_pred_edges);
+    
+    // Second pass: populate flat pred_edges array
+    let mut pred_edges: Vec<PredEdge> = Vec::with_capacity(total_pred_edges);
+    unsafe { pred_edges.set_len(total_pred_edges); }
+    let mut write_pos = vec![0u32; n]; // current write position per target
+    
+    // Re-BFS to fill pred edges (same traversal order)
+    let mut visited2 = vec![false; n];
+    let mut queue2: VecDeque<NWAStateID> = VecDeque::new();
+    for a in range.clone() {
+        if a < n && !visited2[a] {
+            visited2[a] = true;
+            queue2.push_back(a);
+        }
+    }
+
+    while let Some(s) = queue2.pop_front() {
+        let state = &states[s];
+
+        for (eps_idx, &(target, ref w)) in state.epsilons.iter().enumerate() {
+            if target >= n || w.is_empty() { continue; }
+            let pos = preds_offset[target] as usize + write_pos[target] as usize;
+            pred_edges[pos] = PredEdge::Epsilon { from: s, eps_idx };
+            write_pos[target] += 1;
+            if !visited2[target] {
+                visited2[target] = true;
+                queue2.push_back(target);
+            }
+        }
+
+        if range.contains(&s) {
+            for (&label, targets) in &state.transitions {
+                if !is_negative_symbol(label) { continue; }
+                for (trans_idx, &(target, ref w)) in targets.iter().enumerate() {
+                    if target >= n || w.is_empty() { continue; }
+                    let pos = preds_offset[target] as usize + write_pos[target] as usize;
+                    pred_edges[pos] = PredEdge::Negative { from: s, label, trans_idx };
+                    write_pos[target] += 1;
+                    if !visited2[target] {
+                        visited2[target] = true;
+                        queue2.push_back(target);
+                    }
+                }
+            }
+        }
+
+        if let Some(default_targets) = state.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            for (trans_idx, &(target, ref w)) in default_targets.iter().enumerate() {
+                if target >= n || w.is_empty() { continue; }
+                let pos = preds_offset[target] as usize + write_pos[target] as usize;
+                pred_edges[pos] = PredEdge::Default { from: s, trans_idx };
+                write_pos[target] += 1;
+                if !visited2[target] {
+                    visited2[target] = true;
+                    queue2.push_back(target);
+                }
+            }
+        }
+    }
+
+    drop(visited);
+    drop(visited2);
+    drop(write_pos);
+
+    let phase1_time = phase1_start.elapsed();
+    let phase2_start = std::time::Instant::now();
+
+    // Phase 2: Backward fixpoint using Vec-backed storage for future_final.
+    // Use Option<Weight> vector indexed by state ID for O(1) access.
+    let mut future_final: Vec<Option<Weight>> = vec![None; n];
     let mut worklist: VecDeque<NWAStateID> = VecDeque::new();
 
     for &s in &reachable_states {
         if let Some(ref fw) = states[s].final_weight {
             if !fw.is_empty() {
-                future_final_all.insert(s, fw.clone());
+                future_final[s] = Some(fw.clone());
                 worklist.push_back(s);
             }
         }
@@ -1158,66 +1223,62 @@ fn compute_finality_fixpoint_range(
             break;
         }
         steps += 1;
-        let f_s = match future_final_all.get(&s) {
+        let f_s = match &future_final[s] {
             Some(w) if !w.is_empty() => w.clone(),
             _ => continue,
         };
 
-        if let Some(pred_edges) = preds.get(&s) {
-            for edge in pred_edges {
-                let (pred_state, edge_w): (NWAStateID, &Weight) = match *edge {
-                    PredEdge::Epsilon { from, eps_idx } => {
-                        let &(target, ref w) = &states[from].epsilons[eps_idx];
-                        debug_assert_eq!(target, s);
-                        (from, w)
-                    }
-                    PredEdge::Negative {
-                        from,
-                        label,
-                        trans_idx,
-                    } => {
-                        let targets = states[from]
-                            .transitions
-                            .get(&label)
-                            .expect("stored negative edge must exist");
-                        let &(target, ref w) = &targets[trans_idx];
-                        debug_assert_eq!(target, s);
-                        (from, w)
-                    }
-                    PredEdge::Default { from, trans_idx } => {
-                        let targets = states[from]
-                            .transitions
-                            .get(&DEFAULT_TRANSITION_SYMBOL)
-                            .expect("stored default edge must exist");
-                        let &(target, ref w) = &targets[trans_idx];
-                        debug_assert_eq!(target, s);
-                        (from, w)
-                    }
-                };
-
-                let add = &f_s & edge_w;
-                if add.is_empty() {
-                    continue;
+        let start = preds_offset[s] as usize;
+        let end = preds_offset[s + 1] as usize;
+        for edge in &pred_edges[start..end] {
+            let (pred_state, edge_w): (NWAStateID, &Weight) = match *edge {
+                PredEdge::Epsilon { from, eps_idx } => {
+                    let &(target, ref w) = &states[from].epsilons[eps_idx];
+                    debug_assert_eq!(target, s);
+                    (from, w)
                 }
+                PredEdge::Negative { from, label, trans_idx } => {
+                    let targets = states[from]
+                        .transitions
+                        .get(&label)
+                        .expect("stored negative edge must exist");
+                    let &(target, ref w) = &targets[trans_idx];
+                    debug_assert_eq!(target, s);
+                    (from, w)
+                }
+                PredEdge::Default { from, trans_idx } => {
+                    let targets = states[from]
+                        .transitions
+                        .get(&DEFAULT_TRANSITION_SYMBOL)
+                        .expect("stored default edge must exist");
+                    let &(target, ref w) = &targets[trans_idx];
+                    debug_assert_eq!(target, s);
+                    (from, w)
+                }
+            };
 
-                let entry = future_final_all
-                    .entry(pred_state)
-                    .or_insert_with(Weight::zeros);
-                let old = entry.clone();
+            let add = &f_s & edge_w;
+            if add.is_empty() {
+                continue;
+            }
+
+            let entry = future_final[pred_state].get_or_insert_with(Weight::zeros);
+            // Use is_subset_of check instead of clone+compare to avoid expensive clone
+            if !add.is_subset_of(entry) {
                 *entry |= &add;
-                if *entry != old {
-                    worklist.push_back(pred_state);
-                }
+                worklist.push_back(pred_state);
             }
         }
     }
 
+    let phase2_time = phase2_start.elapsed();
+    eprintln!("TIMING: finality_fixpoint phase1={:?} phase2={:?} reachable={} pred_edges={} steps={}", 
+        phase1_time, phase2_time, reachable_states.len(), total_pred_edges, steps);
+
     let mut result: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
     for a in range {
-        if a >= n {
-            continue;
-        }
-        if let Some(w) = future_final_all.get(&a) {
+        if a >= n { continue; }
+        if let Some(w) = &future_final[a] {
             if !w.is_empty() {
                 result.insert(a, w.clone());
             }
