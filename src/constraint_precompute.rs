@@ -557,7 +557,7 @@ pub fn build_reduce_fallback_terminals_by_state(
 pub(crate) struct Precomputer1<'r> {
     pub(crate) tokenizer: &'r Tokenizer,
     pub(crate) vocab: VocabPrefixTree,
-    pub(crate) roots: BTreeMap<DfsKey, NWAStateID>,
+    pub(crate) roots: BTreeMap<DfsKey, BTreeSet<NWAStateID>>,
     pub(crate) state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     pub(crate) possible_matches: RefCell<
         BTreeMap<
@@ -644,9 +644,10 @@ impl<'r> Precomputer1<'r> {
         let mut roots = BTreeMap::new();
         for &rep_sid in state_to_rep.values() {
             let key = DfsKey::new(rep_sid, approx_start_state);
-            if !roots.contains_key(&key) {
+            let entry = roots.entry(key).or_insert_with(BTreeSet::new);
+            if entry.is_empty() {
                 let root_state = nwa.add_state();
-                roots.insert(key, root_state);
+                entry.insert(root_state);
             }
         }
         if crate::r#macro::is_debug_level_enabled(3) {
@@ -997,14 +998,16 @@ impl<'r> Precomputer1<'r> {
                 let mut unique_targets = std::collections::HashSet::new();
                 for (tsid, rep_tsid) in &self.state_to_rep {
                     let root_key = DfsKey::new(*rep_tsid, self.approx_start_state);
-                    if let Some(&state) = self.roots.get(&root_key) {
-                        let label = (tsid.0 + self.terminals_count) as Label;
-                        let weight = Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]));
-                        let add_start = std::time::Instant::now();
-                        self.nwa.add_transition(new_start_state, label, state, weight).unwrap();
-                        add_transition_time += add_start.elapsed();
-                        transitions_added += 1;
-                        unique_targets.insert(state);
+                    if let Some(states) = self.roots.get(&root_key) {
+                        for &state in states {
+                            let label = (tsid.0 + self.terminals_count) as Label;
+                            let weight = Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]));
+                            let add_start = std::time::Instant::now();
+                            self.nwa.add_transition(new_start_state, label, state, weight).unwrap();
+                            add_transition_time += add_start.elapsed();
+                            transitions_added += 1;
+                            unique_targets.insert(state);
+                        }
                     }
                 }
                 crate::debug!(4, "Precompute1 start-state breakdown (symbol-heavy): add_transition={:?}", add_transition_time);
@@ -1035,7 +1038,7 @@ impl<'r> Precomputer1<'r> {
                 for (rep_tsid, tsids) in rep_to_tsids {
                     debug_assert!(tsids.contains(&rep_tsid.0));
                     let root_key = DfsKey::new(rep_tsid, self.approx_start_state);
-                    if let Some(&state) = self.roots.get(&root_key) {
+                    if let Some(states) = self.roots.get(&root_key) {
                         group_count += 1;
                         tsid_count += tsids.len();
                         // Create combined tsid mask for all tsids that map to this representative.
@@ -1050,9 +1053,11 @@ impl<'r> Precomputer1<'r> {
                             tsid_offset_map,
                         );
                         mask_time += mask_start.elapsed();
-                        let add_eps_start = std::time::Instant::now();
-                        self.nwa.add_epsilon(new_start_state, state, tsid_mask);
-                        add_eps_time += add_eps_start.elapsed();
+                        for &state in states {
+                            let add_eps_start = std::time::Instant::now();
+                            self.nwa.add_epsilon(new_start_state, state, tsid_mask.clone());
+                            add_eps_time += add_eps_start.elapsed();
+                        }
                     }
                 }
                 crate::debug!(
@@ -1534,35 +1539,6 @@ impl<'r> Precomputer1<'r> {
         result
     }
 
-    fn get_or_create_next_state(
-        &mut self,
-        _src_node: NWAStateID,
-        tokenizer_state: TokenizerStateID,
-        approx_state: usize,
-        next_level_assoc: &mut BTreeMap<DfsKey, NWAStateID>,
-        depth: usize,
-    ) -> NWAStateID {
-        let result = match next_level_assoc.entry(DfsKey::new(tokenizer_state, approx_state)) {
-            std::collections::btree_map::Entry::Occupied(o) => *o.get(),
-            std::collections::btree_map::Entry::Vacant(v) => {
-                // NOTE: The previous state reuse optimization was removed because it
-                // iterated through all pending_epsilons (~84 items on avg) but NEVER
-                // found a reusable state (0 reuses in 500k+ calls, 42M+ loop iterations).
-                // The check `live.is_disjoint(&Weight::all())` can only be true if the
-                // live_tokens entry is empty, which almost never happens.
-                let t = self.nwa.add_state();
-                if self.nwa_rep_stats_enabled {
-                    *self.nwa_states_by_rep.entry(tokenizer_state).or_insert(0) += 1;
-                }
-                self.record_rep_depth_state(tokenizer_state, depth);
-                self.record_dfskey_state(tokenizer_state, approx_state);
-                v.insert(t);
-                t
-            }
-        };
-        result
-    }
-
     /// Create an expanded weight from a single token ID.
     /// Expands from N-space to N×M-space where M = num_tsids.
     /// If num_tsids == 0 (symbol-heavy mode), returns the token ID directly in N-space.
@@ -1888,7 +1864,7 @@ impl<'r> Precomputer1<'r> {
     fn dfs(
         &mut self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<DfsKey, NWAStateID>,
+        assoc_by_state: BTreeMap<DfsKey, BTreeSet<NWAStateID>>,
     ) {
         self.pb.inc(1);
         let mut total_pending_iters = 0usize;
@@ -1898,11 +1874,11 @@ impl<'r> Precomputer1<'r> {
                 String::from_utf8_lossy(segment_bytes), child_vocab_node.token_id());
             crate::debug!(7, "Initial assoc_by_state: {:?}", assoc_by_state);
             
-            let mut next_level_assoc: BTreeMap<DfsKey, NWAStateID> =
+            let mut next_level_assoc: BTreeMap<DfsKey, BTreeSet<NWAStateID>> =
                 BTreeMap::new();
 
             // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
-            let mut pending: BTreeMap<usize, BTreeMap<DfsKey, NWAStateID>> = BTreeMap::new();
+            let mut pending: BTreeMap<usize, BTreeMap<DfsKey, BTreeSet<NWAStateID>>> = BTreeMap::new();
             pending.insert(0, assoc_by_state.clone());
 
             let child_reachable = child_vocab_node.reachable_token_ids();
@@ -1926,24 +1902,16 @@ impl<'r> Precomputer1<'r> {
                 
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
-                    crate::debug!(7, "  -> End of segment, adding epsilons to next level");
-                    for (state_key, node) in states_at_pos {
-                        let next = self.get_or_create_next_state(
-                            node,
-                            state_key.tokenizer_state,
-                            state_key.approx_state,
-                            &mut next_level_assoc,
-                            child_vocab_node.prefix_length(),
-                        );
-                        crate::debug!(7, "     State {} (tsid={:?}) -> epsilon to state {}", node, state_key.tokenizer_state, next);
-                        // Use expanded "all" weight
-                        let weight_all = self.expanded_weight_all();
-                        self.add_pending_epsilon(node, next, weight_all);
+                    crate::debug!(7, "  -> End of segment, propagating to next level");
+                    for (state_key, nodes) in states_at_pos {
+                        let entry = next_level_assoc.entry(state_key).or_insert_with(BTreeSet::new);
+                        entry.extend(nodes);
                     }
                     continue;
                 }
 
-                for (state_key, src_node) in states_at_pos {
+                for (state_key, nodes) in states_at_pos {
+                    for src_node in nodes {
                     let tokenizer_state_id = state_key.tokenizer_state;
                     let approx_state = state_key.approx_state;
                     let slice = &segment_bytes[pos..];
@@ -2033,9 +2001,21 @@ impl<'r> Precomputer1<'r> {
 
                         let target_entry = dest_map.entry(DfsKey::new(initial_tsid, next_approx_state));
                         let target = match target_entry {
-                            std::collections::btree_map::Entry::Occupied(o) => {
-                                crate::debug!(7, "      -> Continuation to existing state: target={}", *o.get());
-                                *o.get()
+                            std::collections::btree_map::Entry::Occupied(mut o) => {
+                                if let Some(&existing) = o.get().iter().next() {
+                                    crate::debug!(7, "      -> Continuation to existing state: target={}", existing);
+                                    existing
+                                } else {
+                                    let t = self.nwa.add_state();
+                                    if self.nwa_rep_stats_enabled {
+                                        *self.nwa_states_by_rep.entry(initial_tsid).or_insert(0) += 1;
+                                    }
+                                    self.record_rep_depth_state(initial_tsid, base_depth + next_pos);
+                                    self.record_dfskey_state(initial_tsid, next_approx_state);
+                                    crate::debug!(7, "      -> Created new continuation state: target={}", t);
+                                    o.get_mut().insert(t);
+                                    t
+                                }
                             }
                             std::collections::btree_map::Entry::Vacant(v) => {
                                 let t = self.nwa.add_state();
@@ -2045,7 +2025,9 @@ impl<'r> Precomputer1<'r> {
                                 self.record_rep_depth_state(initial_tsid, base_depth + next_pos);
                                 self.record_dfskey_state(initial_tsid, next_approx_state);
                                 crate::debug!(7, "      -> Created new continuation state: target={}", t);
-                                v.insert(t);
+                                let mut set = BTreeSet::new();
+                                set.insert(t);
+                                v.insert(set);
                                 t
                             }
                         };
@@ -2097,17 +2079,11 @@ impl<'r> Precomputer1<'r> {
                             );
                         }
 
-                        let next = self.get_or_create_next_state(
-                            src_node,
-                            final_tokenizer_state,
-                            approx_state,
-                            &mut next_level_assoc,
-                            base_depth + pos,
-                        );
-                        crate::debug!(7, "    -> END_STATE epsilon: {} --eps--> {}", src_node, next);
-                        // Use expanded "all" weight
-                        let weight_all = self.expanded_weight_all();
-                        self.add_pending_epsilon(src_node, next, weight_all);
+                        let entry = next_level_assoc
+                            .entry(DfsKey::new(final_tokenizer_state, approx_state))
+                            .or_insert_with(BTreeSet::new);
+                        entry.insert(src_node);
+                    }
                     }
                 }
             }
