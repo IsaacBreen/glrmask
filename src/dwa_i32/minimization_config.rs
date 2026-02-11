@@ -369,7 +369,7 @@ impl DeterminizeAndMinimizeConfig {
                 // Specialized DWAs derived from Super by weight mapping.
                 // Det/min is valid after vocab-space instantiation.
                 let config_choice = std::env::var("SPECSUPER_CONFIG")
-                    .unwrap_or_else(|_| "baseline".to_string())
+                    .unwrap_or_else(|_| "no-min".to_string())
                     .to_lowercase();
                 let (nwa_passes, dwa_passes) = match config_choice.as_str() {
                     "baseline" => (

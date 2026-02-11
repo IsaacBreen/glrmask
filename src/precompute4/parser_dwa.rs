@@ -886,107 +886,12 @@ fn make_template_bundle(
         }
         return nwa;
     }
-
-    let bundle_start = Instant::now();
-    let bundle_size = terminal_to_weight.len();
-
-    // Graph coloring analysis: nodes = terminals, incompatible = overlapping non-equal weights.
-    {
-        let entries: Vec<(&Option<TerminalID>, &Weight)> = terminal_to_weight
-            .iter()
-            .filter(|(_, w)| !w.is_empty())
-            .collect();
-        let n = entries.len();
-
-        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let wi = entries[i].1;
-                let wj = entries[j].1;
-                if wi == wj {
-                    continue;
-                }
-                let intersection = wi.clone() & wj;
-                if intersection.is_empty() {
-                    continue;
-                }
-                adj[i].push(j);
-                adj[j].push(i);
-            }
-        }
-
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by(|a, b| adj[*b].len().cmp(&adj[*a].len()));
-
-        let mut color: Vec<usize> = vec![usize::MAX; n];
-        let mut num_colors = 0usize;
-        for &node in &order {
-            let mut used = vec![false; n + 1];
-            for &neighbor in &adj[node] {
-                if color[neighbor] != usize::MAX {
-                    used[color[neighbor]] = true;
-                }
-            }
-            let mut c = 0usize;
-            while c < used.len() && used[c] {
-                c += 1;
-            }
-            color[node] = c;
-            num_colors = num_colors.max(c + 1);
-        }
-
-        let mut distinct_weights: BTreeSet<Weight> = BTreeSet::new();
-        for (_, w) in &entries {
-            distinct_weights.insert((*w).clone());
-        }
-        let num_incompatible_edges = adj.iter().map(|a| a.len()).sum::<usize>() / 2;
-
-        eprintln!(
-            "TIMING: bundle_coloring size={} distinct_weights={} incompatible_edges={} greedy_colors={}",
-            n,
-            distinct_weights.len(),
-            num_incompatible_edges,
-            num_colors
-        );
-    }
-
-    // Analyze weight structure for large bundles.
-    if bundle_size >= 10 {
-        let mut weight_groups: BTreeMap<Weight, Vec<Option<TerminalID>>> = BTreeMap::new();
-        for (term_opt, weight) in terminal_to_weight.iter() {
-            if !weight.is_empty() {
-                weight_groups
-                    .entry(weight.clone())
-                    .or_default()
-                    .push(*term_opt);
-            }
-        }
-        let distinct_weights = weight_groups.len();
-
-        eprintln!(
-            "TIMING: make_template_bundle_analysis size={} distinct_weights={}",
-            bundle_size,
-            distinct_weights
-        );
-        for (weight, terms) in &weight_groups {
-            eprintln!(
-                "  weight_group: terminals={} weight_bits={}",
-                terms.len(),
-                weight.len(),
-            );
-        }
-    }
-
-    let mut build_singles_time = std::time::Duration::ZERO;
-    let mut union_time = std::time::Duration::ZERO;
-
     let mut combined: Option<NWA> = None;
 
     for (term_opt, weight) in terminal_to_weight {
         if weight.is_empty() {
             continue;
         }
-        let single_start = Instant::now();
         let base_dwa = match term_opt {
             Some(term_id) if ignore_terminal_ids.contains(term_id) => ignore_dwa,
             Some(term_id) => template_dwas.get(term_id).unwrap_or(ignore_dwa),
@@ -1006,15 +911,11 @@ fn make_template_bundle(
                 state.final_weight = Some(weight.clone());
             }
         }
-        build_singles_time += single_start.elapsed();
-
-        let union_start = Instant::now();
         if let Some(existing) = &mut combined {
             existing.union_assign(&single_nwa);
         } else {
             combined = Some(single_nwa);
         }
-        union_time += union_start.elapsed();
     }
 
     let combined = match combined {
@@ -1022,24 +923,8 @@ fn make_template_bundle(
         None => return NWA::new_empty(),
     };
 
-    let detmin_start = Instant::now();
     let dwa = combined.determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
-    let detmin_time = detmin_start.elapsed();
-
-    let from_dwa_start = Instant::now();
-    let result = NWA::from_dwa(&dwa);
-    let from_dwa_time = from_dwa_start.elapsed();
-
-    eprintln!(
-        "TIMING: make_template_bundle size={} build_singles={:?} union={:?} detmin={:?} from_dwa={:?} total={:?}",
-        bundle_size,
-        build_singles_time,
-        union_time,
-        detmin_time,
-        from_dwa_time,
-        bundle_start.elapsed(),
-    );
-    result
+    NWA::from_dwa(&dwa)
 }
 
 /// Build the Parser DWA from the GLR parser and lexical NWA.
