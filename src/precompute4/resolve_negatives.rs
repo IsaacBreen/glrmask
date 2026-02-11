@@ -1201,12 +1201,17 @@ fn compute_finality_fixpoint_range(
     // Use Option<Weight> vector indexed by state ID for O(1) access.
     let mut future_final: Vec<Option<Weight>> = vec![None; n];
     let mut worklist: VecDeque<NWAStateID> = VecDeque::new();
+    // Track which states are already in the worklist to avoid redundant enqueues.
+    // Without this, the same state can be enqueued multiple times, causing redundant
+    // processing of all its predecessor edges on each dequeue.
+    let mut in_worklist: Vec<bool> = vec![false; n];
 
     for &s in &reachable_states {
         if let Some(ref fw) = states[s].final_weight {
             if !fw.is_empty() {
                 future_final[s] = Some(fw.clone());
                 worklist.push_back(s);
+                in_worklist[s] = true;
             }
         }
     }
@@ -1218,6 +1223,7 @@ fn compute_finality_fixpoint_range(
     let mut steps = 0usize;
 
     while let Some(s) = worklist.pop_front() {
+        in_worklist[s] = false;
         if max_steps > 0 && steps >= max_steps {
             crate::debug!(4, "Pass2 finality fixpoint: reached max steps {}, truncating", max_steps);
             break;
@@ -1266,7 +1272,10 @@ fn compute_finality_fixpoint_range(
             // Use is_subset_of check instead of clone+compare to avoid expensive clone
             if !add.is_subset_of(entry) {
                 *entry |= &add;
-                worklist.push_back(pred_state);
+                if !in_worklist[pred_state] {
+                    worklist.push_back(pred_state);
+                    in_worklist[pred_state] = true;
+                }
             }
         }
     }
