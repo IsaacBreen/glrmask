@@ -596,6 +596,11 @@ pub(crate) struct Precomputer1<'r> {
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ignored_terminals: Arc<Vec<bool>>,
     always_allowed_by_label: Arc<Vec<Vec<Label>>>,
+    nwa_rep_stats_enabled: bool,
+    nwa_states_by_rep: BTreeMap<TokenizerStateID, usize>,
+    nwa_states_by_rep_depth: BTreeMap<TokenizerStateID, BTreeMap<usize, usize>>,
+    approx_states_seen: BTreeSet<usize>,
+    dfs_keys_seen: BTreeSet<DfsKey>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -650,6 +655,26 @@ impl<'r> Precomputer1<'r> {
                 roots.len(),
                 state_to_rep.len()
             );
+        }
+
+        let nwa_rep_stats_enabled = std::env::var("PRECOMPUTE1_NWA_REP_STATS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+            || crate::r#macro::is_debug_level_enabled(4);
+        let mut nwa_states_by_rep = BTreeMap::new();
+        let mut nwa_states_by_rep_depth = BTreeMap::new();
+        let mut approx_states_seen = BTreeSet::new();
+        let mut dfs_keys_seen = BTreeSet::new();
+        if nwa_rep_stats_enabled {
+            for key in roots.keys() {
+                *nwa_states_by_rep.entry(key.tokenizer_state).or_insert(0) += 1;
+                let depth_map = nwa_states_by_rep_depth
+                    .entry(key.tokenizer_state)
+                    .or_insert_with(BTreeMap::new);
+                *depth_map.entry(0).or_insert(0) += 1;
+                approx_states_seen.insert(key.approx_state);
+                dfs_keys_seen.insert(*key);
+            }
         }
 
         let pb = NoOpPb;
@@ -715,6 +740,11 @@ impl<'r> Precomputer1<'r> {
             self_extending_labels_for_collapse,
             ignored_terminals,
             always_allowed_by_label,
+            nwa_rep_stats_enabled,
+            nwa_states_by_rep,
+            nwa_states_by_rep_depth,
+            approx_states_seen,
+            dfs_keys_seen,
         }
     }
 
@@ -1116,6 +1146,93 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(3, "Terminal NWA: {}, num_tsids={}", 
                   self.nwa.stats(), self.num_tsids);
 
+        if self.nwa_rep_stats_enabled && !self.nwa_states_by_rep.is_empty() {
+            let mut counts: Vec<(TokenizerStateID, usize)> = self
+                .nwa_states_by_rep
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            counts.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let total_states: usize = counts.iter().map(|(_, v)| *v).sum();
+            let reps = counts.len();
+            let max = counts.first().map(|(_, v)| *v).unwrap_or(0);
+            let min = counts.last().map(|(_, v)| *v).unwrap_or(0);
+            let avg = total_states as f64 / reps as f64;
+
+            let mut values: Vec<usize> = counts.iter().map(|(_, v)| *v).collect();
+            values.sort_unstable();
+            let p50 = values[reps / 2];
+            let p90 = values[(reps * 90) / 100];
+            let p99 = values[(reps * 99) / 100];
+
+            let top: Vec<(usize, usize)> = counts
+                .iter()
+                .take(10)
+                .map(|(k, v)| (k.0, *v))
+                .collect();
+
+            crate::debug!(
+                4,
+                "Terminal NWA per-rep states (created): reps={}, total_states={}, avg={:.2}, min={}, p50={}, p90={}, p99={}, max={}",
+                reps,
+                total_states,
+                avg,
+                min,
+                p50,
+                p90,
+                p99,
+                max
+            );
+            crate::debug!(4, "Terminal NWA per-rep top10 (tsid -> states): {:?}", top);
+
+            let dfa = self.tokenizer.dfa();
+            let mut top_details: Vec<(usize, usize, usize, usize, usize, usize)> = Vec::new();
+            for (tsid, count) in &top {
+                if let Some(state) = dfa.states.get(*tsid) {
+                    let transitions = state.transitions.len();
+                    let finalizers = state.finalizers.len();
+                    let futures = state.possible_future_group_ids.len();
+                    let accessible_terms = self
+                        .tokenizer
+                        .tokens_accessible_from_state(TokenizerStateID(*tsid))
+                        .len();
+                    top_details.push((*tsid, *count, transitions, finalizers, futures, accessible_terms));
+                }
+            }
+            crate::debug!(
+                4,
+                "Terminal NWA per-rep top10 details (tsid, states, transitions, finalizers, futures, accessible_terms): {:?}",
+                top_details
+            );
+
+            if let Some((top_tsid, _)) = top.first() {
+                if let Some(depths) = self.nwa_states_by_rep_depth.get(&TokenizerStateID(*top_tsid)) {
+                    let mut depth_counts: Vec<(usize, usize)> =
+                        depths.iter().map(|(d, c)| (*d, *c)).collect();
+                    depth_counts.sort_by_key(|(d, _)| *d);
+                    let max_depth = depth_counts.last().map(|(d, _)| *d).unwrap_or(0);
+                    let sample_len = depth_counts.len().min(20);
+                    let sample = depth_counts[..sample_len].to_vec();
+                    crate::debug!(
+                        4,
+                        "Terminal NWA rep {} depth histogram (first {}, max_depth={}): {:?}",
+                        top_tsid,
+                        sample_len,
+                        max_depth,
+                        sample
+                    );
+                }
+            }
+
+            crate::debug!(
+                4,
+                "Approx DFA usage in NWA: approx_states_seen={}, dfs_keys_seen={}",
+                self.approx_states_seen.len(),
+                self.dfs_keys_seen.len()
+            );
+        }
+
         if std::env::var("DWA_DUMP_NWA").map(|v| v == "1").unwrap_or(false) {
             crate::debug!(5, "Dumping NWA to nwa_dump.json");
             let json = serde_json::to_string(&self.nwa).unwrap();
@@ -1124,16 +1241,20 @@ impl<'r> Precomputer1<'r> {
 
         // NWA-level always-allowed collapse only (follow pruning removed).
         if !self.always_allowed_by_label.is_empty() {
+            let before_stats = self.nwa.stats();
             let collapse_start = std::time::Instant::now();
             let changed = collapse_always_allowed(
                 &mut self.nwa,
                 &self.always_allowed_by_label,
                 self.terminals_count,
             );
+            let after_stats = self.nwa.stats();
             crate::debug!(
                 4,
-                "Terminal NWA always-allowed collapse: changed={}",
+                "Terminal NWA always-allowed collapse: changed={}, {} -> {}",
                 changed,
+                before_stats,
+                after_stats,
             );
             eprintln!(
                 "TIMING: terminal_nwa_always_allowed_collapse {:?}",
@@ -1227,6 +1348,7 @@ impl<'r> Precomputer1<'r> {
             crate::datastructures::factorized_weight::set_factorized_weight_profile_active(true);
             crate::datastructures::factorized_weight::reset_factorized_weight_profile();
         }
+        crate::debug!(4, "Terminal NWA (pre-minimize): {}", self.nwa.stats());
         crate::debug!(5, "precompute1::determinize_and_minimize start");
         let dwa = timeit!("precompute1::determinize_and_minimize", {
             self.nwa.determinize_and_minimize_with_hook(
@@ -1418,6 +1540,7 @@ impl<'r> Precomputer1<'r> {
         tokenizer_state: TokenizerStateID,
         approx_state: usize,
         next_level_assoc: &mut BTreeMap<DfsKey, NWAStateID>,
+        depth: usize,
     ) -> NWAStateID {
         let result = match next_level_assoc.entry(DfsKey::new(tokenizer_state, approx_state)) {
             std::collections::btree_map::Entry::Occupied(o) => *o.get(),
@@ -1428,6 +1551,11 @@ impl<'r> Precomputer1<'r> {
                 // The check `live.is_disjoint(&Weight::all())` can only be true if the
                 // live_tokens entry is empty, which almost never happens.
                 let t = self.nwa.add_state();
+                if self.nwa_rep_stats_enabled {
+                    *self.nwa_states_by_rep.entry(tokenizer_state).or_insert(0) += 1;
+                }
+                self.record_rep_depth_state(tokenizer_state, depth);
+                self.record_dfskey_state(tokenizer_state, approx_state);
                 v.insert(t);
                 t
             }
@@ -1657,6 +1785,27 @@ impl<'r> Precomputer1<'r> {
         weight
     }
 
+    #[inline]
+    fn record_rep_depth_state(&mut self, rep: TokenizerStateID, depth: usize) {
+        if !self.nwa_rep_stats_enabled {
+            return;
+        }
+        let depth_map = self
+            .nwa_states_by_rep_depth
+            .entry(rep)
+            .or_insert_with(BTreeMap::new);
+        *depth_map.entry(depth).or_insert(0) += 1;
+    }
+
+    #[inline]
+    fn record_dfskey_state(&mut self, rep: TokenizerStateID, approx_state: usize) {
+        if !self.nwa_rep_stats_enabled {
+            return;
+        }
+        self.approx_states_seen.insert(approx_state);
+        self.dfs_keys_seen.insert(DfsKey::new(rep, approx_state));
+    }
+
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
         let start = self.dfs_profile_enabled.then(std::time::Instant::now);
@@ -1743,6 +1892,7 @@ impl<'r> Precomputer1<'r> {
     ) {
         self.pb.inc(1);
         let mut total_pending_iters = 0usize;
+        let base_depth = vocab_node.prefix_length();
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             crate::debug!(7, "=== Processing vocab segment: {:?} (token_id={}) ===",
                 String::from_utf8_lossy(segment_bytes), child_vocab_node.token_id());
@@ -1783,6 +1933,7 @@ impl<'r> Precomputer1<'r> {
                             state_key.tokenizer_state,
                             state_key.approx_state,
                             &mut next_level_assoc,
+                            child_vocab_node.prefix_length(),
                         );
                         crate::debug!(7, "     State {} (tsid={:?}) -> epsilon to state {}", node, state_key.tokenizer_state, next);
                         // Use expanded "all" weight
@@ -1888,6 +2039,11 @@ impl<'r> Precomputer1<'r> {
                             }
                             std::collections::btree_map::Entry::Vacant(v) => {
                                 let t = self.nwa.add_state();
+                                if self.nwa_rep_stats_enabled {
+                                    *self.nwa_states_by_rep.entry(initial_tsid).or_insert(0) += 1;
+                                }
+                                self.record_rep_depth_state(initial_tsid, base_depth + next_pos);
+                                self.record_dfskey_state(initial_tsid, next_approx_state);
                                 crate::debug!(7, "      -> Created new continuation state: target={}", t);
                                 v.insert(t);
                                 t
@@ -1946,6 +2102,7 @@ impl<'r> Precomputer1<'r> {
                             final_tokenizer_state,
                             approx_state,
                             &mut next_level_assoc,
+                            base_depth + pos,
                         );
                         crate::debug!(7, "    -> END_STATE epsilon: {} --eps--> {}", src_node, next);
                         // Use expanded "all" weight

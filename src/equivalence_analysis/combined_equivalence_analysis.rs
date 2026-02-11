@@ -11,7 +11,7 @@
 //! This combined approach significantly improves performance for grammars with
 //! large DFAs by reducing the workload of the expensive vocab analysis.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::dfa_u8::{Regex, Tokenizer};
 
@@ -137,6 +137,46 @@ pub fn compute_combined_equivalence(
         reduced_states.len(),
         start.elapsed(),
     );
+
+    if crate::r#macro::is_debug_level_enabled(4) {
+        let mut singletons = 0usize;
+        let mut multi_classes = 0usize;
+        let mut multi_states = 0usize;
+        let mut max_class_size = 0usize;
+        let mut size_hist: BTreeMap<usize, usize> = BTreeMap::new();
+
+        for class in &state_classes {
+            let size = class.len();
+            *size_hist.entry(size).or_insert(0) += 1;
+            if size == 1 {
+                singletons += 1;
+            } else {
+                multi_classes += 1;
+                multi_states += size;
+            }
+            if size > max_class_size {
+                max_class_size = size;
+            }
+        }
+
+        let total_classes = state_classes.len();
+        crate::debug!(
+            4,
+            "State equiv classes: total={}, singletons={}, multi_classes={}, multi_states={}, max_class_size={}",
+            total_classes,
+            singletons,
+            multi_classes,
+            multi_states,
+            max_class_size
+        );
+
+        let mut buckets: Vec<(usize, usize)> = size_hist
+            .into_iter()
+            .filter(|(size, _)| *size <= 10)
+            .collect();
+        buckets.sort_by_key(|(size, _)| *size);
+        crate::debug!(4, "State equiv size histogram (<=10): {:?}", buckets);
+    }
 
     #[cfg(test)]
     {

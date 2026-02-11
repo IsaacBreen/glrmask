@@ -45,6 +45,14 @@ pub struct LazyApproximateDFA {
 }
 
 impl LazyApproximateDFA {
+    pub fn nfa_states(&self) -> usize {
+        self.nfa.num_states
+    }
+
+    pub fn dfa_states(&self) -> usize {
+        self.dfa_state_sets.len()
+    }
+
     pub fn new(nfa: ApproximateParserNFA) -> Self {
         let mut initial_set = Bitset::new(nfa.num_states);
         if nfa.num_states > 0 {
