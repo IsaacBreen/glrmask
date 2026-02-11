@@ -4659,6 +4659,49 @@ fn test_json_schema_gpt2_real_vocab() {
 }
 
 #[test]
+#[ignore]
+fn test_specsuper_config_equivalence() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let (llm_token_map, max_id) = match load_gpt2_vocab() {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "Skipping test_specsuper_config_equivalence: GPT-2 vocab not found. \
+                 Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+            );
+            return;
+        }
+    };
+
+    let ebnf_grammar = include_str!("js.ebnf");
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)
+        .expect("Failed to parse JS grammar");
+    let grammar_definition = Arc::new(grammar_definition);
+    let config = GrammarConstraintConfig::default();
+
+    std::env::set_var("SPECSUPER_CONFIG", "baseline");
+    let constraint_baseline = GrammarConstraint::new_from_grammar_definition(
+        Arc::clone(&grammar_definition),
+        llm_token_map.clone(),
+        max_id,
+        &config,
+    );
+
+    std::env::set_var("SPECSUPER_CONFIG", "no-min");
+    let constraint_nomin = GrammarConstraint::new_from_grammar_definition(
+        Arc::clone(&grammar_definition),
+        llm_token_map,
+        max_id,
+        &config,
+    );
+
+    crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test(
+        constraint_baseline.parser_dwa.clone(),
+        constraint_nomin.parser_dwa.clone(),
+    );
+}
+
+#[test]
 fn test_assign_ws_suffix_prune_keeps_class_31() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
 

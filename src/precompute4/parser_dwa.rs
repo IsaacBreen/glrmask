@@ -575,123 +575,6 @@ fn weight_from_terminals(
     w
 }
 
-fn check_dwa_contamination_free(dwa: &DWA) -> bool {
-    // Contamination-free means: for any specialization map sigma: Terminal -> Weight
-    // and any path p with edge weights w_i, the following holds:
-    //   intersect_i spec_sigma(w_i) == spec_sigma(intersect_i w_i)
-    // where spec_sigma(w) = union_{t in w} sigma(t).
-    //
-    // Theorem: This holds for all sigma iff on every path, some edge weight equals
-    // the intersection of all edge weights on that path: exists j: w_j = intersect_i w_i.
-    //
-    // Proof sketch:
-    // (<=) If w_j subset w_i for all i, then intersect_i w_i = w_j. spec is monotone,
-    //      so intersect_i spec(w_i) = spec(w_j) = spec(intersect_i w_i).
-    // (=>) If no w_j equals the intersection, each w_i has t_i in w_i \ intersect_j w_j.
-    //      Adversarial sigma maps all t_i to the same token and maps terminals in
-    //      intersect_j w_j to empty. Then LHS is non-empty and RHS is empty.
-    //
-    // Algorithm: forward worklist over (state, I, has_witness) where I is the running
-    // intersection of edge weights and has_witness tracks whether some edge weight
-    // equals the current intersection on the path. Any reachable (state, I, false)
-    // means contamination is possible.
-    if dwa.states.0.is_empty() {
-        return true;
-    }
-
-    let mut visited: FxHashSet<(StateID, Weight, bool)> = FxHashSet::default();
-    let mut queue: VecDeque<(StateID, Weight, bool)> = VecDeque::new();
-    let start_entry = (dwa.body.start_state, Weight::all(), true);
-    visited.insert(start_entry.clone());
-    queue.push_back(start_entry);
-
-    while let Some((state_id, intersection, has_witness)) = queue.pop_front() {
-        let state = &dwa.states[state_id];
-        for (label, next_state) in &state.transitions {
-            let w = match state.trans_weights.get(label) {
-                Some(weight) => weight,
-                None => continue,
-            };
-            let next_intersection = intersection.clone() & w;
-            let next_has_witness = if next_intersection == intersection {
-                has_witness || (*w == intersection)
-            } else {
-                *w == next_intersection
-            };
-            if !next_has_witness {
-                crate::debug!(
-                    3,
-                    "Super DWA contamination violation at state {} with intersection {:?}",
-                    next_state,
-                    next_intersection
-                );
-                return false;
-            }
-            let entry = (*next_state, next_intersection, next_has_witness);
-            if visited.insert(entry.clone()) {
-                queue.push_back(entry);
-            }
-        }
-    }
-
-    true
-}
-
-fn make_dwa_contamination_free(dwa: &DWA) -> DWA {
-    // Product construction over (state, accumulated_intersection). Each transition
-    // uses the new accumulated intersection as the edge weight, making the DWA
-    // contamination-free by construction.
-    if dwa.states.0.is_empty() {
-        return DWA::new_empty();
-    }
-
-    let mut result = DWA::new();
-    let mut mapping: FxHashMap<(StateID, Weight), StateID> = FxHashMap::default();
-    let mut queue: VecDeque<(StateID, Weight)> = VecDeque::new();
-
-    let start_key = (dwa.body.start_state, Weight::all());
-    mapping.insert(start_key.clone(), result.body.start_state);
-    queue.push_back(start_key);
-
-    while let Some((orig_state, acc)) = queue.pop_front() {
-        let new_state = *mapping
-            .get(&(orig_state, acc.clone()))
-            .expect("state must exist");
-        let state = &dwa.states[orig_state];
-
-        if let Some(fw) = &state.final_weight {
-            let new_fw = &acc & fw;
-            if !new_fw.is_empty() {
-                result.states[new_state].final_weight = Some(new_fw);
-            }
-        }
-
-        for (label, next_state) in &state.transitions {
-            let w = match state.trans_weights.get(label) {
-                Some(weight) => weight,
-                None => continue,
-            };
-            let new_acc = acc.clone() & w;
-            if new_acc.is_empty() {
-                continue;
-            }
-            let key = (*next_state, new_acc.clone());
-            let target_state = if let Some(id) = mapping.get(&key) {
-                *id
-            } else {
-                let id = result.add_state();
-                mapping.insert(key.clone(), id);
-                queue.push_back(key);
-                id
-            };
-            let _ = result.add_transition(new_state, *label, target_state, new_acc);
-        }
-    }
-
-    result.optimize(DwaOptimizeConfig::SpecializedSuper);
-    result
-}
-
 fn ensure_nt_stack_state(
     nwa: &mut NWA,
     nt_stacks: &mut BTreeMap<NonTerminalID, Vec<StateID>>,
@@ -946,14 +829,6 @@ fn build_super_nwa_from_grouped(
         nwa.states.len(),
     );
 
-    let mut nwa_for_detmin = nwa;
-    let dwa = nwa_for_detmin.determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
-    crate::debug!(5, "Super DWA before contamination-free transform: {}", dwa.stats());
-    let dwa = make_dwa_contamination_free(&dwa);
-    crate::debug!(5, "Super DWA after contamination-free transform: {}", dwa.stats());
-    let is_clean = check_dwa_contamination_free(&dwa);
-    assert!(is_clean, "Super DWA is not contamination-free");
-    let nwa = NWA::from_dwa(&dwa);
     Ok(nwa)
 }
 
@@ -1012,78 +887,159 @@ fn make_template_bundle(
         return nwa;
     }
 
-    let mut union_cache: HashMap<Weight, Weight> = HashMap::new();
-    let concrete_template = Weight::zeros();
-    let mut convert_weight = |w: &Weight| -> Weight {
-        if std::mem::discriminant(w) == std::mem::discriminant(&concrete_template) {
-            w.clone()
-        } else {
-            Weight::from_rsb(w.to_rsb_allow_expansion())
-        }
-    };
-    let mut map_weight = |w: &Weight| -> Weight {
-        if w.is_empty() {
-            return Weight::zeros();
-        }
-        if w.is_all_fast() {
-            let mut all = Weight::zeros();
-            for term_weight in terminal_to_weight.values() {
-                let converted = convert_weight(term_weight);
-                all |= &converted;
-            }
-            union_cache.insert(w.clone(), all.clone());
-            return all;
-        }
-        if let Some(cached) = union_cache.get(w) {
-            return cached.clone();
-        }
-        let mut concrete = Weight::zeros();
-        for bit in w.iter_up_to_allow_expansion(bit_to_term.len()) {
-            if let Some(term_opt) = bit_to_term.get(bit) {
-                if let Some(term_weight) = terminal_to_weight.get(term_opt) {
-                    let converted = convert_weight(term_weight);
-                    concrete |= &converted;
-                }
-            }
-        }
-        union_cache.insert(w.clone(), concrete.clone());
-        concrete
-    };
+    let bundle_start = Instant::now();
+    let bundle_size = terminal_to_weight.len();
 
-    let mut nwa = NWA::new_empty();
-    nwa.body = super_nwa.body.clone();
-    nwa.states.0.reserve(super_nwa.states.len());
-    for state in &super_nwa.states.0 {
-        let mut new_state = crate::dwa_i32::nwa::NWAState::default();
-        if let Some(fw) = &state.final_weight {
-            let concrete = map_weight(fw);
-            if !concrete.is_empty() {
-                new_state.final_weight = Some(concrete);
+    // Graph coloring analysis: nodes = terminals, incompatible = overlapping non-equal weights.
+    {
+        let entries: Vec<(&Option<TerminalID>, &Weight)> = terminal_to_weight
+            .iter()
+            .filter(|(_, w)| !w.is_empty())
+            .collect();
+        let n = entries.len();
+
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let wi = entries[i].1;
+                let wj = entries[j].1;
+                if wi == wj {
+                    continue;
+                }
+                let intersection = wi.clone() & wj;
+                if intersection.is_empty() {
+                    continue;
+                }
+                adj[i].push(j);
+                adj[j].push(i);
             }
         }
-        for (label, targets) in &state.transitions {
-            let mut new_targets = Vec::with_capacity(targets.len());
-            for (dest, w) in targets {
-                let concrete = map_weight(w);
-                if !concrete.is_empty() {
-                    new_targets.push((*dest, concrete));
+
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|a, b| adj[*b].len().cmp(&adj[*a].len()));
+
+        let mut color: Vec<usize> = vec![usize::MAX; n];
+        let mut num_colors = 0usize;
+        for &node in &order {
+            let mut used = vec![false; n + 1];
+            for &neighbor in &adj[node] {
+                if color[neighbor] != usize::MAX {
+                    used[color[neighbor]] = true;
                 }
             }
-            if !new_targets.is_empty() {
-                new_state.transitions.insert(*label, new_targets);
+            let mut c = 0usize;
+            while c < used.len() && used[c] {
+                c += 1;
             }
+            color[node] = c;
+            num_colors = num_colors.max(c + 1);
         }
-        for (dest, w) in &state.epsilons {
-            let concrete = map_weight(w);
-            if !concrete.is_empty() {
-                new_state.epsilons.push((*dest, concrete));
-            }
+
+        let mut distinct_weights: BTreeSet<Weight> = BTreeSet::new();
+        for (_, w) in &entries {
+            distinct_weights.insert((*w).clone());
         }
-        nwa.states.0.push(new_state);
+        let num_incompatible_edges = adj.iter().map(|a| a.len()).sum::<usize>() / 2;
+
+        eprintln!(
+            "TIMING: bundle_coloring size={} distinct_weights={} incompatible_edges={} greedy_colors={}",
+            n,
+            distinct_weights.len(),
+            num_incompatible_edges,
+            num_colors
+        );
     }
 
-    let dwa = nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
-    NWA::from_dwa(&dwa)
+    // Analyze weight structure for large bundles.
+    if bundle_size >= 10 {
+        let mut weight_groups: BTreeMap<Weight, Vec<Option<TerminalID>>> = BTreeMap::new();
+        for (term_opt, weight) in terminal_to_weight.iter() {
+            if !weight.is_empty() {
+                weight_groups
+                    .entry(weight.clone())
+                    .or_default()
+                    .push(*term_opt);
+            }
+        }
+        let distinct_weights = weight_groups.len();
+
+        eprintln!(
+            "TIMING: make_template_bundle_analysis size={} distinct_weights={}",
+            bundle_size,
+            distinct_weights
+        );
+        for (weight, terms) in &weight_groups {
+            eprintln!(
+                "  weight_group: terminals={} weight_bits={}",
+                terms.len(),
+                weight.len(),
+            );
+        }
+    }
+
+    let mut build_singles_time = std::time::Duration::ZERO;
+    let mut union_time = std::time::Duration::ZERO;
+
+    let mut combined: Option<NWA> = None;
+
+    for (term_opt, weight) in terminal_to_weight {
+        if weight.is_empty() {
+            continue;
+        }
+        let single_start = Instant::now();
+        let base_dwa = match term_opt {
+            Some(term_id) if ignore_terminal_ids.contains(term_id) => ignore_dwa,
+            Some(term_id) => template_dwas.get(term_id).unwrap_or(ignore_dwa),
+            None => ignore_dwa,
+        };
+        let mut single_nwa = NWA::from_dwa(base_dwa);
+        for state in &mut single_nwa.states.0 {
+            for targets in state.transitions.values_mut() {
+                for (_, w) in targets {
+                    *w = Weight::all();
+                }
+            }
+            for (_, w) in &mut state.epsilons {
+                *w = Weight::all();
+            }
+            if state.final_weight.is_some() {
+                state.final_weight = Some(weight.clone());
+            }
+        }
+        build_singles_time += single_start.elapsed();
+
+        let union_start = Instant::now();
+        if let Some(existing) = &mut combined {
+            existing.union_assign(&single_nwa);
+        } else {
+            combined = Some(single_nwa);
+        }
+        union_time += union_start.elapsed();
+    }
+
+    let combined = match combined {
+        Some(nwa) => nwa,
+        None => return NWA::new_empty(),
+    };
+
+    let detmin_start = Instant::now();
+    let dwa = combined.determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
+    let detmin_time = detmin_start.elapsed();
+
+    let from_dwa_start = Instant::now();
+    let result = NWA::from_dwa(&dwa);
+    let from_dwa_time = from_dwa_start.elapsed();
+
+    eprintln!(
+        "TIMING: make_template_bundle size={} build_singles={:?} union={:?} detmin={:?} from_dwa={:?} total={:?}",
+        bundle_size,
+        build_singles_time,
+        union_time,
+        detmin_time,
+        from_dwa_time,
+        bundle_start.elapsed(),
+    );
+    result
 }
 
 /// Build the Parser DWA from the GLR parser and lexical NWA.

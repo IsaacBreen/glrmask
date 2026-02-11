@@ -365,17 +365,53 @@ impl DeterminizeAndMinimizeConfig {
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::ColPackMinimize],
                 use_rustfst_determinize: false,
             },
-            DeterminizeAndMinimizeProfile::SpecializedSuper => DeterminizeAndMinimizeConfig {
+            DeterminizeAndMinimizeProfile::SpecializedSuper => {
                 // Specialized DWAs derived from Super by weight mapping.
                 // Det/min is valid after vocab-space instantiation.
-                nwa_passes: vec![NwaPass::Minimize],
-                dwa_passes: vec![
-                    DwaPass::PruneUnreachable,
-                    DwaPass::PruneDeadEnds,
-                    DwaPass::FastMinimize,
-                    DwaPass::ColPackMinimize,
-                ],
-                use_rustfst_determinize: false,
+                let config_choice = std::env::var("SPECSUPER_CONFIG")
+                    .unwrap_or_else(|_| "baseline".to_string())
+                    .to_lowercase();
+                let (nwa_passes, dwa_passes) = match config_choice.as_str() {
+                    "baseline" => (
+                        vec![NwaPass::Minimize],
+                        vec![
+                            DwaPass::PruneUnreachable,
+                            DwaPass::PruneDeadEnds,
+                            DwaPass::FastMinimize,
+                            DwaPass::ColPackMinimize,
+                        ],
+                    ),
+                    "colpack-only" => (
+                        vec![NwaPass::Minimize],
+                        vec![DwaPass::ColPackMinimize],
+                    ),
+                    "fast-only" => (
+                        vec![NwaPass::Minimize],
+                        vec![DwaPass::FastMinimize],
+                    ),
+                    "no-dwa" | "nwa-only" => (vec![NwaPass::Minimize], vec![]),
+                    "no-min" => (vec![], vec![]),
+                    other => {
+                        eprintln!(
+                            "WARN: Unknown SPECSUPER_CONFIG='{}', using baseline",
+                            other
+                        );
+                        (
+                            vec![NwaPass::Minimize],
+                            vec![
+                                DwaPass::PruneUnreachable,
+                                DwaPass::PruneDeadEnds,
+                                DwaPass::FastMinimize,
+                                DwaPass::ColPackMinimize,
+                            ],
+                        )
+                    }
+                };
+                DeterminizeAndMinimizeConfig {
+                    nwa_passes,
+                    dwa_passes,
+                    use_rustfst_determinize: false,
+                }
             },
             DeterminizeAndMinimizeProfile::Parser => {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
@@ -504,6 +540,13 @@ impl NWA {
                 }
             });
             eprintln!("TIMING: NWA pass {} {:?}", pass_name, pass_start.elapsed());
+            let pass_stats = self.stats();
+            eprintln!(
+                "TIMING: NWA pass {} states={} transitions={}",
+                pass_name,
+                pass_stats.states,
+                pass_stats.transitions
+            );
         }
         eprintln!("TIMING: NWA passes total {:?}", nwa_passes_start.elapsed());
         crate::debug!(5, "NWA minimization: {}", 
@@ -593,6 +636,13 @@ impl NWA {
                 }
             });
             eprintln!("TIMING: DWA pass {} {:?}", pass_name, pass_start.elapsed());
+            let pass_stats = dwa.stats();
+            eprintln!(
+                "TIMING: DWA pass {} states={} transitions={}",
+                pass_name,
+                pass_stats.states,
+                pass_stats.transitions
+            );
         }
         eprintln!("TIMING: DWA passes total {:?}", dwa_passes_start.elapsed());
         crate::debug!(5, "DWA minimization: {}",
