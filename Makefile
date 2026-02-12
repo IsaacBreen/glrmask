@@ -140,7 +140,7 @@ test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FIL
 	SOURCE_FILE="$(FILE)" timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_diff.py
 
 test-diff-dfa: ffi ## Test diff grammar on static finite_automata.rs (no FILE arg needed)
-	DIFF_ONE_BIG_TERMINAL=1 SOURCE_FILE="testdata/finite_automata.rs" timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_diff.py
+	SOURCE_FILE="testdata/finite_automata.rs" timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_diff.py
 
 diff-grammar: ffi ## Generate EBNF grammar for a file (usage: make diff-grammar FILE=test12.txt OUT=temp.ebnf)
 	@if [ -z "$(FILE)" ] || [ -z "$(OUT)" ]; then echo "Usage: make diff-grammar FILE=<file> OUT=<out.ebnf>"; exit 1; fi

@@ -95,7 +95,7 @@ def generate_diff_grammar(source_path: str) -> str:
     grammar_parts = []
     use_balanced_tree = os.environ.get("DIFF_BALANCED_TREE") == "1"
     balanced_no_hunk = os.environ.get("DIFF_BALANCED_NO_HUNK") == "1"
-    use_one_big_terminal = os.environ.get("DIFF_ONE_BIG_TERMINAL") == "1"
+    use_one_big_terminal = os.environ.get("DIFF_ONE_BIG_TERMINAL", "1") == "1"
     seg_root = f"seg0_{num_lines - 1}" if num_lines > 0 else "seg_empty"
 
     # --- 1. Preamble and Top-Level Rules ---
