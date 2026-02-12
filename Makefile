@@ -12,11 +12,14 @@
 
 .PHONY: paper paper-watch paper-clean notes-today help build test test-release test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa show-schema-id schema-id ffi viz viz-clean all jsonschemabench jsonschemabench-quick jsonschemabench-subset jsonschemabench-analyze jsonschemabench-llg jsonschemabench-llg-analyze jsonschemabench-compare
 
-# Default timeout for test-js (override with TEST_TIMEOUT=...)
-TEST_TIMEOUT ?= 150
+# Default timeout for test targets (override with TEST_TIMEOUT=...)
+TEST_TIMEOUT ?= 60
 
 # Skip serialization by default to speed up test targets (override with SKIP_SERIALIZATION=0)
 SKIP_SERIALIZATION ?= 1
+
+# Default Sep1 macro debug level (override with MACRO_DEBUG_LEVEL=...)
+MACRO_DEBUG_LEVEL ?= 5
 
 # === Build All ===
 
@@ -101,10 +104,10 @@ test-js: ## Compile the JavaScript grammar (verifies it compiles)
 test-json-schema: ffi ## Compile a JSON schema grammar (verifies schema-to-EBNF works)
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
-		python3 scripts/test_json_schema.py
+		timeout $(TEST_TIMEOUT) python3 scripts/test_json_schema.py
 
 test-json-schema-o1051: build ## Compile o1051 (Github Hard) schema
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o1051.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_o1051.json.gz
@@ -112,13 +115,13 @@ test-json-schema-o1051: build ## Compile o1051 (Github Hard) schema
 test-tsconfig: ffi ## Compile TSConfig schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
-		$(PYTHON) scripts/test_json_schema.py
+		timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_json_schema.py
 
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 
 test-schema-id: ffi ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" $(PYTHON) scripts/test_json_schema.py
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_json_schema.py
 
 show-schema-id: ffi ## Print EBNF for a schema by ID to stdout (usage: make show-schema-id ID=...)
 	@if [ -z "$(ID)" ]; then echo "Usage: make show-schema-id ID=<schema_id>"; exit 1; fi
@@ -134,10 +137,10 @@ show-json-schema: ffi ## Print the original JSON schema to stdout (usage: make s
 
 test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FILE=path/to/file.txt)
 	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff FILE=<path_to_text_file>"; exit 1; fi
-	SOURCE_FILE="$(FILE)" $(PYTHON) scripts/test_diff.py
+	SOURCE_FILE="$(FILE)" timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_diff.py
 
 test-diff-dfa: ffi ## Test diff grammar on static finite_automata.rs (no FILE arg needed)
-	SOURCE_FILE="testdata/finite_automata.rs" $(PYTHON) scripts/test_diff.py
+	DIFF_ONE_BIG_TERMINAL=1 SOURCE_FILE="testdata/finite_automata.rs" timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_diff.py
 
 diff-grammar: ffi ## Generate EBNF grammar for a file (usage: make diff-grammar FILE=test12.txt OUT=temp.ebnf)
 	@if [ -z "$(FILE)" ] || [ -z "$(OUT)" ]; then echo "Usage: make diff-grammar FILE=<file> OUT=<out.ebnf>"; exit 1; fi
@@ -174,55 +177,55 @@ repro-washingtonpost: ffi ## Reproduce WashingtonPost failure (property key at s
 # These use the Rust grammar_compiler binary directly with --json-schema
 
 test-schema-packagejson: build ## Compile PackageJson schema
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/PackageJson---package.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_packagejson.json.gz
 
 test-schema-github: build ## Compile GithubWorkflow schema
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/GithubWorkflow---github-workflow.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_github.json.gz
 
 test-schema-sarif: build ## Compile SARIF schema
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/SARIF---sarif-2.1.0-rtm.1.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_sarif.json.gz
 
 test-schema-meta: build ## Compile JSON Schema meta-schema (draft v4)
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/JsonSchemaMeta---schema-draft-v4.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_meta.json.gz
 
 test-schema-extra: build ## Compile bamboo-spec from SchemaStore_Extra
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/SchemaStore_Extra---bamboo-spec.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_bamboo.json.gz
 
 test-schema-kestra: build ## Compile Kestra schema (WARNING: ~8MB, very slow)
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/Kestra---kestra-0.19.0.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_kestra.json.gz
 
 test-schema-vegalite: build ## Compile VegaLite schema (very_high complexity)
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/VegaLite---vega-lite.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_vegalite.json.gz
 
 test-schema-apollo: build ## Compile ApolloRouter schema (very_high complexity)
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/ApolloRouter---apollo-router-2.9.0.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_apollo.json.gz
 
 test-schema-liquibase: build ## Compile Liquibase schema (high complexity)
-	MACRO_DEBUG_LEVEL=4 ./target/release/grammar-compiler \
+	MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/Liquibase---liquibase.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_liquibase.json.gz

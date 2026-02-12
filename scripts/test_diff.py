@@ -163,7 +163,7 @@ def generate_diff_grammar(source_path: str) -> str:
             continue
         if use_balanced_tree:
             # Balanced tree mode: keep line rule minimal for sequencing via segments.
-            grammar_parts.append(f"line{i} ::= PLUS_LINE* content{i} PLUS_LINE*;")
+            grammar_parts.append(f"line{i} ::= PLUS_LINE* CONTENT{i} PLUS_LINE*;")
             continue
 
         # After matching line i, we can:
@@ -175,7 +175,7 @@ def generate_diff_grammar(source_path: str) -> str:
             continuation = f"( PLUS_LINE* HUNK_HEADER s{num_lines} )?"
 
         # NOTE: PLUS_LINE* allows insertions *before* the context/deletion line
-        grammar_parts.append(f"line{i} ::= PLUS_LINE* content{i} {continuation};")
+        grammar_parts.append(f"line{i} ::= PLUS_LINE* CONTENT{i} {continuation};")
     grammar_parts.append("")
 
     # --- 4. Terminal Definitions ---
@@ -217,27 +217,17 @@ def generate_diff_grammar(source_path: str) -> str:
         else:
             grammar_parts.append("VALID_LINE ::= ( \" \" | \"-\" ) NEWLINE;")
     else:
-        # Use lowercase rule names so line content is parsed, not treated as a terminal regex.
+        # Use UPPERCASE rule names so line content is treated as a terminal regex.
+        # This avoids GLR LR(0) state explosion from per-character expansions.
         for i, line in enumerate(lines):
             content = line.rstrip('\r\n')
 
             if not content:
                 # Strict diffs require a space or minus even for empty lines
-                grammar_parts.append(f"content{i} ::= ( ' ' | '-' ) NEWLINE;")
+                grammar_parts.append(f"CONTENT{i} ::= ( \" \" | \"-\" ) NEWLINE;")
             else:
-                # Emit per-character literals to keep the terminal set small.
-                escaped_chars = []
-                for ch in content:
-                    if ch == "\\":
-                        escaped_chars.append("\\\\")
-                    elif ch == '"':
-                        escaped_chars.append("\\\"")
-                    else:
-                        escaped_chars.append(ch)
-                char_terms = " ".join(f'"{ch}"' for ch in escaped_chars)
-                grammar_parts.append(
-                    f"content{i} ::= ( \" \" | \"-\" ) {char_terms} NEWLINE;"
-                )
+                escaped = content.replace("\\", "\\\\").replace('"', "\\\"")
+                grammar_parts.append(f"CONTENT{i} ::= ( \" \" | \"-\" ) \"{escaped}\" NEWLINE;")
 
     return '\n'.join(grammar_parts)
 
