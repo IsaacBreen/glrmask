@@ -607,6 +607,96 @@ impl SchemaToGrammar {
     /// we generate:
     ///   (opts_before_req1)? req1 (opts_after_req1)? ',' req2 (opts_after_req2)?
     /// where each opts_group uses the recursive pattern if there are many optionals.
+    fn merge_common_optional_key_choices(&self, opt_choices: Vec<GrammarType>) -> Vec<GrammarType> {
+        let merge_enabled = std::env::var("SEP1_MERGE_COMMON_KEYS")
+            .map(|value| value != "0")
+            .unwrap_or(true);
+        if !merge_enabled {
+            return opt_choices;
+        }
+
+        let original_len = opt_choices.len();
+        let mut grouped: Vec<(GrammarType, Vec<GrammarType>)> = Vec::new();
+        let mut passthrough: Vec<GrammarType> = Vec::new();
+
+        for choice in opt_choices {
+            match choice {
+                GrammarType::JsonKeyValue { key, value, .. } => {
+                    let shared_value = *value;
+                    let key_expr = *key;
+
+                    if let Some((_, keys)) = grouped
+                        .iter_mut()
+                        .find(|(existing_value, _)| *existing_value == shared_value)
+                    {
+                        keys.push(key_expr);
+                    } else {
+                        grouped.push((shared_value, vec![key_expr]));
+                    }
+                }
+                other => passthrough.push(other),
+            }
+        }
+
+        let mut merged_choices: Vec<GrammarType> = Vec::with_capacity(original_len);
+        let mut merged_group_count = 0usize;
+        let mut merged_key_count = 0usize;
+        let mut debug_group_idx = 0usize;
+
+        for (shared_value, keys) in grouped {
+            if keys.len() == 1 {
+                merged_choices.push(GrammarType::JsonKeyValue {
+                    key: Box::new(keys.into_iter().next().unwrap()),
+                    colon: Box::new(GrammarType::lit(":")),
+                    value: Box::new(shared_value),
+                });
+                continue;
+            }
+
+            merged_group_count += 1;
+            merged_key_count += keys.len();
+
+            if crate::r#macro::is_debug_level_enabled(5) {
+                let key_names: Vec<String> = keys
+                    .iter()
+                    .map(|key| match key {
+                        GrammarType::Literal(bytes) => String::from_utf8_lossy(bytes).to_string(),
+                        other => format!("{:?}", other),
+                    })
+                    .collect();
+                crate::debug!(
+                    5,
+                    "  Common-key merge group {} ({} keys): {}",
+                    debug_group_idx,
+                    key_names.len(),
+                    key_names.join(", "),
+                );
+                debug_group_idx += 1;
+            }
+
+            merged_choices.push(GrammarType::JsonKeyValue {
+                key: Box::new(GrammarType::choice(keys)),
+                colon: Box::new(GrammarType::lit(":")),
+                value: Box::new(shared_value),
+            });
+        }
+
+        merged_choices.extend(passthrough);
+
+        if crate::r#macro::is_debug_level_enabled(5) {
+            crate::debug!(
+                5,
+                "Common-key merge summary: {} groups, {} keys merged, {} -> {} choices",
+                merged_group_count,
+                merged_key_count,
+                original_len,
+                merged_choices.len(),
+            );
+        }
+
+        merged_choices
+    }
+
     fn build_interleaved_property_pattern(&mut self, props: &[(String, GrammarType, bool)], prop_kvs: &[GrammarType], additional_suffix: Option<GrammarType>) -> GrammarType {
         // Separate required and optional properties
         let required_props: Vec<(usize, &GrammarType)> = props.iter().zip(prop_kvs.iter())
@@ -631,6 +721,8 @@ impl SchemaToGrammar {
                 self.needs.json_kv = true;
                 opt_choices.push(GrammarType::RuleRef("_json_kv".to_string()));
             }
+
+            opt_choices = self.merge_common_optional_key_choices(opt_choices);
             
             if opt_choices.is_empty() {
                 return GrammarType::Empty;
@@ -657,6 +749,8 @@ impl SchemaToGrammar {
                 self.needs.json_kv = true;
                 opt_choices.push(GrammarType::RuleRef("_json_kv".to_string()));
             }
+
+            opt_choices = self.merge_common_optional_key_choices(opt_choices);
             
             let opt_repeat = if !opt_choices.is_empty() {
                 let prop_choice = GrammarType::choice(opt_choices);
