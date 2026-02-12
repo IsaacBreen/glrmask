@@ -1758,6 +1758,239 @@ impl GrammarDefinition {
             });
         }
 
+        // Optional terminal-merging pass: merge bare literal alternatives that share
+        // identical choice-membership sets.
+        // Enabled by default; set SEP1_MERGE_TERMINALS=0 to disable.
+        let merge_terminals_enabled = std::env::var("SEP1_MERGE_TERMINALS")
+            .map(|value| value != "0")
+            .unwrap_or(true);
+        if merge_terminals_enabled {
+            let is_quoted_literal = |bytes: &[u8]| {
+                bytes.len() >= 2 && bytes.first() == Some(&b'"') && bytes.last() == Some(&b'"')
+            };
+
+            let mut bare_literals_by_lhs: BTreeMap<NonTerminal, BTreeSet<Vec<u8>>> =
+                BTreeMap::new();
+            for production in &productions {
+                if production.rhs.len() == 1 {
+                    if let Symbol::Terminal(Terminal::Literal(bytes)) = &production.rhs[0] {
+                        if is_quoted_literal(bytes) {
+                            bare_literals_by_lhs
+                                .entry(production.lhs.clone())
+                                .or_default()
+                                .insert(bytes.clone());
+                        }
+                    }
+                }
+            }
+
+            let mut literal_memberships: BTreeMap<Vec<u8>, BTreeSet<NonTerminal>> = BTreeMap::new();
+            let mut choice_node_count = 0usize;
+            for (lhs, literals) in &bare_literals_by_lhs {
+                if literals.len() < 2 {
+                    continue;
+                }
+                choice_node_count += 1;
+                for literal in literals {
+                    literal_memberships
+                        .entry(literal.clone())
+                        .or_default()
+                        .insert(lhs.clone());
+                }
+            }
+
+            let mut membership_to_literals: BTreeMap<BTreeSet<NonTerminal>, Vec<Vec<u8>>> =
+                BTreeMap::new();
+            for (literal, membership) in literal_memberships {
+                if !membership.is_empty() {
+                    membership_to_literals
+                        .entry(membership)
+                        .or_default()
+                        .push(literal);
+                }
+            }
+
+            let merge_groups: Vec<Vec<Vec<u8>>> = membership_to_literals
+                .into_values()
+                .filter(|literals| literals.len() >= 2)
+                .collect();
+
+            if crate::r#macro::is_debug_level_enabled(5) {
+                for (group_idx, literals) in merge_groups.iter().enumerate() {
+                    let names: Vec<String> = literals
+                        .iter()
+                        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                        .collect();
+                    debug!(5, "  Merge group {}: {}", group_idx, names.join(", "));
+                }
+            }
+
+            let mut literal_replacements: BTreeMap<Vec<u8>, Terminal> = BTreeMap::new();
+            let mut merged_group_count = 0usize;
+            let mut merged_terminal_count = 0usize;
+
+            for literals in merge_groups {
+                let mut alternatives: Vec<Expr> = Vec::new();
+                let mut seen_group_ids: HashSet<usize> = HashSet::new();
+                let mut all_literals_mergeable = true;
+
+                for literal in &literals {
+                    let Some(group_id) = literal_to_group_id.get_by_left(literal).copied() else {
+                        all_literals_mergeable = false;
+                        break;
+                    };
+
+                    if !seen_group_ids.insert(group_id) {
+                        continue;
+                    }
+
+                    let Some(expr) = group_id_to_expr.get(&group_id) else {
+                        all_literals_mergeable = false;
+                        break;
+                    };
+
+                    match expr {
+                        Expr::U8Seq(bytes) => {
+                            alternatives.push(Expr::U8Seq(bytes.clone()));
+                        }
+                        _ => {
+                            all_literals_mergeable = false;
+                            break;
+                        }
+                    }
+                }
+
+                if !all_literals_mergeable || alternatives.len() < 2 {
+                    continue;
+                }
+
+                let merged_expr = Expr::Choice(alternatives);
+                let merged_group_id = next_terminal_group_id;
+                next_terminal_group_id += 1;
+
+                let merged_name = Self::generate_unique_indexed_name(
+                    "_merged_terminal",
+                    &mut per_base_counters,
+                    &mut all_names,
+                );
+                regex_name_to_group_id.insert(merged_name.clone(), merged_group_id);
+                group_id_to_expr.insert(merged_group_id, merged_expr);
+
+                let replacement_terminal = regex_name(&merged_name);
+                for literal in literals {
+                    literal_replacements.insert(literal, replacement_terminal.clone());
+                    merged_terminal_count += 1;
+                }
+                merged_group_count += 1;
+            }
+
+            if !literal_replacements.is_empty() {
+                let choice_lhs: HashSet<NonTerminal> = bare_literals_by_lhs
+                    .iter()
+                    .filter(|(_, literals)| literals.len() >= 2)
+                    .map(|(lhs, _)| lhs.clone())
+                    .collect();
+
+                for production in productions.iter_mut() {
+                    if production.rhs.len() == 1 && choice_lhs.contains(&production.lhs) {
+                        if let Symbol::Terminal(Terminal::Literal(bytes)) = &production.rhs[0] {
+                            if let Some(new_terminal) = literal_replacements.get(bytes) {
+                                production.rhs[0] = Symbol::Terminal(new_terminal.clone());
+                            }
+                        }
+                    }
+                }
+
+                let mut still_used_literals: HashSet<Vec<u8>> = HashSet::new();
+                for production in &productions {
+                    for symbol in &production.rhs {
+                        if let Symbol::Terminal(Terminal::Literal(bytes)) = symbol {
+                            still_used_literals.insert(bytes.clone());
+                        }
+                    }
+                }
+
+                for bytes in literal_replacements.keys() {
+                    if !still_used_literals.contains(bytes) {
+                            let _ = literal_to_group_id.remove_by_left(bytes);
+                    }
+                }
+
+                let used_group_ids: HashSet<usize> = regex_name_to_group_id
+                    .right_values()
+                    .copied()
+                    .chain(literal_to_group_id.right_values().copied())
+                    .collect();
+                group_id_to_expr.retain(|group_id, _| used_group_ids.contains(group_id));
+
+                // Keep terminal group IDs dense (0..N-1). Some downstream paths index
+                // vectors by TerminalID and assume no gaps.
+                let sorted_group_ids: Vec<usize> = {
+                    let mut ids: Vec<usize> = used_group_ids.into_iter().collect();
+                    ids.sort_unstable();
+                    ids
+                };
+
+                let needs_compaction = sorted_group_ids
+                    .iter()
+                    .enumerate()
+                    .any(|(new_gid, old_gid)| *old_gid != new_gid);
+
+                if needs_compaction {
+                    let old_to_new: HashMap<usize, usize> = sorted_group_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(new_gid, old_gid)| (*old_gid, new_gid))
+                        .collect();
+
+                    let literal_entries: Vec<(Vec<u8>, usize)> = literal_to_group_id
+                        .iter()
+                        .map(|(literal, group_id)| (literal.clone(), *group_id))
+                        .collect();
+                    literal_to_group_id.clear();
+                    for (literal, old_gid) in literal_entries {
+                        if let Some(new_gid) = old_to_new.get(&old_gid) {
+                            literal_to_group_id.insert(literal, *new_gid);
+                        }
+                    }
+
+                    let regex_entries: Vec<(String, usize)> = regex_name_to_group_id
+                        .iter()
+                        .map(|(name, group_id)| (name.clone(), *group_id))
+                        .collect();
+                    regex_name_to_group_id.clear();
+                    for (name, old_gid) in regex_entries {
+                        if let Some(new_gid) = old_to_new.get(&old_gid) {
+                            regex_name_to_group_id.insert(name, *new_gid);
+                        }
+                    }
+
+                    let expr_entries: Vec<(usize, Expr)> = group_id_to_expr
+                        .iter()
+                        .map(|(group_id, expr)| (*group_id, expr.clone()))
+                        .collect();
+                    group_id_to_expr.clear();
+                    for (old_gid, expr) in expr_entries {
+                        if let Some(new_gid) = old_to_new.get(&old_gid) {
+                            group_id_to_expr.insert(*new_gid, expr);
+                        }
+                    }
+
+                    next_terminal_group_id = sorted_group_ids.len();
+                }
+            }
+
+            debug!(
+                4,
+                "Terminal merge pass: {} choice nodes, {} groups merged, {} terminals merged",
+                choice_node_count,
+                merged_group_count,
+                merged_terminal_count
+            );
+        } else {
+            debug!(4, "Terminal merge pass disabled (SEP1_MERGE_TERMINALS=0)");
+        }
+
         debug!(5, "Creating GrammarDefinition struct with {} productions", productions.len());
         let mut def = GrammarDefinition {
             productions,
