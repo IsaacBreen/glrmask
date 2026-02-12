@@ -1327,8 +1327,56 @@ impl GrammarDefinition {
                     (false, content)
                 };
 
-                let mut u8set = U8Set::none();
                 let mut it = content.chars().peekable();
+
+                let make_u8_range_expr = |start: u8, end: u8| -> Expr {
+                    Expr::U8Class(U8Set::from_u8_range(start, end))
+                };
+                let make_u8_byte_expr = |byte: u8| -> Expr { Expr::U8Seq(vec![byte]) };
+                let make_choice_expr = |mut exprs: Vec<Expr>| -> Expr {
+                    if exprs.is_empty() {
+                        Expr::Epsilon
+                    } else if exprs.len() == 1 {
+                        exprs.pop().unwrap()
+                    } else {
+                        Expr::Choice(exprs)
+                    }
+                };
+                let make_utf8_char_seq = |codepoint: u32| -> Option<Expr> {
+                    char::from_u32(codepoint).map(|ch| {
+                        let mut bytes = [0u8; 4];
+                        let s = ch.encode_utf8(&mut bytes);
+                        Expr::U8Seq(s.as_bytes().to_vec())
+                    })
+                };
+                let make_valid_utf8_above_latin1_expr = || -> Expr {
+                    let cont = make_u8_range_expr(0x80, 0xBF);
+                    Expr::Choice(vec![
+                        Expr::Seq(vec![make_u8_range_expr(0xC4, 0xDF), cont.clone()]),
+                        Expr::Seq(vec![make_u8_byte_expr(0xE0), make_u8_range_expr(0xA0, 0xBF), cont.clone()]),
+                        Expr::Seq(vec![make_u8_range_expr(0xE1, 0xEC), cont.clone(), cont.clone()]),
+                        Expr::Seq(vec![make_u8_byte_expr(0xED), make_u8_range_expr(0x80, 0x9F), cont.clone()]),
+                        Expr::Seq(vec![make_u8_range_expr(0xEE, 0xEF), cont.clone(), cont.clone()]),
+                        Expr::Seq(vec![
+                            make_u8_byte_expr(0xF0),
+                            make_u8_range_expr(0x90, 0xBF),
+                            cont.clone(),
+                            cont.clone(),
+                        ]),
+                        Expr::Seq(vec![
+                            make_u8_range_expr(0xF1, 0xF3),
+                            cont.clone(),
+                            cont.clone(),
+                            cont.clone(),
+                        ]),
+                        Expr::Seq(vec![
+                            make_u8_byte_expr(0xF4),
+                            make_u8_range_expr(0x80, 0x8F),
+                            cont.clone(),
+                            cont,
+                        ]),
+                    ])
+                };
 
                 let mut parse_char =
                     |it: &mut std::iter::Peekable<std::str::Chars>| -> Result<Option<char>, String> {
@@ -1372,26 +1420,77 @@ impl GrammarDefinition {
                         }
                     };
 
+                let mut parsed_ranges: Vec<(u32, u32)> = Vec::new();
                 while let Some(start_char) = parse_char(&mut it)? {
+                    let start_cp = start_char as u32;
                     if it.peek() == Some(&'-') {
                         it.next();
                         if let Some(end_char) = parse_char(&mut it)? {
-                            for i in (start_char as u8)..=(end_char as u8) {
-                                u8set.insert(i);
-                            }
+                            parsed_ranges.push((start_cp, end_char as u32));
                         } else {
-                            u8set.insert(start_char as u8);
-                            u8set.insert(b'-');
+                            parsed_ranges.push((start_cp, start_cp));
+                            parsed_ranges.push((b'-' as u32, b'-' as u32));
                         }
                     } else {
-                        u8set.insert(start_char as u8);
+                        parsed_ranges.push((start_cp, start_cp));
                     }
                 }
-                Ok(Expr::U8Class(if negated {
-                    u8set.complement()
+
+                let latin1_only = parsed_ranges.iter().all(|(_, end)| *end <= 0xFF);
+                if latin1_only {
+                    let contains_cp = |cp: u32| -> bool {
+                        parsed_ranges.iter().any(|(start, end)| *start <= cp && cp <= *end)
+                    };
+                    let is_allowed_cp = |cp: u32| -> bool {
+                        if negated {
+                            !contains_cp(cp)
+                        } else {
+                            contains_cp(cp)
+                        }
+                    };
+
+                    let mut ascii_set = U8Set::none();
+                    for cp in 0u32..=0x7F {
+                        if is_allowed_cp(cp) {
+                            ascii_set.insert(cp as u8);
+                        }
+                    }
+
+                    let mut alternatives: Vec<Expr> = Vec::new();
+                    if !ascii_set.is_empty() {
+                        alternatives.push(Expr::U8Class(ascii_set));
+                    }
+
+                    for cp in 0x80u32..=0xFF {
+                        if is_allowed_cp(cp) {
+                            if let Some(seq_expr) = make_utf8_char_seq(cp) {
+                                alternatives.push(seq_expr);
+                            }
+                        }
+                    }
+
+                    if negated {
+                        alternatives.push(make_valid_utf8_above_latin1_expr());
+                    }
+
+                    Ok(make_choice_expr(alternatives))
                 } else {
-                    u8set
-                }))
+                    // Fallback for non-Latin1 classes: preserve legacy byte-level behavior.
+                    // NOTE: This path may over-approximate Unicode semantics.
+                    let mut u8set = U8Set::none();
+                    for (start, end) in parsed_ranges {
+                        let start_u8 = start as u8;
+                        let end_u8 = end as u8;
+                        for byte in start_u8..=end_u8 {
+                            u8set.insert(byte);
+                        }
+                    }
+                    Ok(Expr::U8Class(if negated {
+                        u8set.complement()
+                    } else {
+                        u8set
+                    }))
+                }
             }
             GrammarExpr::Ref(name) => {
                 if let Some(resolved_expr) = memo.get(name) {

@@ -54,6 +54,31 @@ mod tests {
     }
 
     #[test]
+    fn test_char_class_rejects_invalid_utf8_single_bytes() {
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let ebnf = r#"
+            root ::= STRING_CHAR ;
+            STRING_CHAR ::= [^"\\\x00-\x1F] ;
+        "#;
+
+        let grammar_def = GrammarDefinition::from_ebnf(ebnf).expect("EBNF should parse");
+        let compiled = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
+        let tokenizer = compiled.tokenizer();
+
+        let invalid_single_byte = tokenizer.execute_from_state(&[0xA1], tokenizer.initial_state_id());
+        assert!(
+            invalid_single_byte.matches.is_empty(),
+            "standalone byte 0xA1 is invalid UTF-8 and should not match"
+        );
+
+        let valid_utf8_char = tokenizer.execute_from_state(&[0xC2, 0xA1], tokenizer.initial_state_id());
+        assert!(
+            !valid_utf8_char.matches.is_empty(),
+            "UTF-8 bytes for U+00A1 should match"
+        );
+    }
+
+    #[test]
     fn test_lark_terminal_chain_matches_ebnf_terminal_chain() {
         let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
 
