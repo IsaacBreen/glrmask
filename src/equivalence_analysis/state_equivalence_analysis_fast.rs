@@ -493,6 +493,9 @@ fn find_state_equivalence_classes_token_based(
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
     let mut next_group_ids: Vec<usize> = vec![0usize; states.len()];
+    let mut active_indices: Vec<usize> = (0..states.len()).collect();
+    let mut active_flags: Vec<bool> = vec![false; states.len()];
+    let mut active_hashes: Vec<u128> = vec![0u128; states.len()];
     let mut prev_groups = 1usize;
     let mut stable_batches = 0usize;
     let mut tokens_tested = 0usize;
@@ -500,12 +503,26 @@ fn find_state_equivalence_classes_token_based(
 
     let mut batch_start = 0usize;
     while batch_start < total_tokens {
+        if active_indices.is_empty() {
+            break;
+        }
+
         let batch_end = (batch_start + batch_size).min(total_tokens);
 
-        let batch_hashes: Vec<u128> = (0..states.len())
-            .into_par_iter()
-            .map(|i| {
-                let state = states[i] as u32;
+        let mut batch_hashes: Vec<(usize, u128)> = active_indices
+            .par_iter()
+            .map_init(
+                || {
+                    (
+                        Vec::<u32>::new(),
+                        Vec::<Option<usize>>::new(),
+                        Vec::<usize>::new(),
+                        vec![-1; num_groups],
+                        Vec::<(usize, i32)>::new(),
+                    )
+                },
+                |scratch, &state_idx| {
+                let state = states[state_idx] as u32;
                 let mut hash_delta: u128 = 0;
                 let state_transitions = &dfa_transitions[state as usize];
 
@@ -545,13 +562,9 @@ fn find_state_equivalence_classes_token_based(
                     );
                 }
 
-                let mut state_stack: Vec<u32> = Vec::new();
-                let mut dead_depth_stack: Vec<Option<usize>> = Vec::new();
-                let mut depth_marks: Vec<usize> = Vec::new();
+                let (state_stack, dead_depth_stack, depth_marks, positions, changes) = scratch;
                 let mut matches_len: usize = 0;
                 let mut matches_hash_sum: u128 = 0;
-                let mut positions: Vec<i32> = vec![-1; num_groups];
-                let mut changes: Vec<(usize, i32)> = Vec::new();
 
                 for (range_start, range_end) in live_ranges {
                     if range_start >= range_end {
@@ -697,22 +710,67 @@ fn find_state_equivalence_classes_token_based(
                     }
                 }
 
-                hash_delta
+                (state_idx, hash_delta)
             })
             .collect();
 
+        let all_active = active_indices.len() == states.len();
+
         let mut key_to_group: HashMap<(usize, u128), usize> = HashMap::new();
         let mut num_groups = 0usize;
-        for i in 0..states.len() {
-            let key = (group_ids[i], batch_hashes[i]);
-            let entry = key_to_group.entry(key).or_insert_with(|| {
-                let id = num_groups;
-                num_groups += 1;
-                id
-            });
-            next_group_ids[i] = *entry;
+
+        if all_active {
+            for (state_idx, hash) in batch_hashes.drain(..) {
+                active_hashes[state_idx] = hash;
+            }
+
+            for i in 0..states.len() {
+                let key = (group_ids[i], active_hashes[i]);
+                let entry = key_to_group.entry(key).or_insert_with(|| {
+                    let id = num_groups;
+                    num_groups += 1;
+                    id
+                });
+                next_group_ids[i] = *entry;
+            }
+        } else {
+            for &state_idx in &active_indices {
+                active_flags[state_idx] = false;
+            }
+            for (state_idx, hash) in batch_hashes.drain(..) {
+                active_flags[state_idx] = true;
+                active_hashes[state_idx] = hash;
+            }
+
+            const FROZEN_SIG: u128 = u128::MAX;
+            for i in 0..states.len() {
+                let sig = if active_flags[i] {
+                    active_hashes[i]
+                } else {
+                    FROZEN_SIG
+                };
+                let key = (group_ids[i], sig);
+                let entry = key_to_group.entry(key).or_insert_with(|| {
+                    let id = num_groups;
+                    num_groups += 1;
+                    id
+                });
+                next_group_ids[i] = *entry;
+            }
         }
         std::mem::swap(&mut group_ids, &mut next_group_ids);
+
+        let mut group_sizes = vec![0usize; num_groups];
+        for &gid in &group_ids {
+            group_sizes[gid] += 1;
+        }
+
+        active_indices.clear();
+        for i in 0..states.len() {
+            if group_sizes[group_ids[i]] > 1 {
+                active_indices.push(i);
+            }
+        }
 
         tokens_tested = batch_end;
         if early_stop && tokens_tested * 2 >= total_tokens {

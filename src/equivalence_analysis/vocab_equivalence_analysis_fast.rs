@@ -1095,7 +1095,9 @@ fn compute_chunk_signature(
         if num_groups > 0 {
             // Canonicalize gid iteration order without allocating per-state edge lists.
             let groups = &mut pos0.touched_groups[i];
-            groups.sort_unstable();
+            if groups.len() > 1 {
+                groups.sort_unstable();
+            }
             let base = pos0.base_offsets[i];
             for &gid in groups.iter() {
                 let pos_val = pos0.match_positions[base + gid];
