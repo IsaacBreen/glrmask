@@ -1790,7 +1790,12 @@ fn generate_glr_parser_with_maps(
 
         if right_recursion_remaining.is_empty() && productions == initial_productions {
             crate::debug!(4, "Grammar optimization converged after {} passes", pass + 1);
-            eprintln!("TIMING: glr_normalization_loop {:?} ({} passes, {} prods)", normalization_start.elapsed(), pass + 1, productions.len());
+            crate::timing!(
+                "TIMING: glr_normalization_loop {:?} ({} passes, {} prods)",
+                normalization_start.elapsed(),
+                pass + 1,
+                productions.len()
+            );
             break;
         }
 
@@ -1811,7 +1816,7 @@ fn generate_glr_parser_with_maps(
     crate::debug!(4, "Final epsilon production elimination");
     let t_eps = std::time::Instant::now();
     productions = inline_null_productions(&productions);
-    eprintln!("TIMING: glr_final_epsilon {:?}", t_eps.elapsed());
+    crate::timing!("TIMING: glr_final_epsilon {:?}", t_eps.elapsed());
     print_memory_usage("After final epsilon elimination");
     
     // ============================================================
@@ -1870,7 +1875,7 @@ fn generate_glr_parser_with_maps(
             factored_productions.len());
     }
     productions = factored_productions;
-    eprintln!("TIMING: glr_left_factoring {:?}", t_left_factor.elapsed());
+    crate::timing!("TIMING: glr_left_factoring {:?}", t_left_factor.elapsed());
     print_memory_usage("After left factoring");
 
     // ============================================================
@@ -1882,7 +1887,7 @@ fn generate_glr_parser_with_maps(
     let start_nt_for_merge = productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
     let before_merge = productions.len();
     productions = merge_identical_nonterminals(&productions, &start_nt_for_merge);
-    eprintln!("TIMING: glr_merge_identical {:?}", t_merge.elapsed());
+    crate::timing!("TIMING: glr_merge_identical {:?}", t_merge.elapsed());
     if productions.len() < before_merge {
         crate::debug!(4, "Phase 7: Merged identical nonterminals ({} → {} productions)",
             before_merge,
@@ -1912,7 +1917,7 @@ fn generate_glr_parser_with_maps(
             minimized_productions.len());
     }
     productions = minimized_productions;
-    eprintln!("TIMING: glr_unit_elim {:?} ({} prods)", t_unit.elapsed(), productions.len());
+    crate::timing!("TIMING: glr_unit_elim {:?} ({} prods)", t_unit.elapsed(), productions.len());
     print_memory_usage("After unit production elimination");
 
     // ============================================================
@@ -2192,7 +2197,11 @@ fn generate_glr_parser_with_maps(
     let t_stage1 = std::time::Instant::now();
     let (stage_1_table, item_set_map) =
         stage_1(&light_productions, &lhs_ids, num_terminals, num_nonterminals);
-    eprintln!("TIMING: glr_stage1_lr0 {:?} ({} states)", t_stage1.elapsed(), stage_1_table.len());
+    crate::timing!(
+        "TIMING: glr_stage1_lr0 {:?} ({} states)",
+        t_stage1.elapsed(),
+        stage_1_table.len()
+    );
     print_memory_usage("After Stage 1");
 
     crate::debug!(4, "Computing First/Follow Sets");
@@ -2213,7 +2222,7 @@ fn generate_glr_parser_with_maps(
         num_nonterminals,
         start_nt_id,
     );
-    eprintln!("TIMING: glr_first_follow {:?}", t_ff.elapsed());
+    crate::timing!("TIMING: glr_first_follow {:?}", t_ff.elapsed());
     print_memory_usage("After First/Follow");
 
     crate::debug!(4, "Computing Final Table (Merging Stages 2-8)");
@@ -2226,7 +2235,11 @@ fn generate_glr_parser_with_maps(
         &follow_sets,
         num_terminals,
     );
-    eprintln!("TIMING: glr_final_table {:?} ({} states)", t_final.elapsed(), final_table_map.len());
+    crate::timing!(
+        "TIMING: glr_final_table {:?} ({} states)",
+        t_final.elapsed(),
+        final_table_map.len()
+    );
     print_memory_usage("After Final Table");
 
     // Post-construction table optimization
@@ -2237,7 +2250,11 @@ fn generate_glr_parser_with_maps(
         start_state_id,
         substring_state_id,
     );
-    eprintln!("TIMING: glr_table_opt {:?} ({} states)", t_opt.elapsed(), final_table_map.len());
+    crate::timing!(
+        "TIMING: glr_table_opt {:?} ({} states)",
+        t_opt.elapsed(),
+        final_table_map.len()
+    );
     print_memory_usage("After Table Optimization");
 
     let mut item_set_map_bi = BiBTreeMap::new();

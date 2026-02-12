@@ -604,7 +604,11 @@ fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<
                 let color_elapsed = color_start.elapsed();
                 time_coloring += color_elapsed;
                 if !suppress_height_logs {
-                    eprintln!("TIMING: height {} compute_height_coloring {:?}", h, color_elapsed);
+                    crate::timing!(
+                        "TIMING: height {} compute_height_coloring {:?}",
+                        h,
+                        color_elapsed
+                    );
                 }
                 coloring
             });

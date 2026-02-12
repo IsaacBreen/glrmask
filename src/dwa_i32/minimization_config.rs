@@ -541,16 +541,16 @@ impl NWA {
                     NwaPass::MinimizeRustfst => { self.minimize_with_rustfst_full(); },
                 }
             });
-            eprintln!("TIMING: NWA pass {} {:?}", pass_name, pass_start.elapsed());
+            crate::timing!("TIMING: NWA pass {} {:?}", pass_name, pass_start.elapsed());
             let pass_stats = self.stats();
-            eprintln!(
+            crate::timing!(
                 "TIMING: NWA pass {} states={} transitions={}",
                 pass_name,
                 pass_stats.states,
                 pass_stats.transitions
             );
         }
-        eprintln!("TIMING: NWA passes total {:?}", nwa_passes_start.elapsed());
+        crate::timing!("TIMING: NWA passes total {:?}", nwa_passes_start.elapsed());
         crate::debug!(5, "NWA minimization: {}", 
             self.stats());
 
@@ -580,7 +580,7 @@ impl NWA {
                 dwa.stats(), det_time);
             dwa
         });
-        eprintln!("TIMING: NWA::determinize {:?}", det_total_start.elapsed());
+        crate::timing!("TIMING: NWA::determinize {:?}", det_total_start.elapsed());
 
         if let Some((token_id, labels)) = debug_path.as_ref() {
             let weight = if debug_ignore_final {
@@ -591,7 +591,7 @@ impl NWA {
             log_path_weight("dwa_post_determinize", &weight, *token_id, labels);
         }
         let pre_min_stats = dwa.stats();
-        eprintln!(
+        crate::timing!(
             "TIMING: DWA pre_minimize states={} transitions={}",
             pre_min_stats.states,
             pre_min_stats.transitions,
@@ -637,16 +637,16 @@ impl NWA {
                     DwaPass::TrimWeights => { dwa.trim_weights(); },
                 }
             });
-            eprintln!("TIMING: DWA pass {} {:?}", pass_name, pass_start.elapsed());
+            crate::timing!("TIMING: DWA pass {} {:?}", pass_name, pass_start.elapsed());
             let pass_stats = dwa.stats();
-            eprintln!(
+            crate::timing!(
                 "TIMING: DWA pass {} states={} transitions={}",
                 pass_name,
                 pass_stats.states,
                 pass_stats.transitions
             );
         }
-        eprintln!("TIMING: DWA passes total {:?}", dwa_passes_start.elapsed());
+        crate::timing!("TIMING: DWA passes total {:?}", dwa_passes_start.elapsed());
         crate::debug!(5, "DWA minimization: {}",
             dwa.stats());
 
@@ -659,12 +659,15 @@ impl NWA {
             log_path_weight("dwa_post_minimize", &weight, *token_id, labels);
         }
         let post_min_stats = dwa.stats();
-        eprintln!(
+        crate::timing!(
             "TIMING: DWA post_minimize states={} transitions={}",
             post_min_stats.states,
             post_min_stats.transitions
         );
-        eprintln!("TIMING: NWA::determinize_and_minimize_with_config total {:?}", total_start.elapsed());
+        crate::timing!(
+            "TIMING: NWA::determinize_and_minimize_with_config total {:?}",
+            total_start.elapsed()
+        );
         dwa
     }
 

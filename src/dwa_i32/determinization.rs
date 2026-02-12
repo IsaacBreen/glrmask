@@ -599,20 +599,20 @@ impl DeterminizeProfile {
             return;
         }
         let avg_closure_size = self.closure_size_total as f64 / self.expand_calls as f64;
-        eprintln!("TIMING: determinize::precompute_eps {:?}", self.precompute_eps);
-        eprintln!("TIMING: determinize::start_subset {:?}", self.start_subset);
-        eprintln!(
+        crate::timing!("TIMING: determinize::precompute_eps {:?}", self.precompute_eps);
+        crate::timing!("TIMING: determinize::start_subset {:?}", self.start_subset);
+        crate::timing!(
             "TIMING: determinize::expand_total {:?} over {} expansions (avg_closure_size={:.2})",
             self.expand_total,
             self.expand_calls,
             avg_closure_size,
         );
-        eprintln!("TIMING: determinize::collect_transitions {:?}", self.collect_transitions);
-        eprintln!("TIMING: determinize::build_dest_map {:?}", self.build_dest_map);
-        eprintln!("TIMING: determinize::normalize_subset {:?}", self.normalize_subset);
-        eprintln!("TIMING: determinize::register_closure {:?}", self.register_closure);
-        eprintln!("TIMING: determinize::add_transition {:?}", self.add_transition);
-        eprintln!(
+        crate::timing!("TIMING: determinize::collect_transitions {:?}", self.collect_transitions);
+        crate::timing!("TIMING: determinize::build_dest_map {:?}", self.build_dest_map);
+        crate::timing!("TIMING: determinize::normalize_subset {:?}", self.normalize_subset);
+        crate::timing!("TIMING: determinize::register_closure {:?}", self.register_closure);
+        crate::timing!("TIMING: determinize::add_transition {:?}", self.add_transition);
+        crate::timing!(
             "TIMING: determinize::counters labels={} raw_targets={} eps_pairs={}",
             self.labels,
             self.raw_targets,

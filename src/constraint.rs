@@ -879,18 +879,21 @@ impl GrammarConstraint {
                 + timing_commit_vocab;
             let other = total.saturating_sub(sum);
 
-            eprintln!("TIMING: setup_combined::sort_tokens {:?}", timing_sort_tokens);
-            eprintln!("TIMING: setup_combined::collect_token_strings {:?}", timing_collect_strings);
-            eprintln!("TIMING: setup_combined::all_states {:?}", timing_all_states);
-            eprintln!("TIMING: setup_combined::compute_equivalence {:?}", timing_compute_equivalence);
-            eprintln!("TIMING: setup_combined::build_state_to_rep {:?}", timing_build_state_to_rep);
-            eprintln!("TIMING: setup_combined::filter_states {:?}", timing_filter_states);
-            eprintln!("TIMING: setup_combined::build_original_to_internal {:?}", timing_build_original_to_internal);
-            eprintln!("TIMING: setup_combined::commit_vocab_prep {:?}", timing_commit_vocab_prep);
-            eprintln!("TIMING: setup_combined::build_internal_llm_token_map {:?}", timing_build_internal_llm_token_map);
-            eprintln!("TIMING: setup_combined::commit_vocab {:?}", timing_commit_vocab);
-            eprintln!("TIMING: setup_combined::other {:?}", other);
-            eprintln!("TIMING: setup_combined::total {:?}", total);
+            crate::timing!("TIMING: setup_combined::sort_tokens {:?}", timing_sort_tokens);
+            crate::timing!("TIMING: setup_combined::collect_token_strings {:?}", timing_collect_strings);
+            crate::timing!("TIMING: setup_combined::all_states {:?}", timing_all_states);
+            crate::timing!("TIMING: setup_combined::compute_equivalence {:?}", timing_compute_equivalence);
+            crate::timing!("TIMING: setup_combined::build_state_to_rep {:?}", timing_build_state_to_rep);
+            crate::timing!("TIMING: setup_combined::filter_states {:?}", timing_filter_states);
+            crate::timing!("TIMING: setup_combined::build_original_to_internal {:?}", timing_build_original_to_internal);
+            crate::timing!("TIMING: setup_combined::commit_vocab_prep {:?}", timing_commit_vocab_prep);
+            crate::timing!(
+                "TIMING: setup_combined::build_internal_llm_token_map {:?}",
+                timing_build_internal_llm_token_map
+            );
+            crate::timing!("TIMING: setup_combined::commit_vocab {:?}", timing_commit_vocab);
+            crate::timing!("TIMING: setup_combined::other {:?}", other);
+            crate::timing!("TIMING: setup_combined::total {:?}", total);
         }
         (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep, representative_states)
     }
@@ -1097,7 +1100,7 @@ impl GrammarConstraint {
                 &grammar_group_ids,
             )
         });
-        eprintln!("TIMING: setup_combined {:?}", setup_start.elapsed());
+        crate::timing!("TIMING: setup_combined {:?}", setup_start.elapsed());
         crate::debug!(5, "setup_combined: end");
         let commit_vocab = Arc::new(commit_vocab_data);
 
@@ -1140,8 +1143,11 @@ impl GrammarConstraint {
                     .collect()
             }
         );
-                eprintln!("TIMING: build_internal_to_original_map {:?}", internal_map_start.elapsed());
-                crate::debug!(5, "build_internal_to_original_map: end");
+        crate::timing!(
+            "TIMING: build_internal_to_original_map {:?}",
+            internal_map_start.elapsed()
+        );
+        crate::debug!(5, "build_internal_to_original_map: end");
 
         // internal_llm_token_map was already computed in setup_combined - no need to iterate 50K tokens again!
 
@@ -1155,7 +1161,10 @@ impl GrammarConstraint {
         let vocab_tree = timeit!("build_internal_vocab_tree", {
             VocabPrefixTree::build(&internal_tokens_for_vocab)
         });
-        eprintln!("TIMING: build_internal_vocab_tree {:?}", vocab_tree_start.elapsed());
+        crate::timing!(
+            "TIMING: build_internal_vocab_tree {:?}",
+            vocab_tree_start.elapsed()
+        );
         crate::debug!(5, "build_internal_vocab_tree: end");
         crate::debug!(4, "Done building internal vocab prefix tree");
 
@@ -1195,7 +1204,10 @@ impl GrammarConstraint {
                 }
                 computed_possible_matches
             });
-        eprintln!("TIMING: build_maps_and_possible_matches {:?}", maps_start.elapsed());
+        crate::timing!(
+            "TIMING: build_maps_and_possible_matches {:?}",
+            maps_start.elapsed()
+        );
         crate::debug!(5, "build_maps_and_possible_matches: end");
 
         let allowed_follows_by_label = Arc::new(Vec::new());
@@ -1565,7 +1577,10 @@ impl GrammarConstraint {
                     let approx_dfa = crate::glr::approximate_dfa::build_approximate_parser_dfa_from_start(
                         &cache.parser,
                     );
-                    eprintln!("TIMING: build_approximate_suffix_dfa {:?}", approx_start.elapsed());
+                    crate::timing!(
+                        "TIMING: build_approximate_suffix_dfa {:?}",
+                        approx_start.elapsed()
+                    );
 
                     let orig_to_suffix_tid = cache.orig_to_suffix_tid.clone();
                     let reduce_fallback_terminals_by_state =
@@ -1588,7 +1603,10 @@ impl GrammarConstraint {
                     crate::debug!(4, "Approximate suffix DFA requested but missing suffix parser; falling back to parser DFA...");
                     let approx_start = std::time::Instant::now();
                     let approx_dfa = parser.build_approximate_parser_dfa();
-                    eprintln!("TIMING: build_approximate_parser_dfa {:?}", approx_start.elapsed());
+                    crate::timing!(
+                        "TIMING: build_approximate_parser_dfa {:?}",
+                        approx_start.elapsed()
+                    );
 
                     let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
                     for (_term, orig_tid) in parser.terminal_map.iter() {
@@ -1617,7 +1635,10 @@ impl GrammarConstraint {
                 crate::debug!(4, "Building approximate parser DFA (lazy, all-states initial) for precompute1...");
                 let approx_start = std::time::Instant::now();
                 let approx_dfa = parser.build_approximate_parser_dfa();
-                eprintln!("TIMING: build_approximate_parser_dfa {:?}", approx_start.elapsed());
+                crate::timing!(
+                    "TIMING: build_approximate_parser_dfa {:?}",
+                    approx_start.elapsed()
+                );
 
                 let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
                 for (_term, orig_tid) in parser.terminal_map.iter() {
@@ -1660,7 +1681,7 @@ impl GrammarConstraint {
                 always_allowed_by_label.clone(),
             )
         });
-        eprintln!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());
+        crate::timing!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());
         crate::debug!(5, "run_precompute1: end");
 
         crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
@@ -1683,7 +1704,7 @@ impl GrammarConstraint {
                     terminals_count,
                 );
                 crate::debug!(5, "Suffix grammar pruning in {:?}", prune_start.elapsed());
-                eprintln!("TIMING: suffix_prune {:?}", prune_start.elapsed());
+                crate::timing!("TIMING: suffix_prune {:?}", prune_start.elapsed());
                 crate::debug!(4, "Suffix grammar pruning complete. Kept={}, pruned={}", kept, pruned);
                 did_prune = pruned > 0;
             } else if let Some(ref grammar_def) = grammar_definition {
@@ -1697,7 +1718,7 @@ impl GrammarConstraint {
                     terminals_count,
                 );
                 crate::debug!(5, "Suffix grammar pruning in {:?}", prune_start.elapsed());
-                eprintln!("TIMING: suffix_prune {:?}", prune_start.elapsed());
+                crate::timing!("TIMING: suffix_prune {:?}", prune_start.elapsed());
                 crate::debug!(4, "Suffix grammar pruning complete. Kept={}, pruned={}", kept, pruned);
                 did_prune = pruned > 0;
             }
@@ -1713,7 +1734,10 @@ impl GrammarConstraint {
             );
             terminal_dwa.minimize();
             crate::debug!(5, "Terminal DWA re-minimize in {:?}", rem_start.elapsed());
-            eprintln!("TIMING: terminal_dwa_reminimize {:?}", rem_start.elapsed());
+            crate::timing!(
+                "TIMING: terminal_dwa_reminimize {:?}",
+                rem_start.elapsed()
+            );
             crate::debug!(4, "Terminal DWA re-minimization: {} -> {}",
                 before_stats, terminal_dwa.stats());
         }
@@ -3359,12 +3383,15 @@ impl GrammarConstraint {
         let terminal_nwa = timeit!("terminal_nwa_from_dwa", {
             NWA::from_dwa(&terminal_dwa)
         });
-        eprintln!("TIMING: terminal_nwa_from_dwa {:?}", terminal_nwa_start.elapsed());
+        crate::timing!(
+            "TIMING: terminal_nwa_from_dwa {:?}",
+            terminal_nwa_start.elapsed()
+        );
         crate::debug!(5, "terminal_nwa_from_dwa: end");
         crate::debug!(5, "build_parser_dwa: start");
         let parser_dwa_start = std::time::Instant::now();
         let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
-        eprintln!("TIMING: build_parser_dwa {:?}", parser_dwa_start.elapsed());
+        crate::timing!("TIMING: build_parser_dwa {:?}", parser_dwa_start.elapsed());
         crate::debug!(5, "build_parser_dwa: end");
 
         if std::env::var("VERIFY_PARSER_DWA_MINIMIZE").is_ok() {
@@ -3498,7 +3525,10 @@ impl GrammarConstraint {
         timeit!("parser_dwa.trim_weights_to_domain", {
             parser_dwa.trim_weights_to_domain(domain_max);
         });
-        eprintln!("TIMING: parser_dwa_trim_weights {:?}", trim_start.elapsed());
+        crate::timing!(
+            "TIMING: parser_dwa_trim_weights {:?}",
+            trim_start.elapsed()
+        );
         crate::debug!(5, "parser_dwa.trim_weights_to_domain: end");
         
         // Symbol-heavy mode: apply clip_weights and optimize_dwa_and_vocab
@@ -3507,7 +3537,10 @@ impl GrammarConstraint {
             let optimize_start = std::time::Instant::now();
             parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
             optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
-            eprintln!("TIMING: optimize_dwa_and_vocab {:?}", optimize_start.elapsed());
+            crate::timing!(
+                "TIMING: optimize_dwa_and_vocab {:?}",
+                optimize_start.elapsed()
+            );
         }
 
         // Weight complexity instrumentation for the parser DWA.
@@ -3530,7 +3563,10 @@ impl GrammarConstraint {
                 )
             }
         );
-        eprintln!("TIMING: build_internal_to_original_sparse_matrix {:?}", sparse_start.elapsed());
+        crate::timing!(
+            "TIMING: build_internal_to_original_sparse_matrix {:?}",
+            sparse_start.elapsed()
+        );
         crate::debug!(5, "build_internal_to_original_sparse_matrix: end");
         vocab.max_original_llm_token_id = max_original_llm_token_id;
         vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
@@ -3541,7 +3577,7 @@ impl GrammarConstraint {
         let vocab_trie = Arc::new(timeit!("LLMVocabTrie::from_token_map", {
             LLMVocabTrie::from_token_map(&llm_token_map)
         }));
-        eprintln!("TIMING: build_vocab_trie {:?}", vocab_trie_start.elapsed());
+        crate::timing!("TIMING: build_vocab_trie {:?}", vocab_trie_start.elapsed());
         crate::debug!(5, "LLMVocabTrie::from_token_map: end");
         let eos_token_id = find_eos_token_id(&vocab_trie);
         

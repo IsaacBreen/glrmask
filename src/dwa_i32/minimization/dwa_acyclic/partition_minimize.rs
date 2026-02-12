@@ -336,7 +336,7 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     };
     crate::debug!(5, "Partition minimize: {} -> {} in {:?}", 
         before_stats, new_dwa.stats(), start.elapsed());
-    eprintln!(
+    crate::timing!(
         "TIMING: partition_minimize {} -> {} in {:?}",
         before_states,
         new_dwa.states.len(),

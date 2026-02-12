@@ -93,7 +93,7 @@ pub fn compute_combined_equivalence(
 
     let state_time = state_start.elapsed();
     if profile_equivalence {
-        eprintln!(
+        crate::timing!(
             "TIMING: equivalence.state {:?} ({} -> {} states)",
             state_time,
             initial_states.len(),
@@ -112,13 +112,13 @@ pub fn compute_combined_equivalence(
 
     if profile_equivalence {
         let vocab_time = vocab_start.elapsed();
-        eprintln!(
+        crate::timing!(
             "TIMING: equivalence.vocab {:?} ({} tokens -> {} classes)",
             vocab_time,
             tokens.len(),
             vocab_classes.len(),
         );
-        eprintln!("TIMING: equivalence.total {:?}", start.elapsed());
+        crate::timing!("TIMING: equivalence.total {:?}", start.elapsed());
     }
     
     crate::debug!(

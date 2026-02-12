@@ -434,6 +434,19 @@ macro_rules! debug_alt {
     };
 }
 
+/// Timing helper macro.
+///
+/// Prints the provided `TIMING:` line only when `MACRO_DEBUG_LEVEL >= 5`.
+/// This preserves the existing unprefixed `TIMING:` format used by scripts.
+#[macro_export]
+macro_rules! timing {
+    ($($arg:tt)*) => {{
+        if $crate::r#macro::is_debug_level_enabled(5) {
+            eprintln!($($arg)*);
+        }
+    }};
+}
+
 // =============================================================================
 // Semantic Output Helpers (Backwards Compatibility)
 // =============================================================================

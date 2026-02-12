@@ -195,7 +195,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let prod_count = grammar_definition.productions.len();
     let term_count = grammar_definition.terminal_to_group_id().len();
 
-    eprintln!("TIMING: grammar_definition {:?}", grammar_start.elapsed());
+    sep1::timing!("TIMING: grammar_definition {:?}", grammar_start.elapsed());
     
     if is_debug_level_enabled(2) {
         sep1::debug!(2, "└─ {} productions, {} terminals {MAGENTA}({}){RESET}", 
@@ -246,7 +246,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_original_llm_token_id = max_original_llm_token_id.max(token_id);
     }
 
-    eprintln!("TIMING: load_vocabulary {:?}", vocab_start.elapsed());
+    sep1::timing!("TIMING: load_vocabulary {:?}", vocab_start.elapsed());
     
     if is_debug_level_enabled(2) {
         sep1::debug!(2, "└─ {} tokens {MAGENTA}({}){RESET}", 
@@ -271,7 +271,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &config,
     );
 
-    eprintln!("TIMING: build_constraint {:?}", build_start.elapsed());
+    sep1::timing!("TIMING: build_constraint {:?}", build_start.elapsed());
 
     // Record the total compilation time (grammar + vocab loading + constraint building)
     let compilation_time_seconds = total_start.elapsed().as_secs_f64();
@@ -304,7 +304,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("\n{DIM}─────────────────────────────────────────{RESET}");
             println!("{BOLD_GREEN}{CHECK} Complete in {}{RESET}\n", format_duration(total_start.elapsed()));
         }
-        eprintln!("TIMING: total {:?}", total_start.elapsed());
+        sep1::timing!("TIMING: total {:?}", total_start.elapsed());
         return Ok(());
     }
 
@@ -347,7 +347,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             writer.write_all(&json_bytes).map_err(|e| e.to_string())?;
         }
 
-        eprintln!("TIMING: save_output {:?}", save_start.elapsed());
+        sep1::timing!("TIMING: save_output {:?}", save_start.elapsed());
         
         if is_debug_level_enabled(2) {
             let file_size = std::fs::metadata(&output_path)?.len();
@@ -368,7 +368,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: failed to flush weight dump: {}", e);
     }
 
-    eprintln!("TIMING: total {:?}", total_start.elapsed());
+    sep1::timing!("TIMING: total {:?}", total_start.elapsed());
 
     Ok(())
 }

@@ -2438,65 +2438,62 @@ impl CompiledGrammar {
             let build_other = tokenizer_total
                 .checked_sub(terminal_expr_time + groups_time + regex_total)
                 .unwrap_or_default();
-            eprintln!("TIMING: build_tokenizer.terminal_exprs {:?}", terminal_expr_time);
-            eprintln!("TIMING: build_tokenizer.groups {:?}", groups_time);
-            eprintln!(
+            crate::timing!("TIMING: build_tokenizer.terminal_exprs {:?}", terminal_expr_time);
+            crate::timing!("TIMING: build_tokenizer.groups {:?}", groups_time);
+            crate::timing!(
                 "TIMING: build_tokenizer.nfa_size states={} transitions={}",
                 timings.nfa_states,
                 timings.nfa_transitions
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: build_tokenizer.dfa_size states={} transitions={}",
                 timings.dfa_states,
                 timings.dfa_transitions
             );
-            eprintln!(
-                "TIMING: build_tokenizer.dfa_unique_pairs {}",
-                timings.dfa_unique_pairs
+            crate::timing!("TIMING: build_tokenizer.dfa_unique_pairs {}", timings.dfa_unique_pairs);
+            crate::timing!("TIMING: build_tokenizer.regex.total {:?}", regex_total);
+            crate::timing!("TIMING: build_tokenizer.regex.stats {:?}", timings.stats);
+            crate::timing!("TIMING: build_tokenizer.regex.optimize {:?}", timings.optimize);
+            crate::timing!("TIMING: build_tokenizer.regex.build_nfa {:?}", timings.build_nfa);
+            crate::timing!(
+                "TIMING: build_tokenizer.regex.condense_epsilon_sccs {:?}",
+                timings.condense_epsilon_sccs
             );
-            eprintln!("TIMING: build_tokenizer.regex.total {:?}", regex_total);
-            eprintln!("TIMING: build_tokenizer.regex.stats {:?}", timings.stats);
-            eprintln!("TIMING: build_tokenizer.regex.optimize {:?}", timings.optimize);
-            eprintln!("TIMING: build_tokenizer.regex.build_nfa {:?}", timings.build_nfa);
-            eprintln!("TIMING: build_tokenizer.regex.condense_epsilon_sccs {:?}", timings.condense_epsilon_sccs);
-            eprintln!("TIMING: build_tokenizer.regex.to_dfa {:?}", timings.to_dfa.total);
-            eprintln!("TIMING: build_tokenizer.regex.minimize {:?}", timings.minimize);
-            eprintln!("TIMING: build_tokenizer.regex.other {:?}", timings.other);
+            crate::timing!("TIMING: build_tokenizer.regex.to_dfa {:?}", timings.to_dfa.total);
+            crate::timing!("TIMING: build_tokenizer.regex.minimize {:?}", timings.minimize);
+            crate::timing!("TIMING: build_tokenizer.regex.other {:?}", timings.other);
 
-            eprintln!(
+            crate::timing!(
                 "TIMING: build_tokenizer.to_dfa.compute_equivalence_classes {:?}",
                 timings.to_dfa.compute_equivalence_classes
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: build_tokenizer.to_dfa.remap_transitions {:?}",
                 timings.to_dfa.remap_transitions
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: build_tokenizer.to_dfa.build_compact_nfa {:?}",
                 timings.to_dfa.build_compact_nfa
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: build_tokenizer.to_dfa.precompute_closures {:?}",
                 timings.to_dfa.precompute_closures
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: build_tokenizer.to_dfa.start_closure {:?}",
                 timings.to_dfa.start_closure
             );
-            eprintln!(
-                "TIMING: build_tokenizer.to_dfa.main_loop {:?}",
-                timings.to_dfa.main_loop
-            );
-            eprintln!("TIMING: build_tokenizer.to_dfa.metadata {:?}", timings.to_dfa.metadata);
-            eprintln!("TIMING: build_tokenizer.to_dfa.other {:?}", timings.to_dfa.other);
-            eprintln!("TIMING: build_tokenizer.other {:?}", build_other);
+            crate::timing!("TIMING: build_tokenizer.to_dfa.main_loop {:?}", timings.to_dfa.main_loop);
+            crate::timing!("TIMING: build_tokenizer.to_dfa.metadata {:?}", timings.to_dfa.metadata);
+            crate::timing!("TIMING: build_tokenizer.to_dfa.other {:?}", timings.to_dfa.other);
+            crate::timing!("TIMING: build_tokenizer.other {:?}", build_other);
         }
-        eprintln!("TIMING: build_tokenizer {:?}", tokenizer_total);
+        crate::timing!("TIMING: build_tokenizer {:?}", tokenizer_total);
 
         let parser_start = std::time::Instant::now();
         debug!(3, "Building GLR parser from definition");
         let glr_parser = Self::glr_parser_from_definition(&definition);
-        eprintln!("TIMING: build_glr_parser {:?}", parser_start.elapsed());
+        crate::timing!("TIMING: build_glr_parser {:?}", parser_start.elapsed());
 
         // Report terminal equivalence classes at debug level 5
         // Two terminals are equivalent if they have the same actions in every state

@@ -127,9 +127,11 @@ pub fn apply_cancellations_multi_range(states: &mut NWAStates, ranges: &[std::op
     
     let total_eps: usize = all_epsilons.iter().map(|v| v.len()).sum();
     let elapsed = start.elapsed();
-    eprintln!(
+    crate::timing!(
         "TIMING: apply_cancellations_multi_range ranges={} epsilons={} {:?}",
-        ranges.len(), total_eps, elapsed
+        ranges.len(),
+        total_eps,
+        elapsed
     );
     
     // Apply all epsilons to the arena
@@ -1281,8 +1283,14 @@ fn compute_finality_fixpoint_range(
     }
 
     let phase2_time = phase2_start.elapsed();
-    eprintln!("TIMING: finality_fixpoint phase1={:?} phase2={:?} reachable={} pred_edges={} steps={}", 
-        phase1_time, phase2_time, reachable_states.len(), total_pred_edges, steps);
+    crate::timing!(
+        "TIMING: finality_fixpoint phase1={:?} phase2={:?} reachable={} pred_edges={} steps={}",
+        phase1_time,
+        phase2_time,
+        reachable_states.len(),
+        total_pred_edges,
+        steps
+    );
 
     let mut result: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
     for a in range {

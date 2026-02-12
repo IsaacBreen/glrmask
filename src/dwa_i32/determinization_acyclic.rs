@@ -797,7 +797,7 @@ pub(crate) fn determinize_acyclic_with_progress(
                 *sizes.last().unwrap(),
             )
         };
-        eprintln!(
+        crate::timing!(
             "TIMING: determinize_acyclic::eps_closure_sizes avg={:.2} p50={} p90={} p99={} max={}",
             avg,
             p50,
@@ -1244,22 +1244,22 @@ pub(crate) fn determinize_acyclic_with_progress(
 
     if timing_debug {
         if let Some(t) = eps_unweighted_time {
-            eprintln!("TIMING: determinize_acyclic::precompute_eps_unweighted {:?}", t);
+            crate::timing!("TIMING: determinize_acyclic::precompute_eps_unweighted {:?}", t);
         }
         if let Some(t) = eps_weighted_time {
-            eprintln!("TIMING: determinize_acyclic::precompute_eps_weighted {:?}", t);
+            crate::timing!("TIMING: determinize_acyclic::precompute_eps_weighted {:?}", t);
         }
         if let Some(t) = precompute_loop_time {
-            eprintln!("TIMING: determinize_acyclic::precompute_loop {:?}", t);
+            crate::timing!("TIMING: determinize_acyclic::precompute_loop {:?}", t);
         }
         if let Some(t) = materialize_time {
-            eprintln!("TIMING: determinize_acyclic::materialize_weighted_closures {:?}", t);
+            crate::timing!("TIMING: determinize_acyclic::materialize_weighted_closures {:?}", t);
         }
         if let Some(t) = materialize_parallel_time {
-            eprintln!("TIMING: determinize_acyclic::materialize_parallel {:?}", t);
+            crate::timing!("TIMING: determinize_acyclic::materialize_parallel {:?}", t);
         }
         if let Some(t) = materialize_merge_time {
-            eprintln!("TIMING: determinize_acyclic::materialize_merge {:?}", t);
+            crate::timing!("TIMING: determinize_acyclic::materialize_merge {:?}", t);
         }
         if let Some(timers) = materialize_timers.as_ref() {
             let collect = Duration::from_nanos(
@@ -1281,20 +1281,20 @@ pub(crate) fn determinize_acyclic_with_progress(
             let labels = timers.labels.load(AtomicOrdering::Relaxed);
             let and_ops = timers.and_ops.load(AtomicOrdering::Relaxed);
             let or_ops = timers.or_ops.load(AtomicOrdering::Relaxed);
-            eprintln!("TIMING: determinize_acyclic::materialize_collect {:?}", collect);
-            eprintln!("TIMING: determinize_acyclic::materialize_expand {:?}", expand);
-            eprintln!("TIMING: determinize_acyclic::materialize_normalize {:?}", normalize);
-            eprintln!(
+            crate::timing!("TIMING: determinize_acyclic::materialize_collect {:?}", collect);
+            crate::timing!("TIMING: determinize_acyclic::materialize_expand {:?}", expand);
+            crate::timing!("TIMING: determinize_acyclic::materialize_normalize {:?}", normalize);
+            crate::timing!(
                 "TIMING: determinize_acyclic::materialize_weight_and {:?} ops={}",
                 weight_and,
                 and_ops,
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::materialize_weight_or {:?} ops={}",
                 weight_or,
                 or_ops,
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::materialize_counts calls={} labels={}",
                 calls,
                 labels,
@@ -1323,7 +1323,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (target_total as f64) / (transition_total as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::materialize_stats avg_closure_size={:.2} avg_transitions_per_state={:.2} avg_targets_per_transition={:.2}",
                 avg_closure_size,
                 avg_transitions_per_state,
@@ -1341,7 +1341,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             let total_or = collect_or
                 .saturating_add(expand_or)
                 .saturating_add(normalize_or);
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::materialize_or_ops collect={} expand={} normalize={} total={} all_or_ops={}",
                 collect_or,
                 expand_or,
@@ -1358,7 +1358,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             let pending_insert = Duration::from_nanos(
                 timers.pending_insert_ns.load(AtomicOrdering::Relaxed),
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::materialize_blocks closure_lookup={:?} transition_iter={:?} pending_insert={:?}",
                 closure_lookup,
                 transition_iter,
@@ -1366,7 +1366,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             );
             if let Ok(mut ratios) = timers.eps_expand_ratios.lock() {
                 if ratios.is_empty() {
-                    eprintln!(
+                    crate::timing!(
                         "TIMING: determinize_acyclic::eps_expand_ratio avg=0.00 p50=0.00 p90=0.00 p99=0.00 max=0.00",
                     );
                 } else {
@@ -1378,7 +1378,7 @@ pub(crate) fn determinize_acyclic_with_progress(
                     let p90 = ratios[percentile_index(len, 0.90)];
                     let p99 = ratios[percentile_index(len, 0.99)];
                     let max = *ratios.last().unwrap();
-                    eprintln!(
+                    crate::timing!(
                         "TIMING: determinize_acyclic::eps_expand_ratio avg={:.2} p50={:.2} p90={:.2} p99={:.2} max={:.2}",
                         avg,
                         p50,
@@ -1398,7 +1398,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (total_updates as f64) / (final_cells as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::weighted_update_ratio total_updates={} final_cells={} ratio={:.2}",
                 total_updates,
                 final_cells,
@@ -1428,7 +1428,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (empty_weights as f64) * 100.0 / (total_weights as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::weight_density total={} all={} ({:.1}%) empty={} ({:.1}%)",
                 total_weights,
                 all_weights,
@@ -1445,7 +1445,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (hits as f64) * 100.0 / (total as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or hits={} misses={} rate={:.1}%",
                 hits,
                 misses,
@@ -1459,7 +1459,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (miss_ns as f64) / (miss_count as f64) / 1000.0
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_time {:?} misses={} avg_us={:.1}",
                 miss_time,
                 miss_count,
@@ -1500,29 +1500,29 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (detail.intern_ns as f64) / (miss_count as f64) / 1000.0
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_prep {:?} avg_us={:.1}",
                 prep_time,
                 avg_prep_us,
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_union_asym {:?} count={} avg_us={:.1}",
                 union_asym_time,
                 detail.asym_count,
                 avg_asym_us,
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_merge {:?} count={} avg_us={:.1}",
                 merge_time,
                 detail.merge_count,
                 avg_merge_us,
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_intern {:?} avg_us={:.1}",
                 intern_time,
                 avg_intern_us,
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_ranges avg_left={:.1} avg_right={:.1}",
                 avg_left_ranges,
                 avg_right_ranges,
@@ -1547,13 +1547,13 @@ pub(crate) fn determinize_acyclic_with_progress(
                 (detail.rangeset_right_ranges_total as f64)
                     / (detail.rangeset_union_count as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_rangeset_union {:?} count={} avg_us={:.1}",
                 rangeset_union_time,
                 detail.rangeset_union_count,
                 rangeset_union_avg_us,
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_rangeset_sizes avg_left={:.1} avg_right={:.1}",
                 rangeset_left_avg,
                 rangeset_right_avg,
@@ -1583,7 +1583,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (none as f64) * 100.0 / (segments_total as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::op_cache_or_miss_segments total={} both={} ({:.1}%) left_only={} ({:.1}%) right_only={} ({:.1}%) none={} ({:.1}%)",
                 segments_total,
                 both,
@@ -1603,7 +1603,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (l1_hits as f64) * 100.0 / (l1_total as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::l1_op_cache_or hits={} misses={} rate={:.1}%",
                 l1_hits,
                 l1_misses,
@@ -1619,7 +1619,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (noop_sample as f64) * 100.0 / (total_sample as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::bitor_assign_noop total={} noop={} rate={:.1}%",
                 total_sample,
                 noop_sample,
@@ -1632,7 +1632,7 @@ pub(crate) fn determinize_acyclic_with_progress(
             } else {
                 (sample_noop as f64) * 100.0 / (sample_total as f64)
             };
-            eprintln!(
+            crate::timing!(
                 "TIMING: determinize_acyclic::bitor_assign_noop_sample total={} noop={} rate={:.1}%",
                 sample_total,
                 sample_noop,
@@ -1640,10 +1640,10 @@ pub(crate) fn determinize_acyclic_with_progress(
             );
         }
         if let Some(t) = finalize_time {
-            eprintln!("TIMING: determinize_acyclic::finalize_weighted_closures {:?}", t);
+            crate::timing!("TIMING: determinize_acyclic::finalize_weighted_closures {:?}", t);
         }
-        eprintln!("TIMING: determinize_acyclic::total {:?}", start_time.elapsed());
-        eprintln!(
+        crate::timing!("TIMING: determinize_acyclic::total {:?}", start_time.elapsed());
+        crate::timing!(
             "TIMING: determinize_acyclic::counters dwa_states={} total_transitions={} avg_unweighted_closure_size={:.2}",
             total_dwa_states,
             total_transitions,

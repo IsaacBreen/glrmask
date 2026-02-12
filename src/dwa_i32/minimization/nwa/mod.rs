@@ -545,12 +545,12 @@ impl NWA {
         let build_elapsed = build_start.elapsed();
 
         if profile_rm_epsilon {
-            eprintln!("TIMING: NWA::rm_epsilon::precollapse_scc_elapsed {:?}", scc_elapsed);
-            eprintln!("TIMING: NWA::rm_epsilon::precollapse_scc_components {}", num_comps);
-            eprintln!("TIMING: NWA::rm_epsilon::precollapse_collect_elapsed {:?}", collect_elapsed);
-            eprintln!("TIMING: NWA::rm_epsilon::precollapse_propagate_elapsed {:?}", propagate_elapsed);
-            eprintln!("TIMING: NWA::rm_epsilon::precollapse_build_elapsed {:?}", build_elapsed);
-            eprintln!("TIMING: NWA::rm_epsilon::precollapse_union {:?}", union_time);
+            crate::timing!("TIMING: NWA::rm_epsilon::precollapse_scc_elapsed {:?}", scc_elapsed);
+            crate::timing!("TIMING: NWA::rm_epsilon::precollapse_scc_components {}", num_comps);
+            crate::timing!("TIMING: NWA::rm_epsilon::precollapse_collect_elapsed {:?}", collect_elapsed);
+            crate::timing!("TIMING: NWA::rm_epsilon::precollapse_propagate_elapsed {:?}", propagate_elapsed);
+            crate::timing!("TIMING: NWA::rm_epsilon::precollapse_build_elapsed {:?}", build_elapsed);
+            crate::timing!("TIMING: NWA::rm_epsilon::precollapse_union {:?}", union_time);
         }
 
         Some(NWA {
@@ -714,11 +714,11 @@ impl NWA {
             let total = dag_start.elapsed();
             let sum = timing_build_adj + timing_toposort + timing_build_states;
             let other = total.saturating_sub(sum);
-            eprintln!("TIMING: NWA::rm_epsilon::dag_build_adj {:?}", timing_build_adj);
-            eprintln!("TIMING: NWA::rm_epsilon::dag_toposort {:?}", timing_toposort);
-            eprintln!("TIMING: NWA::rm_epsilon::dag_build_states {:?}", timing_build_states);
-            eprintln!("TIMING: NWA::rm_epsilon::dag_other {:?}", other);
-            eprintln!("TIMING: NWA::rm_epsilon::dag_total {:?}", total);
+            crate::timing!("TIMING: NWA::rm_epsilon::dag_build_adj {:?}", timing_build_adj);
+            crate::timing!("TIMING: NWA::rm_epsilon::dag_toposort {:?}", timing_toposort);
+            crate::timing!("TIMING: NWA::rm_epsilon::dag_build_states {:?}", timing_build_states);
+            crate::timing!("TIMING: NWA::rm_epsilon::dag_other {:?}", other);
+            crate::timing!("TIMING: NWA::rm_epsilon::dag_total {:?}", total);
             eprintln!("NWA::rm_epsilon::dag_stats states={} eps={} no_eps_states={}", num_states, total_eps, states_with_no_eps);
         }
 
@@ -831,7 +831,10 @@ impl NWA {
         self.states.0[source] = new_state;
 
         if profile_rm_epsilon {
-            eprintln!("TIMING: NWA::rm_epsilon::single_source_total {:?}", start_time.elapsed());
+            crate::timing!(
+                "TIMING: NWA::rm_epsilon::single_source_total {:?}",
+                start_time.elapsed()
+            );
             eprintln!("NWA::rm_epsilon::single_source_stats eps={}", total_eps);
         }
 
@@ -979,11 +982,11 @@ impl NWA {
             let total = rm_epsilon_start.elapsed();
             let sum = timing_closure + timing_accumulate + timing_finalize;
             let other = total.saturating_sub(sum);
-            eprintln!("TIMING: NWA::rm_epsilon::closure {:?}", timing_closure);
-            eprintln!("TIMING: NWA::rm_epsilon::accumulate {:?}", timing_accumulate);
-            eprintln!("TIMING: NWA::rm_epsilon::finalize {:?}", timing_finalize);
-            eprintln!("TIMING: NWA::rm_epsilon::other {:?}", other);
-            eprintln!("TIMING: NWA::rm_epsilon::total {:?}", total);
+            crate::timing!("TIMING: NWA::rm_epsilon::closure {:?}", timing_closure);
+            crate::timing!("TIMING: NWA::rm_epsilon::accumulate {:?}", timing_accumulate);
+            crate::timing!("TIMING: NWA::rm_epsilon::finalize {:?}", timing_finalize);
+            crate::timing!("TIMING: NWA::rm_epsilon::other {:?}", other);
+            crate::timing!("TIMING: NWA::rm_epsilon::total {:?}", total);
             eprintln!("NWA::rm_epsilon::stats states={} eps={} no_eps_states={}", num_states, total_eps, states_with_no_eps);
         }
     }
@@ -1083,13 +1086,16 @@ impl NWA {
         let mut did_precollapse = false;
         if use_precollapse {
             if profile_rm_epsilon {
-                eprintln!("TIMING: NWA::rm_epsilon::precollapse_eps_count {}", total_epsilons);
+                crate::timing!("TIMING: NWA::rm_epsilon::precollapse_eps_count {}", total_epsilons);
             }
             let precollapse_start = Instant::now();
             let reduced_opt = self.collapse_all_weight_eps();
             let precollapse_elapsed = precollapse_start.elapsed();
             if profile_rm_epsilon {
-                eprintln!("TIMING: NWA::rm_epsilon::precollapse_elapsed {:?}", precollapse_elapsed);
+                crate::timing!(
+                    "TIMING: NWA::rm_epsilon::precollapse_elapsed {:?}",
+                    precollapse_elapsed
+                );
             }
             if let Some(mut reduced) = reduced_opt {
                 let before_states = self.states.len();

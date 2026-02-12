@@ -655,7 +655,10 @@ impl<'r> Precomputer1<'r> {
     fn finish(mut self) -> DWA {
         let flush_start = std::time::Instant::now();
         self.flush_pending_token_ids();
-        eprintln!("TIMING: precompute1::flush_pending_token_ids {:?}", flush_start.elapsed());
+        crate::timing!(
+            "TIMING: precompute1::flush_pending_token_ids {:?}",
+            flush_start.elapsed()
+        );
         let run_debug_scan = std::env::var("PRECOMPUTE1_DEBUG_SCAN")
             .map(|v| v == "1")
             .unwrap_or(false)
@@ -1165,7 +1168,7 @@ impl<'r> Precomputer1<'r> {
                 before_stats,
                 after_stats,
             );
-            eprintln!(
+            crate::timing!(
                 "TIMING: terminal_nwa_always_allowed_collapse {:?}",
                 collapse_start.elapsed()
             );
@@ -1185,7 +1188,10 @@ impl<'r> Precomputer1<'r> {
                 );
                 crate::debug!(4, "Terminal NWA suffix pruning complete. Kept={}, pruned={}", kept, pruned);
                 crate::debug!(4, "Terminal NWA (after suffix pruning): {}", self.nwa.stats());
-                eprintln!("TIMING: terminal_nwa_suffix_prune {:?}", prune_start.elapsed());
+                crate::timing!(
+                    "TIMING: terminal_nwa_suffix_prune {:?}",
+                    prune_start.elapsed()
+                );
             } else {
                 crate::debug!(4, "NWA_SUFFIX_PRUNE set but missing suffix parser cache; skipping");
             }
@@ -1208,7 +1214,10 @@ impl<'r> Precomputer1<'r> {
                     );
                     crate::debug!(4, "Terminal DWA pre-min suffix pruning complete. Kept={}, pruned={}", kept, pruned);
                     crate::debug!(4, "Terminal DWA (after pre-min suffix pruning): {}", dwa.stats());
-                    eprintln!("TIMING: terminal_dwa_suffix_prune_pre_min {:?}", prune_start.elapsed());
+                    crate::timing!(
+                        "TIMING: terminal_dwa_suffix_prune_pre_min {:?}",
+                        prune_start.elapsed()
+                    );
                 } else {
                     crate::debug!(4, "DWA_SUFFIX_PRUNE set but missing suffix parser cache; skipping");
                 }
@@ -1225,7 +1234,7 @@ impl<'r> Precomputer1<'r> {
                     let before_stats = dwa.stats();
                     let collapse_start = std::time::Instant::now();
                     let stats = collapse_self_extending_chains(dwa, labels);
-                    eprintln!(
+                    crate::timing!(
                         "TIMING: terminal_dwa_self_ext_chain_collapse {:?}",
                         collapse_start.elapsed()
                     );
@@ -1659,7 +1668,7 @@ impl<'r> Precomputer1<'r> {
         let dfs_time = dfs_start.elapsed();
         self.vocab = vocab;
         self.pb.finish();
-        eprintln!("TIMING: precompute1::run_dfs::dfs {:?}", dfs_time);
+        crate::timing!("TIMING: precompute1::run_dfs::dfs {:?}", dfs_time);
         crate::debug!(5, "Precomputation complete");
     }
 
