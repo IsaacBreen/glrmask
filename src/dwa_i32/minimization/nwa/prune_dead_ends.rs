@@ -108,33 +108,29 @@ impl NWA {
         let mut map = vec![usize::MAX; n];
         let mut new_states = NWAStates::default();
 
+        // Move states instead of cloning — avoids expensive BTreeMap/Vec clones.
         for i in 0..n {
             if live[i] {
                 let new_id = new_states.add_state();
                 map[i] = new_id;
-                new_states[new_id] = self.states[i].clone();
+                new_states[new_id] = std::mem::take(&mut self.states.0[i]);
             }
         }
 
+        // Remap transition targets in-place (no new BTreeMap allocation).
         for st in &mut new_states.0 {
             st.epsilons.retain(|(v, w)| *v < n && !w.is_empty() && live[*v]);
             for (v, _) in &mut st.epsilons {
                 *v = map[*v];
             }
 
-            let mut new_transitions: BTreeMap<Label, Vec<(NWAStateID, crate::dwa_i32::Weight)>> = BTreeMap::new();
-            for (&lbl, targets) in &st.transitions {
-                let mut new_targets = Vec::new();
-                for &(v, ref w) in targets {
-                    if v < n && !w.is_empty() && live[v] {
-                        new_targets.push((map[v], w.clone()));
-                    }
-                }
-                if !new_targets.is_empty() {
-                    new_transitions.insert(lbl, new_targets);
+            for targets in st.transitions.values_mut() {
+                targets.retain(|(v, w)| *v < n && !w.is_empty() && live[*v]);
+                for (v, _) in targets.iter_mut() {
+                    *v = map[*v];
                 }
             }
-            st.transitions = new_transitions;
+            st.transitions.retain(|_, targets| !targets.is_empty());
         }
 
         let mut new_start_states = Vec::new();

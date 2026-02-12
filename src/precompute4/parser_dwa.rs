@@ -1507,22 +1507,26 @@ pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 }
 
 pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    crate::debug!(4, "Pruning continuations from final states for NWA with {}...", combined_nwa.stats());
-    let prune_final_start = std::time::Instant::now();
-    combined_nwa.subtract_final_weights_from_outgoing();
-    crate::debug!(5, "subtract_final_weights_from_outgoing in {:?}", prune_final_start.elapsed());
-    eprintln!("TIMING: parser_dwa::finalize::subtract_final_weights_from_outgoing {:?}", prune_final_start.elapsed());
-    crate::debug!(4, "Pruned continuations from final states. NWA now {}.", combined_nwa.stats());
+    crate::debug!(4, "Finalizing NWA with {}...", combined_nwa.stats());
     
-    // After pruning continuations, some transitions may become empty and states may become unreachable.
-    // Prune unreachable states first (forward BFS from starts - fast, removes 97% of states).
-    // Then prune dead ends on the much smaller remaining NWA.
+    // Prune unreachable states FIRST (forward BFS from starts - fast, removes 97% of states).
+    // This dramatically reduces the state count before subtract_final_weights_from_outgoing,
+    // which would otherwise iterate all 1.75M states.
     let before_prune = combined_nwa.stats();
     let prune_unreachable_start = std::time::Instant::now();
     let unreach_changed = combined_nwa.prune_unreachable();
     let prune_unreachable_time = prune_unreachable_start.elapsed();
     eprintln!("TIMING: parser_dwa::finalize::prune_unreachable {:?} changed={}", prune_unreachable_time, unreach_changed);
     let after_unreachable = combined_nwa.stats();
+
+    // Now subtract final weights from outgoing transitions on the much smaller NWA (~45K states).
+    let prune_final_start = std::time::Instant::now();
+    combined_nwa.subtract_final_weights_from_outgoing();
+    crate::debug!(5, "subtract_final_weights_from_outgoing in {:?}", prune_final_start.elapsed());
+    eprintln!("TIMING: parser_dwa::finalize::subtract_final_weights_from_outgoing {:?}", prune_final_start.elapsed());
+    crate::debug!(4, "Pruned continuations from final states. NWA now {}.", combined_nwa.stats());
+
+    // After weight subtraction, prune dead ends (states that can't reach any final state).
     let prune_start = std::time::Instant::now();
     let dead_changed = combined_nwa.prune_dead_ends();
     let prune_dead_time = prune_start.elapsed();
