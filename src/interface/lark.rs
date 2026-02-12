@@ -428,8 +428,14 @@ impl<'a> LarkParser<'a> {
             Ok(CharClass(cc))
         } else if let Some(LarkToken { kind: LarkTokenKind::RegexLiteral(re), .. }) = self.tokens.peek().cloned() {
             self.tokens.next();
-            // Convert regex to character class format
-            Ok(CharClass(format!("[{}]", re)))
+            // Convert regex to character class format.
+            // If the regex is already a single character class like /[^"\\]/,
+            // preserve it verbatim to avoid producing nested brackets.
+            if re.starts_with('[') && re.ends_with(']') {
+                Ok(CharClass(re))
+            } else {
+                Ok(CharClass(format!("[{}]", re)))
+            }
         } else if self.peek_op("(") {
             self.consume_op("(")?;
             self.skip_newlines();
@@ -642,5 +648,30 @@ STR_CHAR: "a"
                 inner: Box::new(GrammarExpr::Ref("STR_CHAR".to_string())),
             }
         );
+    }
+
+    #[test]
+    fn test_lark_regex_charclass_not_nested() {
+        let lark = r#"
+start: STR_CHAR
+STR_CHAR: /[^"\\\x00-\x1F]/
+"#;
+        let mut parser = LarkParser::new(lark).unwrap();
+        let result = parser.parse().unwrap();
+
+        let str_char_expr = result
+            .grammar_rules
+            .iter()
+            .find(|(name, _)| name == "STR_CHAR")
+            .map(|(_, expr)| expr)
+            .expect("STR_CHAR rule should exist");
+
+        match str_char_expr {
+            GrammarExpr::CharClass(cc) => {
+                assert_eq!(cc, "[^\"\\\\\\x00-\\x1F]");
+                assert!(!cc.starts_with("[["));
+            }
+            other => panic!("expected CharClass, got {:?}", other),
+        }
     }
 }

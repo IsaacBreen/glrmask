@@ -54,6 +54,58 @@ mod tests {
     }
 
     #[test]
+    fn test_lark_terminal_chain_matches_ebnf_terminal_chain() {
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+
+        let lark = r#"
+start: obj
+obj: "{" pair ("," pair)* "}"
+pair: JSON_STRING ":" JSON_STRING
+JSON_STRING: "\"" STR_CHAR* "\""
+STR_CHAR: /[^"\\\x00-\x1F]/
+"#;
+
+        let ebnf = r#"
+    start ::= obj ;
+obj ::= "{" pair ("," pair)* "}" ;
+pair ::= JSON_STRING ":" JSON_STRING ;
+JSON_STRING ::= '"' STR_CHAR* '"' ;
+STR_CHAR ::= [^"\\\x00-\x1F] ;
+"#;
+
+        let lark_def = GrammarDefinition::from_lark(lark).expect("Lark grammar should parse");
+        let ebnf_def = GrammarDefinition::from_ebnf(ebnf).expect("EBNF grammar should parse");
+
+        let lark_str_gid = *lark_def
+            .regex_name_to_group_id
+            .get_by_left("JSON_STRING")
+            .expect("Lark JSON_STRING should exist");
+        let ebnf_str_gid = *ebnf_def
+            .regex_name_to_group_id
+            .get_by_left("JSON_STRING")
+            .expect("EBNF JSON_STRING should exist");
+
+        let lark_str_expr = lark_def
+            .group_id_to_expr
+            .get(&lark_str_gid)
+            .expect("Lark JSON_STRING expr missing");
+        let ebnf_str_expr = ebnf_def
+            .group_id_to_expr
+            .get(&ebnf_str_gid)
+            .expect("EBNF JSON_STRING expr missing");
+
+        assert_eq!(
+            lark_str_expr, ebnf_str_expr,
+            "JSON_STRING regex lowering should match between Lark and EBNF paths"
+        );
+
+        assert_eq!(
+            lark_def.productions, ebnf_def.productions,
+            "Production lowering should match between Lark and EBNF paths"
+        );
+    }
+
+    #[test]
     fn test_precompute_for_python_name_token_with_names() {
         let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let ignore_expr = repeat0_fast(choice_fast!(
