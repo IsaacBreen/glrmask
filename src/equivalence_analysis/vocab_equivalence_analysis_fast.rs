@@ -66,8 +66,10 @@ struct PrecomputedDfa {
     transitions: Vec<[u32; 256]>,
     finalizers: Vec<FinalizerList>,
     future_modes: Vec<FutureMode>,
+    guard_masks: Vec<Option<Box<[u64]>>>,
     has_transitions: Vec<bool>,
     num_groups: usize,
+    mask_words: usize,
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
 }
@@ -77,7 +79,12 @@ struct Pos0Scratch {
     current_states: Vec<usize>,
     done: Vec<bool>,
     active_indices: Vec<usize>,
+    end_states: Vec<Option<usize>>,
+    matched_bits: Vec<u64>,
+    mask_words: usize,
     match_positions: Vec<u32>,
+    match_gen: Vec<u32>,
+    cur_gen: u32,
     touched_groups: Vec<GroupList>,
     touched_positions: Vec<usize>,
     touched_states: Vec<usize>,
@@ -145,6 +152,7 @@ fn precompute_dfa(regex: &Tokenizer) -> PrecomputedDfa {
     }
 
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
+    let mask_words = (num_groups + 63) / 64;
 
     // Build transition tables and finalizer lists
     let mut transitions: Vec<[u32; 256]> = Vec::with_capacity(dfa.states.len());
@@ -185,25 +193,53 @@ fn precompute_dfa(regex: &Tokenizer) -> PrecomputedDfa {
         }
     }
 
-    // Compute future modes
-    let future_modes: Vec<FutureMode> = possible_future
-        .iter()
-        .map(|future| {
-            if future.is_empty() {
-                return FutureMode::AlwaysTerminate;
+    // Compute future modes + guarded bitmasks
+    let mut future_modes: Vec<FutureMode> = Vec::with_capacity(possible_future.len());
+    let mut guard_masks: Vec<Option<Box<[u64]>>> = Vec::with_capacity(possible_future.len());
+
+    for future in possible_future.iter() {
+        if future.is_empty() {
+            future_modes.push(FutureMode::AlwaysTerminate);
+            guard_masks.push(None);
+            continue;
+        }
+
+        let mut guard: GroupList = GroupList::new();
+        let mut always_continue = false;
+        for &gid in future {
+            if gid >= num_groups || !non_greedy_flags[gid] {
+                always_continue = true;
+                break;
             }
-            let mut guard: GroupList = GroupList::new();
-            for &gid in future {
-                if gid >= num_groups || !non_greedy_flags[gid] {
-                    return FutureMode::AlwaysContinue;
-                }
-                guard.push(gid);
-            }
-            guard.sort_unstable();
-            guard.dedup();
-            FutureMode::Guarded(guard)
-        })
-        .collect();
+            guard.push(gid);
+        }
+
+        if always_continue {
+            future_modes.push(FutureMode::AlwaysContinue);
+            guard_masks.push(None);
+            continue;
+        }
+
+        guard.sort_unstable();
+        guard.dedup();
+
+        if mask_words == 0 {
+            // num_groups==0 implies possible_future is empty, which was handled above.
+            future_modes.push(FutureMode::AlwaysTerminate);
+            guard_masks.push(None);
+            continue;
+        }
+
+        let mut mask = vec![0u64; mask_words];
+        for &gid in guard.iter() {
+            let word = gid >> 6;
+            let bit = 1u64 << (gid & 63);
+            mask[word] |= bit;
+        }
+
+        future_modes.push(FutureMode::Guarded(guard));
+        guard_masks.push(Some(mask.into_boxed_slice()));
+    }
 
     // Precompute completion hashes
     let none_completion_hash = {
@@ -222,8 +258,10 @@ fn precompute_dfa(regex: &Tokenizer) -> PrecomputedDfa {
         transitions,
         finalizers,
         future_modes,
+        guard_masks,
         has_transitions,
         num_groups,
+        mask_words,
         completion_hash,
         none_completion_hash,
     }
@@ -238,11 +276,18 @@ impl Pos0Scratch {
         let base_offsets: Vec<usize> = (0..num_states)
             .map(|idx| idx.saturating_mul(num_groups))
             .collect();
+        let mask_words = (num_groups + 63) / 64;
+        let match_len = num_states.saturating_mul(num_groups);
         Pos0Scratch {
             current_states: vec![0; num_states],
             done: vec![false; num_states],
             active_indices: Vec::new(),
-            match_positions: vec![NONE_POS; num_states.saturating_mul(num_groups)],
+            end_states: vec![None; num_states],
+            matched_bits: vec![0u64; num_states.saturating_mul(mask_words)],
+            mask_words,
+            match_positions: vec![0u32; match_len],
+            match_gen: vec![0u32; match_len],
+            cur_gen: 1,
             touched_groups: vec![GroupList::new(); num_states],
             touched_positions: Vec::new(),
             touched_states: Vec::new(),
@@ -258,7 +303,11 @@ impl Pos0Scratch {
         if len > self.current_states.len() {
             self.current_states.resize(len, 0);
             self.done.resize(len, false);
-            self.match_positions.resize(len.saturating_mul(num_groups), NONE_POS);
+            self.end_states.resize(len, None);
+            self.matched_bits.resize(len.saturating_mul(self.mask_words), 0);
+            let new_len = len.saturating_mul(num_groups);
+            self.match_positions.resize(new_len, 0);
+            self.match_gen.resize(new_len, 0);
             self.touched_groups.resize(len, GroupList::new());
             self.base_offsets.clear();
             for i in 0..len {
@@ -270,19 +319,29 @@ impl Pos0Scratch {
         self.current_states[..len].clone_from_slice(initial_states);
         self.done.fill(false);
         self.active_indices.clear();
+        self.end_states[..len].fill(None);
 
-        // Only clear match_positions that were touched in the previous run
-        for &idx in &self.touched_positions {
-            if idx < self.match_positions.len() {
-                self.match_positions[idx] = NONE_POS;
-            }
+        // Advance generation instead of clearing `match_positions`.
+        // If we ever wrap to 0, clear the generation array once.
+        self.cur_gen = self.cur_gen.wrapping_add(1);
+        if self.cur_gen == 0 {
+            self.match_gen.fill(0);
+            self.cur_gen = 1;
         }
+
         self.touched_positions.clear();
 
-        // Clear touched_groups efficiently
+        // Clear touched_groups and matched_bits efficiently
         for &state_idx in &self.touched_states {
             if state_idx < self.touched_groups.len() {
                 self.touched_groups[state_idx].clear();
+            }
+            if self.mask_words > 0 {
+                let base = state_idx.saturating_mul(self.mask_words);
+                let end = base.saturating_add(self.mask_words);
+                if end <= self.matched_bits.len() {
+                    self.matched_bits[base..end].fill(0);
+                }
             }
         }
         self.touched_states.clear();
@@ -295,6 +354,233 @@ impl Pos0Scratch {
             self.results.resize_with(self.current_states.len(), || (None, EdgeList::new()));
         }
     }
+}
+
+/// Execute DFA from all initial states on a token, returning end states and unique target positions.
+///
+/// This is the hot-path variant used by vocab equivalence analysis. It avoids allocating/sorting
+/// per-state edge lists; instead, it records (gid -> match position) in `match_positions` and
+/// the set of touched gids in `touched_groups`, which `compute_chunk_signature` later hashes
+/// using the precomputed suffix-cache.
+fn compute_pos0_end_states_and_targets(
+    pre: &PrecomputedDfa,
+    scratch: &mut Pos0Scratch,
+    slice: &[u8],
+    initial_states: &[usize],
+) {
+    let num_states = initial_states.len();
+    let num_groups = pre.num_groups;
+    let len = slice.len();
+
+    scratch.reset(initial_states, num_groups);
+
+    // Prepare all_targets tracking
+    let all_targets = &mut scratch.all_targets;
+
+    // Clear seen_target only for positions we saw last time
+    let seen_target = &mut scratch.seen_target;
+    for &pos in all_targets.iter() {
+        if pos < seen_target.len() {
+            seen_target[pos] = false;
+        }
+    }
+    all_targets.clear();
+
+    let needed_seen = len + 1;
+    if seen_target.len() < needed_seen {
+        seen_target.resize(needed_seen, false);
+    }
+
+    let current_states = &mut scratch.current_states;
+    let done = &mut scratch.done;
+    let active_indices = &mut scratch.active_indices;
+    let match_positions = &mut scratch.match_positions;
+    let match_gen = &mut scratch.match_gen;
+    let cur_gen = scratch.cur_gen;
+    let touched_groups = &mut scratch.touched_groups;
+    let touched_positions = &mut scratch.touched_positions;
+    let touched_states = &mut scratch.touched_states;
+    let matched_bits = &mut scratch.matched_bits;
+    let mask_words = scratch.mask_words;
+    let base_offsets = &scratch.base_offsets;
+
+    active_indices.clear();
+    let has_bytes = !slice.is_empty();
+    let first_byte = if has_bytes { slice[0] } else { 0 };
+
+    // Process initial finalizers
+    for (i, &state) in initial_states.iter().enumerate() {
+        let base = base_offsets[i];
+        for f in &pre.finalizers[state] {
+            let gid = f.gid;
+            if gid < num_groups {
+                let idx = base + gid;
+                if match_gen[idx] != cur_gen {
+                    match_gen[idx] = cur_gen;
+                    match_positions[idx] = 0;
+                    let groups = &mut touched_groups[i];
+                    if groups.is_empty() {
+                        touched_states.push(i);
+                    }
+                    groups.push(gid);
+
+                    if mask_words > 0 {
+                        let word = gid >> 6;
+                        let bit = 1u64 << (gid & 63);
+                        matched_bits[i * mask_words + word] |= bit;
+                    }
+                }
+            }
+        }
+        if !pre.has_transitions[state] {
+            done[i] = true;
+            continue;
+        }
+
+        if has_bytes {
+            let next_state = pre.transitions[state][first_byte as usize];
+            if next_state == NONE_STATE {
+                done[i] = true;
+                continue;
+            }
+        }
+
+        active_indices.push(i);
+    }
+
+    // Process each byte of the token
+    if has_bytes && !active_indices.is_empty() {
+        let mut active_len = active_indices.len();
+        for (pos, &byte) in slice.iter().enumerate() {
+            let position = (pos + 1) as u32;
+            let mut next_len = 0usize;
+
+            unsafe {
+                for idx in 0..active_len {
+                    let i = *active_indices.get_unchecked(idx);
+                    let base = *base_offsets.get_unchecked(i);
+                    let current = *current_states.get_unchecked(i);
+                    let next_state = *pre
+                        .transitions
+                        .get_unchecked(current)
+                        .get_unchecked(byte as usize);
+
+                    if next_state != NONE_STATE {
+                        let next_state = next_state as usize;
+                        *current_states.get_unchecked_mut(i) = next_state;
+
+                        for f in pre.finalizers.get_unchecked(next_state) {
+                            let gid = f.gid;
+                            if gid < num_groups {
+                                let idx = base + gid;
+                                let slot_pos = match_positions.get_unchecked_mut(idx);
+                                let slot_gen = match_gen.get_unchecked_mut(idx);
+                                let was_none = *slot_gen != cur_gen;
+                                if f.non_greedy {
+                                    if was_none {
+                                        *slot_gen = cur_gen;
+                                        *slot_pos = position;
+                                    }
+                                } else {
+                                    *slot_gen = cur_gen;
+                                    *slot_pos = position;
+                                }
+
+                                if was_none {
+                                    let groups = touched_groups.get_unchecked_mut(i);
+                                    if groups.is_empty() {
+                                        touched_states.push(i);
+                                    }
+                                    groups.push(gid);
+
+                                    if mask_words > 0 {
+                                        let word = gid >> 6;
+                                        let bit = 1u64 << (gid & 63);
+                                        *matched_bits
+                                            .get_unchecked_mut(i * mask_words + word) |= bit;
+                                    }
+                                }
+                            }
+                        }
+
+                        let terminate = match pre.future_modes.get_unchecked(next_state) {
+                            FutureMode::AlwaysTerminate => true,
+                            FutureMode::AlwaysContinue => false,
+                            FutureMode::Guarded(_guard) => {
+                                if mask_words == 0 {
+                                    true
+                                } else {
+                                    let guard_mask = pre
+                                        .guard_masks
+                                        .get_unchecked(next_state)
+                                        .as_ref()
+                                        .unwrap();
+                                    let bits_base = i * mask_words;
+                                    let mut all_met = true;
+                                    for w in 0..mask_words {
+                                        let required = *guard_mask.get_unchecked(w);
+                                        if required
+                                            & !*matched_bits.get_unchecked(bits_base + w)
+                                            != 0
+                                        {
+                                            all_met = false;
+                                            break;
+                                        }
+                                    }
+                                    all_met
+                                }
+                            }
+                        };
+
+                        if terminate {
+                            *done.get_unchecked_mut(i) = true;
+                        }
+                    } else {
+                        *done.get_unchecked_mut(i) = true;
+                    }
+
+                    if !*done.get_unchecked(i) {
+                        *active_indices.get_unchecked_mut(next_len) = i;
+                        next_len += 1;
+                    }
+                }
+            }
+
+            active_len = next_len;
+            if active_len == 0 {
+                break;
+            }
+        }
+    }
+
+    // Collect end states and targets
+    for i in 0..num_states {
+        let end_state = if done[i] || !pre.has_transitions[current_states[i]] {
+            None
+        } else {
+            Some(current_states[i])
+        };
+
+        scratch.end_states[i] = end_state;
+
+        if num_groups > 0 {
+            let base = base_offsets[i];
+            for &gid in &touched_groups[i] {
+                let pos_val = match_positions[base + gid];
+                if pos_val > 0 {
+                    let pos_usize = pos_val as usize;
+                    if pos_usize <= len && !seen_target[pos_usize] {
+                        seen_target[pos_usize] = true;
+                        all_targets.push(pos_usize);
+                    }
+                }
+            }
+        }
+    }
+
+    // Results are stored in-place:
+    // - `scratch.end_states[..num_states]`
+    // - `scratch.all_targets`
 }
 
 impl SuffixScratch {
@@ -397,9 +683,13 @@ fn compute_pos0_results<'a>(
     let done = &mut scratch.done;
     let active_indices = &mut scratch.active_indices;
     let match_positions = &mut scratch.match_positions;
+    let match_gen = &mut scratch.match_gen;
+    let cur_gen = scratch.cur_gen;
     let touched_groups = &mut scratch.touched_groups;
     let touched_positions = &mut scratch.touched_positions;
     let touched_states = &mut scratch.touched_states;
+    let matched_bits = &mut scratch.matched_bits;
+    let mask_words = scratch.mask_words;
     let base_offsets = &scratch.base_offsets;
 
     active_indices.clear();
@@ -413,17 +703,21 @@ fn compute_pos0_results<'a>(
             let gid = f.gid;
             if gid < num_groups {
                 let idx = base + gid;
-                if match_positions[idx] == NONE_POS {
+                if match_gen[idx] != cur_gen {
+                    match_gen[idx] = cur_gen;
                     match_positions[idx] = 0;
-                }
-                let groups = &mut touched_groups[i];
-                if !groups.contains(&gid) {
+                    let groups = &mut touched_groups[i];
                     if groups.is_empty() {
                         touched_states.push(i);
                     }
                     groups.push(gid);
+
+                    if mask_words > 0 {
+                        let word = gid >> 6;
+                        let bit = 1u64 << (gid & 63);
+                        matched_bits[i * mask_words + word] |= bit;
+                    }
                 }
-                touched_positions.push(idx);
             }
         }
         if !pre.has_transitions[state] {
@@ -472,39 +766,62 @@ fn compute_pos0_results<'a>(
                             let gid = f.gid;
                             if gid < num_groups {
                                 let idx = base + gid;
-                                let slot = match_positions.get_unchecked_mut(idx);
+                                let slot_pos = match_positions.get_unchecked_mut(idx);
+                                let slot_gen = match_gen.get_unchecked_mut(idx);
+                                let was_none = *slot_gen != cur_gen;
                                 if f.non_greedy {
-                                    if *slot == NONE_POS {
-                                        *slot = position;
+                                    if was_none {
+                                        *slot_gen = cur_gen;
+                                        *slot_pos = position;
                                     }
                                 } else {
-                                    *slot = position;
+                                    *slot_gen = cur_gen;
+                                    *slot_pos = position;
                                 }
 
-                                let groups = touched_groups.get_unchecked_mut(i);
-                                if !groups.contains(&gid) {
+                                if was_none {
+                                    let groups = touched_groups.get_unchecked_mut(i);
                                     if groups.is_empty() {
                                         touched_states.push(i);
                                     }
                                     groups.push(gid);
+
+                                    if mask_words > 0 {
+                                        let word = gid >> 6;
+                                        let bit = 1u64 << (gid & 63);
+                                        *matched_bits
+                                            .get_unchecked_mut(i * mask_words + word) |= bit;
+                                    }
                                 }
-                                touched_positions.push(idx);
                             }
                         }
 
                         let terminate = match pre.future_modes.get_unchecked(next_state) {
                             FutureMode::AlwaysTerminate => true,
                             FutureMode::AlwaysContinue => false,
-                            FutureMode::Guarded(guard) => {
-                                let mut all_met = true;
-                                for &gid in guard.iter() {
-                                    let idx = base + gid;
-                                    if *match_positions.get_unchecked(idx) == NONE_POS {
-                                        all_met = false;
-                                        break;
+                            FutureMode::Guarded(_guard) => {
+                                if mask_words == 0 {
+                                    true
+                                } else {
+                                    let guard_mask = pre
+                                        .guard_masks
+                                        .get_unchecked(next_state)
+                                        .as_ref()
+                                        .unwrap();
+                                    let bits_base = i * mask_words;
+                                    let mut all_met = true;
+                                    for w in 0..mask_words {
+                                        let required = *guard_mask.get_unchecked(w);
+                                        if required
+                                            & !*matched_bits.get_unchecked(bits_base + w)
+                                            != 0
+                                        {
+                                            all_met = false;
+                                            break;
+                                        }
                                     }
+                                    all_met
                                 }
-                                all_met
                             }
                         };
 
@@ -544,8 +861,12 @@ fn compute_pos0_results<'a>(
                 if gid >= num_groups {
                     continue;
                 }
-                let pos_val = match_positions[base + gid];
-                if pos_val != NONE_POS && pos_val > 0 {
+                let idx = base + gid;
+                if match_gen[idx] != cur_gen {
+                    continue;
+                }
+                let pos_val = match_positions[idx];
+                if pos_val > 0 {
                     let pos_usize = pos_val as usize;
                     edges.push((gid, pos_usize));
                     if pos_usize <= len && !seen_target[pos_usize] {
@@ -593,17 +914,16 @@ fn execute_suffix(
             let gid = f.gid;
             if gid < num_groups {
                 let slot = &mut match_positions[gid];
+                let was_none = *slot == NONE_POS;
                 if f.non_greedy {
-                    if *slot == NONE_POS {
+                    if was_none {
                         *slot = 0;
-                        touched.push(gid);
                     }
                 } else {
-                    let was_none = *slot == NONE_POS;
                     *slot = 0;
-                    if was_none {
-                        touched.push(gid);
-                    }
+                }
+                if was_none {
+                    touched.push(gid);
                 }
             }
         }
@@ -630,15 +950,16 @@ fn execute_suffix(
                     let gid = f.gid;
                     if gid < num_groups {
                         let slot = &mut match_positions[gid];
+                        let was_none = *slot == NONE_POS;
                         if f.non_greedy {
-                            if *slot == NONE_POS {
+                            if was_none {
                                 *slot = position;
                             }
                         } else {
                             *slot = position;
                         }
 
-                        if !touched.contains(&gid) {
+                        if was_none {
                             touched.push(gid);
                         }
                     }
@@ -757,22 +1078,33 @@ fn compute_chunk_signature(
     suffix_scratch: &mut SuffixScratch,
     cache: &mut Vec<Option<u64>>,
 ) -> u64 {
-    let (pos0_results, all_targets) = compute_pos0_results(pre, pos0, token, chunk_states);
+    compute_pos0_end_states_and_targets(pre, pos0, token, chunk_states);
 
-    compute_suffix_hashes_incremental(pre, token, all_targets, cache, suffix_scratch);
+    compute_suffix_hashes_incremental(pre, token, &pos0.all_targets, cache, suffix_scratch);
 
     let mut hasher = new_hasher();
-    for (end_state, edges) in pos0_results {
+    let num_groups = pre.num_groups;
+
+    for i in 0..chunk_states.len() {
         let mut state_hasher = new_hasher();
-        let completion_hash = end_state
+        let completion_hash = pos0.end_states[i]
             .map(|id| pre.completion_hash[id])
             .unwrap_or(pre.none_completion_hash);
         state_hasher.write_u64(completion_hash);
 
-        for (gid, target) in edges {
-            let target_hash = cache[*target].unwrap_or(0);
-            state_hasher.write_u64(*gid as u64);
-            state_hasher.write_u64(target_hash);
+        if num_groups > 0 {
+            // Canonicalize gid iteration order without allocating per-state edge lists.
+            let groups = &mut pos0.touched_groups[i];
+            groups.sort_unstable();
+            let base = pos0.base_offsets[i];
+            for &gid in groups.iter() {
+                let pos_val = pos0.match_positions[base + gid];
+                if pos_val > 0 {
+                    let target_hash = cache[pos_val as usize].unwrap_or(0);
+                    state_hasher.write_u64(gid as u64);
+                    state_hasher.write_u64(target_hash);
+                }
+            }
         }
 
         hasher.write_u64(state_hasher.finish());
@@ -853,7 +1185,9 @@ pub fn find_vocab_equivalence_classes(
         );
     }
 
-    // Process states in batches for memory efficiency
+    let num_groups = pre.num_groups;
+
+    // Process states in batches for memory efficiency.
     // Smaller batches improve cache locality for match_positions array
     // (batch_size * num_groups * 4 bytes per thread) and enable early pruning of singletons.
     let batch_size = if num_states < 200 { num_states } else { 200 };
@@ -872,7 +1206,6 @@ pub fn find_vocab_equivalence_classes(
         );
     }
 
-    let num_groups = pre.num_groups;
     let mut batch_count = 0;
     
     // Timing accumulators
