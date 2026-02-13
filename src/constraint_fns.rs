@@ -33,6 +33,62 @@ pub fn get_last_mask_time_ns() -> u64 {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    fn merge_terminal_viable_possible_matches(&self, mask: &mut Bitset) {
+        let possible_matches = &self.parent.possible_matches;
+
+        for (&tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.stack.is_empty() {
+                continue;
+            }
+
+            let Some(state_matches) = possible_matches.get(&tokenizer_state_id) else {
+                continue;
+            };
+
+            for (terminal_id, llm_tokens) in state_matches {
+                let terminal = TerminalID(terminal_id.0);
+                let next_gss = self.parent.parser.process_token_gss(&glr_state.stack, terminal);
+                if next_gss.is_empty() {
+                    continue;
+                }
+
+                for token_id in llm_tokens.iter_indices() {
+                    mask.insert(token_id);
+                }
+            }
+        }
+    }
+
+    fn merge_terminal_viable_possible_matches_i32(&self, out: &mut [i32]) {
+        let possible_matches = &self.parent.possible_matches;
+
+        for (&tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.stack.is_empty() {
+                continue;
+            }
+
+            let Some(state_matches) = possible_matches.get(&tokenizer_state_id) else {
+                continue;
+            };
+
+            for (terminal_id, llm_tokens) in state_matches {
+                let terminal = TerminalID(terminal_id.0);
+                let next_gss = self.parent.parser.process_token_gss(&glr_state.stack, terminal);
+                if next_gss.is_empty() {
+                    continue;
+                }
+
+                for token_id in llm_tokens.iter_indices() {
+                    let word_idx = token_id / 32;
+                    let bit_idx = token_id % 32;
+                    if word_idx < out.len() {
+                        out[word_idx] |= 1i32 << bit_idx;
+                    }
+                }
+            }
+        }
+    }
+
     /// Expose compute_internal_mask for testing/debugging.
     #[cfg(test)]
     pub fn compute_internal_mask_debug(&self) -> RangeSet {
@@ -346,6 +402,11 @@ impl<'a> GrammarConstraintState<'a> {
             self.compute_internal_mask()
         };
         let mut mask = self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal);
+
+        // Ensure mask includes all tokens whose leading grammar terminal is
+        // currently parser-viable for at least one active tokenizer state.
+        self.merge_terminal_viable_possible_matches(&mut mask);
+
         if let Some(eos_id) = self.parent.eos_token_id {
             // Treat EOS as a reserved token: only allow it when the parse is complete.
             mask.remove(eos_id);
@@ -377,6 +438,9 @@ impl<'a> GrammarConstraintState<'a> {
             self.compute_internal_mask()
         };
         self.parent.parser_dwa_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
+
+        self.merge_terminal_viable_possible_matches_i32(out);
+
         if let Some(eos_id) = self.parent.eos_token_id {
             let word_idx = eos_id / 32;
             let bit_idx = eos_id % 32;
