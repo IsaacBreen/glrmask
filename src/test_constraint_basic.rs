@@ -1829,6 +1829,55 @@ fn test_super_dwa_fp_minimal() {
     );
 }
 
+// Regression test for UTF-8 handling in JSON string character classes.
+// Minimal schema-equivalent shape: {"type":"object"} -> object with JSON string keys.
+// At prefix {" the next character is inside a JSON string and must be valid UTF-8.
+#[test]
+fn test_json_string_mask_rejects_invalid_utf8_continuation_byte() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+
+    let lark_grammar = indoc! {r#"
+        start: "{" JSON_STRING ":" JSON_STRING "}"
+        JSON_STRING: "\"" STRING_CHARS "\""
+        STRING_CHARS: STRING_CHAR*
+        STRING_CHAR: /[^\x00-\x1F"\\]/
+    "#};
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
+        .expect("Failed to parse minimal JSON-string grammar");
+
+    let mut llm_token_map = LLMTokenMap::new();
+    let tok_prefix = LLMTokenID(0); // b"{\""
+    let tok_bad_utf8 = LLMTokenID(1); // b"\xA1" (standalone UTF-8 continuation byte)
+    let tok_good_ascii = LLMTokenID(2); // b"a"
+
+    llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
+    llm_token_map.insert(vec![0xA1], tok_bad_utf8);
+    llm_token_map.insert(b"a".to_vec(), tok_good_ascii);
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        2,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(tok_prefix).expect("prefix commit failed");
+
+    let mask = state.get_mask();
+
+    assert!(
+        mask.contains(tok_good_ascii.0),
+        "sanity: ASCII key character should be allowed after {{\""
+    );
+
+    assert!(
+        !mask.contains(tok_bad_utf8.0),
+        "regression: standalone byte 0xA1 must not be allowed as JSON string content after {{\""
+    );
+}
+
 #[test]
 fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();

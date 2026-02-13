@@ -1387,11 +1387,83 @@ impl GrammarDefinition {
                         u8set.insert(start_char as u8);
                     }
                 }
-                Ok(Expr::U8Class(if negated {
-                    u8set.complement()
-                } else {
-                    u8set
-                }))
+                if negated {
+                    // For ASCII-only exclusions (common JSON string case like /[^\x00-\x1F"\\]/),
+                    // build a UTF-8-aware expression instead of a raw byte complement.
+                    // Raw byte complement incorrectly admits standalone invalid UTF-8 bytes.
+                    let excluded_is_ascii = u8set.iter().all(|b| b <= 0x7F);
+                    if excluded_is_ascii {
+                        let ascii_allowed = U8Set::from_match_fn(|b| b <= 0x7F && !u8set.contains(b));
+                        let cont = U8Set::from_u8_range(0x80, 0xBF);
+
+                        let mut choices: Vec<Expr> = Vec::new();
+
+                        // ASCII (single-byte)
+                        if !ascii_allowed.is_empty() {
+                            choices.push(Expr::U8Class(ascii_allowed));
+                        }
+
+                        // Valid UTF-8 2-byte sequences:
+                        // C2-DF 80-BF
+                        choices.push(Expr::Seq(vec![
+                            Expr::U8Class(U8Set::from_u8_range(0xC2, 0xDF)),
+                            Expr::U8Class(cont),
+                        ]));
+
+                        // Valid UTF-8 3-byte sequences (excluding surrogates and overlong forms):
+                        // E0 A0-BF 80-BF
+                        choices.push(Expr::Seq(vec![
+                            Expr::U8Class(U8Set::from_u8_range(0xE0, 0xE0)),
+                            Expr::U8Class(U8Set::from_u8_range(0xA0, 0xBF)),
+                            Expr::U8Class(cont),
+                        ]));
+                        // E1-EC 80-BF 80-BF
+                        choices.push(Expr::Seq(vec![
+                            Expr::U8Class(U8Set::from_u8_range(0xE1, 0xEC)),
+                            Expr::U8Class(cont),
+                            Expr::U8Class(cont),
+                        ]));
+                        // ED 80-9F 80-BF
+                        choices.push(Expr::Seq(vec![
+                            Expr::U8Class(U8Set::from_u8_range(0xED, 0xED)),
+                            Expr::U8Class(U8Set::from_u8_range(0x80, 0x9F)),
+                            Expr::U8Class(cont),
+                        ]));
+                        // EE-EF 80-BF 80-BF
+                        choices.push(Expr::Seq(vec![
+                            Expr::U8Class(U8Set::from_u8_range(0xEE, 0xEF)),
+                            Expr::U8Class(cont),
+                            Expr::U8Class(cont),
+                        ]));
+
+                        // Valid UTF-8 4-byte sequences (U+10000..U+10FFFF):
+                        // F0 90-BF 80-BF 80-BF
+                        choices.push(Expr::Seq(vec![
+                            Expr::U8Class(U8Set::from_u8_range(0xF0, 0xF0)),
+                            Expr::U8Class(U8Set::from_u8_range(0x90, 0xBF)),
+                            Expr::U8Class(cont),
+                            Expr::U8Class(cont),
+                        ]));
+                        // F1-F3 80-BF 80-BF 80-BF
+                        choices.push(Expr::Seq(vec![
+                            Expr::U8Class(U8Set::from_u8_range(0xF1, 0xF3)),
+                            Expr::U8Class(cont),
+                            Expr::U8Class(cont),
+                            Expr::U8Class(cont),
+                        ]));
+                        // F4 80-8F 80-BF 80-BF
+                        choices.push(Expr::Seq(vec![
+                            Expr::U8Class(U8Set::from_u8_range(0xF4, 0xF4)),
+                            Expr::U8Class(U8Set::from_u8_range(0x80, 0x8F)),
+                            Expr::U8Class(cont),
+                            Expr::U8Class(cont),
+                        ]));
+
+                        return Ok(Expr::Choice(choices));
+                    }
+                }
+
+                Ok(Expr::U8Class(if negated { u8set.complement() } else { u8set }))
             }
             GrammarExpr::Ref(name) => {
                 if let Some(resolved_expr) = memo.get(name) {
