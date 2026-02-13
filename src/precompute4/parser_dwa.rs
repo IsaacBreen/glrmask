@@ -14,7 +14,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID};
 use crate::precompute4::characterize::{compute_all_characterizations, TerminalCharacterization};
 use crate::precompute4::resolve_negatives::{
     apply_cancellations, apply_finality_fixpoint, remove_negative_transitions,
-    apply_cancellations_range, apply_cancellations_multi_range,
+    apply_cancellations_range,
     apply_finality_fixpoint_range, remove_negative_transitions_range,
     // Note: remove_redundant_default_transitions is only run in a global pass,
     // not per-range here, since it requires a global pass over all states.
@@ -1426,7 +1426,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     // Batch negative resolution over the full arena after pass2 completes.
     // Multi-range cancellation: seeds from all template ranges in a single call.
     let batch_negatives_start = Instant::now();
-    {
+    let skip_batch_neg = std::env::var("PARSER_DWA_SKIP_BATCH_NEGATIVE_RESOLUTION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !skip_batch_neg {
         let mut states = states_arena.borrow_mut();
         let arena_len = states.len();
         let ranges = template_ranges.into_inner();
@@ -1437,9 +1440,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         );
 
         if arena_len > 0 {
-            // Multi-range cancellation: seeds from template ranges only (not right_body).
-            // More efficient than per-template calls due to single allocation.
-            apply_cancellations_multi_range(&mut states, &ranges);
+            // Cancellation must account for interactions across template ranges.
+            // Always resolve across the full arena for correctness.
+            apply_cancellations_range(&mut states, 0..arena_len);
 
             // Finality fixpoint needs negatives present for correct propagation.
             let finality_start = Instant::now();
@@ -1553,17 +1556,33 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
 
     // Now subtract final weights from outgoing transitions on the much smaller NWA (~45K states).
     let prune_final_start = std::time::Instant::now();
-    combined_nwa.subtract_final_weights_from_outgoing();
+    let skip_final_subtract = std::env::var("PARSER_DWA_SKIP_FINAL_SUBTRACTION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !skip_final_subtract {
+        combined_nwa.subtract_final_weights_from_outgoing();
+    }
     crate::debug!(5, "subtract_final_weights_from_outgoing in {:?}", prune_final_start.elapsed());
     crate::timing!(
         "TIMING: parser_dwa::finalize::subtract_final_weights_from_outgoing {:?}",
         prune_final_start.elapsed()
     );
-    crate::debug!(4, "Pruned continuations from final states. NWA now {}.", combined_nwa.stats());
+    if skip_final_subtract {
+        crate::debug!(4, "Skipped pruning continuations from final states (PARSER_DWA_SKIP_FINAL_SUBTRACTION=1). NWA now {}.", combined_nwa.stats());
+    } else {
+        crate::debug!(4, "Pruned continuations from final states. NWA now {}.", combined_nwa.stats());
+    }
 
     // After weight subtraction, prune dead ends (states that can't reach any final state).
     let prune_start = std::time::Instant::now();
-    let dead_changed = combined_nwa.prune_dead_ends();
+    let skip_prune_dead_ends = std::env::var("PARSER_DWA_SKIP_PRUNE_DEAD_ENDS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let dead_changed = if skip_prune_dead_ends {
+        false
+    } else {
+        combined_nwa.prune_dead_ends()
+    };
     let prune_dead_time = prune_start.elapsed();
     crate::timing!(
         "TIMING: parser_dwa::finalize::prune_dead_ends {:?} changed={}",

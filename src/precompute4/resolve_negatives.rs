@@ -103,45 +103,6 @@ pub fn apply_cancellations_range(states: &mut NWAStates, range: std::ops::Range<
     }
 }
 
-/// Parallel per-range cancellation: runs each range's cancellation independently
-/// using rayon, then applies all results. Each range is processed on the unmodified
-/// arena (no intermediate epsilons from other ranges), producing the same result
-/// as sequential per-range processing because cancellation epsilons don't cross
-/// between template ranges.
-pub fn apply_cancellations_multi_range(states: &mut NWAStates, ranges: &[std::ops::Range<NWAStateID>]) {
-    use rayon::prelude::*;
-    
-    if ranges.is_empty() {
-        return;
-    }
-    let start = Instant::now();
-    
-    // Run all cancellations in parallel on the immutable arena.
-    // Each range's cancellation is independent — cancellation epsilons go from
-    // template states to right_body/template states, and template ranges don't
-    // overlap or interact.
-    let all_epsilons: Vec<Vec<(NWAStateID, NWAStateID, Weight)>> = ranges
-        .par_iter()
-        .map(|range| compute_cancellations_range(states, range.clone()))
-        .collect();
-    
-    let total_eps: usize = all_epsilons.iter().map(|v| v.len()).sum();
-    let elapsed = start.elapsed();
-    crate::timing!(
-        "TIMING: apply_cancellations_multi_range ranges={} epsilons={} {:?}",
-        ranges.len(),
-        total_eps,
-        elapsed
-    );
-    
-    // Apply all epsilons to the arena
-    for eps_batch in all_epsilons {
-        for (from, to, w) in eps_batch {
-            states.add_epsilon(from, to, w);
-        }
-    }
-}
-
 pub fn apply_finality_fixpoint(
     states: &mut NWAStates,
     source_states_filter: &HashSet<NWAStateID>,
