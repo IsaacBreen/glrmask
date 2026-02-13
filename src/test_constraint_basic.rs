@@ -1933,6 +1933,251 @@ fn test_span_token_in_get_mask() {
     );
 }
 
+// Minimal reproduction candidates for span-token bug.
+// The bug: get_mask() misses tokens whose bytes cross a parser reduce boundary.
+
+#[test]
+fn test_span_minimal_two_nonterminals() {
+    // start: A B ; A: "a" ; B: "b"
+    // Token "ab" spans A→"a" (reduce) then B→"b"
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: A B
+        A: "a"
+        B: "b"
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"a".to_vec(), LLMTokenID(0));
+    tm.insert(b"ab".to_vec(), LLMTokenID(1));
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let state = c.init();
+    let mask = state.get_mask();
+    println!("minimal_two_nt mask: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    // commit("ab") should succeed, so get_mask() must include it
+    assert!(mask.contains(1), "token 'ab' spanning A·B must be in mask");
+}
+
+#[test]
+fn test_span_minimal_nt_then_literal() {
+    // start: A "b" ; A: "a"
+    // Token "ab" spans A→"a" (reduce) then literal "b"
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: A "b"
+        A: "a"
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"a".to_vec(), LLMTokenID(0));
+    tm.insert(b"ab".to_vec(), LLMTokenID(1));
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let state = c.init();
+    let mask = state.get_mask();
+    println!("minimal_nt_literal mask: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    assert!(mask.contains(1), "token 'ab' spanning A then literal must be in mask");
+}
+
+#[test]
+fn test_span_minimal_three_literals_with_nt() {
+    // start: A "b" "c" ; A: "a"
+    // Token "abc" spans reduce + 2 subsequent literals
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: A "b" "c"
+        A: "a"
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"a".to_vec(), LLMTokenID(0));
+    tm.insert(b"abc".to_vec(), LLMTokenID(1));
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let state = c.init();
+    let mask = state.get_mask();
+    println!("minimal_three_lits mask: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    assert!(mask.contains(1), "token 'abc' spanning A+'b'+'c' must be in mask");
+}
+
+#[test]
+fn test_span_two_consecutive_terminals_no_reduce() {
+    // start: "a" "b"  — no non-terminal reduce, just 2 consecutive terminals
+    // Token "ab" spans both.
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: "a" "b"
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"a".to_vec(), LLMTokenID(0));
+    tm.insert(b"ab".to_vec(), LLMTokenID(1));
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let state = c.init();
+    let mask = state.get_mask();
+    println!("two_terminals_no_reduce mask: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    assert!(mask.contains(1), "token 'ab' spanning two consecutive terminals must be in mask");
+}
+
+#[test]
+fn test_span_repetition() {
+    // start: A ("," A)* ; A: "a"
+    // After committing "a", token ",a" should be in mask (spans comma + next A)
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: A ("," A)*
+        A: "a"
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"a".to_vec(), LLMTokenID(0));
+    tm.insert(b",a".to_vec(), LLMTokenID(1));
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let mut state = c.init();
+    state.commit(LLMTokenID(0)).expect("prefix 'a' commit failed");
+    let mask = state.get_mask();
+    println!("repetition mask after 'a': {:?}", mask.iter_bits().collect::<Vec<_>>());
+    // commit(",a") should succeed after "a"
+    let mut state2 = c.init();
+    state2.commit(LLMTokenID(0)).unwrap();
+    let ok = state2.commit(LLMTokenID(1));
+    println!("repetition: commit(',a') after 'a' = {:?}", ok.is_ok());
+    assert!(mask.contains(1), "token ',a' spanning comma + repetition body must be in mask");
+}
+
+#[test]
+fn test_span_nested_with_star() {
+    // Closer to original: start: S ; S: A ":" B ; A: C* ; B: C* ; C: /[a-z]/
+    // Prefix: none. Token "a:b" spans A=C* then ":" then B=C*
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: A ":" B
+        A: C*
+        B: C*
+        C: /[a-z]/
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"a".to_vec(), LLMTokenID(0));
+    tm.insert(b":".to_vec(), LLMTokenID(1));
+    tm.insert(b"a:b".to_vec(), LLMTokenID(2));
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let state = c.init();
+    let mask = state.get_mask();
+    println!("nested_star mask: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    let mut state2 = c.init();
+    let ok = state2.commit(LLMTokenID(2));
+    println!("nested_star: commit('a:b') = {:?}", ok.is_ok());
+    assert!(mask.contains(2), "token 'a:b' spanning A-star+colon+B-star must be in mask");
+}
+
+#[test]
+fn test_span_kv_pair() {
+    // Simplified json_kv: start: KV ; KV: STR ":" STR ; STR: "\"" "\""
+    // Zero-content strings (no char class). Token "\"\":\"\",\"" should be in mask after "\""
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: "{" KV ("," KV)* "}"
+        KV: STR ":" STR
+        STR: "\"" "\""
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"{\"".to_vec(), LLMTokenID(0));           // prefix
+    tm.insert(b"\":\"\",\"".to_vec(), LLMTokenID(1));    // span: close + : + "" + , + open 
+    tm.insert(b"\"".to_vec(), LLMTokenID(2));            // single quote
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let mut state = c.init();
+    state.commit(LLMTokenID(0)).expect("prefix commit failed");
+    let mask = state.get_mask();
+    println!("kv_pair mask after prefix: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    let mut state2 = c.init();
+    state2.commit(LLMTokenID(0)).unwrap();
+    let ok = state2.commit(LLMTokenID(1));
+    println!("kv_pair: commit(span) after prefix = {:?}", ok.is_ok());
+    assert!(mask.contains(1), "kv span token must be in mask");
+}
+
+#[test]
+fn test_span_kv_with_char_star() {
+    // Like test_span_kv_pair but with STR: "\"" /[a-z]/* "\""
+    // This adds a star-repeating char class inside the string, closer to JSON.
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: "{" KV ("," KV)* "}"
+        KV: STR ":" STR
+        STR: "\"" CHAR* "\""
+        CHAR: /[a-z]/
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"{\"".to_vec(), LLMTokenID(0));           // prefix
+    tm.insert(b"\":\"\",\"".to_vec(), LLMTokenID(1));    // span
+    tm.insert(b"\"".to_vec(), LLMTokenID(2));            // single quote
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let mut state = c.init();
+    state.commit(LLMTokenID(0)).expect("prefix commit failed");
+    let mask = state.get_mask();
+    println!("kv_char_star mask after prefix: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    let mut state2 = c.init();
+    state2.commit(LLMTokenID(0)).unwrap();
+    let ok = state2.commit(LLMTokenID(1));
+    println!("kv_char_star: commit(span) after prefix = {:?}", ok.is_ok());
+    assert!(mask.contains(1), "kv span token with char* must be in mask");
+}
+
+#[test]
+fn test_span_kv_negated_char_class() {
+    // Negated char class: CHAR: /[^"]/  — everything except quote
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: "{" KV ("," KV)* "}"
+        KV: STR ":" STR
+        STR: "\"" CHAR* "\""
+        CHAR: /[^"]/
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"{\"".to_vec(), LLMTokenID(0));
+    tm.insert(b"\":\"\",\"".to_vec(), LLMTokenID(1));
+    tm.insert(b"\"".to_vec(), LLMTokenID(2));
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let mut state = c.init();
+    state.commit(LLMTokenID(0)).expect("prefix commit failed");
+    let mask = state.get_mask();
+    println!("negated_char mask after prefix: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    let mut state2 = c.init();
+    state2.commit(LLMTokenID(0)).unwrap();
+    let ok = state2.commit(LLMTokenID(1));
+    println!("negated_char: commit(span) after prefix = {:?}", ok.is_ok());
+    assert!(mask.contains(1), "kv span token with negated char class must be in mask");
+}
+
+#[test]
+fn test_span_kv_json_char_class() {
+    // lowercase kv (non-terminal) + simple char class CHAR: /[a-z]/
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let grammar = indoc! {r#"
+        start: "{" json_kv ("," json_kv)* "}"
+        json_kv: JSON_STRING ":" JSON_STRING
+        JSON_STRING: "\"" STR_CHAR* "\""
+        STR_CHAR: /[^\x00-\x1F"\\]/
+    "#};
+    let gd = GrammarDefinition::from_lark(grammar).unwrap();
+    let mut tm = LLMTokenMap::new();
+    tm.insert(b"{\"".to_vec(), LLMTokenID(0));
+    tm.insert(b"\":\"\",\"".to_vec(), LLMTokenID(1));
+    tm.insert(b"\"".to_vec(), LLMTokenID(2));
+    let c = GrammarConstraint::new_from_grammar_definition(Arc::new(gd), tm, 2, &GrammarConstraintConfig::default());
+    let mut state = c.init();
+    state.commit(LLMTokenID(0)).expect("prefix commit failed");
+    let mask = state.get_mask();
+    println!("json_char mask after prefix: {:?}", mask.iter_bits().collect::<Vec<_>>());
+    let mut state2 = c.init();
+    state2.commit(LLMTokenID(0)).unwrap();
+    let ok = state2.commit(LLMTokenID(1));
+    println!("json_char: commit(span) after prefix = {:?}", ok.is_ok());
+    assert!(mask.contains(1), "kv span token must be in mask");
+}
+
 #[test]
 fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();

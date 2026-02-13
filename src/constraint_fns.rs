@@ -5,7 +5,7 @@ use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
 use crate::dwa_i32::common::{Label, StateID as WAStateID};
 use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb_with_offset_map, collapse_weight_rsb};
-use crate::dfa_u8::TokenizerStateID;
+use crate::dfa_u8::{LLMTokenID, TokenizerStateID};
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,6 +33,60 @@ pub fn get_last_mask_time_ns() -> u64 {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    fn recover_missing_tokens_with_commit_probe(&self, mask: &mut Bitset) {
+        if std::env::var("DISABLE_MASK_COMMIT_PROBE_FALLBACK")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let mut candidates = Bitset::zeros();
+        let possible_matches = &self.parent.possible_matches;
+
+        for (&tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.stack.is_empty() {
+                continue;
+            }
+            let Some(state_matches) = possible_matches.get(&tokenizer_state_id) else {
+                continue;
+            };
+
+            for (terminal_id, llm_tokens) in state_matches {
+                let terminal = TerminalID(terminal_id.0);
+                let next_gss = self.parent.parser.process_token_gss(&glr_state.stack, terminal);
+                if next_gss.is_empty() {
+                    continue;
+                }
+
+                for token_id in llm_tokens.iter_indices() {
+                    if !mask.contains(token_id) {
+                        candidates.insert(token_id);
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        for token_id in candidates.iter_bits() {
+            if self.parent.eos_token_id == Some(token_id) {
+                continue;
+            }
+            let Some(token_bytes) = self.parent.vocab_trie.token_bytes(LLMTokenID(token_id)) else {
+                continue;
+            };
+
+            let mut cloned = self.clone();
+            cloned.commit_bytes(token_bytes);
+            if cloned.is_active() {
+                mask.insert(token_id);
+            }
+        }
+    }
+
     /// Expose compute_internal_mask for testing/debugging.
     #[cfg(test)]
     pub fn compute_internal_mask_debug(&self) -> RangeSet {
@@ -353,6 +407,9 @@ impl<'a> GrammarConstraintState<'a> {
                 mask.insert(eos_id);
             }
         }
+
+        self.recover_missing_tokens_with_commit_probe(&mut mask);
+
         mask
     }
 
