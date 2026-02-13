@@ -101,9 +101,11 @@ test-js: ffi ## Compile the JavaScript grammar (verifies it compiles)
 		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
 		--no-recompile
 
+SCHEMA_FILE ?= gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json
+
 test-json-schema: ffi ## Compile a JSON schema grammar (verifies schema-to-EBNF works)
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
-	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
+	SCHEMA_FILE="$(SCHEMA_FILE)" \
 		timeout $(TEST_TIMEOUT) python3 scripts/test_json_schema.py
 
 test-json-schema-o1051: build ## Compile o1051 (Github Hard) schema
@@ -123,17 +125,17 @@ test-schema-id: ffi ## Compile any benchmark schema by ID (usage: make test-sche
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_json_schema.py
 
-show-schema-id: ffi ## Print EBNF for a schema by ID to stdout (usage: make show-schema-id ID=...)
-	@if [ -z "$(ID)" ]; then echo "Usage: make show-schema-id ID=<schema_id>"; exit 1; fi
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" PRINT_EBNF=1 $(PYTHON) scripts/test_json_schema.py
+show-schema-id: ffi ## Print EBNF for a schema by ID or file (usage: make show-schema-id ID=... or SCHEMA_FILE=...)
+	@if [ -z "$(ID)" ] && [ -z "$(SCHEMA_FILE)" ]; then echo "Usage: make show-schema-id ID=<schema_id> or SCHEMA_FILE=<path>"; exit 1; fi
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" SCHEMA_FILE="$(SCHEMA_FILE)" PRINT_EBNF=1 $(PYTHON) scripts/test_json_schema.py
 
 schema-id: ffi ## Write EBNF for a schema by ID to a file (usage: make schema-id ID=... OUT=file.ebnf)
 	@if [ -z "$(ID)" ] || [ -z "$(OUT)" ]; then echo "Usage: make schema-id ID=<schema_id> OUT=<file.ebnf>"; exit 1; fi
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" PRINT_EBNF=1 OUT_FILE="$(OUT)" $(PYTHON) scripts/test_json_schema.py
 
-show-json-schema: ffi ## Print the original JSON schema to stdout (usage: make show-json-schema ID=...)
-	@if [ -z "$(ID)" ]; then echo "Usage: make show-json-schema ID=<schema_id>"; exit 1; fi
-	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" PRINT_JSON_SCHEMA=1 $(PYTHON) scripts/test_json_schema.py
+show-json-schema: ffi ## Print the original JSON schema to stdout (usage: make show-json-schema ID=... or SCHEMA_FILE=...)
+	@if [ -z "$(ID)" ] && [ -z "$(SCHEMA_FILE)" ]; then echo "Usage: make show-json-schema ID=<schema_id> or SCHEMA_FILE=<path>"; exit 1; fi
+	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) SCHEMA_ID="$(ID)" SCHEMA_FILE="$(SCHEMA_FILE)" PRINT_JSON_SCHEMA=1 $(PYTHON) scripts/test_json_schema.py
 
 test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FILE=path/to/file.txt)
 	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff FILE=<path_to_text_file>"; exit 1; fi
