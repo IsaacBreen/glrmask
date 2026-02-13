@@ -130,7 +130,7 @@ pub enum GrammarExpr {
         inner: Box<GrammarExpr>,
     },
     Literal(Vec<u8>),
-    CharClass(String),
+    CharClass { def: String, utf8: bool },
     AnyChar,
 }
 
@@ -144,7 +144,7 @@ enum GrammarExprJSON {
     Repeat { expr: Box<GrammarExprJSON> },
     RepeatBounded { min: usize, max: Option<usize>, inner: Box<GrammarExprJSON> },
     Literal { bytes: Vec<u8> },
-    CharClass { def: String },
+    CharClass { def: String, utf8: bool },
     AnyChar,
 }
 
@@ -170,7 +170,10 @@ impl GrammarExprJSON {
                 inner: Box::new(GrammarExprJSON::from_expr(inner)),
             },
             GrammarExpr::Literal(bytes) => GrammarExprJSON::Literal { bytes: bytes.clone() },
-            GrammarExpr::CharClass(s) => GrammarExprJSON::CharClass { def: s.clone() },
+            GrammarExpr::CharClass { def, utf8 } => GrammarExprJSON::CharClass {
+                def: def.clone(),
+                utf8: *utf8,
+            },
             GrammarExpr::AnyChar => GrammarExprJSON::AnyChar,
         }
     }
@@ -192,7 +195,7 @@ impl GrammarExprJSON {
                 inner: Box::new(inner.to_expr()),
             },
             GrammarExprJSON::Literal { bytes } => GrammarExpr::Literal(bytes),
-            GrammarExprJSON::CharClass { def } => GrammarExpr::CharClass(def),
+            GrammarExprJSON::CharClass { def, utf8 } => GrammarExpr::CharClass { def, utf8 },
             GrammarExprJSON::AnyChar => GrammarExpr::AnyChar,
         }
     }
@@ -1059,7 +1062,7 @@ impl GrammarDefinition {
                 "AnyChar (`.`) is only allowed inside terminal definitions (rules with uppercase names)."
                     .to_string(),
             ),
-            GrammarExpr::CharClass(class_def) => Err(format!(
+            GrammarExpr::CharClass { def: class_def, .. } => Err(format!(
                 "Character class `{}` is only allowed inside terminal definitions (rules with uppercase names).",
                 class_def
             )),
@@ -1319,7 +1322,10 @@ impl GrammarDefinition {
         match grammar_expr {
             GrammarExpr::AnyChar => Ok(Expr::U8Class(U8Set::all())),
             GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
-            GrammarExpr::CharClass(class_def) => {
+            GrammarExpr::CharClass {
+                def: class_def,
+                utf8,
+            } => {
                 let content = &class_def[1..class_def.len() - 1];
                 let (negated, content) = if content.starts_with('^') {
                     (true, &content[1..])
@@ -1387,7 +1393,7 @@ impl GrammarDefinition {
                         u8set.insert(start_char as u8);
                     }
                 }
-                if negated {
+                if *utf8 && negated {
                     // For ASCII-only exclusions (common JSON string case like /[^\x00-\x1F"\\]/),
                     // build a UTF-8-aware expression instead of a raw byte complement.
                     // Raw byte complement incorrectly admits standalone invalid UTF-8 bytes.
@@ -2160,7 +2166,7 @@ impl GrammarDefinition {
         fn contains_regex_features(expr: &GrammarExpr) -> bool {
             match expr {
                 GrammarExpr::AnyChar => true,
-                GrammarExpr::CharClass(_) => true,
+                GrammarExpr::CharClass { .. } => true,
                 GrammarExpr::Literal(_) => false,
                 GrammarExpr::Ref(_) => false,
                 GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
@@ -2190,7 +2196,7 @@ impl GrammarDefinition {
         ) {
             match expr {
                 GrammarExpr::AnyChar => {}
-                GrammarExpr::CharClass(_) => {}
+                GrammarExpr::CharClass { .. } => {}
                 GrammarExpr::Literal(_) => {}
                 GrammarExpr::Ref(name) => {
                     if terminals.contains_key(name) {

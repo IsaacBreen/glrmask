@@ -133,7 +133,7 @@ impl GrammarRepeatBoundedStats {
     fn inner_kind(expr: &GrammarExpr) -> &'static str {
         match expr {
             GrammarExpr::Literal(_) => "literal",
-            GrammarExpr::CharClass(_) => "charclass",
+            GrammarExpr::CharClass { .. } => "charclass",
             GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => Self::inner_kind(inner),
             GrammarExpr::RepeatBounded { inner, .. } => Self::inner_kind(inner),
             _ => "subexpr",
@@ -169,7 +169,7 @@ impl GrammarRepeatBoundedStats {
                 }
             }
             GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => self.collect(inner, rule),
-            GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::CharClass(_) | GrammarExpr::AnyChar => {}
+            GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::CharClass { .. } | GrammarExpr::AnyChar => {}
         }
     }
 
@@ -354,7 +354,7 @@ fn grammar_expr_to_ebnf(expr: &GrammarExpr) -> String {
                 }
             }
         }
-        GrammarExpr::CharClass(s) => s.clone(),
+        GrammarExpr::CharClass { def, .. } => def.clone(),
         GrammarExpr::AnyChar => ".".to_string(),
     }
 }

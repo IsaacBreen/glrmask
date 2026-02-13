@@ -54,7 +54,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lark_terminal_chain_matches_ebnf_terminal_chain() {
+    fn test_lark_terminal_chain_differs_from_ebnf_terminal_chain_when_utf8_enabled() {
         let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
 
         let lark = r#"
@@ -94,9 +94,9 @@ STR_CHAR ::= [^"\\\x00-\x1F] ;
             .get(&ebnf_str_gid)
             .expect("EBNF JSON_STRING expr missing");
 
-        assert_eq!(
+        assert_ne!(
             lark_str_expr, ebnf_str_expr,
-            "JSON_STRING regex lowering should match between Lark and EBNF paths"
+            "JSON_STRING regex lowering should differ when Lark uses utf8=true and EBNF uses utf8=false"
         );
 
         assert_eq!(

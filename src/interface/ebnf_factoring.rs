@@ -40,7 +40,7 @@ use std::collections::{HashMap, HashSet};
 fn contains_regex_features(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::AnyChar => true,
-        GrammarExpr::CharClass(_) => true,
+        GrammarExpr::CharClass { .. } => true,
         GrammarExpr::Literal(_) => false,
         GrammarExpr::Ref(_) => false,
         GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
@@ -247,7 +247,7 @@ impl ChoiceFactorer {
             GrammarExpr::RepeatBounded { inner, .. } => {
                 self.collect_refs_impl(inner, refs);
             }
-            GrammarExpr::Literal(_) | GrammarExpr::CharClass(_) | GrammarExpr::AnyChar => {}
+            GrammarExpr::Literal(_) | GrammarExpr::CharClass { .. } | GrammarExpr::AnyChar => {}
         }
     }
 
@@ -380,7 +380,7 @@ impl ChoiceFactorer {
             GrammarExpr::RepeatBounded { inner, .. } => {
                 Self::collect_refs_static(inner, refs);
             }
-            GrammarExpr::Literal(_) | GrammarExpr::CharClass(_) | GrammarExpr::AnyChar => {}
+            GrammarExpr::Literal(_) | GrammarExpr::CharClass { .. } | GrammarExpr::AnyChar => {}
         }
     }
 

@@ -1,4 +1,3 @@
-use crate::interface::GrammarExpr::CharClass;
 use crate::interface::{choice, literal, optional, r#ref, repeat, sequence, GrammarExpr};
 use regex::Regex;
 use std::collections::HashSet;
@@ -430,7 +429,10 @@ impl<'a> EbnfParser<'a> {
             Ok(literal(lit.into_bytes()))
         } else if let Some(EbnfToken { kind: EbnfTokenKind::CharClass(cc), .. }) = self.peek().cloned() {
             self.advance();
-            Ok(CharClass(cc))
+            Ok(GrammarExpr::CharClass {
+                def: cc,
+                utf8: false,
+            })
         } else if self.peek_grammar_op("(") {
             self.consume_grammar_op("(")?;
             let expr = self.parse_grammar_expression()?;

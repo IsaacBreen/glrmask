@@ -12,7 +12,6 @@
 //! - Terminals: UPPERCASE names are terminals (convention, not enforced)
 
 use crate::interface::{choice, literal, optional, r#ref, repeat, repeat_bounded, sequence, GrammarExpr};
-use crate::interface::GrammarExpr::CharClass;
 use regex::Regex;
 use std::collections::HashSet;
 use std::iter::Peekable;
@@ -425,16 +424,25 @@ impl<'a> LarkParser<'a> {
             Ok(literal(lit.into_bytes()))
         } else if let Some(LarkToken { kind: LarkTokenKind::CharClass(cc), .. }) = self.tokens.peek().cloned() {
             self.tokens.next();
-            Ok(CharClass(cc))
+            Ok(GrammarExpr::CharClass {
+                def: cc,
+                utf8: true,
+            })
         } else if let Some(LarkToken { kind: LarkTokenKind::RegexLiteral(re), .. }) = self.tokens.peek().cloned() {
             self.tokens.next();
             // Convert regex to character class format.
             // If the regex is already a single character class like /[^"\\]/,
             // preserve it verbatim to avoid producing nested brackets.
             if re.starts_with('[') && re.ends_with(']') {
-                Ok(CharClass(re))
+                Ok(GrammarExpr::CharClass {
+                    def: re,
+                    utf8: true,
+                })
             } else {
-                Ok(CharClass(format!("[{}]", re)))
+                Ok(GrammarExpr::CharClass {
+                    def: format!("[{}]", re),
+                    utf8: true,
+                })
             }
         } else if self.peek_op("(") {
             self.consume_op("(")?;
@@ -667,7 +675,7 @@ STR_CHAR: /[^"\\\x00-\x1F]/
             .expect("STR_CHAR rule should exist");
 
         match str_char_expr {
-            GrammarExpr::CharClass(cc) => {
+            GrammarExpr::CharClass { def: cc, .. } => {
                 assert_eq!(cc, "[^\"\\\\\\x00-\\x1F]");
                 assert!(!cc.starts_with("[["));
             }

@@ -81,7 +81,10 @@ impl GrammarEmitter {
             }
             
             GrammarType::CharClass(pattern) => {
-                GrammarExpr::CharClass(pattern.clone())
+                GrammarExpr::CharClass {
+                    def: pattern.clone(),
+                    utf8: false,
+                }
             }
             
             GrammarType::RuleRef(name) => {
@@ -173,20 +176,26 @@ impl GrammarEmitter {
         
         // STRING_CHAR - valid JSON string chars (exclude control bytes, " and \\)
         self.rules.push(("STRING_CHAR".to_string(),
-            GrammarExpr::CharClass(r"[\x20-\x21\x23-\x5B\x5D-\xFF]".to_string())
+            GrammarExpr::CharClass {
+                def: r"[\x20-\x21\x23-\x5B\x5D-\xFF]".to_string(),
+                utf8: false,
+            }
         ));
         
         // ESCAPE_SEQ
         self.rules.push(("ESCAPE_SEQ".to_string(), GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b"\\".to_vec()),
             GrammarExpr::Choice(vec![
-                GrammarExpr::CharClass("[\"\\\\/bfnrt]".to_string()),
+                GrammarExpr::CharClass {
+                    def: "[\"\\\\/bfnrt]".to_string(),
+                    utf8: false,
+                },
                 GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b"u".to_vec()),
-                    GrammarExpr::CharClass("[0-9a-fA-F]".to_string()),
-                    GrammarExpr::CharClass("[0-9a-fA-F]".to_string()),
-                    GrammarExpr::CharClass("[0-9a-fA-F]".to_string()),
-                    GrammarExpr::CharClass("[0-9a-fA-F]".to_string()),
+                    GrammarExpr::CharClass { def: "[0-9a-fA-F]".to_string(), utf8: false },
+                    GrammarExpr::CharClass { def: "[0-9a-fA-F]".to_string(), utf8: false },
+                    GrammarExpr::CharClass { def: "[0-9a-fA-F]".to_string(), utf8: false },
+                    GrammarExpr::CharClass { def: "[0-9a-fA-F]".to_string(), utf8: false },
                 ]),
             ]),
         ])));
@@ -197,20 +206,20 @@ impl GrammarEmitter {
             GrammarExpr::Choice(vec![
                 GrammarExpr::Literal(b"0".to_vec()),
                 GrammarExpr::Sequence(vec![
-                    GrammarExpr::CharClass("[1-9]".to_string()),
-                    GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass("[0-9]".to_string()))),
+                    GrammarExpr::CharClass { def: "[1-9]".to_string(), utf8: false },
+                    GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass { def: "[0-9]".to_string(), utf8: false })),
                 ]),
             ]),
             GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
                 GrammarExpr::Literal(b".".to_vec()),
-                GrammarExpr::CharClass("[0-9]".to_string()),
-                GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass("[0-9]".to_string()))),
+                GrammarExpr::CharClass { def: "[0-9]".to_string(), utf8: false },
+                GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass { def: "[0-9]".to_string(), utf8: false })),
             ]))),
             GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
-                GrammarExpr::CharClass("[eE]".to_string()),
-                GrammarExpr::Optional(Box::new(GrammarExpr::CharClass("[+-]".to_string()))),
-                GrammarExpr::CharClass("[0-9]".to_string()),
-                GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass("[0-9]".to_string()))),
+                GrammarExpr::CharClass { def: "[eE]".to_string(), utf8: false },
+                GrammarExpr::Optional(Box::new(GrammarExpr::CharClass { def: "[+-]".to_string(), utf8: false })),
+                GrammarExpr::CharClass { def: "[0-9]".to_string(), utf8: false },
+                GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass { def: "[0-9]".to_string(), utf8: false })),
             ]))),
         ])));
         
@@ -220,8 +229,8 @@ impl GrammarEmitter {
             GrammarExpr::Choice(vec![
                 GrammarExpr::Literal(b"0".to_vec()),
                 GrammarExpr::Sequence(vec![
-                    GrammarExpr::CharClass("[1-9]".to_string()),
-                    GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass("[0-9]".to_string()))),
+                    GrammarExpr::CharClass { def: "[1-9]".to_string(), utf8: false },
+                    GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass { def: "[0-9]".to_string(), utf8: false })),
                 ]),
             ]),
         ])));
