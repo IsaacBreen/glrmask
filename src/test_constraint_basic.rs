@@ -1952,12 +1952,12 @@ fn test_json_value_span_token_fn() {
         .expect("Failed to parse grammar");
 
     let tok_prefix = LLMTokenID(4895);   // b'{"'
-    let tok_span = LLMTokenID(34713);    // b'":"",'
+    let tok_span = LLMTokenID(34713);    // b'":"","'
     let tok_suffix = LLMTokenID(34714);  // b'"a":null}'
 
     let mut llm_token_map = LLMTokenMap::new();
     llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
-    llm_token_map.insert(b"\":\"\",".to_vec(), tok_span);
+    llm_token_map.insert(b"\":\"\",\"".to_vec(), tok_span);
     llm_token_map.insert(b"\"a\":null}".to_vec(), tok_suffix);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
