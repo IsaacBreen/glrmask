@@ -1878,6 +1878,64 @@ fn test_json_string_mask_rejects_invalid_utf8_continuation_byte() {
     );
 }
 
+// Known limitation: get_mask() can under-accept a token that spans key/value boundaries.
+// Repro shape (GPT-2 token 34713 bytes): b"\":\"\","
+// At prefix b"{\"", this token should be a valid continuation for
+// start: "{" json_kv ("," json_kv)* "}".
+#[ignore]
+#[test]
+fn test_known_fn_span_token_quote_colon_empty_comma() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+
+    let lark_grammar = indoc! {r#"
+        start: "{" json_kv ("," json_kv)* "}"
+        json_kv: JSON_STRING ":" JSON_STRING
+        JSON_STRING: "\"" STR_CHAR* "\""
+        STR_CHAR: /[^\x00-\x1F"\\]/
+    "#};
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
+        .expect("Failed to parse minimal JSON key/value grammar");
+
+    let mut llm_token_map = LLMTokenMap::new();
+    let tok_prefix = LLMTokenID(0); // b"{\""
+    let tok_span = LLMTokenID(1); // b"\":\"\","
+    let tok_next_quote = LLMTokenID(2); // b"\""
+
+    llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
+    llm_token_map.insert(b"\":\"\",".to_vec(), tok_span);
+    llm_token_map.insert(b"\"".to_vec(), tok_next_quote);
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        2,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(tok_prefix).expect("prefix commit failed");
+
+    let mask = state.get_mask();
+
+    // Current known FN: token is absent from mask.
+    assert!(
+        !mask.contains(tok_span.0),
+        "Known limitation repro changed: span token unexpectedly present in mask"
+    );
+
+    // But committing the token succeeds and keeps the state active,
+    // demonstrating that get_mask under-accepts this continuation.
+    state.commit(tok_span).expect("span token commit failed");
+    assert!(state.is_active(), "State should remain active after committing span token");
+
+    let mask_after = state.get_mask();
+    assert!(
+        mask_after.contains(tok_next_quote.0),
+        "After span token, opening quote for next key should be allowed"
+    );
+}
+
 #[test]
 fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
