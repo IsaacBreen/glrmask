@@ -2011,39 +2011,6 @@ fn test_json_value_span_token_fn_copy_minimized() {
     let mut state = constraint.init();
     state.commit(tok_prefix).expect("prefix commit failed");
 
-    if std::env::var_os("DEBUG_JSON_VALUE_SPAN_FN").is_some() {
-        let parser = &state.parent.parser;
-        let quote_tid = parser
-            .terminal_map
-            .get_by_left(&regex_name("QUOTE"))
-            .copied()
-            .expect("QUOTE terminal must exist");
-        let mut top_states = BTreeSet::new();
-        for parser_state in state.state.values() {
-            for (path, _) in parser_state.stack.to_stacks() {
-                if let Some(edge) = path.last() {
-                    top_states.insert(edge.state_id);
-                }
-            }
-        }
-        println!(
-            "DEBUG span_fn_copy_min top_states={:?} quote_tid={:?}",
-            top_states,
-            quote_tid
-        );
-        for sid in top_states {
-            if let Some(row) = crate::glr::table::get_row(&parser.table, sid) {
-                let action = row.get_shifts_and_reduces_for_terminal(&quote_tid);
-                println!(
-                    "DEBUG span_fn_copy_min state={:?} action_for_QUOTE={:?} default_reduce={:?}",
-                    sid,
-                    action,
-                    row.default_reduce
-                );
-            }
-        }
-    }
-
     let mut probe = state.clone();
     probe.commit(tok_span).expect("span commit probe failed");
     assert!(
@@ -2104,6 +2071,54 @@ fn test_json_value_span_token_fn_minimal() {
     assert!(
         mask.contains(tok_span.0),
         "minimal EBNF span-token FN: expected b'\":\"' to be allowed after prefix token"
+    );
+}
+
+#[test]
+fn test_span_token_ignore_ws() {
+    // Regression: span tokens must work across %ignore WS boundaries.
+    // Token b'":"","' crossing key→colon→value→comma→nextkey with %ignore WS.
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark_grammar = indoc! {r#"
+        start: "{" pair ("," pair)* "}"
+        pair: string ":" value
+        value: string | "null"
+        string: QUOTE char* QUOTE
+        char: /[a-z]/
+        QUOTE: "\""
+        WS: " " | "\n" | "\t" | "\r"
+        %ignore WS
+    "#};
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
+        .expect("Failed to parse ignore-WS grammar");
+
+    let tok_prefix = LLMTokenID(0);   // b'{"'
+    let tok_span = LLMTokenID(1);     // b'":"","'
+    let tok_suffix = LLMTokenID(2);   // b'"a":null}'
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
+    llm_token_map.insert(b"\":\"\",".to_vec(), tok_span);
+    llm_token_map.insert(b"\"a\":null}".to_vec(), tok_suffix);
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        tok_suffix.0,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(tok_prefix).expect("prefix commit failed");
+
+    // After '{"', token b'":"","' must be valid:
+    // It completes: " (close key) : (sep) "" (empty value) , (sep) " (start next key)
+    let mask = state.get_mask();
+    assert!(
+        mask.contains(tok_span.0),
+        "ignore-WS span token FN: expected b'\":\"\",\"' to be allowed after b'{{\"'"
     );
 }
 

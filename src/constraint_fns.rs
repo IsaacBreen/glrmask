@@ -8,7 +8,7 @@ use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb_with_offset_map, col
 use crate::dfa_u8::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use crate::datastructures::bitset::Bitset;
@@ -205,19 +205,6 @@ impl<'a> GrammarConstraintState<'a> {
 
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state_id = dwa.body.start_state;
-        let debug_span = std::env::var("DEBUG_JSON_VALUE_SPAN_FN").is_ok();
-        if debug_span {
-            let start_labels: Vec<_> = dwa.states[dwa_start_state_id]
-                .transitions
-                .keys()
-                .copied()
-                .collect();
-            println!(
-                "DEBUG heavy_mask start_state={} start_labels={:?}",
-                dwa_start_state_id,
-                start_labels
-            );
-        }
         
         // Queue: depth -> (dwa_state -> GSS with N×M weights)
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
@@ -272,20 +259,6 @@ impl<'a> GrammarConstraintState<'a> {
             let weighted_gss = gss.apply_and_prune(f);
 
             if !weighted_gss.is_empty() {
-                if debug_span {
-                    let mut top_states = BTreeSet::new();
-                    for (path, _) in weighted_gss.to_stacks() {
-                        if let Some(edge) = path.last() {
-                            top_states.insert(edge.state_id.0);
-                        }
-                    }
-                    println!(
-                        "DEBUG heavy_mask seed tsid={} depth={} top_states={:?}",
-                        tsid,
-                        weighted_gss.max_depth(),
-                        top_states
-                    );
-                }
                 queue
                     .entry(weighted_gss.max_depth())
                     .or_default()
@@ -317,14 +290,6 @@ impl<'a> GrammarConstraintState<'a> {
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
-                        if debug_span {
-                            println!(
-                                "DEBUG heavy_mask exact_transition wa_state={} parser_state={} -> {}",
-                                current_wa_state_id,
-                                parser_state_id,
-                                target_wa_state_id
-                            );
-                        }
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
@@ -343,28 +308,9 @@ impl<'a> GrammarConstraintState<'a> {
                                 .and_modify(|existing| *existing = existing.merge(&final_gss))
                                 .or_insert(final_gss);
                         }
-                    } else if debug_span {
-                        let available_labels: Vec<_> = dwa_state.transitions.keys().copied().collect();
-                        println!(
-                            "DEBUG heavy_mask missing_exact wa_state={} parser_state={} has_default={} labels={:?}",
-                            current_wa_state_id,
-                            parser_state_id,
-                            dwa_state
-                                .get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL)
-                                .is_some(),
-                            available_labels
-                        );
                     }
 
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
-                        if debug_span {
-                            println!(
-                                "DEBUG heavy_mask default_transition wa_state={} parser_state={} -> {}",
-                                current_wa_state_id,
-                                parser_state_id,
-                                target_wa_state_id
-                            );
-                        }
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
