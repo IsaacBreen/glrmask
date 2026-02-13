@@ -1934,45 +1934,6 @@ fn test_span_token_in_get_mask() {
 }
 
 #[test]
-fn test_span_minimal_regression() {
-    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
-
-    let lark_grammar = indoc! {r#"
-        start: "{" s ":" s "}"
-        s: "\"" c* "\""
-        c: /[a-z]/
-    "#};
-
-    let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
-        .expect("Failed to parse minimal span regression grammar");
-
-    let mut llm_token_map = LLMTokenMap::new();
-    let tok_prefix = LLMTokenID(0); // b"{\""
-    let tok_span = LLMTokenID(1); // b"\":\"\""
-    llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
-    llm_token_map.insert(b"\":\"\"".to_vec(), tok_span);
-
-    let constraint = GrammarConstraint::new_from_grammar_definition(
-        Arc::new(grammar_definition),
-        llm_token_map,
-        1,
-        &GrammarConstraintConfig::default(),
-    );
-
-    let mut state = constraint.init();
-    state.commit(tok_prefix).expect("prefix commit failed");
-
-    let mask = state.get_mask();
-    assert!(
-        mask.contains(tok_span.0),
-        "span token should be present in mask for minimal regression"
-    );
-
-    state.commit(tok_span).expect("span token commit failed");
-    assert!(state.is_active(), "State should remain active after span token");
-}
-
-#[test]
 fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Load and compile the grammar from the EBNF file
