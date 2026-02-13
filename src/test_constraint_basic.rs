@@ -1878,13 +1878,11 @@ fn test_json_string_mask_rejects_invalid_utf8_continuation_byte() {
     );
 }
 
-// Known limitation: get_mask() can under-accept a token that spans key/value boundaries.
-// Repro shape (GPT-2 token 34713 bytes): b"\":\"\","
-// At prefix b"{\"", this token should be a valid continuation for
-// start: "{" json_kv ("," json_kv)* "}".
-#[ignore]
+// Regression: get_mask() must include tokens that span multiple grammar
+// terminals (e.g. close-quote + colon + empty-value + comma + open-quote).
+// Token bytes b"\":\"\",\"" is a valid continuation after prefix b"{\"".
 #[test]
-fn test_known_fn_span_token_quote_colon_empty_comma() {
+fn test_span_token_in_get_mask() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
 
     let lark_grammar = indoc! {r#"
@@ -1899,11 +1897,11 @@ fn test_known_fn_span_token_quote_colon_empty_comma() {
 
     let mut llm_token_map = LLMTokenMap::new();
     let tok_prefix = LLMTokenID(0); // b"{\""
-    let tok_span = LLMTokenID(1); // b"\":\"\","
+    let tok_span = LLMTokenID(1);   // b"\":\"\",\""  (spans 5+ terminals)
     let tok_next_quote = LLMTokenID(2); // b"\""
 
     llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
-    llm_token_map.insert(b"\":\"\",".to_vec(), tok_span);
+    llm_token_map.insert(b"\":\"\",\"".to_vec(), tok_span);
     llm_token_map.insert(b"\"".to_vec(), tok_next_quote);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
@@ -1918,14 +1916,13 @@ fn test_known_fn_span_token_quote_colon_empty_comma() {
 
     let mask = state.get_mask();
 
-    // Current known FN: token is absent from mask.
+    // The span token must be in the mask — commit() accepts it,
+    // so get_mask() must too.
     assert!(
-        !mask.contains(tok_span.0),
-        "Known limitation repro changed: span token unexpectedly present in mask"
+        mask.contains(tok_span.0),
+        "span token (close-quote + colon + empty-value + comma + open-quote) must be in get_mask()"
     );
 
-    // But committing the token succeeds and keeps the state active,
-    // demonstrating that get_mask under-accepts this continuation.
     state.commit(tok_span).expect("span token commit failed");
     assert!(state.is_active(), "State should remain active after committing span token");
 
