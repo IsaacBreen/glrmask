@@ -2006,7 +2006,7 @@ fn test_json_value_span_token_fn_minimal() {
     let mask = state.get_mask();
     assert!(
         mask.contains(tok_span.0),
-        "minimal EBNF span-token FN: expected b'\"\":\"\",' to be allowed after prefix token"
+        "minimal EBNF span-token FN: expected b'\":\"\",' to be allowed after prefix token"
     );
 }
 
