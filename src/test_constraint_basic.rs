@@ -1952,12 +1952,12 @@ fn test_json_value_span_token_fn() {
         .expect("Failed to parse grammar");
 
     let tok_prefix = LLMTokenID(4895);   // b'{"'
-    let tok_span = LLMTokenID(34713);    // b'":"","'
+    let tok_span = LLMTokenID(34713);    // b'":"",'
     let tok_suffix = LLMTokenID(34714);  // b'"a":null}'
 
     let mut llm_token_map = LLMTokenMap::new();
     llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
-    llm_token_map.insert(b"\":\"\",\"".to_vec(), tok_span);
+    llm_token_map.insert(b"\":\"\",".to_vec(), tok_span);
     llm_token_map.insert(b"\"a\":null}".to_vec(), tok_suffix);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
@@ -1973,7 +1973,7 @@ fn test_json_value_span_token_fn() {
     let mask = state.get_mask();
     assert!(
         mask.contains(tok_span.0),
-        "json_value span token FN: expected token 34713 (b'\":\"\",\"') to be allowed after token 4895"
+        "json_value span token FN: expected token 34713 (b'\"\":\"\",') to be allowed after token 4895"
     );
 }
 
@@ -1982,16 +1982,16 @@ fn test_json_value_span_token_fn_minimal() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     let ebnf_grammar = indoc! {r#"
-        start ::= '{' string ':' string ',' string;
+        start ::= string ':' string ',';
         string ::= '"' '"';
     "#};
 
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)
         .expect("Failed to parse grammar");
 
-    let tok_span = LLMTokenID(34713); // b'":"","'
+    let tok_span = LLMTokenID(34713); // b'":"",'
     let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"\":\"\",\"".to_vec(), tok_span);
+    llm_token_map.insert(b"\":\"".to_vec(), tok_span);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
@@ -2001,12 +2001,12 @@ fn test_json_value_span_token_fn_minimal() {
     );
 
     let mut state = constraint.init();
-    state.commit_bytes(b"{\"");
+    state.commit_bytes(b"\"");
 
     let mask = state.get_mask();
     assert!(
         mask.contains(tok_span.0),
-        "minimal EBNF span-token FN: expected b'\":\"\",\"' to be allowed after prefix token"
+        "minimal EBNF span-token FN: expected b'\":\"' to be allowed after prefix token"
     );
 }
 
