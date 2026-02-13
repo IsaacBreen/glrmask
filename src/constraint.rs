@@ -1572,11 +1572,9 @@ impl GrammarConstraint {
             let ignored_terminals = ignored_terminals.clone();
             if do_nwa_suffix_prune {
                 if let Some(cache) = suffix_parser_cache.as_ref() {
-                    crate::debug!(4, "Building approximate suffix DFA (lazy, start-state initial) for precompute1...");
+                    crate::debug!(4, "Building approximate suffix DFA (lazy, all-states initial) for precompute1...");
                     let approx_start = std::time::Instant::now();
-                    let approx_dfa = crate::glr::approximate_dfa::build_approximate_parser_dfa_from_start(
-                        &cache.parser,
-                    );
+                    let approx_dfa = cache.parser.build_approximate_parser_dfa();
                     crate::timing!(
                         "TIMING: build_approximate_suffix_dfa {:?}",
                         approx_start.elapsed()

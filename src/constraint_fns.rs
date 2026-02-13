@@ -60,6 +60,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         crate::debug!(5, ">>> Seeding initial states");
+        let disable_disallowed_filter = std::env::var("DISABLE_TERMINALS_DISALLOWED_FILTER").is_ok();
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.stack.is_empty() {
@@ -86,14 +87,16 @@ impl<'a> GrammarConstraintState<'a> {
                 let f = |terminals_disallowed: &TerminalsDisallowed| {
                     // Start with all tokens allowed by the weight
                     let mut allowed = weight.to_rsb_allow_expansion();
-                    
-                    // Subtract forbidden tokens based on disallowed terminals
-                    for (&tsid, disallowed_in_state) in terminals_disallowed {
-                        if disallowed_in_state.is_empty() { continue; }
-                        if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tsid)) {
-                            for (terminal_id, llm_tokens) in state_matches {
-                                if disallowed_in_state.contains(&terminal_id.0) {
-                                    allowed = &allowed - llm_tokens.inner.as_ref();
+
+                    if !disable_disallowed_filter {
+                        // Subtract forbidden tokens based on disallowed terminals
+                        for (&tsid, disallowed_in_state) in terminals_disallowed {
+                            if disallowed_in_state.is_empty() { continue; }
+                            if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tsid)) {
+                                for (terminal_id, llm_tokens) in state_matches {
+                                    if disallowed_in_state.contains(&terminal_id.0) {
+                                        allowed = &allowed - llm_tokens.inner.as_ref();
+                                    }
                                 }
                             }
                         }
@@ -202,9 +205,24 @@ impl<'a> GrammarConstraintState<'a> {
 
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state_id = dwa.body.start_state;
+        let debug_span = std::env::var("DEBUG_JSON_VALUE_SPAN_FN").is_ok();
+        if debug_span {
+            let start_labels: Vec<_> = dwa.states[dwa_start_state_id]
+                .transitions
+                .keys()
+                .copied()
+                .collect();
+            println!(
+                "DEBUG heavy_mask start_state={} start_labels={:?}",
+                dwa_start_state_id,
+                start_labels
+            );
+        }
         
         // Queue: depth -> (dwa_state -> GSS with N×M weights)
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
+
+        let disable_disallowed_filter = std::env::var("DISABLE_TERMINALS_DISALLOWED_FILTER").is_ok();
 
         // 1. Seed: For each tokenizer state, apply tsid mask and seed at DWA start
         for (&tokenizer_state_id, glr_state) in &self.state {
@@ -231,14 +249,16 @@ impl<'a> GrammarConstraintState<'a> {
             let f = |terminals_disallowed: &TerminalsDisallowed| {
                 // Start with all LLM tokens in N-space
                 let mut allowed_n: RangeSetBlaze<usize> = RangeSetBlaze::from_iter([0..=max_llm_token]);
-                
-                // Subtract forbidden tokens based on disallowed terminals
-                for (&ts_id, disallowed_in_state) in terminals_disallowed {
-                    if disallowed_in_state.is_empty() { continue; }
-                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
-                        for (terminal_id, llm_tokens) in state_matches {
-                            if disallowed_in_state.contains(&terminal_id.0) {
-                                allowed_n = &allowed_n - llm_tokens.inner.as_ref();
+
+                    if !disable_disallowed_filter {
+                        // Subtract forbidden tokens based on disallowed terminals
+                        for (&ts_id, disallowed_in_state) in terminals_disallowed {
+                            if disallowed_in_state.is_empty() { continue; }
+                            if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
+                                for (terminal_id, llm_tokens) in state_matches {
+                                    if disallowed_in_state.contains(&terminal_id.0) {
+                                        allowed_n = &allowed_n - llm_tokens.inner.as_ref();
+                                    }
                             }
                         }
                     }
@@ -252,6 +272,20 @@ impl<'a> GrammarConstraintState<'a> {
             let weighted_gss = gss.apply_and_prune(f);
 
             if !weighted_gss.is_empty() {
+                if debug_span {
+                    let mut top_states = BTreeSet::new();
+                    for (path, _) in weighted_gss.to_stacks() {
+                        if let Some(edge) = path.last() {
+                            top_states.insert(edge.state_id.0);
+                        }
+                    }
+                    println!(
+                        "DEBUG heavy_mask seed tsid={} depth={} top_states={:?}",
+                        tsid,
+                        weighted_gss.max_depth(),
+                        top_states
+                    );
+                }
                 queue
                     .entry(weighted_gss.max_depth())
                     .or_default()
@@ -283,6 +317,14 @@ impl<'a> GrammarConstraintState<'a> {
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+                        if debug_span {
+                            println!(
+                                "DEBUG heavy_mask exact_transition wa_state={} parser_state={} -> {}",
+                                current_wa_state_id,
+                                parser_state_id,
+                                target_wa_state_id
+                            );
+                        }
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
@@ -301,9 +343,28 @@ impl<'a> GrammarConstraintState<'a> {
                                 .and_modify(|existing| *existing = existing.merge(&final_gss))
                                 .or_insert(final_gss);
                         }
+                    } else if debug_span {
+                        let available_labels: Vec<_> = dwa_state.transitions.keys().copied().collect();
+                        println!(
+                            "DEBUG heavy_mask missing_exact wa_state={} parser_state={} has_default={} labels={:?}",
+                            current_wa_state_id,
+                            parser_state_id,
+                            dwa_state
+                                .get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL)
+                                .is_some(),
+                            available_labels
+                        );
                     }
 
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
+                        if debug_span {
+                            println!(
+                                "DEBUG heavy_mask default_transition wa_state={} parser_state={} -> {}",
+                                current_wa_state_id,
+                                parser_state_id,
+                                target_wa_state_id
+                            );
+                        }
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }

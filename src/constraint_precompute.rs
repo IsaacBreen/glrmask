@@ -409,13 +409,11 @@ pub fn build_reduce_fallback_terminals_by_state(
         let mut terms: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         for (term_id, action) in row.get_shifts_and_reduces_map() {
             match action {
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
-                    if len > 0 {
-                        terms.insert(term_id.0);
-                    }
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => {
+                    terms.insert(term_id.0);
                 }
                 Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                    if reduces.keys().any(|len| *len > 0) {
+                    if !reduces.is_empty() {
                         terms.insert(term_id.0);
                     }
                 }
@@ -424,24 +422,22 @@ pub fn build_reduce_fallback_terminals_by_state(
         }
 
         if let Some(default_reduce) = &row.default_reduce {
-            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } = default_reduce {
-                if *len > 0 {
-                    if let Some(lookaheads) = &row.default_reduce_lookaheads {
-                        for term_id in lookaheads {
-                            if term_id.0 < num_terminals {
-                                terms.insert(term_id.0);
-                            }
+            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } = default_reduce {
+                if let Some(lookaheads) = &row.default_reduce_lookaheads {
+                    for term_id in lookaheads {
+                        if term_id.0 < num_terminals {
+                            terms.insert(term_id.0);
                         }
-                    } else {
-                        // Wildcard default reduce: we only need to know that a reduce is
-                        // possible for this state. Avoid O(num_terminals) work here since
-                        // downstream only checks for non-empty fallback lists.
-                        if terms.is_empty() {
-                            if num_terminals > 0 {
-                                terms.insert(0);
-                            } else {
-                                terms.insert(usize::MAX);
-                            }
+                    }
+                } else {
+                    // Wildcard default reduce: we only need to know that a reduce is
+                    // possible for this state. Avoid O(num_terminals) work here since
+                    // downstream only checks for non-empty fallback lists.
+                    if terms.is_empty() {
+                        if num_terminals > 0 {
+                            terms.insert(0);
+                        } else {
+                            terms.insert(usize::MAX);
                         }
                     }
                 }

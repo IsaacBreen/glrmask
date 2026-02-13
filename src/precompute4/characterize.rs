@@ -204,6 +204,27 @@ pub fn compute_terminal_characterization(parser: &GLRParser, terminal_id: Termin
     let (initial_shifts, initial_reduces) = collect_initial_actions(parser, terminal_id);
     let reduce_characterizations = collect_reduce_characterizations(parser, terminal_id);
 
+    if std::env::var_os("DEBUG_JSON_VALUE_SPAN_FN").is_some() {
+        let from3_shifts: Vec<_> = initial_shifts
+            .iter()
+            .filter(|(state, _)| state.0 == 3)
+            .copied()
+            .collect();
+        let from3_reduces: Vec<_> = initial_reduces
+            .iter()
+            .filter(|(state, _, _)| state.0 == 3)
+            .copied()
+            .collect();
+        println!(
+            "DEBUG characterize terminal={} initial_shifts={} initial_reduces={} from_state3_shifts={:?} from_state3_reduces={:?}",
+            terminal_id.0,
+            initial_shifts.len(),
+            initial_reduces.len(),
+            from3_shifts,
+            from3_reduces
+        );
+    }
+
     let result = TerminalCharacterization {
         terminal: terminal_id,
         initial_shifts,
@@ -375,13 +396,31 @@ fn collect_initial_actions(
     let mut initial_reduces = BTreeSet::new();
 
     for (&initial_state, row) in iter_rows(&parser.table) {
-        if let Some(action) = row.get_shifts_and_reduces_for_terminal(&terminal_id) {
+        let mut worklist = VecDeque::new();
+        let mut visited = BTreeSet::new();
+        visited.insert(initial_state);
+        worklist.push_back(initial_state);
+
+        while let Some(current_state) = worklist.pop_front() {
+            let Some(current_row) = get_row(&parser.table, current_state) else { continue };
+            let Some(action) = current_row.get_shifts_and_reduces_for_terminal(&terminal_id) else { continue };
+
             match action {
                 Shift(shift_state) => {
                     initial_shifts.insert((initial_state, shift_state));
                 }
                 Reduce { nonterminal_id, len, .. } => {
-                    if len > 0 {
+                    if len == 0 {
+                        if let Some(next_goto_state) = current_row
+                            .gotos
+                            .get(&nonterminal_id)
+                            .and_then(|goto| goto.state_id)
+                        {
+                            if visited.insert(next_goto_state) {
+                                worklist.push_back(next_goto_state);
+                            }
+                        }
+                    } else {
                         initial_reduces.insert((initial_state, len - 1, nonterminal_id));
                     }
                 }
@@ -390,8 +429,18 @@ fn collect_initial_actions(
                         initial_shifts.insert((initial_state, shift_state));
                     }
                     for (len, nts) in reduces {
-                        if len > 0 {
-                            for (nt_id, _) in nts {
+                        for (nt_id, _) in nts {
+                            if len == 0 {
+                                if let Some(next_goto_state) = current_row
+                                    .gotos
+                                    .get(&nt_id)
+                                    .and_then(|goto| goto.state_id)
+                                {
+                                    if visited.insert(next_goto_state) {
+                                        worklist.push_back(next_goto_state);
+                                    }
+                                }
+                            } else {
                                 initial_reduces.insert((initial_state, len - 1, nt_id));
                             }
                         }
@@ -447,7 +496,16 @@ fn explore_from_goto(
                 reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, shift_state));
             }
             Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                handle_reduce(parser, revealed_state, len, reduce_nt, &mut visited, &mut worklist, reduce_char);
+                handle_reduce(
+                    parser,
+                    revealed_state,
+                    current_state,
+                    len,
+                    reduce_nt,
+                    &mut visited,
+                    &mut worklist,
+                    reduce_char,
+                );
             }
             Split { shift, reduces } => {
                 if let Some(shift_state) = shift {
@@ -455,7 +513,16 @@ fn explore_from_goto(
                 }
                 for (len, nts) in reduces {
                     for (reduce_nt, _) in nts {
-                        handle_reduce(parser, revealed_state, len, reduce_nt, &mut visited, &mut worklist, reduce_char);
+                        handle_reduce(
+                            parser,
+                            revealed_state,
+                            current_state,
+                            len,
+                            reduce_nt,
+                            &mut visited,
+                            &mut worklist,
+                            reduce_char,
+                        );
                     }
                 }
             }
@@ -466,13 +533,23 @@ fn explore_from_goto(
 fn handle_reduce(
     parser: &GLRParser,
     revealed_state: StateID,
+    current_state: StateID,
     len: usize,
     reduce_nt: NonTerminalID,
     visited: &mut BTreeSet<StateID>,
     worklist: &mut VecDeque<StateID>,
     reduce_char: &mut ReduceCharacterization,
 ) {
-    if len == 1 {
+    if len == 0 {
+        if let Some(next_goto_state) = get_row(&parser.table, current_state)
+            .and_then(|row| row.gotos.get(&reduce_nt))
+            .and_then(|goto| goto.state_id)
+        {
+            if visited.insert(next_goto_state) {
+                worklist.push_back(next_goto_state);
+            }
+        }
+    } else if len == 1 {
         if let Some(next_goto_state) = get_row(&parser.table, revealed_state)
             .and_then(|row| row.gotos.get(&reduce_nt))
             .and_then(|goto| goto.state_id)
