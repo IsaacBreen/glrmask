@@ -409,13 +409,11 @@ pub fn build_reduce_fallback_terminals_by_state(
         let mut terms: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         for (term_id, action) in row.get_shifts_and_reduces_map() {
             match action {
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } => {
-                    if len > 0 {
-                        terms.insert(term_id.0);
-                    }
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => {
+                    terms.insert(term_id.0);
                 }
                 Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                    if reduces.keys().any(|len| *len > 0) {
+                    if !reduces.is_empty() {
                         terms.insert(term_id.0);
                     }
                 }
@@ -424,8 +422,7 @@ pub fn build_reduce_fallback_terminals_by_state(
         }
 
         if let Some(default_reduce) = &row.default_reduce {
-            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { len, .. } = default_reduce {
-                if *len > 0 {
+            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } = default_reduce {
                     if let Some(lookaheads) = &row.default_reduce_lookaheads {
                         for term_id in lookaheads {
                             if term_id.0 < num_terminals {
@@ -444,7 +441,6 @@ pub fn build_reduce_fallback_terminals_by_state(
                             }
                         }
                     }
-                }
             }
         }
 
@@ -1366,8 +1362,27 @@ impl<'r> Precomputer1<'r> {
             {
                 Some(approx_state)
             } else if let Some(suffix_tid) = approx_dfa.orig_to_suffix_tid.get(term_idx).copied().flatten() {
+                let has_any_reduce = approx_dfa
+                    .dfa
+                    .state_set(approx_state)
+                    .map(|state_set| {
+                        state_set.iter().any(|state_id| {
+                            approx_dfa
+                                .reduce_fallback_terminals_by_state
+                                .get(state_id)
+                                .map(|terms| !terms.is_empty())
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
                 match approx_dfa.dfa.step(approx_state, suffix_tid) {
-                    Some(next) => Some(next),
+                    Some(next) => {
+                        if has_any_reduce {
+                            Some(approx_state)
+                        } else {
+                            Some(next)
+                        }
+                    }
                     None => {
                         // The DFA step failed for this terminal. This can happen
                         // when a reduce should have fired at a PREVIOUS step
@@ -1385,17 +1400,6 @@ impl<'r> Precomputer1<'r> {
                         // We check for ANY reduce (not just one matching this
                         // terminal) because the reduce fires on a PREVIOUS
                         // terminal in the lookahead, not the current one.
-                        let mut has_any_reduce = false;
-                        if let Some(state_set) = approx_dfa.dfa.state_set(approx_state) {
-                            for state_id in state_set.iter() {
-                                if let Some(terms) = approx_dfa.reduce_fallback_terminals_by_state.get(state_id) {
-                                    if !terms.is_empty() {
-                                        has_any_reduce = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
                         if has_any_reduce {
                             // Reduce below bottom -> "all possible states" = start state.
                             // Try stepping from start to see if this terminal is valid.
@@ -1440,7 +1444,7 @@ impl<'r> Precomputer1<'r> {
                                 }
                             }
                         }
-                        None
+                        Some(approx_state)
                     }
                 }
             } else {
