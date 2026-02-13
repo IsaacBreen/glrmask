@@ -1878,10 +1878,11 @@ fn test_json_string_mask_rejects_invalid_utf8_continuation_byte() {
     );
 }
 
-// MINIMAL regression: get_mask() must include tokens spanning multiple terminals.
-// Grammar: start: "a" ":" "a"  — three terminals.
-// Token b"a:a" spans the last byte of terminal 1 + terminal 2 + first byte of terminal 3.
-// After commit_bytes(b"a"), get_mask() must include this token.
+// MINIMAL regression: get_mask() must include continuation tokens spanning
+// multiple terminals after a committed prefix.
+// Grammar: start: "a" ":" "a".
+// After commit_bytes(b"a"), parser expects ":" then "a".
+// Token b":a" must be in the mask.
 #[test]
 fn test_span_token_in_get_mask() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -1895,7 +1896,7 @@ fn test_span_token_in_get_mask() {
 
     let mut llm_token_map = LLMTokenMap::new();
     let tok_span = LLMTokenID(0);
-    llm_token_map.insert(b"a:a".to_vec(), tok_span);
+    llm_token_map.insert(b":a".to_vec(), tok_span);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
@@ -1911,6 +1912,101 @@ fn test_span_token_in_get_mask() {
     assert!(
         mask.contains(tok_span.0),
         "span token must be in get_mask()"
+    );
+}
+
+#[test]
+fn test_json_value_span_token_fn() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark_grammar = indoc! {r#"
+        start: ws value ws
+        value: object | array | string | number | "true" | "false" | "null"
+        object: "{" ws members? ws "}"
+        members: pair (ws "," ws pair)*
+        pair: string ws ":" ws value
+        array: "[" ws elements? ws "]"
+        elements: value (ws "," ws value)*
+        string: QUOTE char* QUOTE
+        char: letter | digit | MINUS | UNDERSCORE
+        number: int | int frac | int exp | int frac exp
+        int: digits | MINUS digits
+        frac: DOT digits
+        exp: EXP digits | EXP PLUS digits | EXP MINUS digits
+        digits: DIGIT+
+        ws: WS*
+        letter: LETTER
+        digit: DIGIT
+        QUOTE: "\""
+        MINUS: "-"
+        PLUS: "+"
+        DOT: "."
+        EXP: "e" | "E"
+        UNDERSCORE: "_"
+        WS: " " | "\n" | "\t" | "\r"
+        LETTER: "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
+        DIGIT: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+    "#};
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
+        .expect("Failed to parse grammar");
+
+    let tok_prefix = LLMTokenID(4895);   // b'{"'
+    let tok_span = LLMTokenID(34713);    // b'":"",'
+    let tok_suffix = LLMTokenID(34714);  // b'"a":null}'
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
+    llm_token_map.insert(b"\":\"\",".to_vec(), tok_span);
+    llm_token_map.insert(b"\"a\":null}".to_vec(), tok_suffix);
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        tok_suffix.0,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(tok_prefix).expect("prefix commit failed");
+
+    let mask = state.get_mask();
+    assert!(
+        mask.contains(tok_span.0),
+        "json_value span token FN: expected token 34713 (b'\"\":\"\",') to be allowed after token 4895"
+    );
+}
+
+#[test]
+fn test_json_value_span_token_fn_minimal() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf_grammar = indoc! {r#"
+        start ::= '{' string ':' string ',';
+        string ::= '"' '"';
+    "#};
+
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)
+        .expect("Failed to parse grammar");
+
+    let tok_span = LLMTokenID(34713); // b'":"",'
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"\":\"\",".to_vec(), tok_span);
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        tok_span.0,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit_bytes(b"{\"");
+
+    let mask = state.get_mask();
+    assert!(
+        mask.contains(tok_span.0),
+        "minimal EBNF span-token FN: expected b'\"\":\"\",' to be allowed after prefix token"
     );
 }
 
