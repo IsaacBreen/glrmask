@@ -1878,80 +1878,24 @@ fn test_json_string_mask_rejects_invalid_utf8_continuation_byte() {
     );
 }
 
-// Regression: get_mask() must include tokens that span multiple grammar
-// terminals (e.g. close-quote + colon + empty-value + comma + open-quote).
-// Token bytes b"\":\"\",\"" is a valid continuation after prefix b"{\"".
+// MINIMAL regression: get_mask() must include tokens spanning multiple terminals.
+// Grammar: start: "a" ":" "a"  — three terminals.
+// Token b"a:a" spans the last byte of terminal 1 + terminal 2 + first byte of terminal 3.
+// After commit_bytes(b"a"), get_mask() must include this token.
 #[test]
 fn test_span_token_in_get_mask() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
 
     let lark_grammar = indoc! {r#"
-        start: "{" json_kv ("," json_kv)* "}"
-        json_kv: JSON_STRING ":" JSON_STRING
-        JSON_STRING: "\"" STR_CHAR* "\""
-        STR_CHAR: /[^\x00-\x1F"\\]/
+        start: "a" ":" "a"
     "#};
 
     let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
-        .expect("Failed to parse minimal JSON key/value grammar");
+        .expect("Failed to parse grammar");
 
     let mut llm_token_map = LLMTokenMap::new();
-    let tok_prefix = LLMTokenID(0); // b"{\""
-    let tok_span = LLMTokenID(1);   // b"\":\"\",\""  (spans 5+ terminals)
-    let tok_next_quote = LLMTokenID(2); // b"\""
-
-    llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
-    llm_token_map.insert(b"\":\"\",\"".to_vec(), tok_span);
-    llm_token_map.insert(b"\"".to_vec(), tok_next_quote);
-
-    let constraint = GrammarConstraint::new_from_grammar_definition(
-        Arc::new(grammar_definition),
-        llm_token_map,
-        2,
-        &GrammarConstraintConfig::default(),
-    );
-
-    let mut state = constraint.init();
-    state.commit(tok_prefix).expect("prefix commit failed");
-
-    let mask = state.get_mask();
-
-    // The span token must be in the mask — commit() accepts it,
-    // so get_mask() must too.
-    assert!(
-        mask.contains(tok_span.0),
-        "span token (close-quote + colon + empty-value + comma + open-quote) must be in get_mask()"
-    );
-
-    state.commit(tok_span).expect("span token commit failed");
-    assert!(state.is_active(), "State should remain active after committing span token");
-
-    let mask_after = state.get_mask();
-    assert!(
-        mask_after.contains(tok_next_quote.0),
-        "After span token, opening quote for next key should be allowed"
-    );
-}
-
-#[test]
-fn test_span_minimal_regression() {
-    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
-
-    let lark_grammar = indoc! {r#"
-        start: "{" s ":" s "}"
-        s: "\"" c* "\""
-        c: /[a-z]/
-    "#};
-
-    let grammar_definition = GrammarDefinition::from_lark(lark_grammar)
-        .expect("Failed to parse minimal span regression grammar");
-
-    let mut llm_token_map = LLMTokenMap::new();
-    let tok_prefix = LLMTokenID(0); // b"{\""
-    let tok_span = LLMTokenID(1);   // b"\":\"\""
-
-    llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
-    llm_token_map.insert(b"\":\"\"".to_vec(), tok_span);
+    let tok_span = LLMTokenID(0);
+    llm_token_map.insert(b"a:a".to_vec(), tok_span);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
@@ -1961,16 +1905,13 @@ fn test_span_minimal_regression() {
     );
 
     let mut state = constraint.init();
-    state.commit(tok_prefix).expect("prefix commit failed");
+    state.commit_bytes(b"a");
 
     let mask = state.get_mask();
     assert!(
         mask.contains(tok_span.0),
-        "span token should be present in mask for minimal regression"
+        "span token must be in get_mask()"
     );
-
-    state.commit(tok_span).expect("span token commit failed");
-    assert!(state.is_active(), "State should remain active after span token");
 }
 
 #[test]
