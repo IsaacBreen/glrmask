@@ -993,6 +993,46 @@ impl AbstractWeight {
         }
     }
 
+    /// Cached version of `to_rsb_allow_expansion()`.
+    ///
+    /// For Factorized and RangeMap weights (which are Arc-wrapped and immutable),
+    /// the expansion result is cached in a thread-local HashMap keyed by Arc pointer
+    /// identity. This avoids re-expanding the same DWA transition weights on every
+    /// mask generation step.
+    ///
+    /// Returns `Arc<RangeSetBlaze<usize>>` for cheap cloning.
+    pub fn to_rsb_allow_expansion_cached(&self) -> Arc<RangeSetBlaze<usize>> {
+        thread_local! {
+            static CACHE: RefCell<std::collections::HashMap<usize, Arc<RangeSetBlaze<usize>>>> =
+                RefCell::new(std::collections::HashMap::new());
+        }
+
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                // RangeSet is already a thin wrapper; no expensive expansion.
+                Arc::new(rsb.inner().clone())
+            }
+            AbstractWeight::Factorized(arc) => {
+                let key = Arc::as_ptr(arc) as usize;
+                CACHE.with(|cache| {
+                    let mut c = cache.borrow_mut();
+                    c.entry(key)
+                        .or_insert_with(|| Arc::new(arc.expand_to_rsb_unchecked()))
+                        .clone()
+                })
+            }
+            AbstractWeight::RangeMap(arc) => {
+                let key = Arc::as_ptr(arc) as usize;
+                CACHE.with(|cache| {
+                    let mut c = cache.borrow_mut();
+                    c.entry(key)
+                        .or_insert_with(|| Arc::new(arc.expand_to_rsb()))
+                        .clone()
+                })
+            }
+        }
+    }
+
     /// Expand to a RangeSetBlaze representation (alias for `to_rsb`).
     pub fn expand_to_rsb(&self) -> RangeSetBlaze<usize> {
         self.to_rsb()

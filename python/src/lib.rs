@@ -1827,6 +1827,12 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_last_mask_seed_time_ns, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_mask_worklist_time_ns, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_mask_worklist_iter_count, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_expand_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_intersect_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_gss_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_merge_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_final_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_expand_count, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
 }
@@ -1880,4 +1886,40 @@ fn get_last_mask_worklist_time_ns() -> u64 {
 #[pyfunction]
 fn get_last_mask_worklist_iter_count() -> u64 {
     sep1::constraint_fns::get_last_mask_worklist_iter_count()
+}
+
+/// Get the last worklist expand time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_wl_expand_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_expand_ns()
+}
+
+/// Get the last worklist intersect time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_wl_intersect_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_intersect_ns()
+}
+
+/// Get the last worklist GSS ops time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_wl_gss_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_gss_ns()
+}
+
+/// Get the last worklist merge time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_wl_merge_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_merge_ns()
+}
+
+/// Get the last worklist final weight time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_wl_final_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_final_ns()
+}
+
+/// Get the count of expand operations in last worklist.
+#[pyfunction]
+fn get_last_mask_wl_expand_count() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_expand_count()
 }
