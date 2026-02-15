@@ -22,6 +22,9 @@ static LAST_MASK_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_MASK_COMPUTE_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_MASK_CONVERT_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_MASK_EOS_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_SEED_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WORKLIST_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WORKLIST_ITER_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Enable benchmark mode which captures precise timing inside Rust.
 /// Call get_last_mask_time_ns() after each fill_mask_i32 call.
@@ -31,6 +34,9 @@ pub fn set_benchmark_mode(enabled: bool) {
     LAST_MASK_COMPUTE_TIME_NS.store(0, Ordering::Relaxed);
     LAST_MASK_CONVERT_TIME_NS.store(0, Ordering::Relaxed);
     LAST_MASK_EOS_TIME_NS.store(0, Ordering::Relaxed);
+    LAST_MASK_SEED_TIME_NS.store(0, Ordering::Relaxed);
+    LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
+    LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
 }
 
 /// Get the last total mask computation time in nanoseconds.
@@ -54,6 +60,21 @@ pub fn get_last_mask_eos_time_ns() -> u64 {
     LAST_MASK_EOS_TIME_NS.load(Ordering::Relaxed)
 }
 
+/// Get the last seed phase time in nanoseconds.
+pub fn get_last_mask_seed_time_ns() -> u64 {
+    LAST_MASK_SEED_TIME_NS.load(Ordering::Relaxed)
+}
+
+/// Get the last main worklist phase time in nanoseconds.
+pub fn get_last_mask_worklist_time_ns() -> u64 {
+    LAST_MASK_WORKLIST_TIME_NS.load(Ordering::Relaxed)
+}
+
+/// Get the last main worklist iteration count.
+pub fn get_last_mask_worklist_iter_count() -> u64 {
+    LAST_MASK_WORKLIST_ITER_COUNT.load(Ordering::Relaxed)
+}
+
 impl<'a> GrammarConstraintState<'a> {
     /// Expose compute_internal_mask for testing/debugging.
     #[cfg(test)]
@@ -65,10 +86,16 @@ impl<'a> GrammarConstraintState<'a> {
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
     /// This is the core computation shared by get_mask and fill_mask_i32.
     fn compute_internal_mask(&self) -> (RangeSet, bool) {
+        let benchmark_enabled = BENCHMARK_MODE.load(Ordering::Relaxed);
         let mut final_mask_internal = RangeSet::zeros();
         let mut has_accepting = false;
         if self.state.is_empty() {
             crate::debug!(7, "compute_internal_mask: state is empty");
+            if benchmark_enabled {
+                LAST_MASK_SEED_TIME_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
+            }
             return (final_mask_internal, has_accepting);
         }
 
@@ -83,6 +110,11 @@ impl<'a> GrammarConstraintState<'a> {
 
         crate::debug!(5, ">>> Seeding initial states");
         let disable_disallowed_filter = std::env::var("DISABLE_TERMINALS_DISALLOWED_FILTER").is_ok();
+        let seed_start = if benchmark_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.stack.is_empty() {
@@ -96,14 +128,14 @@ impl<'a> GrammarConstraintState<'a> {
             // This matches the labeling in precompute1.
             let terminals_count = self.parent.parser.terminal_map.len();
             let tsid_label = (tokenizer_state_id.0 + terminals_count) as Label;
-            
+
             crate::debug!(6, "  Looking for tsid transition: tokenizer_state_id={}, tsid_label={}, {} available transitions",
                 tokenizer_state_id.0, tsid_label,
                 dwa_start_state.transitions.len());
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tsid_label) {
                 crate::debug!(6, "    Found transition to state {} with weight {:?}", target_wa_state_id, weight);
                 let possible_matches = &self.parent.possible_matches;
-                
+
                 // Convert TerminalsDisallowed -> RangeSetBlaze<usize> (LLM tokens allowed)
                 // by computing forbidden tokens and subtracting from weight
                 let f = |terminals_disallowed: &TerminalsDisallowed| {
@@ -123,7 +155,7 @@ impl<'a> GrammarConstraintState<'a> {
                             }
                         }
                     }
-                    
+
                     if allowed.is_empty() { None } else { Some(allowed) }
                 };
                 let weighted_gss = gss.apply_and_prune(f);
@@ -140,10 +172,20 @@ impl<'a> GrammarConstraintState<'a> {
                 crate::debug!(6, "    NO transition found for tsid_label={}", tsid_label);
             }
         }
+        if let Some(start) = seed_start {
+            LAST_MASK_SEED_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
 
+        let worklist_start = if benchmark_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let mut worklist_iters: u64 = 0;
         // 2. Main worklist loop
         while let Some((depth, states_at_depth)) = queue.pop_last() {
             for (current_wa_state_id, gss) in states_at_depth {
+                worklist_iters += 1;
                 let dwa_state = &dwa.states[current_wa_state_id];
 
                 // Check for final state
@@ -205,6 +247,12 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
+        if let Some(start) = worklist_start {
+            LAST_MASK_WORKLIST_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        if benchmark_enabled {
+            LAST_MASK_WORKLIST_ITER_COUNT.store(worklist_iters, Ordering::Relaxed);
+        }
 
         (final_mask_internal, has_accepting)
     }
@@ -217,28 +265,39 @@ impl<'a> GrammarConstraintState<'a> {
     /// - No tsid transitions at DWA start (replaced with epsilon transitions)
     /// - We seed directly at the start state, applying tsid masks to weights
     fn compute_internal_mask_weight_heavy(&self) -> (RangeSet, bool) {
+        let benchmark_enabled = BENCHMARK_MODE.load(Ordering::Relaxed);
         let num_tsids = self.parent.num_tsids;
         let max_llm_token = self.parent.parser_dwa_vocab.internal_max_llm_token;
         let mut final_mask_internal = RangeSet::zeros();
         let mut has_accepting = false;
         if self.state.is_empty() {
+            if benchmark_enabled {
+                LAST_MASK_SEED_TIME_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
+            }
             return (final_mask_internal, has_accepting);
         }
 
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state_id = dwa.body.start_state;
-        
+
         // Queue: depth -> (dwa_state -> GSS with N×M weights)
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
 
         let disable_disallowed_filter = std::env::var("DISABLE_TERMINALS_DISALLOWED_FILTER").is_ok();
+        let seed_start = if benchmark_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         // 1. Seed: For each tokenizer state, apply tsid mask and seed at DWA start
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.stack.is_empty() {
                 continue;
             }
-            
+
             let tsid = tokenizer_state_id.0;
             let tsid_mask = create_tsid_mask_rsb_with_offset_map(
                 tsid,
@@ -250,7 +309,7 @@ impl<'a> GrammarConstraintState<'a> {
                     Some(self.parent.tsid_offset_map.as_slice())
                 },
             );
-            
+
             let gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
 
@@ -259,15 +318,15 @@ impl<'a> GrammarConstraintState<'a> {
                 // Start with all LLM tokens in N-space
                 let mut allowed_n: RangeSetBlaze<usize> = RangeSetBlaze::from_iter([0..=max_llm_token]);
 
-                    if !disable_disallowed_filter {
-                        // Subtract forbidden tokens based on disallowed terminals
-                        for (&ts_id, disallowed_in_state) in terminals_disallowed {
-                            if disallowed_in_state.is_empty() { continue; }
-                            if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
-                                for (terminal_id, llm_tokens) in state_matches {
-                                    if disallowed_in_state.contains(&terminal_id.0) {
-                                        allowed_n = &allowed_n - llm_tokens.inner.as_ref();
-                                    }
+                if !disable_disallowed_filter {
+                    // Subtract forbidden tokens based on disallowed terminals
+                    for (&ts_id, disallowed_in_state) in terminals_disallowed {
+                        if disallowed_in_state.is_empty() { continue; }
+                        if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
+                            for (terminal_id, llm_tokens) in state_matches {
+                                if disallowed_in_state.contains(&terminal_id.0) {
+                                    allowed_n = &allowed_n - llm_tokens.inner.as_ref();
+                                }
                             }
                         }
                     }
@@ -289,10 +348,20 @@ impl<'a> GrammarConstraintState<'a> {
                     .or_insert(weighted_gss);
             }
         }
+        if let Some(start) = seed_start {
+            LAST_MASK_SEED_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
 
+        let worklist_start = if benchmark_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let mut worklist_iters: u64 = 0;
         // 2. Main worklist loop (same structure as symbol-heavy)
         while let Some((depth, states_at_depth)) = queue.pop_last() {
             for (current_wa_state_id, gss) in states_at_depth {
+                worklist_iters += 1;
                 let dwa_state = &dwa.states[current_wa_state_id];
 
                 // Check for final state
@@ -355,6 +424,12 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
+        if let Some(start) = worklist_start {
+            LAST_MASK_WORKLIST_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        if benchmark_enabled {
+            LAST_MASK_WORKLIST_ITER_COUNT.store(worklist_iters, Ordering::Relaxed);
+        }
 
         (final_mask_internal, has_accepting)
     }
@@ -395,6 +470,11 @@ impl<'a> GrammarConstraintState<'a> {
     #[inline]
     pub fn fill_mask_i32(&self, out: &mut [i32]) {
         let benchmark_enabled = BENCHMARK_MODE.load(Ordering::Relaxed);
+        if benchmark_enabled {
+            LAST_MASK_SEED_TIME_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
+        }
         let total_start = if benchmark_enabled {
             Some(Instant::now())
         } else {

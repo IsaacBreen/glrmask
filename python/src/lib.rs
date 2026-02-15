@@ -1824,6 +1824,9 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_last_mask_compute_time_ns, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_mask_convert_time_ns, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_mask_eos_time_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_seed_time_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_worklist_time_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_worklist_iter_count, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
 }
@@ -1859,4 +1862,22 @@ fn get_last_mask_convert_time_ns() -> u64 {
 #[pyfunction]
 fn get_last_mask_eos_time_ns() -> u64 {
     sep1::constraint_fns::get_last_mask_eos_time_ns()
+}
+
+/// Get the last seed phase time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_seed_time_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_seed_time_ns()
+}
+
+/// Get the last main worklist phase time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_worklist_time_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_worklist_time_ns()
+}
+
+/// Get the last main worklist iteration count.
+#[pyfunction]
+fn get_last_mask_worklist_iter_count() -> u64 {
+    sep1::constraint_fns::get_last_mask_worklist_iter_count()
 }
