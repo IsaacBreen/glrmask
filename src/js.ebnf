@@ -108,6 +108,7 @@ assignment_expression ::=
     yield_expression
   | arrow_function
   | conditional_expression
+  | left_hand_side_expression '**=' assignment_expression
   | left_hand_side_expression ASSIGNMENT_OPERATOR assignment_expression
   ;
 
@@ -144,11 +145,13 @@ exponentiation_expression ::= unary_expression ( '**' exponentiation_expression 
 
 unary_expression ::=
     postfix_expression
+  | '+' unary_expression
+  | '~' unary_expression
   | UNARY_OPERATOR unary_expression
   ;
 
 postfix_expression ::=
-    left_hand_side_expression UPDATE_OPERATOR?
+    left_hand_side_expression ( '++' | '--' )?
   ;
 
 left_hand_side_expression ::=
@@ -231,14 +234,13 @@ private_identifier ::= '#' IDENTIFIER ;
 DECLARATION_KEYWORD ::= 'var' | 'let' | 'const' ;
 IN_OF_OPERATOR ::= 'in' | 'of' ;
 
-ASSIGNMENT_OPERATOR ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ;
+ASSIGNMENT_OPERATOR ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' ;
 EQUALITY_OPERATOR ::= '==' | '!=' | '===' | '!==' ;
 RELATIONAL_OPERATOR ::= '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ;
 SHIFT_OPERATOR ::= '<<' | '>>' | '>>>' ;
 ADDITIVE_OPERATOR ::= '+' | '-' ;
 MULTIPLICATIVE_OPERATOR ::= '*' | '/' | '%' ;
-UNARY_OPERATOR ::= 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ;
-UPDATE_OPERATOR ::= '++' | '--' ;
+UNARY_OPERATOR ::= 'delete' | 'void' | 'typeof' | '++' | '--' | '-' | '!' | 'await' ;
 
 // Literals
 literal ::=
