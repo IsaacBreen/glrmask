@@ -43,7 +43,7 @@ block ::= '{' statement_list? '}' ;
 
 labeled_statement ::= IDENTIFIER ':' statement ;
 
-declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
+declaration_statement ::= DECLARATION_KEYWORD variable_declaration_list ';'? ;
 
 variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
@@ -54,8 +54,8 @@ if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 iteration_statement ::=
     'while' '(' expression ')' statement
   | 'do' statement 'while' '(' expression ')' ';'
-  | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
-  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
+  | 'for' '(' ( DECLARATION_KEYWORD variable_declaration_list )? ';' expression? ';' expression? ')' statement
+  | 'for' '(' DECLARATION_KEYWORD? binding_pattern IN_OF_OPERATOR expression ')' statement
   | 'for' '(' expression? ';' expression? ';' expression? ')' statement
   ;
 
@@ -108,7 +108,7 @@ assignment_expression ::=
     yield_expression
   | arrow_function
   | conditional_expression
-  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
+  | left_hand_side_expression ASSIGNMENT_OPERATOR assignment_expression
   ;
 
 arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
@@ -130,25 +130,25 @@ bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )
 
 bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
 
-equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
+equality_expression ::= relational_expression ( EQUALITY_OPERATOR relational_expression )* ;
 
-relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+relational_expression ::= shift_expression ( RELATIONAL_OPERATOR shift_expression )* ;
 
-shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+shift_expression ::= additive_expression ( SHIFT_OPERATOR additive_expression )* ;
 
-additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+additive_expression ::= multiplicative_expression ( ADDITIVE_OPERATOR multiplicative_expression )* ;
 
-multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
+multiplicative_expression ::= exponentiation_expression ( MULTIPLICATIVE_OPERATOR exponentiation_expression )* ;
 
 exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
 
 unary_expression ::=
     postfix_expression
-  | ( 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ) unary_expression
+  | UNARY_OPERATOR unary_expression
   ;
 
 postfix_expression ::=
-    left_hand_side_expression ( '++' | '--' )?
+    left_hand_side_expression UPDATE_OPERATOR?
   ;
 
 left_hand_side_expression ::=
@@ -225,6 +225,20 @@ field_definition ::= ('static')? class_property_name ('=' expression)? ;
 method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
 class_property_name ::= property_name | private_identifier ;
 private_identifier ::= '#' IDENTIFIER ;
+
+
+
+DECLARATION_KEYWORD ::= 'var' | 'let' | 'const' ;
+IN_OF_OPERATOR ::= 'in' | 'of' ;
+
+ASSIGNMENT_OPERATOR ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ;
+EQUALITY_OPERATOR ::= '==' | '!=' | '===' | '!==' ;
+RELATIONAL_OPERATOR ::= '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ;
+SHIFT_OPERATOR ::= '<<' | '>>' | '>>>' ;
+ADDITIVE_OPERATOR ::= '+' | '-' ;
+MULTIPLICATIVE_OPERATOR ::= '*' | '/' | '%' ;
+UNARY_OPERATOR ::= 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ;
+UPDATE_OPERATOR ::= '++' | '--' ;
 
 // Literals
 literal ::=
