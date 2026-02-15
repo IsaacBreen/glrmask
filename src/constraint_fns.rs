@@ -19,17 +19,39 @@ type ParserGSS = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
 // Benchmark mode for capturing Rust-native timings without Python overhead
 static BENCHMARK_MODE: AtomicBool = AtomicBool::new(false);
 static LAST_MASK_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_COMPUTE_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_CONVERT_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_EOS_TIME_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Enable benchmark mode which captures precise timing inside Rust.
 /// Call get_last_mask_time_ns() after each fill_mask_i32 call.
 pub fn set_benchmark_mode(enabled: bool) {
     BENCHMARK_MODE.store(enabled, Ordering::Relaxed);
+    LAST_MASK_TIME_NS.store(0, Ordering::Relaxed);
+    LAST_MASK_COMPUTE_TIME_NS.store(0, Ordering::Relaxed);
+    LAST_MASK_CONVERT_TIME_NS.store(0, Ordering::Relaxed);
+    LAST_MASK_EOS_TIME_NS.store(0, Ordering::Relaxed);
 }
 
-/// Get the last mask computation time in nanoseconds.
+/// Get the last total mask computation time in nanoseconds.
 /// Only valid if benchmark mode is enabled.
 pub fn get_last_mask_time_ns() -> u64 {
     LAST_MASK_TIME_NS.load(Ordering::Relaxed)
+}
+
+/// Get the last `compute_internal_mask*` phase time in nanoseconds.
+pub fn get_last_mask_compute_time_ns() -> u64 {
+    LAST_MASK_COMPUTE_TIME_NS.load(Ordering::Relaxed)
+}
+
+/// Get the last `fill_internal_bv_to_original_i32` phase time in nanoseconds.
+pub fn get_last_mask_convert_time_ns() -> u64 {
+    LAST_MASK_CONVERT_TIME_NS.load(Ordering::Relaxed)
+}
+
+/// Get the last EOS post-processing phase time in nanoseconds.
+pub fn get_last_mask_eos_time_ns() -> u64 {
+    LAST_MASK_EOS_TIME_NS.load(Ordering::Relaxed)
 }
 
 impl<'a> GrammarConstraintState<'a> {
@@ -372,18 +394,44 @@ impl<'a> GrammarConstraintState<'a> {
     /// buffer (e.g., numpy array, torch tensor, or reused buffer).
     #[inline]
     pub fn fill_mask_i32(&self, out: &mut [i32]) {
-        let start = if BENCHMARK_MODE.load(Ordering::Relaxed) {
+        let benchmark_enabled = BENCHMARK_MODE.load(Ordering::Relaxed);
+        let total_start = if benchmark_enabled {
             Some(Instant::now())
         } else {
             None
         };
-        
+
+        let compute_start = if benchmark_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let (final_mask_internal, _has_accepting) = if self.parent.num_tsids > 0 {
             self.compute_internal_mask_weight_heavy()
         } else {
             self.compute_internal_mask()
         };
-        self.parent.parser_dwa_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
+        if let Some(start) = compute_start {
+            LAST_MASK_COMPUTE_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+
+        let convert_start = if benchmark_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        self.parent
+            .parser_dwa_vocab
+            .fill_internal_bv_to_original_i32(&final_mask_internal, out);
+        if let Some(start) = convert_start {
+            LAST_MASK_CONVERT_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+
+        let eos_start = if benchmark_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if let Some(eos_id) = self.parent.eos_token_id {
             let word_idx = eos_id / 32;
             let bit_idx = eos_id % 32;
@@ -394,8 +442,11 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
-        
-        if let Some(start) = start {
+        if let Some(start) = eos_start {
+            LAST_MASK_EOS_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+
+        if let Some(start) = total_start {
             LAST_MASK_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     }

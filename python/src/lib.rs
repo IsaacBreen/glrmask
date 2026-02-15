@@ -1821,6 +1821,9 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Benchmark functions
     m.add_function(wrap_pyfunction!(set_benchmark_mode, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_mask_time_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_compute_time_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_convert_time_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_eos_time_ns, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
 }
@@ -1838,4 +1841,22 @@ fn set_benchmark_mode(enabled: bool) {
 #[pyfunction]
 fn get_last_mask_time_ns() -> u64 {
     sep1::constraint_fns::get_last_mask_time_ns()
+}
+
+/// Get the last compute_internal_mask* phase time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_compute_time_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_compute_time_ns()
+}
+
+/// Get the last internal->original bitvector conversion phase time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_convert_time_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_convert_time_ns()
+}
+
+/// Get the last EOS post-processing phase time in nanoseconds.
+#[pyfunction]
+fn get_last_mask_eos_time_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_eos_time_ns()
 }
