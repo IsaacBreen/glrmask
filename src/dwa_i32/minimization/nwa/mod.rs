@@ -632,12 +632,12 @@ impl NWA {
 
             let new_state = {
                 let states = &self.states.0;
-                let mut final_weight: Option<Weight> = None;
-                let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
+                let mut final_weights: Vec<Weight> = Vec::new();
+                let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Vec<Weight>>> = BTreeMap::new();
 
                 if let Some(fw) = &states[u].final_weight {
                     if !fw.is_empty() {
-                        final_weight = Some(fw.clone());
+                        final_weights.push(fw.clone());
                     }
                 }
 
@@ -649,8 +649,8 @@ impl NWA {
                         }
                         entry
                             .entry(*tgt)
-                            .and_modify(|acc| *acc |= w_tr)
-                            .or_insert_with(|| w_tr.clone());
+                            .or_insert_with(Vec::new)
+                            .push(w_tr.clone());
                     }
                 }
 
@@ -664,10 +664,7 @@ impl NWA {
                         if !fw.is_empty() {
                             let w = if w_uv_all { fw.clone() } else { w_uv & fw };
                             if !w.is_empty() {
-                                final_weight = Some(match final_weight {
-                                    Some(cur) => cur | &w,
-                                    None => w,
-                                });
+                                final_weights.push(w);
                             }
                         }
                     }
@@ -690,17 +687,45 @@ impl NWA {
                             }
                             entry
                                 .entry(*tgt)
-                                .and_modify(|acc| *acc |= &w)
-                                .or_insert(w);
+                                .or_insert_with(Vec::new)
+                                .push(w);
                         }
                     }
                 }
 
+                // Balanced binary merge tree for multi-way union.
+                // Turns O(n²) sequential accumulation into O(n log n) by merging
+                // equal-sized weights at each level, keeping intermediates small.
+                fn balanced_union(mut weights: Vec<Weight>) -> Option<Weight> {
+                    if weights.is_empty() { return None; }
+                    if weights.len() == 1 { return Some(weights.pop().unwrap()); }
+                    while weights.len() > 1 {
+                        let mut next = Vec::with_capacity((weights.len() + 1) / 2);
+                        let mut i = 0;
+                        while i + 1 < weights.len() {
+                            next.push(&weights[i] | &weights[i + 1]);
+                            i += 2;
+                        }
+                        if i < weights.len() {
+                            next.push(weights.pop().unwrap());
+                        }
+                        weights = next;
+                    }
+                    Some(weights.pop().unwrap())
+                }
+
                 let mut new_state = NWAState::default();
-                new_state.final_weight = final_weight;
+                new_state.final_weight = balanced_union(final_weights);
                 new_state.transitions = trans_map
                     .into_iter()
-                    .map(|(label, map)| (label, map.into_iter().collect()))
+                    .map(|(label, map)| {
+                        let targets: Vec<(NWAStateID, Weight)> = map.into_iter()
+                            .filter_map(|(tgt, weights)| {
+                                balanced_union(weights).map(|w| (tgt, w))
+                            })
+                            .collect();
+                        (label, targets)
+                    })
                     .collect();
                 new_state.epsilons.clear();
                 new_state
