@@ -34,6 +34,12 @@ fn tsid_to_offset(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
     }
 }
 
+/// Public version of tsid_to_offset for use outside this module.
+#[inline]
+pub fn tsid_to_offset_pub(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
+    tsid_to_offset(tsid, tsid_offset_map)
+}
+
 static PROFILE_WEIGHT_EXPANSION: Lazy<bool> = Lazy::new(|| {
     std::env::var("PROFILE_WEIGHT_EXPANSION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

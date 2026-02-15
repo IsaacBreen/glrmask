@@ -4,7 +4,7 @@ use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
 use crate::dwa_i32::common::{Label, StateID as WAStateID};
-use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb_with_offset_map, collapse_weight_rsb};
+use crate::dwa_i32::weight_expansion::collapse_weight_rsb;
 use crate::dfa_u8::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
@@ -341,10 +341,9 @@ impl<'a> GrammarConstraintState<'a> {
             }
 
             let tsid = tokenizer_state_id.0;
-            let tsid_mask = create_tsid_mask_rsb_with_offset_map(
+            // Compute the tsid offset once (replaces creating full tsid mask)
+            let tsid_off = crate::dwa_i32::weight_expansion::tsid_to_offset_pub(
                 tsid,
-                num_tsids,
-                max_llm_token,
                 if self.parent.tsid_offset_map.is_empty() {
                     None
                 } else {
@@ -373,11 +372,17 @@ impl<'a> GrammarConstraintState<'a> {
                         }
                     }
                 }
-                // Expand the LLM token set to N×M and intersect with tsid mask
-                // This creates weights where only positions i*M + tsid are set
-                let expanded = crate::dwa_i32::weight_expansion::expand_rsb(&allowed_n, num_tsids);
-                let masked = &expanded & &tsid_mask;
-                if masked.is_empty() { None } else { Some(masked) }
+                // Direct computation: map each allowed token to its N×M position at tsid_off
+                // This replaces: expand_rsb + create_tsid_mask + intersection
+                let result: RangeSetBlaze<usize> = allowed_n.ranges()
+                    .flat_map(|r| {
+                        (*r.start()..=*r.end()).map(move |t| {
+                            let p = t * num_tsids + tsid_off;
+                            p..=p
+                        })
+                    })
+                    .collect();
+                if result.is_empty() { None } else { Some(result) }
             };
             let weighted_gss = gss.apply_and_prune(f);
 
