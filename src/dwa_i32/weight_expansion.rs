@@ -379,11 +379,16 @@ pub fn collapse_weight_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> Rang
     if num_tsids == 0 || rsb.is_empty() {
         return rsb.clone();
     }
-    let mut collapsed = RangeSetBlaze::new();
-    for pos in rsb.iter() {
-        collapsed.insert(pos / num_tsids);
-    }
-    collapsed
+    // Process ranges in bulk rather than individual positions.
+    // Each range [start, end] collapses to [start/M, end/M].
+    // Collapsed ranges may overlap/merge, handled by collect.
+    rsb.ranges()
+        .map(|r| {
+            let start_token = r.start() / num_tsids;
+            let end_token = r.end() / num_tsids;
+            start_token..=end_token
+        })
+        .collect()
 }
 
 /// Expands all weights in a DWA from N-space to NxM-space in-place.
