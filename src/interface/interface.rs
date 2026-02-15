@@ -2162,29 +2162,166 @@ impl GrammarDefinition {
         }
 
         /// Check if an expression contains character classes or AnyChar directly.
-        /// These require the rule to be treated as a terminal.
         fn contains_regex_features(expr: &GrammarExpr) -> bool {
             match expr {
                 GrammarExpr::AnyChar => true,
                 GrammarExpr::CharClass { .. } => true,
-                GrammarExpr::Literal(_) => false,
-                GrammarExpr::Ref(_) => false,
+                GrammarExpr::Literal(_) | GrammarExpr::Ref(_) => false,
                 GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
                     exprs.iter().any(contains_regex_features)
                 }
                 GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => {
                     contains_regex_features(inner)
                 }
-                GrammarExpr::RepeatBounded { inner, .. } => {
-                    contains_regex_features(inner)
+                GrammarExpr::RepeatBounded { inner, .. } => contains_regex_features(inner),
+            }
+        }
+
+        /// True when expression references another grammar rule by name.
+        fn contains_rule_ref(expr: &GrammarExpr, rule_names: &HashSet<String>) -> bool {
+            match expr {
+                GrammarExpr::Ref(name) => rule_names.contains(name),
+                GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
+                    exprs.iter().any(|e| contains_rule_ref(e, rule_names))
+                }
+                GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => {
+                    contains_rule_ref(inner, rule_names)
+                }
+                GrammarExpr::RepeatBounded { inner, .. } => contains_rule_ref(inner, rule_names),
+                GrammarExpr::AnyChar | GrammarExpr::CharClass { .. } | GrammarExpr::Literal(_) => false,
+            }
+        }
+
+        fn next_inline_regex_terminal_name(
+            known_rule_names: &mut HashSet<String>,
+            counter: &mut usize,
+        ) -> String {
+            loop {
+                let candidate = format!("INLINE_REGEX_{}", *counter);
+                *counter += 1;
+                if known_rule_names.insert(candidate.clone()) {
+                    return candidate;
                 }
             }
         }
 
+        fn lift_inline_regex_features(
+            expr: &GrammarExpr,
+            known_rule_names: &mut HashSet<String>,
+            inline_counter: &mut usize,
+            inline_regex_name_by_expr: &mut BTreeMap<GrammarExpr, String>,
+            generated_terminal_rules: &mut Vec<(String, GrammarExpr)>,
+        ) -> GrammarExpr {
+            // Lift maximal regex-only subexpressions into named terminal rules.
+            // This keeps contiguous regex semantics (no inter-token ignore injection)
+            // and deduplicates repeated inline regex patterns.
+            if contains_regex_features(expr) && !contains_rule_ref(expr, known_rule_names) {
+                if let Some(name) = inline_regex_name_by_expr.get(expr) {
+                    return GrammarExpr::Ref(name.clone());
+                }
+                let name = next_inline_regex_terminal_name(known_rule_names, inline_counter);
+                inline_regex_name_by_expr.insert(expr.clone(), name.clone());
+                generated_terminal_rules.push((name.clone(), expr.clone()));
+                return GrammarExpr::Ref(name);
+            }
+
+            match expr {
+                GrammarExpr::Literal(_) | GrammarExpr::Ref(_) | GrammarExpr::AnyChar | GrammarExpr::CharClass { .. } => expr.clone(),
+                GrammarExpr::Sequence(exprs) => GrammarExpr::Sequence(
+                    exprs
+                        .iter()
+                        .map(|e| {
+                            lift_inline_regex_features(
+                                e,
+                                known_rule_names,
+                                inline_counter,
+                                inline_regex_name_by_expr,
+                                generated_terminal_rules,
+                            )
+                        })
+                        .collect(),
+                ),
+                GrammarExpr::Choice(exprs) => GrammarExpr::Choice(
+                    exprs
+                        .iter()
+                        .map(|e| {
+                            lift_inline_regex_features(
+                                e,
+                                known_rule_names,
+                                inline_counter,
+                                inline_regex_name_by_expr,
+                                generated_terminal_rules,
+                            )
+                        })
+                        .collect(),
+                ),
+                GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(
+                    lift_inline_regex_features(
+                        inner,
+                        known_rule_names,
+                        inline_counter,
+                        inline_regex_name_by_expr,
+                        generated_terminal_rules,
+                    ),
+                )),
+                GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(
+                    lift_inline_regex_features(
+                        inner,
+                        known_rule_names,
+                        inline_counter,
+                        inline_regex_name_by_expr,
+                        generated_terminal_rules,
+                    ),
+                )),
+                GrammarExpr::RepeatBounded { min, max, inner } => GrammarExpr::RepeatBounded {
+                    min: *min,
+                    max: *max,
+                    inner: Box::new(lift_inline_regex_features(
+                        inner,
+                        known_rule_names,
+                        inline_counter,
+                        inline_regex_name_by_expr,
+                        generated_terminal_rules,
+                    )),
+                },
+            }
+        }
+
+        let mut known_rule_names: HashSet<String> =
+            grammar_exprs.iter().map(|(name, _)| name.clone()).collect();
+        let mut inline_counter = 0usize;
+        let mut inline_regex_name_by_expr: BTreeMap<GrammarExpr, String> = BTreeMap::new();
+        let mut generated_terminal_rules: Vec<(String, GrammarExpr)> = Vec::new();
+        let mut rewritten_rules: Vec<(String, GrammarExpr)> = Vec::with_capacity(grammar_exprs.len());
+
+        for (name, expr) in grammar_exprs.into_iter() {
+            if is_terminal_name(&name) {
+                rewritten_rules.push((name, expr));
+            } else {
+                let rewritten_expr = lift_inline_regex_features(
+                    &expr,
+                    &mut known_rule_names,
+                    &mut inline_counter,
+                    &mut inline_regex_name_by_expr,
+                    &mut generated_terminal_rules,
+                );
+                rewritten_rules.push((name, rewritten_expr));
+            }
+        }
+
+        rewritten_rules.extend(generated_terminal_rules.into_iter());
+        let grammar_exprs = rewritten_rules;
+
+        let all_rule_names: HashSet<String> =
+            grammar_exprs.iter().map(|(name, _)| name.clone()).collect();
+
         let mut terminals: BTreeMap<String, GrammarExpr> = BTreeMap::new();
         for (name, expr) in &grammar_exprs {
-            // GBNF compatibility: auto-detect terminals by content, not just name
-            if is_terminal_name(name) || contains_regex_features(expr) {
+            // Auto-detect regex-only helper rules as terminals, but keep composed rules (with refs)
+            // as non-terminals so inline regex inside start/sequence rules still parses correctly.
+            if is_terminal_name(name)
+                || (contains_regex_features(expr) && !contains_rule_ref(expr, &all_rule_names))
+            {
                 terminals.insert(name.clone(), expr.clone());
             }
         }

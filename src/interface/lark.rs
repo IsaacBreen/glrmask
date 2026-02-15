@@ -234,6 +234,260 @@ fn unescape_string_literal(content: &str, source: &str, start: usize, end: usize
     Ok(unescaped)
 }
 
+
+fn parse_braced_repeat_suffix(suffix: &str) -> Option<Result<(usize, Option<usize>), String>> {
+    if !(suffix.starts_with('{') && suffix.ends_with('}')) {
+        return None;
+    }
+    let inner = &suffix[1..suffix.len() - 1];
+    if inner.is_empty() {
+        return Some(Err("Empty bounded-repeat suffix in regex literal".to_string()));
+    }
+
+    let parse_usize = |text: &str| -> Result<usize, String> {
+        text.parse::<usize>()
+            .map_err(|_| format!("Invalid repeat bound '{}' in regex literal", text))
+    };
+
+    if let Some((lhs, rhs)) = inner.split_once(',') {
+        let min = match parse_usize(lhs.trim()) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let max = if rhs.trim().is_empty() {
+            None
+        } else {
+            match parse_usize(rhs.trim()) {
+                Ok(v) => Some(v),
+                Err(e) => return Some(Err(e)),
+            }
+        };
+        if let Some(max_val) = max {
+            if max_val < min {
+                return Some(Err(format!(
+                    "Regex literal repeat upper bound {} is less than lower bound {}",
+                    max_val, min
+                )));
+            }
+        }
+        return Some(Ok((min, max)));
+    }
+
+    match parse_usize(inner.trim()) {
+        Ok(exact) => Some(Ok((exact, Some(exact)))),
+        Err(e) => Some(Err(e)),
+    }
+}
+
+fn literal_expr_for_char(c: char) -> GrammarExpr {
+    let mut buf = [0_u8; 4];
+    let bytes = c.encode_utf8(&mut buf).as_bytes().to_vec();
+    GrammarExpr::Literal(bytes)
+}
+
+struct RegexLiteralParser<'a> {
+    source: &'a str,
+    pos: usize,
+}
+
+impl<'a> RegexLiteralParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self { source, pos: 0 }
+    }
+
+    fn parse(mut self) -> Result<GrammarExpr, String> {
+        let expr = self.parse_alternation()?;
+        if self.peek_char().is_some() {
+            return Err(format!(
+                "Unexpected trailing regex content '{}' in '/{}/'",
+                &self.source[self.pos..],
+                self.source
+            ));
+        }
+        Ok(expr)
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.source[self.pos..].chars().next()
+    }
+
+    fn bump_char(&mut self) -> Option<char> {
+        let ch = self.peek_char()?;
+        self.pos += ch.len_utf8();
+        Some(ch)
+    }
+
+    fn parse_alternation(&mut self) -> Result<GrammarExpr, String> {
+        let mut branches = vec![self.parse_concatenation()?];
+        while self.peek_char() == Some('|') {
+            self.bump_char();
+            branches.push(self.parse_concatenation()?);
+        }
+        if branches.len() == 1 {
+            Ok(branches.pop().unwrap())
+        } else {
+            Ok(GrammarExpr::Choice(branches))
+        }
+    }
+
+    fn parse_concatenation(&mut self) -> Result<GrammarExpr, String> {
+        let mut parts: Vec<GrammarExpr> = Vec::new();
+        while let Some(ch) = self.peek_char() {
+            if ch == ')' || ch == '|' {
+                break;
+            }
+            let term = self.parse_repetition()?;
+            if !matches!(term, GrammarExpr::Sequence(ref items) if items.is_empty()) {
+                parts.push(term);
+            }
+        }
+
+        if parts.is_empty() {
+            Ok(GrammarExpr::Sequence(vec![]))
+        } else if parts.len() == 1 {
+            Ok(parts.pop().unwrap())
+        } else {
+            Ok(GrammarExpr::Sequence(parts))
+        }
+    }
+
+    fn parse_repetition(&mut self) -> Result<GrammarExpr, String> {
+        let atom = self.parse_atom()?;
+
+        match self.peek_char() {
+            Some('?') => {
+                self.bump_char();
+                Ok(GrammarExpr::Optional(Box::new(atom)))
+            }
+            Some('*') => {
+                self.bump_char();
+                Ok(GrammarExpr::Repeat(Box::new(atom)))
+            }
+            Some('+') => {
+                self.bump_char();
+                Ok(GrammarExpr::Sequence(vec![
+                    atom.clone(),
+                    GrammarExpr::Repeat(Box::new(atom)),
+                ]))
+            }
+            Some('{') => {
+                let start = self.pos;
+                self.bump_char();
+                while let Some(ch) = self.peek_char() {
+                    self.bump_char();
+                    if ch == '}' {
+                        break;
+                    }
+                }
+                let suffix = &self.source[start..self.pos];
+                let (min, max) = parse_braced_repeat_suffix(suffix)
+                    .ok_or_else(|| format!("Invalid bounded repeat suffix '{}'", suffix))??;
+                Ok(GrammarExpr::RepeatBounded {
+                    min,
+                    max,
+                    inner: Box::new(atom),
+                })
+            }
+            _ => Ok(atom),
+        }
+    }
+
+    fn parse_atom(&mut self) -> Result<GrammarExpr, String> {
+        match self.peek_char() {
+            Some('(') => {
+                self.bump_char();
+                let inner = self.parse_alternation()?;
+                if self.peek_char() != Some(')') {
+                    return Err(format!("Unclosed group in regex '/{}/'", self.source));
+                }
+                self.bump_char();
+                Ok(inner)
+            }
+            Some('[') => self.parse_char_class(),
+            Some('.') => {
+                self.bump_char();
+                Ok(GrammarExpr::AnyChar)
+            }
+            Some('^') | Some('$') => {
+                // Anchors are zero-width assertions in regex syntax.
+                self.bump_char();
+                Ok(GrammarExpr::Sequence(vec![]))
+            }
+            Some('\\') => self.parse_escape(),
+            Some(ch) => {
+                self.bump_char();
+                Ok(literal_expr_for_char(ch))
+            }
+            None => Err("Unexpected end of regex literal".to_string()),
+        }
+    }
+
+    fn parse_char_class(&mut self) -> Result<GrammarExpr, String> {
+        let start = self.pos;
+        self.bump_char(); // consume '['
+
+        let mut escaped = false;
+        while let Some(ch) = self.bump_char() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == ']' {
+                let def = self.source[start..self.pos].to_string();
+                return Ok(GrammarExpr::CharClass { def, utf8: true });
+            }
+        }
+
+        Err(format!("Unterminated character class in regex '/{}/'", self.source))
+    }
+
+    fn parse_escape(&mut self) -> Result<GrammarExpr, String> {
+        self.bump_char(); // consume '\\'
+        let escaped = self
+            .bump_char()
+            .ok_or_else(|| "Dangling escape in regex literal".to_string())?;
+
+        let class_expr = |def: &str| GrammarExpr::CharClass {
+            def: def.to_string(),
+            utf8: true,
+        };
+
+        match escaped {
+            'd' => Ok(class_expr("[0-9]")),
+            'D' => Ok(class_expr("[^0-9]")),
+            'w' => Ok(class_expr("[A-Za-z0-9_]")),
+            'W' => Ok(class_expr("[^A-Za-z0-9_]")),
+            's' => Ok(class_expr("[\\t\\n\\r\\f\\v ]")),
+            'S' => Ok(class_expr("[^\\t\\n\\r\\f\\v ]")),
+            'n' => Ok(literal_expr_for_char('\n')),
+            't' => Ok(literal_expr_for_char('\t')),
+            'r' => Ok(literal_expr_for_char('\r')),
+            'x' => {
+                let h1 = self
+                    .bump_char()
+                    .ok_or_else(|| "Incomplete \\xNN escape in regex literal".to_string())?;
+                let h2 = self
+                    .bump_char()
+                    .ok_or_else(|| "Incomplete \\xNN escape in regex literal".to_string())?;
+                let hex = format!("{}{}", h1, h2);
+                let byte = u8::from_str_radix(&hex, 16)
+                    .map_err(|_| format!("Invalid \\x{} escape in regex literal", hex))?;
+                Ok(GrammarExpr::Literal(vec![byte]))
+            }
+            other => Ok(literal_expr_for_char(other)),
+        }
+    }
+}
+
+fn regex_literal_to_expr(regex_content: &str) -> Result<GrammarExpr, String> {
+    RegexLiteralParser::new(regex_content).parse()
+}
+
+
 #[derive(Debug)]
 pub(super) struct LarkParseResult {
     pub grammar_rules: Vec<(String, GrammarExpr)>,
@@ -428,22 +682,10 @@ impl<'a> LarkParser<'a> {
                 def: cc,
                 utf8: true,
             })
-        } else if let Some(LarkToken { kind: LarkTokenKind::RegexLiteral(re), .. }) = self.tokens.peek().cloned() {
+        } else if let Some(LarkToken { kind: LarkTokenKind::RegexLiteral(re), span }) = self.tokens.peek().cloned() {
             self.tokens.next();
-            // Convert regex to character class format.
-            // If the regex is already a single character class like /[^"\\]/,
-            // preserve it verbatim to avoid producing nested brackets.
-            if re.starts_with('[') && re.ends_with(']') {
-                Ok(GrammarExpr::CharClass {
-                    def: re,
-                    utf8: true,
-                })
-            } else {
-                Ok(GrammarExpr::CharClass {
-                    def: format!("[{}]", re),
-                    utf8: true,
-                })
-            }
+            regex_literal_to_expr(&re)
+                .map_err(|msg| LarkParseError::new(self.source, span, msg))
         } else if self.peek_op("(") {
             self.consume_op("(")?;
             self.skip_newlines();
