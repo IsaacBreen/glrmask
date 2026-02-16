@@ -310,21 +310,24 @@ pub fn build_template_dfas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DF
         .map(|(_key, terms)| {
             let (first_term, first_tc) = &terms[0];
             let nfa = build_nfa_from_terminal_characterization(first_tc).unwrap();
-            (*first_term, terms.clone(), nfa)
+            let nfa_states = nfa.states.len();
+            let nfa_transitions = nfa.states.num_transitions();
+            (*first_term, terms.clone(), nfa, nfa_states, nfa_transitions)
         })
         .collect();
     
     // Determinize and minimize in parallel (thread-local weight caches eliminate contention)
     let results: Vec<_> = nfas_and_terms
         .into_par_iter()
-        .map(|(first_term, terms, nfa)| {
+        .map(|(first_term, terms, nfa, nfa_states, nfa_transitions)| {
             let dfa = nfa.determinize_and_minimize();
-            (first_term, terms, dfa)
+            (first_term, terms, dfa, nfa_states, nfa_transitions)
         })
         .collect();
     
     let mut result = BTreeMap::new();
-    for (first_term, terms, dfa) in results {
+    let mut template_stats_rows: Vec<(usize, String, usize, usize, usize, usize)> = Vec::new();
+    for (first_term, terms, dfa, nfa_states, nfa_transitions) in results {
         crate::debug!(6, "Terminal {:?}: {} states after minimize", first_term, dfa.states.len());
         
         // Debug stats at level 6
@@ -342,10 +345,49 @@ pub fn build_template_dfas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DF
                 crate::debug!(7, "{}", tc);
             }
         }
+
+        if crate::r#macro::is_debug_level_enabled(3) {
+            for (term, _) in &terms {
+                let terminal_name = parser
+                    .terminal_map
+                    .get_by_right(term)
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| format!("TERMINAL_{}", term.0));
+                template_stats_rows.push((
+                    term.0,
+                    terminal_name,
+                    nfa_states,
+                    nfa_transitions,
+                    dfa.states.len(),
+                    dfa.states.num_transitions(),
+                ));
+            }
+        }
         
         // Clone the DFA for all terminals with this characterization
         for (term, _) in terms {
             result.insert(term, dfa.clone());
+        }
+    }
+
+    if crate::r#macro::is_debug_level_enabled(3) {
+        template_stats_rows.sort_by(|a, b| {
+            b.4.cmp(&a.4)
+                .then_with(|| b.5.cmp(&a.5))
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        for (terminal_id, terminal_name, nfa_states, nfa_transitions, dfa_states, dfa_transitions) in template_stats_rows {
+            crate::debug!(
+                3,
+                "TEMPLATE_TERMINAL_STATS terminal_id={} terminal_name={} nfa_states={} nfa_transitions={} dfa_states={} dfa_transitions={}",
+                terminal_id,
+                terminal_name,
+                nfa_states,
+                nfa_transitions,
+                dfa_states,
+                dfa_transitions
+            );
         }
     }
 

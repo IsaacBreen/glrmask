@@ -1510,8 +1510,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         let expected_num_tsids = crate::datastructures::abstract_weight::current_num_tsids();
         validate_nwa_weight_dims(&combined_nwa, expected_num_tsids);
     }
-    crate::debug!(3, "Combined NWA before determinization: {}, is_symbol_heavy={}", 
-        combined_nwa.stats(), is_symbol_heavy);
+    crate::debug!(3, "Combined NWA before determinization: states={}, is_symbol_heavy={}", 
+        combined_nwa.states.len(), is_symbol_heavy);
     let finalize_start = Instant::now();
     let mut final_dwa = timeit!("parser_dwa::finalize_and_determinize", {
         finalize_and_optimize_and_determinize(parser, combined_nwa)
@@ -1527,6 +1527,47 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         crate::debug!(4, "Parser DWA average path length: {:.2}", avg_path_len);
     }
 
+    if crate::r#macro::is_debug_level_enabled(3) {
+        let mut terminal_transition_counts: BTreeMap<TerminalID, usize> = BTreeMap::new();
+        for state in &final_dwa.states.0 {
+            for (label, _target) in &state.transitions {
+                if *label < 0 {
+                    continue;
+                }
+                let terminal_id = TerminalID(*label as usize);
+                if parser.terminal_map.get_by_right(&terminal_id).is_some() {
+                    *terminal_transition_counts.entry(terminal_id).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut terminal_frequency_rows: Vec<(TerminalID, String, usize)> = terminal_transition_counts
+            .into_iter()
+            .map(|(terminal_id, transition_count)| {
+                let terminal_name = parser
+                    .terminal_map
+                    .get_by_right(&terminal_id)
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| format!("TERMINAL_{}", terminal_id.0));
+                (terminal_id, terminal_name, transition_count)
+            })
+            .collect();
+        terminal_frequency_rows.sort_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then_with(|| a.0.0.cmp(&b.0.0))
+        });
+
+        for (terminal_id, terminal_name, transition_count) in terminal_frequency_rows {
+            crate::debug!(
+                3,
+                "FINAL_DWA_TERMINAL_FREQ terminal_id={} terminal_name={} transition_count={}",
+                terminal_id.0,
+                terminal_name,
+                transition_count
+            );
+        }
+    }
+
     crate::debug!(5, "build_parser_dwa: end");
     final_dwa
 }
@@ -1538,12 +1579,12 @@ pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 }
 
 pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    crate::debug!(4, "Finalizing NWA with {}...", combined_nwa.stats());
+    crate::debug!(4, "Finalizing NWA (skipping stats on large arena)...");
     
     // Prune unreachable states FIRST (forward BFS from starts - fast, removes 97% of states).
     // This dramatically reduces the state count before subtract_final_weights_from_outgoing,
     // which would otherwise iterate all 1.75M states.
-    let before_prune = combined_nwa.stats();
+    let before_prune_len = combined_nwa.states.len();
     let prune_unreachable_start = std::time::Instant::now();
     let unreach_changed = combined_nwa.prune_unreachable();
     let prune_unreachable_time = prune_unreachable_start.elapsed();
@@ -1552,7 +1593,7 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
         prune_unreachable_time,
         unreach_changed
     );
-    let after_unreachable = combined_nwa.stats();
+    let after_unreachable_len = combined_nwa.states.len();
 
     // Now subtract final weights from outgoing transitions on the much smaller NWA (~45K states).
     let prune_final_start = std::time::Instant::now();
@@ -1590,8 +1631,8 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
         dead_changed
     );
     crate::debug!(5, "prune_unreachable in {:?}, prune_dead_ends in {:?}", prune_unreachable_time, prune_dead_time);
-    crate::debug!(4, "After pruning: NWA {} -> {} -> {}",
-        before_prune, after_unreachable, combined_nwa.stats());
+    crate::debug!(4, "After pruning state counts: {} -> {} -> {}",
+        before_prune_len, after_unreachable_len, combined_nwa.states.len());
 
     // Always minimize NWA before determinization.
     

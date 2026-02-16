@@ -1933,9 +1933,9 @@ impl GrammarConstraint {
             }
         }
 
-        // Sample and print terminal DWA paths at debug level 5
+        // Sample and print terminal DWA paths when DWA_SAMPLE_PATHS is set.
         // Use DWA_SAMPLE_PATHS env var to override the number of paths (default: 10)
-        if crate::r#macro::is_debug_level_enabled(5) {
+        if std::env::var("DWA_SAMPLE_PATHS").is_ok() {
             use rand::Rng;
             let mut rng = rand::thread_rng();
             let num_sample_paths: usize = std::env::var("DWA_SAMPLE_PATHS")
