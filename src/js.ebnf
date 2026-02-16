@@ -90,14 +90,14 @@ array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? bindi
 binding_element ::= binding_pattern ('=' expression)? ;
 
 // ES6 Modules
-import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
+import_statement ::= 'import' ( import_clause 'from' STRING_NUMERIC_LITERAL | STRING_NUMERIC_LITERAL ) ';'? ;
 import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
 default_import ::= IDENTIFIER ;
 named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
 namespace_import ::= '*' 'as' IDENTIFIER ;
 import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
 
-export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
+export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_NUMERIC_LITERAL )? | named_exports ( 'from' STRING_NUMERIC_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
 named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
 export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
 
@@ -173,7 +173,7 @@ call_expression ::=
   | call_expression '?.' IDENTIFIER
   | call_expression '.' private_identifier
   | call_expression '?.' private_identifier
-  | call_expression template_literal
+  | call_expression TEMPLATE_LITERAL
   ;
 
 arguments ::= '(' ( assignment_expression ( ',' assignment_expression )* )? ')' ;
@@ -187,7 +187,7 @@ member_expression ::=
   | member_expression '.' private_identifier
   | member_expression '?.' private_identifier
   | 'new' member_expression arguments
-  | member_expression template_literal
+  | member_expression TEMPLATE_LITERAL
   ;
 
 primary_expression ::=
@@ -217,7 +217,7 @@ property_assignment ::=
   | '...' assignment_expression
   | IDENTIFIER // Shorthand property
   ;
-property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
+property_name ::= IDENTIFIER | STRING_NUMERIC_LITERAL | '[' expression ']' ;
 
 class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
 class_body ::= '{' class_member* '}' ;
@@ -242,15 +242,10 @@ UNARY_OPERATOR ::= 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' 
 POSTFIX_OPERATOR ::= '++' | '--' ;
 
 // Literals
-literal ::=
-    NULL_LITERAL
-  | BOOLEAN_LITERAL
-  | NUMERIC_LITERAL
-  | BIGINT_LITERAL
-  | STRING_LITERAL
-  | REGULAR_EXPRESSION_LITERAL
-  | template_literal
-  ;
+literal ::= STRING_NUMERIC_LITERAL | OTHER_LITERAL ;
+
+STRING_NUMERIC_LITERAL ::= STRING_LITERAL | NUMERIC_LITERAL ;
+OTHER_LITERAL ::= NULL_LITERAL | BOOLEAN_LITERAL | BIGINT_LITERAL | REGULAR_EXPRESSION_LITERAL | TEMPLATE_LITERAL ;
 
 NULL_LITERAL ::= 'null' ;
 BOOLEAN_LITERAL ::= 'true' | 'false' ;
@@ -302,13 +297,13 @@ REGEX_FLAGS ::= IDENTIFIER_PART+ ;
 
 //template_literal ::= TEMPLATE_LITERAL ;
 //TEMPLATE_LITERAL ::= '`' TEMPLATE_CHARS '`' ;
-//template_literal ::= '`' TEMPLATE_CHARS '`' ;
+//TEMPLATE_LITERAL ::= '`' TEMPLATE_CHARS '`' ;
 //TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
 //TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 
 //template_literal ::= TEMPLATE_LITERAL ;
 //TEMPLATE_LITERAL ::= '`' TEMPLATE_CHARS '`' ;
-template_literal ::= '`' TEMPLATE_CHARS '`' ;
+TEMPLATE_LITERAL ::= '`' TEMPLATE_CHARS '`' ;
 TEMPLATE_CHARS ::= TEMPLATE_CHAR+ ;
 TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 

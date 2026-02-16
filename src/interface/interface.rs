@@ -1836,83 +1836,96 @@ impl GrammarDefinition {
             });
         }
 
-        // Optional terminal-merging pass: merge bare terminal alternatives that share
+        // Optional terminal-merging pass: merge bare literal alternatives that share
         // identical choice-membership sets.
         // Enabled by default; set SEP1_MERGE_TERMINALS=0 to disable.
         let merge_terminals_enabled = std::env::var("SEP1_MERGE_TERMINALS")
             .map(|value| value != "0")
             .unwrap_or(true);
         if merge_terminals_enabled {
-            let mut bare_terminals_by_lhs: BTreeMap<NonTerminal, BTreeSet<Terminal>> =
+            let mut bare_literals_by_lhs: BTreeMap<NonTerminal, BTreeSet<Vec<u8>>> =
                 BTreeMap::new();
             for production in &productions {
                 if production.rhs.len() == 1 {
-                    if let Symbol::Terminal(terminal) = &production.rhs[0] {
-                        bare_terminals_by_lhs
+                    if let Symbol::Terminal(Terminal::Literal(bytes)) = &production.rhs[0] {
+                        bare_literals_by_lhs
                             .entry(production.lhs.clone())
                             .or_default()
-                            .insert(terminal.clone());
+                            .insert(bytes.clone());
                     }
                 }
             }
 
-            let mut terminal_memberships: BTreeMap<Terminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+            let mut literal_memberships: BTreeMap<Vec<u8>, BTreeSet<NonTerminal>> = BTreeMap::new();
             let mut choice_node_count = 0usize;
-            for (lhs, terminals) in &bare_terminals_by_lhs {
-                if terminals.len() < 2 {
+            for (lhs, literals) in &bare_literals_by_lhs {
+                if literals.len() < 2 {
                     continue;
                 }
                 choice_node_count += 1;
-                for terminal in terminals {
-                    terminal_memberships
-                        .entry(terminal.clone())
+                for literal in literals {
+                    literal_memberships
+                        .entry(literal.clone())
                         .or_default()
                         .insert(lhs.clone());
                 }
             }
 
-            let mut membership_to_terminals: BTreeMap<BTreeSet<NonTerminal>, Vec<Terminal>> =
+            let mut membership_to_literals: BTreeMap<BTreeSet<NonTerminal>, Vec<Vec<u8>>> =
                 BTreeMap::new();
-            for (terminal, membership) in terminal_memberships {
+            for (literal, membership) in literal_memberships {
                 if !membership.is_empty() {
-                    membership_to_terminals
+                    membership_to_literals
                         .entry(membership)
                         .or_default()
-                        .push(terminal);
+                        .push(literal);
                 }
             }
 
-            let merge_groups: Vec<Vec<Terminal>> = membership_to_terminals
+            let has_shared_prefix = |literals: &[Vec<u8>]| {
+                for i in 0..literals.len() {
+                    for j in (i + 1)..literals.len() {
+                        let shared_prefix_len = literals[i]
+                            .iter()
+                            .zip(literals[j].iter())
+                            .take_while(|(a, b)| a == b)
+                            .count();
+                        if shared_prefix_len > 0 {
+                            return true;
+                        }
+                    }
+                }
+                false
+            };
+
+            let merge_groups: Vec<Vec<Vec<u8>>> = membership_to_literals
                 .into_values()
-                .filter(|terminals| terminals.len() >= 2)
+                .filter(|literals| literals.len() >= 2)
+                .filter(|literals| !has_shared_prefix(literals))
                 .collect();
 
             if crate::r#macro::is_debug_level_enabled(5) {
-                for (group_idx, terminals) in merge_groups.iter().enumerate() {
-                    let names: Vec<String> = terminals
+                for (group_idx, literals) in merge_groups.iter().enumerate() {
+                    let names: Vec<String> = literals
                         .iter()
-                        .map(|terminal| terminal.to_string())
+                        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
                         .collect();
                     debug!(5, "  Merge group {}: {}", group_idx, names.join(", "));
                 }
             }
 
-            let mut terminal_replacements: BTreeMap<Terminal, Terminal> = BTreeMap::new();
+            let mut literal_replacements: BTreeMap<Vec<u8>, Terminal> = BTreeMap::new();
             let mut merged_group_count = 0usize;
             let mut merged_terminal_count = 0usize;
 
-            for terminals in merge_groups {
+            for literals in merge_groups {
                 let mut alternatives: Vec<Expr> = Vec::new();
                 let mut seen_group_ids: HashSet<usize> = HashSet::new();
-                let mut all_terminals_mergeable = true;
+                let mut all_literals_mergeable = true;
 
-                for terminal in &terminals {
-                    let group_id = match terminal {
-                        Terminal::Literal(bytes) => literal_to_group_id.get_by_left(bytes).copied(),
-                        Terminal::RegexName(name) => regex_name_to_group_id.get_by_left(name).copied(),
-                    };
-                    let Some(group_id) = group_id else {
-                        all_terminals_mergeable = false;
+                for literal in &literals {
+                    let Some(group_id) = literal_to_group_id.get_by_left(literal).copied() else {
+                        all_literals_mergeable = false;
                         break;
                     };
 
@@ -1921,13 +1934,22 @@ impl GrammarDefinition {
                     }
 
                     let Some(expr) = group_id_to_expr.get(&group_id) else {
-                        all_terminals_mergeable = false;
+                        all_literals_mergeable = false;
                         break;
                     };
-                    alternatives.push(expr.clone());
+
+                    match expr {
+                        Expr::U8Seq(bytes) => {
+                            alternatives.push(Expr::U8Seq(bytes.clone()));
+                        }
+                        _ => {
+                            all_literals_mergeable = false;
+                            break;
+                        }
+                    }
                 }
 
-                if !all_terminals_mergeable || alternatives.len() < 2 {
+                if !all_literals_mergeable || alternatives.len() < 2 {
                     continue;
                 }
 
@@ -1944,49 +1966,42 @@ impl GrammarDefinition {
                 group_id_to_expr.insert(merged_group_id, merged_expr);
 
                 let replacement_terminal = regex_name(&merged_name);
-                for terminal in terminals {
-                    terminal_replacements.insert(terminal, replacement_terminal.clone());
+                for literal in literals {
+                    literal_replacements.insert(literal, replacement_terminal.clone());
                     merged_terminal_count += 1;
                 }
                 merged_group_count += 1;
             }
 
-            if !terminal_replacements.is_empty() {
-                let choice_lhs: HashSet<NonTerminal> = bare_terminals_by_lhs
+            if !literal_replacements.is_empty() {
+                let choice_lhs: HashSet<NonTerminal> = bare_literals_by_lhs
                     .iter()
-                    .filter(|(_, terminals)| terminals.len() >= 2)
+                    .filter(|(_, literals)| literals.len() >= 2)
                     .map(|(lhs, _)| lhs.clone())
                     .collect();
 
                 for production in productions.iter_mut() {
                     if production.rhs.len() == 1 && choice_lhs.contains(&production.lhs) {
-                        if let Symbol::Terminal(terminal) = &production.rhs[0] {
-                            if let Some(new_terminal) = terminal_replacements.get(terminal) {
+                        if let Symbol::Terminal(Terminal::Literal(bytes)) = &production.rhs[0] {
+                            if let Some(new_terminal) = literal_replacements.get(bytes) {
                                 production.rhs[0] = Symbol::Terminal(new_terminal.clone());
                             }
                         }
                     }
                 }
 
-                let mut still_used_terminals: HashSet<Terminal> = HashSet::new();
+                let mut still_used_literals: HashSet<Vec<u8>> = HashSet::new();
                 for production in &productions {
                     for symbol in &production.rhs {
-                        if let Symbol::Terminal(terminal) = symbol {
-                            still_used_terminals.insert(terminal.clone());
+                        if let Symbol::Terminal(Terminal::Literal(bytes)) = symbol {
+                            still_used_literals.insert(bytes.clone());
                         }
                     }
                 }
 
-                for terminal in terminal_replacements.keys() {
-                    if !still_used_terminals.contains(terminal) {
-                        match terminal {
-                            Terminal::Literal(bytes) => {
-                                let _ = literal_to_group_id.remove_by_left(bytes);
-                            }
-                            Terminal::RegexName(name) => {
-                                let _ = regex_name_to_group_id.remove_by_left(name);
-                            }
-                        }
+                for bytes in literal_replacements.keys() {
+                    if !still_used_literals.contains(bytes) {
+                            let _ = literal_to_group_id.remove_by_left(bytes);
                     }
                 }
 
