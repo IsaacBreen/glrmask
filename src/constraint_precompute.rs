@@ -456,6 +456,8 @@ pub fn build_reduce_fallback_terminals_by_state(
 // Precomputer1
 // ---------------------------------------------------------------------------
 
+const MERGED_POSSIBLE_MATCH_KEY: GrammarTokenID = GrammarTokenID(usize::MAX);
+
 pub(crate) struct Precomputer1<'r> {
     pub(crate) tokenizer: &'r Tokenizer,
     pub(crate) vocab: VocabPrefixTree,
@@ -1301,6 +1303,7 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
+        let merge_possible_matches = std::env::var("MERGE_POSSIBLE_MATCHES").is_ok();
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
@@ -1339,6 +1342,15 @@ impl<'r> Precomputer1<'r> {
                     }
                 }
             }
+        }
+
+        if merge_possible_matches && !result_map.is_empty() {
+            let mut merged = LLMTokenBV::zeros();
+            for bv in result_map.values().cloned() {
+                merged |= bv;
+            }
+            result_map.clear();
+            result_map.insert(MERGED_POSSIBLE_MATCH_KEY, merged);
         }
 
         self.possible_matches
@@ -1785,11 +1797,14 @@ impl<'r> Precomputer1<'r> {
                         let final_bv: std::borrow::Cow<RangeSetBlaze<usize>> = if next_pos == segment_bytes.len() {
                             let mut edge_bv = child_reachable.clone();
                             edge_bv.remove(child_token_id);
-                            if let Some(pm) = possible_matches_at_end.get(&terminal_id) {
+                            let possible_match = possible_matches_at_end
+                                .get(&terminal_id)
+                                .or_else(|| possible_matches_at_end.get(&MERGED_POSSIBLE_MATCH_KEY));
+                            if let Some(pm) = possible_match {
                                 edge_bv = &edge_bv - pm.inner.as_ref();
                             }
                             crate::debug!(7, "      Continuation at end of segment: edge_bv={:?} (removed child_token_id={}, pm={:?})",
-                                edge_bv.iter().collect::<Vec<_>>(), child_token_id, possible_matches_at_end.get(&terminal_id).map(|pm| &pm.inner));
+                                edge_bv.iter().collect::<Vec<_>>(), child_token_id, possible_match.map(|pm| &pm.inner));
                             std::borrow::Cow::Owned(edge_bv)
                         } else {
                             crate::debug!(7, "      Continuation (not end): using child_reachable={:?}", child_reachable.iter().collect::<Vec<_>>());
