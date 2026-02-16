@@ -202,6 +202,8 @@ pub fn grammar_to_suffix_grammar(grammar: &GrammarDefinition) -> GrammarDefiniti
         group_id_to_expr: new_group_id_to_expr,
         ignore_terminal_ids: grammar.ignore_terminal_ids.clone(),
         external_name_to_group_id: grammar.external_name_to_group_id.clone(),
+        greedy_groups: grammar.greedy_groups.clone(),
+        ungrouped_terminals: grammar.ungrouped_terminals.clone(),
     }
 }
 

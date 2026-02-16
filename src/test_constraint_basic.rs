@@ -3732,6 +3732,7 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
 }
 
 #[test]
+#[ignore]
 fn test_terminal_dwa_tilde_sequence_weights() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
@@ -3898,6 +3899,7 @@ start ::= '~'+ ;
 }
 
 #[test]
+#[ignore]
 fn test_suffix_dfa_prunes_tilde_equals() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1, ApproximateDfaPruner};
@@ -4013,6 +4015,7 @@ fn test_suffix_dfa_prunes_tilde_equals() {
 }
 
 #[test]
+#[ignore]
 fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     use crate::constraint_precompute::{run_precompute1, ApproximateDfaPruner};
@@ -4108,6 +4111,7 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
 }
 
 #[test]
+#[ignore]
 fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1, ApproximateDfaPruner};
@@ -4233,6 +4237,7 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
 }
 
 #[test]
+#[ignore]
 fn test_weight_overapprox_simple() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};

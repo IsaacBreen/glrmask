@@ -126,7 +126,7 @@ fn get_token_regex() -> &'static Regex {
         (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
         (?P<charclass>\[([^\]\[\(\)\{\}\\]|\\.)*\]) |
         (?P<repetition>\{[0-9]*,[0-9]*\}|\{[0-9]+\}) |
-        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
+        (?P<op>::=|;|,|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
         (?P<ws>\s+) |
         (?P<error>.)
         "#,
@@ -252,10 +252,25 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
     Ok(tokens)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum GreedyGroupTerminal {
+    Name(String),
+    Literal(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct GreedyGroup {
+    pub name: String,
+    pub terminals: Vec<GreedyGroupTerminal>,
+    pub has_wildcard: bool,
+}
+
 #[derive(Debug)]
 pub(super) struct EbnfParseResult {
     pub grammar_rules: Vec<(String, GrammarExpr)>,
     pub ignore_symbol_name: Option<String>,
+    pub greedy_groups: Vec<GreedyGroup>,
+    pub ungrouped_terminals: Vec<GreedyGroupTerminal>,
 }
 
 pub(super) struct EbnfParser<'a> {
@@ -302,6 +317,8 @@ impl<'a> EbnfParser<'a> {
         let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
         let mut seen_names = HashSet::new();
         let mut ignore_symbol_name = None;
+        let mut greedy_groups = Vec::new();
+        let mut ungrouped_terminals: Option<Vec<GreedyGroupTerminal>> = None;
 
         while self.peek().is_some() {
             if self.peek_grammar_op("#") {
@@ -309,26 +326,71 @@ impl<'a> EbnfParser<'a> {
                 self.consume_grammar_op("#")?;
                 self.expect_grammar_op("!")?;
                 self.expect_grammar_op("[")?;
-                if ignore_symbol_name.is_some() {
-                    return Err(ParseError::new(
-                        self.source,
-                        directive_span,
-                        "Duplicate ignore directive found",
-                    ));
-                }
                 let (directive_name, directive_name_span) = self.expect_ident()?;
-                if directive_name != "ignore" {
-                    return Err(ParseError::new(
-                        self.source,
-                        directive_name_span,
-                        format!("Unknown directive: {}", directive_name),
-                    ));
+
+                match directive_name.as_str() {
+                    "ignore" => {
+                        if ignore_symbol_name.is_some() {
+                            return Err(ParseError::new(
+                                self.source,
+                                directive_span,
+                                "Duplicate ignore directive found",
+                            ));
+                        }
+                        self.expect_grammar_op("(")?;
+                        let (symbol_name, _) = self.expect_ident()?;
+                        self.expect_grammar_op(")")?;
+                        ignore_symbol_name = Some(symbol_name);
+                    }
+                    "greedy_group" => {
+                        self.expect_grammar_op("(")?;
+                        let (group_name, group_name_span) = self.expect_ident()?;
+                        self.expect_grammar_op(",")?;
+                        if self.peek_grammar_op(")") {
+                            return Err(ParseError::new(
+                                self.source,
+                                group_name_span,
+                                format!("greedy_group '{}' must include at least one terminal", group_name),
+                            ));
+                        }
+                        let terminals = self.parse_greedy_group_terminal_list()?;
+                        self.expect_grammar_op(")")?;
+                        greedy_groups.push(GreedyGroup {
+                            name: group_name,
+                            terminals,
+                            has_wildcard: false,
+                        });
+                    }
+                    "ungrouped" => {
+                        if ungrouped_terminals.is_some() {
+                            return Err(ParseError::new(
+                                self.source,
+                                directive_span,
+                                "Duplicate ungrouped directive found",
+                            ));
+                        }
+                        self.expect_grammar_op("(")?;
+                        if self.peek_grammar_op(")") {
+                            return Err(ParseError::new(
+                                self.source,
+                                directive_span,
+                                "ungrouped directive must include at least one terminal",
+                            ));
+                        }
+                        let terminals = self.parse_greedy_group_terminal_list()?;
+                        self.expect_grammar_op(")")?;
+                        ungrouped_terminals = Some(terminals);
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            self.source,
+                            directive_name_span,
+                            format!("Unknown directive: {}", directive_name),
+                        ));
+                    }
                 }
-                self.expect_grammar_op("(")?;
-                let (symbol_name, _) = self.expect_ident()?;
-                self.expect_grammar_op(")")?;
+
                 self.expect_grammar_op("]")?;
-                ignore_symbol_name = Some(symbol_name);
             } else {
                 let (rule_name, rule_name_span) = self.expect_ident()?;
                 if seen_names.contains(&rule_name) {
@@ -356,7 +418,60 @@ impl<'a> EbnfParser<'a> {
         Ok(EbnfParseResult {
             grammar_rules: rules,
             ignore_symbol_name,
+            greedy_groups,
+            ungrouped_terminals: ungrouped_terminals.unwrap_or_default(),
         })
+    }
+
+    fn parse_greedy_group_terminal_list(&mut self) -> Result<Vec<GreedyGroupTerminal>, ParseError> {
+        let mut terminals = Vec::new();
+
+        loop {
+            terminals.push(self.expect_greedy_group_terminal()?);
+            if self.peek_grammar_op(",") {
+                self.consume_grammar_op(",")?;
+                if self.peek_grammar_op(")") {
+                    return Err(ParseError::new(
+                        self.source,
+                        self.peek().map(|t| t.span).unwrap_or_else(|| self.eof_span()),
+                        "Expected terminal after ',' in directive",
+                    ));
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(terminals)
+    }
+
+    fn expect_greedy_group_terminal(&mut self) -> Result<GreedyGroupTerminal, ParseError> {
+        match self.advance() {
+            Some(EbnfToken { kind: EbnfTokenKind::Ident(id), .. }) => {
+                Ok(GreedyGroupTerminal::Name(id))
+            }
+            Some(EbnfToken { kind: EbnfTokenKind::Literal(lit), .. }) => {
+                Ok(GreedyGroupTerminal::Literal(lit.into_bytes()))
+            }
+            Some(EbnfToken { kind: EbnfTokenKind::Op(op), span }) if op == "*" => Err(ParseError::new(
+                self.source,
+                span,
+                "Wildcard '*' is not supported in greedy_group/ungrouped directives; list terminals explicitly",
+            )),
+            Some(other) => Err(ParseError::new(
+                self.source,
+                other.span,
+                format!(
+                    "Expected terminal name or quoted literal in directive, found {:?}",
+                    other.kind
+                ),
+            )),
+            None => Err(ParseError::new(
+                self.source,
+                self.eof_span(),
+                "Expected terminal name or quoted literal in directive, found end of input",
+            )),
+        }
     }
 
     fn parse_grammar_expression(&mut self) -> Result<GrammarExpr, ParseError> {
@@ -570,6 +685,56 @@ mod tests {
 
         assert_eq!(rules, expected_rules);
     }
+
+    #[test]
+    fn test_ebnf_parser_greedy_group_directives() {
+        let ebnf = r#"
+            #![ignore(IGNORE)]
+            #![greedy_group(main, IDENT, 'if', '(')]
+            #![ungrouped(EOF, IGNORE)]
+            root ::= IDENT | 'if' ;
+            IDENT ::= [a-z]+ ;
+            IGNORE ::= [ ]+ ;
+            EOF ::= '<|endoftext|>' ;
+        "#;
+
+        let mut parser = EbnfParser::new(ebnf).unwrap();
+        let parsed = parser.parse().unwrap();
+
+        assert_eq!(parsed.ignore_symbol_name.as_deref(), Some("IGNORE"));
+        assert_eq!(parsed.greedy_groups.len(), 1);
+        assert_eq!(parsed.greedy_groups[0].name, "main");
+        assert_eq!(
+            parsed.greedy_groups[0].terminals,
+            vec![
+                GreedyGroupTerminal::Name("IDENT".to_string()),
+                GreedyGroupTerminal::Literal(b"if".to_vec()),
+                GreedyGroupTerminal::Literal(b"(".to_vec()),
+            ]
+        );
+        assert_eq!(
+            parsed.ungrouped_terminals,
+            vec![
+                GreedyGroupTerminal::Name("EOF".to_string()),
+                GreedyGroupTerminal::Name("IGNORE".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ebnf_parser_rejects_wildcard_greedy_group() {
+        let ebnf = r#"
+            #![greedy_group(main, *)]
+            root ::= 'a' ;
+        "#;
+
+        let mut parser = EbnfParser::new(ebnf).unwrap();
+        let err = parser.parse().unwrap_err();
+        assert!(err
+            .message
+            .contains("Wildcard '*' is not supported in greedy_group/ungrouped directives"));
+    }
+
 
     #[should_panic]
     #[test]

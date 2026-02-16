@@ -8,7 +8,7 @@ use crate::glr::grammar::regex_name;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
-use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
+use crate::interface::ebnf::{EbnfParseResult, EbnfParser, GreedyGroup as ParsedGreedyGroup, GreedyGroupTerminal};
 use crate::interface::lark::{LarkParseResult, LarkParser};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::types::TerminalID as GrammarTokenID;
@@ -238,6 +238,12 @@ pub fn literal(bytes: Vec<u8>) -> GrammarExpr {
     GrammarExpr::Literal(bytes)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, JSONConvertible)]
+pub struct ResolvedGreedyGroup {
+    pub name: String,
+    pub terminals: Vec<String>,
+}
+
 // --- GrammarDefinition: Abstract representation of the grammar ---
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarDefinition {
@@ -250,6 +256,8 @@ pub struct GrammarDefinition {
     /// These are typically whitespace-like terminals that can appear anywhere.
     pub ignore_terminal_ids: HashSet<TerminalID>,
     pub external_name_to_group_id: BiBTreeMap<String, usize>,
+    pub greedy_groups: Vec<ResolvedGreedyGroup>,
+    pub ungrouped_terminals: Vec<String>,
 }
 
 impl GrammarDefinition {
@@ -446,6 +454,11 @@ impl JSONConvertible for GrammarDefinition {
             "external_name_to_group_id".to_string(),
             self.external_name_to_group_id.to_json(),
         );
+        obj.insert("greedy_groups".to_string(), self.greedy_groups.to_json());
+        obj.insert(
+            "ungrouped_terminals".to_string(),
+            self.ungrouped_terminals.to_json(),
+        );
 
         let mut regexes_json_list = Vec::new();
         let mut sorted_regexes_info: Vec<(usize, String, Expr)> = Vec::new();
@@ -525,6 +538,16 @@ impl JSONConvertible for GrammarDefinition {
                     .map(|node| BiBTreeMap::<String, usize>::from_json(node))
                     .transpose()?
                     .unwrap_or_default();
+                let greedy_groups = obj
+                    .remove("greedy_groups")
+                    .map(Vec::<ResolvedGreedyGroup>::from_json)
+                    .transpose()?
+                    .unwrap_or_default();
+                let ungrouped_terminals = obj
+                    .remove("ungrouped_terminals")
+                    .map(Vec::<String>::from_json)
+                    .transpose()?
+                    .unwrap_or_default();
 
                 let mut new_literal_to_group_id = BiBTreeMap::new();
                 let mut new_regex_name_to_group_id = BiBTreeMap::new();
@@ -580,6 +603,8 @@ impl JSONConvertible for GrammarDefinition {
                     group_id_to_expr: new_group_id_to_expr,
                     ignore_terminal_ids,
                     external_name_to_group_id,
+                    greedy_groups,
+                    ungrouped_terminals,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarDefinition".to_string()),
@@ -2089,6 +2114,8 @@ impl GrammarDefinition {
             group_id_to_expr,
             ignore_terminal_ids: HashSet::new(),
             external_name_to_group_id: BiBTreeMap::new(),
+            greedy_groups: Vec::new(),
+            ungrouped_terminals: Vec::new(),
         };
 
         // Set ignore terminal before optimization so it's preserved
@@ -2150,7 +2177,14 @@ impl GrammarDefinition {
         grammar_exprs: Vec<(String, GrammarExpr)>,
         ignore_symbol_name: Option<String>,
     ) -> Result<Self, String> {
-        Self::from_parsed_rules_impl(grammar_exprs, ignore_symbol_name, false)
+        Self::from_parsed_rules_impl(
+            grammar_exprs,
+            ignore_symbol_name,
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+        )
     }
 
     /// Like `from_parsed_rules` but without grammar optimization.
@@ -2159,17 +2193,32 @@ impl GrammarDefinition {
         grammar_exprs: Vec<(String, GrammarExpr)>,
         ignore_symbol_name: Option<String>,
     ) -> Result<Self, String> {
-        Self::from_parsed_rules_impl(grammar_exprs, ignore_symbol_name, false)
+        Self::from_parsed_rules_impl(
+            grammar_exprs,
+            ignore_symbol_name,
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+        )
     }
 
     /// Internal implementation with explicit optimize flag.
     fn from_parsed_rules_impl(
         grammar_exprs: Vec<(String, GrammarExpr)>,
         ignore_symbol_name: Option<String>,
+        greedy_groups: Vec<ParsedGreedyGroup>,
+        ungrouped_terminals: Vec<GreedyGroupTerminal>,
+        enforce_intermediate_terminals: bool,
         should_optimize: bool,
     ) -> Result<Self, String> {
         fn is_terminal_name(name: &str) -> bool {
-            name.chars().next().map_or(false, |c| c.is_uppercase())
+            let mut chars = name.chars();
+            match chars.next() {
+                Some('_') => chars.next().map_or(false, |c| c.is_uppercase()),
+                Some(c) => c.is_uppercase(),
+                None => false,
+            }
         }
 
         /// Check if an expression contains character classes or AnyChar directly.
@@ -2382,6 +2431,195 @@ impl GrammarDefinition {
             .filter(|(name, _)| !terminals.contains_key(name))
             .collect();
 
+        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+        enum GroupTerminalRef {
+            Name(String),
+            Literal(Vec<u8>),
+        }
+
+        fn collect_inline_literals(expr: &GrammarExpr, inline_literals: &mut BTreeSet<Vec<u8>>) {
+            match expr {
+                GrammarExpr::Literal(bytes) => {
+                    inline_literals.insert(bytes.clone());
+                }
+                GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
+                    for e in exprs {
+                        collect_inline_literals(e, inline_literals);
+                    }
+                }
+                GrammarExpr::Optional(expr_box) | GrammarExpr::Repeat(expr_box) => {
+                    collect_inline_literals(expr_box, inline_literals);
+                }
+                GrammarExpr::RepeatBounded { inner, .. } => {
+                    collect_inline_literals(inner, inline_literals);
+                }
+                GrammarExpr::AnyChar | GrammarExpr::CharClass { .. } | GrammarExpr::Ref(_) => {}
+            }
+        }
+
+        fn find_intermediate_terminal_ref(
+            expr: &GrammarExpr,
+            intermediate_terminals: &HashSet<String>,
+        ) -> Option<String> {
+            match expr {
+                GrammarExpr::Ref(name) if intermediate_terminals.contains(name) => Some(name.clone()),
+                GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => exprs
+                    .iter()
+                    .find_map(|e| find_intermediate_terminal_ref(e, intermediate_terminals)),
+                GrammarExpr::Optional(expr_box) | GrammarExpr::Repeat(expr_box) => {
+                    find_intermediate_terminal_ref(expr_box, intermediate_terminals)
+                }
+                GrammarExpr::RepeatBounded { inner, .. } => {
+                    find_intermediate_terminal_ref(inner, intermediate_terminals)
+                }
+                GrammarExpr::AnyChar
+                | GrammarExpr::CharClass { .. }
+                | GrammarExpr::Literal(_)
+                | GrammarExpr::Ref(_) => None,
+            }
+        }
+
+        fn format_group_terminal(term: &GroupTerminalRef) -> String {
+            match term {
+                GroupTerminalRef::Name(name) => name.clone(),
+                GroupTerminalRef::Literal(bytes) => {
+                    let mut escaped = String::new();
+                    for ch in String::from_utf8_lossy(bytes).chars() {
+                        match ch {
+                            '\\' => escaped.push_str("\\\\"),
+                            '\'' => escaped.push_str("\\'"),
+                            _ => escaped.extend(ch.escape_default()),
+                        }
+                    }
+                    format!("'{}'", escaped)
+                }
+            }
+        }
+
+        let mut inline_literals_in_nonterminals: BTreeSet<Vec<u8>> = BTreeSet::new();
+        for (_rule_name, expr) in &non_terminal_rules {
+            collect_inline_literals(expr, &mut inline_literals_in_nonterminals);
+        }
+
+        if enforce_intermediate_terminals {
+            let intermediate_terminal_names: HashSet<String> = terminals
+                .keys()
+                .filter(|name| name.starts_with('_'))
+                .cloned()
+                .collect();
+
+            for (rule_name, expr) in &non_terminal_rules {
+                if let Some(intermediate_name) =
+                    find_intermediate_terminal_ref(expr, &intermediate_terminal_names)
+                {
+                    return Err(format!(
+                        "Nonterminal rule '{}' references intermediate terminal '{}'. Intermediate terminals (prefix '_') may only be referenced from terminal definitions.",
+                        rule_name, intermediate_name
+                    ));
+                }
+            }
+        }
+
+        let mut resolved_greedy_groups: Vec<ResolvedGreedyGroup> = Vec::new();
+        let mut resolved_ungrouped_terminals: Vec<String> = Vec::new();
+
+        if !greedy_groups.is_empty() {
+            let required_named_terminals: BTreeSet<String> = terminals
+                .keys()
+                .filter(|name| !name.starts_with('_'))
+                .cloned()
+                .collect();
+            let mut required_terminals: BTreeSet<GroupTerminalRef> = required_named_terminals
+                .into_iter()
+                .map(GroupTerminalRef::Name)
+                .collect();
+            for literal in &inline_literals_in_nonterminals {
+                required_terminals.insert(GroupTerminalRef::Literal(literal.clone()));
+            }
+
+            let mut ownership: BTreeMap<GroupTerminalRef, String> = BTreeMap::new();
+
+            let normalize_selector = |selector: &GreedyGroupTerminal| -> Result<GroupTerminalRef, String> {
+                match selector {
+                    GreedyGroupTerminal::Name(name) => {
+                        if name.starts_with('_') {
+                            return Err(format!(
+                                "Intermediate terminal '{}' cannot be listed in greedy_group/ungrouped.",
+                                name
+                            ));
+                        }
+                        if !terminals.contains_key(name) {
+                            return Err(format!(
+                                "Terminal '{}' listed in greedy_group/ungrouped is not defined.",
+                                name
+                            ));
+                        }
+                        Ok(GroupTerminalRef::Name(name.clone()))
+                    }
+                    GreedyGroupTerminal::Literal(bytes) => {
+                        if !inline_literals_in_nonterminals.contains(bytes) {
+                            return Err(format!(
+                                "Literal {} listed in greedy_group/ungrouped does not appear in any nonterminal production.",
+                                format_group_terminal(&GroupTerminalRef::Literal(bytes.clone()))
+                            ));
+                        }
+                        Ok(GroupTerminalRef::Literal(bytes.clone()))
+                    }
+                }
+            };
+
+            for group in &greedy_groups {
+                let mut resolved_terminals = Vec::new();
+                for selector in &group.terminals {
+                    let terminal = normalize_selector(selector)?;
+                    if let Some(existing_owner) =
+                        ownership.insert(terminal.clone(), format!("greedy_group({})", group.name))
+                    {
+                        return Err(format!(
+                            "Terminal {} is listed multiple times (in {} and greedy_group({})).",
+                            format_group_terminal(&terminal),
+                            existing_owner,
+                            group.name
+                        ));
+                    }
+                    resolved_terminals.push(format_group_terminal(&terminal));
+                }
+                resolved_greedy_groups.push(ResolvedGreedyGroup {
+                    name: group.name.clone(),
+                    terminals: resolved_terminals,
+                });
+            }
+
+            for selector in &ungrouped_terminals {
+                let terminal = normalize_selector(selector)?;
+                if let Some(existing_owner) =
+                    ownership.insert(terminal.clone(), "ungrouped".to_string())
+                {
+                    return Err(format!(
+                        "Terminal {} is listed multiple times (in {} and ungrouped).",
+                        format_group_terminal(&terminal),
+                        existing_owner
+                    ));
+                }
+                resolved_ungrouped_terminals.push(format_group_terminal(&terminal));
+            }
+
+            let missing: Vec<String> = required_terminals
+                .iter()
+                .filter(|terminal| !ownership.contains_key(*terminal))
+                .map(format_group_terminal)
+                .collect();
+
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Missing greedy_group/ungrouped coverage for non-intermediate terminals: {}",
+                    missing.join(", ")
+                ));
+            }
+        } else if !ungrouped_terminals.is_empty() {
+            return Err("Found ungrouped directive without any greedy_group directives.".to_string());
+        }
+
         // Share memo across all terminal conversions to avoid exponential re-expansion
         let mut shared_memo = BTreeMap::new();
         let mut terminal_defs = Vec::new();
@@ -2404,12 +2642,14 @@ impl GrammarDefinition {
             terminal_defs.push((name, shared_expr));
         }
 
-        let grammar_def = GrammarDefinition::from_exprs_impl(
-            non_terminal_rules, 
+        let mut grammar_def = GrammarDefinition::from_exprs_impl(
+            non_terminal_rules,
             terminal_defs,
             ignore_symbol_name.as_deref(),
             should_optimize,
         )?;
+        grammar_def.greedy_groups = resolved_greedy_groups;
+        grammar_def.ungrouped_terminals = resolved_ungrouped_terminals;
 
         Ok(grammar_def)
     }
@@ -2422,24 +2662,48 @@ impl GrammarDefinition {
     /// ```
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
         // Parse EBNF first
-        let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-        
+        let EbnfParseResult {
+            grammar_rules,
+            ignore_symbol_name,
+            greedy_groups,
+            ungrouped_terminals,
+        } = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+
         // Choice factoring is disabled by default.
         // Enable with ENABLE_EBNF_CHOICE_FACTORING=1 if needed.
         let grammar_rules = if std::env::var("ENABLE_EBNF_CHOICE_FACTORING").is_ok() {
-            crate::interface::ebnf_factoring::factor_grammar_rules(ebnf.grammar_rules)
+            crate::interface::ebnf_factoring::factor_grammar_rules(grammar_rules)
         } else {
-            ebnf.grammar_rules
+            grammar_rules
         };
-        
-        Self::from_parsed_rules(grammar_rules, ebnf.ignore_symbol_name)
+
+        Self::from_parsed_rules_impl(
+            grammar_rules,
+            ignore_symbol_name,
+            greedy_groups,
+            ungrouped_terminals,
+            true,
+            false,
+        )
     }
 
     /// Like `from_ebnf` but without grammar optimization.
     /// Useful for visualization/debugging where you want to see the original grammar structure.
     pub fn from_ebnf_no_optimize(ebnf_source: &str) -> Result<Self, String> {
-        let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-        Self::from_parsed_rules_no_optimize(ebnf.grammar_rules, ebnf.ignore_symbol_name)
+        let EbnfParseResult {
+            grammar_rules,
+            ignore_symbol_name,
+            greedy_groups,
+            ungrouped_terminals,
+        } = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+        Self::from_parsed_rules_impl(
+            grammar_rules,
+            ignore_symbol_name,
+            greedy_groups,
+            ungrouped_terminals,
+            true,
+            false,
+        )
     }
 
     /// Constructs a `GrammarDefinition` from a Lark grammar string.
