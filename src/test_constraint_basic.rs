@@ -967,6 +967,7 @@ fn test_precompute_a_plus_tokenizer() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     // --- Verification ---
@@ -1057,6 +1058,7 @@ fn test_precompute_x_eq() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     // --- Verification (weight-heavy mode) ---
@@ -3347,6 +3349,7 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
     
     println!("Actual Terminal DWA:\n{}", terminal_dwa);
@@ -3419,6 +3422,7 @@ fn test_terminal_dwa_short_token_path_length_violation() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3631,6 +3635,7 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3773,6 +3778,7 @@ fn test_terminal_dwa_tilde_sequence_weights() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3857,6 +3863,7 @@ start ::= '~'+ ;
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -3896,6 +3903,246 @@ start ::= '~'+ ;
         "expected '~' to be allowed for token id 0"
     );
     assert!(w_quad.is_empty(), "expected '~~~~' weight to be empty");
+}
+
+#[test]
+fn test_terminal_dwa_greedy_keywords_no_else_if_on_ei() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
+    use crate::debug_path_weight::{check_dwa_path_weight, weight_contains_token};
+    use crate::dwa_i32::common::Label;
+    use rand::SeedableRng;
+
+    let ebnf_grammar = indoc! {r#"
+        #![ignore(WS)]
+        start ::= atom;
+        atom ::= IF | ELSE | IDENTIFIER;
+        IF ::= 'if';
+        ELSE ::= 'else';
+        IDENTIFIER ::= [a-zA-Z]+;
+        WS ::= [ ]+;
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let tokenizer = &compiled_grammar.tokenizer;
+
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b"ei".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b"elseif".to_vec(), LLMTokenID(1));
+    internal_llm_token_map.insert(b"else".to_vec(), LLMTokenID(2));
+    internal_llm_token_map.insert(b"if".to_vec(), LLMTokenID(3));
+    internal_llm_token_map.insert(b" else".to_vec(), LLMTokenID(4));
+    internal_llm_token_map.insert(b" if".to_vec(), LLMTokenID(5));
+
+    let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
+    let terminal_map = &compiled_grammar.glr_parser.terminal_map;
+    let if_tid = terminal_map
+        .get_by_left(&Terminal::Literal(b"if".to_vec()))
+        .copied()
+        .or_else(|| terminal_map.get_by_left(&regex_name("IF")).copied())
+        .expect("IF/'if' terminal should exist");
+    let else_tid = terminal_map
+        .get_by_left(&Terminal::Literal(b"else".to_vec()))
+        .copied()
+        .or_else(|| terminal_map.get_by_left(&regex_name("ELSE")).copied())
+        .expect("ELSE/'else' terminal should exist");
+    let identifier_tid = *compiled_grammar
+        .glr_parser
+        .terminal_map
+        .get_by_left(&regex_name("IDENTIFIER"))
+        .expect("IDENTIFIER terminal should exist");
+
+    // Put IF/ELSE/IDENTIFIER in the same greedy group for this repro.
+    let mut terminal_to_greedy_group = vec![None; terminals_count];
+    terminal_to_greedy_group[if_tid.0] = Some(0);
+    terminal_to_greedy_group[else_tid.0] = Some(0);
+    terminal_to_greedy_group[identifier_tid.0] = Some(0);
+
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+    let terminal_dwa = run_precompute1(
+        tokenizer,
+        &internal_llm_token_map,
+        5, // max internal token id
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+        None,
+        None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
+        terminal_to_greedy_group,
+    );
+
+    let num_tsids_for_weight = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        1
+    };
+    let ei_token_id = 0usize;
+
+    // Deterministic targeted check: token "ei" must not admit else->if.
+    let else_if_weight = check_dwa_path_weight(
+        &terminal_dwa,
+        &[else_tid.0 as Label, if_tid.0 as Label],
+    );
+    assert!(
+        !weight_contains_token(&else_if_weight, ei_token_id, num_tsids_for_weight),
+        "Token 'ei' should not be accepted on path else->if"
+    );
+
+    // Sample terminal-DWA paths and ensure no sampled "ei" path has keyword->keyword adjacency.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xE1F);
+    let sampled_paths = terminal_dwa.sample_paths(1000, &mut rng);
+    let is_keyword = |tid: usize| tid == if_tid.0 || tid == else_tid.0;
+
+    for sampled in sampled_paths {
+        let labels: Vec<Label> = sampled.iter().map(|(label, _)| *label).collect();
+        let path_weight = check_dwa_path_weight(&terminal_dwa, &labels);
+        if !weight_contains_token(&path_weight, ei_token_id, num_tsids_for_weight) {
+            continue;
+        }
+
+        let terminal_labels: Vec<usize> = labels
+            .iter()
+            .filter_map(|label| {
+                let u = *label as usize;
+                if u < terminals_count { Some(u) } else { None }
+            })
+            .collect();
+
+        let has_adjacent_keywords = terminal_labels
+            .windows(2)
+            .any(|pair| is_keyword(pair[0]) && is_keyword(pair[1]));
+        assert!(
+            !has_adjacent_keywords,
+            "Sampled token 'ei' path has adjacent keywords: {:?}",
+            terminal_labels
+        );
+    }
+}
+
+#[test]
+fn test_js_greedy_keywords_full_grammar() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
+    use crate::debug_path_weight::{check_dwa_path_weight, weight_contains_token};
+    use crate::dwa_i32::common::Label;
+
+    let ebnf_grammar = include_str!("js.ebnf");
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+    let tokenizer = &compiled_grammar.tokenizer;
+    let parser = compiled_grammar.glr_parser();
+
+    let vocab = [
+        "ei",
+        "sei",
+        "elseif",
+        "aks",
+        "breaks",
+        "en",
+        "else",
+        "if",
+        "import",
+        " else",
+        " if",
+        "tc",
+        "sa",
+    ];
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    for (idx, token) in vocab.iter().enumerate() {
+        internal_llm_token_map.insert(token.as_bytes().to_vec(), LLMTokenID(idx));
+    }
+
+    let terminals_count = parser.terminal_map.len();
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
+
+    // Mirror greedy-group mapping logic from constraint.rs.
+    let terminal_to_greedy_group = {
+        let mut mapping = vec![None; terminals_count];
+        let terminal_name_to_tid: HashMap<String, usize> = parser
+            .terminal_map
+            .iter()
+            .map(|(term, tid)| {
+                let formatted = match term {
+                    Terminal::RegexName(name) => name.clone(),
+                    Terminal::Literal(bytes) => {
+                        let mut escaped = String::new();
+                        for ch in String::from_utf8_lossy(bytes).chars() {
+                            match ch {
+                                '\\' => escaped.push_str("\\\\"),
+                                '\'' => escaped.push_str("\\'"),
+                                _ => escaped.extend(ch.escape_default()),
+                            }
+                        }
+                        format!("'{}'", escaped)
+                    }
+                };
+                (formatted, tid.0)
+            })
+            .collect();
+
+        for (group_idx, group) in grammar_definition.greedy_groups.iter().enumerate() {
+            for terminal_name in &group.terminals {
+                if let Some(&tid) = terminal_name_to_tid.get(terminal_name) {
+                    mapping[tid] = Some(group_idx);
+                }
+            }
+        }
+        mapping
+    };
+
+    let terminal_dwa = run_precompute1(
+        tokenizer,
+        &internal_llm_token_map,
+        vocab.len().saturating_sub(1),
+        terminals_count,
+        state_to_rep,
+        (0..tokenizer.dfa().states.len()).collect(),
+        None,
+        None,
+        None,
+        std::sync::Arc::new(vec![false; terminals_count]),
+        std::sync::Arc::new(Vec::new()),
+        std::sync::Arc::new(Vec::new()),
+        terminal_to_greedy_group,
+    );
+
+    let num_tsids_for_weight = if is_weight_heavy_enabled() {
+        tokenizer.dfa().states.len()
+    } else {
+        1
+    };
+    let en_token_id = vocab
+        .iter()
+        .position(|t| *t == "en")
+        .expect("'en' should be present");
+    let case_tid = parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"case".to_vec()))
+        .expect("'case' terminal should exist");
+    let new_tid = parser
+        .terminal_map
+        .get_by_left(&Terminal::Literal(b"new".to_vec()))
+        .expect("'new' terminal should exist");
+
+    let case_new_weight = check_dwa_path_weight(
+        &terminal_dwa,
+        &[case_tid.0 as Label, new_tid.0 as Label],
+    );
+    assert!(
+        case_new_weight.is_empty()
+            || !weight_contains_token(&case_new_weight, en_token_id, num_tsids_for_weight),
+        "Token 'en' should not be accepted on path 'case' -> 'new'"
+    );
 }
 
 #[test]
@@ -3976,6 +4223,7 @@ fn test_suffix_dfa_prunes_tilde_equals() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -4097,6 +4345,7 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let w_pow_assign_tilde_eq_tilde = crate::debug_path_weight::check_dwa_path_weight(
@@ -4197,6 +4446,7 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -4281,6 +4531,7 @@ fn test_weight_overapprox_simple() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -4423,6 +4674,7 @@ fn test_terminal_nwa_vs_dwa_overapprox_js() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
 
     let num_tsids = if is_weight_heavy_enabled() {
@@ -5136,6 +5388,7 @@ fn test_suffix_grammar_validation() {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+    vec![None; terminals_count],
     );
     
     // Validate paths against suffix grammar (verbose)

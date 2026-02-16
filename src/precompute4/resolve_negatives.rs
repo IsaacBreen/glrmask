@@ -628,7 +628,27 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
 pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
     let n = states.len();
     let profile = cancellations_range_profile_enabled();
+    let total_start = profile.then(Instant::now);
+    let range_len = range.end.saturating_sub(range.start);
     let mut seed_count: u64 = 0;
+    let mut steps = 0usize;
+    let mut max_worklist_len = 0usize;
+    let mut neg_source_states = 0usize;
+    let mut prop_existing_eps_us: u64 = 0;
+    let mut collect_pos_us: u64 = 0;
+    let mut collect_default_us: u64 = 0;
+    let mut apply_updates_us: u64 = 0;
+    let mut propagate_eps_us: u64 = 0;
+    let mut prop_existing_eps_edges: u64 = 0;
+    let mut pos_edges: u64 = 0;
+    let mut default_edges: u64 = 0;
+    let mut eps_edges: u64 = 0;
+    let mut eps_update_events: u64 = 0;
+    let mut eps_created: u64 = 0;
+    let mut eps_grown: u64 = 0;
+    let mut queries_at_source_events: u64 = 0;
+    let mut queries_at_source_total: u64 = 0;
+    let mut queries_at_source_max: u64 = 0;
 
     // Use HashMaps instead of Vec to avoid O(arena_size) allocations.
     // Only states that actually receive queries/epsilons take memory.
@@ -644,15 +664,23 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
         let key = (s, a, c);
         if in_queue.insert(key) {
             worklist.push_back(key);
+            if profile {
+                max_worklist_len = max_worklist_len.max(worklist.len());
+            }
         }
     };
 
     // Seed from negative transitions in the range
     for a in range.clone() {
+        if a >= n {
+            continue;
+        }
+        let mut has_negative = false;
         for (&label, targets) in &states[a].transitions {
             if !is_negative_symbol(label) {
                 continue;
             }
+            has_negative = true;
             let c = label.wrapping_sub(Code::MIN);
             for (b, w_ab) in targets {
                 if *b >= n {
@@ -667,6 +695,9 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 }
             }
         }
+        if profile && has_negative {
+            neg_source_states += 1;
+        }
     }
 
     // Early exit if no negative transitions were found
@@ -674,6 +705,20 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
         if profile {
             CANCELLATIONS_RANGE_SEEDS.fetch_add(seed_count, AtomicOrdering::Relaxed);
             CANCELLATIONS_RANGE_STEPS.fetch_add(0, AtomicOrdering::Relaxed);
+            if let Some(start) = total_start {
+                eprintln!(
+                    "PASS2 cancellations range profile: range_len={} neg_source_states={} seeds=0 steps=0 max_worklist=0 query_states=0 query_entries=0 eps_sources=0 eps_added=0 eps_updates=0 eps_created=0 eps_grown=0 max_steps=0",
+                    range_len,
+                    neg_source_states,
+                );
+                eprintln!(
+                    "PASS2 cancellations range breakdown_us: prop_existing_eps=0 collect_pos=0 collect_default=0 apply_updates=0 propagate_eps=0 prop_existing_eps_edges=0 pos_edges=0 default_edges=0 eps_edges=0 queries_at_source_events=0 queries_at_source_total=0 queries_at_source_max=0",
+                );
+                eprintln!(
+                    "PHASE_TIMING: batch_neg::compute_cancellations_range = {:?}",
+                    start.elapsed()
+                );
+            }
         }
         return Vec::new();
     }
@@ -685,7 +730,6 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             .unwrap_or(0)
     });
     let max_steps = *MAX_STEPS;
-    let mut steps = 0usize;
 
     while let Some((s, a, c)) = worklist.pop_front() {
         in_queue.remove(&(s, a, c));
@@ -698,10 +742,14 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             Some(w) => w.clone(),
             None => continue,
         };
-        
+
         // Propagate through existing cancellation epsilons from s
+        let prop_start = profile.then(Instant::now);
         if let Some(epsilons_from_s) = new_eps_from.get(&s) {
             if !epsilons_from_s.is_empty() {
+                if profile {
+                    prop_existing_eps_edges = prop_existing_eps_edges.saturating_add(epsilons_from_s.len() as u64);
+                }
                 let propagations: Vec<(NWAStateID, Weight)> = epsilons_from_s.iter()
                     .filter_map(|(&target, eps_w)| {
                         let prop_w = &w_as & eps_w;
@@ -718,13 +766,20 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 }
             }
         }
+        if let Some(start) = prop_start {
+            prop_existing_eps_us = prop_existing_eps_us.saturating_add(start.elapsed().as_micros() as u64);
+        }
 
         // Collect cancellation targets, then apply mutations
         let mut cancellation_updates: Vec<(NWAStateID, Weight)> = Vec::new();
 
+        let pos_start = profile.then(Instant::now);
         if let Some(pos_targets) = states[s].transitions.get(&c) {
             for (t, w_st) in pos_targets {
                 if *t < n {
+                    if profile {
+                        pos_edges = pos_edges.saturating_add(1);
+                    }
                     let new_eps_w = &w_as & w_st;
                     if !new_eps_w.is_empty() {
                         cancellation_updates.push((*t, new_eps_w));
@@ -732,27 +787,54 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 }
             }
         }
+        if let Some(start) = pos_start {
+            collect_pos_us = collect_pos_us.saturating_add(start.elapsed().as_micros() as u64);
+        }
+
+        let default_start = profile.then(Instant::now);
         if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
             for (target, weight) in default_targets {
+                if profile {
+                    default_edges = default_edges.saturating_add(1);
+                }
                 let new_eps_w = &w_as & weight;
                 if !new_eps_w.is_empty() {
                     cancellation_updates.push((*target, new_eps_w));
                 }
             }
         }
+        if let Some(start) = default_start {
+            collect_default_us = collect_default_us.saturating_add(start.elapsed().as_micros() as u64);
+        }
 
         // Apply cancellation updates
+        let apply_start = profile.then(Instant::now);
         for (target, new_eps_w) in cancellation_updates {
             let eps_from_a = new_eps_from.entry(a).or_default();
             let eps_weight = eps_from_a.entry(target).or_default();
+            let old_eps_empty = eps_weight.is_empty();
             if !new_eps_w.is_subset_of(eps_weight) {
                 *eps_weight |= &new_eps_w;
+                if profile {
+                    eps_update_events = eps_update_events.saturating_add(1);
+                    if old_eps_empty {
+                        eps_created = eps_created.saturating_add(1);
+                    } else {
+                        eps_grown = eps_grown.saturating_add(1);
+                    }
+                }
                 let combined_eps_w = eps_weight.clone();
 
                 // Propagate existing queries at `a` through the new/updated epsilon
                 let queries_at_a: Vec<(QueryKey, Weight)> = queries.get(&a)
                     .map(|m| m.iter().map(|(k, v)| (*k, v.clone())).collect())
                     .unwrap_or_default();
+                if profile {
+                    let query_count = queries_at_a.len() as u64;
+                    queries_at_source_events = queries_at_source_events.saturating_add(1);
+                    queries_at_source_total = queries_at_source_total.saturating_add(query_count);
+                    queries_at_source_max = queries_at_source_max.max(query_count);
+                }
                 for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
                     let prop_w = w_a_prime_a & &combined_eps_w;
                     if prop_w.is_empty() {
@@ -766,11 +848,18 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 }
             }
         }
+        if let Some(start) = apply_start {
+            apply_updates_us = apply_updates_us.saturating_add(start.elapsed().as_micros() as u64);
+        }
 
         // Propagate through epsilon transitions from s
+        let eps_start = profile.then(Instant::now);
         for (t, w_st) in &states[s].epsilons {
             if *t >= n {
                 continue;
+            }
+            if profile {
+                eps_edges = eps_edges.saturating_add(1);
             }
             let prop_w = &w_as & w_st;
             if prop_w.is_empty() {
@@ -783,6 +872,9 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 enqueue(&mut worklist, &mut in_queue, *t, a, c);
             }
         }
+        if let Some(start) = eps_start {
+            propagate_eps_us = propagate_eps_us.saturating_add(start.elapsed().as_micros() as u64);
+        }
     }
 
     if profile {
@@ -791,9 +883,60 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
     }
 
     let mut result = Vec::new();
+    let mut eps_sources: u64 = 0;
+    let mut eps_added: u64 = 0;
     for (from, targets) in &new_eps_from {
+        if !targets.is_empty() {
+            eps_sources = eps_sources.saturating_add(1);
+            eps_added = eps_added.saturating_add(targets.len() as u64);
+        }
         for (_to, _w) in targets {
             result.push((*from, *_to, _w.clone()));
+        }
+    }
+    if profile {
+        CANCELLATIONS_RANGE_EPS_ADDED.fetch_add(eps_added, AtomicOrdering::Relaxed);
+        let query_states = queries.len() as u64;
+        let mut query_entries: u64 = 0;
+        for query_map in queries.values() {
+            query_entries = query_entries.saturating_add(query_map.len() as u64);
+        }
+        eprintln!(
+            "PASS2 cancellations range profile: range_len={} neg_source_states={} seeds={} steps={} max_worklist={} query_states={} query_entries={} eps_sources={} eps_added={} eps_updates={} eps_created={} eps_grown={} max_steps={}",
+            range_len,
+            neg_source_states,
+            seed_count,
+            steps,
+            max_worklist_len,
+            query_states,
+            query_entries,
+            eps_sources,
+            eps_added,
+            eps_update_events,
+            eps_created,
+            eps_grown,
+            max_steps,
+        );
+        eprintln!(
+            "PASS2 cancellations range breakdown_us: prop_existing_eps={} collect_pos={} collect_default={} apply_updates={} propagate_eps={} prop_existing_eps_edges={} pos_edges={} default_edges={} eps_edges={} queries_at_source_events={} queries_at_source_total={} queries_at_source_max={}",
+            prop_existing_eps_us,
+            collect_pos_us,
+            collect_default_us,
+            apply_updates_us,
+            propagate_eps_us,
+            prop_existing_eps_edges,
+            pos_edges,
+            default_edges,
+            eps_edges,
+            queries_at_source_events,
+            queries_at_source_total,
+            queries_at_source_max,
+        );
+        if let Some(start) = total_start {
+            eprintln!(
+                "PHASE_TIMING: batch_neg::compute_cancellations_range = {:?}",
+                start.elapsed()
+            );
         }
     }
     result

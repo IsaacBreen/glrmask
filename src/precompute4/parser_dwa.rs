@@ -14,6 +14,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID};
 use crate::precompute4::characterize::{compute_all_characterizations, TerminalCharacterization};
 use crate::precompute4::resolve_negatives::{
     apply_cancellations, apply_finality_fixpoint, remove_negative_transitions,
+    is_negative_symbol,
     apply_cancellations_range,
     apply_finality_fixpoint_range, remove_negative_transitions_range,
     // Note: remove_redundant_default_transitions is only run in a global pass,
@@ -940,6 +941,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(5, "build_parser_dwa: start");
     crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {}", 
         terminal_nwa.stats());
+    let parser_dwa_total_start = Instant::now();
 
     // Handle empty terminal NWA (no valid tokens for this grammar/vocabulary combination)
     // Return a minimal DWA with one state and no transitions (always returns empty mask)
@@ -964,6 +966,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         "TIMING: parser_dwa::build_template_dwas {:?}",
         template_dwas_start.elapsed()
     );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::build_template_dwas = {:?}",
+        template_dwas_start.elapsed()
+    );
 
     let ignore_dwa_start = Instant::now();
     let ignore_dwa = timeit!("build_ignore_terminal_dwa", {
@@ -971,6 +977,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     });
     crate::timing!(
         "TIMING: parser_dwa::build_ignore_terminal_dwa {:?}",
+        ignore_dwa_start.elapsed()
+    );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::build_ignore_terminal_dwa = {:?}",
         ignore_dwa_start.elapsed()
     );
 
@@ -1016,6 +1026,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         terminal_nwa.reverse()
     });
     crate::timing!("TIMING: parser_dwa::reverse_nwa {:?}", reverse_start.elapsed());
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::reverse_nwa = {:?}",
+        reverse_start.elapsed()
+    );
     crate::debug!(5, "Reversed NWA: {}, start_states={:?}", reversed_nwa.stats(), reversed_nwa.body.start_states);
     for (i, state) in reversed_nwa.states.0.iter().enumerate() {
         crate::debug!(6, "  State {}: final_weight={:?}, epsilons={:?}, transitions={}", 
@@ -1031,6 +1045,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     });
     crate::timing!(
         "TIMING: parser_dwa::compute_traversal_data {:?}",
+        traversal_start.elapsed()
+    );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::compute_traversal_data = {:?}",
         traversal_start.elapsed()
     );
 
@@ -1066,6 +1084,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     if is_symbol_heavy {
         crate::timing!(
             "TIMING: parser_dwa::outgoing_tsid_edges {:?}",
+            outgoing_tsid_edges_start.elapsed()
+        );
+        eprintln!(
+            "PHASE_TIMING: parser_dwa::outgoing_tsid_edges = {:?}",
             outgoing_tsid_edges_start.elapsed()
         );
     }
@@ -1109,6 +1131,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     };
     crate::debug!(5, "  Super NWA: {}", super_nwa.stats());
     crate::timing!("TIMING: parser_dwa::build_super_nwa {:?}", super_nwa_start.elapsed());
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::build_super_nwa = {:?}",
+        super_nwa_start.elapsed()
+    );
     let super_nwa = Arc::new(super_nwa);
     let bit_to_term = Arc::new(bit_to_term);
 
@@ -1422,6 +1448,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         crate::debug!(4, "Finished Pass 2");
     });
     crate::timing!("TIMING: parser_dwa::pass2_traversal {:?}", pass2_start.elapsed());
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::pass2_traversal = {:?}",
+        pass2_start.elapsed()
+    );
 
     // Batch negative resolution over the full arena after pass2 completes.
     // Multi-range cancellation: seeds from all template ranges in a single call.
@@ -1440,15 +1470,50 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         );
 
         if arena_len > 0 {
+            let mut neg_transition_edges = 0usize;
+            let mut default_transition_edges = 0usize;
+            let mut epsilon_edges = 0usize;
+            for state_id in 0..arena_len {
+                let state = &states[state_id];
+                epsilon_edges += state.epsilons.len();
+                for (&label, targets) in &state.transitions {
+                    if is_negative_symbol(label) {
+                        neg_transition_edges += targets.len();
+                    }
+                    if label == crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL {
+                        default_transition_edges += targets.len();
+                    }
+                }
+            }
+            crate::timing!(
+                "TIMING: parser_dwa::batch_neg_input_sizes neg_edges={} default_edges={} epsilon_edges={}",
+                neg_transition_edges,
+                default_transition_edges,
+                epsilon_edges
+            );
+
             // Cancellation must account for interactions across template ranges.
             // Always resolve across the full arena for correctness.
+            let cancellations_start = Instant::now();
             apply_cancellations_range(&mut states, 0..arena_len);
+            crate::timing!(
+                "TIMING: parser_dwa::apply_cancellations {:?}",
+                cancellations_start.elapsed()
+            );
+            eprintln!(
+                "PHASE_TIMING: parser_dwa::apply_cancellations = {:?}",
+                cancellations_start.elapsed()
+            );
 
             // Finality fixpoint needs negatives present for correct propagation.
             let finality_start = Instant::now();
             apply_finality_fixpoint_range(&mut states, 0..arena_len);
             crate::timing!(
                 "TIMING: parser_dwa::apply_finality_fixpoint {:?}",
+                finality_start.elapsed()
+            );
+            eprintln!(
+                "PHASE_TIMING: parser_dwa::apply_finality_fixpoint = {:?}",
                 finality_start.elapsed()
             );
 
@@ -1458,10 +1523,18 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 "TIMING: parser_dwa::remove_negative_transitions {:?}",
                 remove_start.elapsed()
             );
+            eprintln!(
+                "PHASE_TIMING: parser_dwa::remove_negative_transitions = {:?}",
+                remove_start.elapsed()
+            );
         }
     }
     crate::timing!(
         "TIMING: parser_dwa::batch_negative_resolution {:?}",
+        batch_negatives_start.elapsed()
+    );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::batch_negative_resolution = {:?}",
         batch_negatives_start.elapsed()
     );
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
@@ -1501,6 +1574,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         "TIMING: parser_dwa::combine_bodies {:?}",
         combine_bodies_start.elapsed()
     );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::combine_bodies = {:?}",
+        combine_bodies_start.elapsed()
+    );
 
     let macro_level = std::env::var("MACRO_DEBUG_LEVEL")
         .ok()
@@ -1518,6 +1595,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     });
     crate::timing!(
         "TIMING: parser_dwa::finalize_and_determinize {:?}",
+        finalize_start.elapsed()
+    );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::finalize_and_determinize = {:?}",
         finalize_start.elapsed()
     );
     // SKIP final minimization to test performance impact
@@ -1568,6 +1649,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         }
     }
 
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::total = {:?}",
+        parser_dwa_total_start.elapsed()
+    );
     crate::debug!(5, "build_parser_dwa: end");
     final_dwa
 }
@@ -1580,6 +1665,7 @@ pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
 pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
     crate::debug!(4, "Finalizing NWA (skipping stats on large arena)...");
+    let finalize_total_start = std::time::Instant::now();
     
     // Prune unreachable states FIRST (forward BFS from starts - fast, removes 97% of states).
     // This dramatically reduces the state count before subtract_final_weights_from_outgoing,
@@ -1592,6 +1678,10 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
         "TIMING: parser_dwa::finalize::prune_unreachable {:?} changed={}",
         prune_unreachable_time,
         unreach_changed
+    );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::finalize::prune_unreachable = {:?}",
+        prune_unreachable_time
     );
     let after_unreachable_len = combined_nwa.states.len();
 
@@ -1606,6 +1696,10 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     crate::debug!(5, "subtract_final_weights_from_outgoing in {:?}", prune_final_start.elapsed());
     crate::timing!(
         "TIMING: parser_dwa::finalize::subtract_final_weights_from_outgoing {:?}",
+        prune_final_start.elapsed()
+    );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::finalize::subtract_final_weights_from_outgoing = {:?}",
         prune_final_start.elapsed()
     );
     if skip_final_subtract {
@@ -1630,6 +1724,10 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
         prune_dead_time,
         dead_changed
     );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::finalize::prune_dead_ends = {:?}",
+        prune_dead_time
+    );
     crate::debug!(5, "prune_unreachable in {:?}, prune_dead_ends in {:?}", prune_unreachable_time, prune_dead_time);
     crate::debug!(4, "After pruning state counts: {} -> {} -> {}",
         before_prune_len, after_unreachable_len, combined_nwa.states.len());
@@ -1648,12 +1746,24 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
         let minimize_elapsed = minimize_start.elapsed();
         crate::debug!(4, "Parser NWA minimization: {} -> {} in {:?}", before_minimize, combined_nwa.stats(), minimize_elapsed);
         crate::timing!("TIMING: parser_dwa::finalize::nwa_minimize {:?}", minimize_elapsed);
+        eprintln!(
+            "PHASE_TIMING: parser_dwa::finalize::nwa_minimize = {:?}",
+            minimize_elapsed
+        );
         let det_start = std::time::Instant::now();
         let dwa = combined_nwa.determinize();
         let det_elapsed = det_start.elapsed();
         crate::debug!(5, "determinize(Parser) in {:?}", det_elapsed);
         crate::timing!("TIMING: parser_dwa::finalize::determinize {:?}", det_elapsed);
+        eprintln!(
+            "PHASE_TIMING: parser_dwa::finalize::determinize = {:?}",
+            det_elapsed
+        );
         crate::debug!(4, "Parser DWA determinize complete. {}", dwa.stats());
+        eprintln!(
+            "PHASE_TIMING: parser_dwa::finalize::total = {:?}",
+            finalize_total_start.elapsed()
+        );
         return dwa;
     }
 
@@ -1671,6 +1781,14 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
         "TIMING: parser_dwa::finalize::determinize_and_minimize {:?}",
         det_min_elapsed
     );
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::finalize::determinize_and_minimize = {:?}",
+        det_min_elapsed
+    );
     crate::debug!(4, "Parser DWA minimization complete. {}", dwa.stats());
+    eprintln!(
+        "PHASE_TIMING: parser_dwa::finalize::total = {:?}",
+        finalize_total_start.elapsed()
+    );
     dwa
 }

@@ -1659,6 +1659,41 @@ impl GrammarConstraint {
             None
         };
         let ignored_terminals = Arc::new(ignored_terminals);
+        let terminal_to_greedy_group = {
+            let mut mapping = vec![None; parser.terminal_map.len()];
+            if let Some(grammar_def) = grammar_definition.as_ref() {
+                let terminal_name_to_tid: HashMap<String, usize> = parser
+                    .terminal_map
+                    .iter()
+                    .map(|(term, tid)| {
+                        let formatted = match term {
+                            Terminal::RegexName(name) => name.clone(),
+                            Terminal::Literal(bytes) => {
+                                let mut escaped = String::new();
+                                for ch in String::from_utf8_lossy(bytes).chars() {
+                                    match ch {
+                                        '\\' => escaped.push_str("\\\\"),
+                                        '\'' => escaped.push_str("\\'"),
+                                        _ => escaped.extend(ch.escape_default()),
+                                    }
+                                }
+                                format!("'{}'", escaped)
+                            }
+                        };
+                        (formatted, tid.0)
+                    })
+                    .collect();
+
+                for (group_idx, group) in grammar_def.greedy_groups.iter().enumerate() {
+                    for terminal_name in &group.terminals {
+                        if let Some(&tid) = terminal_name_to_tid.get(terminal_name) {
+                            mapping[tid] = Some(group_idx);
+                        }
+                    }
+                }
+            }
+            mapping
+        };
         
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         crate::debug!(5, "run_precompute1: start");
@@ -1677,12 +1712,14 @@ impl GrammarConstraint {
                 ignored_terminals.clone(),
                 allowed_follows_by_label.clone(),
                 always_allowed_by_label.clone(),
+                terminal_to_greedy_group,
             )
         });
         crate::timing!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());
         crate::debug!(5, "run_precompute1: end");
 
         crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
+        let post_precompute1_start = std::time::Instant::now();
 
         // Prune terminal DWA using suffix grammar if grammar definition is available
         // This removes transitions that can't possibly lead to valid parses
@@ -3375,12 +3412,20 @@ impl GrammarConstraint {
         // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
 
         // Convert the lexical DWA to NWA and build the Parser DWA.
+        eprintln!(
+            "PHASE_TIMING: post_precompute1_to_parser_dwa_start = {:?}",
+            post_precompute1_start.elapsed()
+        );
         crate::debug!(3, "Building Parser DWA");
         crate::debug!(5, "terminal_nwa_from_dwa: start");
         let terminal_nwa_start = std::time::Instant::now();
         let terminal_nwa = timeit!("terminal_nwa_from_dwa", {
             NWA::from_dwa(&terminal_dwa)
         });
+        eprintln!(
+            "PHASE_TIMING: terminal_nwa_from_dwa = {:?}",
+            terminal_nwa_start.elapsed()
+        );
         crate::timing!(
             "TIMING: terminal_nwa_from_dwa {:?}",
             terminal_nwa_start.elapsed()
@@ -3389,6 +3434,10 @@ impl GrammarConstraint {
         crate::debug!(5, "build_parser_dwa: start");
         let parser_dwa_start = std::time::Instant::now();
         let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
+        eprintln!(
+            "PHASE_TIMING: build_parser_dwa = {:?}",
+            parser_dwa_start.elapsed()
+        );
         crate::timing!("TIMING: build_parser_dwa {:?}", parser_dwa_start.elapsed());
         crate::debug!(5, "build_parser_dwa: end");
 

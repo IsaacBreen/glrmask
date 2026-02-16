@@ -116,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
+        vec![None; terminals_count],
     );
     if is_debug_level_enabled(5) {
         println!("Terminal DWA (before minimize):");

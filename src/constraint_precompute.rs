@@ -469,6 +469,9 @@ pub(crate) struct Precomputer1<'r> {
             BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>,
         >,
     >,
+    terminal_to_greedy_group: Vec<Option<usize>>,
+    merge_possible_matches_globally: bool,
+    merge_possible_matches_by_group: bool,
     pub(crate) all_llm_tokens: RangeSetBlaze<usize>,
     pub(crate) pb: NoOpPb,
     pub(crate) leaf_state: NWAStateID,
@@ -520,6 +523,7 @@ impl<'r> Precomputer1<'r> {
         self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
         ignored_terminals: Arc<Vec<bool>>,
         always_allowed_by_label: Arc<Vec<Vec<Label>>>,
+        terminal_to_greedy_group: Vec<Option<usize>>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -609,6 +613,14 @@ impl<'r> Precomputer1<'r> {
         let direct_insert = std::env::var("PRECOMPUTE1_DIRECT_INSERT")
             .map(|v| v == "1")
             .unwrap_or(false);
+        let merge_possible_matches_globally = std::env::var("MERGE_POSSIBLE_MATCHES").is_ok();
+        let disable_greedy_merge = std::env::var("NO_GREEDY_MERGE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let merge_possible_matches_by_group =
+            !merge_possible_matches_globally
+                && !disable_greedy_merge
+                && terminal_to_greedy_group.iter().any(|group| group.is_some());
 
         Self {
             tokenizer,
@@ -616,6 +628,9 @@ impl<'r> Precomputer1<'r> {
             roots,
             state_to_rep,
             possible_matches: RefCell::new(BTreeMap::new()),
+            terminal_to_greedy_group,
+            merge_possible_matches_globally,
+            merge_possible_matches_by_group,
             // IMPORTANT: Use [0..=...] to create from ONE range, not iterate over all integers!
             all_llm_tokens: RangeSetBlaze::from_iter([0..=internal_max_llm_token]),
             pb,
@@ -1303,21 +1318,119 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        let merge_possible_matches = std::env::var("MERGE_POSSIBLE_MATCHES").is_ok();
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
+        let mut blocked_by_terminal: HashMap<GrammarTokenID, LLMTokenBV> = HashMap::new();
+        let tokenizer_dfa = self.tokenizer.dfa();
+        let has_future_in_same_greedy_group = |state_idx: usize, group_idx: usize| -> bool {
+            tokenizer_dfa
+                .states
+                .get(state_idx)
+                .map(|state| {
+                    state
+                        .possible_future_group_ids
+                        .iter()
+                        .any(|future_gid| {
+                            self.terminal_to_greedy_group
+                                .get(*future_gid)
+                                .and_then(|group| *group)
+                                == Some(group_idx)
+                        })
+                })
+                .unwrap_or(false)
+        };
+        let build_state_by_width =
+            |segment_bytes: &[u8], start_state: TokenizerStateID| -> Vec<Option<usize>> {
+                let mut states_by_width = vec![None; segment_bytes.len() + 1];
+                let mut curr_state = start_state.0;
+                states_by_width[0] = Some(curr_state);
+                for (idx, &byte) in segment_bytes.iter().enumerate() {
+                    let Some(state) = tokenizer_dfa.states.get(curr_state) else {
+                        break;
+                    };
+                    let Some(&next_state) = state.transitions.get(byte) else {
+                        break;
+                    };
+                    curr_state = next_state;
+                    states_by_width[idx + 1] = Some(curr_state);
+                }
+                states_by_width
+            };
+
+        // Include this node's own token only for terminals finalized at the current state.
+        // Suppress early emissions inside greedy groups when the same group can continue.
+        let own_token_id = vocab_node.token_id();
+        if vocab_node.reachable_token_ids().contains(own_token_id) {
+            if let Some(state) = tokenizer_dfa.states.get(tokenizer_state_id.0) {
+                for finalizer_gid in state.finalizers.iter() {
+                    let terminal_id = GrammarTokenID(finalizer_gid);
+                    if self.merge_possible_matches_by_group {
+                        if let Some(Some(group_idx)) =
+                            self.terminal_to_greedy_group.get(terminal_id.0)
+                        {
+                            if has_future_in_same_greedy_group(tokenizer_state_id.0, *group_idx) {
+                                for (blocked_tid, blocked_group) in
+                                    self.terminal_to_greedy_group.iter().enumerate()
+                                {
+                                    if *blocked_group == Some(*group_idx) {
+                                        blocked_by_terminal
+                                            .entry(GrammarTokenID(blocked_tid))
+                                            .or_insert_with(LLMTokenBV::zeros)
+                                            .set(own_token_id, true);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    result_map
+                        .entry(terminal_id)
+                        .or_insert_with(LLMTokenBV::zeros)
+                        .set(own_token_id, true);
+                }
+            }
+        }
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let exec_result =
                 self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
-                let applicable_tokens = child_vocab_node.reachable_token_ids();
-                *result_map
-                    .entry(grammar_token_id)
-                    .or_insert_with(LLMTokenBV::zeros) |=
-                    RangeSet::from(applicable_tokens);
-            }
-            if let Some(final_state_val) = exec_result.end_state {
+            let states_by_width = if self.merge_possible_matches_by_group && !exec_result.matches.is_empty() {
+                Some(build_state_by_width(&segment_bytes, tokenizer_state_id))
+                } else {
+                    None
+                };
+                for token in &exec_result.matches {
+                    let applicable_tokens = child_vocab_node.reachable_token_ids();
+                    let applicable_tokens_bv: LLMTokenBV = RangeSet::from(applicable_tokens);
+                    if self.merge_possible_matches_by_group {
+                        if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(token.id) {
+                            if let Some(state_idx) = states_by_width
+                                .as_ref()
+                                .and_then(|states| states.get(token.width))
+                                .and_then(|sid| *sid)
+                            {
+                                if has_future_in_same_greedy_group(state_idx, *group_idx) {
+                                    for (blocked_tid, blocked_group) in
+                                        self.terminal_to_greedy_group.iter().enumerate()
+                                    {
+                                        if *blocked_group == Some(*group_idx) {
+                                            *blocked_by_terminal
+                                                .entry(GrammarTokenID(blocked_tid))
+                                                .or_insert_with(LLMTokenBV::zeros) |=
+                                                applicable_tokens_bv.clone();
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    let grammar_token_id = GrammarTokenID(token.id);
+                    *result_map
+                        .entry(grammar_token_id)
+                        .or_insert_with(LLMTokenBV::zeros) |=
+                        applicable_tokens_bv;
+                }
+                if let Some(final_state_val) = exec_result.end_state {
                 let matches_possible_from_tokenizer_state: std::collections::BTreeSet<_> = self
                     .tokenizer
                     .tokens_accessible_from_state(TokenizerStateID(final_state_val))
@@ -1344,7 +1457,30 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        if merge_possible_matches && !result_map.is_empty() {
+        if self.merge_possible_matches_by_group && !result_map.is_empty() {
+            let mut group_merged: HashMap<usize, LLMTokenBV> = HashMap::new();
+            for (&tid, bv) in &result_map {
+                if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(tid.0) {
+                    group_merged
+                        .entry(*group_idx)
+                        .or_insert_with(LLMTokenBV::zeros)
+                        .bitor_assign(bv.clone());
+                }
+            }
+            for (tid, bv) in result_map.iter_mut() {
+                if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(tid.0) {
+                    if let Some(merged) = group_merged.get(group_idx) {
+                        *bv = merged.clone();
+                    }
+                }
+                if let Some(blocked) = blocked_by_terminal.get(tid) {
+                    *bv -= blocked;
+                }
+            }
+            result_map.retain(|_, bv| !bv.is_empty());
+        }
+
+        if self.merge_possible_matches_globally && !result_map.is_empty() {
             let mut merged = LLMTokenBV::zeros();
             for bv in result_map.values().cloned() {
                 merged |= bv;
@@ -1735,13 +1871,30 @@ impl<'r> Precomputer1<'r> {
                     let num_sources = nodes.len();
 
                     let slice = &segment_bytes[pos..];
-                    let exec_result = self
-                        .tokenizer
-                        .execute_from_state(slice, tokenizer_state_id);
+                      let exec_result = self
+                          .tokenizer
+                          .execute_from_state(slice, tokenizer_state_id);
+                      let states_by_width = {
+                          let tokenizer_dfa = self.tokenizer.dfa();
+                          let mut by_width = vec![None; slice.len() + 1];
+                          let mut curr_state = tokenizer_state_id.0;
+                          by_width[0] = Some(curr_state);
+                          for (idx, &byte) in slice.iter().enumerate() {
+                              let Some(state) = tokenizer_dfa.states.get(curr_state) else {
+                                  break;
+                              };
+                              let Some(&next_state) = state.transitions.get(byte) else {
+                                  break;
+                              };
+                              curr_state = next_state;
+                              by_width[idx + 1] = Some(curr_state);
+                          }
+                          by_width
+                      };
 
-                    crate::debug!(
-                        7,
-                        "  Tokenizer on {:?} from state {:?} (sources={}): matches={:?}, end_state={:?}",
+                      crate::debug!(
+                          7,
+                          "  Tokenizer on {:?} from state {:?} (sources={}): matches={:?}, end_state={:?}",
                         String::from_utf8_lossy(slice),
                         tokenizer_state_id,
                         num_sources,
@@ -1765,15 +1918,46 @@ impl<'r> Precomputer1<'r> {
 
                     let mut leaf_labels: Vec<Label> = Vec::new();
                     let mut cont_transitions: Vec<(Label, NWAStateID, Weight)> = Vec::new();
-                    let mut leaf_weight: Option<Weight> = None;
+                      let mut leaf_weight: Option<Weight> = None;
 
-                    // 1. Handle Matches -> Transitions to Initial State (per state_key)
-                    for match_info in &exec_result.matches {
-                        let terminal_id = GrammarTokenID(match_info.id);
-                        let Some(next_approx_state) = self.approx_step(approx_state, terminal_id) else {
-                            crate::debug!(7, "      -> Skip match (no approx DFA transition for terminal {})", terminal_id.0);
-                            continue;
-                        };
+                      // 1. Handle Matches -> Transitions to Initial State (per state_key)
+                      for match_info in &exec_result.matches {
+                          let terminal_id = GrammarTokenID(match_info.id);
+                          if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(terminal_id.0) {
+                              if let Some(state_idx) = states_by_width
+                                  .get(match_info.width)
+                                  .and_then(|sid| *sid)
+                              {
+                                  let should_suppress = self
+                                      .tokenizer
+                                      .dfa()
+                                      .states
+                                      .get(state_idx)
+                                      .map(|state| {
+                                          state.possible_future_group_ids.iter().any(|future_gid| {
+                                              self.terminal_to_greedy_group
+                                                  .get(*future_gid)
+                                                  .and_then(|group| *group)
+                                                  == Some(*group_idx)
+                                          })
+                                      })
+                                      .unwrap_or(false);
+                                  if should_suppress {
+                                      crate::debug!(
+                                          7,
+                                          "      -> Skip match (greedy continuation): terminal_id={}, width={}, state_after_match={}",
+                                          terminal_id.0,
+                                          match_info.width,
+                                          state_idx
+                                      );
+                                      continue;
+                                  }
+                              }
+                          }
+                          let Some(next_approx_state) = self.approx_step(approx_state, terminal_id) else {
+                              crate::debug!(7, "      -> Skip match (no approx DFA transition for terminal {})", terminal_id.0);
+                              continue;
+                          };
                         let next_pos = pos + match_info.width;
                         crate::debug!(7, "    Match: terminal_id={}, width={}, next_pos={}", terminal_id.0, match_info.width, next_pos);
 
@@ -1997,6 +2181,7 @@ pub fn run_precompute1(
     ignored_terminals: Arc<Vec<bool>>,
     allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
     always_allowed_by_label: Arc<Vec<Vec<Label>>>,
+    terminal_to_greedy_group: Vec<Option<usize>>,
 ) -> DWA {
     let _ = allowed_follows_by_label;
 
@@ -2029,6 +2214,7 @@ pub fn run_precompute1(
         }
     }
 
+    let setup_start = std::time::Instant::now();
     let mut helper = timeit!("precompute1::setup", {
         Precomputer1::new(
             tokenizer,
@@ -2043,16 +2229,23 @@ pub fn run_precompute1(
             self_extending_labels_for_collapse,
             ignored_terminals,
             always_allowed_by_label,
+            terminal_to_greedy_group,
         )
     });
+    eprintln!("PHASE_TIMING: precompute1::setup = {:?}", setup_start.elapsed());
 
+    let dfs_start = std::time::Instant::now();
     timeit!("precompute1::dfs", {
         helper.run_dfs();
     });
+    eprintln!("PHASE_TIMING: precompute1::dfs = {:?}", dfs_start.elapsed());
 
-    timeit!("precompute1::finish", {
+    let finish_start = std::time::Instant::now();
+    let result = timeit!("precompute1::finish", {
         helper.finish()
-    })
+    });
+    eprintln!("PHASE_TIMING: precompute1::finish = {:?}", finish_start.elapsed());
+    result
 }
 
 #[cfg(test)]
@@ -2101,6 +2294,7 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         None,
         ignored_terminals,
         always_allowed_by_label,
+        vec![None; terminals_count],
     );
 
     helper.run_dfs();
