@@ -145,13 +145,11 @@ exponentiation_expression ::= unary_expression ( '**' exponentiation_expression 
 
 unary_expression ::=
     postfix_expression
-  | '+' unary_expression
-  | '~' unary_expression
   | UNARY_OPERATOR unary_expression
   ;
 
 postfix_expression ::=
-    left_hand_side_expression ( '++' | '--' )?
+    left_hand_side_expression POSTFIX_OPERATOR?
   ;
 
 left_hand_side_expression ::=
@@ -240,7 +238,8 @@ RELATIONAL_OPERATOR ::= '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ;
 SHIFT_OPERATOR ::= '<<' | '>>' | '>>>' ;
 ADDITIVE_OPERATOR ::= '+' | '-' ;
 MULTIPLICATIVE_OPERATOR ::= '*' | '/' | '%' ;
-UNARY_OPERATOR ::= 'delete' | 'void' | 'typeof' | '++' | '--' | '-' | '!' | 'await' ;
+UNARY_OPERATOR ::= 'delete' | 'void' | 'typeof' | '++' | '--' | '+' | '-' | '~' | '!' | 'await' ;
+POSTFIX_OPERATOR ::= '++' | '--' ;
 
 // Literals
 literal ::=
