@@ -11,10 +11,10 @@ pub type LLMToken = Vec<u8>;
 // Use BTreeMap for compatibility with serialization
 pub type LLMTokenMap = BTreeMap<Vec<u8>, LLMTokenID>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct LLMTokenID(pub usize);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct TokenizerStateID(pub usize);
 
 // TODO: Just use Match and ExecutionResult in finite_automata.rs
@@ -36,7 +36,7 @@ pub struct ExecuteResult {
 /// interface for tokenization operations. While `Regex` is focused on pattern
 /// matching, `Tokenizer` represents the lexer component that produces terminal
 /// tokens for the GLR parser.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Tokenizer {
     inner: Regex,
 }

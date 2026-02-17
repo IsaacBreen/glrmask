@@ -22,7 +22,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 /// and the intermediate LLMVocabTrie (which maintained an unused trie structure).
 /// 
 /// Serializes as a flat `{hex: id}` dictionary which compresses well with gzip.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LLMVocabTrie {
     // NOTE: Named "Trie" for backward compatibility but is now just a simple Vec.
     // The name will be updated in a future refactor.
@@ -239,7 +239,7 @@ pub struct LLMVocab {
     pub max_original_llm_token_id: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StageVocab {
     pub original_to_internal: BTreeMap<usize, usize>,
     pub internal_to_original: BTreeMap<usize, LLMTokenBV>,
@@ -248,7 +248,7 @@ pub struct StageVocab {
     pub internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitVocab {
     pub representatives: Vec<Vec<u8>>,
     pub original_to_representative: Vec<u32>,

@@ -621,7 +621,7 @@ fn rangeset_from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>
 }
 
 /// Factorized weight representation as a union of (tsid_set × token_set) pairs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FactorizedWeight {
     pub(crate) pairs: Vec<(RangeSet, RangeSet)>,
     num_tsids: usize,

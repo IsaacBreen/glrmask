@@ -200,7 +200,7 @@ fn find_eos_token_id(vocab_trie: &LLMVocabTrie) -> Option<usize> {
 // Main structure
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GrammarConstraint {
     pub tokenizer: Tokenizer,
     pub parser: GLRParser,
@@ -247,6 +247,21 @@ pub struct GrammarConstraint {
 }
 
 impl GrammarConstraint {
+    /// Save GrammarConstraint to a binary cache file using bincode + LZ4 compression.
+    pub fn save_to_cache(&self, path: &std::path::Path) -> Result<(), String> {
+        let bytes = bincode::serialize(self).map_err(|e| format!("bincode serialize error: {}", e))?;
+        let compressed = lz4_flex::compress_prepend_size(&bytes);
+        std::fs::write(path, &compressed).map_err(|e| format!("write error: {}", e))?;
+        Ok(())
+    }
+
+    /// Load GrammarConstraint from a binary cache file.
+    pub fn load_from_cache(path: &std::path::Path) -> Result<Self, String> {
+        let compressed = std::fs::read(path).map_err(|e| format!("read error: {}", e))?;
+        let bytes = lz4_flex::decompress_size_prepended(&compressed).map_err(|e| format!("lz4 decompress error: {}", e))?;
+        bincode::deserialize(&bytes).map_err(|e| format!("bincode deserialize error: {}", e))
+    }
+
     /// Backward compatibility accessor for precomputed4
     #[deprecated(since = "0.3.0", note = "Use parser_dwa instead")]
     pub fn precomputed4(&self) -> &ParserDWA {

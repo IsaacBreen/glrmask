@@ -3,7 +3,7 @@ use json_convertible_derive::JSONConvertible;
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct NonTerminal(pub String);
 
 impl From<&str> for NonTerminal {
@@ -18,7 +18,7 @@ impl Display for NonTerminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Terminal {
     RegexName(String),
     Literal(Vec<u8>),
@@ -132,13 +132,13 @@ impl Terminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub enum Symbol {
     Terminal(Terminal),
     NonTerminal(NonTerminal),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, JSONConvertible)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,

@@ -9,7 +9,7 @@ use std::ops::{Index, IndexMut};
 ///
 /// Internally this is just a `Vec<(u8, T)>`. All operations are linear in the
 /// number of entries, but in DFA states this number is typically tiny.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct CharTransitions<T> {
     entries: Vec<(u8, T)>,
 }

@@ -717,6 +717,24 @@ impl PyGrammarConstraint {
         Ok(self.inner.to_json().to_json_string())
     }
 
+    /// Save GrammarConstraint to a binary cache file for fast loading.
+    fn save_cache(&self, path: &str) -> PyResult<()> {
+        self.inner.save_to_cache(std::path::Path::new(path)).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to save cache: {}", e))
+        })
+    }
+
+    /// Load GrammarConstraint from a binary cache file.
+    #[staticmethod]
+    fn load_cache(path: &str) -> PyResult<Self> {
+        let constraint = GrammarConstraint::load_from_cache(std::path::Path::new(path)).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to load cache: {}", e))
+        })?;
+        Ok(Self {
+            inner: Arc::new(constraint),
+        })
+    }
+
     #[staticmethod]
     fn from_json_string(json_str: &str) -> PyResult<Self> {
         let json_node = JSONNode::from_json_string(json_str).map_err(|e| {

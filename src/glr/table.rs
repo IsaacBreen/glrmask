@@ -245,7 +245,7 @@ struct Stage1Entry {
 
 pub type Table = BTreeMap<StateID, Row>;
 
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum Stage7ShiftsAndReducesLookaheadValue {
     Shift(StateID),
     Reduce {
@@ -408,7 +408,7 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
 
 pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     shifts_and_reduces_full: ShiftsAndReducesFull,
     pub default_reduce: Option<Stage7ShiftsAndReducesLookaheadValue>,
@@ -587,7 +587,7 @@ impl JSONConvertible for Row {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Goto {
     pub state_id: Option<StateID>,
     pub accept: bool,
@@ -613,13 +613,13 @@ impl JSONConvertible for Goto {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct StateID(pub usize);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct ProductionID(pub usize);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct NonTerminalID(pub usize);
 
 #[time_it]

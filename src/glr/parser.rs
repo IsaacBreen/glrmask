@@ -106,7 +106,7 @@ impl ParseState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct GLRParser {
     pub table: Table,
     pub productions: Vec<Production>,
@@ -118,6 +118,7 @@ pub struct GLRParser {
     /// Set of terminal IDs to ignore (skip without consuming).
     /// These are typically whitespace-like terminals that are always optional.
     pub ignore_terminal_ids: HashSet<TerminalID>,
+    #[serde(skip)]
     pub actions: BTreeMap<crate::glr::table::NonTerminalID, ActionFn>,
 }
 

@@ -1,7 +1,7 @@
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
 
-#[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize)]
 pub struct U8Set {
     pub(crate) x: u128,
     pub(crate) y: u128,

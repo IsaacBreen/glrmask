@@ -287,6 +287,37 @@ pub struct RangeMapWeight {
     cached_hash: u64,
 }
 
+impl serde::Serialize for RangeMapWeight {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // Serialize map as vec of (start, end, tsid_set) entries
+        let entries: Vec<(usize, usize, &RangeSet)> = self.map.range_values()
+            .map(|(r, v)| (*r.start(), *r.end(), v))
+            .collect();
+        let mut s = serializer.serialize_struct("RangeMapWeight", 2)?;
+        s.serialize_field("entries", &entries)?;
+        s.serialize_field("num_tsids", &self.num_tsids)?;
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RangeMapWeight {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct RangeMapWeightProxy {
+            entries: Vec<(usize, usize, RangeSet)>,
+            num_tsids: usize,
+        }
+        let proxy = RangeMapWeightProxy::deserialize(deserializer)?;
+        let mut map = RangeMapBlaze::new();
+        for (start, end, tsid_set) in proxy.entries {
+            map.ranges_insert(start..=end, tsid_set);
+        }
+        let cached_hash = Self::compute_hash(&map, proxy.num_tsids);
+        Ok(RangeMapWeight { map, num_tsids: proxy.num_tsids, cached_hash })
+    }
+}
+
 impl RangeMapWeight {
     fn tsid_outer_enabled() -> bool {
         *RANGEMAP_TSID_OUTER

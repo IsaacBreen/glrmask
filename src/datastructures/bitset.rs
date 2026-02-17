@@ -12,7 +12,7 @@ use std::ops::{
 const WORD_SIZE: usize = 64;
 
 /// A bitset implementation using a vector of u64s.
-#[derive(Default, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Default, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Bitset {
     pub(crate) words: Vec<u64>,
 }

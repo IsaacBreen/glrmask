@@ -2,7 +2,7 @@ use crate::glr::grammar::{Production, Symbol};
 use json_convertible_derive::JSONConvertible;
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     /// Index into the `productions` array passed around the parser generator.
     pub production_id: usize,

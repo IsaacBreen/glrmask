@@ -10,14 +10,17 @@ edition = "2021"
 hashbrown = "0.14"
 smallvec = "1.13"
 indicatif = "0.17"
-bimap = "0.6.3"
+bimap = { version = "0.6.3", features = ["serde"] }
 regex = "1.11.1"
 fixedbitset = "0.5.7"
 bitvec = "1.0.1"
 kdam = "0.6.0"
 keyed_priority_queue = "0.4.2"
 biodivine-lib-bdd = "0.6.2"
-serde = { version = "1.0.219", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive", "rc"] }
+bincode = "1"
+lz4_flex = "0.11"
+rmp-serde = "1"
 clap = { version = "4.5.4", features = ["derive"] }
 serde_json = { version = "1.0.148", features = ["unbounded_depth", "preserve_order"] }
 chrono = "0.4.41"

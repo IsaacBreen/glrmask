@@ -195,6 +195,30 @@ pub struct RangeSet {
     pub(crate) inner: Arc<RangeSetBlaze<usize>>,
 }
 
+impl serde::Serialize for RangeSet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let ranges: Vec<_> = self.inner.ranges().collect();
+        let mut seq = serializer.serialize_seq(Some(ranges.len() * 2))?;
+        for range in ranges {
+            seq.serialize_element(range.start())?;
+            seq.serialize_element(range.end())?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RangeSet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let flat: Vec<usize> = Vec::deserialize(deserializer)?;
+        let ranges: Vec<_> = flat.chunks(2)
+            .filter_map(|c| if c.len() == 2 { Some(c[0]..=c[1]) } else { None })
+            .collect();
+        let inner = RangeSetBlaze::from_iter(ranges);
+        Ok(RangeSet { inner: Arc::new(inner) })
+    }
+}
+
 impl JSONConvertible for RangeSet {
     fn to_json(&self) -> JSONNode {
         // Flattened array format: [start1, end1, start2, end2, ...]

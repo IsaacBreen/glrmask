@@ -20,7 +20,7 @@ impl Display for DWABuildError {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DWAState {
     pub transitions: BTreeMap<Label, StateID>,
     pub final_weight: Option<Weight>,
@@ -50,7 +50,7 @@ impl DWAState {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DWAStates(pub Vec<DWAState>);
 
 impl Index<usize> for DWAStates {
@@ -126,12 +126,12 @@ impl DWAStates {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DWABody {
     pub start_state: StateID,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DWA {
     pub states: DWAStates,
     pub body: DWABody,

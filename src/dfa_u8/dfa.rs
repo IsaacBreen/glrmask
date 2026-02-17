@@ -124,7 +124,7 @@ impl JSONConvertible for NFA {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct DFAState {
     pub transitions: CharTransitions<usize>,
     pub finalizers: DenseStateSet,
@@ -170,7 +170,7 @@ impl JSONConvertible for DFAState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct DFA {
     pub states: Vec<DFAState>,
     pub start_state: usize,
@@ -305,7 +305,7 @@ impl JSONConvertible for DFA {
 }
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
-#[derive(Debug, Clone, PartialEq, Eq, JSONConvertible)]
+#[derive(Debug, Clone, PartialEq, Eq, JSONConvertible, serde::Serialize, serde::Deserialize)]
 pub struct Regex {
     pub dfa: DFA,
 }
