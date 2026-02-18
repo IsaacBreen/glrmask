@@ -224,9 +224,6 @@ pub struct GrammarConstraint {
     /// Tokenizer state -> grammar terminal -> internal LLM token bitset.
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 
-    #[serde(default)]
-    pub terminal_to_greedy_group: Vec<Option<usize>>,
-
     /// Vocabulary mappings for the Parser DWA stage.
     pub parser_dwa_vocab: StageVocab,
 
@@ -283,7 +280,6 @@ impl GrammarConstraint {
         // Note: parser_dwa is skipped as it may differ due to runtime computation
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
-        assert_eq!(self.terminal_to_greedy_group, other.terminal_to_greedy_group);
         assert_eq!(self.parser_dwa_vocab, other.parser_dwa_vocab);
         assert_eq!(self.vocab_trie, other.vocab_trie);
         assert_eq!(self.eos_token_id, other.eos_token_id);
@@ -371,7 +367,6 @@ struct GrammarConstraintJSON {
     parser: GLRParser,
     token_name_map: BiBTreeMap<Terminal, usize>,
     possible_matches: PossibleMatchesJSON,
-    terminal_to_greedy_group: Option<Vec<Option<usize>>>,
     /// New trie-based vocab format (preferred)
     vocab_trie: Option<LLMVocabTrie>,
     /// Legacy commit_vocab format (for backward compatibility)
@@ -397,12 +392,6 @@ impl JSONConvertible for GrammarConstraintJSON {
         obj.insert("parser".to_string(), self.parser.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
-        if let Some(ref terminal_to_greedy_group) = self.terminal_to_greedy_group {
-            obj.insert(
-                "terminal_to_greedy_group".to_string(),
-                terminal_to_greedy_group.to_json(),
-            );
-        }
         
         // Only serialize non-None optional fields
         if let Some(ref trie) = self.vocab_trie {
@@ -452,14 +441,6 @@ impl JSONConvertible for GrammarConstraintJSON {
                     possible_matches: JSONConvertible::from_json(
                         obj.get("possible_matches").ok_or("Missing possible_matches")?.clone()
                     )?,
-                    terminal_to_greedy_group: obj.get("terminal_to_greedy_group")
-                        .and_then(|n| {
-                            if matches!(n, JSONNode::Null) {
-                                None
-                            } else {
-                                Vec::<Option<usize>>::from_json(n.clone()).ok()
-                            }
-                        }),
                     // Optional fields
                     vocab_trie: obj.get("vocab_trie")
                         .map(|n| LLMVocabTrie::from_json(n.clone()))
@@ -513,11 +494,6 @@ impl JSONConvertible for GrammarConstraint {
             parser: self.parser.clone(),
             token_name_map: self.token_name_map.clone(),
             possible_matches: PossibleMatchesJSON::from_possible_matches(&self.possible_matches),
-            terminal_to_greedy_group: if self.terminal_to_greedy_group.is_empty() {
-                None
-            } else {
-                Some(self.terminal_to_greedy_group.clone())
-            },
             // Serialize the new trie format
             vocab_trie: Some((*self.vocab_trie).clone()),
             // Don't serialize the legacy format anymore
@@ -574,7 +550,6 @@ impl JSONConvertible for GrammarConstraint {
         );
 
         let eos_token_id = find_eos_token_id(&vocab_trie);
-        let parser_terminal_count = intermediate.parser.terminal_map.len();
 
         #[allow(deprecated)]
         Ok(GrammarConstraint {
@@ -585,9 +560,6 @@ impl JSONConvertible for GrammarConstraint {
             commit_vocab,
             token_name_map: intermediate.token_name_map,
             possible_matches,
-            terminal_to_greedy_group: intermediate
-                .terminal_to_greedy_group
-                .unwrap_or_else(|| vec![None; parser_terminal_count]),
             parser_dwa_vocab: intermediate.vocab,
             eos_token_id,
             num_tsids: intermediate.num_tsids,
@@ -1755,7 +1727,7 @@ impl GrammarConstraint {
                 ignored_terminals.clone(),
                 allowed_follows_by_label.clone(),
                 always_allowed_by_label.clone(),
-                terminal_to_greedy_group.clone(),
+                terminal_to_greedy_group,
             )
         });
         crate::timing!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());
@@ -3440,7 +3412,6 @@ impl GrammarConstraint {
                 parser,
                 parser_dwa: terminal_dwa,
                 possible_matches: possible_matches_precompute1,
-                terminal_to_greedy_group: terminal_to_greedy_group.clone(),
                 vocab_trie,
                 commit_vocab,
                 token_name_map,
@@ -3679,7 +3650,6 @@ impl GrammarConstraint {
             parser,
             parser_dwa,
             possible_matches: possible_matches_precompute1,
-            terminal_to_greedy_group,
             vocab_trie,
             commit_vocab,
             token_name_map,
@@ -3701,24 +3671,6 @@ impl GrammarConstraint {
     /// Check if this constraint is in weight-heavy mode.
     pub fn is_weight_heavy(&self) -> bool {
         self.num_tsids > 0
-    }
-
-    pub(crate) fn mutually_greedy_group_terminals(&self, terminal_id: usize) -> Vec<usize> {
-        let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(terminal_id) else {
-            return vec![terminal_id];
-        };
-
-        self.terminal_to_greedy_group
-            .iter()
-            .enumerate()
-            .filter_map(|(tid, group)| {
-                if *group == Some(*group_idx) {
-                    Some(tid)
-                } else {
-                    None
-                }
-            })
-            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -4144,27 +4096,6 @@ impl<'a> Display for GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
-    pub(crate) fn mutually_greedy_group(&self, terminal_id: &usize) -> Vec<usize> {
-        self.parent.mutually_greedy_group_terminals(*terminal_id)
-    }
-
-    pub(crate) fn expand_disallowed_with_mutually_greedy_groups(
-        &self,
-        disallowed_in_state: &BTreeSet<usize>,
-    ) -> BTreeSet<usize> {
-        if self.parent.terminal_to_greedy_group.is_empty() {
-            return disallowed_in_state.clone();
-        }
-
-        let mut expanded = disallowed_in_state.clone();
-        for terminal_id in disallowed_in_state {
-            for grouped_terminal in self.mutually_greedy_group(terminal_id) {
-                expanded.insert(grouped_terminal);
-            }
-        }
-        expanded
-    }
-
     pub(crate) fn transform_gss_stacks<M, F>(&mut self, mut f: F)
     where
         M: Default,
@@ -4210,9 +4141,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
             let mut terminals = TerminalBV::zeros();
             for token in exec_result.matches {
-                for terminal in self.mutually_greedy_group(&token.id) {
-                    terminals.insert(terminal);
-                }
+                terminals.insert(token.id);
             }
             terminals_map.insert(*tokenizer_state_id, terminals);
         }

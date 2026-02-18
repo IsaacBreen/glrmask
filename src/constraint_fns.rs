@@ -188,11 +188,9 @@ impl<'a> GrammarConstraintState<'a> {
                         // Subtract forbidden tokens based on disallowed terminals
                         for (&tsid, disallowed_in_state) in terminals_disallowed {
                             if disallowed_in_state.is_empty() { continue; }
-                            let expanded_disallowed =
-                                self.expand_disallowed_with_mutually_greedy_groups(disallowed_in_state);
                             if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tsid)) {
                                 for (terminal_id, llm_tokens) in state_matches {
-                                    if expanded_disallowed.contains(&terminal_id.0) {
+                                    if disallowed_in_state.contains(&terminal_id.0) {
                                         allowed = &allowed - llm_tokens.inner.as_ref();
                                     }
                                 }
@@ -365,11 +363,9 @@ impl<'a> GrammarConstraintState<'a> {
                     // Subtract forbidden tokens based on disallowed terminals
                     for (&ts_id, disallowed_in_state) in terminals_disallowed {
                         if disallowed_in_state.is_empty() { continue; }
-                        let expanded_disallowed =
-                            self.expand_disallowed_with_mutually_greedy_groups(disallowed_in_state);
                         if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
                             for (terminal_id, llm_tokens) in state_matches {
-                                if expanded_disallowed.contains(&terminal_id.0) {
+                                if disallowed_in_state.contains(&terminal_id.0) {
                                     allowed_n = &allowed_n - llm_tokens.inner.as_ref();
                                 }
                             }
