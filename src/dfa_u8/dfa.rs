@@ -177,6 +177,24 @@ pub struct DFA {
     pub non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnhancedDFAState {
+    transitions: CharTransitions<usize>,
+    finalizer_to_state: BTreeMap<GroupID, usize>,
+    possible_future_group_ids: BTreeSet<GroupID>,
+    group_id_to_u8set: BTreeMap<GroupID, U8Set>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnhancedDFA {
+    states: Vec<EnhancedDFAState>,
+    start_state: usize,
+    original_start_state: usize,
+    dummy_super_start: Option<usize>,
+    dummy_entry_count: usize,
+    non_greedy_finalizers: BTreeSet<GroupID>,
+}
+
 /// Compact transition entry: (U8Set, target_state)
 /// Groups all input bytes that lead to the same target state.
 #[derive(Debug, Clone, JSONConvertible)]
@@ -636,6 +654,27 @@ pub struct TokenizerBuildTimings {
     pub dfa_states: usize,
     pub dfa_transitions: usize,
     pub dfa_unique_pairs: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+struct EnhancedDfaExperimentStats {
+    total_time: std::time::Duration,
+    build_b_time: std::time::Duration,
+    difference_time: std::time::Duration,
+    enhanced_minimize_time: std::time::Duration,
+    base_states: usize,
+    base_transitions: usize,
+    base_finalizer_edges: usize,
+    per_state_differences_built: usize,
+    appended_copies: usize,
+    appended_states_total: usize,
+    appended_transitions_total: usize,
+    enhanced_states_before_minimize: usize,
+    enhanced_transitions_before_minimize: usize,
+    enhanced_finalizer_edges_before_minimize: usize,
+    enhanced_states_after_minimize: usize,
+    enhanced_transitions_after_minimize: usize,
+    enhanced_finalizer_edges_after_minimize: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1134,6 +1173,30 @@ impl ExprGroups {
             crate::time!("minimize_dfa", dfa.minimize());
             minimize_time = minimize_start.elapsed();
             crate::debug!(5, "Minimized DFA in {:.2?}", minimize_time);
+        }
+
+        if env_flag_enabled("ENHANCED_DFA_EXPERIMENT", true) {
+            let enhanced_stats = run_enhanced_dfa_experiment(&dfa);
+            eprintln!(
+                "ENHANCED_DFA_EXPERIMENT total={:.2?} base_states={} base_transitions={} base_finalizer_edges={} diffs={} copies={} appended_states={} appended_transitions={} enhanced_states_before={} enhanced_states_after={} enhanced_transitions_before={} enhanced_transitions_after={} enhanced_edges_before={} enhanced_edges_after={} build_b={:.2?} diff={:.2?} enhanced_min={:.2?}",
+                enhanced_stats.total_time,
+                enhanced_stats.base_states,
+                enhanced_stats.base_transitions,
+                enhanced_stats.base_finalizer_edges,
+                enhanced_stats.per_state_differences_built,
+                enhanced_stats.appended_copies,
+                enhanced_stats.appended_states_total,
+                enhanced_stats.appended_transitions_total,
+                enhanced_stats.enhanced_states_before_minimize,
+                enhanced_stats.enhanced_states_after_minimize,
+                enhanced_stats.enhanced_transitions_before_minimize,
+                enhanced_stats.enhanced_transitions_after_minimize,
+                enhanced_stats.enhanced_finalizer_edges_before_minimize,
+                enhanced_stats.enhanced_finalizer_edges_after_minimize,
+                enhanced_stats.build_b_time,
+                enhanced_stats.difference_time,
+                enhanced_stats.enhanced_minimize_time,
+            );
         }
 
         if let Some(timings) = timings.as_mut() {
@@ -3065,6 +3128,154 @@ impl DFA {
         }
     }
 
+    fn transition_count(&self) -> usize {
+        self.states.iter().map(|s| s.transitions.len()).sum()
+    }
+
+    fn finalizer_edge_count(&self) -> usize {
+        self.states.iter().map(|s| s.finalizers.len()).sum()
+    }
+
+    fn language_accepting_finalizers(is_accepting: bool) -> DenseStateSet {
+        let mut finalizers = DenseStateSet::empty();
+        if is_accepting {
+            finalizers.insert(0);
+        }
+        finalizers
+    }
+
+    fn as_language_dfa(&self) -> DFA {
+        let mut dfa = self.clone();
+        dfa.non_greedy_finalizers.clear();
+
+        for state in &mut dfa.states {
+            state.finalizers = Self::language_accepting_finalizers(!state.finalizers.is_empty());
+            state.possible_future_group_ids.clear();
+            state.group_id_to_u8set.clear();
+        }
+
+        dfa
+    }
+
+    fn totalize_with_sink(&mut self) {
+        if self.states.is_empty() {
+            return;
+        }
+
+        let needs_sink = self
+            .states
+            .iter()
+            .any(|state| state.transitions.len() < 256);
+        if !needs_sink {
+            return;
+        }
+
+        let sink_state_id = self.states.len();
+        let mut sink_transitions = CharTransitions::new();
+        for byte in u8::MIN..=u8::MAX {
+            sink_transitions.insert(byte, sink_state_id);
+        }
+
+        self.states.push(DFAState {
+            transitions: sink_transitions,
+            finalizers: DenseStateSet::empty(),
+            possible_future_group_ids: BTreeSet::new(),
+            group_id_to_u8set: BTreeMap::new(),
+        });
+
+        for state_idx in 0..sink_state_id {
+            for byte in u8::MIN..=u8::MAX {
+                if !self.states[state_idx].transitions.contains_key(byte) {
+                    self.states[state_idx].transitions.insert(byte, sink_state_id);
+                }
+            }
+        }
+    }
+
+    fn complement_language(&self) -> DFA {
+        let mut complemented = self.as_language_dfa();
+        complemented.totalize_with_sink();
+
+        for state in &mut complemented.states {
+            let is_accepting = !state.finalizers.is_empty();
+            state.finalizers = Self::language_accepting_finalizers(!is_accepting);
+            state.possible_future_group_ids.clear();
+            state.group_id_to_u8set.clear();
+        }
+
+        complemented
+    }
+
+    fn intersection_language(left: &DFA, right: &DFA) -> DFA {
+        let mut left_total = left.as_language_dfa();
+        let mut right_total = right.as_language_dfa();
+        left_total.totalize_with_sink();
+        right_total.totalize_with_sink();
+
+        let mut pair_to_state: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut worklist: VecDeque<(usize, usize)> = VecDeque::new();
+        let mut states: Vec<DFAState> = Vec::new();
+
+        let start_pair = (left_total.start_state, right_total.start_state);
+        pair_to_state.insert(start_pair, 0);
+        worklist.push_back(start_pair);
+
+        let start_accepting = !left_total.states[start_pair.0].finalizers.is_empty()
+            && !right_total.states[start_pair.1].finalizers.is_empty();
+        states.push(DFAState {
+            transitions: CharTransitions::new(),
+            finalizers: Self::language_accepting_finalizers(start_accepting),
+            possible_future_group_ids: BTreeSet::new(),
+            group_id_to_u8set: BTreeMap::new(),
+        });
+
+        while let Some((left_state, right_state)) = worklist.pop_front() {
+            let state_idx = pair_to_state[&(left_state, right_state)];
+            let mut transitions = CharTransitions::new();
+
+            for byte in u8::MIN..=u8::MAX {
+                let next_left = *left_total.states[left_state]
+                    .transitions
+                    .get(byte)
+                    .expect("totalized DFA missing transition");
+                let next_right = *right_total.states[right_state]
+                    .transitions
+                    .get(byte)
+                    .expect("totalized DFA missing transition");
+                let next_pair = (next_left, next_right);
+
+                let next_state_id = if let Some(existing) = pair_to_state.get(&next_pair) {
+                    *existing
+                } else {
+                    let new_state_id = states.len();
+                    pair_to_state.insert(next_pair, new_state_id);
+                    worklist.push_back(next_pair);
+
+                    let is_accepting = !left_total.states[next_left].finalizers.is_empty()
+                        && !right_total.states[next_right].finalizers.is_empty();
+                    states.push(DFAState {
+                        transitions: CharTransitions::new(),
+                        finalizers: Self::language_accepting_finalizers(is_accepting),
+                        possible_future_group_ids: BTreeSet::new(),
+                        group_id_to_u8set: BTreeMap::new(),
+                    });
+
+                    new_state_id
+                };
+
+                transitions.insert(byte, next_state_id);
+            }
+
+            states[state_idx].transitions = transitions;
+        }
+
+        DFA {
+            states,
+            start_state: 0,
+            non_greedy_finalizers: BTreeSet::new(),
+        }
+    }
+
     pub fn compute_possible_future_group_ids(&mut self) {
         for state in &mut self.states {
             state.possible_future_group_ids = BTreeSet::new();
@@ -3246,8 +3457,9 @@ impl DFA {
             }
         }
 
+        let new_start_state = state_mapping[self.start_state];
         self.states = new_states;
-        self.start_state = 0;
+        self.start_state = new_start_state;
     }
 
     fn minimize(&mut self) {
@@ -3491,6 +3703,494 @@ impl DFA {
         }
 
         (state_mapping, new_states)
+    }
+}
+
+impl EnhancedDFA {
+    fn from_base_dfa(base: &DFA) -> Self {
+        let states = base
+            .states
+            .iter()
+            .map(|state| EnhancedDFAState {
+                transitions: state.transitions.clone(),
+                finalizer_to_state: BTreeMap::new(),
+                possible_future_group_ids: state.possible_future_group_ids.clone(),
+                group_id_to_u8set: state.group_id_to_u8set.clone(),
+            })
+            .collect();
+
+        Self {
+            states,
+            start_state: base.start_state,
+            original_start_state: base.start_state,
+            dummy_super_start: None,
+            dummy_entry_count: 0,
+            non_greedy_finalizers: base.non_greedy_finalizers.clone(),
+        }
+    }
+
+    fn empty_state() -> EnhancedDFAState {
+        EnhancedDFAState {
+            transitions: CharTransitions::new(),
+            finalizer_to_state: BTreeMap::new(),
+            possible_future_group_ids: BTreeSet::new(),
+            group_id_to_u8set: BTreeMap::new(),
+        }
+    }
+
+    fn transition_count(&self) -> usize {
+        self.states.iter().map(|s| s.transitions.len()).sum()
+    }
+
+    fn finalizer_edge_count(&self) -> usize {
+        self.states.iter().map(|s| s.finalizer_to_state.len()).sum()
+    }
+
+    fn append_dfa_copy(&mut self, dfa: &DFA) -> usize {
+        let offset = self.states.len();
+
+        for state in &dfa.states {
+            let remapped_transitions = state
+                .transitions
+                .iter()
+                .map(|(input, &target)| (input, target + offset))
+                .collect();
+
+            self.states.push(EnhancedDFAState {
+                transitions: remapped_transitions,
+                finalizer_to_state: BTreeMap::new(),
+                possible_future_group_ids: state.possible_future_group_ids.clone(),
+                group_id_to_u8set: state.group_id_to_u8set.clone(),
+            });
+        }
+
+        offset + dfa.start_state
+    }
+
+    fn ensure_dummy_super_start(&mut self) -> usize {
+        if let Some(super_start) = self.dummy_super_start {
+            return super_start;
+        }
+
+        let super_start = self.states.len();
+        self.states.push(Self::empty_state());
+        self.states[super_start]
+            .transitions
+            .insert(0, self.original_start_state);
+        self.start_state = super_start;
+        self.dummy_super_start = Some(super_start);
+        super_start
+    }
+
+    fn encode_dummy_entry_index(mut index: usize) -> Vec<u8> {
+        // Base-255 encoding with digits in [1, 255] (reserving byte 0 for
+        // "enter target" / original-start transitions).
+        index += 1;
+        let mut bytes = Vec::new();
+        while index > 0 {
+            let digit = ((index - 1) % 255) + 1;
+            bytes.push(digit as u8);
+            index = (index - 1) / 255;
+        }
+        bytes.reverse();
+        bytes
+    }
+
+    fn add_dummy_entry_path(&mut self, target_state: usize) -> usize {
+        let super_start = self.ensure_dummy_super_start();
+        let path_bytes = Self::encode_dummy_entry_index(self.dummy_entry_count);
+        self.dummy_entry_count += 1;
+
+        let mut current = super_start;
+        for byte in path_bytes {
+            let next_state = if let Some(&existing) = self.states[current].transitions.get(byte) {
+                existing
+            } else {
+                let new_state = self.states.len();
+                self.states.push(Self::empty_state());
+                self.states[current].transitions.insert(byte, new_state);
+                new_state
+            };
+            current = next_state;
+        }
+
+        self.states[current].transitions.insert(0, target_state);
+        current
+    }
+
+    fn remove_unreachable_states(&mut self) {
+        if self.states.is_empty() {
+            return;
+        }
+
+        let mut reachable = vec![false; self.states.len()];
+        let mut queue = vec![self.start_state];
+        reachable[self.start_state] = true;
+
+        while let Some(state) = queue.pop() {
+            for &next_state in self.states[state].transitions.values() {
+                if !reachable[next_state] {
+                    reachable[next_state] = true;
+                    queue.push(next_state);
+                }
+            }
+
+            for &next_state in self.states[state].finalizer_to_state.values() {
+                if !reachable[next_state] {
+                    reachable[next_state] = true;
+                    queue.push(next_state);
+                }
+            }
+        }
+
+        let mut state_mapping = vec![0; self.states.len()];
+        let mut new_index = 0;
+        for (old_index, &is_reachable) in reachable.iter().enumerate() {
+            if is_reachable {
+                state_mapping[old_index] = new_index;
+                new_index += 1;
+            }
+        }
+
+        let mut new_states = Vec::new();
+        for (old_index, state) in self.states.iter().enumerate() {
+            if reachable[old_index] {
+                let mut new_state = state.clone();
+                new_state.transitions = new_state
+                    .transitions
+                    .iter()
+                    .map(|(u8, &next)| (u8, state_mapping[next]))
+                    .collect();
+                new_state.finalizer_to_state = new_state
+                    .finalizer_to_state
+                    .iter()
+                    .map(|(&group_id, &target)| (group_id, state_mapping[target]))
+                    .collect();
+                new_states.push(new_state);
+            }
+        }
+
+        let new_start_state = state_mapping[self.start_state];
+        self.states = new_states;
+        self.start_state = new_start_state;
+    }
+
+    fn minimize(&mut self) {
+        let instant = std::time::Instant::now();
+        if self.states.is_empty() {
+            return;
+        }
+
+        let initial_states = self.states.len();
+        self.remove_unreachable_states();
+        let n = self.states.len();
+        if n <= 1 {
+            crate::debug!(
+                3,
+                "Minimized enhanced DFA {} → {} states in {:.2?}",
+                initial_states,
+                n,
+                instant.elapsed()
+            );
+            return;
+        }
+
+        use rustc_hash::FxHashMap;
+
+        let mut inverse: Vec<Vec<(u8, u32)>> = vec![Vec::new(); n];
+        for (src, state) in self.states.iter().enumerate() {
+            for (input, &target) in &state.transitions {
+                inverse[target].push((input, src as u32));
+            }
+        }
+        for inv in &mut inverse {
+            inv.sort_unstable_by_key(|&(input, _)| input);
+        }
+
+        let mut partition = vec![0u32; n];
+        let mut blocks: Vec<Vec<u32>> = Vec::new();
+
+        let referenced_targets: BTreeSet<usize> = self
+            .states
+            .iter()
+            .flat_map(|state| state.finalizer_to_state.values().copied())
+            .collect();
+
+        {
+            let mut finalizer_map_to_block: FxHashMap<(Option<usize>, Vec<(GroupID, usize)>), u32> = FxHashMap::default();
+            for (state_idx, state) in self.states.iter().enumerate() {
+                let key: Vec<(GroupID, usize)> = state
+                    .finalizer_to_state
+                    .iter()
+                    .map(|(&group_id, &target)| (group_id, target))
+                    .collect();
+                let protection_key = if referenced_targets.contains(&state_idx) {
+                    Some(state_idx)
+                } else {
+                    None
+                };
+                let block_idx = *finalizer_map_to_block.entry((protection_key, key)).or_insert_with(|| {
+                    let idx = blocks.len() as u32;
+                    blocks.push(Vec::new());
+                    idx
+                });
+                partition[state_idx] = block_idx;
+                blocks[block_idx as usize].push(state_idx as u32);
+            }
+        }
+
+        let mut worklist: VecDeque<u32> = (0..blocks.len() as u32).collect();
+        let mut in_worklist = vec![true; blocks.len()];
+
+        let mut source_set = vec![false; n];
+        let mut sources_to_clear: Vec<u32> = Vec::with_capacity(n.min(10_000));
+        let mut touched_blocks: Vec<u32> = Vec::with_capacity(1024);
+        let mut block_touched = vec![false; blocks.len()];
+
+        while let Some(splitter_block) = worklist.pop_front() {
+            let splitter_idx = splitter_block as usize;
+            if splitter_idx >= in_worklist.len() {
+                continue;
+            }
+            in_worklist[splitter_idx] = false;
+
+            if splitter_idx >= blocks.len() || blocks[splitter_idx].is_empty() {
+                continue;
+            }
+            let splitter_states = blocks[splitter_idx].clone();
+
+            let mut all_pairs: Vec<(u8, u32)> = Vec::new();
+            for &target in &splitter_states {
+                all_pairs.extend_from_slice(&inverse[target as usize]);
+            }
+
+            if all_pairs.is_empty() {
+                continue;
+            }
+
+            all_pairs.sort_unstable_by_key(|&(input, _)| input);
+
+            let mut i = 0;
+            while i < all_pairs.len() {
+                let current_input = all_pairs[i].0;
+
+                sources_to_clear.clear();
+                while i < all_pairs.len() && all_pairs[i].0 == current_input {
+                    let src = all_pairs[i].1;
+                    if !source_set[src as usize] {
+                        source_set[src as usize] = true;
+                        sources_to_clear.push(src);
+
+                        let block_id = partition[src as usize] as usize;
+                        if block_id < block_touched.len() && !block_touched[block_id] {
+                            block_touched[block_id] = true;
+                            touched_blocks.push(block_id as u32);
+                        }
+                    }
+                    i += 1;
+                }
+
+                for &block_id in &touched_blocks {
+                    let block_idx = block_id as usize;
+                    if block_idx >= blocks.len() {
+                        continue;
+                    }
+                    let block_len = blocks[block_idx].len();
+                    if block_len <= 1 {
+                        continue;
+                    }
+
+                    let mut source_count = 0usize;
+                    for &state in &blocks[block_idx] {
+                        if source_set[state as usize] {
+                            source_count += 1;
+                        }
+                    }
+
+                    if source_count == 0 || source_count == block_len {
+                        continue;
+                    }
+
+                    let new_block_idx = blocks.len();
+                    let move_sources = source_count <= block_len - source_count;
+
+                    let mut new_block =
+                        Vec::with_capacity(if move_sources { source_count } else { block_len - source_count });
+                    let mut remaining = Vec::with_capacity(block_len - new_block.capacity());
+
+                    for &state in &blocks[block_idx] {
+                        let is_source = source_set[state as usize];
+                        if move_sources == is_source {
+                            new_block.push(state);
+                        } else {
+                            remaining.push(state);
+                        }
+                    }
+
+                    for &state in &new_block {
+                        partition[state as usize] = new_block_idx as u32;
+                    }
+
+                    blocks[block_idx] = remaining;
+                    blocks.push(new_block);
+
+                    in_worklist.push(false);
+                    block_touched.push(false);
+
+                    if in_worklist[block_idx] {
+                        in_worklist[new_block_idx] = true;
+                        worklist.push_back(new_block_idx as u32);
+                    } else if blocks[block_idx].len() <= blocks[new_block_idx].len() {
+                        in_worklist[block_idx] = true;
+                        worklist.push_back(block_idx as u32);
+                    } else {
+                        in_worklist[new_block_idx] = true;
+                        worklist.push_back(new_block_idx as u32);
+                    }
+                }
+
+                for &src in &sources_to_clear {
+                    source_set[src as usize] = false;
+                }
+
+                for &block_id in &touched_blocks {
+                    if (block_id as usize) < block_touched.len() {
+                        block_touched[block_id as usize] = false;
+                    }
+                }
+                touched_blocks.clear();
+            }
+        }
+
+        let partition_list: Vec<BTreeSet<usize>> = blocks
+            .into_iter()
+            .filter(|b| !b.is_empty())
+            .map(|b| b.into_iter().map(|s| s as usize).collect())
+            .collect();
+
+        let (state_mapping, new_states) = self.rebuild_from_partitions(partition_list);
+        self.states = new_states;
+        self.start_state = state_mapping[self.start_state];
+
+        crate::debug!(
+            3,
+            "Minimized enhanced DFA {} → {} states in {:.2?}",
+            initial_states,
+            self.states.len(),
+            instant.elapsed()
+        );
+    }
+
+    fn rebuild_from_partitions(
+        &self,
+        mut partition_list: Vec<BTreeSet<usize>>,
+    ) -> (Vec<usize>, Vec<EnhancedDFAState>) {
+        let mut state_mapping = vec![0; self.states.len()];
+
+        if let Some(start_part_idx) = partition_list
+            .iter()
+            .position(|p| p.contains(&self.start_state))
+        {
+            partition_list.swap(0, start_part_idx);
+        }
+
+        for (new_idx, partition) in partition_list.iter().enumerate() {
+            for &old_idx in partition {
+                state_mapping[old_idx] = new_idx;
+            }
+        }
+
+        let mut new_states = Vec::with_capacity(partition_list.len());
+        for partition in &partition_list {
+            let representative_old_idx = *partition.iter().next().unwrap();
+            let mut new_state = self.states[representative_old_idx].clone();
+
+            new_state.transitions = new_state
+                .transitions
+                .iter()
+                .map(|(u8, &old_next_idx)| (u8, state_mapping[old_next_idx]))
+                .collect();
+
+            new_state.finalizer_to_state = new_state
+                .finalizer_to_state
+                .iter()
+                .map(|(&group_id, &old_target_idx)| (group_id, state_mapping[old_target_idx]))
+                .collect();
+
+            new_states.push(new_state);
+        }
+
+        (state_mapping, new_states)
+    }
+}
+
+fn run_enhanced_dfa_experiment(base_dfa: &DFA) -> EnhancedDfaExperimentStats {
+    let start = std::time::Instant::now();
+
+    let mut stats = EnhancedDfaExperimentStats::default();
+    stats.base_states = base_dfa.states.len();
+    stats.base_transitions = base_dfa.transition_count();
+    stats.base_finalizer_edges = base_dfa.finalizer_edge_count();
+
+    let mut enhanced = EnhancedDFA::from_base_dfa(base_dfa);
+    let a_language = base_dfa.as_language_dfa();
+
+    for (state_idx, state) in base_dfa.states.iter().enumerate() {
+        let finalizers: Vec<GroupID> = state.finalizers.iter().collect();
+        if finalizers.is_empty() {
+            continue;
+        }
+
+        let build_b_start = std::time::Instant::now();
+        let mut b = base_dfa.clone();
+        b.start_state = state_idx;
+        b.minimize();
+        stats.build_b_time += build_b_start.elapsed();
+
+        let difference_start = std::time::Instant::now();
+        let mut a_minus_b = DFA::intersection_language(&a_language, &b.complement_language());
+        a_minus_b.minimize();
+        stats.difference_time += difference_start.elapsed();
+        stats.per_state_differences_built += 1;
+
+        for terminal_id in finalizers {
+            let appended_start_state = enhanced.append_dfa_copy(&a_minus_b);
+            let dummy_entry_state = enhanced.add_dummy_entry_path(appended_start_state);
+            enhanced.states[state_idx]
+                .finalizer_to_state
+                .insert(terminal_id, dummy_entry_state);
+
+            stats.appended_copies += 1;
+            stats.appended_states_total += a_minus_b.states.len();
+            stats.appended_transitions_total += a_minus_b.transition_count();
+        }
+    }
+
+    stats.enhanced_states_before_minimize = enhanced.states.len();
+    stats.enhanced_transitions_before_minimize = enhanced.transition_count();
+    stats.enhanced_finalizer_edges_before_minimize = enhanced.finalizer_edge_count();
+
+    let enhanced_min_start = std::time::Instant::now();
+    enhanced.minimize();
+    stats.enhanced_minimize_time = enhanced_min_start.elapsed();
+
+    stats.enhanced_states_after_minimize = enhanced.states.len();
+    stats.enhanced_transitions_after_minimize = enhanced.transition_count();
+    stats.enhanced_finalizer_edges_after_minimize = enhanced.finalizer_edge_count();
+    stats.total_time = start.elapsed();
+    stats
+}
+
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => {
+            let value = value.trim();
+            !(value == "0"
+                || value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("off")
+                || value.eq_ignore_ascii_case("no"))
+        }
+        Err(_) => default,
     }
 }
 
