@@ -3429,7 +3429,7 @@ impl GrammarConstraint {
         // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
 
         // Convert the lexical DWA to NWA and build the Parser DWA.
-        eprintln!(
+        crate::timing!(
             "PHASE_TIMING: post_precompute1_to_parser_dwa_start = {:?}",
             post_precompute1_start.elapsed()
         );
@@ -3439,7 +3439,7 @@ impl GrammarConstraint {
         let terminal_nwa = timeit!("terminal_nwa_from_dwa", {
             NWA::from_dwa(&terminal_dwa)
         });
-        eprintln!(
+        crate::timing!(
             "PHASE_TIMING: terminal_nwa_from_dwa = {:?}",
             terminal_nwa_start.elapsed()
         );
@@ -3451,7 +3451,7 @@ impl GrammarConstraint {
         crate::debug!(5, "build_parser_dwa: start");
         let parser_dwa_start = std::time::Instant::now();
         let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
-        eprintln!(
+        crate::timing!(
             "PHASE_TIMING: build_parser_dwa = {:?}",
             parser_dwa_start.elapsed()
         );

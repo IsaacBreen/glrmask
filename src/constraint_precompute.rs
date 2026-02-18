@@ -2292,13 +2292,13 @@ pub fn run_precompute1_with_possible_matches(
             terminal_to_greedy_group,
         )
     });
-    eprintln!("PHASE_TIMING: precompute1::setup = {:?}", setup_start.elapsed());
+    crate::timing!("PHASE_TIMING: precompute1::setup = {:?}", setup_start.elapsed());
 
     let dfs_start = std::time::Instant::now();
     timeit!("precompute1::dfs", {
         helper.run_dfs();
     });
-    eprintln!("PHASE_TIMING: precompute1::dfs = {:?}", dfs_start.elapsed());
+    crate::timing!("PHASE_TIMING: precompute1::dfs = {:?}", dfs_start.elapsed());
 
     let possible_matches = helper.compute_possible_matches_for_all_states();
 
@@ -2306,7 +2306,7 @@ pub fn run_precompute1_with_possible_matches(
     let result = timeit!("precompute1::finish", {
         helper.finish()
     });
-    eprintln!("PHASE_TIMING: precompute1::finish = {:?}", finish_start.elapsed());
+    crate::timing!("PHASE_TIMING: precompute1::finish = {:?}", finish_start.elapsed());
     (result, possible_matches)
 }
 

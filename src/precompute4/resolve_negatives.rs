@@ -714,7 +714,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
                 eprintln!(
                     "PASS2 cancellations range breakdown_us: prop_existing_eps=0 collect_pos=0 collect_default=0 apply_updates=0 propagate_eps=0 prop_existing_eps_edges=0 pos_edges=0 default_edges=0 eps_edges=0 queries_at_source_events=0 queries_at_source_total=0 queries_at_source_max=0",
                 );
-                eprintln!(
+                crate::timing!(
                     "PHASE_TIMING: batch_neg::compute_cancellations_range = {:?}",
                     start.elapsed()
                 );
@@ -933,7 +933,7 @@ pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::R
             queries_at_source_max,
         );
         if let Some(start) = total_start {
-            eprintln!(
+            crate::timing!(
                 "PHASE_TIMING: batch_neg::compute_cancellations_range = {:?}",
                 start.elapsed()
             );

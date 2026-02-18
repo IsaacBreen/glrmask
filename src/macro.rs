@@ -25,6 +25,7 @@ use std::sync::Mutex;
 // Control via environment variables:
 //   MACRO_DEBUG_LEVEL - verbosity level (default: 1)
 //   MACRO_LINE_LEVELS - comma-separated levels that draw │ lines (default: "")
+//   SEP1_PHASE_TIMING - set to any value to enable PHASE_TIMING lines
 //
 // Level 0: Errors only
 // Level 1: Major milestones (headings)
@@ -442,7 +443,13 @@ macro_rules! debug_alt {
 macro_rules! timing {
     ($($arg:tt)*) => {{
         if $crate::r#macro::is_debug_level_enabled(5) {
-            eprintln!($($arg)*);
+            let __timing_msg = format!($($arg)*);
+            if __timing_msg.starts_with("PHASE_TIMING:")
+                && ::std::env::var_os("SEP1_PHASE_TIMING").is_none()
+            {
+            } else {
+                eprintln!("{}", __timing_msg);
+            }
         }
     }};
 }
