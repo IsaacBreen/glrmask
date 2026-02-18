@@ -50,7 +50,7 @@ use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::{
     build_reduce_fallback_terminals_by_state,
-    run_precompute1,
+    run_precompute1_with_possible_matches,
     ApproximateDfaPruner,
 };
 
@@ -223,6 +223,9 @@ pub struct GrammarConstraint {
 
     /// Tokenizer state -> grammar terminal -> internal LLM token bitset.
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+
+    #[serde(skip, default)]
+    pub terminal_to_greedy_group: Vec<Option<usize>>,
 
     /// Vocabulary mappings for the Parser DWA stage.
     pub parser_dwa_vocab: StageVocab,
@@ -560,6 +563,7 @@ impl JSONConvertible for GrammarConstraint {
             commit_vocab,
             token_name_map: intermediate.token_name_map,
             possible_matches,
+            terminal_to_greedy_group: Vec::new(),
             parser_dwa_vocab: intermediate.vocab,
             eos_token_id,
             num_tsids: intermediate.num_tsids,
@@ -1713,8 +1717,8 @@ impl GrammarConstraint {
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         crate::debug!(5, "run_precompute1: start");
         let precompute_start = std::time::Instant::now();
-        let mut terminal_dwa = timeit!("run_precompute1", {
-            run_precompute1(
+        let (mut terminal_dwa, mut possible_matches_precompute1) = timeit!("run_precompute1", {
+            run_precompute1_with_possible_matches(
                 &tokenizer,
                 &internal_llm_token_map,
                 vocab.internal_max_llm_token,
@@ -1727,7 +1731,7 @@ impl GrammarConstraint {
                 ignored_terminals.clone(),
                 allowed_follows_by_label.clone(),
                 always_allowed_by_label.clone(),
-                terminal_to_greedy_group,
+                terminal_to_greedy_group.clone(),
             )
         });
         crate::timing!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());
@@ -3242,9 +3246,6 @@ impl GrammarConstraint {
             } // end DUMP_DWA_DOT block - both DOT dumps complete
         }
 
-
-        let mut possible_matches_precompute1 = computed_possible_matches;
-
         if verify_equivalence {
             crate::debug!(2, "VERIFY_EQUIVALENCE: Running optimize_dwa_and_vocab on terminal_dwa...");
             let vocab_before = vocab.internal_max_llm_token;
@@ -3412,6 +3413,7 @@ impl GrammarConstraint {
                 parser,
                 parser_dwa: terminal_dwa,
                 possible_matches: possible_matches_precompute1,
+                terminal_to_greedy_group: terminal_to_greedy_group.clone(),
                 vocab_trie,
                 commit_vocab,
                 token_name_map,
@@ -3650,6 +3652,7 @@ impl GrammarConstraint {
             parser,
             parser_dwa,
             possible_matches: possible_matches_precompute1,
+            terminal_to_greedy_group,
             vocab_trie,
             commit_vocab,
             token_name_map,
@@ -3671,6 +3674,24 @@ impl GrammarConstraint {
     /// Check if this constraint is in weight-heavy mode.
     pub fn is_weight_heavy(&self) -> bool {
         self.num_tsids > 0
+    }
+
+    pub(crate) fn mutually_greedy_group_terminals(&self, terminal_id: usize) -> Vec<usize> {
+        let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(terminal_id) else {
+            return vec![terminal_id];
+        };
+
+        self.terminal_to_greedy_group
+            .iter()
+            .enumerate()
+            .filter_map(|(tid, group)| {
+                if *group == Some(*group_idx) {
+                    Some(tid)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -4096,6 +4117,10 @@ impl<'a> Display for GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    fn mutually_greedy_group(&self, terminal_id: &usize) -> Vec<usize> {
+        self.parent.mutually_greedy_group_terminals(*terminal_id)
+    }
+
     pub(crate) fn transform_gss_stacks<M, F>(&mut self, mut f: F)
     where
         M: Default,
@@ -4141,7 +4166,9 @@ impl<'a> GrammarConstraintState<'a> {
             }
             let mut terminals = TerminalBV::zeros();
             for token in exec_result.matches {
-                terminals.insert(token.id);
+                for terminal in self.mutually_greedy_group(&token.id) {
+                    terminals.insert(terminal);
+                }
             }
             terminals_map.insert(*tokenizer_state_id, terminals);
         }

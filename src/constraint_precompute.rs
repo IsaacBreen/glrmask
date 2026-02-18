@@ -1498,6 +1498,29 @@ impl<'r> Precomputer1<'r> {
         result_map
     }
 
+    fn compute_possible_matches_for_all_states(
+        &self,
+    ) -> BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> {
+        let mut rep_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> =
+            BTreeMap::new();
+
+        for rep_state in self.state_to_rep.values() {
+            rep_possible_matches
+                .entry(*rep_state)
+                .or_insert_with(|| self.possible_matches(&self.vocab.root, *rep_state));
+        }
+
+        let mut all_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> =
+            BTreeMap::new();
+        for (state, rep_state) in &self.state_to_rep {
+            if let Some(rep_map) = rep_possible_matches.get(rep_state) {
+                all_possible_matches.insert(*state, rep_map.clone());
+            }
+        }
+
+        all_possible_matches
+    }
+
     #[inline]
     fn approx_step(&mut self, approx_state: usize, terminal_id: GrammarTokenID) -> Option<usize> {
         let result = if let Some(approx_dfa) = self.approx_dfa.as_mut() {
@@ -2183,6 +2206,43 @@ pub fn run_precompute1(
     always_allowed_by_label: Arc<Vec<Vec<Label>>>,
     terminal_to_greedy_group: Vec<Option<usize>>,
 ) -> DWA {
+    run_precompute1_with_possible_matches(
+        tokenizer,
+        internal_llm_token_map,
+        internal_max_llm_token,
+        terminals_count,
+        state_to_rep,
+        tsid_offset_map,
+        approx_dfa,
+        suffix_prune_cache,
+        self_extending_labels_for_collapse,
+        ignored_terminals,
+        allowed_follows_by_label,
+        always_allowed_by_label,
+        terminal_to_greedy_group,
+    )
+    .0
+}
+
+#[time_it("run_precompute1_with_possible_matches")]
+pub fn run_precompute1_with_possible_matches(
+    tokenizer: &Tokenizer,
+    internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
+    internal_max_llm_token: usize,
+    terminals_count: usize,
+    state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
+    tsid_offset_map: Vec<usize>,
+    approx_dfa: Option<ApproximateDfaPruner>,
+    suffix_prune_cache: Option<Arc<SuffixParserCache>>,
+    self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
+    ignored_terminals: Arc<Vec<bool>>,
+    allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
+    always_allowed_by_label: Arc<Vec<Vec<Label>>>,
+    terminal_to_greedy_group: Vec<Option<usize>>,
+) -> (
+    DWA,
+    BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>,
+) {
     let _ = allowed_follows_by_label;
 
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
@@ -2240,12 +2300,14 @@ pub fn run_precompute1(
     });
     eprintln!("PHASE_TIMING: precompute1::dfs = {:?}", dfs_start.elapsed());
 
+    let possible_matches = helper.compute_possible_matches_for_all_states();
+
     let finish_start = std::time::Instant::now();
     let result = timeit!("precompute1::finish", {
         helper.finish()
     });
     eprintln!("PHASE_TIMING: precompute1::finish = {:?}", finish_start.elapsed());
-    result
+    (result, possible_matches)
 }
 
 #[cfg(test)]
