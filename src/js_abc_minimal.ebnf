@@ -1,3 +1,2 @@
-#![greedy_group(main, *)]
-start ::= 'a' ( 'b' ID )?;
-ID ::= ('b'|'c')+;
+#![greedy_group(main,*)]
+S::='a'[abc]*;
