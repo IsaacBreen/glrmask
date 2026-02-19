@@ -343,13 +343,6 @@ impl<'a> EbnfParser<'a> {
                         ignore_symbol_name = Some(symbol_name);
                     }
                     "greedy_group" => {
-                        if greedy_groups.iter().any(|group: &GreedyGroup| group.has_wildcard) {
-                            return Err(ParseError::new(
-                                self.source,
-                                directive_span,
-                                "greedy_group directives cannot be combined with greedy_all",
-                            ));
-                        }
                         self.expect_grammar_op("(")?;
                         let (group_name, group_name_span) = self.expect_ident()?;
                         self.expect_grammar_op(",")?;
@@ -357,40 +350,27 @@ impl<'a> EbnfParser<'a> {
                             return Err(ParseError::new(
                                 self.source,
                                 group_name_span,
-                                format!("greedy_group '{}' must include at least one terminal", group_name),
+                                format!(
+                                    "greedy_group '{}' must include at least one terminal or '*'",
+                                    group_name
+                                ),
                             ));
                         }
-                        let terminals = self.parse_greedy_group_terminal_list()?;
+                        let (terminals, has_wildcard) =
+                            self.parse_greedy_group_terminal_list_allow_wildcard()?;
                         self.expect_grammar_op(")")?;
                         greedy_groups.push(GreedyGroup {
                             name: group_name,
                             terminals,
-                            has_wildcard: false,
+                            has_wildcard,
                         });
                     }
                     "greedy_all" => {
-                        if !greedy_groups.is_empty() {
-                            return Err(ParseError::new(
-                                self.source,
-                                directive_span,
-                                "greedy_all cannot be combined with greedy_group directives",
-                            ));
-                        }
-                        self.expect_grammar_op("(")?;
-                        let (group_name, group_name_span) = self.expect_ident()?;
-                        self.expect_grammar_op(")")?;
-                        if group_name.is_empty() {
-                            return Err(ParseError::new(
-                                self.source,
-                                group_name_span,
-                                "greedy_all requires a non-empty group name",
-                            ));
-                        }
-                        greedy_groups.push(GreedyGroup {
-                            name: group_name,
-                            terminals: Vec::new(),
-                            has_wildcard: true,
-                        });
+                        return Err(ParseError::new(
+                            self.source,
+                            directive_span,
+                            "greedy_all is no longer supported; use greedy_group(<name>, *)",
+                        ));
                     }
                     "ungrouped" => {
                         if ungrouped_terminals.is_some() {
@@ -474,6 +454,24 @@ impl<'a> EbnfParser<'a> {
         }
 
         Ok(terminals)
+    }
+
+    fn parse_greedy_group_terminal_list_allow_wildcard(
+        &mut self,
+    ) -> Result<(Vec<GreedyGroupTerminal>, bool), ParseError> {
+        if self.peek_grammar_op("*") {
+            self.consume_grammar_op("*")?;
+            if self.peek_grammar_op(",") {
+                return Err(ParseError::new(
+                    self.source,
+                    self.peek().map(|t| t.span).unwrap_or_else(|| self.eof_span()),
+                    "Wildcard '*' must be the only selector in a greedy_group directive",
+                ));
+            }
+            return Ok((Vec::new(), true));
+        }
+
+        Ok((self.parse_greedy_group_terminal_list()?, false))
     }
 
     fn expect_greedy_group_terminal(&mut self) -> Result<GreedyGroupTerminal, ParseError> {
@@ -753,40 +751,37 @@ mod tests {
     }
 
     #[test]
-    fn test_ebnf_parser_rejects_wildcard_greedy_group() {
+    fn test_ebnf_parser_allows_wildcard_greedy_group() {
         let ebnf = r#"
             #![greedy_group(main, *)]
             root ::= 'a' ;
         "#;
 
         let mut parser = EbnfParser::new(ebnf).unwrap();
-        let err = parser.parse().unwrap_err();
-        assert!(err
-            .message
-            .contains("Wildcard '*' is not supported in greedy_group/ungrouped directives"));
-    }
-
-    #[test]
-    fn test_ebnf_parser_greedy_all_directive() {
-        let ebnf = r#"
-            #![greedy_all(all_terminals)]
-            root ::= IDENT | 'if' ;
-            IDENT ::= [a-z]+ ;
-        "#;
-
-        let mut parser = EbnfParser::new(ebnf).unwrap();
         let parsed = parser.parse().unwrap();
-
         assert_eq!(parsed.greedy_groups.len(), 1);
-        assert_eq!(parsed.greedy_groups[0].name, "all_terminals");
+        assert_eq!(parsed.greedy_groups[0].name, "main");
         assert!(parsed.greedy_groups[0].has_wildcard);
         assert!(parsed.greedy_groups[0].terminals.is_empty());
     }
 
     #[test]
+    fn test_ebnf_parser_rejects_greedy_all_directive() {
+        let ebnf = r#"
+            #![greedy_all]
+            root ::= IDENT | 'if' ;
+            IDENT ::= [a-z]+ ;
+        "#;
+
+        let mut parser = EbnfParser::new(ebnf).unwrap();
+        let err = parser.parse().unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
     fn test_ebnf_parser_rejects_mixed_greedy_all_and_greedy_group() {
         let ebnf = r#"
-            #![greedy_all(all_terminals)]
+            #![greedy_all]
             #![greedy_group(main, IDENT)]
             root ::= IDENT ;
             IDENT ::= [a-z]+ ;
@@ -794,15 +789,13 @@ mod tests {
 
         let mut parser = EbnfParser::new(ebnf).unwrap();
         let err = parser.parse().unwrap_err();
-        assert!(err
-            .message
-            .contains("greedy_group directives cannot be combined with greedy_all"));
+        assert!(!err.message.is_empty());
     }
 
     #[test]
-    fn test_grammar_definition_from_ebnf_greedy_all_directive() {
+    fn test_grammar_definition_from_ebnf_wildcard_greedy_group_directive() {
         let ebnf = r#"
-            #![greedy_all(main)]
+            #![greedy_group(main, *)]
             #![ungrouped(IGNORE)]
             root ::= IDENT | 'if' ;
             IDENT ::= [a-z]+ ;
@@ -815,6 +808,56 @@ mod tests {
         assert!(grammar.greedy_groups[0].terminals.contains(&"IDENT".to_string()));
         assert!(grammar.greedy_groups[0].terminals.contains(&"'if'".to_string()));
         assert_eq!(grammar.ungrouped_terminals, vec!["IGNORE".to_string()]);
+    }
+
+    #[test]
+    fn test_ebnf_parser_allows_wildcard_and_explicit_greedy_groups() {
+        let ebnf = r#"
+            #![greedy_group(explicit, IDENT)]
+            #![greedy_group(catchall, *)]
+            root ::= IDENT | 'if' ;
+            IDENT ::= [a-z]+ ;
+        "#;
+
+        let mut parser = EbnfParser::new(ebnf).unwrap();
+        let parsed = parser.parse().unwrap();
+
+        assert_eq!(parsed.greedy_groups.len(), 2);
+        assert!(parsed
+            .greedy_groups
+            .iter()
+            .any(|group| group.name == "explicit" && !group.has_wildcard));
+        assert!(parsed
+            .greedy_groups
+            .iter()
+            .any(|group| group.name == "catchall" && group.has_wildcard));
+    }
+
+    #[test]
+    fn test_grammar_definition_from_ebnf_wildcard_and_explicit_greedy_groups() {
+        let ebnf = r#"
+            #![greedy_group(explicit, IDENT)]
+            #![greedy_group(catchall, *)]
+            root ::= IDENT | 'if' ;
+            IDENT ::= [a-z]+ ;
+        "#;
+
+        let grammar = GrammarDefinition::from_ebnf(ebnf).unwrap();
+        assert_eq!(grammar.greedy_groups.len(), 2);
+
+        let explicit = grammar
+            .greedy_groups
+            .iter()
+            .find(|group| group.name == "explicit")
+            .expect("missing explicit group");
+        assert_eq!(explicit.terminals, vec!["IDENT".to_string()]);
+
+        let catchall = grammar
+            .greedy_groups
+            .iter()
+            .find(|group| group.name == "catchall")
+            .expect("missing catchall group");
+        assert!(catchall.terminals.contains(&"'if'".to_string()));
     }
 
 

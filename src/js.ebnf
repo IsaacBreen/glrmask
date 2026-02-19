@@ -1,6 +1,6 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 #![ignore(IGNORE)]
-#![greedy_all(main)]
+#![greedy_group(main, *)]
 #![ungrouped(EOF, IGNORE)]
 
 program ::= statement_list? EOF;

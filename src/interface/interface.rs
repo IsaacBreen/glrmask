@@ -2528,13 +2528,8 @@ impl GrammarDefinition {
                 greedy_groups.iter().filter(|group| group.has_wildcard).collect();
             if wildcard_groups.len() > 1 {
                 return Err(
-                    "Multiple greedy_all directives found; only one greedy_all directive is allowed."
+                    "Multiple wildcard greedy_group directives found; only one wildcard greedy_group is allowed."
                         .to_string(),
-                );
-            }
-            if wildcard_groups.len() == 1 && greedy_groups.len() > 1 {
-                return Err(
-                    "greedy_all cannot be combined with greedy_group directives.".to_string(),
                 );
             }
 
@@ -2582,21 +2577,43 @@ impl GrammarDefinition {
                 }
             };
 
-            if let Some(wildcard_group) = wildcard_groups.first() {
-                for selector in &ungrouped_terminals {
+            for group in greedy_groups.iter().filter(|group| !group.has_wildcard) {
+                let mut resolved_terminals = Vec::new();
+                for selector in &group.terminals {
                     let terminal = normalize_selector(selector)?;
                     if let Some(existing_owner) =
-                        ownership.insert(terminal.clone(), "ungrouped".to_string())
+                        ownership.insert(terminal.clone(), format!("greedy_group({})", group.name))
                     {
                         return Err(format!(
-                            "Terminal {} is listed multiple times (in {} and ungrouped).",
+                            "Terminal {} is listed multiple times (in {} and greedy_group({})).",
                             format_group_terminal(&terminal),
-                            existing_owner
+                            existing_owner,
+                            group.name
                         ));
                     }
-                    resolved_ungrouped_terminals.push(format_group_terminal(&terminal));
+                    resolved_terminals.push(format_group_terminal(&terminal));
                 }
+                resolved_greedy_groups.push(ResolvedGreedyGroup {
+                    name: group.name.clone(),
+                    terminals: resolved_terminals,
+                });
+            }
 
+            for selector in &ungrouped_terminals {
+                let terminal = normalize_selector(selector)?;
+                if let Some(existing_owner) =
+                    ownership.insert(terminal.clone(), "ungrouped".to_string())
+                {
+                    return Err(format!(
+                        "Terminal {} is listed multiple times (in {} and ungrouped).",
+                        format_group_terminal(&terminal),
+                        existing_owner
+                    ));
+                }
+                resolved_ungrouped_terminals.push(format_group_terminal(&terminal));
+            }
+
+            if let Some(wildcard_group) = wildcard_groups.first() {
                 let mut resolved_terminals = Vec::new();
                 for terminal in &required_terminals {
                     if ownership.contains_key(terminal) {
@@ -2604,51 +2621,14 @@ impl GrammarDefinition {
                     }
                     ownership.insert(
                         terminal.clone(),
-                        format!("greedy_all({})", wildcard_group.name),
+                        format!("greedy_group({})", wildcard_group.name),
                     );
                     resolved_terminals.push(format_group_terminal(terminal));
                 }
-
                 resolved_greedy_groups.push(ResolvedGreedyGroup {
                     name: wildcard_group.name.clone(),
                     terminals: resolved_terminals,
                 });
-            } else {
-                for group in &greedy_groups {
-                    let mut resolved_terminals = Vec::new();
-                    for selector in &group.terminals {
-                        let terminal = normalize_selector(selector)?;
-                        if let Some(existing_owner) = ownership
-                            .insert(terminal.clone(), format!("greedy_group({})", group.name))
-                        {
-                            return Err(format!(
-                                "Terminal {} is listed multiple times (in {} and greedy_group({})).",
-                                format_group_terminal(&terminal),
-                                existing_owner,
-                                group.name
-                            ));
-                        }
-                        resolved_terminals.push(format_group_terminal(&terminal));
-                    }
-                    resolved_greedy_groups.push(ResolvedGreedyGroup {
-                        name: group.name.clone(),
-                        terminals: resolved_terminals,
-                    });
-                }
-
-                for selector in &ungrouped_terminals {
-                    let terminal = normalize_selector(selector)?;
-                    if let Some(existing_owner) =
-                        ownership.insert(terminal.clone(), "ungrouped".to_string())
-                    {
-                        return Err(format!(
-                            "Terminal {} is listed multiple times (in {} and ungrouped).",
-                            format_group_terminal(&terminal),
-                            existing_owner
-                        ));
-                    }
-                    resolved_ungrouped_terminals.push(format_group_terminal(&terminal));
-                }
             }
 
             let missing: Vec<String> = required_terminals
@@ -2665,8 +2645,7 @@ impl GrammarDefinition {
             }
         } else if !ungrouped_terminals.is_empty() {
             return Err(
-                "Found ungrouped directive without any greedy_group/greedy_all directives."
-                    .to_string(),
+                "Found ungrouped directive without any greedy_group directives.".to_string(),
             );
         }
 
