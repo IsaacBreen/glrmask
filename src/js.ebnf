@@ -1,17 +1,6 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 #![ignore(IGNORE)]
-#![greedy_group(main,
-    ADDITIVE_OPERATOR, ASSIGNMENT_OPERATOR, DECLARATION_KEYWORD, ELISION,
-    EQUALITY_OPERATOR, IDENTIFIER, IN_OF_OPERATOR, MULTIPLICATIVE_OPERATOR,
-    OTHER_LITERAL, POSTFIX_OPERATOR, RELATIONAL_OPERATOR, SHIFT_OPERATOR,
-    STRING_NUMERIC_LITERAL, TEMPLATE_LITERAL, UNARY_OPERATOR,
-    '#', '&&', '&', '(', ')', '*', '**', '**=', ',', '.', '...', ':', ';', '=',
-    '=>', '?', '?.', '??', '[', ']', '^', 'as', 'async', 'break', 'case',
-    'catch', 'class', 'continue', 'debugger', 'default', 'do', 'else', 'export',
-    'extends', 'finally', 'for', 'from', 'function', 'get', 'if', 'import',
-    'new', 'return', 'set', 'static', 'super', 'switch', 'this', 'throw', 'try',
-    'while', 'with', 'yield', '{', '|', '||', '}'
-)]
+#![greedy_all(main)]
 #![ungrouped(EOF, IGNORE)]
 
 program ::= statement_list? EOF;
