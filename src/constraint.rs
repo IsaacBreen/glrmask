@@ -1549,13 +1549,34 @@ impl GrammarConstraint {
             map
         };
 
-        let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true);
+        let parse_env_flag = |name: &str| -> Option<bool> {
+            std::env::var(name).ok().map(|v| {
+                let value = v.trim();
+                !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
+            })
+        };
+        let disable_suffix_prune = parse_env_flag("DISABLE_SUFFIX_PRUNE").unwrap_or(false);
+        let enable_suffix_prune = parse_env_flag("ENABLE_SUFFIX_PRUNE").unwrap_or(false);
+        let legacy_nwa_opt_in = parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(false);
+        let legacy_dwa_opt_in = parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false);
+
+        let suffix_prune_enabled = if disable_suffix_prune {
+            false
+        } else {
+            enable_suffix_prune || legacy_nwa_opt_in || legacy_dwa_opt_in
+        };
+        let do_nwa_suffix_prune = if suffix_prune_enabled {
+            parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(true)
+        } else {
+            false
+        };
+        let do_dwa_suffix_prune = if suffix_prune_enabled {
+            parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false)
+        } else {
+            false
+        };
         let need_suffix_cache = grammar_definition.is_some()
-            && (do_nwa_suffix_prune
-                || std::env::var("DWA_SUFFIX_PRUNE").is_ok()
-                || std::env::var("DISABLE_SUFFIX_PRUNE").is_err());
+            && (suffix_prune_enabled || do_nwa_suffix_prune || do_dwa_suffix_prune);
         let suffix_parser_cache = if need_suffix_cache {
             grammar_definition
                 .as_ref()
@@ -1587,69 +1608,36 @@ impl GrammarConstraint {
             ignored
         };
 
-        let approx_dfa = if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
+        let approx_dfa = if do_nwa_suffix_prune {
             let ignored_terminals = ignored_terminals.clone();
-            if do_nwa_suffix_prune {
-                if let Some(cache) = suffix_parser_cache.as_ref() {
-                    crate::debug!(4, "Building approximate suffix DFA (lazy, all-states initial) for precompute1...");
-                    let approx_start = std::time::Instant::now();
-                    let approx_dfa = cache.parser.build_approximate_parser_dfa();
-                    crate::timing!(
-                        "TIMING: build_approximate_suffix_dfa {:?}",
-                        approx_start.elapsed()
-                    );
+            if let Some(cache) = suffix_parser_cache.as_ref() {
+                crate::debug!(4, "Building approximate suffix DFA (lazy, all-states initial) for precompute1...");
+                let approx_start = std::time::Instant::now();
+                let approx_dfa = cache.parser.build_approximate_parser_dfa();
+                crate::timing!(
+                    "TIMING: build_approximate_suffix_dfa {:?}",
+                    approx_start.elapsed()
+                );
 
-                    let orig_to_suffix_tid = cache.orig_to_suffix_tid.clone();
-                    let reduce_fallback_terminals_by_state =
-                        build_reduce_fallback_terminals_by_state(&cache.parser);
+                let orig_to_suffix_tid = cache.orig_to_suffix_tid.clone();
+                let reduce_fallback_terminals_by_state =
+                    build_reduce_fallback_terminals_by_state(&cache.parser);
 
-                    crate::debug!(4, "Approximate suffix DFA built (lazy), start_state={}", approx_dfa.start_state);
-                    crate::debug!(
-                        4,
-                        "Approximate suffix DFA stats: nfa_states={}, dfa_states={}",
-                        approx_dfa.nfa_states(),
-                        approx_dfa.dfa_states()
-                    );
-                    Some(ApproximateDfaPruner {
-                        dfa: approx_dfa,
-                        orig_to_suffix_tid,
-                        ignored_terminals,
-                        reduce_fallback_terminals_by_state,
-                    })
-                } else {
-                    crate::debug!(4, "Approximate suffix DFA requested but missing suffix parser; falling back to parser DFA...");
-                    let approx_start = std::time::Instant::now();
-                    let approx_dfa = parser.build_approximate_parser_dfa();
-                    crate::timing!(
-                        "TIMING: build_approximate_parser_dfa {:?}",
-                        approx_start.elapsed()
-                    );
-
-                    let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
-                    for (_term, orig_tid) in parser.terminal_map.iter() {
-                        if orig_tid.0 < orig_to_suffix_tid.len() {
-                            orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
-                        }
-                    }
-                    let reduce_fallback_terminals_by_state =
-                        build_reduce_fallback_terminals_by_state(&parser);
-
-                    crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
-                    crate::debug!(
-                        4,
-                        "Approximate parser DFA stats: nfa_states={}, dfa_states={}",
-                        approx_dfa.nfa_states(),
-                        approx_dfa.dfa_states()
-                    );
-                    Some(ApproximateDfaPruner {
-                        dfa: approx_dfa,
-                        orig_to_suffix_tid,
-                        ignored_terminals,
-                        reduce_fallback_terminals_by_state,
-                    })
-                }
+                crate::debug!(4, "Approximate suffix DFA built (lazy), start_state={}", approx_dfa.start_state);
+                crate::debug!(
+                    4,
+                    "Approximate suffix DFA stats: nfa_states={}, dfa_states={}",
+                    approx_dfa.nfa_states(),
+                    approx_dfa.dfa_states()
+                );
+                Some(ApproximateDfaPruner {
+                    dfa: approx_dfa,
+                    orig_to_suffix_tid,
+                    ignored_terminals,
+                    reduce_fallback_terminals_by_state,
+                })
             } else {
-                crate::debug!(4, "Building approximate parser DFA (lazy, all-states initial) for precompute1...");
+                crate::debug!(4, "Approximate suffix DFA requested but missing suffix parser; falling back to parser DFA...");
                 let approx_start = std::time::Instant::now();
                 let approx_dfa = parser.build_approximate_parser_dfa();
                 crate::timing!(
@@ -1742,12 +1730,14 @@ impl GrammarConstraint {
 
         // Prune terminal DWA using suffix grammar if grammar definition is available
         // This removes transitions that can't possibly lead to valid parses
-        crate::debug!(4, "Checking suffix prune conditions: grammar_def={}, env_disabled={}", 
+        crate::debug!(4, "Checking suffix prune conditions: grammar_def={}, enabled={}, env_enable={}, env_disable={}",
             grammar_definition.is_some(),
-            std::env::var("DISABLE_SUFFIX_PRUNE").is_ok()
+            suffix_prune_enabled,
+            enable_suffix_prune,
+            disable_suffix_prune
         );
         let mut did_prune = false;
-        if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
+        if suffix_prune_enabled {
             if let Some(cache) = suffix_parser_cache.as_ref() {
                 crate::debug!(4, "Pruning terminal DWA with suffix grammar...");
                 let prune_start = std::time::Instant::now();

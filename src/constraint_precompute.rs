@@ -1187,9 +1187,27 @@ impl<'r> Precomputer1<'r> {
             );
         }
 
-        let do_nwa_suffix_prune = std::env::var("NWA_SUFFIX_PRUNE")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true);
+        let parse_env_flag = |name: &str| -> Option<bool> {
+            std::env::var(name).ok().map(|v| {
+                let value = v.trim();
+                !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
+            })
+        };
+        let disable_suffix_prune = parse_env_flag("DISABLE_SUFFIX_PRUNE").unwrap_or(false);
+        let enable_suffix_prune = parse_env_flag("ENABLE_SUFFIX_PRUNE").unwrap_or(false);
+        let legacy_nwa_opt_in = parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(false);
+        let legacy_dwa_opt_in = parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false);
+        let suffix_prune_enabled = if disable_suffix_prune {
+            false
+        } else {
+            enable_suffix_prune || legacy_nwa_opt_in || legacy_dwa_opt_in
+        };
+
+        let do_nwa_suffix_prune = if suffix_prune_enabled {
+            parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(true)
+        } else {
+            false
+        };
         if do_nwa_suffix_prune {
             if let Some(cache) = self.suffix_prune_cache.as_ref() {
                 crate::debug!(4, "Terminal NWA (before suffix pruning): {}", self.nwa.stats());
@@ -1210,9 +1228,11 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        let do_dwa_suffix_prune = std::env::var("DWA_SUFFIX_PRUNE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let do_dwa_suffix_prune = if suffix_prune_enabled {
+            parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false)
+        } else {
+            false
+        };
         let pre_dwa_suffix_prune = if do_dwa_suffix_prune {
             let suffix_prune_cache = self.suffix_prune_cache.clone();
             let terminals_count = self.terminals_count;

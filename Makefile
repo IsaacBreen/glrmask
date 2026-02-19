@@ -24,7 +24,7 @@ MACRO_DEBUG_LEVEL ?= 5
 # Disable suffix-prune precompute in schema test helpers by default.
 # These targets are used as compile/smoke checks, and suffix-prune precompute
 # can dominate runtime (and hit timeout) on hard schemas.
-# Set `SCHEMA_TEST_DISABLE_SUFFIX_PRUNE=0` to run with suffix pruning enabled.
+# Set `SCHEMA_TEST_DISABLE_SUFFIX_PRUNE=0` to explicitly opt in via ENABLE_SUFFIX_PRUNE=1.
 SCHEMA_TEST_DISABLE_SUFFIX_PRUNE ?= 1
 
 # === Build All ===
@@ -101,7 +101,7 @@ test-release: ## Run all crate tests in release profile + test_nwa_minimize_dete
 
 test-js: ffi ## Compile the JavaScript grammar (verifies it compiles)
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) $(PYTHON) scripts/compile.py \
 		--grammar src/js.ebnf \
 		--format ebnf \
@@ -113,13 +113,13 @@ SCHEMA_FILE ?= gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o2137
 
 test-json-schema: ffi ## Compile a JSON schema grammar (verifies schema-to-EBNF works)
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	SCHEMA_FILE="$(SCHEMA_FILE)" \
 		timeout $(TEST_TIMEOUT) python3 scripts/test_json_schema.py
 
 test-json-schema-o1051: build ## Compile o1051 (Github Hard) schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	./target/release/grammar-compiler \
 		--json-schema gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o1051.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -127,7 +127,7 @@ test-json-schema-o1051: build ## Compile o1051 (Github Hard) schema
 
 test-tsconfig: ffi ## Compile TSConfig schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
 		timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_json_schema.py
 
@@ -136,7 +136,7 @@ PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 test-schema-id: ffi ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	SCHEMA_ID="$(ID)" timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_json_schema.py
 
 show-schema-id: ffi ## Print EBNF for a schema by ID or file (usage: make show-schema-id ID=... or SCHEMA_FILE=...)
@@ -194,7 +194,7 @@ repro-washingtonpost: ffi ## Reproduce WashingtonPost failure (property key at s
 
 test-schema-packagejson: build ## Compile PackageJson schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/PackageJson---package.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -202,7 +202,7 @@ test-schema-packagejson: build ## Compile PackageJson schema
 
 test-schema-github: build ## Compile GithubWorkflow schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/GithubWorkflow---github-workflow.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -210,7 +210,7 @@ test-schema-github: build ## Compile GithubWorkflow schema
 
 test-schema-sarif: build ## Compile SARIF schema
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/SARIF---sarif-2.1.0-rtm.1.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -218,7 +218,7 @@ test-schema-sarif: build ## Compile SARIF schema
 
 test-schema-meta: build ## Compile JSON Schema meta-schema (draft v4)
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/JsonSchemaMeta---schema-draft-v4.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -226,7 +226,7 @@ test-schema-meta: build ## Compile JSON Schema meta-schema (draft v4)
 
 test-schema-extra: build ## Compile bamboo-spec from SchemaStore_Extra
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/SchemaStore_Extra---bamboo-spec.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -234,7 +234,7 @@ test-schema-extra: build ## Compile bamboo-spec from SchemaStore_Extra
 
 test-schema-kestra: build ## Compile Kestra schema (WARNING: ~8MB, very slow)
 	SKIP_SERIALIZATION=$(SKIP_SERIALIZATION) MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/Kestra---kestra-0.19.0.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -242,7 +242,7 @@ test-schema-kestra: build ## Compile Kestra schema (WARNING: ~8MB, very slow)
 
 test-schema-vegalite: build ## Compile VegaLite schema (very_high complexity)
 	MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/VegaLite---vega-lite.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -250,7 +250,7 @@ test-schema-vegalite: build ## Compile VegaLite schema (very_high complexity)
 
 test-schema-apollo: build ## Compile ApolloRouter schema (very_high complexity)
 	MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/ApolloRouter---apollo-router-2.9.0.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
@@ -258,7 +258,7 @@ test-schema-apollo: build ## Compile ApolloRouter schema (very_high complexity)
 
 test-schema-liquibase: build ## Compile Liquibase schema (high complexity)
 	MACRO_DEBUG_LEVEL=$(MACRO_DEBUG_LEVEL) \
-	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,) \
+	$(if $(filter 1,$(SCHEMA_TEST_DISABLE_SUFFIX_PRUNE)),DISABLE_SUFFIX_PRUNE=1,ENABLE_SUFFIX_PRUNE=1) \
 	timeout $(TEST_TIMEOUT) ./target/release/grammar-compiler \
 		--json-schema gcg-paper/hard_schemas/data/Liquibase---liquibase.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
