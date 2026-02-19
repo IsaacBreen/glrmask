@@ -1,0 +1,6 @@
+#![ignore(IGNORE)]
+#![greedy_group(main, *)]
+
+start ::= 'if' '(' expr;
+expr ::= 'true' ( 'in' [A-Za-z_][A-Za-z0-9_]* )?;
+IGNORE ::= ' '+;

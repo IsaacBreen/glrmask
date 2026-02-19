@@ -1,0 +1,4 @@
+#![greedy_group(main, *)]
+start ::= 'a' ( 'b' ID )?;
+ID ::= LETTER LETTER*;
+LETTER ::= 'b' | 'c';
