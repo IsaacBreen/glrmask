@@ -5035,6 +5035,68 @@ fn test_newsletter_schema_disallows_quote_colon_minus() {
 }
 
 #[test]
+fn test_newsletter_schema_disallows_quote_colon_minus_dumped_ebnf() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = include_str!("test_data/newsletter_schema_dumped.ebnf");
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf).unwrap();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"\"".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"name".to_vec(), LLMTokenID(3));
+    llm_token_map.insert(b"\":-".to_vec(), LLMTokenID(4));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        10,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(LLMTokenID(1)).expect("Commit {");
+    state.commit(LLMTokenID(2)).expect("Commit \"");
+    state.commit(LLMTokenID(3)).expect("Commit name");
+
+    let mask = state.get_mask();
+    assert!(!mask.contains(4), "Token '\":-' should not be allowed after key prefix '\"name' (dumped EBNF)");
+}
+
+#[test]
+fn test_newsletter_schema_disallows_quote_colon_minus_minimized_single_token() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let schema_json = r#"{
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"}
+        },
+        "additionalProperties": false,
+        "required": ["name"]
+    }"#;
+
+    let ebnf = json_schema_to_ebnf(schema_json).unwrap();
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).unwrap();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"\":-".to_vec(), LLMTokenID(0));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        0,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit_bytes(b"{\"name");
+
+    let mask = state.get_mask();
+    assert!(!mask.contains(0), "Minimized variant should not allow token '\":-' after prefix '\"name'");
+}
+
+#[test]
 #[ignore]
 fn debug_newsletter_nwa_path_for_quote_colon_minus() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -5502,8 +5564,8 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
     let mask = state.get_mask();
 
     assert!(
-        mask.contains(tok_disputed.0),
-        "LOUD_FAIL disputed token missing from mask: prefix='{{\"\":\"\",\"a\":{{\"\":\"' disputed='\",\"' token_id={} mask={mask:?}",
+        !mask.contains(tok_disputed.0),
+        "Disputed token should be disallowed from mask after prefix='{{\"\":\"\",\"a\":{{\"\":\"': disputed='\",\"' token_id={} mask={mask:?}",
         tok_disputed.0,
     );
 }
@@ -5512,11 +5574,10 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
 fn test_triad_tuple_locked_replay_votes_explicit() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
-    let triad_grammar = "#![greedy_group(main,*)]\nS::='a'[a]*;\n";
-    let triad_lark_equivalent = indoc! {r#"
+    let triad_grammar = indoc! {r#"
         #![greedy_group(main, *)]
-        PATTERN_0: /[\x61]*/
-        start: "a" PATTERN_0
+        start ::= "a" PATTERN_0 ;
+        PATTERN_0 ::= [\x61]* ;
     "#};
     let prefix_bytes = b"";
     let disputed_bytes = b"a";
@@ -5525,7 +5586,7 @@ fn test_triad_tuple_locked_replay_votes_explicit() {
     let disputed_token_id = LLMTokenID(0);
     llm_token_map.insert(disputed_bytes.to_vec(), disputed_token_id);
 
-    let grammar_definition = GrammarDefinition::from_lark(triad_lark_equivalent).unwrap();
+    let grammar_definition = GrammarDefinition::from_ebnf(triad_grammar).unwrap();
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
@@ -5550,8 +5611,8 @@ fn test_triad_tuple_locked_replay_votes_explicit() {
         .unwrap_or(false);
 
     assert_eq!(
-        (sep1_vote, ground_truth_vote),
-        (false, true),
-        "LOUD_FAIL triad tuple sep1-vs-ground-truth mismatch: grammar={triad_grammar:?} lark_equivalent={triad_lark_equivalent:?} prefix={prefix_bytes:?} disputed={disputed_bytes:?} sep1={sep1_vote} ground_truth={ground_truth_vote}",
+        sep1_vote,
+        ground_truth_vote,
+        "LOUD_FAIL triad tuple sep1-vs-ground-truth mismatch: grammar={triad_grammar:?} prefix={prefix_bytes:?} disputed={disputed_bytes:?} sep1={sep1_vote} ground_truth={ground_truth_vote}",
     );
 }

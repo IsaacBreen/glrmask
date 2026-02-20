@@ -1,0 +1,14 @@
+#![ignore(WS)]
+
+root ::= '{' '"name"' ':' STRING_LEN_8_80 ',' '"email"' ':' STRING_LEN_0_120 ',' '"lists"' ':' ( '"Daily New"' | '"Promotion"' ) '}' ;
+STRING_LEN_8_80 ::= '"' ( ( [\x20-\x21\x23-\x5B\x5D-\xFF] | '\\' ( ["\\/bfnrt] | 'u' [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) ) ){8,80} '"' ;
+STRING_LEN_0_120 ::= '"' ( ( [\x20-\x21\x23-\x5B\x5D-\xFF] | '\\' ( ["\\/bfnrt] | 'u' [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) ) ){0,120} '"' ;
+WS ::= ( ( ' ' | '\t' | '\n' | '\r' ) )* ;
+JSON_STRING ::= '"' STRING_CHARS '"' ;
+STRING_CHARS ::= ( ( STRING_CHAR | ESCAPE_SEQ ) )* ;
+STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF] ;
+ESCAPE_SEQ ::= '\\' ( ["\\/bfnrt] | 'u' [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) ;
+JSON_NUMBER ::= ( '-' )? ( '0' | [1-9] ( [0-9] )* ) ( '.' [0-9] ( [0-9] )* )? ( [eE] ( [+-] )? [0-9] ( [0-9] )* )? ;
+JSON_INTEGER ::= ( '-' )? ( '0' | [1-9] ( [0-9] )* ) ;
+JSON_BOOL ::= ( 'true' | 'false' ) ;
+JSON_NULL ::= 'null' ;

@@ -1194,20 +1194,10 @@ impl<'r> Precomputer1<'r> {
             })
         };
         let disable_suffix_prune = parse_env_flag("DISABLE_SUFFIX_PRUNE").unwrap_or(false);
-        let enable_suffix_prune = parse_env_flag("ENABLE_SUFFIX_PRUNE").unwrap_or(false);
-        let legacy_nwa_opt_in = parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(false);
-        let legacy_dwa_opt_in = parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false);
-        let suffix_prune_enabled = if disable_suffix_prune {
-            false
-        } else {
-            enable_suffix_prune || legacy_nwa_opt_in || legacy_dwa_opt_in
-        };
+        let suffix_prune_enabled = !disable_suffix_prune;
 
-        let do_nwa_suffix_prune = if suffix_prune_enabled {
-            parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(true)
-        } else {
-            false
-        };
+        let do_nwa_suffix_prune = suffix_prune_enabled
+            && parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(true);
         if do_nwa_suffix_prune {
             if let Some(cache) = self.suffix_prune_cache.as_ref() {
                 crate::debug!(4, "Terminal NWA (before suffix pruning): {}", self.nwa.stats());
@@ -1228,11 +1218,8 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        let do_dwa_suffix_prune = if suffix_prune_enabled {
-            parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false)
-        } else {
-            false
-        };
+        let do_dwa_suffix_prune = suffix_prune_enabled
+            && parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false);
         let pre_dwa_suffix_prune = if do_dwa_suffix_prune {
             let suffix_prune_cache = self.suffix_prune_cache.clone();
             let terminals_count = self.terminals_count;
@@ -1966,42 +1953,44 @@ impl<'r> Precomputer1<'r> {
                       // 1. Handle Matches -> Transitions to Initial State (per state_key)
                       for match_info in &exec_result.matches {
                           let terminal_id = GrammarTokenID(match_info.id);
-                          if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(terminal_id.0) {
-                              if let Some(state_idx) = states_by_width
-                                  .get(match_info.width)
-                                  .and_then(|sid| *sid)
-                              {
-                                  let should_suppress = self
-                                      .tokenizer
-                                      .dfa()
-                                      .states
-                                      .get(state_idx)
-                                      .map(|state| {
-                                          state.possible_future_group_ids.iter().any(|future_gid| {
-                                              self.terminal_to_greedy_group
-                                                  .get(*future_gid)
-                                                  .and_then(|group| *group)
-                                                  == Some(*group_idx)
-                                          })
-                                      })
-                                      .unwrap_or(false);
-                                  if should_suppress {
-                                      crate::debug!(
-                                          7,
-                                          "      -> Skip match (greedy continuation): terminal_id={}, width={}, state_after_match={}",
-                                          terminal_id.0,
-                                          match_info.width,
-                                          state_idx
-                                      );
-                                      continue;
-                                  }
-                              }
-                          }
+                            let next_pos = pos + match_info.width;
+                            if next_pos < segment_bytes.len() {
+                                if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(terminal_id.0) {
+                                    if let Some(state_idx) = states_by_width
+                                        .get(match_info.width)
+                                        .and_then(|sid| *sid)
+                                    {
+                                        let should_suppress = self
+                                            .tokenizer
+                                            .dfa()
+                                            .states
+                                            .get(state_idx)
+                                            .map(|state| {
+                                                state.possible_future_group_ids.iter().any(|future_gid| {
+                                                    self.terminal_to_greedy_group
+                                                        .get(*future_gid)
+                                                        .and_then(|group| *group)
+                                                        == Some(*group_idx)
+                                                })
+                                            })
+                                            .unwrap_or(false);
+                                        if should_suppress {
+                                            crate::debug!(
+                                                7,
+                                                "      -> Skip match (greedy continuation): terminal_id={}, width={}, state_after_match={}",
+                                                terminal_id.0,
+                                                match_info.width,
+                                                state_idx
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
                           let Some(next_approx_state) = self.approx_step(approx_state, terminal_id) else {
                               crate::debug!(7, "      -> Skip match (no approx DFA transition for terminal {})", terminal_id.0);
                               continue;
                           };
-                        let next_pos = pos + match_info.width;
                         crate::debug!(7, "    Match: terminal_id={}, width={}, next_pos={}", terminal_id.0, match_info.width, next_pos);
 
                         // Leaf check: if match consumes remainder of segment
