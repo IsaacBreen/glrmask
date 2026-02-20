@@ -5452,23 +5452,42 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
         start: "{" obj_required_0_0 "}"
     "#};
 
-    let mut llm_token_map = LLMTokenMap::new();
     let tok_prefix_0 = LLMTokenID(0); // b"{\""
     let tok_prefix_1 = LLMTokenID(1); // b"\":\""
     let tok_disputed = LLMTokenID(2); // b"\",\""
-    let tok_prefix_3 = LLMTokenID(3); // b"\"a\""
+    let tok_prefix_3 = LLMTokenID(3); // b"a\""
     let tok_prefix_4 = LLMTokenID(4); // b":{\""
+    let tok_suffix = LLMTokenID(5); // b"\":{}}}"
+
+    let committed_prefix = [
+        b"{\"".as_slice(),
+        b"\":\"".as_slice(),
+        b"\",\"".as_slice(),
+        b"a\"".as_slice(),
+        b":{\"".as_slice(),
+        b"\":\"".as_slice(),
+    ]
+    .concat();
+    let expected_prefix = b"{\"\":\"\",\"a\":{\"\":\"";
+    assert_eq!(
+        committed_prefix,
+        expected_prefix,
+        "test setup invariant failed: committed token bytes must match intended prefix"
+    );
+
+    let mut llm_token_map = LLMTokenMap::new();
     llm_token_map.insert(b"{\"".to_vec(), tok_prefix_0);
     llm_token_map.insert(b"\":\"".to_vec(), tok_prefix_1);
     llm_token_map.insert(b"\",\"".to_vec(), tok_disputed);
-    llm_token_map.insert(b"\"a\"".to_vec(), tok_prefix_3);
+    llm_token_map.insert(b"a\"".to_vec(), tok_prefix_3);
     llm_token_map.insert(b":{\"".to_vec(), tok_prefix_4);
+    llm_token_map.insert(b"\":{}}}".to_vec(), tok_suffix);
 
     let grammar_definition = GrammarDefinition::from_lark(lark_grammar).unwrap();
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
-        0,
+        5,
         &GrammarConstraintConfig::default(),
     );
 
@@ -5486,5 +5505,53 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
         mask.contains(tok_disputed.0),
         "LOUD_FAIL disputed token missing from mask: prefix='{{\"\":\"\",\"a\":{{\"\":\"' disputed='\",\"' token_id={} mask={mask:?}",
         tok_disputed.0,
+    );
+}
+
+#[test]
+fn test_triad_tuple_locked_replay_votes_explicit() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let triad_grammar = "#![greedy_group(main,*)]\nS::='a'[a]*;\n";
+    let triad_lark_equivalent = indoc! {r#"
+        #![greedy_group(main, *)]
+        PATTERN_0: /[\x61]*/
+        start: "a" PATTERN_0
+    "#};
+    let prefix_bytes = b"";
+    let disputed_bytes = b"a";
+
+    let mut llm_token_map = LLMTokenMap::new();
+    let disputed_token_id = LLMTokenID(0);
+    llm_token_map.insert(disputed_bytes.to_vec(), disputed_token_id);
+
+    let grammar_definition = GrammarDefinition::from_lark(triad_lark_equivalent).unwrap();
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        0,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut sep1_state = constraint.init();
+    if !prefix_bytes.is_empty() {
+        sep1_state.commit_bytes(prefix_bytes);
+    }
+    let sep1_vote = sep1_state.get_mask().contains(disputed_token_id.0);
+
+    let mut gt_state = crate::bruteforce_constraint::BruteforceConstraintState::new(&constraint);
+    if !prefix_bytes.is_empty() {
+        gt_state.commit_bytes(prefix_bytes);
+    }
+    let gt_mask = gt_state.get_mask_bruteforce();
+    let ground_truth_vote = gt_mask
+        .get(disputed_token_id.0)
+        .copied()
+        .unwrap_or(false);
+
+    assert_eq!(
+        (sep1_vote, ground_truth_vote),
+        (false, true),
+        "LOUD_FAIL triad tuple sep1-vs-ground-truth mismatch: grammar={triad_grammar:?} lark_equivalent={triad_lark_equivalent:?} prefix={prefix_bytes:?} disputed={disputed_bytes:?} sep1={sep1_vote} ground_truth={ground_truth_vote}",
     );
 }
