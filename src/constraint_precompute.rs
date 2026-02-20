@@ -1194,10 +1194,20 @@ impl<'r> Precomputer1<'r> {
             })
         };
         let disable_suffix_prune = parse_env_flag("DISABLE_SUFFIX_PRUNE").unwrap_or(false);
-        let suffix_prune_enabled = !disable_suffix_prune;
+        let enable_suffix_prune = parse_env_flag("ENABLE_SUFFIX_PRUNE").unwrap_or(false);
+        let legacy_nwa_opt_in = parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(false);
+        let legacy_dwa_opt_in = parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false);
+        let suffix_prune_enabled = if disable_suffix_prune {
+            false
+        } else {
+            enable_suffix_prune || legacy_nwa_opt_in || legacy_dwa_opt_in
+        };
 
-        let do_nwa_suffix_prune = suffix_prune_enabled
-            && parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(true);
+        let do_nwa_suffix_prune = if suffix_prune_enabled {
+            parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(true)
+        } else {
+            false
+        };
         if do_nwa_suffix_prune {
             if let Some(cache) = self.suffix_prune_cache.as_ref() {
                 crate::debug!(4, "Terminal NWA (before suffix pruning): {}", self.nwa.stats());
@@ -1218,8 +1228,11 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        let do_dwa_suffix_prune = suffix_prune_enabled
-            && parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false);
+        let do_dwa_suffix_prune = if suffix_prune_enabled {
+            parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false)
+        } else {
+            false
+        };
         let pre_dwa_suffix_prune = if do_dwa_suffix_prune {
             let suffix_prune_cache = self.suffix_prune_cache.clone();
             let terminals_count = self.terminals_count;
@@ -1987,10 +2000,18 @@ impl<'r> Precomputer1<'r> {
                                     }
                                 }
                             }
-                          let Some(next_approx_state) = self.approx_step(approx_state, terminal_id) else {
-                              crate::debug!(7, "      -> Skip match (no approx DFA transition for terminal {})", terminal_id.0);
-                              continue;
-                          };
+                            let next_approx_state = match self.approx_step(approx_state, terminal_id) {
+                                Some(next) => next,
+                                None => {
+                                    crate::debug!(
+                                        7,
+                                        "      -> Keep match despite missing approx DFA transition for terminal {} (fallback to current approx state {})",
+                                        terminal_id.0,
+                                        approx_state
+                                    );
+                                    approx_state
+                                }
+                            };
                         crate::debug!(7, "    Match: terminal_id={}, width={}, next_pos={}", terminal_id.0, match_info.width, next_pos);
 
                         // Leaf check: if match consumes remainder of segment
@@ -2106,7 +2127,6 @@ impl<'r> Precomputer1<'r> {
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
 
-                        // Use cached accessible terminals (389 unique states, but called 700k+ times)
                         let accessible_terminals: std::rc::Rc<Vec<GrammarTokenID>> = if let Some(cached) = self.accessible_terminals_cache.get(&final_tokenizer_state) {
                             cached.clone() // Rc clone is cheap
                         } else {
@@ -2123,28 +2143,29 @@ impl<'r> Precomputer1<'r> {
 
                         let end_idx = self.leaf_state;
                         let mut end_labels: Vec<Label> = Vec::new();
+                        if pos == 0 || approx_state == self.approx_start_state || segment_bytes.len() <= 2 {
+                            for terminal_id in accessible_terminals.iter() {
+                                let Some(_next_approx_state) = self.approx_step(approx_state, *terminal_id) else {
+                                    crate::debug!(7, "    -> Skip END_STATE terminal {} (no approx DFA transition)", terminal_id.0);
+                                    continue;
+                                };
+                                crate::debug!(
+                                    7,
+                                    "    -> END_STATE transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
+                                    num_sources,
+                                    terminal_id.0,
+                                    end_idx,
+                                    single_token_weight,
+                                );
+                                end_labels.push(terminal_id.0 as Label);
+                            }
 
-                        for terminal_id in accessible_terminals.iter() {
-                            let Some(_next_approx_state) = self.approx_step(approx_state, *terminal_id) else {
-                                crate::debug!(7, "    -> Skip END_STATE terminal {} (no approx DFA transition)", terminal_id.0);
-                                continue;
-                            };
-                            crate::debug!(
-                                7,
-                                "    -> END_STATE transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
-                                num_sources,
-                                terminal_id.0,
-                                end_idx,
-                                single_token_weight,
-                            );
-                            end_labels.push(terminal_id.0 as Label);
-                        }
-
-                        if !end_labels.is_empty() {
-                            self.update_live_tokens(end_idx, &single_token_weight);
-                            for &src_node in nodes.iter() {
-                                for label in &end_labels {
-                                    self.add_pending_token_id(src_node, *label, end_idx, child_token_id);
+                            if !end_labels.is_empty() {
+                                self.update_live_tokens(end_idx, &single_token_weight);
+                                for &src_node in nodes.iter() {
+                                    for label in &end_labels {
+                                        self.add_pending_token_id(src_node, *label, end_idx, child_token_id);
+                                    }
                                 }
                             }
                         }
