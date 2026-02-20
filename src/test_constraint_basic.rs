@@ -5408,3 +5408,43 @@ fn test_suffix_grammar_validation() {
     // Note: We're not asserting 100% validity since the terminal DWA might have
     // paths that are valid tokenizer transitions but not grammar suffixes
 }
+
+#[test]
+fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark_grammar = indoc! {r#"
+        #![greedy_group(main, *)]
+        PATTERN_0: /[\x61]*/
+        start: "a" PATTERN_0
+    "#};
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar).unwrap();
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        0,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    let disputed = LLMTokenID(0);
+
+    let pre_mask = state.get_mask();
+    let pre_allowed = pre_mask.contains(disputed.0);
+
+    let commit_res = state.commit(disputed);
+    let commit_ok = commit_res.is_ok();
+
+    let post_mask = state.get_mask();
+    let alive_any = post_mask.contains(disputed.0);
+    let alive_count = if alive_any { 1 } else { 0 };
+
+    assert!(
+        !commit_ok || !alive_any || pre_allowed,
+        "LOUD_FAIL mask/commit invariant violated: pre_allowed={pre_allowed} commit_ok={commit_ok} alive_any={alive_any} alive_count={alive_count} grammar='#![greedy_group(main,*)] S::='a'[a]*;' prefix='' disputed_token='a' token_id=0"
+    );
+}
