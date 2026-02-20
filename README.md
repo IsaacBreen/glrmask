@@ -150,6 +150,40 @@ RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 \
 cd python && bash run_benchmarks.sh
 ```
 
+## Terminal DWA Debug Sampling
+
+Set `DWA_SAMPLE_PATHS` to dump sampled terminal-DWA paths during constraint build.
+
+Useful environment variables:
+
+- `DWA_SAMPLE_PATHS`: number of sampled paths to print
+- `DWA_SAMPLE_LONG`: bias toward longer paths
+- `DWA_SAMPLE_MIN_LEN`: minimum accepted sampled path length
+- `DWA_SAMPLE_MAX_ATTEMPTS`: cap sampling attempts
+- `DWA_SAMPLE_MAX_STEPS`: cap steps per sampled walk
+- `DWA_SAMPLE_END_PROB`: override end probability in random walk (0.0..1.0)
+- `DWA_SAMPLE_MAX_TOKENS`: max token IDs shown for large weights
+- `DWA_SAMPLE_TRACE`: print per-step weight/token evolution for sampled paths
+
+Focused single-token mode (for debugging one target token like `","`):
+
+- `DWA_SAMPLE_FOCUS_TOKEN_ID`: one or more internal token IDs (comma-separated)
+- `DWA_SAMPLE_FOCUS_TOKEN_TEXT`: token bytes as literal text (e.g. `","`)
+- `DWA_SAMPLE_FOCUS_TOKEN_HEX`: token bytes as hex (e.g. `222c22`)
+- `DWA_SAMPLE_FOCUS_ONLY`: if set (or implied by focus token), only keep paths whose final weight contains the focus token
+
+Example:
+
+```bash
+DWA_SAMPLE_PATHS=20 \
+DWA_SAMPLE_TRACE=1 \
+DWA_SAMPLE_FOCUS_TOKEN_TEXT='","' \
+MACRO_DEBUG_LEVEL=5 cargo run --bin grammar-compiler -- \
+    --grammar src/json.ebnf --format ebnf \
+    --vocab benchmarking/gpt2_vocab.json \
+    --output /tmp/constraint_json_debug.json.gz
+```
+
 ## JSON Schema Support
 
 Sep1 supports JSON Schema constraints via EBNF conversion:

@@ -5414,15 +5414,57 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     let lark_grammar = indoc! {r#"
-        #![greedy_group(main, *)]
-        PATTERN_0: /[\x61]*/
-        start: "a" PATTERN_0
+        PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/
+        PATTERN_1: /[\xC2-\xDF]/
+        PATTERN_2: /[\x80-\xBF]/
+        PATTERN_3: /[\xE0-\xEF]/
+        PATTERN_4: /[\xF0-\xF4]/
+        PATTERN_5: /[\x30-\x39\x41-\x46\x61-\x66]/
+        PATTERN_6: /[\x22\x2F\x5C\x62\x66\x6E\x72\x74]/
+        PATTERN_7: /[\x30-\x39]/
+        PATTERN_8: /[\x31-\x39]/
+        PATTERN_9: /[\x45\x65]/
+        PATTERN_10: /[\x2B\x2D]/
+        STRING_CHAR: PATTERN_0 | PATTERN_1 PATTERN_2 | PATTERN_3 PATTERN_2 PATTERN_2 | PATTERN_4 PATTERN_2 PATTERN_2 PATTERN_2
+        HEX: PATTERN_5
+        ESCAPE_SHORT_CHAR: PATTERN_6
+        ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" HEX HEX HEX HEX
+        STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+        JSON_STRING: "\"" STRING_CONTENT "\""
+        DIGIT: PATTERN_7
+        NONZERO_DIGIT: PATTERN_8
+        INT_PART: "0" | NONZERO_DIGIT DIGIT*
+        FRAC_PART: "." DIGIT+
+        EXP_MARK: PATTERN_9
+        EXP_SIGN: PATTERN_10
+        EXP_PART: EXP_MARK EXP_SIGN? DIGIT+
+        JSON_INTEGER: "-"? INT_PART
+        JSON_NUMBER: "-"? INT_PART FRAC_PART? EXP_PART?
+        JSON_BOOL: "true" | "false"
+        JSON_NULL: "null"
+        json_kv: JSON_STRING ":" json_value
+        json_object: "{" "}" | "{" json_kv ("," json_kv)* "}"
+        json_array: "[" "]" | "[" json_value ("," json_value)* "]"
+        json_value: json_object | json_array | JSON_STRING | JSON_NUMBER | JSON_INTEGER | JSON_BOOL | JSON_NULL
+        obj_required_0_1: "\"a\"" ":" json_object
+        obj_required_0_2: "\"\"" ":" JSON_STRING
+        obj_required_0_0: "\"\"" ":" JSON_STRING "," obj_required_0_1 | "\"a\"" ":" json_object "," obj_required_0_2
+        start: "{" obj_required_0_0 "}"
     "#};
-    let grammar_definition = GrammarDefinition::from_lark(lark_grammar).unwrap();
 
     let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    let tok_prefix_0 = LLMTokenID(0); // b"{\""
+    let tok_prefix_1 = LLMTokenID(1); // b"\":\""
+    let tok_disputed = LLMTokenID(2); // b"\",\""
+    let tok_prefix_3 = LLMTokenID(3); // b"\"a\""
+    let tok_prefix_4 = LLMTokenID(4); // b":{\""
+    llm_token_map.insert(b"{\"".to_vec(), tok_prefix_0);
+    llm_token_map.insert(b"\":\"".to_vec(), tok_prefix_1);
+    llm_token_map.insert(b"\",\"".to_vec(), tok_disputed);
+    llm_token_map.insert(b"\"a\"".to_vec(), tok_prefix_3);
+    llm_token_map.insert(b":{\"".to_vec(), tok_prefix_4);
 
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar).unwrap();
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map,
@@ -5431,20 +5473,18 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
     );
 
     let mut state = constraint.init();
-    let disputed = LLMTokenID(0);
+    state.commit(tok_prefix_0).unwrap();
+    state.commit(tok_prefix_1).unwrap();
+    state.commit(tok_disputed).unwrap();
+    state.commit(tok_prefix_3).unwrap();
+    state.commit(tok_prefix_4).unwrap();
+    state.commit(tok_prefix_1).unwrap();
 
-    let pre_mask = state.get_mask();
-    let pre_allowed = pre_mask.contains(disputed.0);
-
-    let commit_res = state.commit(disputed);
-    let commit_ok = commit_res.is_ok();
-
-    let post_mask = state.get_mask();
-    let alive_any = post_mask.contains(disputed.0);
-    let alive_count = if alive_any { 1 } else { 0 };
+    let mask = state.get_mask();
 
     assert!(
-        !commit_ok || !alive_any || pre_allowed,
-        "LOUD_FAIL mask/commit invariant violated: pre_allowed={pre_allowed} commit_ok={commit_ok} alive_any={alive_any} alive_count={alive_count} grammar='#![greedy_group(main,*)] S::='a'[a]*;' prefix='' disputed_token='a' token_id=0"
+        mask.contains(tok_disputed.0),
+        "LOUD_FAIL disputed token missing from mask: prefix='{{\"\":\"\",\"a\":{{\"\":\"' disputed='\",\"' token_id={} mask={mask:?}",
+        tok_disputed.0,
     );
 }

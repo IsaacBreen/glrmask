@@ -5,119 +5,11 @@
 //!
 //! Complexity: O(states × tokens × avg_token_length) with parallelism
 
-use std::collections::{BTreeSet, HashMap};
-use rayon::prelude::*;
+use std::collections::BTreeSet;
 use crate::finite_automata::Regex;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
-
-/// Fast 64-bit mixing function
-#[inline(always)]
-fn mix64(mut x: u64) -> u64 {
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51afd7ed558ccd);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
-    x ^= x >> 33;
-    x
-}
-
-/// Compute signature for a state based on its behavior on all tokens.
-/// 
-/// The signature must capture all information that affects the trellis structure:
-/// - Finalizers at each position (which groups complete at each byte position)
-/// - Possible futures at the END (after consuming all bytes)
-/// 
-/// Two states are equivalent iff they produce identical trellis structures for all tokens.
-/// 
-/// The trellis edges at position 0 are based on the FINAL match positions for each group:
-/// - Greedy groups: last position where they matched
-/// - Non-greedy groups: first position where they matched
-///
-/// So we need to track (group_id, final_position) pairs, not just which groups completed.
-fn compute_state_signature(
-    dfa_transitions: &[[u32; 256]],
-    dfa_finalizers: &[Vec<usize>],
-    possible_futures: &[Vec<usize>],
-    non_greedy_finalizers: &std::collections::BTreeSet<usize>,
-    tokens: &[Vec<u8>],
-    state: usize,
-) -> u64 {
-    const NONE_STATE: u32 = u32::MAX;
-    let mut hash: u64 = 0;
-    
-    for (token_idx, token) in tokens.iter().enumerate() {
-        // Run token through DFA from this state
-        let mut current = state as u32;
-        let mut dead_at_depth: Option<usize> = None;
-        
-        // Track (group_id, final_position) using the same semantics as execute():
-        // - For greedy groups: store last position (overwrite)
-        // - For non-greedy groups: store first position (don't overwrite)
-        let mut matches: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
-        
-        for (depth, &byte) in token.iter().enumerate() {
-            if current == NONE_STATE {
-                dead_at_depth = Some(depth);
-                break;
-            }
-            let next = dfa_transitions[current as usize][byte as usize];
-            if next == NONE_STATE {
-                dead_at_depth = Some(depth + 1);
-                current = NONE_STATE;
-                break;
-            }
-            current = next;
-            let position = depth + 1; // 1-indexed like execute()
-            
-            // Record matches at this state with proper greedy/non-greedy semantics
-            for &gid in &dfa_finalizers[current as usize] {
-                if non_greedy_finalizers.contains(&gid) {
-                    // Non-greedy: keep first
-                    matches.entry(gid).or_insert(position);
-                } else {
-                    // Greedy: keep last
-                    matches.insert(gid, position);
-                }
-            }
-        }
-        
-        // Hash structure: dead position OR (matches + end state)
-        let structure_hash: u64;
-        let end_hash: u64;
-        
-        if let Some(dead_depth) = dead_at_depth {
-            // Token leads to dead state - hash the dead depth
-            structure_hash = mix64((dead_depth as u64) ^ 0xDEAD_DEAD_DEAD_DEAD);
-            end_hash = mix64(0xDEADBEEF_u64);
-        } else {
-            // Token is valid - hash the (group_id, position) pairs
-            // The order is determined by BTreeMap (sorted by group_id)
-            let mut sh: u64 = mix64(matches.len() as u64 | (1 << 48));
-            for (&gid, &pos) in &matches {
-                // Hash both the group ID and position together
-                sh = sh.wrapping_add(mix64((gid as u64) | ((pos as u64) << 32)));
-            }
-            structure_hash = sh;
-            
-            // Hash end state possible_futures
-            let futures = &possible_futures[current as usize];
-            let mut h: u64 = mix64(futures.len() as u64 | (1 << 48));
-            for &gid in futures {
-                h = h.wrapping_add(mix64(gid as u64));
-            }
-            end_hash = h | (1 << 63);
-        }
-        
-        // Combine into token result, weighted by token index
-        let token_hash = end_hash.wrapping_add(structure_hash);
-        let weight = mix64((token_idx + 1) as u64);
-        hash = hash.wrapping_add(token_hash.wrapping_mul(weight));
-    }
-    
-    hash
-}
 
 /// Find state equivalence classes for a tokenizer.
 ///
@@ -135,67 +27,15 @@ pub fn find_state_equivalence_classes(
     states: &[usize],
 ) -> Vec<usize> {
     let start = std::time::Instant::now();
-    let dfa = &regex.dfa;
-    
-    // Precompute packed transition tables
-    const NONE_STATE: u32 = u32::MAX;
-    let dfa_transitions: Vec<[u32; 256]> = dfa.states
-        .iter()
-        .map(|state| {
-            let mut table = [NONE_STATE; 256];
-            for (byte, &target) in state.transitions.iter() {
-                table[byte as usize] = target as u32;
-            }
-            table
-        })
-        .collect();
-    
-    let dfa_finalizers: Vec<Vec<usize>> = dfa.states
-        .iter()
-        .map(|state| state.finalizers.iter().collect())
-        .collect();
-    
-    let possible_futures: Vec<Vec<usize>> = dfa.states
-        .iter()
-        .map(|state| state.possible_future_group_ids.iter().copied().collect())
-        .collect();
-    
-    let non_greedy_finalizers = &dfa.non_greedy_finalizers;
-    
-    // Compute signatures for all states in parallel
-    let signatures: Vec<u64> = states
-        .par_iter()
-        .map(|&state| {
-            compute_state_signature(
-                &dfa_transitions,
-                &dfa_finalizers,
-                &possible_futures,
-                non_greedy_finalizers,
-                tokens,
-                state,
-            )
-        })
-        .collect();
-    
-    // Group states by signature
-    let mut sig_groups: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (idx, &sig) in signatures.iter().enumerate() {
-        sig_groups.entry(sig).or_default().push(idx);
-    }
-    
-    // Build mapping: state index -> representative state ID
-    let mut mapping = vec![0usize; states.len()];
-    for members in sig_groups.values() {
-        let rep_state_id = states[members[0]];
-        for &idx in members {
-            mapping[idx] = rep_state_id;
-        }
-    }
-    
-    let num_groups = sig_groups.len();
+    let mapping = super::trellis_equivalence_analysis::find_state_equivalence_classes_trellis(
+        regex,
+        tokens,
+        states,
+    );
+    let num_groups = mapping.iter().copied().collect::<BTreeSet<_>>().len();
     crate::debug!(
         3,
-        "State equiv reference: {} states -> {} groups in {:?}",
+        "State equiv reference (trellis-backed): {} states -> {} groups in {:?}",
         states.len(),
         num_groups,
         start.elapsed(),
@@ -214,3 +54,98 @@ pub fn mapping_to_equivalence_classes(states: &[usize], mapping: &[usize]) -> St
     
     rep_to_class.into_values().collect()
 }
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::Arc;
+
+        use indoc::indoc;
+
+        use crate::interface::{CompiledGrammar, GrammarDefinition};
+
+        use super::{find_state_equivalence_classes, mapping_to_equivalence_classes, StateEquivalenceResult};
+
+        fn state_is_refinement(candidate: &StateEquivalenceResult, target: &StateEquivalenceResult) -> bool {
+            candidate.iter().all(|candidate_class| {
+                target
+                    .iter()
+                    .any(|target_class| candidate_class.is_subset(target_class))
+            })
+        }
+
+        #[test]
+        fn test_reference_state_equivalence_refines_trellis_on_schema_case() {
+            let _guard = crate::GLOBAL_DIMS_MUTEX
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            let lark_grammar = indoc! {r#"
+                PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/
+                PATTERN_1: /[\xC2-\xDF]/
+                PATTERN_2: /[\x80-\xBF]/
+                PATTERN_3: /[\xE0-\xEF]/
+                PATTERN_4: /[\xF0-\xF4]/
+                PATTERN_5: /[\x30-\x39\x41-\x46\x61-\x66]/
+                PATTERN_6: /[\x22\x2F\x5C\x62\x66\x6E\x72\x74]/
+                PATTERN_7: /[\x30-\x39]/
+                PATTERN_8: /[\x31-\x39]/
+                PATTERN_9: /[\x45\x65]/
+                PATTERN_10: /[\x2B\x2D]/
+                STRING_CHAR: PATTERN_0 | PATTERN_1 PATTERN_2 | PATTERN_3 PATTERN_2 PATTERN_2 | PATTERN_4 PATTERN_2 PATTERN_2 PATTERN_2
+                HEX: PATTERN_5
+                ESCAPE_SHORT_CHAR: PATTERN_6
+                ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" HEX HEX HEX HEX
+                STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+                JSON_STRING: "\"" STRING_CONTENT "\""
+                DIGIT: PATTERN_7
+                NONZERO_DIGIT: PATTERN_8
+                INT_PART: "0" | NONZERO_DIGIT DIGIT*
+                FRAC_PART: "." DIGIT+
+                EXP_MARK: PATTERN_9
+                EXP_SIGN: PATTERN_10
+                EXP_PART: EXP_MARK EXP_SIGN? DIGIT+
+                JSON_INTEGER: "-"? INT_PART
+                JSON_NUMBER: "-"? INT_PART FRAC_PART? EXP_PART?
+                JSON_BOOL: "true" | "false"
+                JSON_NULL: "null"
+                json_kv: JSON_STRING ":" json_value
+                json_object: "{" "}" | "{" json_kv ("," json_kv)* "}"
+                json_array: "[" "]" | "[" json_value ("," json_value)* "]"
+                json_value: json_object | json_array | JSON_STRING | JSON_NUMBER | JSON_INTEGER | JSON_BOOL | JSON_NULL
+                obj_required_0_1: "\"a\"" ":" json_object
+                obj_required_0_2: "\"\"" ":" JSON_STRING
+                obj_required_0_0: "\"\"" ":" JSON_STRING "," obj_required_0_1 | "\"a\"" ":" json_object "," obj_required_0_2
+                start: "{" obj_required_0_0 "}"
+            "#};
+
+            let definition = GrammarDefinition::from_lark(lark_grammar).unwrap();
+            let compiled = CompiledGrammar::from_definition(Arc::new(definition));
+            let tokenizer = compiled.tokenizer();
+
+            let tokens: Vec<Vec<u8>> = vec![
+                b"{\"".to_vec(),
+                b"\":\"".to_vec(),
+                b"\",\"".to_vec(),
+                b"\"a\"".to_vec(),
+                b":{\"".to_vec(),
+            ];
+
+            let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+
+            let ref_mapping = find_state_equivalence_classes(tokenizer.as_regex(), &tokens, &states);
+            let trellis_mapping = super::super::trellis_equivalence_analysis::find_state_equivalence_classes_trellis(
+                tokenizer.as_regex(),
+                &tokens,
+                &states,
+            );
+
+            let ref_classes = mapping_to_equivalence_classes(&states, &ref_mapping);
+            let trellis_classes =
+                super::super::trellis_equivalence_analysis::mapping_to_equivalence_classes(&states, &trellis_mapping);
+
+            assert!(
+                state_is_refinement(&ref_classes, &trellis_classes),
+                "Reference state equivalence over-merged vs trellis. ref={ref_classes:?} trellis={trellis_classes:?}"
+            );
+        }
+    }

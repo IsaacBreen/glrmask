@@ -1980,25 +1980,54 @@ impl GrammarConstraint {
         }
 
         // Sample and print terminal DWA paths when DWA_SAMPLE_PATHS is set.
-        // Use DWA_SAMPLE_PATHS env var to override the number of paths (default: 10)
+        // Sampling controls:
+        // - DWA_SAMPLE_PATHS: number of paths to print (default: 10)
+        // - DWA_SAMPLE_LONG: bias toward longer paths
+        // - DWA_SAMPLE_MIN_LEN: minimum path length to accept
+        // - DWA_SAMPLE_MAX_ATTEMPTS / DWA_SAMPLE_MAX_STEPS / DWA_SAMPLE_END_PROB / DWA_SAMPLE_MAX_TOKENS
+        // Focus mode (single-token debugging):
+        // - DWA_SAMPLE_FOCUS_TOKEN_ID: internal token id (or comma-separated ids)
+        // - DWA_SAMPLE_FOCUS_TOKEN_TEXT: token bytes as literal text (e.g. '","')
+        // - DWA_SAMPLE_FOCUS_TOKEN_HEX: token bytes as hex (e.g. 222c22)
+        // - DWA_SAMPLE_FOCUS_ONLY: keep only paths whose final weight contains focus token(s)
         if std::env::var("DWA_SAMPLE_PATHS").is_ok() {
             use rand::Rng;
             let mut rng = rand::thread_rng();
+            let parse_env_bool = |key: &str| -> bool {
+                std::env::var(key)
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("on"))
+                    .unwrap_or(false)
+            };
             let num_sample_paths: usize = std::env::var("DWA_SAMPLE_PATHS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10);
-            let sample_long = std::env::var("DWA_SAMPLE_LONG")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            let sample_long = parse_env_bool("DWA_SAMPLE_LONG");
             let min_len: Option<usize> = std::env::var("DWA_SAMPLE_MIN_LEN")
                 .ok()
                 .and_then(|s| s.parse().ok());
+            let sample_max_tokens: usize = std::env::var("DWA_SAMPLE_MAX_TOKENS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3);
             let target_samples = if sample_long {
                 num_sample_paths.saturating_mul(20).max(num_sample_paths)
             } else {
                 num_sample_paths
             };
+            let max_attempts: usize = std::env::var("DWA_SAMPLE_MAX_ATTEMPTS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| target_samples.saturating_mul(50).max(target_samples));
+            let max_steps: usize = std::env::var("DWA_SAMPLE_MAX_STEPS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(if sample_long { 2048 } else { 512 });
+            let end_prob: f64 = std::env::var("DWA_SAMPLE_END_PROB")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|p| p.clamp(0.0, 1.0))
+                .unwrap_or(if sample_long { 0.1 } else { 0.3 });
             
             // In weight-heavy mode, token IDs in weights are expanded: id = internal_id * num_tsids + tsid_offset
             // We need to convert back to internal token ID to look up bytes
@@ -2065,9 +2094,7 @@ impl GrammarConstraint {
                 reachable
             };
 
-            let print_terminals = std::env::var("DWA_PRINT_TERMINALS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            let print_terminals = parse_env_bool("DWA_PRINT_TERMINALS");
             if print_terminals {
                 crate::debug!(5, "Terminal list (reachable {} of {}):", reachable_terminals.len(), terminals_count);
                 for tid in reachable_terminals.iter() {
@@ -2112,6 +2139,107 @@ impl GrammarConstraint {
                 format!("{}:{}", internal_id, token_str)
             };
 
+            let parse_hex_bytes = |raw: &str| -> Option<Vec<u8>> {
+                let cleaned: String = raw
+                    .trim()
+                    .chars()
+                    .filter(|c| !c.is_ascii_whitespace() && *c != '_' && *c != ':')
+                    .collect();
+                if cleaned.is_empty() || cleaned.len() % 2 != 0 {
+                    return None;
+                }
+                let mut out = Vec::with_capacity(cleaned.len() / 2);
+                let bytes = cleaned.as_bytes();
+                let mut idx = 0usize;
+                while idx < bytes.len() {
+                    let pair = std::str::from_utf8(&bytes[idx..idx + 2]).ok()?;
+                    let byte = u8::from_str_radix(pair, 16).ok()?;
+                    out.push(byte);
+                    idx += 2;
+                }
+                Some(out)
+            };
+
+            let mut focus_token_ids: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+            let mut focus_requests: Vec<String> = Vec::new();
+
+            if let Ok(raw_ids) = std::env::var("DWA_SAMPLE_FOCUS_TOKEN_ID") {
+                for part in raw_ids.split(',') {
+                    let trimmed = part.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if let Ok(id) = trimmed.parse::<usize>() {
+                        focus_token_ids.insert(id);
+                        focus_requests.push(format!("id={}", id));
+                    }
+                }
+            }
+
+            if let Ok(raw_text) = std::env::var("DWA_SAMPLE_FOCUS_TOKEN_TEXT") {
+                if !raw_text.is_empty() {
+                    let target_bytes = raw_text.as_bytes();
+                    let mut matches = 0usize;
+                    for (token_bytes, token_id) in &internal_llm_token_map {
+                        if token_bytes.as_slice() == target_bytes {
+                            focus_token_ids.insert(token_id.0);
+                            matches += 1;
+                        }
+                    }
+                    focus_requests.push(format!("text='{}' matches={}", raw_text, matches));
+                }
+            }
+
+            if let Ok(raw_hex) = std::env::var("DWA_SAMPLE_FOCUS_TOKEN_HEX") {
+                if !raw_hex.trim().is_empty() {
+                    if let Some(target_bytes) = parse_hex_bytes(raw_hex.as_str()) {
+                        let mut matches = 0usize;
+                        for (token_bytes, token_id) in &internal_llm_token_map {
+                            if token_bytes.as_slice() == target_bytes.as_slice() {
+                                focus_token_ids.insert(token_id.0);
+                                matches += 1;
+                            }
+                        }
+                        focus_requests.push(format!("hex={} matches={}", raw_hex, matches));
+                    } else {
+                        crate::debug!(4, "DWA_SAMPLE_FOCUS_TOKEN_HEX parse error: '{}'", raw_hex);
+                    }
+                }
+            }
+
+            let focus_only = std::env::var("DWA_SAMPLE_FOCUS_ONLY")
+                .ok()
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("on"))
+                .unwrap_or(!focus_token_ids.is_empty());
+
+            let weight_contains_internal_token = |weight: &crate::dwa_i32::Weight, internal_id: usize| -> bool {
+                crate::debug_path_weight::weight_contains_token(weight, internal_id, num_tsids_for_conversion)
+            };
+
+            crate::debug!(
+                5,
+                "DWA_SAMPLE config: n={}, target_samples={}, long={}, min_len={:?}, max_attempts={}, max_steps={}, end_prob={:.3}, max_tokens={}, focus_only={}",
+                num_sample_paths,
+                target_samples,
+                sample_long,
+                min_len,
+                max_attempts,
+                max_steps,
+                end_prob,
+                sample_max_tokens,
+                focus_only
+            );
+            if !focus_token_ids.is_empty() {
+                let focused: Vec<String> = focus_token_ids
+                    .iter()
+                    .copied()
+                    .map(format_token)
+                    .collect();
+                crate::debug!(5, "DWA_SAMPLE focus tokens: [{}]", focused.join(", "));
+            } else if !focus_requests.is_empty() {
+                crate::debug!(5, "DWA_SAMPLE focus requested but unresolved: {}", focus_requests.join("; "));
+            }
+
             if let Ok(token_list) = std::env::var("DEBUG_TOKEN_BYTES") {
                 let mut ids: Vec<usize> = Vec::new();
                 for part in token_list.split(',') {
@@ -2137,8 +2265,6 @@ impl GrammarConstraint {
             }
             
             let mut collected: Vec<(String, usize, crate::dwa_i32::Weight, Option<Vec<u8>>, Vec<crate::dwa_i32::Label>)> = Vec::new();
-            let max_attempts = target_samples.saturating_mul(50).max(target_samples);
-            let max_steps = if sample_long { 2048 } else { 512 };
             let mut attempts = 0usize;
 
             while collected.len() < target_samples && attempts < max_attempts {
@@ -2174,9 +2300,14 @@ impl GrammarConstraint {
                     }
 
                     if let Some(w) = end_weight {
-                        let end_prob = if sample_long { 0.1 } else { 0.3 };
                         if !w.is_empty() && (choices.is_empty() || rng.gen_bool(end_prob)) {
-                            if min_len.map_or(true, |min| path_strs.len() >= min) {
+                            let focus_hit = !focus_token_ids.is_empty()
+                                && focus_token_ids
+                                    .iter()
+                                    .copied()
+                                    .any(|token_id| weight_contains_internal_token(&w, token_id));
+                            let focus_ok = !focus_only || focus_hit;
+                            if focus_ok && min_len.map_or(true, |min| path_strs.len() >= min) {
                                 let path_str = path_strs.join(" → ");
                                 collected.push((path_str, path_strs.len(), w, path_literal_bytes.clone(), path_labels.clone()));
                                 collected_this_attempt = true;
@@ -2274,12 +2405,16 @@ impl GrammarConstraint {
             }
 
             crate::debug!(5, "Terminal DWA sample paths (n={}, non-empty weights):", collected.len());
-            let trace_samples = std::env::var("DWA_SAMPLE_TRACE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            let trace_samples = parse_env_bool("DWA_SAMPLE_TRACE");
             for (i, (path_str, path_len, w, path_literal_bytes, path_labels)) in collected.iter().enumerate() {
                 let weight_len = w.len();
-                let max_tokens = if weight_len <= 20 { usize::MAX } else { 3 };
+                let max_tokens = if sample_max_tokens == 0 {
+                    0
+                } else if weight_len <= 20 {
+                    usize::MAX
+                } else {
+                    sample_max_tokens
+                };
                 let mut token_samples: Vec<usize> = Vec::new();
                 let mut seen_tokens = std::collections::BTreeSet::new();
                 for range in w.ranges() {
@@ -2342,8 +2477,19 @@ impl GrammarConstraint {
                     }
                     _ => String::new(),
                 };
+                let focus_hits: Vec<String> = focus_token_ids
+                    .iter()
+                    .copied()
+                    .filter(|token_id| weight_contains_internal_token(w, *token_id))
+                    .map(format_token)
+                    .collect();
+                let focus_note = if focus_token_ids.is_empty() {
+                    String::new()
+                } else {
+                    format!(", focus_tokens=[{}]", focus_hits.join(", "))
+                };
                 let weight_info = format!("weight_len={}, {}{}", weight_len, tokens_str, validation_note);
-                crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path_len, weight_info);
+                crate::debug!(5, "  Path {}: {} (len={}, {}{})", i, path_str, path_len, weight_info, focus_note);
 
                 if trace_samples {
                     let mut current_state = terminal_dwa.body.start_state;
@@ -2354,7 +2500,13 @@ impl GrammarConstraint {
                         };
                         acc &= w_edge;
                         let step_weight_len = acc.len();
-                        let max_step_tokens = if step_weight_len <= 20 { usize::MAX } else { 3 };
+                        let max_step_tokens = if sample_max_tokens == 0 {
+                            0
+                        } else if step_weight_len <= 20 {
+                            usize::MAX
+                        } else {
+                            sample_max_tokens
+                        };
                         let mut step_samples: Vec<usize> = Vec::new();
                         let mut step_seen = std::collections::BTreeSet::new();
                         for range in acc.ranges() {
@@ -2394,7 +2546,18 @@ impl GrammarConstraint {
                         } else {
                             format!("TSID{}", label_usize.saturating_sub(terminals_count))
                         };
-                        crate::debug!(5, "    Step {}: {} weight_len={}, {}", step_idx, label_name, step_weight_len, step_tokens);
+                        let step_focus_hits: Vec<String> = focus_token_ids
+                            .iter()
+                            .copied()
+                            .filter(|token_id| weight_contains_internal_token(&acc, *token_id))
+                            .map(format_token)
+                            .collect();
+                        let step_focus_note = if focus_token_ids.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", focus_tokens=[{}]", step_focus_hits.join(", "))
+                        };
+                        crate::debug!(5, "    Step {}: {} weight_len={}, {}{}", step_idx, label_name, step_weight_len, step_tokens, step_focus_note);
                         current_state = next_state;
                         if acc.is_empty() {
                             break;

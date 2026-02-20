@@ -2743,7 +2743,119 @@ impl GrammarDefinition {
     /// ```
     pub fn from_lark(lark_source: &str) -> Result<Self, String> {
         let lark = LarkParser::new(lark_source).and_then(|mut p| p.parse())?;
-        Self::from_parsed_rules(lark.grammar_rules, lark.ignore_symbol_name)
+        let (greedy_groups, ungrouped_terminals) =
+            Self::extract_hash_bang_directives_from_lark(lark_source)?;
+        Self::from_parsed_rules_impl(
+            lark.grammar_rules,
+            lark.ignore_symbol_name,
+            greedy_groups,
+            ungrouped_terminals,
+            false,
+            false,
+        )
+    }
+
+    fn extract_hash_bang_directives_from_lark(
+        lark_source: &str,
+    ) -> Result<(Vec<ParsedGreedyGroup>, Vec<GreedyGroupTerminal>), String> {
+        let mut greedy_groups: Vec<ParsedGreedyGroup> = Vec::new();
+        let mut ungrouped: Vec<GreedyGroupTerminal> = Vec::new();
+
+        for (idx, line) in lark_source.lines().enumerate() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("#![") {
+                continue;
+            }
+            if !trimmed.ends_with(']') {
+                return Err(format!(
+                    "Invalid hashbang directive at line {}: missing closing ']': {}",
+                    idx + 1,
+                    trimmed
+                ));
+            }
+
+            let body = trimmed[3..trimmed.len() - 1].trim();
+            if body == "greedy_all" || body.starts_with("greedy_all(") {
+                return Err(format!(
+                    "Unsupported hashbang directive at line {}: greedy_all is no longer supported",
+                    idx + 1
+                ));
+            }
+
+            if let Some(args) = body
+                .strip_prefix("greedy_group(")
+                .and_then(|rest| rest.strip_suffix(')'))
+            {
+                let parts: Vec<String> = args
+                    .split(',')
+                    .map(|part| part.trim().to_string())
+                    .filter(|part| !part.is_empty())
+                    .collect();
+                if parts.len() < 2 {
+                    return Err(format!(
+                        "Invalid greedy_group directive at line {}: expected name and selectors",
+                        idx + 1
+                    ));
+                }
+                let group_name = parts[0].clone();
+                let selectors = &parts[1..];
+
+                if selectors.len() == 1 && selectors[0] == "*" {
+                    greedy_groups.push(ParsedGreedyGroup {
+                        name: group_name,
+                        terminals: Vec::new(),
+                        has_wildcard: true,
+                    });
+                    continue;
+                }
+
+                let mut terminals: Vec<GreedyGroupTerminal> = Vec::new();
+                for selector in selectors {
+                    if selector.starts_with('"') || selector.starts_with('\'') {
+                        return Err(format!(
+                            "Unsupported literal selector in greedy_group at line {}; use named terminals or '*'",
+                            idx + 1
+                        ));
+                    }
+                    terminals.push(GreedyGroupTerminal::Name(selector.clone()));
+                }
+                greedy_groups.push(ParsedGreedyGroup {
+                    name: group_name,
+                    terminals,
+                    has_wildcard: false,
+                });
+                continue;
+            }
+
+            if let Some(args) = body
+                .strip_prefix("ungrouped(")
+                .and_then(|rest| rest.strip_suffix(')'))
+            {
+                let parts: Vec<String> = args
+                    .split(',')
+                    .map(|part| part.trim().to_string())
+                    .filter(|part| !part.is_empty())
+                    .collect();
+                if parts.is_empty() {
+                    return Err(format!(
+                        "Invalid ungrouped directive at line {}: expected at least one selector",
+                        idx + 1
+                    ));
+                }
+                for selector in parts {
+                    if selector == "*" {
+                        return Err(format!(
+                            "Wildcard '*' is not allowed in ungrouped directive at line {}",
+                            idx + 1
+                        ));
+                    }
+                    ungrouped.push(GreedyGroupTerminal::Name(selector));
+                }
+                continue;
+            }
+        }
+
+        Ok((greedy_groups, ungrouped))
     }
 
     /// Constructs a `GrammarDefinition` from an EBNF file.
