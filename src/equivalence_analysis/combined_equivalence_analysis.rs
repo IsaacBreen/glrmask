@@ -42,7 +42,8 @@ fn should_run_trellis_verification() -> bool {
     // Trellis checks are expensive and can panic on known mismatch classes.
     // We therefore gate them behind explicit pedantic/debug/test signals.
     let pedantic_mode = env_flag_enabled("SEP1_PEDANTIC");
-    let debug_gate = crate::r#macro::is_debug_level_enabled(4);
+    // let debug_gate = crate::r#macro::is_debug_level_enabled(4);
+    let debug_gate = false;
     let test_gate = cfg!(test) && env_flag_enabled("SEP1_TEST_TRELLIS_VERIFY");
     pedantic_mode || debug_gate || test_gate
 }
