@@ -1549,34 +1549,12 @@ impl GrammarConstraint {
             map
         };
 
-        let parse_env_flag = |name: &str| -> Option<bool> {
-            std::env::var(name).ok().map(|v| {
-                let value = v.trim();
-                !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
-            })
-        };
-        let disable_suffix_prune = parse_env_flag("DISABLE_SUFFIX_PRUNE").unwrap_or(false);
-        let enable_suffix_prune = parse_env_flag("ENABLE_SUFFIX_PRUNE").unwrap_or(false);
-        let legacy_nwa_opt_in = parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(false);
-        let legacy_dwa_opt_in = parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false);
-
-        let suffix_prune_enabled = if disable_suffix_prune {
-            false
-        } else {
-            enable_suffix_prune || legacy_nwa_opt_in || legacy_dwa_opt_in
-        };
-        let do_nwa_suffix_prune = if suffix_prune_enabled {
-            parse_env_flag("NWA_SUFFIX_PRUNE").unwrap_or(true)
-        } else {
-            false
-        };
-        let do_dwa_suffix_prune = if suffix_prune_enabled {
-            parse_env_flag("DWA_SUFFIX_PRUNE").unwrap_or(false)
-        } else {
-            false
-        };
-        let need_suffix_cache = grammar_definition.is_some()
-            && (suffix_prune_enabled || do_nwa_suffix_prune || do_dwa_suffix_prune);
+        let disable_suffix_prune = true;
+        let enable_suffix_prune = false;
+        let suffix_prune_enabled = false;
+        let do_nwa_suffix_prune = false;
+        let do_dwa_suffix_prune = false;
+        let need_suffix_cache = false;
         let suffix_parser_cache = if need_suffix_cache {
             grammar_definition
                 .as_ref()
