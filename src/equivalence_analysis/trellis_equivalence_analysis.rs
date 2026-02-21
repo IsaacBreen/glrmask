@@ -8,10 +8,9 @@
 //! This is O(tokens × states × token_length × trellis_size) and should
 //! only be used when the problem size is small enough (< 1M operations).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
-use std::sync::Arc;
 
 use crate::finite_automata::{Regex, TokenTrellisWithCompletion, GroupID, Trellis};
 
@@ -52,77 +51,6 @@ fn hash_trellis_recursive<H: Hasher>(trellis: &Trellis<BTreeSet<GroupID>>, hashe
     }
 }
 
-fn generate_trellis_full_token_only(
-    regex: &Regex,
-    bytes: &[u8],
-    start_state: usize,
-) -> TokenTrellisWithCompletion {
-    let mut flat_trellis: BTreeMap<usize, (Option<BTreeSet<GroupID>>, Vec<(GroupID, usize)>)> = BTreeMap::new();
-    let mut queue = VecDeque::new();
-    let mut visited = HashSet::new();
-
-    queue.push_back(0usize);
-    visited.insert(0usize);
-    flat_trellis.insert(0usize, (None, Vec::new()));
-
-    while let Some(pos) = queue.pop_front() {
-        if pos > bytes.len() {
-            continue;
-        }
-
-        let exec_start = if pos == 0 {
-            start_state
-        } else {
-            regex.dfa.start_state
-        };
-        let result = regex.execute_from_state_nonzero(&bytes[pos..], exec_start);
-
-        let mut edges = Vec::new();
-        for m in result.matches {
-            let target_pos = pos + m.position;
-            if target_pos != bytes.len() || target_pos <= pos {
-                continue;
-            }
-
-            edges.push((m.group_id, target_pos));
-            if visited.insert(target_pos) {
-                queue.push_back(target_pos);
-                flat_trellis.insert(target_pos, (None, Vec::new()));
-            }
-        }
-
-        let completion = result
-            .end_state
-            .map(|idx| regex.dfa.states[idx].possible_future_group_ids.clone());
-        if let Some(node) = flat_trellis.get_mut(&pos) {
-            node.0 = completion;
-            node.1 = edges;
-        } else {
-            flat_trellis.insert(pos, (completion, edges));
-        }
-    }
-
-    let mut memo: HashMap<usize, Arc<TokenTrellisWithCompletion>> = HashMap::new();
-    for (pos, (end_state, edges_list)) in flat_trellis.into_iter().rev() {
-        let mut edges = BTreeMap::new();
-        for (gid, target_pos) in edges_list {
-            if let Some(target_node) = memo.get(&target_pos) {
-                if edges.insert(gid, target_node.clone()).is_some() {
-                    panic!("Duplicate edge for group ID {} at position {}", gid, pos);
-                }
-            }
-        }
-        memo.insert(pos, Arc::new(Trellis { end_state, edges }));
-    }
-
-    memo.get(&0)
-        .map(|root| root.as_ref().clone())
-        .unwrap_or_else(|| Trellis {
-            end_state: None,
-            edges: BTreeMap::new(),
-        })
-}
-
 /// Find vocab equivalence classes using trellis hashing.
 ///
 /// For each token, compute a combined hash of its trellis structure
@@ -142,7 +70,7 @@ pub fn find_vocab_equivalence_classes_trellis(
         let mut combined_hasher = DefaultHasher::new();
         
         for &state in initial_states {
-            let trellis = generate_trellis_full_token_only(regex, token, state);
+            let trellis = regex.generate_token_trellis_with_completion(token, state);
             let trellis_hash = hash_trellis(&trellis);
             trellis_hash.hash(&mut combined_hasher);
         }
@@ -179,7 +107,7 @@ pub fn find_state_equivalence_classes_trellis(
         let mut combined_hasher = DefaultHasher::new();
         
         for token in tokens {
-            let trellis = generate_trellis_full_token_only(regex, token, state);
+            let trellis = regex.generate_token_trellis_with_completion(token, state);
             let trellis_hash = hash_trellis(&trellis);
             trellis_hash.hash(&mut combined_hasher);
         }

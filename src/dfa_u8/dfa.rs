@@ -3926,6 +3926,9 @@ impl Regex {
             let mut new_edges = Vec::new();
             for m in result.matches {
                 let target_pos = pos + m.position;
+                if target_pos != bytes.len() || target_pos <= pos {
+                    continue;
+                }
                 new_edges.push((m.group_id, target_pos));
                 if visited.insert(target_pos) {
                     queue.push_back(target_pos);
@@ -3936,6 +3939,52 @@ impl Regex {
             node.0 = result.end_state;
             node.1 = new_edges;
         }
+
+        // Prune branches that cannot reach end-of-string.
+        // Keep provenance via explicit reverse-edge reachability from `bytes.len()`.
+        let end_pos = bytes.len();
+        let mut reverse_edges: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (src, (_end_state, edges)) in &flat_trellis {
+            for (_gid, dst) in edges {
+                reverse_edges.entry(*dst).or_default().push(*src);
+            }
+        }
+
+        let mut can_reach_end: HashSet<usize> = HashSet::new();
+        let mut stack: Vec<usize> = Vec::new();
+        if flat_trellis.contains_key(&end_pos) {
+            can_reach_end.insert(end_pos);
+            stack.push(end_pos);
+        }
+
+        while let Some(node) = stack.pop() {
+            if let Some(preds) = reverse_edges.get(&node) {
+                for &pred in preds {
+                    if can_reach_end.insert(pred) {
+                        stack.push(pred);
+                    }
+                }
+            }
+        }
+
+        for (_pos, (_end_state, edges)) in flat_trellis.iter_mut() {
+            edges.retain(|(_gid, target)| can_reach_end.contains(target));
+        }
+
+        // If root cannot reach end, treat it as a dead root node with no completion/edges.
+        if !can_reach_end.contains(&0) {
+            if let Some((end_state, edges)) = flat_trellis.get_mut(&0) {
+                *end_state = None;
+                edges.clear();
+            }
+        }
+
+        flat_trellis.retain(|pos, _| *pos == 0 || can_reach_end.contains(pos));
+
+        if !flat_trellis.contains_key(&0) {
+            flat_trellis.insert(0, (None, Vec::new()));
+        }
+
         flat_trellis
     }
 
