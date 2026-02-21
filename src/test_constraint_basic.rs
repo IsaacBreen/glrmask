@@ -5456,6 +5456,97 @@ STR_CHAR: /[a-z]/
 }
 
 #[test]
+fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open_brace_quote() {
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let schema_json = r#"{
+    "type": "object",
+    "properties": {
+        "displayGroupOnSameAxis": { "type": "boolean" },
+        "graphType": {
+            "type": "string",
+            "enum": ["SCATTER", "LINE", "DIAGNOSTIC", "MICROBIO", "STEP", "NONE"]
+        },
+        "groupName": { "type": "string" },
+        "parentGroupName": { "type": "string" }
+    },
+    "required": ["groupName", "graphType", "displayGroupOnSameAxis"],
+    "additionalProperties": false,
+    "title": "Clinical Concept Display Group"
+}"#;
+
+        let ebnf = json_schema_to_ebnf(schema_json).expect("convert schema to EBNF");
+        let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).expect("parse generated EBNF");
+
+        let (llm_token_map, max_id) = load_gpt2_vocab_exact_decode().expect(
+                "No valid GPT-2 vocab found! clinical-concept mismatch test requires real vocab. \
+                 Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+        );
+
+        let tok_prefix = LLMTokenID(4895); // b"{\""
+        let tok_disputed = LLMTokenID(34713); // b"\":\"\",\""
+
+        assert_eq!(llm_token_map.get(b"{\"".as_slice()), Some(&tok_prefix));
+        assert_eq!(llm_token_map.get(b"\":\"\",\"".as_slice()), Some(&tok_disputed));
+
+        let constraint = GrammarConstraint::new_from_grammar_definition(
+                Arc::new(grammar_definition),
+                llm_token_map,
+                max_id,
+                &GrammarConstraintConfig::default(),
+        );
+
+        let mut state = constraint.init();
+        state
+                .commit(tok_prefix)
+                .expect("Commit token 4895 (b\"{\\\"\")");
+
+        let mask = state.get_mask();
+        assert!(
+                mask.contains(tok_disputed.0),
+                "LOUD_FAIL clinical_concept_display_group sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"' but sep1 disallowed it. disputed_id=34713 disputed_bytes=b'\":\"\",\"' mask={mask:?}"
+        );
+}
+
+#[test]
+fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open_brace_quote_minimized_copy() {
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let schema_json = r#"{
+    "type": "object",
+    "additionalProperties": false
+}"#;
+
+        let ebnf = json_schema_to_ebnf(schema_json).expect("convert minimized schema to EBNF");
+        let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).expect("parse minimized EBNF");
+
+        let tok_prefix = LLMTokenID(0); // b"{\""
+        let tok_disputed = LLMTokenID(1); // b"\":\"\",\""
+        let mut llm_token_map = LLMTokenMap::new();
+        llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
+        llm_token_map.insert(b"\":\"\",\"".to_vec(), tok_disputed);
+
+        let constraint = GrammarConstraint::new_from_grammar_definition(
+                Arc::new(grammar_definition),
+                llm_token_map,
+                1,
+                &GrammarConstraintConfig::default(),
+        );
+
+        let mut state = constraint.init();
+        state
+                .commit(tok_prefix)
+                .expect("Commit token 4895 (b\"{\\\"\")");
+
+        let mask = state.get_mask();
+        assert!(
+                mask.contains(tok_disputed.0),
+            "LOUD_FAIL clinical_concept_display_group minimized_copy sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"' but sep1 disallowed it. disputed_id={} disputed_bytes=b'\":\"\",\"' mask={mask:?}",
+            tok_disputed.0,
+        );
+}
+
+#[test]
 fn test_json_schema_gpt2_real_vocab() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // 1. Define minimal JSON schema
