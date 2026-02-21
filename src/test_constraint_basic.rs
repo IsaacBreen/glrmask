@@ -5486,11 +5486,9 @@ fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open
                  Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
         );
 
-        let tok_prefix = LLMTokenID(4895); // b"{\""
-        let tok_disputed = LLMTokenID(34713); // b"\":\"\",\""
+        let tok_disputed = LLMTokenID(41424); // b".\",\""
 
-        assert_eq!(llm_token_map.get(b"{\"".as_slice()), Some(&tok_prefix));
-        assert_eq!(llm_token_map.get(b"\":\"\",\"".as_slice()), Some(&tok_disputed));
+        assert_eq!(llm_token_map.get(b".\",\"".as_slice()), Some(&tok_disputed));
 
         let constraint = GrammarConstraint::new_from_grammar_definition(
                 Arc::new(grammar_definition),
@@ -5500,14 +5498,12 @@ fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open
         );
 
         let mut state = constraint.init();
-        state
-                .commit(tok_prefix)
-                .expect("Commit token 4895 (b\"{\\\"\")");
+        state.commit_bytes(b"{\"groupName\":\"");
 
         let mask = state.get_mask();
         assert!(
                 mask.contains(tok_disputed.0),
-                "LOUD_FAIL clinical_concept_display_group sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"' but sep1 disallowed it. disputed_id=34713 disputed_bytes=b'\":\"\",\"' mask={mask:?}"
+                "LOUD_FAIL clinical_concept_display_group sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"groupName\":\"' but sep1 disallowed it. disputed_id=41424 disputed_bytes=b'.\",\"' mask={mask:?}"
         );
 }
 
@@ -5517,18 +5513,23 @@ fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open
         let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
         let schema_json = r#"{
-    "type": "object",
-    "additionalProperties": false
+            "type": "object",
+            "properties": {
+              "groupName": { "type": "string" },
+              "graphType": { "type": "string", "enum": ["LINE"] }
+            },
+            "required": ["groupName", "graphType"],
+            "additionalProperties": false
 }"#;
 
         let ebnf = json_schema_to_ebnf(schema_json).expect("convert minimized schema to EBNF");
         let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).expect("parse minimized EBNF");
 
-        let tok_prefix = LLMTokenID(0); // b"{\""
-        let tok_disputed = LLMTokenID(1); // b"\":\"\",\""
+        let tok_prefix = LLMTokenID(0); // b"{\"groupName\":\""
+        let tok_disputed = LLMTokenID(1); // b".\",\""
         let mut llm_token_map = LLMTokenMap::new();
-        llm_token_map.insert(b"{\"".to_vec(), tok_prefix);
-        llm_token_map.insert(b"\":\"\",\"".to_vec(), tok_disputed);
+        llm_token_map.insert(b"{\"groupName\":\"".to_vec(), tok_prefix);
+        llm_token_map.insert(b".\",\"".to_vec(), tok_disputed);
 
         let constraint = GrammarConstraint::new_from_grammar_definition(
                 Arc::new(grammar_definition),
@@ -5545,9 +5546,50 @@ fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open
         let mask = state.get_mask();
         assert!(
                 mask.contains(tok_disputed.0),
-            "LOUD_FAIL clinical_concept_display_group minimized_copy sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"' but sep1 disallowed it. disputed_id={} disputed_bytes=b'\":\"\",\"' mask={mask:?}",
+            "LOUD_FAIL clinical_concept_display_group minimized_copy sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"groupName\":\"' but sep1 disallowed it. disputed_id={} disputed_bytes=b'.\",\"' mask={mask:?}",
             tok_disputed.0,
         );
+}
+
+#[test]
+#[ignore]
+fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open_brace_quote_dumped_grammar_minimized_copy() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = r##"#![ignore(WS)]
+
+root ::= '{' '"groupName"' ':' JSON_STRING ',' '"graphType"' ':' '"LINE"' '}' ;
+WS ::= ( ( ' ' | '\t' | '\n' | '\r' ) )* ;
+JSON_STRING ::= '"' STRING_CHARS '"' ;
+STRING_CHARS ::= ( STRING_CHAR )* ;
+STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF] ;
+"##;
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf).expect("parse dumped minimized EBNF");
+
+    let tok_prefix = LLMTokenID(0); // b"{\"groupName\":\""
+    let tok_disputed = LLMTokenID(1); // b".\",\""
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{\"groupName\":\"".to_vec(), tok_prefix);
+    llm_token_map.insert(b".\",\"".to_vec(), tok_disputed);
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        1,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state
+        .commit(tok_prefix)
+        .expect("Commit token 0 (b\"{\\\"groupName\\\":\\\"\")");
+
+    let mask = state.get_mask();
+    assert!(
+        mask.contains(tok_disputed.0),
+        "LOUD_FAIL clinical_concept_display_group dumped_grammar_minimized_copy sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"groupName\":\"' but sep1 disallowed it. disputed_id={} disputed_bytes=b'.\",\"' mask={mask:?}",
+        tok_disputed.0,
+    );
 }
 
 #[test]
