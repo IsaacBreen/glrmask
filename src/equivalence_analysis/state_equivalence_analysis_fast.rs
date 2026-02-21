@@ -341,14 +341,16 @@ fn find_state_equivalence_classes_token_based(
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
-    let use_legacy_token_refinement = std::env::var("SEP1_LEGACY_TOKEN_EQUIV")
-        .map(|v| {
-            let trimmed = v.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+    let parse_env_flag = |name: &str| -> Option<bool> {
+        std::env::var(name).ok().map(|value| {
+            let trimmed = value.trim();
+            !(trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(false);
+    };
 
-    if !use_legacy_token_refinement {
+    let use_exact_token_refinement = parse_env_flag("SEP1_EXACT_TOKEN_EQUIV").unwrap_or(false);
+
+    if use_exact_token_refinement {
         use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
