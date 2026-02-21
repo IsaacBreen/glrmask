@@ -38,6 +38,9 @@ pub fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64
         let mut edges = Vec::with_capacity(result.matches.len());
         for m in result.matches {
             let target = pos + m.position;
+            if target != slice.len() || target <= pos {
+                continue;
+            }
             edges.push((m.group_id, target));
 
             if visited.insert(target) {

@@ -5839,6 +5839,8 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly_minimized_copy(
         &GrammarConstraintConfig::default(),
     );
 }
+
+#[test]
 fn test_triad_tuple_locked_replay_votes_explicit() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
