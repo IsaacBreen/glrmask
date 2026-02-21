@@ -5820,6 +5820,25 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
 }
 
 #[test]
+fn test_mask_commit_consistency_minimal_repro_should_fail_loudly_minimized_copy() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark_grammar = indoc! {r#"
+        start: "aa"
+    "#};
+
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"ay".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"xa".to_vec(), LLMTokenID(1));
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar).unwrap();
+    let _constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        1,
+        &GrammarConstraintConfig::default(),
+    );
+}
 fn test_triad_tuple_locked_replay_votes_explicit() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
