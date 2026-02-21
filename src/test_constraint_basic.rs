@@ -5508,7 +5508,6 @@ fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open
 }
 
 #[test]
-#[ignore]
 fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open_brace_quote_minimized_copy() {
         let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -5552,24 +5551,14 @@ fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open
 }
 
 #[test]
-#[ignore]
 fn test_clinical_concept_display_group_allows_quote_colon_quote_comma_after_open_brace_quote_dumped_grammar_minimized_copy() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
-    let ebnf = r##"#![ignore(WS)]
-
-root ::= '{' '"groupName"' ':' JSON_STRING ',' '"graphType"' ':' '"LINE"' '}' ;
-WS ::= ( ( ' ' | '\t' | '\n' | '\r' ) )* ;
-JSON_STRING ::= '"' STRING_CHARS '"' ;
-STRING_CHARS ::= ( STRING_CHAR )* ;
-STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF] ;
-"##;
+    let ebnf = r##"root ::= '{' '"groupName"' ':' '"' '.' '"' ',' '"graphType"' ':' '"LINE"' '}' ;"##;
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf).expect("parse dumped minimized EBNF");
 
-    let tok_prefix = LLMTokenID(0); // b"{\"groupName\":\""
     let tok_disputed = LLMTokenID(1); // b".\",\""
     let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"{\"groupName\":\"".to_vec(), tok_prefix);
     llm_token_map.insert(b".\",\"".to_vec(), tok_disputed);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
@@ -5580,15 +5569,30 @@ STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF] ;
     );
 
     let mut state = constraint.init();
-    state
-        .commit(tok_prefix)
-        .expect("Commit token 0 (b\"{\\\"groupName\\\":\\\"\")");
+    state.commit_bytes(b"{\"groupName\":\"");
 
     let mask = state.get_mask();
+    let sep1_vote = mask.contains(tok_disputed.0);
+
+    let mut gt_state = crate::bruteforce_constraint::BruteforceConstraintState::new(&constraint);
+    gt_state.commit_bytes(b"{\"groupName\":\"");
+    let gt_mask = gt_state.get_mask_bruteforce();
+    let gt_vote = gt_mask
+        .get(tok_disputed.0)
+        .copied()
+        .unwrap_or(false);
+
     assert!(
-        mask.contains(tok_disputed.0),
-        "LOUD_FAIL clinical_concept_display_group dumped_grammar_minimized_copy sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"groupName\":\"' but sep1 disallowed it. disputed_id={} disputed_bytes=b'.\",\"' mask={mask:?}",
+        sep1_vote,
+        "LOUD_FAIL clinical_concept_display_group dumped_grammar_minimized_copy sep1-vs-CFA mismatch: expected disputed token to be allowed at prefix=b'{{\"groupName\":\"' but sep1 disallowed it. disputed_id={} disputed_bytes=b'.\",\"' sep1_vote={} gt_vote={} mask={mask:?}",
         tok_disputed.0,
+        sep1_vote,
+        gt_vote,
+    );
+
+    assert!(
+        gt_vote,
+        "ground-truth expected disputed token to be allowed after prefix=b'{{\"groupName\":\"' but got disallowed"
     );
 }
 
