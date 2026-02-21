@@ -1608,7 +1608,7 @@ impl GrammarConstraint {
             ignored
         };
 
-        let approx_dfa = if std::env::var("DISABLE_APPROX_DFA_PRUNER").is_err() {
+        let approx_dfa = {
             let ignored_terminals = ignored_terminals.clone();
             if let Some(cache) = suffix_parser_cache.as_ref() {
                 crate::debug!(4, "Building approximate suffix DFA (lazy, all-states initial) for precompute1...");
@@ -1662,8 +1662,6 @@ impl GrammarConstraint {
                     reduce_fallback_terminals_by_state,
                 })
             }
-        } else {
-            None
         };
         let ignored_terminals = Arc::new(ignored_terminals);
         let terminal_to_greedy_group = {

@@ -1556,6 +1556,8 @@ impl<'r> Precomputer1<'r> {
                 match approx_dfa.dfa.step(approx_state, suffix_tid) {
                     Some(next) => Some(next),
                     None => {
+                        let disable_approx_pruner =
+                            std::env::var("DISABLE_APPROX_DFA_PRUNER").is_ok();
                         // The DFA step failed for this terminal. This can happen
                         // when a reduce should have fired at a PREVIOUS step
                         // but the DFA doesn't model reduce-then-goto within
@@ -1591,6 +1593,9 @@ impl<'r> Precomputer1<'r> {
                             if result.is_some() {
                                 return result;
                             }
+                        }
+                        if disable_approx_pruner {
+                            return Some(approx_state);
                         }
                         if std::env::var("DEBUG_APPROX_STEP").is_ok() {
                             let mut should_log = true;
