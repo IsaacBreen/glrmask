@@ -1603,6 +1603,95 @@ fn load_gpt2_vocab() -> Option<(LLMTokenMap, usize)> {
     None
 }
 
+fn build_gpt2_byte_decoder_exact() -> HashMap<char, u8> {
+    let mut byte_decoder: HashMap<char, u8> = HashMap::new();
+
+    for b in b'!'..=b'~' {
+        byte_decoder.insert(b as char, b);
+    }
+    for b in 0xA1..=0xAC {
+        byte_decoder.insert(b as char, b);
+    }
+    for b in 0xAE..=0xFF {
+        byte_decoder.insert(b as char, b);
+    }
+
+    let mut n = 0;
+    for b in 0u8..=255 {
+        if !byte_decoder.values().any(|&v| v == b) {
+            byte_decoder.insert(char::from_u32(256 + n).unwrap(), b);
+            n += 1;
+        }
+    }
+
+    byte_decoder
+}
+
+fn gpt2_bpe_decode_exact(token_str: &str, byte_decoder: &HashMap<char, u8>) -> Vec<u8> {
+    token_str
+        .chars()
+        .map(|c| *byte_decoder.get(&c).unwrap_or(&(c as u8)))
+        .collect()
+}
+
+fn load_gpt2_vocab_exact_decode() -> Option<(LLMTokenMap, usize)> {
+    use std::io::BufReader;
+    use std::fs;
+
+    let paths = vec![
+        "vocab.json",
+        "src/tests/data/vocab.json",
+        "gpt2_vocab.json",
+        "benchmarking/gpt2_vocab.json",
+        "python/.cache/py_benchmark_vocabs/gpt2_vocab.json",
+    ];
+
+    for p in &paths {
+        if let Ok(file) = fs::File::open(p) {
+            let reader = BufReader::new(file);
+            if let Ok(vocab_json) = serde_json::from_reader::<_, serde_json::Value>(reader) {
+                let vocab_map = match vocab_json.as_object() {
+                    Some(m) => m,
+                    None => continue,
+                };
+
+                let byte_decoder = build_gpt2_byte_decoder_exact();
+                let mut llm_token_map = LLMTokenMap::new();
+                let mut max_id = 0usize;
+                let mut valid = true;
+
+                for (token_str, id_val) in vocab_map {
+                    let id = match id_val.as_u64() {
+                        Some(id) => id as usize,
+                        None => { valid = false; break; }
+                    };
+                    if id > max_id { max_id = id; }
+
+                    let bytes = gpt2_bpe_decode_exact(token_str, &byte_decoder);
+                    llm_token_map.insert(bytes, LLMTokenID(id));
+                }
+
+                if !valid {
+                    continue;
+                }
+
+                if llm_token_map.len() < 1000 {
+                    continue;
+                }
+
+                if !llm_token_map.contains_key(&vec![b'{']) {
+                    continue;
+                }
+
+                println!("Loaded exact-decoded GPT-2 vocab from {}", p);
+                return Some((llm_token_map, max_id));
+            }
+        }
+    }
+
+    None
+}
+
 #[test]
 fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -5038,7 +5127,21 @@ fn test_newsletter_schema_disallows_quote_colon_minus() {
 fn test_newsletter_schema_disallows_quote_colon_minus_dumped_ebnf() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
-    let ebnf = include_str!("test_data/newsletter_schema_dumped.ebnf");
+    let ebnf = r##"#![ignore(WS)]
+
+root ::= '{' '"name"' ':' STRING_LEN_8_80 ',' '"email"' ':' STRING_LEN_0_120 ',' '"lists"' ':' ( '"Daily New"' | '"Promotion"' ) '}' ;
+STRING_LEN_8_80 ::= '"' ( ( [\x20-\x21\x23-\x5B\x5D-\xFF] | '\\' ( ["\\/bfnrt] | 'u' [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) ) ){8,80} '"' ;
+STRING_LEN_0_120 ::= '"' ( ( [\x20-\x21\x23-\x5B\x5D-\xFF] | '\\' ( ["\\/bfnrt] | 'u' [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) ) ){0,120} '"' ;
+WS ::= ( ( ' ' | '\t' | '\n' | '\r' ) )* ;
+JSON_STRING ::= '"' STRING_CHARS '"' ;
+STRING_CHARS ::= ( ( STRING_CHAR | ESCAPE_SEQ ) )* ;
+STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF] ;
+ESCAPE_SEQ ::= '\\' ( ["\\/bfnrt] | 'u' [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) ;
+JSON_NUMBER ::= ( '-' )? ( '0' | [1-9] ( [0-9] )* ) ( '.' [0-9] ( [0-9] )* )? ( [eE] ( [+-] )? [0-9] ( [0-9] )* )? ;
+JSON_INTEGER ::= ( '-' )? ( '0' | [1-9] ( [0-9] )* ) ;
+JSON_BOOL ::= ( 'true' | 'false' ) ;
+JSON_NULL ::= 'null' ;
+"##;
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf).unwrap();
 
     let mut llm_token_map = LLMTokenMap::new();
@@ -5061,6 +5164,152 @@ fn test_newsletter_schema_disallows_quote_colon_minus_dumped_ebnf() {
 
     let mask = state.get_mask();
     assert!(!mask.contains(4), "Token '\":-' should not be allowed after key prefix '\"name' (dumped EBNF)");
+}
+
+#[test]
+fn test_person_schema_disallows_quote_comma() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let cfa_lark = r#"start: "{" "\"name\"" ":" ("\"alice\"" | "\"bob\"") "," "\"age\"" ":" ("1" | "2" | "3") "}"
+
+JSON_BOOL: "true" | "false"
+JSON_NULL: "null"
+
+JSON_STRING: "\"" STRING_CHARS "\""
+STRING_CHARS: (STRING_CHAR | ESCAPE_SEQ)*
+STRING_CHAR: /[^\x00-\x1F"\\]/
+ESCAPE_SEQ: "\\" (/["\\bfnrt]/ | "/" | "u" HEX HEX HEX HEX)
+HEX: /[0-9a-fA-F]/
+
+JSON_INTEGER: "-"? INT_PART
+JSON_NUMBER: "-"? INT_PART FRAC_PART? EXP_PART?
+INT_PART: "0" | /[1-9]/ DIGIT*
+FRAC_PART: "." DIGIT+
+EXP_PART: /[eE]/ /[+-]/? DIGIT+
+DIGIT: /[0-9]/
+"#;
+    let compiler_path = std::path::Path::new("target/release/grammar-compiler");
+    assert!(
+        compiler_path.exists(),
+        "Expected CFA compiler artifact at {}",
+        compiler_path.display()
+    );
+
+    let grammar_path = std::env::temp_dir().join(format!(
+        "person_schema_cfa_fixture_{}_{}.lark",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let output_path = grammar_path.with_extension("json");
+    std::fs::write(&grammar_path, cfa_lark).expect("Write temp CFA Lark fixture");
+
+    let status = std::process::Command::new(compiler_path)
+        .args([
+            "--grammar",
+            grammar_path.to_str().unwrap(),
+            "--format",
+            "lark",
+            "--vocab",
+            "benchmarking/gpt2_vocab.json",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .env("ENABLE_PROGRESS_BAR", "0")
+        .status()
+        .expect("Run target/release/grammar-compiler for CFA fixture");
+    assert!(status.success(), "grammar-compiler release build failed for CFA fixture");
+
+    let file = std::fs::File::open(&output_path).expect("Open compiled CFA constraint JSON");
+    let reader = std::io::BufReader::new(file);
+    let constraint = GrammarConstraint::from_reader(reader)
+        .expect("Load GrammarConstraint from compiled CFA fixture JSON");
+
+    let (llm_token_map, _) = load_gpt2_vocab_exact_decode().expect(
+        "No valid GPT-2 vocab found! person_schema mismatch test requires real vocab. \
+         Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+    );
+
+    let tok_prefix_0 = LLMTokenID(4895); // b"{\""
+    let tok_prefix_1 = LLMTokenID(3672); // b"name"
+    let tok_expected_good = LLMTokenID(2404); // b"\":\""
+    let tok_disputed = LLMTokenID(20598); // b"\":["
+
+    assert_eq!(llm_token_map.get(b"{\"".as_slice()), Some(&tok_prefix_0));
+    assert_eq!(llm_token_map.get(b"name".as_slice()), Some(&tok_prefix_1));
+    assert_eq!(llm_token_map.get(b"\":\"".as_slice()), Some(&tok_expected_good));
+    assert_eq!(llm_token_map.get(b"\":[".as_slice()), Some(&tok_disputed));
+
+    let mut state = constraint.init();
+    state.commit(tok_prefix_0).expect("Commit token 4895 (b\"{\\\"\")");
+    state.commit(tok_prefix_1).expect("Commit token 3672 (b\"name\")");
+
+    let mask = state.get_mask();
+    assert!(
+        mask.contains(tok_expected_good.0),
+        "Sanity check failed: expected good token 2404 (b'\":\"') to be allowed at probe prefix b'{{\"name'; mask={mask:?}"
+    );
+    assert!(
+        !mask.contains(tok_disputed.0),
+        "Disputed token should be disallowed at CFA probe: prefix=b'{{\"name' committed=[4895,3672] disputed=20598 bytes=b'\":[' mask={mask:?}"
+    );
+
+    let _ = std::fs::remove_file(&grammar_path);
+    let _ = std::fs::remove_file(&output_path);
+}
+
+#[test]
+fn test_person_schema_disallows_quote_comma_dumped_ebnf() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = r##"#![ignore(WS)]
+
+    root ::= '{' '"name"' ':' ( '"alice"' | '"bob"' ) ',' '"age"' ':' ( '1' | '2' | '3' ) '}' ;
+WS ::= ( ( ' ' | '\t' | '\n' | '\r' ) )* ;
+JSON_STRING ::= '"' STRING_CHARS '"' ;
+STRING_CHARS ::= ( ( STRING_CHAR | ESCAPE_SEQ ) )* ;
+STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF] ;
+ESCAPE_SEQ ::= '\\' ( ["\\/bfnrt] | 'u' [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) ;
+JSON_NUMBER ::= ( '-' )? ( '0' | [1-9] ( [0-9] )* ) ( '.' [0-9] ( [0-9] )* )? ( [eE] ( [+-] )? [0-9] ( [0-9] )* )? ;
+JSON_INTEGER ::= ( '-' )? ( '0' | [1-9] ( [0-9] )* ) ;
+JSON_BOOL ::= ( 'true' | 'false' ) ;
+JSON_NULL ::= 'null' ;
+"##;
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf).unwrap();
+
+    let (llm_token_map, max_id) = load_gpt2_vocab_exact_decode().expect(
+        "No valid GPT-2 vocab found! person_schema mismatch dumped-EBNF test requires real vocab. \
+         Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+    );
+    let tok_prefix_0 = LLMTokenID(4895); // b"{\""
+    let tok_prefix_1 = LLMTokenID(3672); // b"name"
+    let tok_expected_good = LLMTokenID(2404); // b"\":\""
+    let tok_disputed = LLMTokenID(20598); // b"\":["
+
+    assert_eq!(llm_token_map.get(b"{\"".as_slice()), Some(&tok_prefix_0));
+    assert_eq!(llm_token_map.get(b"name".as_slice()), Some(&tok_prefix_1));
+    assert_eq!(llm_token_map.get(b"\":\"".as_slice()), Some(&tok_expected_good));
+    assert_eq!(llm_token_map.get(b"\":[".as_slice()), Some(&tok_disputed));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map.clone(),
+        max_id,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit(tok_prefix_0).expect("Commit token 4895 (b\"{\\\"\")");
+    state.commit(tok_prefix_1).expect("Commit token 3672 (b\"name\")");
+
+    let mask = state.get_mask();
+    assert!(
+        mask.contains(tok_expected_good.0),
+        "Sanity check failed: expected good token 2404 (b'\":\"') to be allowed at probe prefix b'{{\"name' (dumped EBNF); mask={mask:?}"
+    );
+    assert!(
+        !mask.contains(tok_disputed.0),
+        "Disputed token should be disallowed at CFA probe (dumped EBNF): prefix=b'{{\"name' committed=[4895,3672] disputed=20598 bytes=b'\":[' mask={mask:?}"
+    );
 }
 
 #[test]
