@@ -1907,26 +1907,9 @@ impl GrammarDefinition {
                 }
             }
 
-            let has_shared_prefix = |literals: &[Vec<u8>]| {
-                for i in 0..literals.len() {
-                    for j in (i + 1)..literals.len() {
-                        let shared_prefix_len = literals[i]
-                            .iter()
-                            .zip(literals[j].iter())
-                            .take_while(|(a, b)| a == b)
-                            .count();
-                        if shared_prefix_len > 0 {
-                            return true;
-                        }
-                    }
-                }
-                false
-            };
-
             let merge_groups: Vec<Vec<Vec<u8>>> = membership_to_literals
                 .into_values()
                 .filter(|literals| literals.len() >= 2)
-                .filter(|literals| !has_shared_prefix(literals))
                 .collect();
 
             if crate::r#macro::is_debug_level_enabled(5) {
