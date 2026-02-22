@@ -2125,29 +2125,27 @@ impl<'r> Precomputer1<'r> {
 
                         let end_idx = self.leaf_state;
                         let mut end_labels: Vec<Label> = Vec::new();
-                        if pos == 0 || approx_state == self.approx_start_state || segment_bytes.len() <= 2 || segment_bytes.len() >= 4 {
-                            for terminal_id in accessible_terminals.iter() {
-                                let Some(_next_approx_state) = self.approx_step(approx_state, *terminal_id) else {
-                                    crate::debug!(7, "    -> Skip END_STATE terminal {} (no approx DFA transition)", terminal_id.0);
-                                    continue;
-                                };
-                                crate::debug!(
-                                    7,
-                                    "    -> END_STATE transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
-                                    num_sources,
-                                    terminal_id.0,
-                                    end_idx,
-                                    single_token_weight,
-                                );
-                                end_labels.push(terminal_id.0 as Label);
-                            }
+                        for terminal_id in accessible_terminals.iter() {
+                            let Some(_next_approx_state) = self.approx_step(approx_state, *terminal_id) else {
+                                crate::debug!(7, "    -> Skip END_STATE terminal {} (no approx DFA transition)", terminal_id.0);
+                                continue;
+                            };
+                            crate::debug!(
+                                7,
+                                "    -> END_STATE transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
+                                num_sources,
+                                terminal_id.0,
+                                end_idx,
+                                single_token_weight,
+                            );
+                            end_labels.push(terminal_id.0 as Label);
+                        }
 
-                            if !end_labels.is_empty() {
-                                self.update_live_tokens(end_idx, &single_token_weight);
-                                for &src_node in nodes.iter() {
-                                    for label in &end_labels {
-                                        self.add_pending_token_id(src_node, *label, end_idx, child_token_id);
-                                    }
+                        if !end_labels.is_empty() {
+                            self.update_live_tokens(end_idx, &single_token_weight);
+                            for &src_node in nodes.iter() {
+                                for label in &end_labels {
+                                    self.add_pending_token_id(src_node, *label, end_idx, child_token_id);
                                 }
                             }
                         }
