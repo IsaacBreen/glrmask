@@ -5955,9 +5955,12 @@ fn test_mask_commit_consistency_minimal_repro_should_fail_loudly() {
 
     let mask = state.get_mask();
 
+    // Ground truth (CFA-verified): after prefix '{"":"","a":{"":"}', the token '","'  IS valid.
+    // The inner json_object for key "a" is unconstrained and allows additional kv pairs.
+    // Earlier code incorrectly blocked this via an over-restrictive END_STATE guard (commit 8d1b345a2).
     assert!(
-        !mask.contains(tok_disputed.0),
-        "Disputed token should be disallowed from mask after prefix='{{\"\":\"\",\"a\":{{\"\":\"': disputed='\",\"' token_id={} mask={mask:?}",
+        mask.contains(tok_disputed.0),
+        "Disputed token ',\"' should be ALLOWED in mask after prefix='{{\"\":\"\",\"a\":{{\"\":\"': CFA ground truth accepts it. disputed_id={} mask={mask:?}",
         tok_disputed.0,
     );
 }
