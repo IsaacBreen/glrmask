@@ -320,23 +320,89 @@ fn build_left_chain(
 // Balanced-tree pre-processing
 // ---------------------------------------------------------------------------
 
-/// Replaces each nullable run of N symbols with a balanced k-ary tree.
+/// For a nullable NT, create a non-nullable version (`a_nn`) that has all
+/// epsilon-derivable alternatives removed.  Returns the original NT unchanged
+/// if it is already non-nullable or if no non-nullable alternatives are found.
 ///
-/// For a run `[S_0, …, S_{N-1}]` with group size k:
-///   • Leaf rules: `leaf_j → all non-empty ordered subsets of [S_{j*k} … S_{(j+1)*k - 1}]`
-///   • Root rule: `root → leaf_0 leaf_1 … leaf_{N/k - 1}` (single production)
-///   • The outer production gets one nullable NT per run (the root).
+/// An alternative is epsilon-derivable iff it is empty OR every symbol in it
+/// is itself a nullable NT (terminals are never nullable in this sense).
+fn create_nn_nt(
+    nt: &NonTerminal,
+    nullability: &BTreeMap<NonTerminal, Nullability>,
+    prods_by_lhs: &BTreeMap<NonTerminal, Vec<Vec<Symbol>>>,
+    gen: &mut impl FnMut(&str) -> String,
+    new_prods: &mut Vec<Production>,
+) -> NonTerminal {
+    // If not in the nullability map or not nullable, use it as-is.
+    if !matches!(nullability.get(nt), Some(Nullability::Nullable) | Some(Nullability::Null)) {
+        return nt.clone();
+    }
+
+    let Some(alts) = prods_by_lhs.get(nt) else {
+        return nt.clone();
+    };
+
+    let sym_is_nullable = |sym: &Symbol| -> bool {
+        matches!(sym, Symbol::NonTerminal(inner)
+            if matches!(nullability.get(inner), Some(Nullability::Nullable) | Some(Nullability::Null)))
+    };
+
+    // Keep alternatives that are NOT epsilon-derivable:
+    // non-empty AND containing at least one non-nullable symbol.
+    let kept: Vec<Vec<Symbol>> = alts.iter()
+        .filter(|alt| !alt.is_empty() && alt.iter().any(|s| !sym_is_nullable(s)))
+        .cloned()
+        .collect();
+
+    if kept.is_empty() {
+        // All alternatives are epsilon-derivable; can't create a meaningful nn version.
+        return nt.clone();
+    }
+
+    let nn_name = gen(&nt.0);
+    let nn_nt = NonTerminal(nn_name);
+    for alt in kept {
+        new_prods.push(Production { lhs: nn_nt.clone(), rhs: alt });
+    }
+    nn_nt
+}
+
+/// Replaces each nullable run of N symbols with a **non-nullable** balanced k-ary tree
+/// wrapped in an explicit optional (`opt → tree | ""`).
+///
+/// Using non-nullable leaf and internal nodes prevents `inline_null_productions`
+/// from multiplying productions inside the tree (it only sees one `opt` NT to
+/// expand at the parent level, adding one extra variant instead of 2^N).
+///
+/// Structure for segment [A, B, C, D] with k=2 (each A–D is nullable):
+/// ```text
+/// A_nn  → "a"                        (non-nullable: A with "" removed)
+/// B_nn  → "b"
+/// leaf_0 → A_nn | B_nn | A_nn B_nn   (non-empty subsets of chunk {A_nn, B_nn})
+/// leaf_1 → C_nn | D_nn | C_nn D_nn   (non-empty subsets of chunk {C_nn, D_nn})
+/// mid    → leaf_0 | leaf_1 | leaf_0 leaf_1  (non-empty subsets of {leaf_0, leaf_1})
+/// opt    → mid | ""                  (nullable optional wrapper — only place for "")
+/// ```
+/// Parent `X → … A B C D …` becomes `X → … opt …`.
 fn preprocess_balanced_tree(
     productions: &[Production],
     new_name_gen: &mut impl FnMut(&str) -> String,
     k: usize,
 ) -> Vec<Production> {
-    let k = k.max(1);
+    // Use k >= 2 to guarantee termination (k=1 would never reduce chunk count).
+    let k = k.max(2);
     let nullability = compute_nonterminal_nullability(productions);
+
+    // Build a lookup map for create_nn_nt.
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Vec<Symbol>>> = BTreeMap::new();
+    for prod in productions {
+        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod.rhs.clone());
+    }
+
     let mut result: Vec<Production> = Vec::new();
 
     for prod in productions {
-        let runs = find_nullable_runs(&prod.rhs, &nullability, 1); // threshold=1: only process runs with 2+ nullable NTs
+        let runs = find_nullable_runs(&prod.rhs, &nullability, 1); // only runs of 2+ nullable NTs
         if runs.is_empty() {
             result.push(prod.clone());
             continue;
@@ -345,85 +411,93 @@ fn preprocess_balanced_tree(
         let mut new_rhs = prod.rhs.clone();
         for &(start, end) in runs.iter().rev() {
             let segment: Vec<Symbol> = new_rhs.drain(start..=end).collect();
-            let root_nt = build_balanced_tree_rule(
+
+            // Build a non-nullable balanced tree for this nullable run.
+            let root_nn = build_non_nullable_tree(
                 &segment, k, &prod.lhs.0, new_name_gen, &mut result,
+                &nullability, &prods_by_lhs,
             );
-            new_rhs.insert(start, Symbol::NonTerminal(root_nt));
+
+            // Wrap with an explicit nullable optional: opt → root_nn | ""
+            let opt_name = new_name_gen(&prod.lhs.0);
+            let root_opt = NonTerminal(opt_name);
+            result.push(Production {
+                lhs: root_opt.clone(),
+                rhs: vec![Symbol::NonTerminal(root_nn)],
+            });
+            result.push(Production { lhs: root_opt.clone(), rhs: vec![] }); // epsilon
+
+            new_rhs.insert(start, Symbol::NonTerminal(root_opt));
         }
         result.push(Production { lhs: prod.lhs.clone(), rhs: new_rhs });
     }
     result
 }
 
-/// Create a balanced tree of rules covering `segment`.  Returns the root NT.
+/// Build a non-nullable balanced k-ary tree of rules covering all **non-empty**
+/// ordered subsequences of `segment`.
 ///
-/// Leaf rules enumerate all non-empty ordered subsequences of their chunk.
-/// If the run has only one "chunk" (segment.len() <= k), create one rule directly.
-/// Otherwise: split into chunks, recurse for each half, combine.
+/// Returns a NON-NULLABLE NT (no epsilon production).  The top-level caller
+/// (`preprocess_balanced_tree`) wraps the result in `opt → result | ""`.
 ///
-/// Representation:
-/// ```text
-/// // For segment = [A, B, C, D] and k = 2:
-/// leaf_0 → A B | A | B       (non-empty subsets of {A, B})
-/// leaf_1 → C D | C | D       (non-empty subsets of {C, D})
-/// root   → leaf_0 leaf_1     (root is nullable because leaves are nullable)
-///        | leaf_0             (leaf_1 absent — but leaf_1 can't be empty via this rule)
-///        | leaf_1
-///        | ""                 (all absent)
-///  -- wait, root's alternatives are handled by inline_null_productions on the parent.
-/// ```
-///
-/// Actually we just emit:
-///   leaf_j rules (for each chunk of k symbols, all 2^k ordered subsets including "")
-///   root rule: `root → leaf_0 leaf_1 … leaf_{m-1}`  (m = ceil(N/k))
-///   The root IS nullable (all leaves can produce ""), so inline_null_productions
-///   on the parent adds a variant without the root.
-fn build_balanced_tree_rule(
+/// At the leaf level, `_nn` (non-nullable) versions of each input symbol are
+/// created/looked-up to ensure `inline_null_productions` cannot expand leaf
+/// productions.
+fn build_non_nullable_tree(
     segment: &[Symbol],
     k: usize,
     base: &str,
     gen: &mut impl FnMut(&str) -> String,
     new_prods: &mut Vec<Production>,
+    nullability: &BTreeMap<NonTerminal, Nullability>,
+    prods_by_lhs: &BTreeMap<NonTerminal, Vec<Vec<Symbol>>>,
 ) -> NonTerminal {
     let n = segment.len();
 
     if n == 0 {
-        // Degenerate: create an epsilon-only rule
+        // Degenerate: shouldn't happen with threshold=1 but create an epsilon NT as fallback.
         let name = gen(base);
         let nt = NonTerminal(name.clone());
         new_prods.push(Production { lhs: nt.clone(), rhs: vec![] });
         return nt;
     }
 
+    // For each symbol, obtain a non-nullable version.
+    // - For nullable NTs: call create_nn_nt to strip epsilon-derivable alternatives.
+    // - For terminals or non-nullable NTs: use as-is.
+    // - For freshly-created tree NTs (not in nullability map): use as-is (already non-nullable).
+    let nn_segment: Vec<Symbol> = segment.iter().map(|sym| match sym {
+        Symbol::NonTerminal(nt) =>
+            Symbol::NonTerminal(create_nn_nt(nt, nullability, prods_by_lhs, gen, new_prods)),
+        Symbol::Terminal(_) => sym.clone(),
+    }).collect();
+
     if n <= k {
-        // Leaf: enumerate all 2^n ordered subsequences (including the empty one)
+        // Leaf: enumerate all NON-EMPTY ordered subsequences (mask 1 to 2^n-1).
+        // No epsilon alternative → this NT is non-nullable.
         let name = gen(base);
-        let nt = NonTerminal(name.clone());
-        // Generate all 2^n non-empty subsets (masks from 1 to 2^n - 1), plus empty
-        for mask in 0u64..(1u64 << n) {
-            let rhs: Vec<Symbol> = segment.iter().enumerate()
+        let leaf_nt = NonTerminal(name.clone());
+        for mask in 1u64..(1u64 << n) {
+            let rhs: Vec<Symbol> = nn_segment.iter().enumerate()
                 .filter(|(i, _)| (mask >> i) & 1 == 1)
                 .map(|(_, sym)| sym.clone())
                 .collect();
-            new_prods.push(Production { lhs: nt.clone(), rhs });
+            new_prods.push(Production { lhs: leaf_nt.clone(), rhs });
         }
-        return nt;
+        return leaf_nt;
     }
 
-    // Split into chunks of size k (last chunk may be smaller)
-    let chunk_nts: Vec<NonTerminal> = segment
-        .chunks(k)
-        .map(|chunk| build_balanced_tree_rule(chunk, k, base, gen, new_prods))
+    // Split nn_segment into chunks of size k and build a non-nullable NT for each chunk.
+    let chunk_nts: Vec<NonTerminal> = nn_segment.chunks(k)
+        .map(|chunk| build_non_nullable_tree(chunk, k, base, gen, new_prods, nullability, prods_by_lhs))
         .collect();
 
-    // Root: single production concatenating all chunk NTs
-    let root_name = gen(base);
-    let root_nt = NonTerminal(root_name.clone());
-    let root_rhs: Vec<Symbol> = chunk_nts.iter()
+    // Recurse over the chunk NTs (they are non-nullable by construction).
+    // Since k >= 2, chunk_nts.len() < n, so the recursion terminates.
+    let chunk_syms: Vec<Symbol> = chunk_nts.iter()
         .map(|nt| Symbol::NonTerminal(nt.clone()))
         .collect();
-    new_prods.push(Production { lhs: root_nt.clone(), rhs: root_rhs });
-    root_nt
+    build_non_nullable_tree(&chunk_syms, k, base, gen, new_prods, nullability, prods_by_lhs)
 }
 
 // ---------------------------------------------------------------------------
