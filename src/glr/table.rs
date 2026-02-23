@@ -1727,15 +1727,6 @@ fn generate_glr_parser_with_maps(
             let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
             let mut unique_name_generator = create_unique_name_generator(&nonterminals);
 
-            // Debug: dump ALL right-reachability relevant productions before indirect RR elimination
-            for p in &productions {
-                let rhs_str: Vec<String> = p.rhs.iter().map(|s| match s {
-                    crate::glr::grammar::Symbol::NonTerminal(nt) => nt.0.clone(),
-                    crate::glr::grammar::Symbol::Terminal(t) => format!("T({:?})", t),
-                }).collect();
-                crate::debug!(9, "  PRE-INDIRECT-RR: {} → {}", p.lhs.0, rhs_str.join(" "));
-            }
-
             // Resolve indirect right recursion first (by inlining)
             crate::glr::analyze::resolve_indirect_right_recursion(
                 &mut productions,
