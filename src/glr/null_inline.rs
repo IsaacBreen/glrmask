@@ -336,7 +336,7 @@ fn preprocess_balanced_tree(
     let mut result: Vec<Production> = Vec::new();
 
     for prod in productions {
-        let runs = find_nullable_runs(&prod.rhs, &nullability, 0); // threshold=0: process ALL runs
+        let runs = find_nullable_runs(&prod.rhs, &nullability, 1); // threshold=1: only process runs with 2+ nullable NTs
         if runs.is_empty() {
             result.push(prod.clone());
             continue;
