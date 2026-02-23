@@ -1243,26 +1243,102 @@ pub fn create_unique_name_generator(
     }
 }
 
-/// Resolves indirect right recursion by inlining to convert it to direct.
+/// Resolves indirect right recursion by breaking cycles one edge at a time.
+///
+/// For each cycle, we prefer to inline an edge where `to_nt` has NO direct
+/// right recursion, because this permanently removes the edge without grammar
+/// growth. If no such edge exists, we inline the cheapest edge and eliminate
+/// the resulting direct right recursion on `from_nt`.
 pub fn resolve_indirect_right_recursion(
     productions: &mut Vec<Production>,
-    _new_name_generator: &mut impl FnMut(&str) -> String,
+    new_name_generator: &mut impl FnMut(&str) -> String,
 ) {
-    for iteration in 0..100 {
+    for iteration in 0..200 {
         let nullable = compute_nullable_nonterminals(productions);
         let graph = build_right_reachability_graph(productions, &nullable);
-        
-        // Find a non-self-loop cycle using DFS
+
         let cycle = find_cycle_excluding_self_loops(&graph);
-        
-        if let Some(cycle) = cycle {
-            crate::debug!(6, "Found indirect right recursion: {:?}", cycle.iter().map(|nt| &nt.0).collect::<Vec<_>>());
-            inline_right_end(productions, &cycle[0], &cycle[1], &nullable);
-        } else {
+        let Some(cycle) = cycle else {
             crate::debug!(6, "Indirect right recursion resolved after {} iterations", iteration);
             break;
+        };
+
+        crate::debug!(6, "Found indirect right recursion cycle (len {}): {:?}",
+            cycle.len(), cycle.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+
+        // Check which NTs in the cycle have direct right recursion
+        let has_direct_rr: Vec<bool> = cycle.iter().map(|nt| {
+            productions.iter().any(|p| &p.lhs == nt && is_direct_right_recursive(p))
+        }).collect();
+
+        // Prefer an edge where to_nt has NO direct RR (inlining won't re-create the edge)
+        let safe_edge = (0..cycle.len()).find(|&i| {
+            let to_idx = (i + 1) % cycle.len();
+            !has_direct_rr[to_idx]
+        });
+
+        if let Some(edge_idx) = safe_edge {
+            let from = &cycle[edge_idx].clone();
+            let to = &cycle[(edge_idx + 1) % cycle.len()].clone();
+            crate::debug!(7, "  Safe inline: {} → {} (to has no direct RR)", from.0, to.0);
+            inline_right_end(productions, from, to, &nullable);
+        } else {
+            // All targets have direct RR. Pick cheapest edge and resolve direct RR after.
+            let best_edge = (0..cycle.len()).min_by_key(|&i| {
+                let from = &cycle[i];
+                let to = &cycle[(i + 1) % cycle.len()];
+                productions.iter().filter(|p| {
+                    &p.lhs == from && (0..p.rhs.len()).rev().any(|k| {
+                        matches!(&p.rhs[k], Symbol::NonTerminal(nt) if nt == to) &&
+                        p.rhs[k + 1..].iter().all(|s| matches!(s, Symbol::NonTerminal(n) if nullable.contains(n)))
+                    })
+                }).count()
+            }).unwrap();
+
+            let from = &cycle[best_edge].clone();
+            let to = &cycle[(best_edge + 1) % cycle.len()].clone();
+            crate::debug!(7, "  Forced inline+RR: {} → {} (all targets have direct RR)", from.0, to.0);
+            inline_right_end(productions, from, to, &nullable);
+            resolve_direct_right_recursion_single_nt(productions, from, &mut *new_name_generator);
         }
     }
+}
+
+/// Eliminate direct right recursion for a single NT using epsilon-free transformation.
+fn resolve_direct_right_recursion_single_nt(
+    productions: &mut Vec<Production>,
+    nt: &NonTerminal,
+    new_name_generator: &mut impl FnMut(&str) -> String,
+) {
+    let prods_for_nt: Vec<_> = productions.iter().filter(|p| &p.lhs == nt).cloned().collect();
+    if !prods_for_nt.iter().any(is_direct_right_recursive) { return; }
+
+    let (recursive, non_recursive): (Vec<_>, Vec<_>) =
+        prods_for_nt.iter().cloned().partition(is_direct_right_recursive);
+    if non_recursive.is_empty() || recursive.is_empty() { return; }
+
+    let new_nt = NonTerminal(new_name_generator(&nt.0));
+    crate::debug!(7, "  Direct RR elimination: {} → {} ({} rec, {} base)",
+        nt.0, new_nt.0, recursive.len(), non_recursive.len());
+
+    let mut new_prods: Vec<Production> = productions.iter().filter(|p| &p.lhs != nt).cloned().collect();
+
+    for rule in &non_recursive { new_prods.push(rule.clone()); }
+    for rule in &non_recursive {
+        let mut rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+        rhs.extend(rule.rhs.clone());
+        new_prods.push(Production { lhs: nt.clone(), rhs });
+    }
+    for rule in &recursive {
+        new_prods.push(Production { lhs: new_nt.clone(), rhs: rule.rhs[..rule.rhs.len()-1].to_vec() });
+    }
+    for rule in &recursive {
+        let mut rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+        rhs.extend(rule.rhs[..rule.rhs.len()-1].iter().cloned());
+        new_prods.push(Production { lhs: new_nt.clone(), rhs });
+    }
+
+    *productions = new_prods;
 }
 
 /// Build graph: A -> B if A has production ending with B (considering nullable suffix)
@@ -1353,7 +1429,7 @@ fn inline_right_end(productions: &mut Vec<Production>, from_nt: &NonTerminal, to
                 let mut rhs = prod.rhs[..pos].to_vec();
                 rhs.extend(to_prod.rhs.clone());
                 rhs.extend(prod.rhs[pos + 1..].to_vec());
-                // Skip trivial self-loops
+                // Skip trivial unit self-loops (A → A)
                 if !(rhs.len() == 1 && matches!(&rhs[0], Symbol::NonTerminal(nt) if nt == from_nt)) {
                     new_prods.push(Production { lhs: from_nt.clone(), rhs });
                 }

@@ -64,10 +64,11 @@ pub enum NullableInliningStrategy {
 impl NullableInliningStrategy {
     /// Read the strategy from the `NULL_INLINE_STRATEGY` environment variable.
     ///
-    /// Default (when unset): `right_chain`.  This is strictly safer than `exhaustive`
-    /// because it produces identical results on grammars with no long nullable runs
-    /// (like the Python chain encoding) while avoiding exponential blowup on grammars
-    /// with many consecutive nullable NTs (like the Python inline-optional encoding).
+    /// Default (when unset): `balanced_tree_2`.  This strategy is strictly safer than
+    /// `exhaustive` because it produces identical results on grammars with no long nullable
+    /// runs while avoiding exponential blowup on grammars with many consecutive nullable NTs.
+    /// It automatically falls back to `exhaustive` when the grammar has pre-existing right
+    /// recursion (to avoid creating problematic right-reachability cycles).
     ///
     /// Recognised values:
     /// - `exhaustive`   – all 2^N variants (original behaviour; may cause OOM/timeout)
@@ -76,7 +77,7 @@ impl NullableInliningStrategy {
     /// - `balanced_tree_N` where N is the group size (e.g. `balanced_tree_4`)
     pub fn from_env() -> Self {
         let val = std::env::var("NULL_INLINE_STRATEGY")
-            .unwrap_or_else(|_| "right_chain".to_string());
+            .unwrap_or_else(|_| "balanced_tree_2".to_string());
         let val = val.trim().to_lowercase();
         if val == "exhaustive" {
             return Self::Exhaustive;
@@ -212,6 +213,15 @@ fn preprocess_runs(
         let mut new_rhs = prod.rhs.clone();
         for &(start, end) in runs.iter().rev() {
             let segment: Vec<Symbol> = new_rhs.drain(start..=end).collect();
+            if segment.len() <= 1 {
+                // Singleton nullable runs do not benefit from chain encoding and can
+                // introduce unit-derivation artifacts (chain -> NT) after epsilon
+                // elimination. Keep them as-is and let exhaustive inlining handle them.
+                if let Some(sym) = segment.into_iter().next() {
+                    new_rhs.insert(start, sym);
+                }
+                continue;
+            }
             let chain_root = match direction {
                 Direction::Right => build_right_chain(&segment, &prod.lhs.0, new_name_gen, &mut result),
                 Direction::Left  => build_left_chain(&segment, &prod.lhs.0, new_name_gen, &mut result),

@@ -20,7 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 
-COMPILER = Path(__file__).parent / "target" / "debug" / "grammar-compiler"
+COMPILER = Path(__file__).parent / "target" / "release" / "grammar-compiler"
 
 STRATEGIES = [
     "exhaustive",
