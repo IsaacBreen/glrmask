@@ -1533,83 +1533,12 @@ impl<'r> Precomputer1<'r> {
                 match approx_dfa.dfa.step(approx_state, suffix_tid) {
                     Some(next) => Some(next),
                     None => {
-                        let disable_approx_pruner =
-                            std::env::var("DISABLE_APPROX_DFA_PRUNER").is_ok();
-                        // The DFA step failed for this terminal. This can happen
-                        // when a reduce should have fired at a PREVIOUS step
-                        // but the DFA doesn't model reduce-then-goto within
-                        // its state transitions.
-                        //
-                        // If any parser state in the state set has ANY reduce
-                        // with len>0 (for any terminal), then the parser might
-                        // have reduced at a previous step, popping below the
-                        // bottom of the stack. After reducing below bottom,
-                        // any state is possible, so we transition to the
-                        // start state (which represents all possible parser
-                        // states) and try stepping from there.
-                        //
-                        // We check for ANY reduce (not just one matching this
-                        // terminal) because the reduce fires on a PREVIOUS
-                        // terminal in the lookahead, not the current one.
-                        let mut has_any_reduce = false;
-                        if let Some(state_set) = approx_dfa.dfa.state_set(approx_state) {
-                            for state_id in state_set.iter() {
-                                if let Some(terms) = approx_dfa.reduce_fallback_terminals_by_state.get(state_id) {
-                                    if !terms.is_empty() {
-                                        has_any_reduce = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if has_any_reduce {
-                            // Reduce below bottom -> "all possible states" = start state.
-                            // Try stepping from start to see if this terminal is valid.
-                            let start = approx_dfa.dfa.start_state;
-                            let result = approx_dfa.dfa.step(start, suffix_tid);
-                            if result.is_some() {
-                                return result;
-                            }
-                        }
-                        if disable_approx_pruner {
-                            return Some(approx_state);
-                        }
-                        if std::env::var("DEBUG_APPROX_STEP").is_ok() {
-                            let mut should_log = true;
-                            if let Ok(filter) = std::env::var("DEBUG_APPROX_STEP_TERMS") {
-                                let mut hits = false;
-                                for part in filter.split(',') {
-                                    if let Ok(val) = part.trim().parse::<usize>() {
-                                        if val == suffix_tid.0 {
-                                            hits = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                should_log = hits;
-                            }
-                            if should_log {
-                                eprintln!(
-                                    "DEBUG_APPROX_STEP PRUNE state={} term_idx={} suffix_tid={} state_set={:?}",
-                                    approx_state,
-                                    term_idx,
-                                    suffix_tid.0,
-                                    approx_dfa.dfa.state_set(approx_state)
-                                );
-                                if let Some(state_set) = approx_dfa.dfa.state_set(approx_state) {
-                                    for state_id in state_set.iter() {
-                                        if let Some(terms) = approx_dfa.reduce_fallback_terminals_by_state.get(state_id) {
-                                            eprintln!(
-                                                "  state {} reduce_terms={:?}",
-                                                state_id,
-                                                terms
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        None
+                        // The DFA step failed for this terminal. Pruning is permanently
+                        // disabled — the approx DFA here is used ONLY for state tracking
+                        // (DfsKey discrimination) and never for path pruning. Returning
+                        // Some(approx_state) keeps the current approximate state and
+                        // lets the path continue without pruning.
+                        Some(approx_state)
                     }
                 }
             } else {
