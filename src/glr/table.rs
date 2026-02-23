@@ -3,6 +3,7 @@ use crate::glr::analyze::{
     create_unique_name_generator, inline_null_productions,
     remove_productions_with_undefined_nonterminals, validate, merge_identical_nonterminals,
 };
+use crate::glr::null_inline::{NullableInliningStrategy, make_null_inline_name_gen, run_null_inline};
 use crate::glr::minimizer::{substitute_single_productions_and_report, remove_productions_for_nts, left_factor_grammar, eliminate_unreachable_productions};
 use crate::glr::automaton::{
     compute_first_sets_ids_with_lhs, compute_follow_sets_ids, compute_nullable_nonterminals,
@@ -1693,6 +1694,11 @@ fn generate_glr_parser_with_maps(
     // We loop until no more changes occur (fixed point).
     const MAX_OPTIMIZATION_PASSES: usize = usize::MAX;
     let normalization_start = std::time::Instant::now();
+
+    // Read the nullable inlining strategy once from the environment.
+    let null_inline_strategy = NullableInliningStrategy::from_env();
+    crate::debug!(4, "Nullable inlining strategy: {}", null_inline_strategy.name());
+
     for pass in 0..MAX_OPTIMIZATION_PASSES {
         crate::debug!(4, "Grammar optimization pass {}", pass + 1);
         let initial_productions = productions.clone();
@@ -1701,8 +1707,12 @@ fn generate_glr_parser_with_maps(
         // Phase 2: ESSENTIAL - Inline null productions
         // This exposes hidden right recursion: A → α A β where β is nullable
         // becomes A → α A | A → α A β
-        crate::debug!(5, "  Phase 2: Inlining null productions");
-        productions = inline_null_productions(&productions);
+        crate::debug!(5, "  Phase 2: Inlining null productions (strategy: {})", null_inline_strategy.name());
+        {
+            let existing_nts: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
+            let mut null_name_gen = make_null_inline_name_gen(&existing_nts);
+            productions = run_null_inline(&productions, &null_inline_strategy, &mut null_name_gen);
+        }
 
         // Phase 3: ESSENTIAL - Right recursion elimination
         // Transforms A → α A into A → A' α, A' → ε | A' α
@@ -1789,9 +1799,13 @@ fn generate_glr_parser_with_maps(
     // inline these so that no epsilon productions remain.
     // inline_null_productions now guarantees elimination of ALL
     // epsilon productions by inlining into the start production as well.
-    crate::debug!(4, "Final epsilon production elimination");
+    crate::debug!(4, "Final epsilon production elimination (strategy: {})", null_inline_strategy.name());
     let t_eps = std::time::Instant::now();
-    productions = inline_null_productions(&productions);
+    {
+        let existing_nts: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
+        let mut null_name_gen = make_null_inline_name_gen(&existing_nts);
+        productions = run_null_inline(&productions, &null_inline_strategy, &mut null_name_gen);
+    }
     crate::timing!("TIMING: glr_final_epsilon {:?}", t_eps.elapsed());
     print_memory_usage("After final epsilon elimination");
     

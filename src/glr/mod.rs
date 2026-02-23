@@ -8,3 +8,4 @@ mod tests;
 pub mod analyze;
 pub mod automaton;
 pub mod minimizer;
+pub mod null_inline;
