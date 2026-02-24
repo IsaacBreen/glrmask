@@ -2725,17 +2725,27 @@ impl GrammarDefinition {
     /// rule: expr
     /// ```
     pub fn from_lark(lark_source: &str) -> Result<Self, String> {
-        let lark = LarkParser::new(lark_source).and_then(|mut p| p.parse())?;
+        let t0 = std::time::Instant::now();
+        let lark = LarkParser::new(lark_source).and_then(|mut p| {
+            let t_parse_start = std::time::Instant::now();
+            let result = p.parse();
+            debug!(5, "  Lark parse() took {:?}", t_parse_start.elapsed());
+            result
+        })?;
+        debug!(5, "  Lark tokenize+parse took {:?} ({} rules)", t0.elapsed(), lark.grammar_rules.len());
         let (greedy_groups, ungrouped_terminals) =
             Self::extract_hash_bang_directives_from_lark(lark_source)?;
-        Self::from_parsed_rules_impl(
+        let t1 = std::time::Instant::now();
+        let result = Self::from_parsed_rules_impl(
             lark.grammar_rules,
             lark.ignore_symbol_name,
             greedy_groups,
             ungrouped_terminals,
             false,
             false,
-        )
+        );
+        debug!(5, "  from_parsed_rules_impl took {:?}", t1.elapsed());
+        result
     }
 
     fn extract_hash_bang_directives_from_lark(

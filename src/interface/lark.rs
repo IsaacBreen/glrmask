@@ -14,9 +14,7 @@
 use crate::interface::{choice, literal, optional, r#ref, repeat, repeat_bounded, sequence, GrammarExpr};
 use regex::Regex;
 use std::collections::HashSet;
-use std::iter::Peekable;
 use std::sync::OnceLock;
-use std::vec::IntoIter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Span {
@@ -496,7 +494,8 @@ pub(super) struct LarkParseResult {
 
 pub(super) struct LarkParser<'a> {
     source: &'a str,
-    tokens: Peekable<IntoIter<LarkToken>>,
+    tokens: Vec<LarkToken>,
+    pos: usize,
 }
 
 impl<'a> LarkParser<'a> {
@@ -504,7 +503,8 @@ impl<'a> LarkParser<'a> {
         let tokens = tokenize_lark(source)?;
         Ok(LarkParser {
             source,
-            tokens: tokens.into_iter().peekable(),
+            tokens,
+            pos: 0,
         })
     }
 
@@ -516,7 +516,7 @@ impl<'a> LarkParser<'a> {
         // Skip leading newlines
         self.skip_newlines();
 
-        while self.tokens.peek().is_some() {
+        while self.peek().is_some() {
             if self.peek_directive("%ignore") {
                 self.consume_directive("%ignore")?;
                 let (symbol_name, _) = self.expect_ident()?;
@@ -524,16 +524,16 @@ impl<'a> LarkParser<'a> {
                 self.skip_newlines();
             } else if self.peek_directive("%import") {
                 // Skip %import directives - consume until newline
-                self.tokens.next();
-                while self.tokens.peek().is_some() && !self.peek_newline() {
-                    self.tokens.next();
+                self.advance();
+                while self.peek().is_some() && !self.peek_newline() {
+                    self.advance();
                 }
                 self.skip_newlines();
             } else if self.peek_directive_any() {
                 // Skip unknown directives
-                self.tokens.next();
-                while self.tokens.peek().is_some() && !self.peek_newline() {
-                    self.tokens.next();
+                self.advance();
+                while self.peek().is_some() && !self.peek_newline() {
+                    self.advance();
                 }
                 self.skip_newlines();
             } else if self.peek_newline() {
@@ -586,7 +586,7 @@ impl<'a> LarkParser<'a> {
                 choices.push(self.parse_sequence()?);
             } else if self.peek_newline() {
                 // Look ahead: is there a | after the newlines?
-                let saved_pos = self.tokens.clone();
+                let saved_pos = self.pos;
                 self.skip_newlines();
                 if self.peek_op("|") {
                     self.consume_op("|")?;
@@ -594,7 +594,7 @@ impl<'a> LarkParser<'a> {
                     choices.push(self.parse_sequence()?);
                 } else {
                     // Not a continuation, restore position and break
-                    self.tokens = saved_pos;
+                    self.pos = saved_pos;
                     break;
                 }
             } else {
@@ -612,7 +612,7 @@ impl<'a> LarkParser<'a> {
     fn parse_sequence(&mut self) -> Result<GrammarExpr, LarkParseError> {
         let mut terms = Vec::new();
         
-        while self.tokens.peek().is_some()
+        while self.peek().is_some()
             && !self.peek_op(")")
             && !self.peek_op("|")
             && !self.peek_newline()
@@ -670,20 +670,20 @@ impl<'a> LarkParser<'a> {
     }
 
     fn parse_factor(&mut self) -> Result<GrammarExpr, LarkParseError> {
-        if let Some(LarkToken { kind: LarkTokenKind::Ident(id), .. }) = self.tokens.peek().cloned() {
-            self.tokens.next();
+        if let Some(LarkToken { kind: LarkTokenKind::Ident(id), .. }) = self.peek().cloned() {
+            self.advance();
             Ok(r#ref(&id))
-        } else if let Some(LarkToken { kind: LarkTokenKind::Literal(lit), .. }) = self.tokens.peek().cloned() {
-            self.tokens.next();
+        } else if let Some(LarkToken { kind: LarkTokenKind::Literal(lit), .. }) = self.peek().cloned() {
+            self.advance();
             Ok(literal(lit.into_bytes()))
-        } else if let Some(LarkToken { kind: LarkTokenKind::CharClass(cc), .. }) = self.tokens.peek().cloned() {
-            self.tokens.next();
+        } else if let Some(LarkToken { kind: LarkTokenKind::CharClass(cc), .. }) = self.peek().cloned() {
+            self.advance();
             Ok(GrammarExpr::CharClass {
                 def: cc,
-                utf8: true,
+                utf8: false,
             })
-        } else if let Some(LarkToken { kind: LarkTokenKind::RegexLiteral(re), span }) = self.tokens.peek().cloned() {
-            self.tokens.next();
+        } else if let Some(LarkToken { kind: LarkTokenKind::RegexLiteral(re), span }) = self.peek().cloned() {
+            self.advance();
             regex_literal_to_expr(&re)
                 .map_err(|msg| LarkParseError::new(self.source, span, msg))
         } else if self.peek_op("(") {
@@ -694,7 +694,7 @@ impl<'a> LarkParser<'a> {
             self.expect_op(")")?;
             Ok(expr)
         } else {
-            let (message, span) = if let Some(token) = self.tokens.peek() {
+            let (message, span) = if let Some(token) = self.peek() {
                 (
                     format!("Expected identifier, literal, or group, found {:?}", &token.kind),
                     token.span,
@@ -718,24 +718,24 @@ impl<'a> LarkParser<'a> {
 
     fn skip_newlines(&mut self) {
         while self.peek_newline() {
-            self.tokens.next();
+            self.advance();
         }
     }
 
-    fn peek_newline(&mut self) -> bool {
-        matches!(self.tokens.peek(), Some(LarkToken { kind: LarkTokenKind::Newline, .. }))
+    fn peek_newline(&self) -> bool {
+        matches!(self.peek(), Some(LarkToken { kind: LarkTokenKind::Newline, .. }))
     }
 
-    fn peek_op(&mut self, op: &str) -> bool {
-        matches!(self.tokens.peek(), Some(LarkToken { kind: LarkTokenKind::Op(s), .. }) if s == op)
+    fn peek_op(&self, op: &str) -> bool {
+        matches!(self.peek(), Some(LarkToken { kind: LarkTokenKind::Op(s), .. }) if s == op)
     }
 
     fn consume_op(&mut self, op: &str) -> Result<(), LarkParseError> {
         if self.peek_op(op) {
-            self.tokens.next();
+            self.advance();
             Ok(())
         } else {
-            let (message, span) = if let Some(token) = self.tokens.peek() {
+            let (message, span) = if let Some(token) = self.peek() {
                 (format!("Expected '{}', found {:?}", op, &token.kind), token.span)
             } else {
                 (format!("Expected '{}', found end of input", op), self.eof_span())
@@ -745,7 +745,7 @@ impl<'a> LarkParser<'a> {
     }
 
     fn expect_op(&mut self, op: &str) -> Result<(), LarkParseError> {
-        match self.tokens.next() {
+        match self.next() {
             Some(LarkToken { kind: LarkTokenKind::Op(s), .. }) if s == op => Ok(()),
             Some(other) => Err(LarkParseError::new(
                 self.source,
@@ -760,20 +760,20 @@ impl<'a> LarkParser<'a> {
         }
     }
 
-    fn peek_directive(&mut self, directive: &str) -> bool {
-        matches!(self.tokens.peek(), Some(LarkToken { kind: LarkTokenKind::Directive(s), .. }) if s == directive)
+    fn peek_directive(&self, directive: &str) -> bool {
+        matches!(self.peek(), Some(LarkToken { kind: LarkTokenKind::Directive(s), .. }) if s == directive)
     }
 
-    fn peek_directive_any(&mut self) -> bool {
-        matches!(self.tokens.peek(), Some(LarkToken { kind: LarkTokenKind::Directive(_), .. }))
+    fn peek_directive_any(&self) -> bool {
+        matches!(self.peek(), Some(LarkToken { kind: LarkTokenKind::Directive(_), .. }))
     }
 
     fn consume_directive(&mut self, directive: &str) -> Result<(), LarkParseError> {
         if self.peek_directive(directive) {
-            self.tokens.next();
+            self.advance();
             Ok(())
         } else {
-            let (message, span) = if let Some(token) = self.tokens.peek() {
+            let (message, span) = if let Some(token) = self.peek() {
                 (format!("Expected '{}', found {:?}", directive, &token.kind), token.span)
             } else {
                 (format!("Expected '{}', found end of input", directive), self.eof_span())
@@ -783,7 +783,7 @@ impl<'a> LarkParser<'a> {
     }
 
     fn expect_ident(&mut self) -> Result<(String, Span), LarkParseError> {
-        match self.tokens.next() {
+        match self.next() {
             Some(LarkToken { kind: LarkTokenKind::Ident(id), span }) => Ok((id, span)),
             Some(other) => Err(LarkParseError::new(
                 self.source,
@@ -799,7 +799,7 @@ impl<'a> LarkParser<'a> {
     }
 
     fn parse_repeat_number(&mut self) -> Result<usize, LarkParseError> {
-        match self.tokens.next() {
+        match self.next() {
             Some(LarkToken { kind: LarkTokenKind::Number(num), span }) => num
                 .parse::<usize>()
                 .map_err(|_| LarkParseError::new(self.source, span, "Invalid repeat count")),
@@ -828,15 +828,49 @@ impl<'a> LarkParser<'a> {
         }
     }
 
+    /// Peek at the current token without advancing.
+    #[inline]
+    fn peek(&self) -> Option<&LarkToken> {
+        self.tokens.get(self.pos)
+    }
+
+    /// Peek at the token at offset `n` from the current position.
+    #[inline]
+    fn peek_nth(&self, n: usize) -> Option<&LarkToken> {
+        self.tokens.get(self.pos + n)
+    }
+
+    /// Advance the position by one.
+    #[inline]
+    fn advance(&mut self) -> Option<()> {
+        if self.pos < self.tokens.len() {
+            self.pos += 1;
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    /// Consume and return the next token (owned via clone).
+    fn next(&mut self) -> Option<LarkToken> {
+        if self.pos < self.tokens.len() {
+            let token = self.tokens[self.pos].clone();
+            self.pos += 1;
+            Some(token)
+        } else {
+            None
+        }
+    }
+
     /// Check if we're at the start of a new rule definition (ident followed by :)
-    fn is_at_rule_start(&mut self) -> bool {
-        let tokens: Vec<_> = self.tokens.clone().take(2).collect();
+    /// O(1) — just index-based lookahead, no cloning.
+    fn is_at_rule_start(&self) -> bool {
         matches!(
-            tokens.as_slice(),
-            [
-                LarkToken { kind: LarkTokenKind::Ident(_), .. },
-                LarkToken { kind: LarkTokenKind::Op(op), .. }
-            ] if op == ":"
+            (self.peek(), self.peek_nth(1)),
+            (
+                Some(LarkToken { kind: LarkTokenKind::Ident(_), .. }),
+                Some(LarkToken { kind: LarkTokenKind::Op(op), .. })
+            ) if op == ":"
         )
     }
 }
