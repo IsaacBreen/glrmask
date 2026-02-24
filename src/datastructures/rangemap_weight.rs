@@ -529,6 +529,32 @@ impl RangeMapWeight {
         normalize_num_tsids(self.num_tsids)
     }
 
+    /// Extract the N-space token set for a specific tsid offset.
+    ///
+    /// Returns the set of LLM token IDs allowed when the active tokenizer state
+    /// maps to the given tsid offset.
+    pub fn tokens_for_tsid_offset(&self, tsid_offset: usize) -> RangeSet {
+        if Self::tsid_outer_enabled() {
+            // Map is tsid -> token_set.  Find the range containing tsid_offset.
+            let mut result = RangeSet::zeros();
+            for (tsid_range, token_set) in self.map.range_values() {
+                if *tsid_range.start() <= tsid_offset && tsid_offset <= *tsid_range.end() {
+                    result |= token_set;
+                }
+            }
+            result
+        } else {
+            // Map is token_id -> tsid_set.  Collect tokens whose tsid_set contains tsid_offset.
+            let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
+            for (token_range, tsid_set) in self.map.range_values() {
+                if tsid_set.contains(tsid_offset) {
+                    ranges.push(*token_range.start()..=*token_range.end());
+                }
+            }
+            RangeSet::from(RangeSetBlaze::from_iter(ranges))
+        }
+    }
+
     /// Check if this weight is disjoint with another (no shared positions).
     /// Uses a merge-scan over sorted range maps — O(|ranges_a| + |ranges_b|)
     /// without materializing the full intersection.

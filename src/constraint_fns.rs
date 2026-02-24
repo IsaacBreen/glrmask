@@ -4,7 +4,8 @@ use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
 use crate::dwa_i32::common::{Label, StateID as WAStateID};
-use crate::dwa_i32::weight_expansion::collapse_weight_rsb;
+
+use crate::datastructures::abstract_weight::AbstractWeight;
 use crate::dfa_u8::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
@@ -324,9 +325,6 @@ impl<'a> GrammarConstraintState<'a> {
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state_id = dwa.body.start_state;
 
-        // Queue: depth -> (dwa_state -> GSS with N×M weights)
-        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
-
         let disable_disallowed_filter = std::env::var("DISABLE_TERMINALS_DISALLOWED_FILTER").is_ok();
         let seed_start = if benchmark_enabled {
             Some(Instant::now())
@@ -334,55 +332,62 @@ impl<'a> GrammarConstraintState<'a> {
             None
         };
 
-        // 1. Seed: For each tokenizer state, apply tsid mask and seed at DWA start
-        for (&tokenizer_state_id, glr_state) in &self.state {
-            if glr_state.stack.is_empty() {
-                continue;
-            }
-
-            let tsid = tokenizer_state_id.0;
-            // Compute the tsid offset once (replaces creating full tsid mask)
-            let tsid_off = crate::dwa_i32::weight_expansion::tsid_to_offset_pub(
-                tsid,
+        // Collect active tsid offsets for all tokenizer states.
+        let active_tsid_offsets: Vec<usize> = self.state.keys().map(|ts_id| {
+            crate::dwa_i32::weight_expansion::tsid_to_offset_pub(
+                ts_id.0,
                 if self.parent.tsid_offset_map.is_empty() {
                     None
                 } else {
                     Some(self.parent.tsid_offset_map.as_slice())
                 },
-            );
+            )
+        }).collect();
+
+        // Closure: project a weight to N-space by unioning across all active tsid offsets.
+        let get_tokens_n = |weight: &AbstractWeight| -> std::sync::Arc<RangeSet> {
+            if active_tsid_offsets.len() == 1 {
+                weight.tokens_for_tsid_offset_cached(active_tsid_offsets[0], num_tsids)
+            } else {
+                let mut combined = RangeSet::zeros();
+                for &off in &active_tsid_offsets {
+                    combined |= weight.tokens_for_tsid_offset_cached(off, num_tsids).as_ref();
+                }
+                std::sync::Arc::new(combined)
+            }
+        };
+
+        // Queue: depth -> (dwa_state -> GSS with N-space RangeSet weights)
+        // We work entirely in token-space (0..vocab_size) instead of N×M space.
+        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSet>>> = BTreeMap::new();
+
+        // 1. Seed: For each tokenizer state, apply tsid mask and seed at DWA start
+        for ((&tokenizer_state_id, glr_state), &tsid_off) in self.state.iter().zip(active_tsid_offsets.iter()) {
+            if glr_state.stack.is_empty() {
+                continue;
+            }
 
             let gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
 
-            // Convert GSS accumulator (TerminalsDisallowed) to N×M space with tsid mask applied
+            // Convert GSS accumulator (TerminalsDisallowed) to N-space token set
             let f = |terminals_disallowed: &TerminalsDisallowed| {
-                // Start with all LLM tokens in N-space
-                let mut allowed_n: RangeSetBlaze<usize> = RangeSetBlaze::from_iter([0..=max_llm_token]);
+                // Start with all LLM tokens
+                let mut allowed = RangeSet::ones(max_llm_token + 1);
 
                 if !disable_disallowed_filter {
-                    // Subtract forbidden tokens based on disallowed terminals
                     for (&ts_id, disallowed_in_state) in terminals_disallowed {
                         if disallowed_in_state.is_empty() { continue; }
                         if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
                             for (terminal_id, llm_tokens) in state_matches {
                                 if disallowed_in_state.contains(&terminal_id.0) {
-                                    allowed_n = &allowed_n - llm_tokens.inner.as_ref();
+                                    allowed -= llm_tokens;
                                 }
                             }
                         }
                     }
                 }
-                // Direct computation: map each allowed token to its N×M position at tsid_off
-                // This replaces: expand_rsb + create_tsid_mask + intersection
-                let result: RangeSetBlaze<usize> = allowed_n.ranges()
-                    .flat_map(|r| {
-                        (*r.start()..=*r.end()).map(move |t| {
-                            let p = t * num_tsids + tsid_off;
-                            p..=p
-                        })
-                    })
-                    .collect();
-                if result.is_empty() { None } else { Some(result) }
+                if allowed.is_empty() { None } else { Some(allowed) }
             };
             let weighted_gss = gss.apply_and_prune(f);
 
@@ -411,7 +416,8 @@ impl<'a> GrammarConstraintState<'a> {
         let mut wl_merge_ns: u64 = 0;
         let mut wl_final_ns: u64 = 0;
         let mut wl_expand_count: u64 = 0;
-        // 2. Main worklist loop (same structure as symbol-heavy)
+
+        // 2. Main worklist loop — all intersections in N-space (token-space)
         while let Some((depth, states_at_depth)) = queue.pop_last() {
             for (current_wa_state_id, gss) in states_at_depth {
                 worklist_iters += 1;
@@ -421,38 +427,39 @@ impl<'a> GrammarConstraintState<'a> {
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                        let expanded_final = final_weight.to_rsb_allow_expansion_cached();
+                        let tokens_n = get_tokens_n(final_weight);
                         if let Some(t0) = t0 { wl_expand_ns += t0.elapsed().as_nanos() as u64; wl_expand_count += 1; }
                         let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                        let final_tokens = &reduced_acc & expanded_final.as_ref();
+                        let final_tokens = &reduced_acc & tokens_n.as_ref();
                         if let Some(t0) = t0 { wl_intersect_ns += t0.elapsed().as_nanos() as u64; }
                         if !final_tokens.is_empty() {
                             has_accepting = true;
                             let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                            // Collapse from N×M to N before adding to result
-                            let collapsed = collapse_weight_rsb(&final_tokens, num_tsids);
-                            final_mask_internal |= RangeSet::from(collapsed);
+                            final_mask_internal |= &final_tokens;
                             if let Some(t0) = t0 { wl_final_ns += t0.elapsed().as_nanos() as u64; }
                         }
                     }
                 }
 
-                // Process transitions (same as symbol-heavy)
+                // Process transitions
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
-                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+
+                    // Helper: process a single transition
+                    let mut process_transition = |target_wa_state_id: WAStateID, trans_weight: &AbstractWeight| {
                         let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
                         if let Some(t0) = t0 { wl_gss_ns += t0.elapsed().as_nanos() as u64; }
-                        if popped_gss.is_empty() { continue; }
+                        if popped_gss.is_empty() { return; }
 
                         let t0_exp = if benchmark_enabled { Some(Instant::now()) } else { None };
-                        let expanded_tw = trans_weight.to_rsb_allow_expansion_cached();
+                        let tokens_n = get_tokens_n(trans_weight);
                         if let Some(t0) = t0_exp { wl_expand_ns += t0.elapsed().as_nanos() as u64; wl_expand_count += 1; }
-                        let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & expanded_tw.as_ref();
-                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+
+                        let f = |acc: &RangeSet| {
+                            let new_acc = acc & tokens_n.as_ref();
+                            if new_acc.is_empty() { None } else { Some(new_acc) }
                         };
                         let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let final_gss = popped_gss.apply_and_prune(f);
@@ -468,36 +475,14 @@ impl<'a> GrammarConstraintState<'a> {
                                 .or_insert(final_gss);
                             if let Some(t0) = t0 { wl_merge_ns += t0.elapsed().as_nanos() as u64; }
                         }
+                    };
+
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+                        process_transition(target_wa_state_id, trans_weight);
                     }
 
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
-                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                        let isolated_gss = gss.isolate(Some(peeked_edge));
-                        let popped_gss = isolated_gss.pop();
-                        if let Some(t0) = t0 { wl_gss_ns += t0.elapsed().as_nanos() as u64; }
-                        if popped_gss.is_empty() { continue; }
-
-                        let t0_exp = if benchmark_enabled { Some(Instant::now()) } else { None };
-                        let expanded_tw = trans_weight.to_rsb_allow_expansion_cached();
-                        if let Some(t0) = t0_exp { wl_expand_ns += t0.elapsed().as_nanos() as u64; wl_expand_count += 1; }
-                        let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & expanded_tw.as_ref();
-                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
-                        };
-                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                        let final_gss = popped_gss.apply_and_prune(f);
-                        if let Some(t0) = t0 { wl_intersect_ns += t0.elapsed().as_nanos() as u64; }
-
-                        if !final_gss.is_empty() {
-                            let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                            queue
-                                .entry(final_gss.max_depth())
-                                .or_default()
-                                .entry(target_wa_state_id)
-                                .and_modify(|existing| *existing = existing.merge(&final_gss))
-                                .or_insert(final_gss);
-                            if let Some(t0) = t0 { wl_merge_ns += t0.elapsed().as_nanos() as u64; }
-                        }
+                        process_transition(target_wa_state_id, trans_weight);
                     }
                 }
             }

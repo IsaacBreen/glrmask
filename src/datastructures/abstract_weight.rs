@@ -1017,6 +1017,81 @@ impl AbstractWeight {
         }
     }
 
+    /// Extract the N-space token set for a specific tsid offset.
+    ///
+    /// For Factorized/RangeMap weights, this slices the factorized structure
+    /// to get the token set for a single tsid.  For RangeSet (raw N×M ranges),
+    /// it extracts positions at the given tsid offset modulo num_tsids.
+    ///
+    /// This is dramatically cheaper than expanding to a full N×M RangeSetBlaze
+    /// and then intersecting, because the result is in N-space (0..vocab_size)
+    /// instead of N×M-space (0..vocab_size*num_tsids).
+    pub fn tokens_for_tsid_offset(&self, tsid_offset: usize, num_tsids: usize) -> RangeSet {
+        match self {
+            AbstractWeight::Factorized(fw) => {
+                fw.tokens_for_tsid_offset(tsid_offset)
+            }
+            AbstractWeight::RangeMap(rm) => {
+                rm.tokens_for_tsid_offset(tsid_offset)
+            }
+            AbstractWeight::RangeSet(rs) => {
+                // Raw N×M ranges: extract token IDs where token*num_tsids+tsid_offset is in the set.
+                if num_tsids == 0 {
+                    return rs.clone();
+                }
+                let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
+                for r in rs.ranges() {
+                    let start = *r.start();
+                    let end = *r.end();
+                    // For range [start, end], the tokens with this tsid are:
+                    // t such that t*num_tsids + tsid_offset in [start..=end]
+                    // i.e., t in [ceil((start-tsid_offset)/num_tsids) .. floor((end-tsid_offset)/num_tsids)]
+                    if end < tsid_offset {
+                        continue;
+                    }
+                    let adjusted_start = if start <= tsid_offset { 0 } else { start - tsid_offset };
+                    let adjusted_end = end - tsid_offset;
+                    // t_min = ceiling division of adjusted_start by num_tsids
+                    let t_min = (adjusted_start + num_tsids - 1) / num_tsids;
+                    let t_max = adjusted_end / num_tsids;
+                    // Also need t*num_tsids + tsid_offset to actually be in [start, end]
+                    // Check: t_min*num_tsids + tsid_offset >= start (guaranteed by our calculation)
+                    //         t_max*num_tsids + tsid_offset <= end (guaranteed by our calculation)
+                    if t_min <= t_max {
+                        ranges.push(t_min..=t_max);
+                    }
+                }
+                RangeSet::from(RangeSetBlaze::from_iter(ranges))
+            }
+        }
+    }
+
+    /// Like `tokens_for_tsid_offset` but with per-weight caching.
+    ///
+    /// The cache is keyed by (weight pointer, tsid_offset) and is thread-local.
+    pub fn tokens_for_tsid_offset_cached(&self, tsid_offset: usize, num_tsids: usize) -> Arc<RangeSet> {
+        thread_local! {
+            static CACHE: RefCell<std::collections::HashMap<(usize, usize), Arc<RangeSet>>> =
+                RefCell::new(std::collections::HashMap::new());
+        }
+
+        let key = match self {
+            AbstractWeight::Factorized(arc) => (Arc::as_ptr(arc) as usize, tsid_offset),
+            AbstractWeight::RangeMap(arc) => (Arc::as_ptr(arc) as usize, tsid_offset),
+            AbstractWeight::RangeSet(_) => {
+                // RangeSet doesn't have Arc identity, compute directly
+                return Arc::new(self.tokens_for_tsid_offset(tsid_offset, num_tsids));
+            }
+        };
+
+        CACHE.with(|cache| {
+            let mut c = cache.borrow_mut();
+            c.entry(key)
+                .or_insert_with(|| Arc::new(self.tokens_for_tsid_offset(tsid_offset, num_tsids)))
+                .clone()
+        })
+    }
+
     /// Expand to a RangeSetBlaze representation (alias for `to_rsb`).
     pub fn expand_to_rsb(&self) -> RangeSetBlaze<usize> {
         self.to_rsb()

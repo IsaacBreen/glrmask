@@ -656,6 +656,21 @@ impl FactorizedWeight {
         &self.pairs
     }
 
+    /// Extract the N-space token set for a specific tsid offset.
+    ///
+    /// Returns the union of all token_sets whose tsid_set contains `tsid_offset`.
+    /// This is the set of LLM tokens allowed when the active tokenizer state
+    /// maps to the given tsid offset in N×M space.
+    pub fn tokens_for_tsid_offset(&self, tsid_offset: usize) -> RangeSet {
+        let mut result = RangeSet::zeros();
+        for (tsid_set, token_set) in &self.pairs {
+            if tsid_set.contains(tsid_offset) {
+                result |= token_set;
+            }
+        }
+        result
+    }
+
     /// Serialize to a JSON-compatible format for analysis.
     /// Returns a JSON object with:
     /// - num_tsids: the total number of terminal signature IDs

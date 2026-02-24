@@ -4392,6 +4392,10 @@ impl Merge for RangeSetBlaze<usize> {
     fn merge(&self, other: &Self) -> Self { self | other }
 }
 
+impl Merge for RangeSet {
+    fn merge(&self, other: &Self) -> Self { self | other }
+}
+
 impl Merge for Weight {
     fn merge(&self, other: &Self) -> Self { self | other }
 }
