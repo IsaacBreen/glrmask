@@ -4116,6 +4116,7 @@ fn test_terminal_dwa_greedy_keywords_no_else_if_on_ei() {
 }
 
 #[test]
+#[ignore = "greedy_group removed from js.ebnf — greedy matching is disabled"]
 fn test_js_greedy_keywords_full_grammar() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
@@ -6756,3 +6757,5 @@ start: "{" obj_ord_0_0_nc "}"
     }
     }
 }
+
+// (greedy_group tests removed — greedy_group is disabled/broken)

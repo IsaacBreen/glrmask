@@ -1766,6 +1766,203 @@ impl GrammarConstraint {
         crate::debug!(3, "Terminal DWA (final): {}", 
             terminal_dwa.stats());
 
+        // Analyze effective equivalence classes in the terminal DWA
+        if std::env::var("ANALYZE_TERMINAL_DWA_EQUIV").is_ok() {
+            use std::collections::{BTreeSet, HashMap, HashSet};
+            use std::hash::{Hash, Hasher};
+            let start_analysis = std::time::Instant::now();
+            
+            // For each weight in the terminal DWA, the weight is a RangeMapWeight: token → tsid_set.
+            // 
+            // TOKEN equivalence: Two tokens are equiv if for every weight, they map to the same tsid_set.
+            //   Approach: For each weight, iterate range_values to get (token_range, tsid_set) pairs.
+            //   For each token, its "column" across all weights is the tuple of tsid_sets.
+            //   Number of distinct columns = number of token equivalence classes.
+            //
+            // TSID equivalence: Two TSIDs are equiv if for every weight×token, they're both in or both out.
+            //   Approach: Invert each weight to tsid → token_set. For each TSID, its "row" across all
+            //   weights is the tuple of token_sets. Number of distinct rows = TSID eq classes.
+            
+            // Step 1: Collect all weights as (weight_idx, RangeMapWeight ref) 
+            let mut all_rangemaps: Vec<&crate::datastructures::RangeMapWeight> = Vec::new();
+            let mut weight_count = 0usize;
+            let mut non_rangemap_count = 0usize;
+            
+            for state in &terminal_dwa.states.0 {
+                for (_, w) in &state.trans_weights {
+                    weight_count += 1;
+                    match w {
+                        crate::datastructures::AbstractWeight::RangeMap(rm) => {
+                            all_rangemaps.push(rm);
+                        }
+                        _ => { non_rangemap_count += 1; }
+                    }
+                }
+                if let Some(fw) = &state.final_weight {
+                    weight_count += 1;
+                    match fw {
+                        crate::datastructures::AbstractWeight::RangeMap(rm) => {
+                            all_rangemaps.push(rm);
+                        }
+                        _ => { non_rangemap_count += 1; }
+                    }
+                }
+            }
+            
+            crate::timing!(
+                "ANALYZE_EQUIV: {} weights total, {} RangeMaps, {} non-RangeMap. DWA has {} states.",
+                weight_count,
+                all_rangemaps.len(),
+                non_rangemap_count,
+                terminal_dwa.states.0.len(),
+            );
+            
+            // Step 2: Collect all token range boundaries across all weights.
+            // This gives us a partition of the token space where each interval maps to
+            // the same tsid_set in every weight.
+            let mut token_boundaries: BTreeSet<usize> = BTreeSet::new();
+            token_boundaries.insert(0);
+            let max_token = vocab.internal_max_llm_token;
+            
+            for rm in &all_rangemaps {
+                for (token_range, _tsid_set) in rm.map.range_values() {
+                    token_boundaries.insert(*token_range.start());
+                    token_boundaries.insert(token_range.end().wrapping_add(1));
+                }
+            }
+            
+            // Build token intervals
+            let token_bps: Vec<usize> = token_boundaries.into_iter().filter(|&t| t <= max_token + 1).collect();
+            let mut token_intervals: Vec<(usize, usize)> = Vec::new();
+            for i in 0..token_bps.len() {
+                let start = token_bps[i];
+                let end = if i + 1 < token_bps.len() { token_bps[i+1].saturating_sub(1) } else { max_token };
+                if start <= end {
+                    token_intervals.push((start, end));
+                }
+            }
+            
+            crate::timing!(
+                "ANALYZE_EQUIV: {} token boundaries -> {} token intervals",
+                token_bps.len(),
+                token_intervals.len(),
+            );
+            
+            // Step 3: TOKEN EQUIVALENCE CLASSES
+            // For each token interval, compute signature = for each weight, hash of the tsid_set it maps to.
+            // Use the representative token (start of interval) since all tokens in the interval
+            // have the same tsid_set mapping in every weight.
+            let tok_eq_start = std::time::Instant::now();
+            let mut token_sig_map: HashMap<Vec<u64>, usize> = HashMap::new(); // sig -> count of intervals
+            
+            for &(tok_start, _tok_end) in &token_intervals {
+                let mut sig: Vec<u64> = Vec::with_capacity(all_rangemaps.len());
+                for rm in &all_rangemaps {
+                    if let Some(tsid_set) = rm.map.get(tok_start) {
+                        // Hash the tsid_set by its ranges
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        for r in tsid_set.ranges() {
+                            r.start().hash(&mut hasher);
+                            r.end().hash(&mut hasher);
+                        }
+                        sig.push(hasher.finish());
+                    } else {
+                        sig.push(0); // empty
+                    }
+                }
+                *token_sig_map.entry(sig).or_insert(0) += 1;
+            }
+            
+            let num_token_eq_classes = token_sig_map.len();
+            let mut tok_class_sizes: Vec<usize> = token_sig_map.values().copied().collect();
+            tok_class_sizes.sort_unstable();
+            tok_class_sizes.reverse();
+            let top10_tok: Vec<usize> = tok_class_sizes.iter().take(10).copied().collect();
+            
+            crate::timing!(
+                "ANALYZE_EQUIV: Token eq classes: {} (from {} intervals). Top10 sizes: {:?}. ({:?})",
+                num_token_eq_classes,
+                token_intervals.len(),
+                top10_tok,
+                tok_eq_start.elapsed(),
+            );
+            
+            // Step 4: TSID EQUIVALENCE CLASSES (inverted)
+            // For each TSID, its signature = for each weight × token_interval, is this TSID present?
+            // Collect TSID range boundaries across all weights.
+            let tsid_eq_start = std::time::Instant::now();
+            let mut tsid_boundaries: BTreeSet<usize> = BTreeSet::new();
+            tsid_boundaries.insert(0);
+            
+            for rm in &all_rangemaps {
+                for (_token_range, tsid_set) in rm.map.range_values() {
+                    for tsid_range in tsid_set.ranges() {
+                        tsid_boundaries.insert(*tsid_range.start());
+                        tsid_boundaries.insert(tsid_range.end().wrapping_add(1));
+                    }
+                }
+            }
+            
+            let tsid_bps: Vec<usize> = tsid_boundaries.into_iter().filter(|&t| t <= num_tsids + 1).collect();
+            let mut tsid_intervals: Vec<(usize, usize)> = Vec::new();
+            for i in 0..tsid_bps.len() {
+                let start = tsid_bps[i];
+                let end = if i + 1 < tsid_bps.len() { tsid_bps[i+1].saturating_sub(1) } else { num_tsids };
+                if start <= end {
+                    tsid_intervals.push((start, end));
+                }
+            }
+            
+            // For each TSID interval, compute: for each (weight_idx, token_interval_idx), is rep_tsid present?
+            // We hash this as a compact signature.
+            let mut tsid_sig_map: HashMap<Vec<u8>, usize> = HashMap::new();
+            
+            for &(tsid_start, _tsid_end) in &tsid_intervals {
+                let rep_tsid = tsid_start;
+                // Bit-packed signature: 1 bit per (weight, token_interval) context
+                let total_bits = all_rangemaps.len() * token_intervals.len();
+                let mut sig = vec![0u8; (total_bits + 7) / 8];
+                let mut bit_idx = 0usize;
+                
+                for rm in &all_rangemaps {
+                    for &(tok_start, _tok_end) in &token_intervals {
+                        let present = rm.map.get(tok_start)
+                            .map_or(false, |tsid_set| tsid_set.contains(rep_tsid));
+                        if present {
+                            sig[bit_idx / 8] |= 1 << (bit_idx % 8);
+                        }
+                        bit_idx += 1;
+                    }
+                }
+                
+                *tsid_sig_map.entry(sig).or_insert(0) += 1;
+            }
+            
+            let num_tsid_eq_classes = tsid_sig_map.len();
+            let mut tsid_class_sizes: Vec<usize> = tsid_sig_map.values().copied().collect();
+            tsid_class_sizes.sort_unstable();
+            tsid_class_sizes.reverse();
+            let top10_tsid: Vec<usize> = tsid_class_sizes.iter().take(10).copied().collect();
+            
+            crate::timing!(
+                "ANALYZE_EQUIV: TSID eq classes: {} (from {} intervals). Top10 sizes: {:?}. ({:?})",
+                num_tsid_eq_classes,
+                tsid_intervals.len(),
+                top10_tsid,
+                tsid_eq_start.elapsed(),
+            );
+            
+            // Summary comparison with setup_combined
+            crate::timing!(
+                "ANALYZE_EQUIV SUMMARY: setup_combined: {} token reps (from {}), {} state reps. Terminal DWA: {} token eq classes, {} TSID eq classes.",
+                vocab.original_to_internal.len(),
+                max_token + 1,
+                num_tsids,
+                num_token_eq_classes,
+                num_tsid_eq_classes,
+            );
+        }
+
         if let Some((token_id, labels)) = crate::debug_path_weight::parse_debug_path_weight_env() {
             let ignore_final = crate::debug_path_weight::debug_path_weight_ignore_final();
             let weight = if ignore_final {

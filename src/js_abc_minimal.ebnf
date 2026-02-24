@@ -1,2 +1,1 @@
-#![greedy_group(main,*)]
 S::='a'[abc]*;

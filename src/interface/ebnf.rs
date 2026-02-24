@@ -343,6 +343,8 @@ impl<'a> EbnfParser<'a> {
                         ignore_symbol_name = Some(symbol_name);
                     }
                     "greedy_group" => {
+                        // Note: greedy_group is broken — do not use in production grammars.
+                        // Kept for testing only.
                         self.expect_grammar_op("(")?;
                         let (group_name, group_name_span) = self.expect_ident()?;
                         self.expect_grammar_op(",")?;
@@ -359,6 +361,7 @@ impl<'a> EbnfParser<'a> {
                         let (terminals, has_wildcard) =
                             self.parse_greedy_group_terminal_list_allow_wildcard()?;
                         self.expect_grammar_op(")")?;
+                        eprintln!("WARNING: greedy_group is known to be broken — do not use in production grammars");
                         greedy_groups.push(GreedyGroup {
                             name: group_name,
                             terminals,
