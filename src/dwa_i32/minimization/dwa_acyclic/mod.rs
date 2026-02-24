@@ -979,6 +979,236 @@ fn compute_height_coloring_with_range(
         return colors;
     }
 
+    // ── ExactColPack early termination via representative-based greedy ────
+    //
+    // For large candidate sets, the O(N²) incompatibility graph is expensive.
+    // Instead, run a greedy coloring that checks each candidate against ONE
+    // representative per existing color class.  This is O(N × K) where K is
+    // the number of colors found.
+    //
+    // When K ≤ 2 the result is provably optimal:
+    //   K=1 ⇒ trivially minimal.
+    //   K=2 ⇒ greedy found an incompatible pair ⇒ χ≥2, and K≥χ, so χ=2.
+    //
+    // For K ≥ 3 with K == num_signature_groups we verify by checking that
+    // every pair of group representatives is pairwise incompatible.
+    //
+    // The coloring is then validated: within each color class, all pairwise
+    // states must be compatible.  Same-signature pairs (128-bit hash) are
+    // skipped as they are compatible with overwhelming probability.
+    if matches!(coloring_mode, ColoringMode::ExactColPack | ColoringMode::ColPackVerified)
+        && candidates.len() > 50
+    {
+        let greedy_et_start = std::time::Instant::now();
+
+        // Representative-based greedy: check against one rep per color class.
+        let n = candidates.len();
+        let mut greedy_colors = vec![0usize; n];
+        let mut color_reps: Vec<StateID> = Vec::new(); // one representative per color
+        for i in 0..n {
+            let cand = candidates[i];
+            let mut assigned = false;
+            for (c, &rep) in color_reps.iter().enumerate() {
+                if are_compatible(
+                    cand,
+                    rep,
+                    dwa,
+                    needed,
+                    range,
+                    old_to_new,
+                    new_states,
+                    productive_transitions,
+                ) {
+                    greedy_colors[i] = c;
+                    assigned = true;
+                    break;
+                }
+            }
+            if !assigned {
+                greedy_colors[i] = color_reps.len();
+                color_reps.push(cand);
+            }
+        }
+        let k_greedy = color_reps.len();
+        let greedy_time = greedy_et_start.elapsed();
+
+        let is_provably_optimal = if k_greedy <= 2 {
+            true
+        } else if k_greedy == num_groups && num_groups <= 50 {
+            // Verify that every pair of group reps is incompatible.
+            let mut all_cross_incompat = true;
+            'outer: for i in 0..color_reps.len() {
+                for j in i + 1..color_reps.len() {
+                    if are_compatible(
+                        color_reps[i],
+                        color_reps[j],
+                        dwa,
+                        needed,
+                        range,
+                        old_to_new,
+                        new_states,
+                        productive_transitions,
+                    ) {
+                        all_cross_incompat = false;
+                        break 'outer;
+                    }
+                }
+            }
+            all_cross_incompat
+        } else {
+            false
+        };
+
+        if is_provably_optimal {
+            // ── O(N×L) accumulated-domain verification ─────────────────
+            // Instead of O(N²) pairwise checks, verify each state against
+            // an accumulated "merged" domain.  Proof: if state C agrees
+            // with accumulated(A₁…Aₖ) on overlap(acc_needed, needed_C),
+            // it agrees with each Aᵢ on overlap(needed_Aᵢ, needed_C)
+            // because needed_Aᵢ ⊆ acc_needed.
+            let verify_start = std::time::Instant::now();
+            let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); k_greedy.max(1)];
+            for (idx, &c) in greedy_colors.iter().enumerate() {
+                buckets[c].push(idx);
+            }
+            for bucket in &buckets {
+                if bucket.len() <= 1 {
+                    continue;
+                }
+                let first = candidates[bucket[0]];
+                let mut acc_needed = needed[first].clone();
+                let mut acc_final = dwa.states[first]
+                    .final_weight
+                    .as_ref()
+                    .map(|w| w & &acc_needed)
+                    .unwrap_or_else(Weight::zeros);
+                // Accumulated transitions: label → (target_new_id, weight_on_needed)
+                let mut acc_trans: BTreeMap<Label, (Option<StateID>, Weight)> = BTreeMap::new();
+                for pt in &productive_transitions[first] {
+                    let target_new = old_to_new_get(old_to_new, pt.target);
+                    let w = &pt.weight & &acc_needed;
+                    if !w.is_empty() {
+                        acc_trans.insert(pt.label, (target_new, w));
+                    }
+                }
+
+                for &idx in &bucket[1..] {
+                    let cand = candidates[idx];
+                    let needed_c = &needed[cand];
+                    let overlap = &acc_needed & needed_c;
+                    if !overlap.is_empty() {
+                        // Check final weight on overlap
+                        let final_c = dwa.states[cand]
+                            .final_weight
+                            .as_ref()
+                            .map(|w| w & &overlap)
+                            .unwrap_or_else(Weight::zeros);
+                        let acc_final_on_overlap = &acc_final & &overlap;
+                        if final_c != acc_final_on_overlap {
+                            panic!(
+                                "ExactColPack early-term verify failed at height {}: \
+                                 final weight mismatch for state {} (overlap with accumulator)",
+                                height, cand,
+                            );
+                        }
+                        // Check transitions on overlap
+                        // 1. Labels in cand: must match accumulated on overlap
+                        for pt in &productive_transitions[cand] {
+                            let w_on_overlap = &pt.weight & &overlap;
+                            if w_on_overlap.is_empty() {
+                                continue;
+                            }
+                            let target_new = old_to_new_get(old_to_new, pt.target);
+                            if let Some((acc_target, acc_w)) = acc_trans.get(&pt.label) {
+                                let acc_w_on_overlap = acc_w & &overlap;
+                                if !acc_w_on_overlap.is_empty() {
+                                    if w_on_overlap != acc_w_on_overlap {
+                                        panic!(
+                                            "ExactColPack early-term verify failed at height {}: \
+                                             weight mismatch for state {} label {}",
+                                            height, cand, pt.label,
+                                        );
+                                    }
+                                    if target_new != *acc_target {
+                                        panic!(
+                                            "ExactColPack early-term verify failed at height {}: \
+                                             target mismatch for state {} label {}",
+                                            height, cand, pt.label,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        // 2. Labels in accumulated but not in cand: must be empty on overlap
+                        for (&label, (_, acc_w)) in &acc_trans {
+                            let acc_w_on_overlap = acc_w & &overlap;
+                            if acc_w_on_overlap.is_empty() {
+                                continue;
+                            }
+                            let cand_has_label = productive_transitions[cand]
+                                .iter()
+                                .any(|pt| pt.label == label && !(&pt.weight & &overlap).is_empty());
+                            if !cand_has_label {
+                                panic!(
+                                    "ExactColPack early-term verify failed at height {}: \
+                                     state {} missing label {} that accumulator has on overlap",
+                                    height, cand, label,
+                                );
+                            }
+                        }
+                    }
+                    // Extend accumulated state
+                    acc_needed |= needed_c;
+                    let final_c = dwa.states[cand]
+                        .final_weight
+                        .as_ref()
+                        .map(|w| w & needed_c)
+                        .unwrap_or_else(Weight::zeros);
+                    acc_final |= &final_c;
+                    for pt in &productive_transitions[cand] {
+                        let target_new = old_to_new_get(old_to_new, pt.target);
+                        let w = &pt.weight & needed_c;
+                        if !w.is_empty() {
+                            acc_trans
+                                .entry(pt.label)
+                                .and_modify(|(_, aw)| *aw |= &w)
+                                .or_insert((target_new, w));
+                        }
+                    }
+                }
+            }
+            let verify_time = verify_start.elapsed();
+
+            if !suppress_height_logs {
+                crate::debug!(
+                    5,
+                    "ExactColPack early termination: height {} → {} colors ({} sig groups), \
+                     greedy {:?}, verify {:?}",
+                    height,
+                    k_greedy,
+                    num_groups,
+                    greedy_time,
+                    verify_time,
+                );
+            }
+            if trace_heights && !suppress_height_logs {
+                eprintln!("TRACE: height {} colors={}", height, k_greedy);
+            }
+            return greedy_colors;
+        }
+        // Greedy was not provably optimal — fall through to full graph coloring.
+        if !suppress_height_logs {
+            crate::debug!(
+                5,
+                "ExactColPack greedy gave {} colors ({} sig groups) in {:?} — \
+                 not provably optimal, building graph",
+                k_greedy,
+                num_groups,
+                greedy_time,
+            );
+        }
+    }
+
     // Build full incompatibility graph
     let graph_start = std::time::Instant::now();
     if !suppress_height_logs {

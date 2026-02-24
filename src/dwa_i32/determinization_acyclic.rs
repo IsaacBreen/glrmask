@@ -1359,7 +1359,7 @@ pub(crate) fn determinize_acyclic_with_progress(
                 timers.pending_insert_ns.load(AtomicOrdering::Relaxed),
             );
             crate::timing!(
-                "TIMING: determinize_acyclic::materialize_blocks closure_lookup={:?} transition_iter={:?} pending_insert={:?}",
+                "TIMING: determinize_acyclic::materialize_blocks closure_lookup={:?} build_dest_thread_time={:?} pending_insert={:?}",
                 closure_lookup,
                 transition_iter,
                 pending_insert,
