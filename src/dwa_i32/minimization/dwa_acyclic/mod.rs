@@ -1032,34 +1032,16 @@ fn compute_height_coloring_with_range(
         let k_greedy = color_reps.len();
         let greedy_time = greedy_et_start.elapsed();
 
-        let is_provably_optimal = if k_greedy <= 2 {
-            true
-        } else if k_greedy == num_groups && num_groups <= 50 {
-            // Verify that every pair of group reps is incompatible.
-            let mut all_cross_incompat = true;
-            'outer: for i in 0..color_reps.len() {
-                for j in i + 1..color_reps.len() {
-                    if are_compatible(
-                        color_reps[i],
-                        color_reps[j],
-                        dwa,
-                        needed,
-                        range,
-                        old_to_new,
-                        new_states,
-                        productive_transitions,
-                    ) {
-                        all_cross_incompat = false;
-                        break 'outer;
-                    }
-                }
-            }
-            all_cross_incompat
-        } else {
-            false
-        };
-
-        if is_provably_optimal {
+        // The greedy representatives always form a k-clique by construction:
+        // each new rep was incompatible with all previous reps, so all pairs
+        // of reps are pairwise incompatible.  Therefore:
+        //   clique_number >= k_greedy, and chromatic_number <= k_greedy (from greedy),
+        //   thus chromatic_number = k_greedy.
+        //
+        // The number of colors is always optimal.  We just need to verify the
+        // assignment (the greedy may misplace states that are compatible with
+        // the rep but not with other class members).
+        {
             // ── O(N×L) accumulated-domain verification ─────────────────
             // Instead of O(N²) pairwise checks, verify each state against
             // an accumulated "merged" domain.  Proof: if state C agrees
@@ -1067,6 +1049,7 @@ fn compute_height_coloring_with_range(
             // it agrees with each Aᵢ on overlap(needed_Aᵢ, needed_C)
             // because needed_Aᵢ ⊆ acc_needed.
             let verify_start = std::time::Instant::now();
+            let mut verify_ok = true;
             let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); k_greedy.max(1)];
             for (idx, &c) in greedy_colors.iter().enumerate() {
                 buckets[c].push(idx);
@@ -1092,7 +1075,7 @@ fn compute_height_coloring_with_range(
                     }
                 }
 
-                for &idx in &bucket[1..] {
+                'verify: for &idx in &bucket[1..] {
                     let cand = candidates[idx];
                     let needed_c = &needed[cand];
                     let overlap = &acc_needed & needed_c;
@@ -1105,11 +1088,8 @@ fn compute_height_coloring_with_range(
                             .unwrap_or_else(Weight::zeros);
                         let acc_final_on_overlap = &acc_final & &overlap;
                         if final_c != acc_final_on_overlap {
-                            panic!(
-                                "ExactColPack early-term verify failed at height {}: \
-                                 final weight mismatch for state {} (overlap with accumulator)",
-                                height, cand,
-                            );
+                            verify_ok = false;
+                            break 'verify;
                         }
                         // Check transitions on overlap
                         // 1. Labels in cand: must match accumulated on overlap
@@ -1123,18 +1103,12 @@ fn compute_height_coloring_with_range(
                                 let acc_w_on_overlap = acc_w & &overlap;
                                 if !acc_w_on_overlap.is_empty() {
                                     if w_on_overlap != acc_w_on_overlap {
-                                        panic!(
-                                            "ExactColPack early-term verify failed at height {}: \
-                                             weight mismatch for state {} label {}",
-                                            height, cand, pt.label,
-                                        );
+                                        verify_ok = false;
+                                        break 'verify;
                                     }
                                     if target_new != *acc_target {
-                                        panic!(
-                                            "ExactColPack early-term verify failed at height {}: \
-                                             target mismatch for state {} label {}",
-                                            height, cand, pt.label,
-                                        );
+                                        verify_ok = false;
+                                        break 'verify;
                                     }
                                 }
                             }
@@ -1149,11 +1123,8 @@ fn compute_height_coloring_with_range(
                                 .iter()
                                 .any(|pt| pt.label == label && !(&pt.weight & &overlap).is_empty());
                             if !cand_has_label {
-                                panic!(
-                                    "ExactColPack early-term verify failed at height {}: \
-                                     state {} missing label {} that accumulator has on overlap",
-                                    height, cand, label,
-                                );
+                                verify_ok = false;
+                                break 'verify;
                             }
                         }
                     }
@@ -1176,36 +1147,42 @@ fn compute_height_coloring_with_range(
                         }
                     }
                 }
+                if !verify_ok {
+                    break;
+                }
             }
             let verify_time = verify_start.elapsed();
 
+            if verify_ok {
+                if !suppress_height_logs {
+                    crate::debug!(
+                        5,
+                        "ExactColPack early termination: height {} → {} colors ({} sig groups), \
+                         greedy {:?}, verify {:?}",
+                        height,
+                        k_greedy,
+                        num_groups,
+                        greedy_time,
+                        verify_time,
+                    );
+                }
+                if trace_heights && !suppress_height_logs {
+                    eprintln!("TRACE: height {} colors={}", height, k_greedy);
+                }
+                return greedy_colors;
+            }
+            // Greedy assignment invalid — fall through to full graph coloring.
             if !suppress_height_logs {
                 crate::debug!(
                     5,
-                    "ExactColPack early termination: height {} → {} colors ({} sig groups), \
-                     greedy {:?}, verify {:?}",
-                    height,
+                    "ExactColPack greedy gave {} colors ({} sig groups) in {:?}, \
+                     verify failed in {:?} — building graph",
                     k_greedy,
                     num_groups,
                     greedy_time,
                     verify_time,
                 );
             }
-            if trace_heights && !suppress_height_logs {
-                eprintln!("TRACE: height {} colors={}", height, k_greedy);
-            }
-            return greedy_colors;
-        }
-        // Greedy was not provably optimal — fall through to full graph coloring.
-        if !suppress_height_logs {
-            crate::debug!(
-                5,
-                "ExactColPack greedy gave {} colors ({} sig groups) in {:?} — \
-                 not provably optimal, building graph",
-                k_greedy,
-                num_groups,
-                greedy_time,
-            );
         }
     }
 
@@ -1899,104 +1876,71 @@ fn union_forward_pending(forward: &Weight, pending: &[Weight]) -> Weight {
 /// Compute forward reachability: which tokens can reach each state from start
 #[time_it("compute_forward_reachable")]
 fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
-    let mut time_init = std::time::Duration::ZERO;
-    let mut time_loop_outer = std::time::Duration::ZERO;
-    let mut time_clone = std::time::Duration::ZERO;
-    let mut time_and = std::time::Duration::ZERO;
-    let mut time_or = std::time::Duration::ZERO;
-    let mut count_transitions = 0usize;
-    let mut count_clones = 0usize;
-    let mut count_ands = 0usize;
-    let mut count_ors = 0usize;
-
-    let init_start = std::time::Instant::now();
+    // Eager forward propagation: update forward[v] directly when processing
+    // parent u, instead of buffering in pending lists.  Early `all` detection
+    // skips further updates and avoids needless cloning.
     let mut forward = vec![Weight::zeros(); dwa.states.len()];
     let mut forward_is_all = vec![false; dwa.states.len()];
     forward[dwa.body.start_state] = Weight::all();
     forward_is_all[dwa.body.start_state] = true;
-    time_init = init_start.elapsed();
 
-    let mut pending: Vec<Vec<Weight>> = vec![Vec::new(); dwa.states.len()];
-    let mut pending_is_all = vec![false; dwa.states.len()];
+    let mut count_transitions = 0usize;
+    let mut count_ands = 0usize;
+    let mut count_ors = 0usize;
+    let mut count_skip_all = 0usize;
 
+    // Process in reverse topological order: parents before children.
+    // By the time we process u, forward[u] has been fully computed by
+    // all of u's predecessors.
     for &u in topo_order.iter().rev() {
-        let outer_start = std::time::Instant::now();
-        if forward_is_all[u] {
-            pending[u].clear();
-            pending_is_all[u] = false;
-        } else if pending_is_all[u] {
-            forward[u] = Weight::all();
-            forward_is_all[u] = true;
-            pending_is_all[u] = false;
-            pending[u].clear();
-        } else if !pending[u].is_empty() {
-            let or_start = std::time::Instant::now();
-            let new_forward = union_forward_pending(&forward[u], &pending[u]);
-            time_or += or_start.elapsed();
-            count_ors += 1;
-            forward[u] = new_forward;
-            forward_is_all[u] = forward[u].is_all_fast();
-            pending[u].clear();
-        }
-
         let incoming_all = forward_is_all[u];
         if !incoming_all && forward[u].is_empty() {
-            time_loop_outer += outer_start.elapsed();
             continue;
         }
-        let clone_start = std::time::Instant::now();
-        let incoming = if incoming_all {
-            None
-        } else {
-            count_clones += 1;
-            Some(forward[u].clone())
-        };
-        time_clone += clone_start.elapsed();
 
         for (&lbl, &v) in &dwa.states[u].transitions {
             count_transitions += 1;
             if v >= dwa.states.len() { continue; }
-            if forward_is_all[v] || pending_is_all[v] { continue; }
+            if forward_is_all[v] {
+                count_skip_all += 1;
+                continue;
+            }
             if let Some(w) = dwa.states[u].trans_weights.get(&lbl) {
                 if w.is_empty() { continue; }
                 if incoming_all {
+                    // forward[u] = all → contribution is just w
                     if w.is_all_fast() {
-                        pending_is_all[v] = true;
-                        pending[v].clear();
-                        continue;
+                        forward[v] = Weight::all();
+                        forward_is_all[v] = true;
+                    } else {
+                        forward[v] |= w;
+                        count_ors += 1;
+                        if forward[v].is_all_fast() {
+                            forward_is_all[v] = true;
+                        }
                     }
-                    pending[v].push(w.clone());
-                } else if let Some(incoming) = &incoming {
-                    let and_start = std::time::Instant::now();
-                    let result = incoming & w;
-                    time_and += and_start.elapsed();
+                } else {
+                    let result = &forward[u] & w;
                     count_ands += 1;
-
                     if !result.is_empty() {
-                        pending[v].push(result);
+                        forward[v] |= &result;
+                        count_ors += 1;
+                        if forward[v].is_all_fast() {
+                            forward_is_all[v] = true;
+                        }
                     }
                 }
             }
         }
-        time_loop_outer += outer_start.elapsed();
     }
 
     crate::debug!(
         5,
-        "forward_reachable breakdown: init={:?}, loop_outer={:?}, clone={:?}, and={:?}, or={:?}",
-        time_init,
-        time_loop_outer,
-        time_clone,
-        time_and,
-        time_or,
-    );
-    crate::debug!(
-        5,
-        "forward_reachable counts: transitions={}, clones={}, ands={}, ors={}",
+        "forward_reachable: transitions={}, ands={}, ors={}, skipped_all={}",
         count_transitions,
-        count_clones,
         count_ands,
         count_ors,
+        count_skip_all,
     );
     forward
 }

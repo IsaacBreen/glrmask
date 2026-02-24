@@ -336,7 +336,7 @@ impl RangeMapWeight {
         hasher.finish()
     }
 
-    fn from_map(map: RangeMapBlaze<usize, RangeSet>, num_tsids: usize) -> Self {
+    pub(crate) fn from_map(map: RangeMapBlaze<usize, RangeSet>, num_tsids: usize) -> Self {
         let num_tsids = normalize_num_tsids(num_tsids);
         let cached_hash = Self::compute_hash(&map, num_tsids);
         Self {

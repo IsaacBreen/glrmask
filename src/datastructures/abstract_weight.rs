@@ -539,15 +539,25 @@ impl JSONConvertible for AbstractWeight {
                 JSONNode::Object(obj)
             }
             AbstractWeight::RangeMap(rm) => {
-                let ranges_vec: Vec<Vec<usize>> = rm
-                    .expand_to_rsb()
-                    .ranges()
-                    .map(|ri| vec![*ri.start(), *ri.end()])
+                // Serialize as compact native entries: [token_start, token_end, [tsid_start, tsid_end, ...]]
+                // This avoids the expensive expand_to_rsb() which can create millions of flat ranges.
+                let entries: Vec<JSONNode> = rm.map.range_values()
+                    .map(|(token_range, tsid_set)| {
+                        let mut entry = vec![
+                            (*token_range.start()).to_json(),
+                            (*token_range.end()).to_json(),
+                        ];
+                        let tsid_ranges: Vec<JSONNode> = tsid_set.ranges()
+                            .flat_map(|ri| [(*ri.start()).to_json(), (*ri.end()).to_json()])
+                            .collect();
+                        entry.push(JSONNode::Array(tsid_ranges));
+                        JSONNode::Array(entry)
+                    })
                     .collect();
                 let mut obj = std::collections::BTreeMap::new();
-                obj.insert("type".to_string(), JSONNode::String("rangemap".to_string()));
+                obj.insert("type".to_string(), JSONNode::String("rangemap_v2".to_string()));
                 obj.insert("num_tsids".to_string(), JSONNode::UInt(rm.num_tsids() as u128));
-                obj.insert("ranges".to_string(), ranges_vec.to_json());
+                obj.insert("entries".to_string(), JSONNode::Array(entries));
                 JSONNode::Object(obj)
             }
         }
@@ -627,6 +637,33 @@ impl JSONConvertible for AbstractWeight {
                             ranges.push(start..=end);
                         }
                         return Ok(AbstractWeight::from_rsb(RangeSetBlaze::from_iter(ranges)));
+                    }
+                    "rangemap_v2" => {
+                        let num_tsids: usize = match obj.remove("num_tsids") {
+                            Some(JSONNode::UInt(n)) => n as usize,
+                            Some(JSONNode::Int(n)) => n as usize,
+                            _ => return Err("Missing or invalid num_tsids for rangemap_v2".to_string()),
+                        };
+                        let entries_json = obj.remove("entries").ok_or("Missing entries")?;
+                        let entries_arr = entries_json.into_array()?;
+                        let mut map = range_set_blaze::RangeMapBlaze::new();
+                        for entry_node in entries_arr {
+                            let entry = entry_node.into_array()?;
+                            if entry.len() != 3 {
+                                return Err(format!("Expected 3-element entry [tok_start, tok_end, tsid_ranges], got {} elements", entry.len()));
+                            }
+                            let tok_start = usize::from_json(entry[0].clone())?;
+                            let tok_end = usize::from_json(entry[1].clone())?;
+                            let tsid_flat: Vec<usize> = Vec::from_json(entry[2].clone())?;
+                            let tsid_ranges: Vec<std::ops::RangeInclusive<usize>> = tsid_flat
+                                .chunks(2)
+                                .map(|c| c[0]..=c[1])
+                                .collect();
+                            let tsid_set = RangeSet::from(RangeSetBlaze::from_iter(tsid_ranges));
+                            map.ranges_insert(tok_start..=tok_end, tsid_set);
+                        }
+                        let rm = RangeMapWeight::from_map(map, num_tsids);
+                        return Ok(AbstractWeight::RangeMap(intern_rangemap(rm)));
                     }
                     _ => return Err(format!("Unknown weight type: {}", type_str)),
                 }
