@@ -924,7 +924,12 @@ fn make_template_bundle(
         None => return NWA::new_empty(),
     };
 
-    let dwa = combined.determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
+    let dwa = {
+        let _restore = crate::r#macro::set_silence_debug_timing(true);
+        let res = combined.determinize_and_minimize(DeterminizeAndMinimizeProfile::SpecializedSuper);
+        crate::r#macro::set_silence_debug_timing(_restore);
+        res
+    };
     NWA::from_dwa(&dwa)
 }
 
@@ -957,10 +962,13 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     
     let template_dwas_start = Instant::now();
     let template_dwas = timeit!("build_template_dwas", {
-        match build_template_dwas(parser) {
+        let _restore = crate::r#macro::set_silence_debug_timing(true);
+        let res = match build_template_dwas(parser) {
             Ok(m) => m,
             Err(e) => panic!("Failed to build template DWAs: {:?}", e),
-        }
+        };
+        crate::r#macro::set_silence_debug_timing(_restore);
+        res
     });
     crate::timing!(
         "TIMING: parser_dwa::build_template_dwas {:?}",
