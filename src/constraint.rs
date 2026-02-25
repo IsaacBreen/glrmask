@@ -49,9 +49,7 @@ use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::{
-    build_reduce_fallback_terminals_by_state,
     run_precompute1_with_possible_matches,
-    ApproximateDfaPruner,
 };
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
@@ -1586,61 +1584,6 @@ impl GrammarConstraint {
             ignored
         };
 
-        let approx_dfa = {
-            let ignored_terminals = ignored_terminals.clone();
-            if let Some(cache) = suffix_parser_cache.as_ref() {
-                crate::debug!(4, "Building approximate suffix DFA (lazy, all-states initial) for precompute1...");
-                let approx_start = std::time::Instant::now();
-                let approx_dfa = cache.parser.build_approximate_parser_dfa();
-                crate::timing!(
-                    "TIMING: build_approximate_suffix_dfa {:?}",
-                    approx_start.elapsed()
-                );
-
-                let orig_to_suffix_tid = cache.orig_to_suffix_tid.clone();
-                let reduce_fallback_terminals_by_state =
-                    build_reduce_fallback_terminals_by_state(&cache.parser);
-
-                crate::debug!(4, "Approximate suffix DFA built (lazy), start_state={}", approx_dfa.start_state);
-                crate::debug!(
-                    4,
-                    "Approximate suffix DFA stats: nfa_states={}, dfa_states={}",
-                    approx_dfa.nfa_states(),
-                    approx_dfa.dfa_states()
-                );
-                Some(ApproximateDfaPruner {
-                    dfa: approx_dfa,
-                    orig_to_suffix_tid,
-                    ignored_terminals,
-                    reduce_fallback_terminals_by_state,
-                })
-            } else {
-                crate::debug!(4, "Approximate suffix DFA requested but missing suffix parser; falling back to parser DFA...");
-                let approx_start = std::time::Instant::now();
-                let approx_dfa = parser.build_approximate_parser_dfa();
-                crate::timing!(
-                    "TIMING: build_approximate_parser_dfa {:?}",
-                    approx_start.elapsed()
-                );
-
-                let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
-                for (_term, orig_tid) in parser.terminal_map.iter() {
-                    if orig_tid.0 < orig_to_suffix_tid.len() {
-                        orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
-                    }
-                }
-                let reduce_fallback_terminals_by_state =
-                    build_reduce_fallback_terminals_by_state(&parser);
-
-                crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
-                Some(ApproximateDfaPruner {
-                    dfa: approx_dfa,
-                    orig_to_suffix_tid,
-                    ignored_terminals,
-                    reduce_fallback_terminals_by_state,
-                })
-            }
-        };
         let ignored_terminals = Arc::new(ignored_terminals);
         let terminal_to_greedy_group = {
             let mut mapping = vec![None; parser.terminal_map.len()];
@@ -1689,7 +1632,6 @@ impl GrammarConstraint {
                 parser.terminal_map.len(),
                 state_to_rep.clone(),
                 tsid_offset_map.clone(),
-                approx_dfa,
                 suffix_parser_cache.clone(),
                 self_extending_labels_for_collapse.clone(),
                 ignored_terminals.clone(),

@@ -165,7 +165,10 @@ impl SchemaToGrammar {
     fn make_string_key(&self, escaped_content: &str) -> GrammarType {
         let split_keys = std::env::var("SEP1_SPLIT_STRING_KEYS")
             .map(|v| v == "1")
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || std::env::var("SEP1_SPLIT_ALL_STRINGS")
+                .map(|v| v == "1")
+                .unwrap_or(false);
         
         if split_keys {
             // Split into: '"' 'content' '"'
@@ -237,10 +240,16 @@ impl SchemaToGrammar {
         // The pattern is: '"' (char_or_escape){min,max} '"'
         // where char_or_escape is inlined as [^"\\x00-\x1f] | \\["\\\/bfnrt] | \\uHHHH
         
-        // Generate a unique terminal name based on constraints
-        let name = match max {
-            Some(max_val) => format!("STRING_LEN_{}_{}", min, max_val),
-            None => format!("STRING_LEN_{}_INF", min),
+        // Generate a unique rule name based on constraints
+        // When SEP1_SPLIT_ALL_STRINGS=1, use lowercase (parser rule) to split quotes
+        let split_all = std::env::var("SEP1_SPLIT_ALL_STRINGS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let name = match (split_all, max) {
+            (false, Some(max_val)) => format!("STRING_LEN_{}_{}", min, max_val),
+            (false, None) => format!("STRING_LEN_{}_INF", min),
+            (true, Some(max_val)) => format!("string_len_{}_{}", min, max_val),
+            (true, None) => format!("string_len_{}_INF", min),
         };
         
         // If we've already defined this constrained string type, just return a reference
@@ -286,7 +295,7 @@ impl SchemaToGrammar {
             GrammarType::lit("\""),
         ]);
         
-        // Create a rule definition with an uppercase name (terminal convention)
+        // Create a rule definition (uppercase=terminal, lowercase=parser when splitting)
         GrammarType::RuleDefinition(name.clone(), Box::new(full_pattern))
     }
     

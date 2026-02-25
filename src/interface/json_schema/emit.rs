@@ -159,8 +159,12 @@ impl GrammarEmitter {
             ))));
         }
         
-        // JSON_STRING
-        self.rules.push(("JSON_STRING".to_string(), GrammarExpr::Sequence(vec![
+        // JSON_STRING (or json_string when splitting all strings)
+        let split_all_strings = std::env::var("SEP1_SPLIT_ALL_STRINGS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let json_string_name = if split_all_strings { "json_string" } else { "JSON_STRING" };
+        self.rules.push((json_string_name.to_string(), GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b"\"".to_vec()),
             GrammarExpr::Ref("STRING_CHARS".to_string()),
             GrammarExpr::Literal(b"\"".to_vec()),
@@ -253,7 +257,7 @@ impl GrammarEmitter {
             self.rules.push(("_json_value".to_string(), GrammarExpr::Choice(vec![
                 GrammarExpr::Ref("_json_object".to_string()),
                 GrammarExpr::Ref("_json_array".to_string()),
-                GrammarExpr::Ref("JSON_STRING".to_string()),
+                GrammarExpr::Ref(json_string_name.to_string()),
                 GrammarExpr::Ref("JSON_NUMBER".to_string()),
                 GrammarExpr::Ref("JSON_BOOL".to_string()),
                 GrammarExpr::Ref("JSON_NULL".to_string()),
@@ -278,7 +282,7 @@ impl GrammarEmitter {
         
         if needs_kv || needs_object || needs_value {
             self.rules.push(("_json_kv".to_string(), GrammarExpr::Sequence(vec![
-                GrammarExpr::Ref("JSON_STRING".to_string()),
+                GrammarExpr::Ref(json_string_name.to_string()),
                 GrammarExpr::Literal(b":".to_vec()),
                 GrammarExpr::Ref("_json_value".to_string()),
             ])));

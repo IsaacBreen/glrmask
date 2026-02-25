@@ -112,7 +112,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
-        None,
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),

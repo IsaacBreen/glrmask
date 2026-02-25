@@ -240,8 +240,11 @@ pub enum GrammarPrimitive {
 
 impl GrammarPrimitive {
     pub fn rule_name(&self) -> &'static str {
+        let split_all = std::env::var("SEP1_SPLIT_ALL_STRINGS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         match self {
-            GrammarPrimitive::JsonString => "JSON_STRING",
+            GrammarPrimitive::JsonString => if split_all { "json_string" } else { "JSON_STRING" },
             GrammarPrimitive::JsonInteger => "JSON_INTEGER",
             GrammarPrimitive::JsonNumber => "JSON_NUMBER",
             GrammarPrimitive::JsonBoolean => "JSON_BOOL",

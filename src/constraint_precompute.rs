@@ -377,13 +377,12 @@ type SourceStates = SmallVec<[NWAStateID; 1]>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct DfsKey {
     tokenizer_state: TokenizerStateID,
-    approx_state: usize,
 }
 
 impl DfsKey {
     #[inline]
-    fn new(tokenizer_state: TokenizerStateID, approx_state: usize) -> Self {
-        Self { tokenizer_state, approx_state }
+    fn new(tokenizer_state: TokenizerStateID) -> Self {
+        Self { tokenizer_state }
     }
 }
 
@@ -495,8 +494,6 @@ pub(crate) struct Precomputer1<'r> {
     /// Optional tsid->offset mapping for weight-heavy encoding (empty = identity).
     pub(crate) tsid_offset_map: Vec<usize>,
     expanded_all_weight: Weight,
-    approx_dfa: Option<ApproximateDfaPruner>,
-    approx_start_state: usize,
     direct_insert: bool,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
@@ -505,8 +502,6 @@ pub(crate) struct Precomputer1<'r> {
     nwa_rep_stats_enabled: bool,
     nwa_states_by_rep: BTreeMap<TokenizerStateID, usize>,
     nwa_states_by_rep_depth: BTreeMap<TokenizerStateID, BTreeMap<usize, usize>>,
-    approx_states_seen: BTreeSet<usize>,
-    dfs_keys_seen: BTreeSet<DfsKey>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -518,7 +513,6 @@ impl<'r> Precomputer1<'r> {
         state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
         num_tsids: usize,
         tsid_offset_map: Vec<usize>,
-        approx_dfa: Option<ApproximateDfaPruner>,
         suffix_prune_cache: Option<Arc<SuffixParserCache>>,
         self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
         ignored_terminals: Arc<Vec<bool>>,
@@ -546,11 +540,9 @@ impl<'r> Precomputer1<'r> {
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Clear default start state
 
-        let approx_start_state = approx_dfa.as_ref().map(|dfa| dfa.dfa.start_state).unwrap_or(0);
-
         let mut roots = BTreeMap::new();
         for &rep_sid in state_to_rep.values() {
-            let key = DfsKey::new(rep_sid, approx_start_state);
+            let key = DfsKey::new(rep_sid);
             let entry = roots.entry(key).or_insert_with(SmallVec::new);
             if entry.is_empty() {
                 let root_state = nwa.add_state();
@@ -571,8 +563,6 @@ impl<'r> Precomputer1<'r> {
             || crate::r#macro::is_debug_level_enabled(4);
         let mut nwa_states_by_rep = BTreeMap::new();
         let mut nwa_states_by_rep_depth = BTreeMap::new();
-        let mut approx_states_seen = BTreeSet::new();
-        let mut dfs_keys_seen = BTreeSet::new();
         if nwa_rep_stats_enabled {
             for key in roots.keys() {
                 *nwa_states_by_rep.entry(key.tokenizer_state).or_insert(0) += 1;
@@ -580,8 +570,6 @@ impl<'r> Precomputer1<'r> {
                     .entry(key.tokenizer_state)
                     .or_insert_with(BTreeMap::new);
                 *depth_map.entry(0).or_insert(0) += 1;
-                approx_states_seen.insert(key.approx_state);
-                dfs_keys_seen.insert(*key);
             }
         }
 
@@ -649,8 +637,6 @@ impl<'r> Precomputer1<'r> {
             internal_max_llm_token,
             tsid_offset_map,
             expanded_all_weight,
-            approx_dfa,
-            approx_start_state,
             direct_insert,
             suffix_prune_cache,
             self_extending_labels_for_collapse,
@@ -659,8 +645,6 @@ impl<'r> Precomputer1<'r> {
             nwa_rep_stats_enabled,
             nwa_states_by_rep,
             nwa_states_by_rep_depth,
-            approx_states_seen,
-            dfs_keys_seen,
         }
     }
 
@@ -917,7 +901,7 @@ impl<'r> Precomputer1<'r> {
                 let mut add_transition_time = std::time::Duration::ZERO;
                 let mut unique_targets = std::collections::HashSet::new();
                 for (tsid, rep_tsid) in &self.state_to_rep {
-                    let root_key = DfsKey::new(*rep_tsid, self.approx_start_state);
+                    let root_key = DfsKey::new(*rep_tsid);
                     if let Some(states) = self.roots.get(&root_key) {
                         for &state in states {
                             let label = (tsid.0 + self.terminals_count) as Label;
@@ -957,7 +941,7 @@ impl<'r> Precomputer1<'r> {
                 // Create one epsilon transition per representative with combined tsid mask
                 for (rep_tsid, tsids) in rep_to_tsids {
                     debug_assert!(tsids.contains(&rep_tsid.0));
-                    let root_key = DfsKey::new(rep_tsid, self.approx_start_state);
+                    let root_key = DfsKey::new(rep_tsid);
                     if let Some(states) = self.roots.get(&root_key) {
                         group_count += 1;
                         tsid_count += tsids.len();
@@ -1149,13 +1133,6 @@ impl<'r> Precomputer1<'r> {
                     );
                 }
             }
-
-            crate::debug!(
-                4,
-                "Approx DFA usage in NWA: approx_states_seen={}, dfs_keys_seen={}",
-                self.approx_states_seen.len(),
-                self.dfs_keys_seen.len()
-            );
         }
 
         if std::env::var("DWA_DUMP_NWA").map(|v| v == "1").unwrap_or(false) {
@@ -1518,38 +1495,6 @@ impl<'r> Precomputer1<'r> {
         all_possible_matches
     }
 
-    #[inline]
-    fn approx_step(&mut self, approx_state: usize, terminal_id: GrammarTokenID) -> Option<usize> {
-        let result = if let Some(approx_dfa) = self.approx_dfa.as_mut() {
-            let term_idx = terminal_id.0;
-            if approx_dfa
-                .ignored_terminals
-                .get(term_idx)
-                .copied()
-                .unwrap_or(false)
-            {
-                Some(approx_state)
-            } else if let Some(suffix_tid) = approx_dfa.orig_to_suffix_tid.get(term_idx).copied().flatten() {
-                match approx_dfa.dfa.step(approx_state, suffix_tid) {
-                    Some(next) => Some(next),
-                    None => {
-                        // The DFA step failed for this terminal. Pruning is permanently
-                        // disabled — the approx DFA here is used ONLY for state tracking
-                        // (DfsKey discrimination) and never for path pruning. Returning
-                        // Some(approx_state) keeps the current approximate state and
-                        // lets the path continue without pruning.
-                        Some(approx_state)
-                    }
-                }
-            } else {
-                Some(approx_state)
-            }
-        } else {
-            Some(approx_state)
-        };
-        result
-    }
-
     /// Create an expanded weight from a single token ID.
     /// Expands from N-space to N×M-space where M = num_tsids.
     /// If num_tsids == 0 (symbol-heavy mode), returns the token ID directly in N-space.
@@ -1651,14 +1596,6 @@ impl<'r> Precomputer1<'r> {
         *depth_map.entry(depth).or_insert(0) += 1;
     }
 
-    #[inline]
-    fn record_dfskey_state(&mut self, rep: TokenizerStateID, approx_state: usize) {
-        if !self.nwa_rep_stats_enabled {
-            return;
-        }
-        self.approx_states_seen.insert(approx_state);
-        self.dfs_keys_seen.insert(DfsKey::new(rep, approx_state));
-    }
 
 
     #[inline]
@@ -1821,7 +1758,6 @@ impl<'r> Precomputer1<'r> {
 
                 for (state_key, nodes) in states_at_pos {
                     let tokenizer_state_id = state_key.tokenizer_state;
-                    let approx_state = state_key.approx_state;
                     let num_sources = nodes.len();
 
                     let slice = &segment_bytes[pos..];
@@ -1911,19 +1847,6 @@ impl<'r> Precomputer1<'r> {
                                     }
                                 }
                             }
-                            let next_approx_state = match self.approx_step(approx_state, terminal_id) {
-                                Some(next) => next,
-                                None => {
-                                    crate::debug!(
-                                        7,
-                                        "      -> Keep match despite missing approx DFA transition for terminal {} (fallback to current approx state {})",
-                                        terminal_id.0,
-                                        approx_state
-                                    );
-                                    approx_state
-                                }
-                            };
-                        crate::debug!(7, "    Match: terminal_id={}, width={}, next_pos={}", terminal_id.0, match_info.width, next_pos);
 
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
@@ -1975,7 +1898,7 @@ impl<'r> Precomputer1<'r> {
                             std::borrow::Cow::Owned(rsb) => self.expanded_weight_from_rsb_owned(rsb),
                         };
 
-                        let target_entry = dest_map.entry(DfsKey::new(initial_tsid, next_approx_state));
+                        let target_entry = dest_map.entry(DfsKey::new(initial_tsid));
                         let target = match target_entry {
                             std::collections::btree_map::Entry::Occupied(mut o) => {
                                 if let Some(&existing) = o.get().first() {
@@ -1987,7 +1910,6 @@ impl<'r> Precomputer1<'r> {
                                         *self.nwa_states_by_rep.entry(initial_tsid).or_insert(0) += 1;
                                     }
                                     self.record_rep_depth_state(initial_tsid, base_depth + next_pos);
-                                    self.record_dfskey_state(initial_tsid, next_approx_state);
                                     crate::debug!(7, "      -> Created new continuation state: target={}", t);
                                     o.get_mut().push(t);
                                     t
@@ -1999,7 +1921,6 @@ impl<'r> Precomputer1<'r> {
                                     *self.nwa_states_by_rep.entry(initial_tsid).or_insert(0) += 1;
                                 }
                                 self.record_rep_depth_state(initial_tsid, base_depth + next_pos);
-                                self.record_dfskey_state(initial_tsid, next_approx_state);
                                 crate::debug!(7, "      -> Created new continuation state: target={}", t);
                                 let mut set = SmallVec::new();
                                 set.push(t);
@@ -2055,10 +1976,6 @@ impl<'r> Precomputer1<'r> {
                         let end_idx = self.leaf_state;
                         let mut end_labels: Vec<Label> = Vec::new();
                         for terminal_id in accessible_terminals.iter() {
-                            let Some(_next_approx_state) = self.approx_step(approx_state, *terminal_id) else {
-                                crate::debug!(7, "    -> Skip END_STATE terminal {} (no approx DFA transition)", terminal_id.0);
-                                continue;
-                            };
                             crate::debug!(
                                 7,
                                 "    -> END_STATE transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
@@ -2080,7 +1997,7 @@ impl<'r> Precomputer1<'r> {
                         }
 
                         let entry = next_level_assoc
-                            .entry(DfsKey::new(final_tokenizer_state, approx_state))
+                            .entry(DfsKey::new(final_tokenizer_state))
                             .or_insert_with(SmallVec::new);
                         entry.extend(nodes);
                     }
@@ -2137,7 +2054,6 @@ pub fn run_precompute1(
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     tsid_offset_map: Vec<usize>,
-    approx_dfa: Option<ApproximateDfaPruner>,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ignored_terminals: Arc<Vec<bool>>,
@@ -2152,7 +2068,6 @@ pub fn run_precompute1(
         terminals_count,
         state_to_rep,
         tsid_offset_map,
-        approx_dfa,
         suffix_prune_cache,
         self_extending_labels_for_collapse,
         ignored_terminals,
@@ -2171,7 +2086,6 @@ pub fn run_precompute1_with_possible_matches(
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     tsid_offset_map: Vec<usize>,
-    approx_dfa: Option<ApproximateDfaPruner>,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ignored_terminals: Arc<Vec<bool>>,
@@ -2223,7 +2137,6 @@ pub fn run_precompute1_with_possible_matches(
             state_to_rep,
             num_tsids,
             tsid_offset_map,
-            approx_dfa,
             suffix_prune_cache,
             self_extending_labels_for_collapse,
             ignored_terminals,
@@ -2257,7 +2170,6 @@ pub(crate) fn run_precompute1_nwa_for_tests(
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     tsid_offset_map: Vec<usize>,
-    approx_dfa: Option<ApproximateDfaPruner>,
 ) -> NWA {
     let num_tsids = if is_weight_heavy_enabled() {
         tokenizer.dfa().states.len()
@@ -2290,7 +2202,6 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         state_to_rep,
         num_tsids,
         tsid_offset_map,
-        approx_dfa,
         None,
         None,
         ignored_terminals,

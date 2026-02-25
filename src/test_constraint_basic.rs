@@ -963,7 +963,6 @@ fn test_precompute_a_plus_tokenizer() {
         (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
-        None,
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
@@ -1052,7 +1051,6 @@ fn test_precompute_x_eq() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -3434,7 +3432,6 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
-        None,
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
@@ -3505,7 +3502,6 @@ fn test_terminal_dwa_short_token_path_length_violation() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -3720,7 +3716,6 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
         (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
-        None,
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
@@ -3862,7 +3857,6 @@ fn test_terminal_dwa_tilde_sequence_weights() {
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
         None,
-        None,
         Some(Arc::new(HashSet::from([tilde_label]))),
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
@@ -3946,7 +3940,6 @@ start ::= '~'+ ;
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         Some(Arc::new(HashSet::from([tilde_label]))),
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4058,7 +4051,6 @@ fn test_terminal_dwa_greedy_keywords_no_else_if_on_ei() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4199,7 +4191,6 @@ fn test_js_greedy_keywords_full_grammar() {
         (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
-        None,
         std::sync::Arc::new(vec![false; terminals_count]),
         std::sync::Arc::new(Vec::new()),
         std::sync::Arc::new(Vec::new()),
@@ -4239,10 +4230,8 @@ fn test_js_greedy_keywords_full_grammar() {
 #[ignore]
 fn test_suffix_dfa_prunes_tilde_equals() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1, ApproximateDfaPruner};
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
     use crate::glr::grammar::Terminal;
-    use crate::glr::approximate_dfa::build_approximate_parser_dfa_from_start;
-    use crate::interface::grammar_to_suffix_grammar;
     use crate::dwa_i32::Weight;
     use crate::dwa_i32::common::Label;
 
@@ -4251,33 +4240,6 @@ fn test_suffix_dfa_prunes_tilde_equals() {
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
     let parser = compiled_grammar.glr_parser();
     let tokenizer = &compiled_grammar.tokenizer;
-
-    let suffix_grammar = grammar_to_suffix_grammar(&grammar_definition);
-    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
-    let suffix_parser = suffix_compiled.glr_parser();
-
-    let approx_dfa = build_approximate_parser_dfa_from_start(&suffix_parser);
-    let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
-    for (term, orig_tid) in parser.terminal_map.iter() {
-        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
-            orig_to_suffix_tid[orig_tid.0] = Some(*suffix_tid);
-        }
-    }
-
-    let mut ignored_terminals = vec![false; parser.terminal_map.len()];
-    for tid in &grammar_definition.ignore_terminal_ids {
-        if tid.0 < ignored_terminals.len() {
-            ignored_terminals[tid.0] = true;
-        }
-    }
-
-    let approx_pruner = ApproximateDfaPruner {
-        dfa: approx_dfa,
-        orig_to_suffix_tid,
-        ignored_terminals,
-        reduce_fallback_terminals_by_state:
-            crate::constraint_precompute::build_reduce_fallback_terminals_by_state(&suffix_parser),
-    };
 
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     internal_llm_token_map.insert(b"~".to_vec(), LLMTokenID(0));
@@ -4307,7 +4269,6 @@ fn test_suffix_dfa_prunes_tilde_equals() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        Some(approx_pruner),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4356,10 +4317,8 @@ fn test_suffix_dfa_prunes_tilde_equals() {
 #[ignore]
 fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    use crate::constraint_precompute::{run_precompute1, ApproximateDfaPruner};
-    use crate::glr::approximate_dfa::build_approximate_parser_dfa_from_start;
+    use crate::constraint_precompute::run_precompute1;
     use crate::glr::grammar::Terminal;
-    use crate::interface::grammar_to_suffix_grammar;
     use crate::dwa_i32::common::Label;
 
     let ebnf_grammar = include_str!("js.ebnf");
@@ -4367,33 +4326,6 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
     let parser = compiled_grammar.glr_parser();
     let tokenizer = &compiled_grammar.tokenizer;
-
-    let suffix_grammar = grammar_to_suffix_grammar(&grammar_definition);
-    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
-    let suffix_parser = suffix_compiled.glr_parser();
-
-    let approx_dfa = build_approximate_parser_dfa_from_start(&suffix_parser);
-    let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
-    for (term, orig_tid) in parser.terminal_map.iter() {
-        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
-            orig_to_suffix_tid[orig_tid.0] = Some(*suffix_tid);
-        }
-    }
-
-    let mut ignored_terminals = vec![false; parser.terminal_map.len()];
-    for tid in &grammar_definition.ignore_terminal_ids {
-        if tid.0 < ignored_terminals.len() {
-            ignored_terminals[tid.0] = true;
-        }
-    }
-
-    let approx_pruner = ApproximateDfaPruner {
-        dfa: approx_dfa,
-        orig_to_suffix_tid,
-        ignored_terminals,
-        reduce_fallback_terminals_by_state:
-            crate::constraint_precompute::build_reduce_fallback_terminals_by_state(&suffix_parser),
-    };
 
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     internal_llm_token_map.insert(b"**=".to_vec(), LLMTokenID(0));
@@ -4429,7 +4361,6 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        Some(approx_pruner),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4453,10 +4384,8 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
 #[ignore]
 fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1, ApproximateDfaPruner};
-    use crate::glr::approximate_dfa::build_approximate_parser_dfa_from_start;
+    use crate::constraint_precompute::{is_weight_heavy_enabled, run_precompute1};
     use crate::glr::grammar::Terminal;
-    use crate::interface::grammar_to_suffix_grammar;
     use crate::dwa_i32::Weight;
     use crate::dwa_i32::common::Label;
 
@@ -4465,10 +4394,6 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
     let parser = compiled_grammar.glr_parser();
     let tokenizer = &compiled_grammar.tokenizer;
-
-    let suffix_grammar = grammar_to_suffix_grammar(&grammar_definition);
-    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
-    let suffix_parser = suffix_compiled.glr_parser();
 
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     internal_llm_token_map.insert(b"=~=~".to_vec(), LLMTokenID(0));
@@ -4495,29 +4420,6 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
         .map(|sid| (sid, sid))
         .collect();
 
-    let mut ignored_terminals = vec![false; parser.terminal_map.len()];
-    for tid in &grammar_definition.ignore_terminal_ids {
-        if tid.0 < ignored_terminals.len() {
-            ignored_terminals[tid.0] = true;
-        }
-    }
-
-    let approx_dfa = build_approximate_parser_dfa_from_start(&suffix_parser);
-    let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
-    for (term, orig_tid) in parser.terminal_map.iter() {
-        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
-            orig_to_suffix_tid[orig_tid.0] = Some(*suffix_tid);
-        }
-    }
-
-    let approx_pruner = ApproximateDfaPruner {
-        dfa: approx_dfa,
-        orig_to_suffix_tid,
-        ignored_terminals,
-        reduce_fallback_terminals_by_state:
-            crate::constraint_precompute::build_reduce_fallback_terminals_by_state(&suffix_parser),
-    };
-
     let suffix_prune_cache = Arc::new(crate::interface::build_suffix_parser_cache(
         &grammar_definition,
         &parser.terminal_map,
@@ -4530,7 +4432,6 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        Some(approx_pruner),
         Some(suffix_prune_cache),
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4615,7 +4516,6 @@ fn test_weight_overapprox_simple() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4748,7 +4648,6 @@ fn test_terminal_nwa_vs_dwa_overapprox_js() {
         terminals_count,
         state_to_rep.clone(),
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
     );
 
     let terminal_dwa = run_precompute1(
@@ -4758,7 +4657,6 @@ fn test_terminal_nwa_vs_dwa_overapprox_js() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -5837,7 +5735,6 @@ fn test_suffix_grammar_validation() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
-        None,
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
