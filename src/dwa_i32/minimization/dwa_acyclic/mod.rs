@@ -2787,7 +2787,6 @@ fn build_incompatibility_graph_general(
     let num_groups = groups.len();
 
     // Build incompatibility graph
-    let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
     let mut skipped_by_labels = 0usize;
@@ -2804,70 +2803,91 @@ fn build_incompatibility_graph_general(
         lt
     }).collect();
 
-    // Compare across groups, with fast label-target conflict filtering
-    timeit!("coloring::build_incompatibility_graph::compare_pairs", {
-        for i in 0..groups.len() {
-            for j in (i + 1)..groups.len() {
-                for &idx_i in &groups[i] {
-                    for &idx_j in &groups[j] {
-                        // Fast check: do they share any label with different mapped targets?
-                        // If no shared labels at all, then targets_compatible is never called,
-                        // so check if needed sets overlap (the only other incompatibility source)
-                        let lt_i = &candidate_label_targets[idx_i];
-                        let lt_j = &candidate_label_targets[idx_j];
+    // Generate all cross-group pairs to compare
+    let mut pair_list: Vec<(usize, usize)> = Vec::new();
+    let mut fast_incompat: Vec<(usize, usize)> = Vec::new();
+    for i in 0..groups.len() {
+        for j in (i + 1)..groups.len() {
+            for &idx_i in &groups[i] {
+                for &idx_j in &groups[j] {
+                    let lt_i = &candidate_label_targets[idx_i];
+                    let lt_j = &candidate_label_targets[idx_j];
 
-                        // Quick skip: if one has no productive transitions,
-                        // incompatibility can only come from needed overlap + final weight
-                        let have_label_conflict = if lt_i.len() <= lt_j.len() {
-                            lt_i.iter().any(|(label, target_i)| {
-                                if let Some(target_j) = lt_j.get(label) {
-                                    target_i != target_j
-                                } else {
-                                    false
-                                }
-                            })
-                        } else {
-                            lt_j.iter().any(|(label, target_j)| {
-                                if let Some(target_i) = lt_i.get(label) {
-                                    target_i != target_j
-                                } else {
-                                    false
-                                }
-                            })
-                        };
+                    let have_label_conflict = if lt_i.len() <= lt_j.len() {
+                        lt_i.iter().any(|(label, target_i)| {
+                            if let Some(target_j) = lt_j.get(label) {
+                                target_i != target_j
+                            } else {
+                                false
+                            }
+                        })
+                    } else {
+                        lt_j.iter().any(|(label, target_j)| {
+                            if let Some(target_i) = lt_i.get(label) {
+                                target_i != target_j
+                            } else {
+                                false
+                            }
+                        })
+                    };
 
-                        if have_label_conflict {
-                            // Definitely incompatible: different mapped targets on shared label
-                            adj[idx_i].push(idx_j);
-                            adj[idx_j].push(idx_i);
-                            edge_count += 1;
-                            skipped_by_labels += 1;
-                            continue;
-                        }
-
-                        compare_count += 1;
-                        let cmp_start = std::time::Instant::now();
-                        let compatible = are_compatible(
-                            candidates[idx_i],
-                            candidates[idx_j],
-                            dwa,
-                            needed,
-                            range,
-                            old_to_new,
-                            new_states,
-                            productive_transitions,
-                        );
-                        compare_time += cmp_start.elapsed();
-                        if !compatible {
-                            adj[idx_i].push(idx_j);
-                            adj[idx_j].push(idx_i);
-                            edge_count += 1;
-                        }
+                    if have_label_conflict {
+                        fast_incompat.push((idx_i, idx_j));
+                        skipped_by_labels += 1;
+                    } else {
+                        pair_list.push((idx_i, idx_j));
                     }
                 }
             }
         }
+    }
+    compare_count = pair_list.len();
+
+    // Parallel compatibility check using rayon
+    let cmp_start = std::time::Instant::now();
+    let adj = timeit!("coloring::build_incompatibility_graph::compare_pairs", {
+        use rayon::prelude::*;
+
+        // Compute incompatible edges in parallel
+        let incompat_edges: Vec<(usize, usize)> = pair_list
+            .par_iter()
+            .filter_map(|&(idx_i, idx_j)| {
+                let compatible = are_compatible(
+                    candidates[idx_i],
+                    candidates[idx_j],
+                    dwa,
+                    needed,
+                    range,
+                    old_to_new,
+                    new_states,
+                    productive_transitions,
+                );
+                if !compatible {
+                    Some((idx_i, idx_j))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Build adjacency list from edges
+        let mut adj = vec![vec![]; n];
+        for &(idx_i, idx_j) in &fast_incompat {
+            adj[idx_i].push(idx_j);
+            adj[idx_j].push(idx_i);
+        }
+        for &(idx_i, idx_j) in &incompat_edges {
+            adj[idx_i].push(idx_j);
+            adj[idx_j].push(idx_i);
+        }
+        // Sort adjacency lists for deterministic coloring
+        for neighbors in adj.iter_mut() {
+            neighbors.sort_unstable();
+        }
+        edge_count = fast_incompat.len() + incompat_edges.len();
+        adj
     });
+    compare_time = cmp_start.elapsed();
     
     // Debug assertions for signature correctness
     #[cfg(debug_assertions)]

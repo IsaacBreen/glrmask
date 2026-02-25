@@ -67,7 +67,10 @@ pub fn compute_combined_equivalence(
     tokens: &[Vec<u8>],
     initial_states: &[usize],
 ) -> CombinedEquivalenceResult {
-    let state_reduction_threshold = 0;
+    let state_reduction_threshold = std::env::var("STATE_EQUIV_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
 
     let start = std::time::Instant::now();
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();

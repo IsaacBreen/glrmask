@@ -442,12 +442,16 @@ macro_rules! debug_alt {
 #[macro_export]
 macro_rules! timing {
     ($($arg:tt)*) => {{
-        if $crate::r#macro::is_debug_level_enabled(5) {
+        // PHASE_TIMING messages can be enabled independently via SEP1_PHASE_TIMING
+        // without requiring the full debug level 5 verbosity.
+        let __phase_timing_enabled = ::std::env::var_os("SEP1_PHASE_TIMING").is_some();
+        if $crate::r#macro::is_debug_level_enabled(5) || __phase_timing_enabled {
             let __timing_msg = format!($($arg)*);
-            if __timing_msg.starts_with("PHASE_TIMING:")
-                && ::std::env::var_os("SEP1_PHASE_TIMING").is_none()
-            {
-            } else {
+            if __timing_msg.starts_with("PHASE_TIMING:") {
+                if __phase_timing_enabled || $crate::r#macro::is_debug_level_enabled(5) {
+                    eprintln!("{}", __timing_msg);
+                }
+            } else if $crate::r#macro::is_debug_level_enabled(5) {
                 eprintln!("{}", __timing_msg);
             }
         }
