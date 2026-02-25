@@ -999,64 +999,37 @@ fn test_epsilon_explosion_json_like() {
 /// then unioned (because the destination DWA state is shared), items from the
 /// non-final NWA state leak into the DWA final weight.
 ///
-/// This test constructs an NWA where:
-///   start --ε--> A
-///   A --label0--> B [weight: item 0]   (B is final)
-///   A --label0--> C [weight: item 1]   (C is dead/non-final)
-///   A --label1--> B [weight: item 2]   (B is final)
-///   A --label1--> C [weight: item 3]   (C is dead/non-final)
+/// Minimal NWA: 3 states, 4 transitions, 2 labels, 4 items (distinct per label).
+///   A --label0--> B (item 0)    A --label0--> C (item 1)
+///   A --label1--> B (item 2)    A --label1--> C (item 3)
+///   B is final, C is dead.
 ///
-/// Correct behavior:
-///   eval(label 0) = {item 0}   (only item reaching final state B)
-///   eval(label 1) = {item 2}   (only item reaching final state B)
-///
-/// Bug behavior (before fix):
-///   eval(label 0) = {item 0, item 1}   (item 1 leaks from dead state C)
-///   eval(label 1) = {item 2, item 3}   (item 3 leaks from dead state C)
+/// Correct:  eval(label 0) = {item 0},  eval(label 1) = {item 2}
+/// Buggy:    eval(label 0) = {item 0, item 1}  (item 1 leaks from dead C)
 #[test]
 fn test_acyclic_determinize_shared_dest_no_weight_inflation() {
     let mut nwa = NWA::new();
     nwa.states.0.clear();
 
-    let a = nwa.states.add_state();  // Intermediate
-    let b = nwa.states.add_state();  // Final (accepting)
-    let c = nwa.states.add_state();  // Dead (non-final)
+    let a = nwa.states.add_state(); // start
+    let b = nwa.states.add_state(); // final
+    let c = nwa.states.add_state(); // dead
+    nwa.body.start_states = vec![a];
 
-    let start = nwa.states.add_state();
-    nwa.add_epsilon(start, a, Weight::all());
-    nwa.body.start_states = vec![start];
-
-    // Two labels, both reaching {B, C} but with different item weights
     nwa.add_transition(a, 0 as Label, b, Weight::from_item(0)).unwrap();
     nwa.add_transition(a, 0 as Label, c, Weight::from_item(1)).unwrap();
     nwa.add_transition(a, 1 as Label, b, Weight::from_item(2)).unwrap();
     nwa.add_transition(a, 1 as Label, c, Weight::from_item(3)).unwrap();
 
-    // B is final, C is dead
     nwa.states[b].final_weight = Some(Weight::all());
-    // C has no final_weight
 
     let dwa = nwa.determinize();
 
-    // eval(label 0): only item 0 should survive (item 0 → B which is final)
     let w0 = dwa.eval_word_weight(&[0 as Label]);
-    assert!(
-        w0.contains(0),
-        "item 0 should be accepted for label 0 (reaches final state B)"
-    );
-    assert!(
-        !w0.contains(1),
-        "item 1 should NOT be accepted for label 0 (reaches dead state C, not final)"
-    );
+    assert!(w0.contains(0), "item 0 should be accepted for label 0 (A→B, final)");
+    assert!(!w0.contains(1), "item 1 should NOT be accepted for label 0 (A→C, dead)");
 
-    // eval(label 1): only item 2 should survive (item 2 → B which is final)
     let w1 = dwa.eval_word_weight(&[1 as Label]);
-    assert!(
-        w1.contains(2),
-        "item 2 should be accepted for label 1 (reaches final state B)"
-    );
-    assert!(
-        !w1.contains(3),
-        "item 3 should NOT be accepted for label 1 (reaches dead state C, not final)"
-    );
+    assert!(w1.contains(2), "item 2 should be accepted for label 1 (A→B, final)");
+    assert!(!w1.contains(3), "item 3 should NOT be accepted for label 1 (A→C, dead)");
 }
