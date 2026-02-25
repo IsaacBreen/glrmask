@@ -362,6 +362,210 @@ pub(crate) fn collapse_always_allowed(
     changed
 }
 
+/// Prune NWA transitions based on disallowed follow sets.
+///
+/// For an acyclic NWA, propagates "disallowed terminal" sets forward through
+/// the graph in topological order:
+///   - Start states begin with empty disallowed sets.
+///   - Epsilon transitions transmit the source's disallowed set unchanged.
+///   - Label transitions (terminal L) transmit disallowed_after[L] to the dest
+///     (the set of terminals that can NEVER follow L in the grammar, i.e.,
+///      complement of the union of follow sets across all occurrences of L).
+///   - At each state, outgoing transitions whose label is in that state's
+///     disallowed set are pruned.
+///
+/// `ever_allowed_by_label[L]` = union of per-occurrence follow sets for terminal L.
+/// The complement gives terminals that can NEVER follow L — safe to prune.
+///
+/// Returns true if any transitions were removed.
+pub(crate) fn prune_nwa_disallowed_follows(
+    nwa: &mut NWA,
+    ever_allowed_by_label: &[Vec<Label>],
+    terminals_count: usize,
+) -> bool {
+    if ever_allowed_by_label.is_empty() || terminals_count == 0 {
+        return false;
+    }
+    let num_states = nwa.states.len();
+    if num_states == 0 {
+        return false;
+    }
+
+    // Precompute disallowed_after[label] = all terminals NOT in ever_allowed[label]
+    // These are terminals that can NEVER follow label L in any production.
+    let all_terminals: HashSet<Label> = (0..terminals_count as Label).collect();
+    let disallowed_after: Vec<HashSet<Label>> = (0..terminals_count)
+        .map(|idx| {
+            if idx < ever_allowed_by_label.len() {
+                let allowed: HashSet<Label> =
+                    ever_allowed_by_label[idx].iter().copied().collect();
+                all_terminals.difference(&allowed).copied().collect()
+            } else {
+                // Unknown terminal: no follow info, disallow nothing
+                HashSet::new()
+            }
+        })
+        .collect();
+
+    // Topological sort via Kahn's algorithm
+    let mut in_degree = vec![0u32; num_states];
+    for state in &nwa.states.0 {
+        for (dst, _) in &state.epsilons {
+            in_degree[*dst] += 1;
+        }
+        for (_, targets) in &state.transitions {
+            for (dst, _) in targets {
+                in_degree[*dst] += 1;
+            }
+        }
+    }
+
+    let mut topo_queue: VecDeque<NWAStateID> = VecDeque::new();
+    for id in 0..num_states {
+        if in_degree[id] == 0 {
+            topo_queue.push_back(id);
+        }
+    }
+
+    // At each state: which terminals are disallowed on outgoing transitions.
+    // Use Option to distinguish "not yet visited" from "empty disallowed set".
+    let mut disallowed: Vec<Option<HashSet<Label>>> = vec![None; num_states];
+
+    // Initialize start states with empty disallowed set
+    for &start in &nwa.body.start_states {
+        disallowed[start] = Some(HashSet::new());
+    }
+
+    let mut topo_order: Vec<NWAStateID> = Vec::with_capacity(num_states);
+
+    while let Some(sid) = topo_queue.pop_front() {
+        topo_order.push(sid);
+
+        // Propagate disallowed sets to successors
+        let state = &nwa.states[sid];
+        let src_disallowed = disallowed[sid].clone().unwrap_or_default();
+
+        // Epsilon transitions: transmit disallowed set unchanged
+        for (dst, _) in &state.epsilons {
+            let dst_set = disallowed[*dst].get_or_insert_with(HashSet::new);
+            // Union: if ANY incoming path disallows a terminal, *we cannot prune it*
+            // because another path might allow it. So we use INTERSECTION semantics:
+            // only disallow a terminal if ALL incoming paths disallow it.
+            // But for first visit, just copy.
+            // Actually, we need intersection: a terminal can only be pruned if
+            // it's disallowed on ALL paths reaching this state.
+            // We'll handle this with a second pass. For now, collect all incoming sets.
+            dst_set.extend(src_disallowed.iter().copied());
+        }
+
+        // Label transitions: transmit disallowed_after[label] to destination
+        for (&label, targets) in &state.transitions {
+            if label < 0 || label as usize >= terminals_count {
+                continue;
+            }
+            let label_disallowed = &disallowed_after[label as usize];
+            for (dst, _) in targets {
+                let dst_set = disallowed[*dst].get_or_insert_with(HashSet::new);
+                dst_set.extend(label_disallowed.iter().copied());
+            }
+        }
+
+        // Decrement in-degree for successors
+        for (dst, _) in &state.epsilons {
+            in_degree[*dst] -= 1;
+            if in_degree[*dst] == 0 {
+                topo_queue.push_back(*dst);
+            }
+        }
+        for (_, targets) in &state.transitions {
+            for (dst, _) in targets {
+                in_degree[*dst] -= 1;
+                if in_degree[*dst] == 0 {
+                    topo_queue.push_back(*dst);
+                }
+            }
+        }
+    }
+
+    // Re-propagate with intersection semantics:
+    // A terminal is disallowed at a state only if ALL incoming edges agree it's disallowed.
+    // We do a second forward pass where we intersect rather than union.
+    let mut disallowed_intersected: Vec<Option<HashSet<Label>>> = vec![None; num_states];
+    for &start in &nwa.body.start_states {
+        disallowed_intersected[start] = Some(HashSet::new());
+    }
+
+    for &sid in &topo_order {
+        let state = &nwa.states[sid];
+        let src_disallowed = disallowed_intersected[sid].clone().unwrap_or_default();
+
+        for (dst, _) in &state.epsilons {
+            let entry = &mut disallowed_intersected[*dst];
+            match entry {
+                None => *entry = Some(src_disallowed.clone()),
+                Some(existing) => {
+                    existing.retain(|t| src_disallowed.contains(t));
+                }
+            }
+        }
+
+        for (&label, targets) in &state.transitions {
+            if label < 0 || label as usize >= terminals_count {
+                continue;
+            }
+            let label_disallowed = &disallowed_after[label as usize];
+            for (dst, _) in targets {
+                let entry = &mut disallowed_intersected[*dst];
+                match entry {
+                    None => *entry = Some(label_disallowed.clone()),
+                    Some(existing) => {
+                        existing.retain(|t| label_disallowed.contains(t));
+                    }
+                }
+            }
+        }
+    }
+
+    // Now prune: for each state, remove outgoing transitions whose label is disallowed
+    let mut changed = false;
+    let mut total_pruned = 0usize;
+    for sid in 0..num_states {
+        let state_disallowed = match &disallowed_intersected[sid] {
+            Some(d) if !d.is_empty() => d,
+            _ => continue,
+        };
+
+        let state = &mut nwa.states[sid];
+        let mut labels_to_remove: Vec<Label> = Vec::new();
+
+        for (&label, targets) in state.transitions.iter() {
+            if state_disallowed.contains(&label) {
+                labels_to_remove.push(label);
+                total_pruned += targets.len();
+            }
+        }
+
+        if !labels_to_remove.is_empty() {
+            changed = true;
+            for label in labels_to_remove {
+                state.transitions.remove(&label);
+            }
+        }
+    }
+
+    if changed {
+        crate::debug!(
+            4,
+            "NWA disallowed-follows prune: removed {} transition targets",
+            total_pruned,
+        );
+        // Prune states that became unreachable
+        nwa.prune_unreachable();
+    }
+
+    changed
+}
+
 // No-op progress bar replacement
 struct NoOpPb;
 impl NoOpPb {
@@ -499,6 +703,7 @@ pub(crate) struct Precomputer1<'r> {
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ignored_terminals: Arc<Vec<bool>>,
     always_allowed_by_label: Arc<Vec<Vec<Label>>>,
+    ever_allowed_by_label: Arc<Vec<Vec<Label>>>,
     nwa_rep_stats_enabled: bool,
     nwa_states_by_rep: BTreeMap<TokenizerStateID, usize>,
     nwa_states_by_rep_depth: BTreeMap<TokenizerStateID, BTreeMap<usize, usize>>,
@@ -517,6 +722,7 @@ impl<'r> Precomputer1<'r> {
         self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
         ignored_terminals: Arc<Vec<bool>>,
         always_allowed_by_label: Arc<Vec<Vec<Label>>>,
+        ever_allowed_by_label: Arc<Vec<Vec<Label>>>,
         terminal_to_greedy_group: Vec<Option<usize>>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
@@ -642,6 +848,7 @@ impl<'r> Precomputer1<'r> {
             self_extending_labels_for_collapse,
             ignored_terminals,
             always_allowed_by_label,
+            ever_allowed_by_label,
             nwa_rep_stats_enabled,
             nwa_states_by_rep,
             nwa_states_by_rep_depth,
@@ -1161,6 +1368,33 @@ impl<'r> Precomputer1<'r> {
             crate::timing!(
                 "TIMING: terminal_nwa_always_allowed_collapse {:?}",
                 collapse_start.elapsed()
+            );
+        }
+
+        // NWA disallowed-follows prune: prune transitions based on follow sets.
+        // On by default. Disable via NWA_FOLLOW_PRUNE=0
+        let nwa_follow_prune_disabled = std::env::var("NWA_FOLLOW_PRUNE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        if !nwa_follow_prune_disabled && !self.ever_allowed_by_label.is_empty() {
+            let before_stats = self.nwa.stats();
+            let prune_start = std::time::Instant::now();
+            let changed = prune_nwa_disallowed_follows(
+                &mut self.nwa,
+                &self.ever_allowed_by_label,
+                self.terminals_count,
+            );
+            let after_stats = self.nwa.stats();
+            crate::debug!(
+                4,
+                "Terminal NWA disallowed-follows prune: changed={}, {} -> {}",
+                changed,
+                before_stats,
+                after_stats,
+            );
+            crate::timing!(
+                "TIMING: terminal_nwa_disallowed_follows_prune {:?}",
+                prune_start.elapsed()
             );
         }
 
@@ -2059,6 +2293,7 @@ pub fn run_precompute1(
     ignored_terminals: Arc<Vec<bool>>,
     allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
     always_allowed_by_label: Arc<Vec<Vec<Label>>>,
+    ever_allowed_by_label: Arc<Vec<Vec<Label>>>,
     terminal_to_greedy_group: Vec<Option<usize>>,
 ) -> DWA {
     run_precompute1_with_possible_matches(
@@ -2073,6 +2308,7 @@ pub fn run_precompute1(
         ignored_terminals,
         allowed_follows_by_label,
         always_allowed_by_label,
+        ever_allowed_by_label,
         terminal_to_greedy_group,
     )
     .0
@@ -2091,6 +2327,7 @@ pub fn run_precompute1_with_possible_matches(
     ignored_terminals: Arc<Vec<bool>>,
     allowed_follows_by_label: Arc<Vec<Vec<Label>>>,
     always_allowed_by_label: Arc<Vec<Vec<Label>>>,
+    ever_allowed_by_label: Arc<Vec<Vec<Label>>>,
     terminal_to_greedy_group: Vec<Option<usize>>,
 ) -> (
     DWA,
@@ -2141,6 +2378,7 @@ pub fn run_precompute1_with_possible_matches(
             self_extending_labels_for_collapse,
             ignored_terminals,
             always_allowed_by_label,
+            ever_allowed_by_label,
             terminal_to_greedy_group,
         )
     });
@@ -2193,6 +2431,7 @@ pub(crate) fn run_precompute1_nwa_for_tests(
 
     let ignored_terminals = Arc::new(vec![false; terminals_count]);
     let always_allowed_by_label = Arc::new(Vec::new());
+    let ever_allowed_by_label = Arc::new(Vec::new());
 
     let mut helper = Precomputer1::new(
         tokenizer,
@@ -2206,6 +2445,7 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         None,
         ignored_terminals,
         always_allowed_by_label,
+        ever_allowed_by_label,
         vec![None; terminals_count],
     );
 

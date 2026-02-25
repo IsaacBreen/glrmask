@@ -188,6 +188,28 @@ pub fn get_macro_debug_level() -> usize {
     *MACRO_DEBUG_LEVEL
 }
 
+// =============================================================================
+// Log Suppression Override
+// =============================================================================
+
+thread_local! {
+    pub static SILENCE_DEBUG_TIMING: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Sets the suppression flag and returns the previous value.
+pub fn set_silence_debug_timing(silence: bool) -> bool {
+    SILENCE_DEBUG_TIMING.with(|c| {
+        let old = c.get();
+        c.set(silence);
+        old
+    })
+}
+
+/// Returns whether thread-local suppression is active.
+pub fn is_silence_debug_timing() -> bool {
+    SILENCE_DEBUG_TIMING.with(|c| c.get())
+}
+
 /// Returns which levels should draw lines, from `MACRO_LINE_LEVELS` env var.
 /// Format: comma-separated level numbers, e.g., "1,2" means levels 1 and 2 draw lines.
 /// If not set, defaults to levels 1-4 drawing lines for hierarchical output.
@@ -391,7 +413,7 @@ pub fn print_debug_alt(level: usize, message: &str, _file: &str, _line: u32) {
 #[macro_export]
 macro_rules! __debug_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
-        if $level <= $crate::r#macro::get_macro_debug_level() {
+        if $level <= $crate::r#macro::get_macro_debug_level() && !$crate::r#macro::is_silence_debug_timing() {
             let msg = format!($user_fmt, $($user_args)*);
             $crate::r#macro::print_debug($level, &msg, file!(), line!());
         }
@@ -403,7 +425,7 @@ macro_rules! __debug_impl {
 #[macro_export]
 macro_rules! __debug_alt_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
-        if $level <= $crate::r#macro::get_macro_debug_level() {
+        if $level <= $crate::r#macro::get_macro_debug_level() && !$crate::r#macro::is_silence_debug_timing() {
             let msg = format!($user_fmt, $($user_args)*);
             $crate::r#macro::print_debug_alt($level, &msg, file!(), line!());
         }
@@ -452,7 +474,9 @@ macro_rules! timing {
                     eprintln!("{}", __timing_msg);
                 }
             } else if $crate::r#macro::is_debug_level_enabled(5) {
-                eprintln!("{}", __timing_msg);
+                if !$crate::r#macro::is_silence_debug_timing() {
+                    eprintln!("{}", __timing_msg);
+                }
             }
         }
     }};

@@ -27,7 +27,8 @@ use crate::{
     dfa_u8::{Regex, Tokenizer},
     glr::{
         analyze::{
-            compute_always_allowed_terminal_follows, compute_always_follow_sets,
+            compute_always_allowed_terminal_follows, compute_ever_allowed_terminal_follows,
+            compute_always_follow_sets,
             compute_self_extending_terminals,
         },
         grammar::Terminal,
@@ -1250,6 +1251,24 @@ impl GrammarConstraint {
             }
         }
         let always_allowed_by_label = Arc::new(always_allowed_by_label);
+
+        // Compute ever-allowed (union of follow sets across all occurrences).
+        // The complement gives "never follows" — safe for unconditional pruning.
+        let ever_allowed = compute_ever_allowed_terminal_follows(&parser.productions);
+        let mut ever_allowed_by_label: Vec<Vec<crate::dwa_i32::Label>> =
+            vec![Vec::new(); parser.terminal_map.len()];
+        for (term, follows) in &ever_allowed {
+            if let Some(tid) = parser.terminal_map.get_by_left(term) {
+                let entry = &mut ever_allowed_by_label[tid.0];
+                for follow in follows {
+                    if let Some(fid) = parser.terminal_map.get_by_left(follow) {
+                        entry.push(fid.0 as crate::dwa_i32::Label);
+                    }
+                }
+            }
+        }
+        let ever_allowed_by_label = Arc::new(ever_allowed_by_label);
+
         if std::env::var("DEBUG_TERMINAL_ALWAYS_ALLOWED_FOLLOW_MAP")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
@@ -1637,6 +1656,7 @@ impl GrammarConstraint {
                 ignored_terminals.clone(),
                 allowed_follows_by_label.clone(),
                 always_allowed_by_label.clone(),
+                ever_allowed_by_label.clone(),
                 terminal_to_greedy_group.clone(),
             )
         });
