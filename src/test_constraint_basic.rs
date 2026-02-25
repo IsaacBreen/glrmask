@@ -6655,4 +6655,40 @@ start: "{" obj_ord_0_0_nc "}"
     }
 }
 
-// (greedy_group tests removed — greedy_group is disabled/broken)
+/// Regression test: approx-DFA removal exposes terminal leak in from_exprs path.
+///
+/// Minimal repro: 3 terminals, no separator.
+/// Grammar: start → A B, A = a | ba, B = ac.
+/// Token "ac" (index 2) should NOT appear in the initial mask — only A-terminals.
+/// Bug: DFS merges contexts at same tokenizer state, leaking B-terminal into A-position.
+#[test]
+fn test_terminal_leak_from_exprs_minimal() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    use crate::dfa_u8::{eat_u8, eat_u8_seq};
+    use crate::interface::{CompiledGrammar, GrammarDefinition, choice, sequence, r#ref};
+
+    let terminals = vec![
+        ("a".to_string(), eat_u8(b'a')),
+        ("ba".to_string(), eat_u8_seq(b"ba".to_vec())),
+        ("ac".to_string(), eat_u8_seq(b"ac".to_vec())),
+    ];
+    let exprs = vec![
+        ("start".to_string(), sequence(vec![r#ref("A"), r#ref("B")])),
+        ("A".to_string(), choice(vec![r#ref("a"), r#ref("ba")])),
+        ("B".to_string(), r#ref("ac")),
+    ];
+    let grammar_def = GrammarDefinition::from_exprs(exprs, terminals)
+        .expect("grammar");
+    let compiled = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
+    let mut llm_map = std::collections::BTreeMap::new();
+    for (i, tok) in [b"a".as_slice(), b"ba", b"ac"].iter().enumerate() {
+        llm_map.insert(tok.to_vec(), LLMTokenID(i));
+    }
+    let gc = GrammarConstraint::from_compiled_grammar(compiled, llm_map, 3);
+    let mut state = gc.init();
+    let mask = state.get_mask();
+    let allowed: Vec<usize> = (0..3).filter(|i| mask.contains(*i)).collect();
+    assert!(!allowed.contains(&2),
+        "Token 'ac' leaked into initial mask: allowed={:?}", allowed);
+}
+
