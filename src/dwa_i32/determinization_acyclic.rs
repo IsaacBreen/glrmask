@@ -591,24 +591,23 @@ fn build_destinations_batched(
         }
 
         let normalize_start = if timers.is_some() { Some(Instant::now()) } else { None };
-        let w_edge_inv = !&w_edge;
+        // NOTE: We intentionally do NOT normalize weights here.
+        // The previous code did `w | !w_edge` ("Boolean semiring division") to factor
+        // out the common edge weight. This is correct when each destination DWA state
+        // has a unique reaching edge weight. But in the acyclic determinizer, DWA states
+        // are identified by unweighted closures, so the same destination can be reached
+        // by multiple edges with different w_edge values. When normalized residuals from
+        // different edges are unioned, the inflation from `| !w_edge` causes items from
+        // non-final NWA states to leak into the DWA final weight.
+        //
+        // Using raw accumulated weights is correct because:
+        // - The transition weight (w_edge) already captures which items reach this dest
+        // - Raw final weights correctly exclude items that only reached non-final NWA states
+        // - eval_word_weight() intersects accumulated transition weights with final weight,
+        //   giving correct per-path acceptance
         let mut subset: WeightedSubset = Vec::with_capacity(expanded.len());
         for (sid, w) in expanded {
-            let combined = if let Some(timers) = timers {
-                let start = Instant::now();
-                let combined = w | &w_edge_inv;
-                timers
-                    .or_ns
-                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                timers.or_ops.fetch_add(1, AtomicOrdering::Relaxed);
-                timers
-                    .normalize_or_ops
-                    .fetch_add(1, AtomicOrdering::Relaxed);
-                combined
-            } else {
-                w | &w_edge_inv
-            };
-            subset.push((sid, combined));
+            subset.push((sid, w));
         }
         if let (Some(timers), Some(start)) = (timers, normalize_start) {
             timers
@@ -616,36 +615,33 @@ fn build_destinations_batched(
                 .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
         }
         if let Some(token_id) = debug_token {
-            let mut normalized_count = 0usize;
-            let mut normalized_sample = SmallVec::<[NWAStateID; 8]>::new();
+            let mut subset_count = 0usize;
+            let mut subset_sample = SmallVec::<[NWAStateID; 8]>::new();
             for (sid, w) in subset.iter() {
                 if weight_contains_token(w, token_id, num_tsids) {
-                    normalized_count = normalized_count.saturating_add(1);
-                    if normalized_sample.len() < 8 {
-                        normalized_sample.push(*sid);
+                    subset_count = subset_count.saturating_add(1);
+                    if subset_sample.len() < 8 {
+                        subset_sample.push(*sid);
                     }
                 }
             }
             let edge_has = weight_contains_token(&w_edge, token_id, num_tsids);
-            let edge_inv_has = weight_contains_token(&w_edge_inv, token_id, num_tsids);
             let log_needed = edge_has
                 || pre_count > 0
-                || expanded_count > 0
-                || (debug_include_complement && normalized_count > 0 && !edge_has);
+                || expanded_count > 0;
             if log_needed {
                 eprintln!(
-                    "DEBUG_DETERMINIZE_TOKEN closure={} lbl={:?} token={} w_edge={} w_edge_inv={} pre={} expanded={} normalized={} pre_sample={:?} expanded_sample={:?} normalized_sample={:?}",
+                    "DEBUG_DETERMINIZE_TOKEN closure={} lbl={:?} token={} w_edge={} pre={} expanded={} subset={} pre_sample={:?} expanded_sample={:?} subset_sample={:?}",
                     closure_id,
                     lbl,
                     token_id,
                     edge_has,
-                    edge_inv_has,
                     pre_count,
                     expanded_count,
-                    normalized_count,
+                    subset_count,
                     pre_sample,
                     expanded_sample,
-                    normalized_sample,
+                    subset_sample,
                 );
             }
         }

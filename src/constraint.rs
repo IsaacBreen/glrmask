@@ -1644,6 +1644,7 @@ impl GrammarConstraint {
         crate::debug!(5, "run_precompute1: end");
 
         crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
+
         let post_precompute1_start = std::time::Instant::now();
 
         // Prune terminal DWA using suffix grammar if grammar definition is available
