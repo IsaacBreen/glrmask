@@ -939,6 +939,72 @@ pub fn compute_always_allowed_terminal_follows(
     result
 }
 
+/// Like `compute_always_allowed_terminal_follows`, but takes the UNION across
+/// all occurrences instead of the intersection. This gives the set of terminals
+/// that can EVER follow a given terminal in ANY production.
+///
+/// The complement of this set gives the terminals that can NEVER follow a given
+/// terminal — safe to prune unconditionally.
+pub fn compute_ever_allowed_terminal_follows(
+    productions: &[Production],
+) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let first_sets = compute_first_sets_for_nonterminals(productions, &nullable_nonterminals);
+    let nonterminal_follow_sets =
+        compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+    let mut ever_map: BTreeMap<Terminal, BTreeSet<Terminal>> = BTreeMap::new();
+
+    for production in productions {
+        let lhs = &production.lhs;
+        let rhs = &production.rhs;
+
+        for (i, symbol) in rhs.iter().enumerate() {
+            if let Symbol::Terminal(t) = symbol {
+                let mut occ_follows: BTreeSet<Terminal> = BTreeSet::new();
+                let mut suffix_is_nullable = true;
+
+                for next_symbol in &rhs[i + 1..] {
+                    match next_symbol {
+                        Symbol::Terminal(next_t) => {
+                            occ_follows.insert(next_t.clone());
+                            suffix_is_nullable = false;
+                            break;
+                        }
+                        Symbol::NonTerminal(next_nt) => {
+                            if let Some(first_next) = first_sets.get(next_nt) {
+                                occ_follows.extend(first_next.iter().cloned());
+                            }
+                            if !nullable_nonterminals.contains(next_nt) {
+                                suffix_is_nullable = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if suffix_is_nullable {
+                    if let Some(follow_lhs) = nonterminal_follow_sets.get(lhs) {
+                        for opt_t in follow_lhs {
+                            if let Some(tt) = opt_t.clone() {
+                                occ_follows.insert(tt);
+                            }
+                        }
+                    }
+                }
+
+                // UNION instead of intersection
+                ever_map
+                    .entry(t.clone())
+                    .or_insert_with(BTreeSet::new)
+                    .extend(occ_follows);
+            }
+        }
+    }
+
+    ever_map
+}
+
 /// Compute a conservative "always-follow" relation for terminals.
 ///
 /// For terminal `t1`, returns terminals `t2` such that for **every parser state**
