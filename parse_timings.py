@@ -1,6 +1,7 @@
 import re
+import sys
 
-with open('test_output.log', 'r') as f:
+with open(sys.argv[1], 'r') as f:
     text = f.read()
 
 def get_time(pattern):
@@ -38,23 +39,23 @@ mat_closures = get_time(r'TIMING: acyclic_det::materialize_weighted_closures ([0
 det_acyclic = get_time(r'TIMING: acyclic_det::determinize ([0-9.]+m?s|µ?s)')
 
 print("📌 kb_143 Benchmark Results")
-print(f"=== Total compile time: {build_parser_dwa + setup + dfs + finish}ms ===")
+print(f"=== Total compile time: {build_parser_dwa + setup + dfs + finish:.1f}ms ===")
 print("Phase breakdown:")
 print("| Phase                                  | Time    |")
 print("| -------------------------------------- | ------- |")
-print(f"| precompute1::setup                     | {setup}ms  |")
-print(f"| precompute1::dfs                       | {dfs}ms   |")
-print(f"| precompute1::finish                    | {finish}ms |")
-print(f"| parser_dwa::total                     | {parser_dwa_total}ms |")
-print(f"| build_parser_dwa                     | {build_parser_dwa}ms |")
+print(f"| precompute1::setup                     | {setup:.1f}ms  |")
+print(f"| precompute1::dfs                       | {dfs:.1f}ms   |")
+print(f"| precompute1::finish                    | {finish:.1f}ms |")
+print(f"| parser_dwa::total                     | {parser_dwa_total:.1f}ms |")
+print(f"| build_parser_dwa                     | {build_parser_dwa:.1f}ms |")
 print("Terminal NWA/DWA:")
 print(f"⦁ Terminal NWA: {term_nwa_s} states, {term_nwa_t} transitions")
 print(f"⦁ After determinize: {after_det_s} DWA states → ColPackMinimize → {post_min_s} states, {post_min_t} transitions")
 print(f"⦁ ColPackMinimize: {colpack_t}")
-print(f"⦁ materialize_weighted_closures: {mat_closures}ms")
+print(f"⦁ materialize_weighted_closures: {mat_closures:.1f}ms")
 print("")
 print("Key timings inside finish():")
-print(f"⦁ determinize acyclic: {det_acyclic}ms")
-print(f"⦁ determinize acyclic materialize: {mat_closures}ms")
+print(f"⦁ determinize acyclic: {det_acyclic:.1f}ms")
+print(f"⦁ determinize acyclic materialize: {mat_closures:.1f}ms")
 print(f"⦁ ColPackMinimize: {colpack_t}")
-print(f"⦁ Total finish: {finish}ms")
+print(f"⦁ Total finish: {finish:.1f}ms")
