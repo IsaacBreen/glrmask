@@ -71,10 +71,14 @@ pub fn compute_combined_equivalence(
     ever_allowed_by_group: Option<&[Vec<bool>]>,
     group_to_class: Option<&[usize]>,
 ) -> CombinedEquivalenceResult {
+    // State equivalence reduction: only worthwhile when it removes enough states
+    // to offset the cost. For kb_143 (2173 states → 1883, 13% reduction), state
+    // equiv costs 577ms but only saves ~90ms in vocab equiv. Default: disabled.
+    // Set STATE_EQUIV_THRESHOLD=0 to enable.
     let state_reduction_threshold = std::env::var("STATE_EQUIV_THRESHOLD")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
+        .unwrap_or(usize::MAX);
 
     let start = std::time::Instant::now();
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
