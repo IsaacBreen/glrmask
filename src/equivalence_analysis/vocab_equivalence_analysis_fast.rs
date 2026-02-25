@@ -103,6 +103,7 @@ struct SuffixScratch {
     order: Vec<usize>,
     nodes: Vec<Option<(u64, EdgeList)>>,
     pos_hashes: Vec<u64>,
+    projected_cache: HashMap<(usize, usize), u64>,
 }
 
 // =============================================================================
@@ -593,6 +594,7 @@ impl SuffixScratch {
             order: Vec::new(),
             nodes: Vec::new(),
             pos_hashes: Vec::new(),
+            projected_cache: HashMap::new(),
         }
     }
 
@@ -632,6 +634,7 @@ impl SuffixScratch {
 
         self.queue.clear();
         self.order.clear();
+        self.projected_cache.clear();
     }
 }
 
@@ -1009,12 +1012,50 @@ fn compute_suffix_hashes_incremental(
     new_targets: &[usize],
     cache: &mut Vec<Option<u64>>,
     scratch: &mut SuffixScratch,
+    _suffix_group_mask: Option<&[bool]>,
+    group_to_class: Option<&[usize]>,
+) {
+    // Build suffix DAG (also used by projected hash computation)
+    build_suffix_dag(pre, slice, new_targets, scratch);
+
+    // Compute unprojected hashes from the DAG
+    // Process in reverse order (bottom-up for DAG)
+    scratch.order.sort_unstable_by(|a, b| b.cmp(a));
+
+    for &pos in &scratch.order {
+        if cache[pos].is_some() {
+            continue;
+        }
+        if let Some((completion_hash, ref edges)) = scratch.nodes[pos] {
+            let mut hasher = new_hasher();
+            hasher.write_u64(completion_hash);
+
+            for &(group_id, target) in edges.iter() {
+                let target_hash = cache[target].unwrap_or(0);
+                hasher.write_u64(group_id as u64);
+                hasher.write_u64(target_hash);
+            }
+
+            cache[pos] = Some(hasher.finish());
+        }
+    }
+    scratch.order.clear();
+}
+
+/// Build the suffix DAG without computing hashes.
+/// After this call, `scratch.nodes[pos]` contains `(completion_hash, edges)` for each
+/// reachable suffix position. The DAG can be used for projected hash computation.
+fn build_suffix_dag(
+    pre: &PrecomputedDfa,
+    slice: &[u8],
+    new_targets: &[usize],
+    scratch: &mut SuffixScratch,
 ) {
     scratch.ensure_capacity(slice.len());
 
     // Queue positions that need computation
     for &pos in new_targets {
-        if pos <= slice.len() && cache[pos].is_none() && !scratch.visited[pos] {
+        if pos <= slice.len() && scratch.nodes[pos].is_none() && !scratch.visited[pos] {
             scratch.visited[pos] = true;
             scratch.queue.push(pos);
         }
@@ -1033,7 +1074,7 @@ fn compute_suffix_hashes_incremental(
         let (end_state, edges) = execute_suffix(pre, &slice[pos..], pos, scratch);
 
         for &(_, target) in &edges {
-            if target <= slice.len() && cache[target].is_none() && !scratch.visited[target] {
+            if target <= slice.len() && scratch.nodes[target].is_none() && !scratch.visited[target] {
                 scratch.visited[target] = true;
                 scratch.queue.push(target);
             }
@@ -1045,24 +1086,60 @@ fn compute_suffix_hashes_incremental(
         scratch.nodes[pos] = Some((completion_hash, edges));
         scratch.order.push(pos);
     }
+}
 
-    // Process in reverse order (bottom-up for DAG)
-    scratch.order.sort_unstable_by(|a, b| b.cmp(a));
-
-    for pos in scratch.order.drain(..) {
-        if let Some((completion_hash, edges)) = scratch.nodes[pos].take() {
-            let mut hasher = new_hasher();
-            hasher.write_u64(completion_hash);
-
-            for (group_id, target) in edges {
-                let target_hash = cache[target].unwrap_or(0);
-                hasher.write_u64(group_id as u64);
-                hasher.write_u64(target_hash);
-            }
-
-            cache[pos] = Some(hasher.finish());
-        }
+/// Compute a projected suffix hash for a specific position, only considering
+/// edges whose group is allowed after `parent_group`. Uses memoization via `projected_cache`.
+///
+/// This mirrors `prune_trellis_recursive`: at each level, only edges in
+/// `ever_allowed_by_group[parent_group]` are included in the hash.
+fn compute_projected_suffix_hash(
+    pos: usize,
+    parent_group: usize,
+    ever_allowed_by_group: &[Vec<bool>],
+    nodes: &[Option<(u64, EdgeList)>],
+    projected_cache: &mut HashMap<(usize, usize), u64>,
+    group_to_class: Option<&[usize]>,
+) -> u64 {
+    let key = (pos, parent_group);
+    if let Some(&cached) = projected_cache.get(&key) {
+        return cached;
     }
+
+    let hash = if let Some((completion_hash, ref edges)) = nodes[pos] {
+        let mut hasher = new_hasher();
+        hasher.write_u64(completion_hash);
+
+        let allowed = if parent_group < ever_allowed_by_group.len() {
+            Some(&ever_allowed_by_group[parent_group])
+        } else {
+            None
+        };
+
+        for &(group_id, target) in edges.iter() {
+            // Check if group_id is allowed after parent_group
+            let is_allowed = match allowed {
+                Some(mask) => group_id < mask.len() && mask[group_id],
+                None => true, // No follow info -> allow all
+            };
+            if !is_allowed {
+                continue;
+            }
+            // Recurse with group_id as the new parent
+            let target_hash = compute_projected_suffix_hash(
+                target, group_id, ever_allowed_by_group, nodes, projected_cache, group_to_class,
+            );
+            hasher.write_u64(group_id as u64);
+            hasher.write_u64(target_hash);
+        }
+
+        hasher.finish()
+    } else {
+        0
+    };
+
+    projected_cache.insert(key, hash);
+    hash
 }
 
 // =============================================================================
@@ -1077,10 +1154,20 @@ fn compute_chunk_signature(
     pos0: &mut Pos0Scratch,
     suffix_scratch: &mut SuffixScratch,
     cache: &mut Vec<Option<u64>>,
+    suffix_group_mask: Option<&[bool]>,
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
 ) -> u64 {
     compute_pos0_end_states_and_targets(pre, pos0, token, chunk_states);
 
-    compute_suffix_hashes_incremental(pre, token, &pos0.all_targets, cache, suffix_scratch);
+    compute_suffix_hashes_incremental(pre, token, &pos0.all_targets, cache, suffix_scratch, suffix_group_mask, group_to_class);
+
+    // If ever_allowed_by_group is provided, we'll compute projected hashes
+    // that prune suffix edges based on which group was matched at position 0.
+    let use_projected = ever_allowed_by_group.is_some();
+
+    // Diagnostic: skip all group matching in the signature (only use completion hashes)
+    let skip_groups = std::env::var("EQUIV_SKIP_GROUPS").is_ok();
 
     let mut hasher = new_hasher();
     let num_groups = pre.num_groups;
@@ -1092,7 +1179,7 @@ fn compute_chunk_signature(
             .unwrap_or(pre.none_completion_hash);
         state_hasher.write_u64(completion_hash);
 
-        if num_groups > 0 {
+        if num_groups > 0 && !skip_groups {
             // Canonicalize gid iteration order without allocating per-state edge lists.
             let groups = &mut pos0.touched_groups[i];
             if groups.len() > 1 {
@@ -1102,7 +1189,21 @@ fn compute_chunk_signature(
             for &gid in groups.iter() {
                 let pos_val = pos0.match_positions[base + gid];
                 if pos_val > 0 {
-                    let target_hash = cache[pos_val as usize].unwrap_or(0);
+                    let target_hash = if use_projected {
+                        let ea = ever_allowed_by_group.unwrap();
+                        // Use projected hash: only include suffix edges
+                        // allowed after group `gid`
+                        compute_projected_suffix_hash(
+                            pos_val as usize,
+                            gid,
+                            ea,
+                            &suffix_scratch.nodes,
+                            &mut suffix_scratch.projected_cache,
+                            group_to_class,
+                        )
+                    } else {
+                        cache[pos_val as usize].unwrap_or(0)
+                    };
                     state_hasher.write_u64(gid as u64);
                     state_hasher.write_u64(target_hash);
                 }
@@ -1137,6 +1238,28 @@ pub fn find_vocab_equivalence_classes(
     regex: &Tokenizer,
     strings: &[Vec<u8>],
     initial_states: &[usize],
+) -> VocabEquivalenceResult {
+    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, None, None, None)
+}
+
+/// Find vocab equivalence classes with optional follow-set pruning.
+///
+/// `suffix_group_mask`: if provided, suffix hashes will only include edges for groups where
+/// `mask[gid] == true`. Groups not in the mask are ignored in suffix positions, causing
+/// tokens that differ only in those groups to be merged. The mask should be `true` for
+/// groups that can appear after any other group (i.e., groups that appear in at least one
+/// follow set).
+///
+/// `ever_allowed_by_group`: if provided, per-group follow masks. `ever_allowed_by_group[g]`
+/// is a bool mask: `mask[h] == true` means group h can follow group g. When this is
+/// provided, suffix hashes use projected computation that prunes edges per-context.
+pub fn find_vocab_equivalence_classes_with_follow(
+    regex: &Tokenizer,
+    strings: &[Vec<u8>],
+    initial_states: &[usize],
+    suffix_group_mask: Option<&[bool]>,
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
 ) -> VocabEquivalenceResult {
     use std::time::Instant;
     
@@ -1243,7 +1366,7 @@ pub fn find_vocab_equivalence_classes(
                     }
                     scratch_cache.iter_mut().for_each(|x| *x = None);
                     
-                    let sig = compute_chunk_signature(&pre, token, batch, scratch_pos0, scratch_suffix, scratch_cache);
+                    let sig = compute_chunk_signature(&pre, token, batch, scratch_pos0, scratch_suffix, scratch_cache, suffix_group_mask, ever_allowed_by_group, group_to_class);
                     (token_idx, sig)
                 },
             )
@@ -1460,5 +1583,5 @@ pub fn compute_signature_actual(
     let mut suffix_scratch = SuffixScratch::new(pre.num_groups);
     let mut cache = vec![None; slice.len() + 1];
 
-    compute_chunk_signature(&pre, slice, initial_states, &mut pos0, &mut suffix_scratch, &mut cache)
+    compute_chunk_signature(&pre, slice, initial_states, &mut pos0, &mut suffix_scratch, &mut cache, None, None, None)
 }

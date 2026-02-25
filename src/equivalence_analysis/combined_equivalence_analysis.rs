@@ -17,6 +17,7 @@ use crate::dfa_u8::{Regex, Tokenizer};
 
 use super::state_equivalence_analysis_fast::{self as state_equivalence_analysis, StateEquivalenceResult};
 use super::vocab_equivalence_analysis_fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
+use super::trellis_equivalence_analysis;
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -66,6 +67,9 @@ pub fn compute_combined_equivalence(
     regex: &Tokenizer,
     tokens: &[Vec<u8>],
     initial_states: &[usize],
+    suffix_group_mask: Option<&[bool]>,
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
 ) -> CombinedEquivalenceResult {
     let state_reduction_threshold = std::env::var("STATE_EQUIV_THRESHOLD")
         .ok()
@@ -128,10 +132,13 @@ pub fn compute_combined_equivalence(
     // Step 2: Vocab equivalence analysis on reduced states
     let vocab_start = std::time::Instant::now();
     
-    let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes(
+    let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
         regex,
         tokens,
         &reduced_states,
+        suffix_group_mask,
+        ever_allowed_by_group,
+        group_to_class,
     );
 
     if profile_equivalence {
@@ -160,6 +167,53 @@ pub fn compute_combined_equivalence(
         reduced_states.len(),
         start.elapsed(),
     );
+
+    // Diagnostic: run trellis-based vocab equiv with follow pruning for comparison
+    if std::env::var("TRELLIS_FOLLOW_COMPARE").is_ok() {
+        let trellis_start = std::time::Instant::now();
+        // Convert ever_allowed_by_group from Option<&[Vec<bool>]> to Option<Vec<BTreeSet<GroupID>>>
+        let ea_btree: Option<Vec<std::collections::BTreeSet<crate::finite_automata::GroupID>>> =
+            ever_allowed_by_group.map(|ea| {
+                ea.iter().map(|row| {
+                    row.iter().enumerate()
+                        .filter_map(|(j, &allowed)| if allowed { Some(j as crate::finite_automata::GroupID) } else { None })
+                        .collect()
+                }).collect()
+            });
+
+        // Two-pass approach: use fast-pass representatives only (not all tokens).
+        // Take one representative token from each fast-pass class, then run trellis on those.
+        let mut rep_indices: Vec<usize> = vocab_classes.iter().map(|class| class[0]).collect();
+        rep_indices.sort_unstable();
+        let rep_tokens: Vec<Vec<u8>> = rep_indices.iter().map(|&i| tokens[i].to_vec()).collect();
+
+        eprintln!(
+            "TRELLIS COMPARISON: Running trellis on {} representative tokens (from {} fast-pass classes) × {} states...",
+            rep_tokens.len(),
+            vocab_classes.len(),
+            reduced_states.len(),
+        );
+
+        let trellis_classes = trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis_with_follow(
+            regex.as_regex(),
+            &rep_tokens,
+            &reduced_states,
+            ea_btree.as_deref(),
+        );
+        let trellis_no_follow = trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis_with_follow(
+            regex.as_regex(),
+            &rep_tokens,
+            &reduced_states,
+            None,
+        );
+        eprintln!(
+            "TRELLIS COMPARISON: fast={} classes, trellis_with_follow={} classes, trellis_no_follow={} classes ({:?})",
+            vocab_classes.len(),
+            trellis_classes.len(),
+            trellis_no_follow.len(),
+            trellis_start.elapsed(),
+        );
+    }
 
     if crate::r#macro::is_debug_level_enabled(4) {
         let mut singletons = 0usize;
@@ -352,5 +406,5 @@ pub fn find_vocab_equivalence_classes_with_state_reduction(
     tokens: &[Vec<u8>],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
-    compute_combined_equivalence(regex, tokens, initial_states).vocab_classes
+    compute_combined_equivalence(regex, tokens, initial_states, None, None, None).vocab_classes
 }

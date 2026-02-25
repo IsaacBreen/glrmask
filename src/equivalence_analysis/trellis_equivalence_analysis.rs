@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::sync::Arc;
 
 use crate::finite_automata::{Regex, TokenTrellisWithCompletion, GroupID, Trellis};
 
@@ -62,16 +63,37 @@ pub fn find_vocab_equivalence_classes_trellis(
     tokens: &[Vec<u8>],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
+    find_vocab_equivalence_classes_trellis_with_follow(regex, tokens, initial_states, None)
+}
+
+/// Find vocab equivalence classes using trellis hashing, with optional follow-set pruning.
+///
+/// If `ever_allowed_by_group` is provided, uses the FULL trellis (with intermediate
+/// group match positions) and applies NWA-style disallowed-follow pruning:
+/// edges whose group is not in `ever_allowed[parent_group]` are removed.
+/// This mirrors how `prune_nwa_disallowed_follows` works on the NWA graph.
+pub fn find_vocab_equivalence_classes_trellis_with_follow(
+    regex: &Regex,
+    tokens: &[Vec<u8>],
+    initial_states: &[usize],
+    ever_allowed_by_group: Option<&[BTreeSet<GroupID>]>,
+) -> VocabEquivalenceResult {
     // Compute signature for each token
     let mut token_signatures: Vec<u64> = Vec::with_capacity(tokens.len());
-    
+
     for token in tokens {
         // Combine trellis hashes across all initial states
         let mut combined_hasher = DefaultHasher::new();
-        
+
         for &state in initial_states {
-            let trellis = regex.generate_token_trellis_with_completion(token, state);
-            let trellis_hash = hash_trellis(&trellis);
+            let trellis_to_hash = if let Some(ea) = ever_allowed_by_group {
+                // Use FULL trellis (with intermediate positions) for follow pruning
+                let trellis = regex.generate_token_trellis_with_completion_full(token, state);
+                prune_trellis_disallowed_follows(&trellis, ea)
+            } else {
+                regex.generate_token_trellis_with_completion(token, state)
+            };
+            let trellis_hash = hash_trellis(&trellis_to_hash);
             trellis_hash.hash(&mut combined_hasher);
         }
         
@@ -136,4 +158,61 @@ pub fn mapping_to_equivalence_classes(states: &[usize], mapping: &[usize]) -> St
     }
     
     rep_to_class.into_values().collect()
+}
+
+/// Prune a trellis based on disallowed-follows relationships.
+///
+/// For each edge labeled with group G, if G is not in `ever_allowed[parent_group]`,
+/// remove that edge. At the root level (no parent), all groups are allowed.
+///
+/// `ever_allowed_by_group`: for each group_id G, the set of group_ids that can
+/// follow G in the grammar. If a group doesn't have an entry (or is out of bounds),
+/// it is treated as allowing all followers.
+///
+/// Returns a new trellis with disallowed edges removed.
+pub fn prune_trellis_disallowed_follows(
+    trellis: &TokenTrellisWithCompletion,
+    ever_allowed_by_group: &[BTreeSet<GroupID>],
+) -> TokenTrellisWithCompletion {
+    // At root, no parent group -> all edges are allowed
+    // Recurse into children with context of the parent edge's group
+    let mut new_edges = BTreeMap::new();
+    for (&gid, child) in &trellis.edges {
+        let pruned_child = prune_trellis_recursive(child, gid, ever_allowed_by_group);
+        new_edges.insert(gid, Arc::new(pruned_child));
+    }
+    Trellis {
+        end_state: trellis.end_state.clone(),
+        edges: new_edges,
+    }
+}
+
+fn prune_trellis_recursive(
+    trellis: &Trellis<BTreeSet<GroupID>>,
+    parent_group: GroupID,
+    ever_allowed_by_group: &[BTreeSet<GroupID>],
+) -> Trellis<BTreeSet<GroupID>> {
+    let allowed = if (parent_group as usize) < ever_allowed_by_group.len() {
+        Some(&ever_allowed_by_group[parent_group as usize])
+    } else {
+        None // No follow info for this group -> allow everything
+    };
+
+    let mut new_edges = BTreeMap::new();
+    for (&gid, child) in &trellis.edges {
+        // Check if gid is allowed after parent_group
+        let is_allowed = match allowed {
+            Some(set) => set.contains(&gid),
+            None => true,
+        };
+        if is_allowed {
+            let pruned_child = prune_trellis_recursive(child, gid, ever_allowed_by_group);
+            new_edges.insert(gid, Arc::new(pruned_child));
+        }
+    }
+
+    Trellis {
+        end_state: trellis.end_state.clone(),
+        edges: new_edges,
+    }
 }

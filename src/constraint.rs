@@ -673,6 +673,9 @@ impl GrammarConstraint {
         tokenizer: &Tokenizer,
         max_original_llm_token_id: usize,
         grammar_group_ids: &std::collections::BTreeSet<usize>,
+        suffix_group_mask: Option<&[bool]>,
+        ever_allowed_by_group: Option<&[Vec<bool>]>,
+        group_to_class: Option<&[usize]>,
     ) -> (
         BTreeMap<usize, usize>,
         CommitVocab,
@@ -741,6 +744,9 @@ impl GrammarConstraint {
                 tokenizer,
                 &llm_token_strings,
                 &all_states,
+                suffix_group_mask,
+                ever_allowed_by_group,
+                group_to_class,
             )
         });
         timing_compute_equivalence = compute_equivalence_start.elapsed();
@@ -1099,6 +1105,166 @@ impl GrammarConstraint {
         let grammar_group_ids: std::collections::BTreeSet<usize> = token_name_map.right_values().copied().collect();
         let verify_equivalence = std::env::var("VERIFY_EQUIVALENCE").is_ok();
 
+        // Compute suffix_group_mask for vocab equivalence analysis: which tokenizer groups
+        // can appear in suffix positions (i.e., appear in at least one terminal's follow set).
+        // Groups not in any follow set can only be "first" terminals and are irrelevant in suffixes.
+        let nwa_follow_prune_disabled = std::env::var("NWA_FOLLOW_PRUNE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+
+        let suffix_group_mask: Option<Vec<bool>> = {
+            if nwa_follow_prune_disabled {
+                None
+            } else {
+                let ever_allowed = compute_ever_allowed_terminal_follows(&parser.productions);
+                // Collect all terminals that appear in any follow set (union of all ever_allowed values)
+                let mut suffix_relevant_terminals: std::collections::BTreeSet<Terminal> = std::collections::BTreeSet::new();
+                for (_term, follows) in &ever_allowed {
+                    for follow in follows {
+                        suffix_relevant_terminals.insert(follow.clone());
+                    }
+                }
+                // Map to group IDs via token_name_map
+                let max_group_id = token_name_map.right_values().copied().max().unwrap_or(0);
+                let mut mask = vec![false; max_group_id + 1];
+                for terminal in &suffix_relevant_terminals {
+                    if let Some(&gid) = token_name_map.get_by_left(terminal) {
+                        mask[gid] = true;
+                    }
+                }
+                let num_relevant = mask.iter().filter(|&&b| b).count();
+                let total = mask.len();
+                crate::debug!(
+                    4,
+                    "Vocab equiv suffix_group_mask: {}/{} groups relevant in suffix positions",
+                    num_relevant,
+                    total,
+                );
+                Some(mask)
+            }
+        };
+
+        // Compute per-group follow masks for projected suffix hashing.
+        // ever_allowed_by_group[g][h] = true means group h can follow group g.
+        // Controlled by VOCAB_FOLLOW_PRUNE env var (default: enabled when NWA prune is enabled)
+        let vocab_follow_prune_disabled = std::env::var("VOCAB_FOLLOW_PRUNE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        let ever_allowed_by_group: Option<Vec<Vec<bool>>> = {
+            if nwa_follow_prune_disabled || vocab_follow_prune_disabled {
+                None
+            } else {
+                let ever_allowed = compute_ever_allowed_terminal_follows(&parser.productions);
+                let max_group_id = token_name_map.right_values().copied().max().unwrap_or(0);
+                let num_groups = max_group_id + 1;
+                let mut masks: Vec<Vec<bool>> = vec![vec![true; num_groups]; num_groups];
+                // For each terminal with follow data, set its mask
+                for (term, follows) in &ever_allowed {
+                    if let Some(&gid) = token_name_map.get_by_left(term) {
+                        // Replace the all-true default with the actual follow set
+                        let mask = &mut masks[gid];
+                        mask.fill(false);
+                        for follow_term in follows {
+                            if let Some(&follow_gid) = token_name_map.get_by_left(follow_term) {
+                                mask[follow_gid] = true;
+                            }
+                        }
+                    }
+                }
+                let groups_with_follow: usize = ever_allowed.len();
+                crate::debug!(
+                    4,
+                    "Vocab equiv ever_allowed_by_group: {}/{} groups have follow data",
+                    groups_with_follow,
+                    num_groups,
+                );
+                // Diagnostic: follow matrix density analysis
+                if std::env::var("ANALYZE_FOLLOW_MATRIX").is_ok() {
+                    let mut total_allowed = 0usize;
+                    let mut total_cells = 0usize;
+                    let mut all_true_rows = 0usize;
+                    let mut unique_rows: std::collections::HashSet<Vec<bool>> = std::collections::HashSet::new();
+                    for gid in 0..num_groups {
+                        let row = &masks[gid];
+                        let allowed_count = row.iter().filter(|&&b| b).count();
+                        total_allowed += allowed_count;
+                        total_cells += num_groups;
+                        if allowed_count == num_groups {
+                            all_true_rows += 1;
+                        }
+                        unique_rows.insert(row.clone());
+                    }
+                    eprintln!("FOLLOW MATRIX ANALYSIS:");
+                    eprintln!("  Groups: {}", num_groups);
+                    eprintln!("  Groups with follow data: {}", groups_with_follow);
+                    eprintln!("  Groups without follow data (all-true rows): {}", all_true_rows);
+                    eprintln!("  Density: {}/{} = {:.1}%", total_allowed, total_cells, 100.0 * total_allowed as f64 / total_cells as f64);
+                    eprintln!("  Unique rows: {}", unique_rows.len());
+                    // Show per-row stats for groups WITH follow data
+                    let mut row_sizes: Vec<(usize, usize)> = Vec::new();
+                    for gid in 0..num_groups {
+                        let row = &masks[gid];
+                        let allowed_count = row.iter().filter(|&&b| b).count();
+                        if allowed_count < num_groups {
+                            row_sizes.push((gid, allowed_count));
+                        }
+                    }
+                    row_sizes.sort_by_key(|&(_, c)| c);
+                    eprintln!("  Non-trivial rows (gid, allowed_count):");
+                    for &(gid, count) in row_sizes.iter().take(20) {
+                        eprintln!("    gid={}: {}/{} ({:.1}%)", gid, count, num_groups, 100.0 * count as f64 / num_groups as f64);
+                    }
+                    if row_sizes.len() > 20 {
+                        eprintln!("    ... and {} more", row_sizes.len() - 20);
+                    }
+                }
+                Some(masks)
+            }
+        };
+
+        // Compute group equivalence classes from the follow matrix.
+        // Two groups are grammar-equivalent if they have the same row AND column
+        // in the ever_allowed matrix. Using class IDs instead of raw group IDs
+        // in suffix hashing merges tokens that differ only in grammar-equivalent groups.
+        let group_to_class: Option<Vec<usize>> = ever_allowed_by_group.as_ref().map(|masks| {
+            use std::collections::HashMap;
+            let num_groups = masks.len();
+            // For each group, build signature = (row, column) in follow matrix
+            let mut sig_to_class: HashMap<Vec<u8>, usize> = HashMap::new();
+            let mut g2c: Vec<usize> = Vec::with_capacity(num_groups);
+            let mut next_class = 0usize;
+            for gid in 0..num_groups {
+                // Encode signature as packed bits: row bits then column bits
+                let row = &masks[gid];
+                let total_bits = num_groups * 2;
+                let num_bytes = (total_bits + 7) / 8;
+                let mut sig = vec![0u8; num_bytes];
+                for j in 0..num_groups {
+                    if row[j] {
+                        sig[j / 8] |= 1 << (j % 8);
+                    }
+                    // Column: does parent j allow group gid?
+                    if masks[j][gid] {
+                        let bit = num_groups + j;
+                        sig[bit / 8] |= 1 << (bit % 8);
+                    }
+                }
+                let class = *sig_to_class.entry(sig).or_insert_with(|| {
+                    let c = next_class;
+                    next_class += 1;
+                    c
+                });
+                g2c.push(class);
+            }
+            crate::debug!(
+                2,
+                "Group equivalence: {} groups -> {} grammar classes (from follow matrix)",
+                num_groups,
+                next_class,
+            );
+            g2c
+        });
+
         // Combined equivalence analysis - computes state equivalence, vocab equivalence, and internal mappings
         // State equivalence is computed ONCE and reused for both vocab analysis and building maps
         crate::debug!(5, "setup_combined: start");
@@ -1116,6 +1282,9 @@ impl GrammarConstraint {
                 &tokenizer,
                 max_original_llm_token_id,
                 &grammar_group_ids,
+                suffix_group_mask.as_deref(),
+                ever_allowed_by_group.as_deref(),
+                group_to_class.as_deref(),
             )
         });
         crate::timing!("TIMING: setup_combined {:?}", setup_start.elapsed());

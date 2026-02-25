@@ -3896,6 +3896,20 @@ impl Regex {
         })
     }
 
+    /// Like `generate_token_trellis_with_completion` but includes intermediate
+    /// group match positions (not just end-of-token matches). This produces a
+    /// trellis with multi-level group sequences, suitable for follow pruning.
+    pub fn generate_token_trellis_with_completion_full(
+        &self,
+        bytes: &[u8],
+        start_state: usize,
+    ) -> TokenTrellisWithCompletion {
+        let flat = self.generate_flat_trellis_full(bytes, start_state);
+        Self::hydrate_trellis(flat, |idx| {
+            self.dfa.states[idx].possible_future_group_ids.clone()
+        })
+    }
+
     fn generate_flat_trellis(
         &self,
         bytes: &[u8],
@@ -3972,6 +3986,101 @@ impl Regex {
         }
 
         // If root cannot reach end, treat it as a dead root node with no completion/edges.
+        if !can_reach_end.contains(&0) {
+            if let Some((end_state, edges)) = flat_trellis.get_mut(&0) {
+                *end_state = None;
+                edges.clear();
+            }
+        }
+
+        flat_trellis.retain(|pos, _| *pos == 0 || can_reach_end.contains(pos));
+
+        if !flat_trellis.contains_key(&0) {
+            flat_trellis.insert(0, (None, Vec::new()));
+        }
+
+        flat_trellis
+    }
+
+    /// Like `generate_flat_trellis` but includes intermediate group match positions,
+    /// not just end-of-token matches. This produces a multi-level DAG suitable for
+    /// NWA-style disallowed follow pruning.
+    fn generate_flat_trellis_full(
+        &self,
+        bytes: &[u8],
+        start_state: usize,
+    ) -> BTreeMap<usize, (Option<usize>, Vec<(GroupID, usize)>)> {
+        let mut flat_trellis = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+
+        queue.push_back(0);
+        visited.insert(0);
+        flat_trellis.insert(0, (None, Vec::new()));
+
+        while let Some(pos) = queue.pop_front() {
+            let slice = if pos <= bytes.len() {
+                &bytes[pos..]
+            } else {
+                &[]
+            };
+
+            let exec_start = if pos == 0 {
+                start_state
+            } else {
+                self.dfa.start_state
+            };
+            let result = self.execute_from_state_nonzero(slice, exec_start);
+
+            let mut new_edges = Vec::new();
+            for m in result.matches {
+                let target_pos = pos + m.position;
+                // Unlike generate_flat_trellis, we include intermediate positions
+                // (not just target_pos == bytes.len()), enabling multi-level follow pruning.
+                if target_pos <= pos {
+                    continue;
+                }
+                new_edges.push((m.group_id, target_pos));
+                if visited.insert(target_pos) {
+                    queue.push_back(target_pos);
+                    flat_trellis.insert(target_pos, (None, Vec::new()));
+                }
+            }
+            let node = flat_trellis.get_mut(&pos).unwrap();
+            node.0 = result.end_state;
+            node.1 = new_edges;
+        }
+
+        // Prune branches that cannot reach end-of-string.
+        let end_pos = bytes.len();
+        let mut reverse_edges: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (src, (_end_state, edges)) in &flat_trellis {
+            for (_gid, dst) in edges {
+                reverse_edges.entry(*dst).or_default().push(*src);
+            }
+        }
+
+        let mut can_reach_end: HashSet<usize> = HashSet::new();
+        let mut stack: Vec<usize> = Vec::new();
+        if flat_trellis.contains_key(&end_pos) {
+            can_reach_end.insert(end_pos);
+            stack.push(end_pos);
+        }
+
+        while let Some(node) = stack.pop() {
+            if let Some(preds) = reverse_edges.get(&node) {
+                for &pred in preds {
+                    if can_reach_end.insert(pred) {
+                        stack.push(pred);
+                    }
+                }
+            }
+        }
+
+        for (_pos, (_end_state, edges)) in flat_trellis.iter_mut() {
+            edges.retain(|(_gid, target)| can_reach_end.contains(target));
+        }
+
         if !can_reach_end.contains(&0) {
             if let Some((end_state, edges)) = flat_trellis.get_mut(&0) {
                 *end_state = None;

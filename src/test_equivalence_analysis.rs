@@ -62,7 +62,7 @@ mod tests {
         println!("Tokenizer has {} states", states.len());
         
         let start = std::time::Instant::now();
-        let result = compute_combined_equivalence(tokenizer, &tokens, &states);
+        let result = compute_combined_equivalence(tokenizer, &tokens, &states, None, None, None);
         println!("Analysis took {:?}", start.elapsed());
         
         let classes = result.vocab_classes;
@@ -147,7 +147,7 @@ mod tests {
         println!("Tokenizer has {} states", states.len());
 
         let start = std::time::Instant::now();
-        let result = compute_combined_equivalence(tokenizer, &tokens, &states);
+        let result = compute_combined_equivalence(tokenizer, &tokens, &states, None, None, None);
         println!("Analysis took {:?}", start.elapsed());
 
         let classes = result.vocab_classes;
