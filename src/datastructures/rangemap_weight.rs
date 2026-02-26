@@ -1740,21 +1740,45 @@ impl RangeMapWeight {
             for (tsid_range, token_set) in self.map.range_values() {
                 let tsid_start = *tsid_range.start();
                 let tsid_end = *tsid_range.end();
+                let tsid_span = tsid_end - tsid_start + 1;
                 for token_range in token_set.ranges() {
-                    for token in *token_range.start()..=*token_range.end() {
-                        let base = token.saturating_mul(num_tsids);
-                        ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                    let t_start = *token_range.start();
+                    let t_end = *token_range.end();
+                    if num_tsids <= 1 || tsid_span == num_tsids {
+                        // Full tsid coverage (or single tsid): consecutive tokens
+                        // produce contiguous positions, so emit one merged range.
+                        let pos_start = t_start.saturating_mul(num_tsids).saturating_add(tsid_start);
+                        let pos_end = t_end.saturating_mul(num_tsids).saturating_add(tsid_end);
+                        ranges.push(pos_start..=pos_end);
+                    } else {
+                        // Partial tsid range: each token produces a separate
+                        // non-contiguous block. Iterate per token.
+                        for token in t_start..=t_end {
+                            let base = token.saturating_mul(num_tsids);
+                            ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                        }
                     }
                 }
             }
         } else {
             for (token_range, tsid_set) in self.map.range_values() {
-                for token in *token_range.start()..=*token_range.end() {
-                    for tsid_range in tsid_set.ranges() {
-                        let base = token.saturating_mul(num_tsids);
-                        let tsid_start = *tsid_range.start();
-                        let tsid_end = *tsid_range.end();
-                        ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                let t_start = *token_range.start();
+                let t_end = *token_range.end();
+                for tsid_range in tsid_set.ranges() {
+                    let tsid_start = *tsid_range.start();
+                    let tsid_end = *tsid_range.end();
+                    let tsid_span = tsid_end - tsid_start + 1;
+                    if num_tsids <= 1 || tsid_span == num_tsids {
+                        // Full tsid coverage: one contiguous range.
+                        let pos_start = t_start.saturating_mul(num_tsids).saturating_add(tsid_start);
+                        let pos_end = t_end.saturating_mul(num_tsids).saturating_add(tsid_end);
+                        ranges.push(pos_start..=pos_end);
+                    } else {
+                        // Partial tsid range: per-token iteration required.
+                        for token in t_start..=t_end {
+                            let base = token.saturating_mul(num_tsids);
+                            ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                        }
                     }
                 }
             }
@@ -1779,6 +1803,7 @@ impl RangeMapWeight {
 
                 let left_end = tsid_end.min(max_tsid);
                 if tsid_start <= left_end {
+                    let left_span = left_end - tsid_start + 1;
                     for token_range in token_set.ranges() {
                         let token_start = *token_range.start();
                         let mut token_end = *token_range.end();
@@ -1786,9 +1811,16 @@ impl RangeMapWeight {
                             continue;
                         }
                         token_end = token_end.min(max_token);
-                        for token in token_start..=token_end {
-                            let base = token.saturating_mul(num_tsids);
-                            ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(left_end));
+                        if num_tsids <= 1 || left_span == num_tsids {
+                            // Full tsid coverage: merge into single contiguous range
+                            let pos_start = token_start.saturating_mul(num_tsids).saturating_add(tsid_start);
+                            let pos_end = token_end.saturating_mul(num_tsids).saturating_add(left_end);
+                            ranges.push(pos_start..=pos_end);
+                        } else {
+                            for token in token_start..=token_end {
+                                let base = token.saturating_mul(num_tsids);
+                                ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(left_end));
+                            }
                         }
                     }
                 }
@@ -1796,6 +1828,7 @@ impl RangeMapWeight {
                 if tsid_end > max_tsid && max_token > 0 {
                     let right_start = tsid_start.max(max_tsid.saturating_add(1));
                     if right_start <= tsid_end {
+                        let right_span = tsid_end - right_start + 1;
                         let token_limit = max_token.saturating_sub(1);
                         for token_range in token_set.ranges() {
                             let token_start = *token_range.start();
@@ -1804,9 +1837,15 @@ impl RangeMapWeight {
                                 continue;
                             }
                             token_end = token_end.min(token_limit);
-                            for token in token_start..=token_end {
-                                let base = token.saturating_mul(num_tsids);
-                                ranges.push(base.saturating_add(right_start)..=base.saturating_add(tsid_end));
+                            if num_tsids <= 1 || right_span == num_tsids {
+                                let pos_start = token_start.saturating_mul(num_tsids).saturating_add(right_start);
+                                let pos_end = token_end.saturating_mul(num_tsids).saturating_add(tsid_end);
+                                ranges.push(pos_start..=pos_end);
+                            } else {
+                                for token in token_start..=token_end {
+                                    let base = token.saturating_mul(num_tsids);
+                                    ranges.push(base.saturating_add(right_start)..=base.saturating_add(tsid_end));
+                                }
                             }
                         }
                     }
@@ -1819,18 +1858,48 @@ impl RangeMapWeight {
                 if token_start > token_end {
                     continue;
                 }
-                for token in token_start..=token_end {
-                    let base = token.saturating_mul(num_tsids);
-                    for tsid_range in tsid_set.ranges() {
-                        let tsid_start = *tsid_range.start();
-                        let mut tsid_end = *tsid_range.end();
-                        if token == max_token {
-                            if tsid_start > max_tsid {
-                                continue;
+                for tsid_range in tsid_set.ranges() {
+                    let tsid_start = *tsid_range.start();
+                    let mut tsid_end_inner = *tsid_range.end();
+                    // For the last token, cap the tsid range
+                    let capped_tsid_end = if token_end == max_token {
+                        tsid_end_inner.min(max_tsid)
+                    } else {
+                        tsid_end_inner
+                    };
+                    let tsid_span = tsid_end_inner - tsid_start + 1;
+                    if num_tsids <= 1 || tsid_span == num_tsids {
+                        // Full tsid coverage: can merge most tokens into one range.
+                        // But last token may have capped tsids, handle separately.
+                        if token_end == max_token && capped_tsid_end < tsid_end_inner {
+                            // Handle non-last tokens merged
+                            if token_start < token_end {
+                                let pos_start = token_start.saturating_mul(num_tsids).saturating_add(tsid_start);
+                                let pos_end = (token_end - 1).saturating_mul(num_tsids).saturating_add(tsid_end_inner);
+                                ranges.push(pos_start..=pos_end);
                             }
-                            tsid_end = tsid_end.min(max_tsid);
+                            // Handle last token with capped tsid
+                            if tsid_start <= capped_tsid_end {
+                                let base = token_end.saturating_mul(num_tsids);
+                                ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(capped_tsid_end));
+                            }
+                        } else {
+                            let pos_start = token_start.saturating_mul(num_tsids).saturating_add(tsid_start);
+                            let pos_end = token_end.saturating_mul(num_tsids).saturating_add(capped_tsid_end);
+                            ranges.push(pos_start..=pos_end);
                         }
-                        ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                    } else {
+                        // Partial tsid: iterate per token
+                        for token in token_start..=token_end {
+                            let base = token.saturating_mul(num_tsids);
+                            let eff_tsid_end = if token == max_token {
+                                if tsid_start > max_tsid { continue; }
+                                tsid_end_inner.min(max_tsid)
+                            } else {
+                                tsid_end_inner
+                            };
+                            ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(eff_tsid_end));
+                        }
                     }
                 }
             }

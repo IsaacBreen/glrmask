@@ -331,12 +331,10 @@ pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
                 &wa,
                 &wb,
                 format!(
-                    "Equivalence fail: A(w) != B(w) for word from A.\nword: {}\nA(w): {}\nB(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                    "Equivalence fail: A(w) != B(w) for word from A.\nword: {}\nA(w): {}\nB(w): {}",
                     format_word(&w),
                     wa,
                     wb,
-                    a,
-                    b
                 ),
             );
         }
@@ -348,12 +346,10 @@ pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
                 &wb,
                 &wa,
                 format!(
-                    "Equivalence fail: B(w) != A(w) for word from B.\nword: {}\nB(w): {}\nA(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                    "Equivalence fail: B(w) != A(w) for word from B.\nword: {}\nB(w): {}\nA(w): {}",
                     format_word(&w),
                     wb,
                     wa,
-                    a,
-                    b
                 ),
             );
         }
