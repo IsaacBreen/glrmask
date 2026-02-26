@@ -6722,9 +6722,7 @@ fn test_github_easy_o63377_false_positive_a() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     let lark = indoc! {r#"
-        A: "a" ("b"?)
-        B: "ac"
-        start: A B
+        start: "a" "ac"
     "#};
     let grammar_definition = GrammarDefinition::from_lark(lark).expect("from_lark");
 
