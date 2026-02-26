@@ -6739,11 +6739,14 @@ fn test_github_easy_o63377_false_positive_a() {
         max_id,
         &GrammarConstraintConfig::default(),
     );
+    constraint.dump_parser_dwa();
 
     let mut state = constraint.init();
     state.commit_bytes(b"aa");
+    state.print_gss();
 
     let mask = state.get_mask();
 
     assert!(!mask.contains(0), "Expected token 'b' (local_id=0) to be REJECTED at prefix='aa', but sep1 accepted it (false_positive).");
 }
+
