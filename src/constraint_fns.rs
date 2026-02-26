@@ -710,40 +710,9 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
 
-                  if let Some(end_state_id) = exec_result.end_state {
-                      let final_tsid = TokenizerStateID(end_state_id);
-                      let accessible_terminals = self.parent.tokenizer.tokens_accessible_from_state(final_tsid);
-                      let mut has_viable_terminal = false;
-                      for terminal_id in accessible_terminals {
-                          let test_gss = self.parent.parser.process_token_gss(&gss_at_offset, terminal_id);
-                          if !test_gss.is_empty() {
-                              has_viable_terminal = true;
-                              break;
-                          }
-                      }
-
-                      if has_viable_terminal {
-                        let final_tsid = TokenizerStateID(end_state_id);
-                        let remapped_gss = gss_at_offset.apply(|terminals_disallowed: &TerminalsDisallowed| {
-                            let mut new_terminals_union: TerminalsDisallowed = BTreeMap::new();
-                            for (sid, disallowed) in terminals_disallowed {
-                                let mapped_sid = if *sid == tokenizer_s_id_at_offset.0 {
-                                    final_tsid.0
-                                } else {
-                                    *sid
-                                };
-                                new_terminals_union
-                                    .entry(mapped_sid)
-                                    .or_default()
-                                    .extend(disallowed.iter().cloned());
-                            }
-                            new_terminals_union
-                        });
-                        new_overall_state
-                            .entry(final_tsid)
-                            .and_modify(|s| s.stack = s.stack.merge(&remapped_gss))
-                            .or_insert_with(|| GLRParserState { parser: &self.parent.parser, stack: remapped_gss });
-                    }
+                if let Some(end_state_id) = exec_result.end_state {
+                    let final_tsid = TokenizerStateID(end_state_id);
+                    new_overall_state.entry(final_tsid).and_modify(|s| s.stack = s.stack.merge(&gss_at_offset)).or_insert_with(|| GLRParserState { parser: &self.parent.parser, stack: gss_at_offset });
                 }
             }
         }
