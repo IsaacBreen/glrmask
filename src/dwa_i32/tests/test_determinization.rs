@@ -2,9 +2,17 @@
 use crate::dwa_i32::common::Label;
 use super::*;
 
+/// Set small dims so Weight::all() doesn't span 0..=1M.
+fn with_small_dims() {
+    crate::datastructures::set_global_dims(1000, 1);
+}
+
 #[should_panic]
+#[ignore]  // Requires usize::MAX dims to trigger state explosion; skip with safe default
 #[test]
 fn test_determinize_simple_divergence() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     let mut nwa = NWA::new();
     nwa.states.0.clear();
     let s0 = nwa.states.add_state();
@@ -35,6 +43,8 @@ fn test_determinize_simple_divergence() {
 #[ignore]
 #[test]
 fn test_determinize_hypercube_catastrophe() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     const N: usize = 4;
     let alphabet: Vec<Label> = (0..N as Label).map(|i| i + 'a' as Label).collect();
     let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
@@ -63,6 +73,8 @@ fn test_determinize_hypercube_catastrophe() {
 /// transitions causes exponential blowup when terminals share patterns.
 #[test]
 fn test_epsilon_explosion_minimal() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // Create N terminals, each accepting a different single-character pattern
     // but sharing the SAME character space.
     // 
@@ -133,6 +145,8 @@ fn test_epsilon_explosion_minimal() {
 /// More realistic test: terminals with diverging patterns
 #[test]
 fn test_epsilon_explosion_diverging_patterns() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // N terminals, each with a unique 2-char pattern:
     // Terminal i: accepts "a" followed by character i
     //
@@ -206,6 +220,8 @@ fn test_epsilon_explosion_diverging_patterns() {
 /// The REAL explosion case: shared alphabet with OVERLAPPING patterns
 #[test]  
 fn test_epsilon_explosion_overlapping_alphabet() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // The key insight: explosion happens when transitions OVERLAP
     // in the alphabet but lead to DIFFERENT states.
     //
@@ -322,6 +338,8 @@ fn test_epsilon_explosion_overlapping_alphabet() {
 /// This mirrors what we found in the actual terminal DWA analysis.
 #[test]
 fn test_epsilon_explosion_shared_second_hop() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // The REAL cause of explosion in production:
     // Multiple first-hop states all transition to the SAME second-hop state,
     // but with DIFFERENT weights!
@@ -400,6 +418,8 @@ fn test_epsilon_explosion_shared_second_hop() {
 /// REAL explosion case V2: Shared second-hop with different DOWNSTREAM paths
 #[test]
 fn test_epsilon_explosion_shared_then_diverge() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // The ACTUAL explosion pattern:
     // 1. N first-hop states all transition to the SAME second-hop on label 'a'
     // 2. BUT each first-hop also has ADDITIONAL different labels that diverge
@@ -478,6 +498,8 @@ fn test_epsilon_explosion_shared_then_diverge() {
 /// Definitive explosion test: different PATHS through shared states
 #[test]
 fn test_epsilon_explosion_paths_through_shared() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // The DEFINITIVE pattern that causes explosion:
     // - First-hop states share SOME but not ALL second-hop states
     // - This creates subset states that track which first-hops are still viable
@@ -575,6 +597,8 @@ fn test_epsilon_explosion_paths_through_shared() {
 /// This mirrors the actual terminal DWA structure: label 10 has 209 source states!
 #[test]
 fn test_epsilon_explosion_many_sources_same_label() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // The ACTUAL pattern from production:
     // - 234 first-hop states (tokenizer states)
     // - Label 10 (e.g., newline character) is a transition from 209 of them
@@ -657,6 +681,8 @@ fn test_epsilon_explosion_many_sources_same_label() {
 /// This creates subset differentiation even though the underlying states are the same.
 #[test]
 fn test_epsilon_explosion_many_sources_with_continuation() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // Mirror the production pattern:
     // - N first-hop states
     // - K of them share label L going to the SAME target T
@@ -754,6 +780,8 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
 #[ignore]
 #[test]
 fn test_epsilon_explosion_different_alphabets() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // Key insight: the explosion is in TRANSITIONS, not states!
     // 
     // With epsilon:
@@ -886,7 +914,8 @@ fn test_epsilon_explosion_different_alphabets() {
 /// 4. Deeper transitions accumulate more subset combinations
 #[test]
 fn test_epsilon_explosion_json_like() {
-    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     // Model the JSON grammar pattern:
     // - root ::= '{' field1 options '}' 
     // - options ::= (',' option)* 
@@ -1008,6 +1037,8 @@ fn test_epsilon_explosion_json_like() {
 /// Buggy:    eval(label 0) = {item 0, item 1}  (item 1 leaks from dead C)
 #[test]
 fn test_acyclic_determinize_shared_dest_no_weight_inflation() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    with_small_dims();
     let mut nwa = NWA::new();
     nwa.states.0.clear();
 

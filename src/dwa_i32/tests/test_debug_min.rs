@@ -44,6 +44,8 @@ mod tests {
     #[ignore]
     #[test]
     fn test_trace_minimal_nwa() {
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        crate::datastructures::set_global_dims(1000, 1);
         let content = fs::read_to_string("nwa_repro_min.json").expect("Failed to read nwa_repro_min.json");
         let nwa: NWA = serde_json::from_str(&content).expect("Failed to parse NWA");
         

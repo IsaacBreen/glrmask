@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn test_char_class_excludes_control_bytes() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let ebnf = r#"
             root ::= STRING_CHAR ;
             STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF] ;
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn test_lark_terminal_chain_differs_from_ebnf_terminal_chain_when_utf8_enabled() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
         let lark = r#"
 start: obj
@@ -107,7 +107,7 @@ STR_CHAR ::= [^"\\\x00-\x1F] ;
 
     #[test]
     fn test_precompute_for_python_name_token_with_names() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let ignore_expr = repeat0_fast(choice_fast!(
             eat_u8_fast(b' '),
             seq_fast!(
@@ -179,7 +179,7 @@ STR_CHAR ::= [^"\\\x00-\x1F] ;
 
     #[test]
     fn test_incremental_parser_simple() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let terminals = vec![
             ("a".to_string(), eat_u8(b'a')),
             ("b".to_string(), eat_u8(b'b')),
@@ -243,7 +243,7 @@ STR_CHAR ::= [^"\\\x00-\x1F] ;
 
     #[test]
     fn test_minimal_python_example_with_compiled_grammar() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let terminals = vec![
             (
                 "NUMBER".to_string(),
@@ -353,7 +353,7 @@ STR_CHAR ::= [^"\\\x00-\x1F] ;
 
     #[test]
     fn test_sentence_grammar_from_prompt() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let terminals = vec![
             ("a".to_string(), eat_u8(b'a')),
             ("the".to_string(), eat_u8_seq(b"the".to_vec())),
@@ -506,7 +506,7 @@ STR_CHAR ::= [^"\\\x00-\x1F] ;
 
     #[test]
     fn test_sentence_grammar_from_prompt_minimized() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let terminals = vec![
             ("A_T".to_string(), eat_u8_seq(b"ab".to_vec())),
             ("B_T".to_string(), eat_u8_seq(b"bc".to_vec())),
@@ -583,7 +583,7 @@ STR_CHAR ::= [^"\\\x00-\x1F] ;
 
     #[test]
     fn test_python_reported_bug_def_rep_space_f() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let terminals = vec![
             ("SPACE".to_string(), eat_u8(b' ')),
             ("F".to_string(), eat_u8(b'f')),
@@ -634,7 +634,7 @@ STR_CHAR ::= [^"\\\x00-\x1F] ;
 
     #[test]
     fn test_nullability_handling_in_from_exprs() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // This test verifies the raw grammar structure before optimization,
         // so we use from_exprs_no_optimize to avoid terminal consolidation.
         let terminals = vec![

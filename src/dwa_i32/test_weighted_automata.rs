@@ -1,12 +1,38 @@
 use crate::dwa_i32::{DWAState, RangeSet, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DWAStates, StateID, DWABody};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::MutexGuard;
 use crate::dwa_i32::common::Label;
 
 // --- Stochastic validation controls and RNG ---
 const VALIDATION_SAMPLES: usize = 32;
 const VALIDATION_MAX_STEPS: usize = 32;
 const SAMPLING_TRIES: usize = 100;
+
+/// RAII guard that sets small global dims for the test and restores original
+/// values on drop.  Also holds the global mutex to prevent concurrent tests
+/// from observing the temporary dims.
+struct DimsGuard {
+    _mutex: MutexGuard<'static, ()>,
+    old_max: usize,
+    old_tsids: usize,
+}
+
+impl Drop for DimsGuard {
+    fn drop(&mut self) {
+        crate::datastructures::set_global_dims(self.old_max, self.old_tsids);
+    }
+}
+
+fn lock_dims() -> DimsGuard {
+    let guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let old_max = crate::datastructures::get_max_llm_token();
+    let old_tsids = crate::datastructures::get_num_tsids();
+    // Keep dims small for fast tests; the default (1M) is safe but a smaller
+    // value makes Weight operations faster in these unit tests.
+    crate::datastructures::set_global_dims(1000, 1);
+    DimsGuard { _mutex: guard, old_max, old_tsids }
+}
 
 #[derive(Clone, Debug)]
 struct SimpleRng(u64);
@@ -383,6 +409,7 @@ fn assert_weight_option_semantic_eq(actual: Option<&Weight>, expected: &Weight, 
 
 #[test]
 fn test_simple_bitset_ops() {
+    let _guard = lock_dims();
     let set1 = Weight::from_iter(vec![1, 2, 5]);
     let set2 = Weight::from_iter(vec![2, 3, 5, 6]);
     let all = Weight::all();
@@ -402,6 +429,7 @@ fn test_simple_bitset_ops() {
 
 #[test]
 fn test_dwa_builder() {
+    let _guard = lock_dims();
     let mut dwa = DWA::new();
     assert_eq!(dwa.states.len(), 1);
     assert_eq!(dwa.body.start_state, 0);
@@ -460,6 +488,7 @@ fn dwa_from_str(s: &str, final_weight: Weight) -> DWA {
 
 #[test]
 fn test_minimize_redundant_states() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -487,6 +516,7 @@ fn test_minimize_redundant_states() {
 
 #[test]
 fn test_union_simple() {
+    let _guard = lock_dims();
     let d1 = dwa_accepts_char('a', Weight::from_item(1));
     let d2 = dwa_accepts_char('b', Weight::from_item(2));
 
@@ -504,6 +534,7 @@ fn test_union_simple() {
 
 #[test]
 fn test_union_overlapping() {
+    let _guard = lock_dims();
     let d1 = dwa_accepts_char('a', Weight::from_item(1));
     let mut d2 = dwa_accepts_char('b', Weight::from_item(3));
     let s_a2 = d2.add_state();
@@ -524,6 +555,7 @@ fn test_union_overlapping() {
 
 #[test]
 fn test_concatenate_simple() {
+    let _guard = lock_dims();
     let d1 = dwa_accepts_char('a', Weight::from_iter([1, 2]));
     let d2 = dwa_accepts_char('b', Weight::from_iter([2, 3]));
     let c = d1.concatenate(&d2);
@@ -533,6 +565,7 @@ fn test_concatenate_simple() {
 
 #[test]
 fn test_apply_weight() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     d.set_final_weight(0, Weight::from_iter(vec![5, 6])).unwrap();
@@ -575,6 +608,7 @@ fn dwa_with_char_and_weights(ch: char, edge_weight: Weight, final_weight: Weight
 
 #[test]
 fn test_simple_bitset_iter_up_to_all() {
+    let _guard = lock_dims();
     let all = Weight::all();
     let vals: Vec<_> = all.iter_up_to(5).collect();
     assert_eq!(vals, vec![0, 1, 2, 3, 4, 5]);
@@ -582,6 +616,7 @@ fn test_simple_bitset_iter_up_to_all() {
 
 #[test]
 fn test_union_transition_weight_union() {
+    let _guard = lock_dims();
     fn build(ch: char, ew: usize, fw: usize) -> DWA {
         dwa_with_char_and_weights(ch, Weight::from_item(ew), Weight::from_item(fw))
     }
@@ -604,6 +639,7 @@ fn test_union_transition_weight_union() {
 
 #[test]
 fn test_json_roundtrip_complex() {
+    let _guard = lock_dims();
     use crate::json_serialization::JSONConvertible;
 
     let mut d = DWA::new();
@@ -621,6 +657,7 @@ fn test_json_roundtrip_complex() {
 
 #[test]
 fn test_add_transition_out_of_bounds() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let res = d.add_transition(5, 'a' as Label, 0, Weight::zeros());
     assert_eq!(res, Err(DWABuildError::StateOutOfBounds { state: 5 }));
@@ -631,6 +668,7 @@ fn test_add_transition_out_of_bounds() {
 
 #[test]
 fn test_prune_unreachable_with_default_chain() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let _s2 = d.add_state(); // Unused, unreachable
@@ -652,6 +690,7 @@ fn test_prune_unreachable_with_default_chain() {
 
 #[test]
 fn test_equivalence_via_minimization() {
+    let _guard = lock_dims();
     // DWA 'a' has explicit transitions for inputs '1' and '3' which lead
     // to non-final, sink-like states. State 1 is a true sink, and state 2
     // only transitions to state 1.
@@ -676,6 +715,7 @@ fn test_equivalence_via_minimization() {
 
 #[test]
 fn test_concatenate_left_start_is_final() {
+    let _guard = lock_dims();
     // LEFT: DWA (start: 0)
     //   State 0:
     //     weight: []
@@ -700,6 +740,7 @@ fn test_concatenate_left_start_is_final() {
 
 #[test]
 fn test_minimize_propagates_future_weights() {
+    let _guard = lock_dims();
     // This test checks that weight constraints from final states are propagated
     // backward to relax unnecessarily restrictive edge weights.
     // DWA A has a transition 1 -> 2 with weight [1..=2], but the final
@@ -732,6 +773,7 @@ fn test_minimize_propagates_future_weights() {
 
 #[test]
 fn test_union_complex_from_attachment() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -911,6 +953,7 @@ fn test_union_complex_from_attachment() {
 
 #[test]
 fn test_union_complex_from_attachment_simpified() {
+    let _guard = lock_dims();
     fn neg(val: Label) -> Label {
         val.wrapping_add(Label::MIN)
     }
@@ -1054,6 +1097,7 @@ fn test_union_complex_from_attachment_simpified() {
 
 #[test]
 fn test_concatenate_complex_from_attachment() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -1145,6 +1189,7 @@ fn test_concatenate_complex_from_attachment() {
 
 #[test]
 fn test_union_from_debug_log() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -1206,6 +1251,7 @@ fn test_union_from_debug_log() {
 
 #[test]
 fn test_union_from_debug_log_minimized1() {
+    let _guard = lock_dims();
     // This test isolates two simple paths with different initial edge weights.
     // A: path [0, 1] with weight [0]
     // B: path [0, 1, 2] with weight [1]
@@ -1227,6 +1273,7 @@ fn test_union_from_debug_log_minimized1() {
 
 #[test]
 fn test_union_from_debug_log_minimized2() {
+    let _guard = lock_dims();
     // This test isolates two simple paths with different initial edge weights.
     // A: path [0, 1] with weight [0]
     // B: path [0, 1, 2] with weight [1]
@@ -1252,6 +1299,7 @@ fn test_union_from_debug_log_minimized2() {
 
 #[test]
 fn test_union_from_debug_log_minimized2_with_minimization_trick() {
+    let _guard = lock_dims();
     // This test isolates two simple paths with different initial edge weights.
     // A: path [0, 1] with weight [0]
     // B: path [0, 1, 2] with weight [1]
@@ -1278,6 +1326,7 @@ fn test_union_from_debug_log_minimized2_with_minimization_trick() {
 
 #[test]
 fn test_union_from_debug_log_minimized3() {
+    let _guard = lock_dims();
     // This test isolates two simple paths with different initial edge weights.
     // A: path [0, 1] with weight [0]
     // B: path [0, 1, 2] with weight [1]
@@ -1307,6 +1356,7 @@ fn test_union_from_debug_log_minimized3() {
 
 #[test]
 fn test_union_identical_cyclic() {
+    let _guard = lock_dims();
     // DWA that accepts a* with final weight [1].
     let mut d1 = DWA::new();
     d1.add_transition(d1.body.start_state, 'a' as Label, d1.body.start_state, Weight::all()).unwrap();
@@ -1322,6 +1372,7 @@ fn test_union_identical_cyclic() {
 
 #[test]
 fn test_concatenate_disjoint_weights() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -1371,6 +1422,7 @@ fn test_concatenate_disjoint_weights() {
 
 #[test]
 fn test_minimize_complex_dwa_from_attachment() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -1457,6 +1509,7 @@ fn test_minimize_complex_dwa_from_attachment() {
 
 #[test]
 fn test_concatenate_from_debug_log() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -1513,6 +1566,7 @@ fn test_concatenate_from_debug_log() {
 
 #[test]
 fn test_union_from_panicked_log() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -1601,6 +1655,7 @@ fn test_union_from_panicked_log() {
 
 #[test]
 fn test_concatenate_default_path_to_final() {
+    let _guard = lock_dims();
     let mut a = DWA::new();
     let s1a = a.add_state();
     a.add_transition(a.body.start_state, 'a' as Label, s1a, Weight::all()).unwrap();
@@ -1624,6 +1679,7 @@ fn test_concatenate_default_path_to_final() {
 
 #[test]
 fn test_minimize() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -1708,6 +1764,7 @@ fn test_minimize() {
 
 #[test]
 fn test_dwa_to_nwa_to_dwa_roundtrip() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -1835,6 +1892,7 @@ mod determinization_tests {
 
     #[test]
     fn test_det_simple_char() {
+        let _guard = lock_dims();
         let nwa = nwa_accepts_char('a', Weight::from_item(1));
         let dwa = nwa.determinize();
         let expected = dwa_accepts_char('a', Weight::from_item(1));
@@ -1843,6 +1901,7 @@ mod determinization_tests {
 
     #[test]
     fn test_det_union_of_chars() {
+        let _guard = lock_dims();
         // NWA for a|b
         let mut nwa = NWA::new();
         let s_a = nwa.states.add_state();
@@ -1871,6 +1930,7 @@ mod determinization_tests {
 
     #[test]
     fn test_det_nondeterminism_on_char() {
+        let _guard = lock_dims();
         // NWA with two transitions on 'a'
         let mut nwa = NWA::new();
         let f1 = nwa.states.add_state();
@@ -1893,6 +1953,7 @@ mod determinization_tests {
 
     #[test]
     fn test_det_weight_union_overapprox_paths() {
+        let _guard = lock_dims();
         let mut nwa = NWA::new();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
@@ -1935,6 +1996,7 @@ mod determinization_tests {
 
     #[test]
     fn test_det_weight_partitioning() {
+        let _guard = lock_dims();
         // NWA with overlapping weights on 'a'
         let mut nwa = NWA::new();
         let f1 = nwa.states.add_state();
@@ -1965,6 +2027,7 @@ mod determinization_tests {
 
     #[test]
     fn test_det_empty_nwa() {
+        let _guard = lock_dims();
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Truly empty
         let dwa = nwa.determinize();
@@ -1975,6 +2038,7 @@ mod determinization_tests {
 
     #[test]
     fn test_det_accepts_nothing() {
+        let _guard = lock_dims();
         let nwa = NWA::new(); // start state, but no transitions and not final
         let dwa = nwa.determinize();
         let expected = DWA::new();
@@ -1983,6 +2047,7 @@ mod determinization_tests {
 
     #[test]
     fn test_det_accepts_empty_word() {
+        let _guard = lock_dims();
         let mut nwa = NWA::new();
         nwa.states[nwa.body.start_states[0]].final_weight = Some(Weight::from_item(42));
         let dwa = nwa.determinize();
@@ -1993,6 +2058,7 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_complex_nwa_from_template() {
+        let _guard = lock_dims();
         fn neg(x: Label) -> Label {
             Label::MIN + x
         }
@@ -2093,6 +2159,7 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_minimal_failing_nwa_repro() {
+        let _guard = lock_dims();
         fn neg(x: Label) -> Label {
             Label::MIN + x
         }
@@ -2159,6 +2226,7 @@ mod determinization_tests {
     #[test]
     #[ignore] // This test is for finding the minimal repro, it's slow and prints a lot.
     fn test_minimize_failing_nwa() {
+        let _guard = lock_dims();
         fn neg(x: Label) -> Label {
             Label::MIN + x
         }
@@ -2262,6 +2330,7 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_minimal_failing_nwa() {
+        let _guard = lock_dims();
         fn neg(x: Label) -> Label {
             Label::MIN + x
         }
@@ -2288,6 +2357,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_det_rustfst_simple_char() {
+        let _guard = lock_dims();
         let nwa = nwa_accepts_char('a', Weight::from_item(1));
         let dwa = nwa.determinize_to_dwa_with_rustfst();
         let expected = dwa_accepts_char('a', Weight::from_item(1));
@@ -2298,6 +2368,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_det_union_of_chars_rustfst() {
+        let _guard = lock_dims();
         // NWA for a|b
         let mut nwa = NWA::new();
         let s_a = nwa.states.add_state();
@@ -2328,6 +2399,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_det_nondeterminism_on_char_rustfst() {
+        let _guard = lock_dims();
         // NWA with two transitions on 'a'
         let mut nwa = NWA::new();
         let f1 = nwa.states.add_state();
@@ -2352,6 +2424,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_det_weight_partitioning_rustfst() {
+        let _guard = lock_dims();
         // NWA with overlapping weights on 'a'
         let mut nwa = NWA::new();
         let f1 = nwa.states.add_state();
@@ -2384,6 +2457,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_det_empty_nwa_rustfst() {
+        let _guard = lock_dims();
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Truly empty
         nwa.body.start_states.clear();
@@ -2397,6 +2471,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_det_accepts_nothing_rustfst() {
+        let _guard = lock_dims();
         let nwa = NWA::new(); // start state, but no transitions and not final
         let dwa = nwa.determinize_to_dwa_with_rustfst();
         let expected = DWA::new();
@@ -2407,6 +2482,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_det_accepts_empty_word_rustfst() {
+        let _guard = lock_dims();
         let mut nwa = NWA::new();
         nwa.states[nwa.body.start_states[0]].final_weight = Some(Weight::from_item(42));
         let dwa = nwa.determinize_to_dwa_with_rustfst();
@@ -2419,6 +2495,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_determinize_complex_nwa_from_template_rustfst() {
+        let _guard = lock_dims();
         fn neg(x: Label) -> Label {
             Label::MIN + x
         }
@@ -2521,6 +2598,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_determinize_minimal_failing_nwa_repro_rustfst() {
+        let _guard = lock_dims();
         fn neg(x: Label) -> Label {
             Label::MIN + x
         }
@@ -2588,6 +2666,7 @@ mod determinization_tests {
     #[ignore]
     #[test]
     fn test_determinize_minimal_failing_nwa_rustfst() {
+        let _guard = lock_dims();
         fn neg(x: Label) -> Label {
             Label::MIN + x
         }
@@ -2613,6 +2692,7 @@ mod determinization_tests {
 }
 #[test]
 fn test_dwa_roundtrip_minimal_repro() {
+    let _guard = lock_dims();
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -2693,6 +2773,7 @@ fn run_push_optimization_test(input: DWA, expected: DWA) {
 
 #[test]
 fn test_diamond_structure() {
+    let _guard = lock_dims();
     // Labels
     let l0: Label = 0;
     let l1: Label = 1;
@@ -2792,6 +2873,7 @@ fn test_diamond_structure() {
 /// and on that domain, S3 and S4 are equivalent (both produce [1,2] restricted to [1,2] = [1,2]).
 #[test]
 fn test_minimize_relaxed_merge_conditions() {
+    let _guard = lock_dims();
     // Build the DWA
     let mut d = DWA::new();
     let s1 = d.add_state();
@@ -2858,6 +2940,7 @@ fn test_minimize_relaxed_merge_conditions() {
 /// Additional test: states that should NOT be merged because targets differ on combined domain
 #[test] 
 fn test_minimize_no_false_merge_when_targets_differ() {
+    let _guard = lock_dims();
     // Structure similar to above, but targets ARE different on combined domain
     let mut d = DWA::new();
     let s1 = d.add_state();
@@ -2934,6 +3017,7 @@ fn test_minimize_no_false_merge_when_targets_differ() {
 /// - Path "d,b": [1] & [0] = [] (rejected, same as original) ✓
 #[test]
 fn test_minimize_cross_height_merge_opportunity() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -3023,6 +3107,7 @@ fn test_minimize_cross_height_merge_opportunity() {
 /// - Result: 3 states
 #[test]
 fn test_minimize_disjoint_paths_merge() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -3099,6 +3184,7 @@ fn test_minimize_disjoint_paths_merge() {
 /// merging without explicitly implementing cross-height comparisons.
 #[test]
 fn test_minimize_cross_height_via_relaxed_conditions() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -3183,6 +3269,7 @@ fn test_minimize_cross_height_via_relaxed_conditions() {
 /// Test basic path sampling on a simple linear DWA
 #[test]
 fn test_sample_paths_linear() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -3207,6 +3294,7 @@ fn test_sample_paths_linear() {
 /// Test path counting
 #[test]
 fn test_count_paths_simple() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -3226,6 +3314,7 @@ fn test_count_paths_simple() {
 /// Test path sampling distribution on a branching DWA
 #[test]
 fn test_sample_paths_uniform_distribution() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -3264,6 +3353,7 @@ fn test_sample_paths_uniform_distribution() {
 /// Test that start state can be final
 #[test]
 fn test_sample_paths_start_final() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     
@@ -3291,6 +3381,7 @@ fn test_sample_paths_start_final() {
 /// Test average path length estimation
 #[test]
 fn test_estimate_average_path_length() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -3311,6 +3402,7 @@ fn test_estimate_average_path_length() {
 /// Test comparison of exact vs estimated average path length
 #[test]
 fn test_average_path_length_exact_vs_estimated() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -3340,6 +3432,7 @@ fn test_average_path_length_exact_vs_estimated() {
 #[test]
 #[should_panic(expected = "sample_paths requires an acyclic DWA")]
 fn test_sample_paths_panics_on_cyclic() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     
@@ -3354,6 +3447,7 @@ fn test_sample_paths_panics_on_cyclic() {
 /// Test count_paths returns None for cyclic DWA
 #[test]
 fn test_count_paths_cyclic_returns_none() {
+    let _guard = lock_dims();
     let mut d = DWA::new();
     let s1 = d.add_state();
     
