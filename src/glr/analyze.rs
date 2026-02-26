@@ -1850,7 +1850,7 @@ pub fn merge_identical_nonterminals(
     result
 }
 
-pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
+pub fn inline_null_productions(productions: &[Production], new_name_gen: &mut impl FnMut(&str) -> String) -> Vec<Production> {
     if productions.is_empty() {
         return Vec::new();
     }
@@ -1864,6 +1864,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     
     let mut seen = BTreeSet::<Production>::new();
     let mut out = Vec::<Production>::new();
+    let mut concat_cache = BTreeMap::<Vec<Symbol>, NonTerminal>::new();
 
     for (i, prod) in productions.iter().enumerate() {
         // Count nullable symbols for this production
@@ -1881,37 +1882,61 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
                 i, nullable_count, nullable_count, 1usize << nullable_count.min(20), prod.lhs, prod.rhs);
         }
         
-        let rhs_variants: Vec<Vec<Symbol>> =
-            prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
-                let sym_options = match sym {
-                    Symbol::Terminal(_) => vec![Some(sym.clone())],
-                    Symbol::NonTerminal(nt) => match nullability.get(nt) {
-                        Some(Nullability::Null) => vec![None],
-                        Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
-                        _ => vec![Some(sym.clone())],
-                    },
-                };
+        if nullable_count >= 4 {
+            let (sym_opt, can_be_empty) = get_or_create_intermediate(
+                &prod.rhs,
+                &nullability,
+                new_name_gen,
+                &mut out,
+                &mut concat_cache,
+                &prod.lhs.0
+            );
+            
+            if let Some(sym) = sym_opt {
+                let new_prod = Production { lhs: prod.lhs.clone(), rhs: vec![sym] };
+                if seen.insert(new_prod.clone()) {
+                    out.push(new_prod);
+                }
+            }
+            if can_be_empty {
+                let new_prod = Production { lhs: prod.lhs.clone(), rhs: vec![] };
+                if seen.insert(new_prod.clone()) {
+                    out.push(new_prod);
+                }
+            }
+        } else {
+            let rhs_variants: Vec<Vec<Symbol>> =
+                prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                    let sym_options = match sym {
+                        Symbol::Terminal(_) => vec![Some(sym.clone())],
+                        Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                            Some(Nullability::Null) => vec![None],
+                            Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
+                            _ => vec![Some(sym.clone())],
+                        },
+                    };
 
-                acc.into_iter()
-                    .flat_map(|variant| {
-                        sym_options.iter().map(move |opt| {
-                            let mut new_variant = variant.clone();
-                            if let Some(s) = opt {
-                                new_variant.push(s.clone());
-                            }
-                            new_variant
+                    acc.into_iter()
+                        .flat_map(|variant| {
+                            sym_options.iter().map(move |opt| {
+                                let mut new_variant = variant.clone();
+                                if let Some(s) = opt {
+                                    new_variant.push(s.clone());
+                                }
+                                new_variant
+                            })
                         })
-                    })
-                    .collect()
-            });
+                        .collect()
+                });
 
-        for rhs in rhs_variants {
-            let new_prod = Production {
-                lhs: prod.lhs.clone(),
-                rhs,
-            };
-            if seen.insert(new_prod.clone()) {
-                out.push(new_prod);
+            for rhs in rhs_variants {
+                let new_prod = Production {
+                    lhs: prod.lhs.clone(),
+                    rhs,
+                };
+                if seen.insert(new_prod.clone()) {
+                    out.push(new_prod);
+                }
             }
         }
         
@@ -1927,6 +1952,86 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     out.into_iter()
         .filter(|p| !p.rhs.is_empty())
         .collect()
+}
+
+fn get_or_create_intermediate(
+    slice: &[Symbol],
+    nullability: &BTreeMap<NonTerminal, Nullability>,
+    new_name_gen: &mut impl FnMut(&str) -> String,
+    out: &mut Vec<Production>,
+    cache: &mut BTreeMap<Vec<Symbol>, NonTerminal>,
+    base_name: &str,
+) -> (Option<Symbol>, bool) {
+    let can_be_empty = slice.iter().all(|sym| {
+        if let Symbol::NonTerminal(nt) = sym {
+            matches!(nullability.get(nt), Some(Nullability::Nullable) | Some(Nullability::Null))
+        } else { false }
+    });
+    
+    let only_empty = slice.iter().all(|sym| {
+        if let Symbol::NonTerminal(nt) = sym {
+            matches!(nullability.get(nt), Some(Nullability::Null))
+        } else { false }
+    });
+    
+    if only_empty || slice.is_empty() { return (None, true); }
+    if let Some(nt) = cache.get(slice) { return (Some(Symbol::NonTerminal(nt.clone())), can_be_empty); }
+    
+    let nullable_count = slice.iter().filter(|sym| {
+        if let Symbol::NonTerminal(nt) = sym { matches!(nullability.get(nt), Some(Nullability::Nullable)) } else { false }
+    }).count();
+    
+    if nullable_count <= 1 || slice.len() <= 2 {
+        let variants: Vec<Vec<Symbol>> = slice.iter().fold(vec![vec![]], |acc, sym| {
+            let sym_options = match sym {
+                Symbol::Terminal(_) => vec![Some(sym.clone())],
+                Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                    Some(Nullability::Null) => vec![None],
+                    Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
+                    _ => vec![Some(sym.clone())],
+                },
+            };
+            acc.into_iter().flat_map(|variant| {
+                sym_options.clone().into_iter().map(move |opt| {
+                    let mut new_variant = variant.clone();
+                    if let Some(s) = &opt { new_variant.push(s.clone()); }
+                    new_variant
+                })
+            }).collect()
+        });
+        
+        let non_empty_variants: Vec<Vec<Symbol>> = variants.into_iter().filter(|v| !v.is_empty()).collect();
+        if non_empty_variants.is_empty() { return (None, can_be_empty); }
+        if non_empty_variants.len() == 1 && non_empty_variants[0].len() == 1 {
+            return (Some(non_empty_variants[0][0].clone()), can_be_empty);
+        }
+        
+        let new_nt_name = new_name_gen(base_name);
+        let new_nt = NonTerminal(new_nt_name);
+        for var in non_empty_variants { out.push(Production { lhs: new_nt.clone(), rhs: var }); }
+        cache.insert(slice.to_vec(), new_nt.clone());
+        return (Some(Symbol::NonTerminal(new_nt)), can_be_empty);
+    }
+    
+    let mid = slice.len() / 2;
+    let (left_sym, left_empty) = get_or_create_intermediate(&slice[..mid], nullability, new_name_gen, out, cache, base_name);
+    let (right_sym, right_empty) = get_or_create_intermediate(&slice[mid..], nullability, new_name_gen, out, cache, base_name);
+    
+    let mut non_empty_variants = Vec::new();
+    if let (Some(l), Some(r)) = (&left_sym, &right_sym) { non_empty_variants.push(vec![l.clone(), r.clone()]); }
+    if let Some(l) = &left_sym { if right_empty { non_empty_variants.push(vec![l.clone()]); } }
+    if let Some(r) = &right_sym { if left_empty { non_empty_variants.push(vec![r.clone()]); } }
+    
+    let mut unique_variants = Vec::new();
+    for v in non_empty_variants { if !unique_variants.contains(&v) { unique_variants.push(v); } }
+    if unique_variants.is_empty() { return (None, can_be_empty); }
+    if unique_variants.len() == 1 && unique_variants[0].len() == 1 { return (Some(unique_variants[0][0].clone()), can_be_empty); }
+    
+    let new_nt_name = new_name_gen(base_name);
+    let new_nt = NonTerminal(new_nt_name);
+    for var in unique_variants { out.push(Production { lhs: new_nt.clone(), rhs: var }); }
+    cache.insert(slice.to_vec(), new_nt.clone());
+    (Some(Symbol::NonTerminal(new_nt)), can_be_empty)
 }
 
 pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {

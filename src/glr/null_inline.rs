@@ -129,19 +129,19 @@ pub fn run_null_inline(
 ) -> Vec<Production> {
     match strategy {
         NullableInliningStrategy::Exhaustive => {
-            inline_null_productions(productions)
+            inline_null_productions(productions, new_name_gen)
         }
         NullableInliningStrategy::RightChain => {
             let preprocessed = preprocess_runs(productions, new_name_gen, 1, Direction::Right);
-            inline_null_productions(&preprocessed)
+            inline_null_productions(&preprocessed, new_name_gen)
         }
         NullableInliningStrategy::LeftChain => {
             let preprocessed = preprocess_runs(productions, new_name_gen, 1, Direction::Left);
-            inline_null_productions(&preprocessed)
+            inline_null_productions(&preprocessed, new_name_gen)
         }
         NullableInliningStrategy::BalancedTree(k) => {
             let preprocessed = preprocess_balanced_tree(productions, new_name_gen, *k);
-            inline_null_productions(&preprocessed)
+            inline_null_productions(&preprocessed, new_name_gen)
         }
     }
 }
