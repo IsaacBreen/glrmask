@@ -29,10 +29,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
 thread_local! {
     /// Maximum LLM token ID (internal). Set during constraint initialization.
-    /// Default is 1_000_000 — large enough for any LLM vocab while preventing
-    /// catastrophic memory blowup when Weight::all() is used without explicit
-    /// set_global_dims (e.g. in unit tests).
-    static MAX_LLM_TOKEN: Cell<usize> = Cell::new(1_000_000);
+    /// Default is usize::MAX for backwards compatibility.
+    static MAX_LLM_TOKEN: Cell<usize> = Cell::new(usize::MAX);
 
     /// Number of tokenizer states. Set during constraint initialization.
     /// Default is 1 for symbol-heavy mode.

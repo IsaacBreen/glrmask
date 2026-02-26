@@ -80,8 +80,6 @@ fn run_push_optimization_test(input: DWA, expected: DWA) {
 #[test]
 #[ignore = "This test requires weight pushing optimization which redistributes weights across the DWA. Our current minimization is more conservative and only merges states with identical outputs."]
 fn test_merge_branches() {
-    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    crate::datastructures::set_global_dims(1000, 1);
     let a: Label = 97;
     let b: Label = 98;
     let colon: Label = 58;
@@ -164,8 +162,6 @@ fn test_merge_branches() {
 #[test]
 #[ignore = "This test requires weight pushing optimization which redistributes weights across the DWA. Our current minimization is more conservative and only merges states with identical outputs."]
 fn test_field_name_optimization() {
-    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    crate::datastructures::set_global_dims(1000, 1);
     let num_fields = 5;
     let colon: Label = 58;
     let value: Label = 200;

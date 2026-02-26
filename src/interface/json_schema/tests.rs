@@ -361,7 +361,7 @@ mod tests {
     /// Test that WS (whitespace) is nullable - empty object should work.
     #[test]
     fn test_ebnf_ws_nullable() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let ebnf = indoc! {r#"
             root ::= '{' WS '}' ;
             WS ::= ( ' ' | '\t' | '\n' | '\r' )* ;
@@ -394,7 +394,7 @@ mod tests {
     /// Test that object member after open brace allows both whitespace and quote.
     #[test]
     fn test_ebnf_object_member_after_brace() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let ebnf = indoc! {r#"
             root ::= '{' WS member_opt WS '}' ;
             member_opt ::= ( member ( ',' WS member )* )? ;
@@ -429,7 +429,7 @@ mod tests {
     /// This test uses a minimal token map to clearly show the bug.
     #[test]
     fn test_small_vocab_only_brace_valid_at_start() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -591,7 +591,7 @@ mod tests {
     /// Test simple object schema without additionalProperties
     #[test]
     fn test_schema_simple_object() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_schema_simple_object_weight_heavy() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -666,7 +666,7 @@ mod tests {
     /// Test object with additionalProperties: true
     #[test]
     fn test_schema_additional_properties_true() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -687,7 +687,7 @@ mod tests {
     /// Test object with additionalProperties schema
     #[test]
     fn test_schema_additional_properties_schema() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -707,7 +707,7 @@ mod tests {
     /// Test dependencies schema (like package.json subset)
     #[test]
     fn test_schema_dependencies() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -731,7 +731,7 @@ mod tests {
     /// Test nested objects
     #[test]
     fn test_schema_nested_objects() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -754,7 +754,7 @@ mod tests {
     /// Test array schema
     #[test]
     fn test_schema_array() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "array",
             "items": {"type": "string"}
@@ -770,7 +770,7 @@ mod tests {
     /// Test mixed types (anyOf)
     #[test]
     fn test_schema_anyof() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "anyOf": [
                 {"type": "string"},
@@ -791,7 +791,7 @@ mod tests {
     /// Test enum
     #[test]
     fn test_schema_enum() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "enum": ["red", "green", "blue"]
         }"#;
@@ -806,7 +806,7 @@ mod tests {
     /// Test const
     #[test]
     fn test_schema_const() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "const": "fixed_value"
         }"#;
@@ -819,7 +819,7 @@ mod tests {
     /// Simpler reproduction case with minimal vocab.
     #[test]
     fn test_schema_const2() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "const": "x"
         }"#;
@@ -839,7 +839,7 @@ mod tests {
     /// Requires a valid GPT-2 vocab - will panic if not available.
     #[test]
     fn test_multibyte_tokens_simple_object() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -856,7 +856,7 @@ mod tests {
     /// Requires a valid GPT-2 vocab - will panic if not available.
     #[test]
     fn test_multibyte_tokens_additional_properties_true() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -882,7 +882,7 @@ mod tests {
     /// - Token 4895: `{"`
     #[test]
     fn test_object_schema_rejects_quote_at_empty_prefix() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -969,7 +969,7 @@ mod tests {
     
     #[test]
     fn test_conversion_simple_object() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "type": "object",
             "properties": {
@@ -986,7 +986,7 @@ mod tests {
 
     #[test]
     fn test_conversion_any_of() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "anyOf": [
                 {"type": "string"},
@@ -1001,7 +1001,7 @@ mod tests {
 
     #[test]
     fn test_conversion_enum() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r#"{
             "enum": ["red", "green", "blue"]
         }"#;
@@ -1014,7 +1014,7 @@ mod tests {
 
     #[test]
     fn test_conversion_ref() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
         let schema = r##"{
             "$defs": {
                 "person": {

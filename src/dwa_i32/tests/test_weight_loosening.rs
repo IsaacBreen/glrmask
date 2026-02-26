@@ -16,8 +16,6 @@ use crate::dwa_i32::common::Weight;
 /// Token 100 can reach state 2 but can't accept (100 not in [0,10]).
 #[test]
 fn test_weight_loosening_preserves_semantics() {
-    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    crate::datastructures::set_global_dims(1000, 1);
     let mut dwa = DWA::new();
     
     // State 0 is already created as start state
@@ -91,8 +89,6 @@ fn test_weight_loosening_preserves_semantics() {
 /// the forbidden-set approach.
 #[test]
 fn test_weight_loosening_loosens_unreachable() {
-    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    crate::datastructures::set_global_dims(1000, 1);
     let mut dwa = DWA::new();
     
     let s1 = dwa.add_state();
@@ -133,8 +129,6 @@ fn test_weight_loosening_loosens_unreachable() {
 /// Test that cyclic DWAs are skipped (returns false without modification).
 #[test]
 fn test_weight_loosening_skips_cyclic() {
-    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    crate::datastructures::set_global_dims(1000, 1);
     let mut dwa = DWA::new();
     
     let s1 = dwa.add_state();

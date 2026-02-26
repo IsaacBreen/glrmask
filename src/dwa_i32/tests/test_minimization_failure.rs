@@ -72,8 +72,6 @@ mod test_minimization_failure {
     #[ignore]
     #[test]
     fn test_rm_epsilon_effect_on_weights() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        crate::datastructures::set_global_dims(1000, 1);
         // Enable detailed debug output
         std::env::set_var("DETERMINIZE_DEBUG_VERBOSE", "1");
         
@@ -330,8 +328,6 @@ mod test_minimization_failure {
     #[ignore]
     #[test]
     fn test_weight_fragmentation_complex() {
-        let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        crate::datastructures::set_global_dims(1000, 1);
         // Create a diamond pattern that will show weight fragmentation
         //
         //    S0 (start)
