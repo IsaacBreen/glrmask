@@ -6723,7 +6723,7 @@ fn test_github_easy_o63377_false_positive_a() {
 
     let lark = indoc! {r#"
         JSON_STRING: "\"" "a"*
-        STR_TERM_0: /["a]*/
+        STR_TERM_0: ["a]*
         start: JSON_STRING "\"b" STR_TERM_0
     "#};
     let grammar_definition = GrammarDefinition::from_lark(lark).expect("from_lark");
