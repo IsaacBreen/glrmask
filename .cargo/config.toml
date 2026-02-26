@@ -1,5 +1,19 @@
 
 
+[profile.dev]
+opt-level = 0
+codegen-units = 256
+debug = 1               # Line tables only, reduces symbol generation time
+incremental = true
+split-debuginfo = "unpacked"
+
+[profile.test]
+opt-level = 0
+codegen-units = 256
+debug = 1
+incremental = true
+split-debuginfo = "unpacked"
+
 [profile.release]
 opt-level = 3
 lto = "off"
