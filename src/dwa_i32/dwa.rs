@@ -1010,17 +1010,30 @@ impl DWA {
 
 impl Display for DWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        fn format_weight_ranges(weight: &Weight) -> String {
+            let ranges: Vec<String> = weight
+                .to_rsb_allow_expansion()
+                .ranges()
+                .map(|r| format!("{}..={}", r.start(), r.end()))
+                .collect();
+            format!("[{}]", ranges.join(", "))
+        }
+
         writeln!(f, "DWA (start: {})", self.body.start_state)?;
         for (id, state) in self.states.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
-            if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", format_weight_ranges(w))?;
+            }
             for (on, to) in &state.transitions {
                 let w = state.trans_weights.get(on).cloned().unwrap_or_else(Weight::all);
-                if w.is_all_fast() {
-                    writeln!(f, "    {} -> {}", format_pos_code(*on), to)?;
-                } else {
-                    writeln!(f, "    {} -> {} (weight: {})", format_pos_code(*on), to, w)?;
-                }
+                writeln!(
+                    f,
+                    "    {} -> {} (weight: {})",
+                    format_pos_code(*on),
+                    to,
+                    format_weight_ranges(&w)
+                )?;
             }
         }
         Ok(())

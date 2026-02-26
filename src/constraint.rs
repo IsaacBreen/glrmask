@@ -79,6 +79,52 @@ fn count_dwa_ranges(dwa: &DWA) -> usize {
     unique_weights.iter().map(|w| w.ranges_len()).sum()
 }
 
+fn profile_terminal_automata_dump_enabled() -> bool {
+    match std::env::var("PROFILE_TERMINAL_DWA") {
+        Ok(value) => {
+            let normalized = value.trim();
+            normalized.is_empty()
+                || !(normalized == "0"
+                    || normalized.eq_ignore_ascii_case("false")
+                    || normalized.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => false,
+    }
+}
+
+fn format_terminal_for_debug(term: &Terminal) -> String {
+    match term {
+        Terminal::RegexName(name) => name.clone(),
+        Terminal::Literal(bytes) => {
+            if bytes.iter().all(|b| *b >= 0x20 && *b < 0x7f) {
+                format!("'{}'", String::from_utf8_lossy(bytes))
+            } else {
+                format!(
+                    "Lit[{}]",
+                    bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join("")
+                )
+            }
+        }
+    }
+}
+
+fn dump_terminal_id_map(parser: &GLRParser) {
+    println!("\n--- Terminal ID Map ---");
+    let mut entries: Vec<(usize, String)> = parser
+        .terminal_map
+        .iter()
+        .map(|(term, tid)| (tid.0, format_terminal_for_debug(term)))
+        .collect();
+    entries.sort_by_key(|(tid, _)| *tid);
+    for (tid, name) in entries {
+        println!("  {} -> {}", tid, name);
+    }
+}
+
 /// Compute the token partition that optimize_dwa_and_vocab would produce,
 /// without actually modifying anything.
 fn compute_dwa_partition(
@@ -1808,6 +1854,11 @@ impl GrammarConstraint {
             }
             mapping
         };
+
+        let dump_terminal_automata = profile_terminal_automata_dump_enabled();
+        if dump_terminal_automata {
+            dump_terminal_id_map(&parser);
+        }
         
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         crate::debug!(5, "run_precompute1: start");
@@ -3851,35 +3902,9 @@ impl GrammarConstraint {
         }
         // Normal mode: Skip vocab optimization on terminal_dwa (optimization happens on parser_dwa below)
 
-        // Profile-only early return after terminal DWA build.
-        if std::env::var("PROFILE_TERMINAL_DWA").is_ok() {
-            crate::debug!(4, "PROFILE_TERMINAL_DWA=1: returning after terminal DWA build");
-            let internal_to_original_sparse_matrix = StageVocab::build_internal_to_original_sparse_matrix(
-                &vocab.internal_to_original,
-                max_original_llm_token_id,
-                vocab.internal_max_llm_token,
-            );
-            vocab.max_original_llm_token_id = max_original_llm_token_id;
-            vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
-
-            let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
-            let eos_token_id = find_eos_token_id(&vocab_trie);
-
-            #[allow(deprecated)]
-            return GrammarConstraint {
-                tokenizer,
-                parser,
-                parser_dwa: terminal_dwa,
-                possible_matches: possible_matches_precompute1,
-                terminal_to_greedy_group: terminal_to_greedy_group.clone(),
-                vocab_trie,
-                commit_vocab,
-                token_name_map,
-                parser_dwa_vocab: vocab,
-                eos_token_id,
-                num_tsids,
-                tsid_offset_map,
-            };
+        if dump_terminal_automata {
+            println!("\n--- Terminal DWA ---");
+            println!("{}", terminal_dwa);
         }
 
         // Build Parser DWA

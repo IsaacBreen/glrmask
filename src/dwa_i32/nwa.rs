@@ -123,16 +123,35 @@ impl IndexMut<NWAStateID> for NWAStates {
 
 impl Display for NWAStates {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        fn format_weight_ranges(weight: &Weight) -> String {
+            let ranges: Vec<String> = weight
+                .to_rsb_allow_expansion()
+                .ranges()
+                .map(|r| format!("{}..={}", r.start(), r.end()))
+                .collect();
+            format!("[{}]", ranges.join(", "))
+        }
+
         writeln!(f, "NWAStates ({} states):", self.0.len())?;
         for (id, state) in self.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
-            if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", format_weight_ranges(w))?;
+            }
             for (on, targets) in &state.transitions {
                 for (to, w) in targets {
-                    writeln!(f, "    {} -> {} (weight: {})", format_i16_char(*on), to, w)?;
+                    writeln!(
+                        f,
+                        "    {} -> {} (weight: {})",
+                        format_i16_char(*on),
+                        to,
+                        format_weight_ranges(w)
+                    )?;
                 }
             }
-            for (to, w) in &state.epsilons { writeln!(f, "    ε -> {} (weight: {})", to, w)?; }
+            for (to, w) in &state.epsilons {
+                writeln!(f, "    ε -> {} (weight: {})", to, format_weight_ranges(w))?;
+            }
         }
         Ok(())
     }

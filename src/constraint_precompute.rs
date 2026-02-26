@@ -1262,6 +1262,22 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(3, "Terminal NWA: {}, num_tsids={}", 
                   self.nwa.stats(), self.num_tsids);
 
+        let dump_terminal_automata = match std::env::var("PROFILE_TERMINAL_DWA") {
+            Ok(value) => {
+                let normalized = value.trim();
+                normalized.is_empty()
+                    || !(normalized == "0"
+                        || normalized.eq_ignore_ascii_case("false")
+                        || normalized.eq_ignore_ascii_case("off"))
+            }
+            Err(_) => false,
+        };
+
+        if dump_terminal_automata {
+            println!("\n--- Terminal NWA (raw, before follow pruning / minimize / determinize) ---");
+            println!("{}", self.nwa);
+        }
+
         if self.nwa_rep_stats_enabled && !self.nwa_states_by_rep.is_empty() {
             let mut counts: Vec<(TokenizerStateID, usize)> = self
                 .nwa_states_by_rep
