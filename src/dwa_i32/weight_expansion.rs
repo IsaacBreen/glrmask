@@ -5,10 +5,7 @@
 // weight space itself).
 //
 // Weight space expansion: N (LLM tokens) -> N×M (LLM tokens × tokenizer states)
-// Layout: position = llm_token * M + tsid_offset
-// By default, tsid_offset == tsid. However, callers may provide a permutation
-// tsid_offset(tsid) to reduce RangeSet fragmentation (by making frequently-used
-// tsid groups contiguous in the offset space).
+// Layout: position = llm_token * M + tsid
 //
 // Note: A single LLM token active on ALL tsids uses just ONE range.
 
@@ -23,22 +20,6 @@ use super::nwa::NWA;
 use crate::datastructures::abstract_weight::{BackendChoice, current_backend_choice};
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::rangemap_weight::{RangeMapWeight, intern_rangemap};
-
-#[inline]
-fn tsid_to_offset(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
-    if let Some(map) = tsid_offset_map {
-        debug_assert!(tsid < map.len());
-        map[tsid]
-    } else {
-        tsid
-    }
-}
-
-/// Public version of tsid_to_offset for use outside this module.
-#[inline]
-pub fn tsid_to_offset_pub(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
-    tsid_to_offset(tsid, tsid_offset_map)
-}
 
 static PROFILE_WEIGHT_EXPANSION: Lazy<bool> = Lazy::new(|| {
     std::env::var("PROFILE_WEIGHT_EXPANSION")
@@ -124,44 +105,18 @@ pub fn expand_rsb_with_dims(rsb: &RangeSetBlaze<usize>, dims: crate::datastructu
 /// The mask has positions: tsid + n*M for n in 0..N
 /// This is equivalent to: all positions where position % M == tsid
 pub fn create_tsid_mask(tsid: usize, num_tsids: usize, max_llm_token: usize) -> Weight {
-    create_tsid_mask_with_offset_map(tsid, num_tsids, max_llm_token, None)
-}
-
-/// Create a tsid mask for a specific tokenizer state ID, using an optional tsid->offset map.
-///
-/// The mask has positions: off(tsid) + n*M for n in 0..N.
-/// This is equivalent to: all positions where (position % M) == off(tsid).
-pub fn create_tsid_mask_with_offset_map(
-    tsid: usize,
-    num_tsids: usize,
-    max_llm_token: usize,
-    tsid_offset_map: Option<&[usize]>,
-) -> Weight {
-    // For tsid off, we want positions: off, off+M, off+2M, ..., off+n*M where n <= max_llm_token
-    let off = tsid_to_offset(tsid, tsid_offset_map);
     let mut mask = RangeSetBlaze::new();
     for n in 0..=max_llm_token {
-        mask.insert(off + n * num_tsids);
+        mask.insert(tsid + n * num_tsids);
     }
     Weight::from_rsb(mask)
 }
 
 /// Create a tsid mask as a RangeSetBlaze.
 pub fn create_tsid_mask_rsb(tsid: usize, num_tsids: usize, max_llm_token: usize) -> RangeSetBlaze<usize> {
-    create_tsid_mask_rsb_with_offset_map(tsid, num_tsids, max_llm_token, None)
-}
-
-/// Create a tsid mask as a RangeSetBlaze, using an optional tsid->offset map.
-pub fn create_tsid_mask_rsb_with_offset_map(
-    tsid: usize,
-    num_tsids: usize,
-    max_llm_token: usize,
-    tsid_offset_map: Option<&[usize]>,
-) -> RangeSetBlaze<usize> {
-    let off = tsid_to_offset(tsid, tsid_offset_map);
     let mut mask = RangeSetBlaze::new();
     for n in 0..=max_llm_token {
-        mask.insert(off + n * num_tsids);
+        mask.insert(tsid + n * num_tsids);
     }
     mask
 }
@@ -182,19 +137,6 @@ pub fn create_tsid_set_mask<I>(tsids: I, num_tsids: usize, max_llm_token: usize)
 where
     I: IntoIterator<Item = usize>,
 {
-    create_tsid_set_mask_with_offset_map(tsids, num_tsids, max_llm_token, None)
-}
-
-/// Create a combined tsid mask for a set of tokenizer state IDs, using an optional tsid->offset map.
-pub fn create_tsid_set_mask_with_offset_map<I>(
-    tsids: I,
-    num_tsids: usize,
-    max_llm_token: usize,
-    tsid_offset_map: Option<&[usize]>,
-) -> Weight
-where
-    I: IntoIterator<Item = usize>,
-{
     let profile = weight_expansion_profile_enabled();
     let start = profile.then(Instant::now);
     let token_count = max_llm_token.saturating_add(1);
@@ -204,7 +146,7 @@ where
         .into_iter()
         .map(|t| {
             tsid_count += 1;
-            tsid_to_offset(t, tsid_offset_map)
+            t
         })
         .collect();
     let base_ranges_len = if profile { base_pattern.ranges().count() } else { 0 };
@@ -216,7 +158,7 @@ where
             if should_log_weight_expansion(elapsed) {
                 crate::debug!(
                     5,
-                    "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                    "create_tsid_set_mask: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
                     tsid_count,
                     num_tsids,
                     token_count,
@@ -236,7 +178,7 @@ where
             if should_log_weight_expansion(elapsed) {
                 crate::debug!(
                     5,
-                    "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                    "create_tsid_set_mask: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
                     tsid_count,
                     num_tsids,
                     token_count,
@@ -259,7 +201,7 @@ where
             if should_log_weight_expansion(elapsed) {
                 crate::debug!(
                     5,
-                    "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                    "create_tsid_set_mask: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
                     tsid_count,
                     num_tsids,
                     token_count,
@@ -278,7 +220,7 @@ where
             if should_log_weight_expansion(elapsed) {
                 crate::debug!(
                     5,
-                    "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                    "create_tsid_set_mask: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
                     tsid_count,
                     num_tsids,
                     token_count,
@@ -305,7 +247,7 @@ where
                     if should_log_weight_expansion(elapsed) {
                         crate::debug!(
                             5,
-                            "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                            "create_tsid_set_mask: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
                             tsid_count,
                             num_tsids,
                             token_count,
@@ -343,7 +285,7 @@ where
         if should_log_weight_expansion(elapsed) {
             crate::debug!(
                 5,
-                "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                "create_tsid_set_mask: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
                 tsid_count,
                 num_tsids,
                 token_count,
@@ -362,14 +304,13 @@ where
 pub fn create_tsid_set_mask_with_dims<I>(
     tsids: I,
     dims: crate::datastructures::WeightDimensions,
-    tsid_offset_map: Option<&[usize]>,
 ) -> Weight
 where
     I: IntoIterator<Item = usize>,
 {
     // max_llm_token is num_tokens - 1, or 0 if num_tokens is 0
     let max_llm_token = dims.num_tokens.saturating_sub(1);
-    create_tsid_set_mask_with_offset_map(tsids, dims.num_tsids, max_llm_token, tsid_offset_map)
+    create_tsid_set_mask(tsids, dims.num_tsids, max_llm_token)
 }
 
 /// Collapse a weight from N×M-space back to N-space.

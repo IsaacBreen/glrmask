@@ -24,7 +24,7 @@ use crate::glr::approximate_dfa::LazyApproximateDFA;
 use crate::glr::parser::GLRParser;
 use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
 use crate::dwa_i32::{DeterminizeAndMinimizeProfile, DWA, NWA, NWAStateID, Weight};
-use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask_with_offset_map};
+use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask};
 use crate::profiler::{self};
 use crate::interface::{prune_dwa_with_suffix_cache, prune_nwa_with_suffix_cache, SuffixParserCache};
 
@@ -695,8 +695,6 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) num_tsids: usize,
     // Max LLM token ID for creating tsid masks
     pub(crate) internal_max_llm_token: usize,
-    /// Optional tsid->offset mapping for weight-heavy encoding (empty = identity).
-    pub(crate) tsid_offset_map: Vec<usize>,
     expanded_all_weight: Weight,
     direct_insert: bool,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
@@ -717,7 +715,6 @@ impl<'r> Precomputer1<'r> {
         terminals_count: usize,
         state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
         num_tsids: usize,
-        tsid_offset_map: Vec<usize>,
         suffix_prune_cache: Option<Arc<SuffixParserCache>>,
         self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
         ignored_terminals: Arc<Vec<bool>>,
@@ -841,7 +838,6 @@ impl<'r> Precomputer1<'r> {
             expanded_rsb_value_cache: HashMap::new(),
             num_tsids,
             internal_max_llm_token,
-            tsid_offset_map,
             expanded_all_weight,
             direct_insert,
             suffix_prune_cache,
@@ -1139,12 +1135,6 @@ impl<'r> Precomputer1<'r> {
                 let mut group_count = 0usize;
                 let mut tsid_count = 0usize;
 
-                let tsid_offset_map = if self.tsid_offset_map.is_empty() {
-                    None
-                } else {
-                    Some(self.tsid_offset_map.as_slice())
-                };
-
                 // Create one epsilon transition per representative with combined tsid mask
                 for (rep_tsid, tsids) in rep_to_tsids {
                     debug_assert!(tsids.contains(&rep_tsid.0));
@@ -1153,15 +1143,11 @@ impl<'r> Precomputer1<'r> {
                         group_count += 1;
                         tsid_count += tsids.len();
                         // Create combined tsid mask for all tsids that map to this representative.
-                        // If we have a tsid->offset map, build the mask in the permuted offset space
-                        // (this can substantially reduce RangeSet fragmentation when representative
-                        // groups are scattered across the original tsid numbering).
                         let mask_start = std::time::Instant::now();
-                        let tsid_mask = create_tsid_set_mask_with_offset_map(
+                        let tsid_mask = create_tsid_set_mask(
                             tsids,
                             self.num_tsids,
                             self.internal_max_llm_token,
-                            tsid_offset_map,
                         );
                         mask_time += mask_start.elapsed();
                         for &state in states {
@@ -2303,7 +2289,6 @@ pub fn run_precompute1(
     internal_max_llm_token: usize,
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
-    tsid_offset_map: Vec<usize>,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ignored_terminals: Arc<Vec<bool>>,
@@ -2318,7 +2303,6 @@ pub fn run_precompute1(
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
-        tsid_offset_map,
         suffix_prune_cache,
         self_extending_labels_for_collapse,
         ignored_terminals,
@@ -2337,7 +2321,6 @@ pub fn run_precompute1_with_possible_matches(
     internal_max_llm_token: usize,
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
-    tsid_offset_map: Vec<usize>,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ignored_terminals: Arc<Vec<bool>>,
@@ -2370,7 +2353,7 @@ pub fn run_precompute1_with_possible_matches(
     if profile_minimize_only {
         crate::datastructures::factorized_weight::set_factorized_weight_profile_active(false);
     }
-    
+
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();
 
@@ -2389,7 +2372,6 @@ pub fn run_precompute1_with_possible_matches(
             terminals_count,
             state_to_rep,
             num_tsids,
-            tsid_offset_map,
             suffix_prune_cache,
             self_extending_labels_for_collapse,
             ignored_terminals,
@@ -2423,7 +2405,6 @@ pub(crate) fn run_precompute1_nwa_for_tests(
     internal_max_llm_token: usize,
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
-    tsid_offset_map: Vec<usize>,
 ) -> NWA {
     let num_tsids = if is_weight_heavy_enabled() {
         tokenizer.dfa().states.len()
@@ -2456,7 +2437,6 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         terminals_count,
         state_to_rep,
         num_tsids,
-        tsid_offset_map,
         None,
         None,
         ignored_terminals,

@@ -335,12 +335,6 @@ impl<'a> GrammarConstraintState<'a> {
             None
         };
 
-        let tsid_offset_map = if self.parent.tsid_offset_map.is_empty() {
-            None
-        } else {
-            Some(self.parent.tsid_offset_map.as_slice())
-        };
-
         // Queue: depth -> (dwa_state -> GSS with N×M-space Weight accumulators)
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, Weight>>> = BTreeMap::new();
 
@@ -356,11 +350,10 @@ impl<'a> GrammarConstraintState<'a> {
             let possible_matches = &self.parent.possible_matches;
 
             // Build tsid mask for this tokenizer state in N×M space
-            let tsid_mask = crate::dwa_i32::weight_expansion::create_tsid_set_mask_with_offset_map(
+            let tsid_mask = crate::dwa_i32::weight_expansion::create_tsid_set_mask(
                 std::iter::once(tokenizer_state_id.0),
                 num_tsids,
                 max_llm_token,
-                tsid_offset_map,
             );
 
             // Convert GSS accumulator (TerminalsDisallowed) to N×M-space Weight.

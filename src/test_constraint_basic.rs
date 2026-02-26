@@ -960,7 +960,6 @@ fn test_precompute_a_plus_tokenizer() {
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -1051,7 +1050,6 @@ fn test_precompute_x_eq() {
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -3431,7 +3429,6 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         0, // max internal token id
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -3504,7 +3501,6 @@ fn test_terminal_dwa_short_token_path_length_violation() {
         8, // max internal token id
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -3717,7 +3713,6 @@ TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
         8, // max internal token id
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -3860,7 +3855,6 @@ fn test_terminal_dwa_tilde_sequence_weights() {
         1, // max internal token id
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         Some(Arc::new(HashSet::from([tilde_label]))),
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -3945,7 +3939,6 @@ start ::= '~'+ ;
         1, // max internal token id
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         Some(Arc::new(HashSet::from([tilde_label]))),
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4057,7 +4050,6 @@ fn test_terminal_dwa_greedy_keywords_no_else_if_on_ei() {
         5, // max internal token id
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4196,7 +4188,6 @@ fn test_js_greedy_keywords_full_grammar() {
         vocab.len().saturating_sub(1),
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4277,7 +4268,6 @@ fn test_suffix_dfa_prunes_tilde_equals() {
         1,
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4370,7 +4360,6 @@ fn test_suffix_dfa_prunes_pow_assign_tilde_equals_tilde() {
         2,
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4442,7 +4431,6 @@ fn test_terminal_dwa_prunes_pow_assign_tilde_equals_tilde_default_precompute1() 
         0,
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         Some(suffix_prune_cache),
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4527,7 +4515,6 @@ fn test_weight_overapprox_simple() {
         9, // max internal token id
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -4660,7 +4647,6 @@ fn test_terminal_nwa_vs_dwa_overapprox_js() {
         8,
         terminals_count,
         state_to_rep.clone(),
-        (0..tokenizer.dfa().states.len()).collect(),
     );
 
     let terminal_dwa = run_precompute1(
@@ -4669,7 +4655,6 @@ fn test_terminal_nwa_vs_dwa_overapprox_js() {
         8,
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
@@ -5748,7 +5733,6 @@ fn test_suffix_grammar_validation() {
         2, // max token ID
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa().states.len()).collect(),
         None,
         None,
         std::sync::Arc::new(vec![false; terminals_count]),
