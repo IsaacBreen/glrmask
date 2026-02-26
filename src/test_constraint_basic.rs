@@ -6722,9 +6722,9 @@ fn test_github_easy_o63377_false_positive_a() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     let lark = indoc! {r#"
-        JSON_STRING: "\"" /[a]/*
+        JSON_STRING: "\"" "a"*
         STR_TERM_0: /["a]*/
-        start: JSON_STRING "\"b\":" STR_TERM_0
+        start: JSON_STRING "\"b" STR_TERM_0
     "#};
     let grammar_definition = GrammarDefinition::from_lark(lark).expect("from_lark");
 
