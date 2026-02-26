@@ -82,3 +82,11 @@ path = "src/bin/grammar_compiler.rs"
 name = "grammar-inference"
 path = "src/bin/inference_cli.rs"
 
+
+[profile.release]
+opt-level = 3
+lto = "off"
+codegen-units = 256
+debug = false
+incremental = true
+split-debuginfo = "unpacked"
