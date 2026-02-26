@@ -1312,6 +1312,49 @@ pub fn find_vocab_equivalence_classes_with_follow(
 
     let num_groups = pre.num_groups;
 
+    // Check if trie-based processing is enabled
+    let use_trie = std::env::var("USE_TRIE_EQUIV").is_ok();
+
+    // Build trie and precompute suffix hashes if using trie path
+    let trie = if use_trie {
+        let trie_start = std::time::Instant::now();
+        let t = VocabTrie::build(strings);
+        if is_debug_level_enabled(3) {
+            crate::debug!(
+                3,
+                "Built vocab trie: {} nodes from {} tokens in {:?}",
+                t.num_nodes(),
+                num_tokens,
+                trie_start.elapsed(),
+            );
+        }
+        Some(t)
+    } else {
+        None
+    };
+
+    // Precompute suffix hashes for all tokens if using trie path
+    let suffix_caches: Option<Vec<Vec<Option<u64>>>> = if use_trie {
+        let suffix_start = std::time::Instant::now();
+        let caches: Vec<Vec<Option<u64>>> = strings
+            .par_iter()
+            .map(|token| {
+                precompute_all_suffix_hashes(&pre, token, suffix_group_mask, group_to_class)
+            })
+            .collect();
+        if is_debug_level_enabled(3) {
+            crate::debug!(
+                3,
+                "Precomputed suffix hashes for {} tokens in {:?}",
+                num_tokens,
+                suffix_start.elapsed(),
+            );
+        }
+        Some(caches)
+    } else {
+        None
+    };
+
     // Process states in batches for memory efficiency.
     // Smaller batches improve cache locality for match_positions array
     // (batch_size * num_groups * 4 bytes per thread) and enable early pruning of singletons.
@@ -1344,9 +1387,24 @@ pub fn find_vocab_equivalence_classes_with_follow(
         let batch_end = (batch_start + batch_size).min(num_states);
         let batch = &reduced_initial_states[batch_start..batch_end];
 
-        // Compute partial signatures for active tokens in PARALLEL
+        // Compute partial signatures for active tokens
         let batch_start_time = Instant::now();
-        let active_sigs: Vec<(usize, u64)> = active_indices
+        let active_sigs: Vec<(usize, u64)> = if let (Some(ref trie), Some(ref suffix_caches)) = (&trie, &suffix_caches) {
+            // TRIE PATH: process states in parallel through the trie
+            compute_batch_signatures_trie(
+                trie,
+                &pre,
+                batch,
+                strings,
+                &active_indices,
+                suffix_caches,
+                ever_allowed_by_group,
+                group_to_class,
+                num_tokens,
+            )
+        } else {
+            // ORIGINAL PATH: process tokens in parallel
+            active_indices
             .par_iter()
             .map_init(
                 || {
@@ -1370,7 +1428,8 @@ pub fn find_vocab_equivalence_classes_with_follow(
                     (token_idx, sig)
                 },
             )
-            .collect();
+            .collect()
+        };
         let batch_compute_time = batch_start_time.elapsed();
 
         // Group by (old_class, new_signature) to refine partition
@@ -1466,6 +1525,496 @@ pub fn find_vocab_equivalence_classes_with_follow(
     }
 
     groups.into_values().collect()
+}
+
+// =============================================================================
+// TRIE-BASED BATCH SIGNATURE COMPUTATION
+// =============================================================================
+
+/// Compact byte-level trie for vocabulary prefix sharing.
+/// Reduces DFA transitions by ~69% by sharing work for common token prefixes.
+struct VocabTrie {
+    /// Flat array of trie nodes. Node 0 is the root.
+    nodes: Vec<TrieNode>,
+}
+
+struct TrieNode {
+    /// Children sorted by byte for deterministic traversal.
+    /// (byte, child_node_index)
+    children: SmallVec<[(u8, u32); 4]>,
+    /// Token index if this node is a leaf (complete token), else u32::MAX.
+    token_idx: u32,
+    /// Number of tokens reachable from this subtree (for active filtering).
+    subtree_size: u32,
+}
+
+impl VocabTrie {
+    fn build(tokens: &[Vec<u8>]) -> Self {
+        let mut nodes = Vec::with_capacity(tokens.len() * 2);
+        nodes.push(TrieNode {
+            children: SmallVec::new(),
+            token_idx: u32::MAX,
+            subtree_size: 0,
+        });
+
+        for (idx, token) in tokens.iter().enumerate() {
+            let mut current = 0u32;
+            for &byte in token {
+                let pos = nodes[current as usize]
+                    .children
+                    .iter()
+                    .position(|&(b, _)| b == byte);
+                current = match pos {
+                    Some(p) => nodes[current as usize].children[p].1,
+                    None => {
+                        let new_idx = nodes.len() as u32;
+                        nodes.push(TrieNode {
+                            children: SmallVec::new(),
+                            token_idx: u32::MAX,
+                            subtree_size: 0,
+                        });
+                        nodes[current as usize].children.push((byte, new_idx));
+                        new_idx
+                    }
+                };
+            }
+            nodes[current as usize].token_idx = idx as u32;
+        }
+
+        // Sort children by byte for deterministic ordering
+        for node in &mut nodes {
+            node.children.sort_unstable_by_key(|&(b, _)| b);
+        }
+
+        // Compute subtree sizes (post-order)
+        fn compute_subtree_size(nodes: &mut [TrieNode], idx: u32) -> u32 {
+            let has_token = if nodes[idx as usize].token_idx != u32::MAX { 1 } else { 0 };
+            let children: SmallVec<[(u8, u32); 4]> = nodes[idx as usize].children.clone();
+            let mut size = has_token;
+            for &(_, child_idx) in &children {
+                size += compute_subtree_size(nodes, child_idx);
+            }
+            nodes[idx as usize].subtree_size = size;
+            size
+        }
+        compute_subtree_size(&mut nodes, 0);
+
+        VocabTrie { nodes }
+    }
+
+    fn num_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+}
+
+/// Per-state match tracking using sparse representation.
+/// Only stores groups that actually matched, keeping save/restore cheap.
+#[derive(Clone)]
+struct SparseMatchState {
+    /// (group_id, position, is_non_greedy). Sorted by group_id.
+    entries: SmallVec<[(usize, u32, bool); 8]>,
+}
+
+impl SparseMatchState {
+    fn new() -> Self {
+        SparseMatchState {
+            entries: SmallVec::new(),
+        }
+    }
+
+    #[inline]
+    fn update(&mut self, gid: usize, position: u32, non_greedy: bool) {
+        match self.entries.binary_search_by_key(&gid, |&(g, _, _)| g) {
+            Ok(idx) => {
+                // Group already matched
+                if !non_greedy {
+                    // Greedy: update to latest position
+                    self.entries[idx].1 = position;
+                }
+                // Non-greedy: keep first match (do nothing)
+            }
+            Err(idx) => {
+                // New group match
+                self.entries.insert(idx, (gid, position, non_greedy));
+            }
+        }
+    }
+}
+
+/// Precomputed suffix hashes for all positions of a token.
+/// suffix_hashes[pos] = hash of suffix structure from position pos.
+struct TokenSuffixHashes {
+    /// Indexed by position (0..=token.len()). None if not computed.
+    hashes: Vec<Option<u64>>,
+    /// DAG nodes for projected hash computation.
+    nodes: Vec<Option<(u64, EdgeList)>>,
+}
+
+/// Precompute suffix hashes for ALL positions of a token.
+fn precompute_all_suffix_hashes(
+    pre: &PrecomputedDfa,
+    token: &[u8],
+    suffix_group_mask: Option<&[bool]>,
+    group_to_class: Option<&[usize]>,
+) -> Vec<Option<u64>> {
+    let len = token.len();
+    let all_positions: Vec<usize> = (0..=len).collect();
+
+    let mut scratch = SuffixScratch::new(pre.num_groups);
+    let mut cache: Vec<Option<u64>> = vec![None; len + 1];
+
+    compute_suffix_hashes_incremental(
+        pre,
+        token,
+        &all_positions,
+        &mut cache,
+        &mut scratch,
+        suffix_group_mask,
+        group_to_class,
+    );
+
+    cache
+}
+
+/// Process a single initial state through the trie via DFS.
+/// Returns partial signature (u64) for each token reached.
+fn dfs_single_state(
+    trie: &VocabTrie,
+    pre: &PrecomputedDfa,
+    initial_state: usize,
+    strings: &[Vec<u8>],
+    active: &[bool],
+    suffix_caches: &[Vec<Option<u64>>],
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
+    partial_sigs: &mut Vec<(u32, u64)>, // output: (token_idx, partial_sig)
+) {
+    let num_groups = pre.num_groups;
+    let use_projected = ever_allowed_by_group.is_some();
+
+    // Stack entry for DFS backtracking
+    struct Frame {
+        node_idx: u32,
+        dfa_state: usize,     // DFA state at this trie node
+        match_state: SparseMatchState,
+        child_idx: u16,        // next child to process
+        position: u32,         // byte position (depth in trie)
+    }
+
+    let root_state = initial_state;
+    let mut root_match = SparseMatchState::new();
+
+    // Check root finalizers (position 0)
+    if num_groups > 0 {
+        for f in &pre.finalizers[root_state] {
+            if f.gid < num_groups {
+                root_match.update(f.gid, 0, f.non_greedy);
+            }
+        }
+    }
+
+    // If root is a leaf (empty token)
+    let root_node = &trie.nodes[0];
+    let root_is_done = !pre.has_transitions[root_state];
+    if root_node.token_idx != u32::MAX {
+        let token_idx = root_node.token_idx;
+        if active[token_idx as usize] {
+            let completion_hash = if root_is_done {
+                pre.none_completion_hash
+            } else {
+                pre.completion_hash[root_state]
+            };
+            let sig = compute_state_leaf_sig_with_completion(
+                completion_hash, &root_match, &suffix_caches[token_idx as usize],
+                ever_allowed_by_group, group_to_class,
+            );
+            partial_sigs.push((token_idx, sig));
+        }
+    }
+
+    // Iterative DFS using explicit stack
+    let mut stack: Vec<Frame> = Vec::with_capacity(32);
+
+    if !root_node.children.is_empty() && pre.has_transitions[root_state] {
+        stack.push(Frame {
+            node_idx: 0,
+            dfa_state: root_state,
+            match_state: root_match.clone(),
+            child_idx: 0,
+            position: 0,
+        });
+    }
+
+    if root_is_done && !root_node.children.is_empty() {
+        // Root state has no transitions: emit terminated sigs for all tokens
+        emit_terminated_descendants(
+            trie, 0, pre, &root_match, active,
+            suffix_caches, ever_allowed_by_group, group_to_class,
+            partial_sigs,
+        );
+    }
+
+    while let Some(frame) = stack.last_mut() {
+        let node = &trie.nodes[frame.node_idx as usize];
+
+        if frame.child_idx as usize >= node.children.len() {
+            // All children processed, backtrack
+            stack.pop();
+            continue;
+        }
+
+        let (byte, child_idx) = node.children[frame.child_idx as usize];
+        frame.child_idx += 1;
+
+        // Transition
+        let next_state_raw = pre.transitions[frame.dfa_state][byte as usize];
+        if next_state_raw == NONE_STATE {
+            // Dead end: emit terminated signatures for the child and all descendants
+            let child_node_dead = &trie.nodes[child_idx as usize];
+            if child_node_dead.token_idx != u32::MAX {
+                let token_idx = child_node_dead.token_idx;
+                if active[token_idx as usize] {
+                    let sig = compute_state_leaf_sig_with_completion(
+                        pre.none_completion_hash, &frame.match_state,
+                        &suffix_caches[token_idx as usize],
+                        ever_allowed_by_group, group_to_class,
+                    );
+                    partial_sigs.push((token_idx, sig));
+                }
+            }
+            if !child_node_dead.children.is_empty() {
+                emit_terminated_descendants(
+                    trie, child_idx, pre, &frame.match_state, active,
+                    suffix_caches, ever_allowed_by_group, group_to_class,
+                    partial_sigs,
+                );
+            }
+            continue;
+        }
+        let next_state = next_state_raw as usize;
+
+        // Update match state with finalizers
+        let mut child_match = frame.match_state.clone();
+        let child_position = frame.position + 1;
+
+        if num_groups > 0 {
+            for f in &pre.finalizers[next_state] {
+                if f.gid < num_groups {
+                    child_match.update(f.gid, child_position, f.non_greedy);
+                }
+            }
+        }
+
+        let child_node = &trie.nodes[child_idx as usize];
+
+        // Check termination (guard masks)
+        let terminate = match &pre.future_modes[next_state] {
+            FutureMode::AlwaysTerminate => true,
+            FutureMode::AlwaysContinue => false,
+            FutureMode::Guarded(guard) => {
+                // Check if all guarded groups have been matched
+                guard.iter().all(|&gid| {
+                    child_match.entries.binary_search_by_key(&gid, |&(g, _, _)| g).is_ok()
+                })
+            }
+        };
+
+        // Determine whether this state is "done" (like the original code)
+        // Original: end_state = None when done[i] || !has_transitions[state]
+        let is_done = terminate || !pre.has_transitions[next_state];
+
+
+        // Emit leaf signature if this node has a token
+        if child_node.token_idx != u32::MAX {
+            let token_idx = child_node.token_idx;
+            if active[token_idx as usize] {
+                let completion_hash = if is_done {
+                    pre.none_completion_hash
+                } else {
+                    pre.completion_hash[next_state]
+                };
+                let sig = compute_state_leaf_sig_with_completion(
+                    completion_hash, &child_match,
+                    &suffix_caches[token_idx as usize],
+                    ever_allowed_by_group, group_to_class,
+                );
+                partial_sigs.push((token_idx, sig));
+            }
+        }
+
+        if is_done {
+            // State terminated: emit terminated signatures for ALL descendant
+            // tokens in the subtree. They get none_completion_hash + current match state.
+            if !child_node.children.is_empty() {
+                emit_terminated_descendants(
+                    trie, child_idx, pre, &child_match, active,
+                    suffix_caches, ever_allowed_by_group, group_to_class,
+                    partial_sigs,
+                );
+            }
+        } else if !child_node.children.is_empty() {
+            // Continue DFS with updated DFA state
+            stack.push(Frame {
+                node_idx: child_idx,
+                dfa_state: next_state,
+                match_state: child_match,
+                child_idx: 0,
+                position: child_position,
+            });
+        }
+    }
+}
+
+/// Emit terminated signatures for all descendant tokens in a trie subtree.
+/// When a DFA state terminates early, all tokens deeper in the trie get
+/// signatures with none_completion_hash and the match state at termination.
+fn emit_terminated_descendants(
+    trie: &VocabTrie,
+    node_idx: u32,
+    pre: &PrecomputedDfa,
+    match_state: &SparseMatchState,
+    active: &[bool],
+    suffix_caches: &[Vec<Option<u64>>],
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
+    partial_sigs: &mut Vec<(u32, u64)>,
+) {
+    // Iterative traversal of the subtree
+    let mut visit_stack: Vec<u32> = Vec::new();
+    let node = &trie.nodes[node_idx as usize];
+    for &(_, child_idx) in &node.children {
+        visit_stack.push(child_idx);
+    }
+    while let Some(idx) = visit_stack.pop() {
+        let n = &trie.nodes[idx as usize];
+        if n.token_idx != u32::MAX {
+            let token_idx = n.token_idx;
+            if active[token_idx as usize] {
+                let sig = compute_state_leaf_sig_with_completion(
+                    pre.none_completion_hash, match_state,
+                    &suffix_caches[token_idx as usize],
+                    ever_allowed_by_group, group_to_class,
+                );
+                partial_sigs.push((token_idx, sig));
+            }
+        }
+        for &(_, child_idx) in &n.children {
+            visit_stack.push(child_idx);
+        }
+    }
+}
+
+/// Compute the partial signature for a single state at a leaf node.
+#[inline]
+fn compute_state_leaf_sig_with_completion(
+    completion_hash: u64,
+    match_state: &SparseMatchState,
+    suffix_cache: &[Option<u64>],
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
+) -> u64 {
+    let mut hasher = new_hasher();
+    hasher.write_u64(completion_hash);
+
+    // Group match signatures
+    for &(gid, pos_val, _) in &match_state.entries {
+        if pos_val > 0 {
+            let target_hash = suffix_cache.get(pos_val as usize)
+                .and_then(|h| *h)
+                .unwrap_or(0);
+            hasher.write_u64(gid as u64);
+            hasher.write_u64(target_hash);
+        }
+    }
+
+    hasher.finish()
+}
+
+/// Dead-state signature for states that hit a dead end in the trie.
+fn compute_dead_state_sig(pre: &PrecomputedDfa) -> u64 {
+    let mut hasher = new_hasher();
+    hasher.write_u64(pre.none_completion_hash);
+    hasher.finish()
+}
+
+/// Compute batch signatures using trie-based prefix sharing.
+/// Each initial state is processed independently through the trie via DFS.
+/// Parallelism is over states (not tokens).
+fn compute_batch_signatures_trie(
+    trie: &VocabTrie,
+    pre: &PrecomputedDfa,
+    batch: &[usize],
+    strings: &[Vec<u8>],
+    active_indices: &[usize],
+    suffix_caches: &[Vec<Option<u64>>],
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
+    num_tokens: usize,
+) -> Vec<(usize, u64)> {
+    let batch_size = batch.len();
+
+    // Build active token bitset
+    let mut active = vec![false; num_tokens];
+    for &idx in active_indices {
+        active[idx] = true;
+    }
+
+    // Process each state through the trie in parallel
+    // Each thread collects (token_idx, partial_sig) pairs
+    let per_state_results: Vec<Vec<(u32, u64)>> = batch
+        .par_iter()
+        .map(|&initial_state| {
+            let mut partial_sigs = Vec::with_capacity(active_indices.len());
+            dfs_single_state(
+                trie,
+                pre,
+                initial_state,
+                strings,
+                &active,
+                suffix_caches,
+                ever_allowed_by_group,
+                group_to_class,
+                &mut partial_sigs,
+            );
+            partial_sigs
+        })
+        .collect();
+
+    // Combine per-state partial sigs into per-token full sigs
+    // Hash (state_idx, partial_sig) per entry, then sum — order-aware combination
+    let mut combined: Vec<u64> = vec![0; num_tokens];
+    for (state_idx, state_results) in per_state_results.iter().enumerate() {
+        for &(token_idx, partial_sig) in state_results {
+            let mut h = new_hasher();
+            h.write_u64(state_idx as u64);
+            h.write_u64(partial_sig);
+            combined[token_idx as usize] = combined[token_idx as usize].wrapping_add(h.finish());
+        }
+    }
+
+    // Handle tokens that weren't reached by ANY state (dead in all states)
+    let dead_sig = compute_dead_state_sig(pre);
+    let dead_combined = {
+        let mut h_total = 0u64;
+        for state_idx in 0..batch_size {
+            let mut h = new_hasher();
+            h.write_u64(state_idx as u64);
+            h.write_u64(dead_sig);
+            h_total = h_total.wrapping_add(h.finish());
+        }
+        h_total
+    };
+
+    // Collect results for active tokens
+    active_indices
+        .iter()
+        .map(|&token_idx| {
+            let sig = combined[token_idx];
+            // If sig is 0 (no state reached this token), use dead_combined
+            let final_sig = if sig == 0 { dead_combined } else { sig };
+            (token_idx, final_sig)
+        })
+        .collect()
 }
 
 // =============================================================================

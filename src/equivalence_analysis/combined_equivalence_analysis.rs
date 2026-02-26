@@ -119,7 +119,7 @@ pub fn compute_combined_equivalence(
             .iter()
             .map(|&s| std::iter::once(s).collect())
             .collect();
-        
+
         (initial_states.to_vec(), state_classes)
     };
 
