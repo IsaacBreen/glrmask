@@ -6730,7 +6730,7 @@ fn test_github_easy_o63377_false_positive_a() {
     let grammar_definition = GrammarDefinition::from_lark(lark).expect("from_lark");
 
     let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"b".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"c".to_vec(), LLMTokenID(0));
     let max_id = 0usize;
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
@@ -6745,5 +6745,5 @@ fn test_github_easy_o63377_false_positive_a() {
 
     let mask = state.get_mask();
 
-    assert!(!mask.contains(0), "Expected token 'b' (local_id=0) to be REJECTED at prefix='aa', but sep1 accepted it (false_positive).");
+    assert!(!mask.contains(0), "Expected token 'c' (local_id=0) to be REJECTED at prefix='aa', but sep1 accepted it (false_positive).");
 }
