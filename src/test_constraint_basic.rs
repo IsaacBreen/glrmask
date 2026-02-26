@@ -6752,5 +6752,5 @@ fn test_github_easy_o63377_false_positive_kward() {
 
     let mask = state.get_mask();
 
-    assert!(!mask.contains(3), "Expected token 'kward' (local_id=3) to be REJECTED at prefix='{\"last_update\":\"', but sep1 accepted it (false_positive).");
+    assert!(!mask.contains(3), "Expected token 'kward' (local_id=3) to be REJECTED at prefix='{{\"last_update\":\"', but sep1 accepted it (false_positive).");
 }
