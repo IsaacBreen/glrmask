@@ -5,7 +5,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fmt::{self, Debug, Display, Formatter},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use std::collections::BTreeMap as StdMap;
 
@@ -283,9 +283,33 @@ pub struct GrammarConstraint {
     /// Empty in symbol-heavy mode.
     #[serde(default)]
     pub state_to_internal_tsid: Vec<usize>,
+
+    /// Cached per-tsid masks for weight-heavy mode.
+    /// Indexed by internal_tsid (0..num_tsids).
+    /// Each mask has points: tsid + n*M for n in 0..=max_llm_token.
+    /// Initialized lazily on first use.
+    #[serde(skip)]
+    pub(crate) cached_tsid_masks: OnceLock<Vec<crate::dwa_i32::common::Weight>>,
 }
 
 impl GrammarConstraint {
+    /// Get the cached tsid mask for a given internal_tsid.
+    /// The mask has points: tsid + n * num_tsids for n in 0..=max_llm_token.
+    /// When terminals_disallowed is empty, the seed phase result is exactly this mask
+    /// (since expand(full_vocab) covers all N×M space, intersect with tsid_mask = tsid_mask).
+    pub(crate) fn get_tsid_mask(&self, internal_tsid: usize) -> &crate::dwa_i32::common::Weight {
+        let masks = self.cached_tsid_masks.get_or_init(|| {
+            let max_llm_token = self.parser_dwa_vocab.internal_max_llm_token;
+            let num_tsids = self.num_tsids;
+            (0..num_tsids)
+                .map(|tsid| {
+                    crate::dwa_i32::weight_expansion::create_tsid_mask(tsid, num_tsids, max_llm_token)
+                })
+                .collect()
+        });
+        &masks[internal_tsid]
+    }
+
     /// Save GrammarConstraint to a binary cache file using bincode + LZ4 compression.
     pub fn save_to_cache(&self, path: &std::path::Path) -> Result<(), String> {
         let bytes = bincode::serialize(self).map_err(|e| format!("bincode serialize error: {}", e))?;
@@ -415,6 +439,8 @@ struct GrammarConstraintJSON {
     max_orig_id: Option<usize>,
     /// Number of tsids for weight-heavy mode (0 = symbol-heavy)
     num_tsids: usize,
+    /// Mapping from raw tokenizer state ID to internal tsid index
+    state_to_internal_tsid: Vec<usize>,
 }
 
 impl JSONConvertible for GrammarConstraintJSON {
@@ -444,6 +470,14 @@ impl JSONConvertible for GrammarConstraintJSON {
         // num_tsids (0 = symbol-heavy, > 0 = weight-heavy)
         if self.num_tsids > 0 {
             obj.insert("num_tsids".to_string(), JSONNode::UInt(self.num_tsids as u128));
+        }
+
+        // state_to_internal_tsid
+        if !self.state_to_internal_tsid.is_empty() {
+            let arr: Vec<JSONNode> = self.state_to_internal_tsid.iter()
+                .map(|&v| JSONNode::UInt(v as u128))
+                .collect();
+            obj.insert("state_to_internal_tsid".to_string(), JSONNode::Array(arr));
         }
 
         JSONNode::Object(obj)
@@ -496,6 +530,19 @@ impl JSONConvertible for GrammarConstraintJSON {
                             _ => None,
                         })
                         .unwrap_or(0),
+                    state_to_internal_tsid: obj.get("state_to_internal_tsid")
+                        .and_then(|n| match n {
+                            JSONNode::Array(arr) => {
+                                let vals: Result<Vec<usize>, _> = arr.iter().map(|item| match item {
+                                    JSONNode::UInt(v) => Ok(*v as usize),
+                                    JSONNode::Int(v) => Ok(*v as usize),
+                                    _ => Err("Expected integer in state_to_internal_tsid"),
+                                }).collect();
+                                vals.ok()
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default(),
                 })
             }
             _ => Err("Expected object for GrammarConstraintJSON".to_string()),
@@ -521,6 +568,7 @@ impl JSONConvertible for GrammarConstraint {
             original_llm_vocab: None,
             max_orig_id: Some(self.parser_dwa_vocab.max_original_llm_token_id),
             num_tsids: self.num_tsids,
+            state_to_internal_tsid: self.state_to_internal_tsid.clone(),
         };
         intermediate.to_json()
     }
@@ -583,7 +631,8 @@ impl JSONConvertible for GrammarConstraint {
             parser_dwa_vocab: intermediate.vocab,
             eos_token_id,
             num_tsids: intermediate.num_tsids,
-            state_to_internal_tsid: vec![],  // Not available from JSON deserialization
+            state_to_internal_tsid: intermediate.state_to_internal_tsid,
+            cached_tsid_masks: OnceLock::new(),
         })
     }
 }
@@ -1572,20 +1621,37 @@ impl GrammarConstraint {
             internal_to_original_sparse_matrix: vec![],
         };
 
-        // Number of tokenizer states for weight-heavy encoding
+        // Number of tokenizer states for weight-heavy encoding.
+        // Always use representative count (internal tsid compression).
         let weight_heavy_enabled = crate::constraint_precompute::is_weight_heavy_enabled();
-        let original_num_tsids = tokenizer.dfa().states.len();
-        let use_rep_tsids = std::env::var("ENABLE_REP_TSID_COMPRESSION")
-            .map(|v| v == "1")
-            .unwrap_or(false);
         let num_tsids = if weight_heavy_enabled {
-            if use_rep_tsids {
-                representative_states.len()
-            } else {
-                original_num_tsids
-            }
+            representative_states.len()
         } else {
             0
+        };
+
+        // Build state_to_internal_tsid: raw tokenizer state ID → internal tsid (0..num_tsids-1)
+        // This MUST be built before precompute1 so the DWA weights use internal indices.
+        let mut state_to_internal_tsid: Vec<usize> = if weight_heavy_enabled {
+            let rep_to_internal: std::collections::HashMap<usize, usize> = representative_states
+                .iter()
+                .enumerate()
+                .map(|(idx, &rep)| (rep, idx))
+                .collect();
+            let num_raw_states = tokenizer.dfa().states.len();
+            let mut mapping = vec![0usize; num_raw_states];
+            for (&state, &rep) in &state_to_rep {
+                if let Some(&internal) = rep_to_internal.get(&rep.0) {
+                    if state.0 < num_raw_states {
+                        mapping[state.0] = internal;
+                    }
+                }
+            }
+            crate::debug!(3, "Built state_to_internal_tsid: {} raw states -> {} internal tsids",
+                num_raw_states, representative_states.len());
+            mapping
+        } else {
+            vec![]
         };
 
         // Set global dimensions for RangeSet operations (LLMTokenBV::max_ones(), etc.)
@@ -1676,7 +1742,7 @@ impl GrammarConstraint {
 
         // Pre-DWA dimension reordering: predict good token and tsid orderings
         // from possible_matches data, BEFORE building the terminal DWA.
-        // This makes the DWA weights naturally have fewer ranges.
+        // This permutes the internal tsid mapping and token IDs without touching the DFA.
         let pre_dwa_reorder_enabled = weight_heavy_enabled
             && std::env::var("ENABLE_PRE_DWA_REORDER")
                 .map(|v| v == "1")
@@ -1686,43 +1752,21 @@ impl GrammarConstraint {
             let reorder_start = std::time::Instant::now();
             crate::debug!(3, "Pre-DWA reorder: predicting orderings from possible_matches...");
 
-            let num_tok_states = tokenizer.dfa().states.len();
-            let (token_perm, mut tsid_perm) =
+            // Predict orderings operating on internal tsid space (0..num_tsids-1)
+            // and internal token space (0..max_internal_token)
+            let (token_perm, tsid_perm) =
                 crate::dwa_i32::reorder::predict_orderings_from_possible_matches(
                     &computed_possible_matches,
                     vocab.internal_max_llm_token,
-                    num_tok_states,
+                    num_tsids,
+                    &state_to_internal_tsid,
                 );
 
-            // Pin the tokenizer start state at position 0 to maintain invariants
-            let start_state = tokenizer.initial_state_id().0;
-            if tsid_perm[start_state] != 0 {
-                // Find which old state currently maps to position 0
-                let old_at_zero = tsid_perm.iter().position(|&p| p == 0).unwrap();
-                // Swap so start_state stays at position 0
-                tsid_perm[old_at_zero] = tsid_perm[start_state];
-                tsid_perm[start_state] = 0;
+            // Apply tsid permutation to state_to_internal_tsid values (no DFA reorder!)
+            // The tsid_perm operates on 0..num_tsids-1 (internal space).
+            for internal in state_to_internal_tsid.iter_mut() {
+                *internal = tsid_perm[*internal];
             }
-
-            // Apply tsid permutation: reorder tokenizer DFA states
-            tokenizer.reorder_states(&tsid_perm);
-
-            // Update state_to_rep with new state IDs
-            let mut new_state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-            for (old_state, old_rep) in &state_to_rep {
-                let new_state = TokenizerStateID(tsid_perm[old_state.0]);
-                let new_rep = TokenizerStateID(tsid_perm[old_rep.0]);
-                new_state_to_rep.insert(new_state, new_rep);
-            }
-            state_to_rep = new_state_to_rep;
-
-            // Update representative_states
-            representative_states = representative_states
-                .iter()
-                .map(|&s| tsid_perm[s])
-                .collect();
-            representative_states.sort_unstable();
-            representative_states.dedup();
 
             // Apply token permutation: remap internal token IDs
             let mut new_internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
@@ -1752,10 +1796,10 @@ impl GrammarConstraint {
             did_pre_dwa_reorder = true;
             crate::debug!(
                 3,
-                "Pre-DWA reorder complete in {:?} (tokens: {}, tsids: {})",
+                "Pre-DWA reorder complete in {:?} (tokens: {}, internal_tsids: {})",
                 reorder_start.elapsed(),
                 vocab.internal_max_llm_token + 1,
-                num_tok_states,
+                num_tsids,
             );
         }
 
@@ -1769,6 +1813,8 @@ impl GrammarConstraint {
                 vocab.internal_max_llm_token,
                 parser.terminal_map.len(),
                 state_to_rep.clone(),
+                num_tsids,
+                state_to_internal_tsid.clone(),
                 suffix_parser_cache.clone(),
                 self_extending_labels_for_collapse.clone(),
                 ignored_terminals.clone(),
@@ -3826,22 +3872,12 @@ impl GrammarConstraint {
             );
             crate::timing!("TIMING: terminal_dwa_reorder {:?}", reorder_start.elapsed());
 
-            // Apply tsid_perm to state_to_rep
-            let mut new_state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-            for (old_state, old_rep) in &state_to_rep {
-                // State IDs stay the same (raw tokenizer), but rep IDs get permuted
-                let new_rep = TokenizerStateID(tsid_perm[old_rep.0]);
-                new_state_to_rep.insert(*old_state, new_rep);
+            // Apply tsid_perm to state_to_internal_tsid values.
+            // tsid_perm operates on internal space (0..num_tsids-1).
+            // No state_to_rep or representative_states changes needed — those stay in raw state IDs.
+            for internal in state_to_internal_tsid.iter_mut() {
+                *internal = tsid_perm[*internal];
             }
-            state_to_rep = new_state_to_rep;
-
-            // Update representative_states with tsid_perm
-            representative_states = representative_states
-                .iter()
-                .map(|&s| tsid_perm[s])
-                .collect();
-            representative_states.sort_unstable();
-            representative_states.dedup();
 
             // Apply token_perm to internal_llm_token_map
             let mut new_internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
@@ -4031,8 +4067,9 @@ impl GrammarConstraint {
 
         // Check if weight-heavy mode is enabled via environment variable
         let weight_heavy = crate::constraint_precompute::is_weight_heavy_enabled();
+        // num_tsids uses the representative count (same as earlier in the build)
         let num_tsids = if weight_heavy {
-            tokenizer.dfa().states.len()
+            representative_states.len()
         } else {
             0
         };
@@ -4078,30 +4115,8 @@ impl GrammarConstraint {
             );
         }
 
-        // Build state_to_internal_tsid mapping: raw tokenizer state ID → internal tsid (0..num_reps-1)
-        // This compresses the tokenizer state space to only representative states.
-        let mut state_to_internal_tsid: Vec<usize> = if weight_heavy {
-            // Build rep → internal index mapping
-            let rep_to_internal: std::collections::HashMap<usize, usize> = representative_states
-                .iter()
-                .enumerate()
-                .map(|(idx, &rep)| (rep, idx))
-                .collect();
-            let num_raw_states = tokenizer.dfa().states.len();
-            let mut mapping = vec![0usize; num_raw_states];
-            for (&state, &rep) in &state_to_rep {
-                if let Some(&internal) = rep_to_internal.get(&rep.0) {
-                    if state.0 < num_raw_states {
-                        mapping[state.0] = internal;
-                    }
-                }
-            }
-            crate::debug!(3, "Built state_to_internal_tsid: {} raw states -> {} internal tsids",
-                num_raw_states, representative_states.len());
-            mapping
-        } else {
-            vec![]
-        };
+        // state_to_internal_tsid was already built before precompute1 and updated
+        // by terminal DWA reorder. No need to rebuild it here.
 
         // Post-DWA dimension reordering: permute token and tsid IDs to minimize
         // total range counts in the weight pool.
@@ -4207,6 +4222,7 @@ impl GrammarConstraint {
             eos_token_id,
             num_tsids,
             state_to_internal_tsid,
+            cached_tsid_masks: OnceLock::new(),
         }
     }
 

@@ -7,15 +7,24 @@ use crate::dwa_i32::common::{Label, StateID as WAStateID};
 
 use crate::datastructures::abstract_weight::AbstractWeight;
 use crate::dfa_u8::TokenizerStateID;
+use rustc_hash::FxHashMap as LocalFxHashMap;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::TerminalsDisallowed;
 
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
+
+// Persistent projection cache: maps (weight_arc_ptr, internal_tsid) → Arc<RangeSetBlaze<usize>>.
+// Thread-local to avoid synchronization. Persists across mask generations.
+thread_local! {
+    static PROJ_CACHE: std::cell::RefCell<LocalFxHashMap<(usize, usize), Arc<RangeSetBlaze<usize>>>> =
+        std::cell::RefCell::new(LocalFxHashMap::default());
+}
 
 // Benchmark mode for capturing Rust-native timings without Python overhead
 static BENCHMARK_MODE: AtomicBool = AtomicBool::new(false);
@@ -176,13 +185,49 @@ impl<'a> GrammarConstraintState<'a> {
     /// Expose compute_internal_mask for testing/debugging.
     #[cfg(test)]
     pub fn compute_internal_mask_debug(&self) -> RangeSet {
-        let (mask, _) = self.compute_internal_mask();
+        let (mask, _, _) = self.compute_internal_mask();
         mask
     }
-    
+
+    /// Pre-fill the thread-local projection cache for all DWA weights and all active TSIDs.
+    /// Call this after construction to move projection cost from first mask gen to build time.
+    pub fn warm_projection_cache(&self) {
+        let num_tsids = self.parent.num_tsids;
+        if num_tsids == 0 { return; }
+
+        let dwa = &self.parent.parser_dwa;
+
+        // Collect all unique (weight_ptr, tsid) pairs we'll need
+        for (&tokenizer_state_id, _) in &self.state {
+            let internal_tsid = self.parent.state_to_internal_tsid[tokenizer_state_id.0];
+
+            PROJ_CACHE.with(|c| {
+                let mut cache = c.borrow_mut();
+                for state in dwa.states.iter() {
+                    // Warm transition weights
+                    for (_, weight) in &state.trans_weights {
+                        let key = (weight.arc_ptr_key(), internal_tsid);
+                        cache.entry(key).or_insert_with(|| {
+                            let rs = weight.tokens_for_tsid_offset(internal_tsid, num_tsids);
+                            rs.inner.clone()
+                        });
+                    }
+                    // Warm final weight
+                    if let Some(fw) = &state.final_weight {
+                        let key = (fw.arc_ptr_key(), internal_tsid);
+                        cache.entry(key).or_insert_with(|| {
+                            let rs = fw.tokens_for_tsid_offset(internal_tsid, num_tsids);
+                            rs.inner.clone()
+                        });
+                    }
+                }
+            });
+        }
+    }
+
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
     /// This is the core computation shared by get_mask and fill_mask_i32.
-    fn compute_internal_mask(&self) -> (RangeSet, bool) {
+    fn compute_internal_mask(&self) -> (RangeSet, bool, bool) {
         let benchmark_enabled = BENCHMARK_MODE.load(Ordering::Relaxed);
         let mut final_mask_internal = RangeSet::zeros();
         let mut has_accepting = false;
@@ -193,7 +238,7 @@ impl<'a> GrammarConstraintState<'a> {
                 LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
                 LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
             }
-            return (final_mask_internal, has_accepting);
+            return (final_mask_internal, has_accepting, false);
         }
 
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
@@ -390,7 +435,7 @@ impl<'a> GrammarConstraintState<'a> {
             LAST_MASK_WL_EXPAND_COUNT.store(wl_expand_count, Ordering::Relaxed);
         }
 
-        (final_mask_internal, has_accepting)
+        (final_mask_internal, has_accepting, false)
     }
 
     /// Compute the internal mask using weight-heavy encoding.
@@ -401,7 +446,450 @@ impl<'a> GrammarConstraintState<'a> {
     /// - No tsid transitions at DWA start (all items start at the same start state)
     /// - GSS accumulators carry N×M-space Weight values throughout
     /// - Only collapsed to N-space (vocab) when collecting final mask
-    fn compute_internal_mask_weight_heavy(&self) -> (RangeSet, bool) {
+    fn compute_internal_mask_weight_heavy(&self) -> (RangeSet, bool, bool) {
+        // Projected N-space fast path: process each tokenizer state independently.
+        // Each state maps to a single TSID, so we project DWA weights to that TSID's
+        // column and work entirely in N-space (token-space). Results are unioned.
+        // This works for ANY number of states, not just 1.
+        if !self.state.is_empty() && self.parent.num_tsids > 0 {
+            let mut combined_mask = RangeSetBlaze::<usize>::new();
+            let mut has_accepting = false;
+            let mut is_complete_dwa = false;
+            let mut all_succeeded = true;
+            for (&tokenizer_state_id, glr_state) in &self.state {
+                if let Some((mask, acc, complete)) = self.compute_internal_mask_projected_for_state(tokenizer_state_id, glr_state) {
+                    combined_mask |= &*mask.inner;
+                    has_accepting |= acc;
+                    is_complete_dwa |= complete;
+                } else {
+                    all_succeeded = false;
+                    break;
+                }
+            }
+            if all_succeeded {
+                return (RangeSet::from(combined_mask), has_accepting, is_complete_dwa);
+            }
+        }
+        let (mask, acc) = self.compute_internal_mask_weight_heavy_nxm();
+        (mask, acc, false)
+    }
+
+    /// Fast path for weight-heavy mode: project a single tokenizer state to N-space.
+    ///
+    /// Instead of working in N×M space (which has ~800K positions and expensive
+    /// RangeMap intersections), this projects all DWA weights to the state's TSID
+    /// column and works entirely in N-space (token space, ~327 positions).
+    ///
+    /// Each DWA weight intersection becomes a simple RangeSetBlaze AND in token-space
+    /// instead of an N×M-space RangeMap merge. This reduces intersection cost from
+    /// ~5-10us to ~0.5us per operation.
+    ///
+    /// Called once per tokenizer state; results are unioned by the caller.
+    fn compute_internal_mask_projected_for_state(
+        &self,
+        tokenizer_state_id: TokenizerStateID,
+        glr_state: &GLRParserState<'_>,
+    ) -> Option<(RangeSet, bool, bool)> {
+        let benchmark_enabled = BENCHMARK_MODE.load(Ordering::Relaxed);
+        let num_tsids = self.parent.num_tsids;
+        if num_tsids == 0 { return None; }
+
+        let max_llm_token = self.parent.parser_dwa_vocab.internal_max_llm_token;
+        let mut final_mask_rsb = RangeSetBlaze::<usize>::new();
+        let mut has_accepting = false;
+
+        if glr_state.stack.is_empty() {
+            if benchmark_enabled {
+                LAST_MASK_SEED_TIME_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_EXPAND_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_INTERSECT_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_GSS_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_MERGE_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_FINAL_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_EXPAND_COUNT.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_FINAL_INTERSECT_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_FINAL_COLLAPSE_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_FINAL_COUNT.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_INTERSECT_COUNT.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_MAX_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_TOTAL_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_MAX_DWA_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_TOTAL_DWA_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+            }
+            return Some((RangeSet::from(final_mask_rsb), has_accepting, false));
+        }
+
+        let internal_tsid = self.parent.state_to_internal_tsid[tokenizer_state_id.0];
+        let dwa = &self.parent.parser_dwa;
+        let dwa_start_state_id = dwa.body.start_state;
+        let possible_matches = &self.parent.possible_matches;
+        let disable_disallowed_filter = std::env::var("DISABLE_TERMINALS_DISALLOWED_FILTER").is_ok();
+
+        // Projection cache lookup (uses module-level thread-local PROJ_CACHE).
+        let get_proj = |weight: &AbstractWeight| -> Arc<RangeSetBlaze<usize>> {
+            let key = (weight.arc_ptr_key(), internal_tsid);
+            PROJ_CACHE.with(|c| {
+                let mut cache = c.borrow_mut();
+                cache.entry(key).or_insert_with(|| {
+                    let rs = weight.tokens_for_tsid_offset(internal_tsid, num_tsids);
+                    rs.inner.clone()
+                }).clone()
+            })
+        };
+
+        let seed_start = if benchmark_enabled { Some(Instant::now()) } else { None };
+
+        // Seed: convert GSS TerminalsDisallowed → token-space RangeSetBlaze via apply_and_prune
+        let gss = glr_state.stack.clone();
+        let f = |terminals_disallowed: &TerminalsDisallowed| -> Option<RangeSetBlaze<usize>> {
+            if disable_disallowed_filter || terminals_disallowed.is_empty()
+                || terminals_disallowed.values().all(|s| s.is_empty())
+            {
+                return Some(RangeSetBlaze::from_iter([0..=max_llm_token]));
+            }
+            let mut allowed: RangeSetBlaze<usize> = RangeSetBlaze::from_iter([0..=max_llm_token]);
+            for (&ts_id, disallowed_in_state) in terminals_disallowed {
+                if disallowed_in_state.is_empty() { continue; }
+                if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
+                    for (terminal_id, llm_tokens) in state_matches {
+                        if disallowed_in_state.contains(&terminal_id.0) {
+                            allowed = &allowed - llm_tokens.inner.as_ref();
+                        }
+                    }
+                }
+            }
+            if allowed.is_empty() { return None; }
+            Some(allowed)
+        };
+        let weighted_gss: LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>> = gss.apply_and_prune(f);
+
+        if let Some(start) = seed_start {
+            LAST_MASK_SEED_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+
+        if weighted_gss.is_empty() {
+            if benchmark_enabled {
+                LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
+            }
+            return Some((RangeSet::from(final_mask_rsb), has_accepting, false));
+        }
+
+        // Check if DWA start state accepts at seed level (= is_complete for this TSID)
+        let mut is_complete_at_seed = false;
+        {
+            let dwa_start_state = &dwa.states[dwa_start_state_id];
+            if let Some(final_weight) = &dwa_start_state.final_weight {
+                if let Some(reduced_acc) = weighted_gss.reduce_acc() {
+                    let final_tokens = get_proj(final_weight);
+                    if !(&reduced_acc & &*final_tokens).is_empty() {
+                        is_complete_at_seed = true;
+                    }
+                }
+            }
+        }
+
+        // FAST PATH: Try to extract single path from seeded GSS → flat worklist
+        let single_path_result = weighted_gss.try_extract_single_path();
+        if let Some((edges, seed_acc)) = single_path_result {
+            let worklist_start = if benchmark_enabled { Some(Instant::now()) } else { None };
+            let mut worklist_iters: u64 = 0;
+            let mut wl_intersect_ns: u64 = 0;
+            let mut wl_intersect_count: u64 = 0;
+            let mut wl_final_intersect_ns: u64 = 0;
+            let mut wl_final_count: u64 = 0;
+            let mut wl_final_ns: u64 = 0;
+            let mut wl_max_weight_ranges: u64 = 0;
+            let mut wl_total_weight_ranges: u64 = 0;
+
+            // Flat worklist: iterate through DWA transitions following the extracted stack edges
+            let mut current_acc = seed_acc;
+            let mut current_wa_state_id = dwa_start_state_id;
+
+            for edge in &edges {
+                worklist_iters += 1;
+                let dwa_state = &dwa.states[current_wa_state_id];
+                let parser_state_id = edge.state_id.0 as Label;
+
+                // Check final weight
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                    let final_tokens = get_proj(final_weight);
+                    let final_result = &current_acc & &*final_tokens;
+                    if let Some(t0) = t0 {
+                        wl_final_intersect_ns += t0.elapsed().as_nanos() as u64;
+                        wl_final_count += 1;
+                        let nr = current_acc.ranges_len() as u64;
+                        wl_total_weight_ranges += nr;
+                        if nr > wl_max_weight_ranges { wl_max_weight_ranges = nr; }
+                    }
+                    if !final_result.is_empty() {
+                        has_accepting = true;
+                        final_mask_rsb |= final_result;
+                    }
+                    if let Some(t0) = t0 {
+                        wl_final_ns += t0.elapsed().as_nanos() as u64;
+                    }
+                }
+
+                // Process transitions (specific + default)
+                let mut next_state = None;
+                let mut next_acc = RangeSetBlaze::<usize>::new();
+
+                for (target_wa_state_id, trans_weight) in [
+                    dwa_state.get_transition(parser_state_id),
+                    dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL),
+                ].into_iter().flatten() {
+                    let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                    let trans_tokens = get_proj(trans_weight);
+                    let intersected = &current_acc & &*trans_tokens;
+                    if let Some(t0) = t0 {
+                        wl_intersect_ns += t0.elapsed().as_nanos() as u64;
+                        wl_intersect_count += 1;
+                    }
+                    if !intersected.is_empty() {
+                        if next_state.is_none() {
+                            next_state = Some(target_wa_state_id);
+                            next_acc = intersected;
+                        } else {
+                            // Multiple transitions hit — can't stay flat, bail to GSS path
+                            // This shouldn't happen often for single-path GSS
+                            next_acc |= intersected;
+                            // Keep the same target (they should match for single-path)
+                        }
+                    }
+                }
+
+                if let Some(ns) = next_state {
+                    current_acc = next_acc;
+                    current_wa_state_id = ns;
+                } else {
+                    break; // Dead end
+                }
+            }
+
+            // Handle final weight at the last DWA state
+            {
+                worklist_iters += 1;
+                let dwa_state = &dwa.states[current_wa_state_id];
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                    let final_tokens = get_proj(final_weight);
+                    let final_result = &current_acc & &*final_tokens;
+                    if let Some(t0) = t0 {
+                        wl_final_intersect_ns += t0.elapsed().as_nanos() as u64;
+                        wl_final_count += 1;
+                        let nr = current_acc.ranges_len() as u64;
+                        wl_total_weight_ranges += nr;
+                        if nr > wl_max_weight_ranges { wl_max_weight_ranges = nr; }
+                    }
+                    if !final_result.is_empty() {
+                        has_accepting = true;
+                        final_mask_rsb |= final_result;
+                    }
+                    if let Some(t0) = t0 {
+                        wl_final_ns += t0.elapsed().as_nanos() as u64;
+                    }
+                }
+            }
+
+            if let Some(start) = worklist_start {
+                LAST_MASK_WORKLIST_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+            if benchmark_enabled {
+                LAST_MASK_WORKLIST_ITER_COUNT.store(worklist_iters, Ordering::Relaxed);
+                LAST_MASK_WL_EXPAND_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_INTERSECT_NS.store(wl_intersect_ns, Ordering::Relaxed);
+                LAST_MASK_WL_GSS_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_MERGE_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_FINAL_NS.store(wl_final_ns, Ordering::Relaxed);
+                LAST_MASK_WL_EXPAND_COUNT.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_FINAL_INTERSECT_NS.store(wl_final_intersect_ns, Ordering::Relaxed);
+                // Marker: 888888 = flat single-path fast path
+                LAST_MASK_WL_FINAL_COLLAPSE_NS.store(888888, Ordering::Relaxed);
+                LAST_MASK_WL_FINAL_COUNT.store(wl_final_count, Ordering::Relaxed);
+                LAST_MASK_WL_INTERSECT_COUNT.store(wl_intersect_count, Ordering::Relaxed);
+                LAST_MASK_WL_MAX_WEIGHT_RANGES.store(wl_max_weight_ranges, Ordering::Relaxed);
+                LAST_MASK_WL_TOTAL_WEIGHT_RANGES.store(wl_total_weight_ranges, Ordering::Relaxed);
+                LAST_MASK_WL_MAX_DWA_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_TOTAL_DWA_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+            }
+
+            return Some((RangeSet::from(final_mask_rsb), has_accepting, is_complete_at_seed));
+        }
+
+        // FALLBACK: GSS-based worklist for multi-path stacks
+        // weighted_gss already seeded above
+        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
+        if !weighted_gss.is_empty() {
+            queue
+                .entry(weighted_gss.max_depth())
+                .or_default()
+                .entry(dwa_start_state_id)
+                .and_modify(|existing| *existing = existing.merge(&weighted_gss))
+                .or_insert(weighted_gss);
+        }
+
+        let worklist_start = if benchmark_enabled { Some(Instant::now()) } else { None };
+        let mut worklist_iters: u64 = 0;
+        let mut wl_expand_ns: u64 = 0;
+        let mut wl_intersect_ns: u64 = 0;
+        let mut wl_gss_ns: u64 = 0;
+        let mut wl_merge_ns: u64 = 0;
+        let mut wl_final_ns: u64 = 0;
+        let mut wl_expand_count: u64 = 0;
+        let mut wl_final_intersect_ns: u64 = 0;
+        let mut wl_final_collapse_ns: u64 = 0;
+        let mut wl_final_count: u64 = 0;
+        let mut wl_intersect_count: u64 = 0;
+        let mut wl_max_weight_ranges: u64 = 0;
+        let mut wl_total_weight_ranges: u64 = 0;
+        let mut wl_max_dwa_weight_ranges: u64 = 0;
+        let mut wl_total_dwa_weight_ranges: u64 = 0;
+
+        // Worklist loop — all operations in N-space (token space)
+        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+            for (current_wa_state_id, gss) in states_at_depth {
+                worklist_iters += 1;
+                let dwa_state = &dwa.states[current_wa_state_id];
+
+                // Check for final state — project final weight to this tsid
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    if let Some(reduced_acc) = gss.reduce_acc() {
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let final_tokens = get_proj(final_weight);
+                        let final_result = &reduced_acc & &*final_tokens;
+                        if let Some(t0) = t0 {
+                            wl_final_intersect_ns += t0.elapsed().as_nanos() as u64;
+                            wl_final_count += 1;
+                            let nr = reduced_acc.ranges_len() as u64;
+                            wl_total_weight_ranges += nr;
+                            if nr > wl_max_weight_ranges { wl_max_weight_ranges = nr; }
+                        }
+                        if !final_result.is_empty() {
+                            has_accepting = true;
+                            final_mask_rsb |= final_result;
+                        }
+                        if let Some(t0) = t0 {
+                            wl_final_ns += t0.elapsed().as_nanos() as u64;
+                        }
+                    }
+                }
+
+                // Process transitions — project transition weights to this tsid
+                // Collect results for balanced merge (avoids O(n²) sequential merge)
+                let mut deferred_results: Vec<(isize, WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>)> = Vec::new();
+                for peeked_edge in gss.peek() {
+                    let parser_state_id = peeked_edge.state_id.0 as Label;
+
+                    let mut process_transition = |target_wa_state_id: WAStateID, trans_weight: &AbstractWeight| {
+                        wl_expand_count += 1;
+
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let isolated_gss = gss.isolate(Some(peeked_edge));
+                        let popped_gss = isolated_gss.pop();
+                        if let Some(t0) = t0 {
+                            wl_gss_ns += t0.elapsed().as_nanos() as u64;
+                        }
+                        if popped_gss.is_empty() { return; }
+
+                        // Project transition weight to this tsid's token set (local cache)
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let trans_tokens = get_proj(trans_weight);
+                        let f = |acc: &RangeSetBlaze<usize>| {
+                            let new_acc = acc & &*trans_tokens;
+                            if new_acc.is_empty() { None } else { Some(new_acc) }
+                        };
+                        let final_gss = popped_gss.apply_and_prune(f);
+                        if let Some(t0) = t0 {
+                            wl_intersect_ns += t0.elapsed().as_nanos() as u64;
+                            wl_intersect_count += 1;
+                        }
+
+                        if !final_gss.is_empty() {
+                            deferred_results.push((final_gss.max_depth(), target_wa_state_id, final_gss));
+                        }
+                    };
+
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+                        process_transition(target_wa_state_id, trans_weight);
+                    }
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
+                        process_transition(target_wa_state_id, trans_weight);
+                    }
+                }
+
+                // Balanced merge: group by (depth, target_wa_state_id), then merge in pairs
+                {
+                    deferred_results.sort_by_key(|&(depth, wa, _)| (depth, wa));
+                    let mut i = 0;
+                    while i < deferred_results.len() {
+                        let key = (deferred_results[i].0, deferred_results[i].1);
+                        let start = i;
+                        while i < deferred_results.len() && (deferred_results[i].0, deferred_results[i].1) == key {
+                            i += 1;
+                        }
+                        // Balanced merge of deferred_results[start..i]
+                        let mut gsses: Vec<LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>> = 
+                            deferred_results[start..i].iter_mut().map(|(_, _, g)| std::mem::replace(g, LeveledGSS::empty())).collect();
+                        while gsses.len() > 1 {
+                            let mut next = Vec::with_capacity((gsses.len() + 1) / 2);
+                            let mut iter = gsses.into_iter();
+                            while let Some(a) = iter.next() {
+                                if let Some(b) = iter.next() {
+                                    next.push(a.merge(&b));
+                                } else {
+                                    next.push(a);
+                                }
+                            }
+                            gsses = next;
+                        }
+                        if let Some(merged) = gsses.into_iter().next() {
+                            let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                            queue
+                                .entry(key.0)
+                                .or_default()
+                                .entry(key.1)
+                                .and_modify(|existing| *existing = existing.merge(&merged))
+                                .or_insert(merged);
+                            if let Some(t0) = t0 {
+                                wl_merge_ns += t0.elapsed().as_nanos() as u64;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(start) = worklist_start {
+            LAST_MASK_WORKLIST_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        if benchmark_enabled {
+            LAST_MASK_WORKLIST_ITER_COUNT.store(worklist_iters, Ordering::Relaxed);
+            LAST_MASK_WL_EXPAND_NS.store(wl_expand_ns, Ordering::Relaxed);
+            LAST_MASK_WL_INTERSECT_NS.store(wl_intersect_ns, Ordering::Relaxed);
+            LAST_MASK_WL_GSS_NS.store(wl_gss_ns, Ordering::Relaxed);
+            LAST_MASK_WL_MERGE_NS.store(wl_merge_ns, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_NS.store(wl_final_ns, Ordering::Relaxed);
+            LAST_MASK_WL_EXPAND_COUNT.store(wl_expand_count, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_INTERSECT_NS.store(wl_final_intersect_ns, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_COLLAPSE_NS.store(999999, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_COUNT.store(wl_final_count, Ordering::Relaxed);
+            LAST_MASK_WL_INTERSECT_COUNT.store(wl_intersect_count, Ordering::Relaxed);
+            LAST_MASK_WL_MAX_WEIGHT_RANGES.store(wl_max_weight_ranges, Ordering::Relaxed);
+            LAST_MASK_WL_TOTAL_WEIGHT_RANGES.store(wl_total_weight_ranges, Ordering::Relaxed);
+            LAST_MASK_WL_MAX_DWA_WEIGHT_RANGES.store(wl_max_dwa_weight_ranges, Ordering::Relaxed);
+            LAST_MASK_WL_TOTAL_DWA_WEIGHT_RANGES.store(wl_total_dwa_weight_ranges, Ordering::Relaxed);
+        }
+
+        Some((RangeSet::from(final_mask_rsb), has_accepting, is_complete_at_seed))
+    }
+
+    /// Original N×M-space weight-heavy mask computation.
+    /// Used as fallback when the projected single-tsid fast path is not applicable.
+    fn compute_internal_mask_weight_heavy_nxm(&self) -> (RangeSet, bool) {
         use crate::dwa_i32::common::Weight;
 
         let benchmark_enabled = BENCHMARK_MODE.load(Ordering::Relaxed);
@@ -448,34 +936,41 @@ impl<'a> GrammarConstraintState<'a> {
             let gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
 
-            // Build tsid mask for this tokenizer state in N×M space
-            // Use internal tsid if mapping is available, otherwise raw state ID
-            let internal_tsid = if !self.parent.state_to_internal_tsid.is_empty() {
-                self.parent.state_to_internal_tsid[tokenizer_state_id.0]
-            } else {
-                tokenizer_state_id.0
-            };
-            let tsid_mask = crate::dwa_i32::weight_expansion::create_tsid_set_mask(
-                std::iter::once(internal_tsid),
-                num_tsids,
-                max_llm_token,
+            // Build tsid mask for this tokenizer state in N×M space.
+            // state_to_internal_tsid MUST be populated in weight-heavy mode.
+            assert!(
+                !self.parent.state_to_internal_tsid.is_empty(),
+                "state_to_internal_tsid is empty in weight-heavy mode! \
+                 This likely means the GrammarConstraint was deserialized without \
+                 including the tsid mapping. Rebuild the grammar or fix deserialization."
             );
+            let internal_tsid = self.parent.state_to_internal_tsid[tokenizer_state_id.0];
+            // Use cached tsid mask (avoids O(max_llm_token) insertions per call)
+            let tsid_mask = self.parent.get_tsid_mask(internal_tsid);
 
             // Convert GSS accumulator (TerminalsDisallowed) to N×M-space Weight.
             // Compute vocab-space allowed (same as symbol-heavy), expand to N×M,
             // intersect with this entry's tsid mask.
+            //
+            // OPTIMIZATION: When terminals_disallowed is empty (common case),
+            // allowed = full vocab, so expand(full_vocab) covers all of N×M space.
+            // Therefore expand(full_vocab) & tsid_mask == tsid_mask.
+            // We skip the expand + intersect and return tsid_mask directly.
             let f = |terminals_disallowed: &TerminalsDisallowed| {
-                // Start with all LLM tokens in vocab-space (same as symbol-heavy)
+                // Fast path: no terminals disallowed → result is just the tsid mask
+                if disable_disallowed_filter || terminals_disallowed.is_empty() || terminals_disallowed.values().all(|s| s.is_empty()) {
+                    return Some(tsid_mask.clone());
+                }
+
+                // Slow path: compute allowed set after removing disallowed terminals
                 let mut allowed: RangeSetBlaze<usize> = RangeSetBlaze::from_iter([0..=max_llm_token]);
 
-                if !disable_disallowed_filter {
-                    for (&ts_id, disallowed_in_state) in terminals_disallowed {
-                        if disallowed_in_state.is_empty() { continue; }
-                        if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
-                            for (terminal_id, llm_tokens) in state_matches {
-                                if disallowed_in_state.contains(&terminal_id.0) {
-                                    allowed = &allowed - llm_tokens.inner.as_ref();
-                                }
+                for (&ts_id, disallowed_in_state) in terminals_disallowed {
+                    if disallowed_in_state.is_empty() { continue; }
+                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
+                        for (terminal_id, llm_tokens) in state_matches {
+                            if disallowed_in_state.contains(&terminal_id.0) {
+                                allowed = &allowed - llm_tokens.inner.as_ref();
                             }
                         }
                     }
@@ -485,7 +980,7 @@ impl<'a> GrammarConstraintState<'a> {
                 // Expand from vocab-space (N) to N×M space
                 let expanded = crate::dwa_i32::weight_expansion::expand_rsb(&allowed, num_tsids);
                 // Convert to Weight and intersect with tsid mask
-                let weight = Weight::from_rsb(expanded) & &tsid_mask;
+                let weight = Weight::from_rsb(expanded) & tsid_mask;
                 if weight.is_empty() { None } else { Some(weight) }
             };
             let weighted_gss = gss.apply_and_prune(f);
@@ -649,7 +1144,7 @@ impl<'a> GrammarConstraintState<'a> {
     ///
     /// For zero-allocation mask filling, see `fill_mask_i32` and `fill_mask_i32_ptr`.
     pub fn get_mask(&self) -> Bitset {
-        let (final_mask_internal, _has_accepting) = if self.parent.num_tsids > 0 {
+        let (final_mask_internal, _has_accepting, is_complete_dwa) = if self.parent.num_tsids > 0 {
             // Weight-heavy mode: tsid encoded in N×M weights
             self.compute_internal_mask_weight_heavy()
         } else {
@@ -660,7 +1155,12 @@ impl<'a> GrammarConstraintState<'a> {
         if let Some(eos_id) = self.parent.eos_token_id {
             // Treat EOS as a reserved token: only allow it when the parse is complete.
             mask.remove(eos_id);
-            if self.is_complete() {
+            let is_complete = if self.parent.num_tsids > 0 {
+                is_complete_dwa
+            } else {
+                self.is_complete()
+            };
+            if is_complete {
                 mask.insert(eos_id);
             }
         }
@@ -707,7 +1207,7 @@ impl<'a> GrammarConstraintState<'a> {
         } else {
             None
         };
-        let (final_mask_internal, _has_accepting) = if self.parent.num_tsids > 0 {
+        let (final_mask_internal, _has_accepting, is_complete_dwa) = if self.parent.num_tsids > 0 {
             self.compute_internal_mask_weight_heavy()
         } else {
             self.compute_internal_mask()
@@ -738,7 +1238,14 @@ impl<'a> GrammarConstraintState<'a> {
             let bit_idx = eos_id % 32;
             if word_idx < out.len() {
                 out[word_idx] &= !(1i32 << bit_idx);
-                if self.is_complete() {
+                // Use DWA-based completion check (fast, avoids expensive to_stacks())
+                // Fall back to is_complete() for symbol-heavy mode where DWA info isn't available
+                let is_complete = if self.parent.num_tsids > 0 {
+                    is_complete_dwa
+                } else {
+                    self.is_complete()
+                };
+                if is_complete {
                     out[word_idx] |= 1i32 << bit_idx;
                 }
             }

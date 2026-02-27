@@ -1066,6 +1066,16 @@ impl AbstractWeight {
         }
     }
 
+    /// Returns a stable key derived from the Arc pointer, for use in local caches.
+    /// Falls back to 0 for non-Arc variants (RangeSet).
+    pub fn arc_ptr_key(&self) -> usize {
+        match self {
+            AbstractWeight::Factorized(arc) => Arc::as_ptr(arc) as usize,
+            AbstractWeight::RangeMap(arc) => Arc::as_ptr(arc) as usize,
+            AbstractWeight::RangeSet(_) => 0,
+        }
+    }
+
     /// Like `tokens_for_tsid_offset` but with per-weight caching.
     ///
     /// The cache is keyed by (weight pointer, tsid_offset) and is thread-local.

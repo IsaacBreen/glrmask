@@ -49,11 +49,7 @@ paper-open: paper ## Build and open paper
 
 ffi: ## Build the Python FFI binding (required for visualizations)
 	@if [ -z "$(SKIP_MATURIN)" ]; then \
-		if [ -d ".venv" ]; then \
-			cd python && unset CONDA_PREFIX && VIRTUAL_ENV=$(CURDIR)/.venv PATH=$(CURDIR)/.venv/bin:$$PATH RUSTFLAGS=-Awarnings maturin develop -r; \
-		else \
-			cd python && RUSTFLAGS=-Awarnings maturin develop -r; \
-		fi; \
+		cd python && RUSTFLAGS=-Awarnings maturin develop -r; \
 	else \
 		echo "Skipping maturin compilation (SKIP_MATURIN is set)"; \
 	fi
@@ -131,7 +127,7 @@ test-tsconfig: ffi ## Compile TSConfig schema
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
 		timeout $(TEST_TIMEOUT) $(PYTHON) scripts/test_json_schema.py
 
-PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
+PYTHON ?= python
 
 test-schema-id: ffi ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi

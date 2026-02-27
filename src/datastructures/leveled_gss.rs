@@ -3637,6 +3637,66 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         result
     }
 
+    /// Extract the single path from a GSS that has exactly one path.
+    /// Returns Some((edges_from_deep_to_shallow, bottom_accumulator)) if single path,
+    /// None if the GSS has multiple paths or is empty.
+    /// This is O(depth) with no allocations besides the Vec.
+    pub fn try_extract_single_path(&self) -> Option<(Vec<T>, A)> {
+        let mut edges = Vec::new();
+
+        match &*self.inner {
+            Upper::Branch(b) => {
+                if b.children.is_empty() {
+                    // Empty branch — return accumulator if present
+                    return b.empty.as_ref().map(|acc| (edges, acc.clone()));
+                }
+                if b.empty.is_some() || b.children.len() != 1 {
+                    return None; // multiple paths
+                }
+                let (edge, ordmap) = b.children.iter().next().unwrap();
+                if ordmap.len() != 1 { return None; }
+                let (_, upper_child) = ordmap.iter().next().unwrap();
+                edges.push(edge.clone());
+
+                match &**upper_child {
+                    Upper::Interface(iface) => {
+                        let acc = iface.acc.clone();
+                        let mut lower = &*iface.inner;
+                        loop {
+                            if lower.empty {
+                                if !lower.children.is_empty() { return None; }
+                                return Some((edges, acc));
+                            }
+                            if lower.children.len() != 1 { return None; }
+                            let (edge, ordmap) = lower.children.iter().next().unwrap();
+                            if ordmap.len() != 1 { return None; }
+                            let (_, lower_child) = ordmap.iter().next().unwrap();
+                            edges.push(edge.clone());
+                            lower = &**lower_child;
+                        }
+                    }
+                    Upper::Branch(_) => None,
+                }
+            }
+            Upper::Interface(iface) => {
+                let acc = iface.acc.clone();
+                let mut lower = &*iface.inner;
+                loop {
+                    if lower.empty {
+                        if !lower.children.is_empty() { return None; }
+                        return Some((edges, acc));
+                    }
+                    if lower.children.len() != 1 { return None; }
+                    let (edge, ordmap) = lower.children.iter().next().unwrap();
+                    if ordmap.len() != 1 { return None; }
+                    let (_, lower_child) = ordmap.iter().next().unwrap();
+                    edges.push(edge.clone());
+                    lower = &**lower_child;
+                }
+            }
+        }
+    }
+
     pub fn num_paths(&self) -> usize {
         self.paths_info().num_paths
     }

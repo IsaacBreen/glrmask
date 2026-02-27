@@ -691,10 +691,13 @@ pub(crate) struct Precomputer1<'r> {
     // Cache for expanded RangeSetBlaze weights (pointer-keyed, stable sets only)
     expanded_rsb_cache: HashMap<usize, Weight>,
     expanded_rsb_value_cache: HashMap<RangeSetBlaze<usize>, Weight>,
-    // Weight-heavy mode: number of tokenizer states
+    // Weight-heavy mode: number of internal tsids (representative count)
     pub(crate) num_tsids: usize,
     // Max LLM token ID for creating tsid masks
     pub(crate) internal_max_llm_token: usize,
+    // Mapping from raw tokenizer state ID -> internal tsid index (0..num_tsids-1)
+    // Used in weight-heavy mode to encode tsid dimension in DWA weights.
+    pub(crate) state_to_internal_tsid: Vec<usize>,
     expanded_all_weight: Weight,
     direct_insert: bool,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
@@ -715,6 +718,7 @@ impl<'r> Precomputer1<'r> {
         terminals_count: usize,
         state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
         num_tsids: usize,
+        state_to_internal_tsid: Vec<usize>,
         suffix_prune_cache: Option<Arc<SuffixParserCache>>,
         self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
         ignored_terminals: Arc<Vec<bool>>,
@@ -838,6 +842,7 @@ impl<'r> Precomputer1<'r> {
             expanded_rsb_value_cache: HashMap::new(),
             num_tsids,
             internal_max_llm_token,
+            state_to_internal_tsid,
             expanded_all_weight,
             direct_insert,
             suffix_prune_cache,
@@ -1122,11 +1127,13 @@ impl<'r> Precomputer1<'r> {
                     transitions_added, unique_targets.len());
             } else {
                 // Weight-heavy mode: create epsilon transitions with tsid-masked weights.
-                // Group tsids by their representative to call create_tsid_set_mask once per group.
+                // Use INTERNAL tsid indices (0..num_tsids-1) for the weight encoding,
+                // not original/raw tokenizer state IDs.
+                // Group raw tsids by representative, then use the single internal index per group.
                 let group_start = std::time::Instant::now();
-                let mut rep_to_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
+                let mut rep_to_raw_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
                 for (tsid, rep_tsid) in &self.state_to_rep {
-                    rep_to_tsids.entry(*rep_tsid).or_default().push(tsid.0);
+                    rep_to_raw_tsids.entry(*rep_tsid).or_default().push(tsid.0);
                 }
                 let group_time = group_start.elapsed();
 
@@ -1135,17 +1142,19 @@ impl<'r> Precomputer1<'r> {
                 let mut group_count = 0usize;
                 let mut tsid_count = 0usize;
 
-                // Create one epsilon transition per representative with combined tsid mask
-                for (rep_tsid, tsids) in rep_to_tsids {
-                    debug_assert!(tsids.contains(&rep_tsid.0));
+                // Create one epsilon transition per representative with internal-tsid mask.
+                // All raw states in the same equivalence class map to the same internal index.
+                for (rep_tsid, raw_tsids) in rep_to_raw_tsids {
+                    debug_assert!(raw_tsids.contains(&rep_tsid.0));
                     let root_key = DfsKey::new(rep_tsid);
                     if let Some(states) = self.roots.get(&root_key) {
                         group_count += 1;
-                        tsid_count += tsids.len();
-                        // Create combined tsid mask for all tsids that map to this representative.
+                        tsid_count += raw_tsids.len();
+                        // Use the internal tsid index (same for all raw tsids in this group)
+                        let internal_idx = self.state_to_internal_tsid[rep_tsid.0];
                         let mask_start = std::time::Instant::now();
                         let tsid_mask = create_tsid_set_mask(
-                            tsids,
+                            std::iter::once(internal_idx),
                             self.num_tsids,
                             self.internal_max_llm_token,
                         );
@@ -2297,12 +2306,36 @@ pub fn run_precompute1(
     ever_allowed_by_label: Arc<Vec<Vec<Label>>>,
     terminal_to_greedy_group: Vec<Option<usize>>,
 ) -> DWA {
+    // Compute num_tsids and state_to_internal_tsid from state_to_rep
+    let (num_tsids, state_to_internal_tsid) = if is_weight_heavy_enabled() {
+        let mut representatives: Vec<usize> = state_to_rep.values().map(|r| r.0).collect();
+        representatives.sort_unstable();
+        representatives.dedup();
+        let rep_count = representatives.len();
+        let rep_to_internal: std::collections::HashMap<usize, usize> = representatives
+            .iter().enumerate().map(|(i, &r)| (r, i)).collect();
+        let num_raw_states = tokenizer.dfa().states.len();
+        let mut mapping = vec![0usize; num_raw_states];
+        for (&state, &rep) in &state_to_rep {
+            if let Some(&internal) = rep_to_internal.get(&rep.0) {
+                if state.0 < num_raw_states {
+                    mapping[state.0] = internal;
+                }
+            }
+        }
+        (rep_count, mapping)
+    } else {
+        (0, vec![])
+    };
+
     run_precompute1_with_possible_matches(
         tokenizer,
         internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
+        num_tsids,
+        state_to_internal_tsid,
         suffix_prune_cache,
         self_extending_labels_for_collapse,
         ignored_terminals,
@@ -2321,6 +2354,8 @@ pub fn run_precompute1_with_possible_matches(
     internal_max_llm_token: usize,
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
+    num_tsids: usize,
+    state_to_internal_tsid: Vec<usize>,
     suffix_prune_cache: Option<Arc<SuffixParserCache>>,
     self_extending_labels_for_collapse: Option<Arc<HashSet<Label>>>,
     ignored_terminals: Arc<Vec<bool>>,
@@ -2333,13 +2368,6 @@ pub fn run_precompute1_with_possible_matches(
     BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>,
 ) {
     let _ = allowed_follows_by_label;
-
-    // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
-    let num_tsids = if is_weight_heavy_enabled() {
-        tokenizer.dfa().states.len()
-    } else {
-        0
-    };
 
     // Ensure global dimensions are set when run_precompute1 is called directly (e.g., tests).
     crate::datastructures::set_global_dims_all_threads(
@@ -2372,6 +2400,7 @@ pub fn run_precompute1_with_possible_matches(
             terminals_count,
             state_to_rep,
             num_tsids,
+            state_to_internal_tsid,
             suffix_prune_cache,
             self_extending_labels_for_collapse,
             ignored_terminals,
@@ -2406,10 +2435,26 @@ pub(crate) fn run_precompute1_nwa_for_tests(
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
 ) -> NWA {
-    let num_tsids = if is_weight_heavy_enabled() {
-        tokenizer.dfa().states.len()
+    // Compute num_tsids and state_to_internal_tsid from state_to_rep
+    let (num_tsids, state_to_internal_tsid) = if is_weight_heavy_enabled() {
+        let mut representatives: Vec<usize> = state_to_rep.values().map(|r| r.0).collect();
+        representatives.sort_unstable();
+        representatives.dedup();
+        let rep_count = representatives.len();
+        let rep_to_internal: std::collections::HashMap<usize, usize> = representatives
+            .iter().enumerate().map(|(i, &r)| (r, i)).collect();
+        let num_raw_states = tokenizer.dfa().states.len();
+        let mut mapping = vec![0usize; num_raw_states];
+        for (&state, &rep) in &state_to_rep {
+            if let Some(&internal) = rep_to_internal.get(&rep.0) {
+                if state.0 < num_raw_states {
+                    mapping[state.0] = internal;
+                }
+            }
+        }
+        (rep_count, mapping)
     } else {
-        0
+        (0, vec![])
     };
 
     crate::datastructures::set_global_dims_all_threads(
@@ -2437,6 +2482,7 @@ pub(crate) fn run_precompute1_nwa_for_tests(
         terminals_count,
         state_to_rep,
         num_tsids,
+        state_to_internal_tsid,
         None,
         None,
         ignored_terminals,

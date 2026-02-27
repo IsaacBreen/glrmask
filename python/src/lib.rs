@@ -1442,7 +1442,7 @@ pub struct PyGrammarConstraintState {
 impl PyGrammarConstraintState {
     #[new]
     fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
-        Ok(PyGrammarConstraintState {
+        let result = PyGrammarConstraintState {
             inner: PyGrammarConstraintStateWrapperTryBuilder {
                 constraint,
                 inner_builder: |c: &PyGrammarConstraint| {
@@ -1451,7 +1451,10 @@ impl PyGrammarConstraintState {
                 },
             }
             .try_build()?,
-        })
+        };
+        // Pre-fill the projection cache so the first mask gen doesn't pay the cost.
+        result.inner.with_inner(|state| state.warm_projection_cache());
+        Ok(result)
     }
 
     fn clone(&self) -> Self {
