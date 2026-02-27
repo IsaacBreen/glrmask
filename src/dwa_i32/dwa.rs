@@ -696,83 +696,69 @@ impl DWA {
     /// 
     /// If the same Arc<RangeSetBlaze> appears multiple times (across weights or
     /// within a weight's structure), it is only counted once.
+    ///
+    /// For RangeMap weights, we also count the outer RangeMapBlaze range entries
+    /// (deduped by Arc<RangeMapWeight> pointer) since these represent the outer
+    /// dimension fragmentation.
     pub fn num_ranges_interned(&self) -> usize {
-        use std::collections::HashSet;
-        // Track unique RangeSet Arc pointers (not weight values!)
-        let mut seen_pointers: HashSet<usize> = HashSet::new();
-        
-        // First pass: collect all unique interned RangeSet pointers
-        for state in &self.states.0 {
-            if let Some(fw) = &state.final_weight {
-                fw.collect_interned_rangesets(&mut seen_pointers);
-            }
-            for w in state.trans_weights.values() {
-                w.collect_interned_rangesets(&mut seen_pointers);
-            }
-        }
-        
-        // Second pass: sum ranges for each unique pointer
-        // We need to revisit the weights to get the actual range counts
-        let mut counted_pointers: HashSet<usize> = HashSet::new();
-        let mut total = 0;
-        
-        for state in &self.states.0 {
-            if let Some(fw) = &state.final_weight {
-                total += Self::count_ranges_for_weight(fw, &seen_pointers, &mut counted_pointers);
-            }
-            for w in state.trans_weights.values() {
-                total += Self::count_ranges_for_weight(w, &seen_pointers, &mut counted_pointers);
-            }
-        }
-        
-        total
-    }
-    
-    /// Helper to count ranges for a weight, only counting each unique interned RangeSet once.
-    fn count_ranges_for_weight(
-        w: &Weight, 
-        _all_pointers: &std::collections::HashSet<usize>,
-        counted: &mut std::collections::HashSet<usize>,
-    ) -> usize {
         use crate::datastructures::AbstractWeight;
+        use std::collections::HashSet;
         use std::sync::Arc;
-        
-        match w {
-            AbstractWeight::RangeSet(rsb) => {
-                let ptr = Arc::as_ptr(&rsb.inner) as usize;
-                if counted.insert(ptr) {
-                    rsb.ranges_len()
-                } else {
-                    0
+
+        let mut seen_weight_ptrs: HashSet<usize> = HashSet::new();
+        let mut seen_rangeset_ptrs: HashSet<usize> = HashSet::new();
+        let mut total_outer_ranges = 0usize;
+        let mut total_inner_ranges = 0usize;
+
+        let mut process_weight = |w: &Weight| {
+            match w {
+                AbstractWeight::RangeSet(rsb) => {
+                    let ptr = Arc::as_ptr(&rsb.inner) as usize;
+                    if seen_rangeset_ptrs.insert(ptr) {
+                        total_inner_ranges += rsb.ranges_len();
+                    }
+                }
+                AbstractWeight::Factorized(fw) => {
+                    for (tsid_set, token_set) in &fw.pairs {
+                        let ptr1 = Arc::as_ptr(&tsid_set.inner) as usize;
+                        let ptr2 = Arc::as_ptr(&token_set.inner) as usize;
+                        if seen_rangeset_ptrs.insert(ptr1) {
+                            total_inner_ranges += tsid_set.ranges_len();
+                        }
+                        if seen_rangeset_ptrs.insert(ptr2) {
+                            total_inner_ranges += token_set.ranges_len();
+                        }
+                    }
+                }
+                AbstractWeight::RangeMap(rm) => {
+                    let weight_ptr = Arc::as_ptr(rm) as usize;
+                    if seen_weight_ptrs.insert(weight_ptr) {
+                        // Count outer RangeMapBlaze range entries (once per unique weight)
+                        total_outer_ranges += rm.map.range_values().count();
+                    }
+                    // Count inner RangeSets (deduped across ALL weights)
+                    for (_, tsid_set) in rm.map.range_values() {
+                        let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
+                        if seen_rangeset_ptrs.insert(ptr) {
+                            total_inner_ranges += tsid_set.ranges_len();
+                        }
+                    }
                 }
             }
-            AbstractWeight::Factorized(fw) => {
-                let mut local_total = 0;
-                for (tsid_set, token_set) in &fw.pairs {
-                    let ptr1 = Arc::as_ptr(&tsid_set.inner) as usize;
-                    let ptr2 = Arc::as_ptr(&token_set.inner) as usize;
-                    if counted.insert(ptr1) {
-                        local_total += tsid_set.ranges_len();
-                    }
-                    if counted.insert(ptr2) {
-                        local_total += token_set.ranges_len();
-                    }
-                }
-                local_total
+        };
+
+        for state in &self.states.0 {
+            if let Some(fw) = &state.final_weight {
+                process_weight(fw);
             }
-            AbstractWeight::RangeMap(rm) => {
-                let mut local_total = 0;
-                for (_, tsid_set) in rm.map.range_values() {
-                    let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
-                    if counted.insert(ptr) {
-                        local_total += tsid_set.ranges_len();
-                    }
-                }
-                local_total
+            for w in state.trans_weights.values() {
+                process_weight(w);
             }
         }
+
+        total_outer_ranges + total_inner_ranges
     }
-    
+
     /// Analyze weight distribution to understand range fragmentation
     pub fn analyze_weights(&self) {
         use std::collections::HashMap;

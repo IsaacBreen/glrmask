@@ -70,14 +70,6 @@ pub enum TerminalAllowanceCheckMode {
     StepProbe,
 }
 
-fn count_dwa_ranges(dwa: &DWA) -> usize {
-    let mut unique_weights = HashSet::new();
-    for state in &dwa.states.0 {
-        if let Some(w) = &state.final_weight { unique_weights.insert(w); }
-        for w in state.trans_weights.values() { unique_weights.insert(w); }
-    }
-    unique_weights.iter().map(|w| w.ranges_len()).sum()
-}
 
 fn profile_terminal_automata_dump_enabled() -> bool {
     match std::env::var("PROFILE_TERMINAL_DWA") {
@@ -1291,7 +1283,7 @@ impl GrammarConstraint {
         let (
             original_to_internal_map,
             commit_vocab_data,
-            internal_llm_token_map,
+            mut internal_llm_token_map,
             mask_classes,
             mut state_to_rep,
             mut representative_states,
@@ -1681,7 +1673,82 @@ impl GrammarConstraint {
         if dump_terminal_automata {
             dump_terminal_id_map(&parser);
         }
-        
+
+        // Pre-DWA dimension reordering: predict good token and tsid orderings
+        // from possible_matches data, BEFORE building the terminal DWA.
+        // This makes the DWA weights naturally have fewer ranges.
+        let pre_dwa_reorder_enabled = weight_heavy_enabled
+            && std::env::var("ENABLE_PRE_DWA_REORDER")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+        let mut did_pre_dwa_reorder = false;
+        if pre_dwa_reorder_enabled {
+            let reorder_start = std::time::Instant::now();
+            crate::debug!(3, "Pre-DWA reorder: predicting orderings from possible_matches...");
+
+            let num_tok_states = tokenizer.dfa().states.len();
+            let (token_perm, tsid_perm) =
+                crate::dwa_i32::reorder::predict_orderings_from_possible_matches(
+                    &computed_possible_matches,
+                    vocab.internal_max_llm_token,
+                    num_tok_states,
+                );
+
+            // Apply tsid permutation: reorder tokenizer DFA states
+            tokenizer.reorder_states(&tsid_perm);
+
+            // Update state_to_rep with new state IDs
+            let mut new_state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+            for (old_state, old_rep) in &state_to_rep {
+                let new_state = TokenizerStateID(tsid_perm[old_state.0]);
+                let new_rep = TokenizerStateID(tsid_perm[old_rep.0]);
+                new_state_to_rep.insert(new_state, new_rep);
+            }
+            state_to_rep = new_state_to_rep;
+
+            // Update representative_states
+            representative_states = representative_states
+                .iter()
+                .map(|&s| tsid_perm[s])
+                .collect();
+            representative_states.sort_unstable();
+            representative_states.dedup();
+
+            // Apply token permutation: remap internal token IDs
+            let mut new_internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+            for (bytes, old_id) in &internal_llm_token_map {
+                new_internal_llm_token_map.insert(bytes.clone(), LLMTokenID(token_perm[old_id.0]));
+            }
+            internal_llm_token_map = new_internal_llm_token_map;
+
+            // Update original_to_internal
+            for (_orig, int_id) in vocab.original_to_internal.iter_mut() {
+                *int_id = token_perm[*int_id];
+            }
+
+            // Rebuild internal_to_original
+            let max_int = vocab.internal_max_llm_token;
+            let mut groups: Vec<Vec<usize>> = vec![Vec::new(); max_int + 1];
+            for (orig, int_id) in &vocab.original_to_internal {
+                groups[*int_id].push(*orig);
+            }
+            vocab.internal_to_original = groups
+                .into_iter()
+                .enumerate()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
+                .collect();
+
+            did_pre_dwa_reorder = true;
+            crate::debug!(
+                3,
+                "Pre-DWA reorder complete in {:?} (tokens: {}, tsids: {})",
+                reorder_start.elapsed(),
+                vocab.internal_max_llm_token + 1,
+                num_tok_states,
+            );
+        }
+
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         crate::debug!(5, "run_precompute1: start");
         let precompute_start = std::time::Instant::now();
@@ -3732,6 +3799,72 @@ impl GrammarConstraint {
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
         // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
 
+        // Post-terminal-DWA reorder: reorder token and tsid dimensions in the terminal DWA
+        // to minimize range fragmentation. This makes parser DWA construction faster and
+        // gives the parser DWA better initial ordering.
+        let terminal_reorder_enabled = weight_heavy_enabled
+            && std::env::var("ENABLE_TERMINAL_DWA_REORDER")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+        if terminal_reorder_enabled && num_tsids > 0 {
+            crate::debug!(3, "Reordering terminal DWA dimensions...");
+            let reorder_start = std::time::Instant::now();
+            let (token_perm, tsid_perm) = crate::dwa_i32::reorder::reorder_dwa_dimensions(
+                &mut terminal_dwa,
+                max_internal_llm_token_id,
+                num_tsids,
+            );
+            crate::timing!("TIMING: terminal_dwa_reorder {:?}", reorder_start.elapsed());
+
+            // Apply tsid_perm to state_to_rep
+            let mut new_state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+            for (old_state, old_rep) in &state_to_rep {
+                // State IDs stay the same (raw tokenizer), but rep IDs get permuted
+                let new_rep = TokenizerStateID(tsid_perm[old_rep.0]);
+                new_state_to_rep.insert(*old_state, new_rep);
+            }
+            state_to_rep = new_state_to_rep;
+
+            // Update representative_states with tsid_perm
+            representative_states = representative_states
+                .iter()
+                .map(|&s| tsid_perm[s])
+                .collect();
+            representative_states.sort_unstable();
+            representative_states.dedup();
+
+            // Apply token_perm to internal_llm_token_map
+            let mut new_internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+            for (bytes, old_id) in &internal_llm_token_map {
+                new_internal_llm_token_map.insert(bytes.clone(), LLMTokenID(token_perm[old_id.0]));
+            }
+            internal_llm_token_map = new_internal_llm_token_map;
+
+            // Update original_to_internal
+            for (_orig, int_id) in vocab.original_to_internal.iter_mut() {
+                *int_id = token_perm[*int_id];
+            }
+
+            // Rebuild internal_to_original
+            let max_int = vocab.internal_max_llm_token;
+            let mut groups: Vec<Vec<usize>> = vec![Vec::new(); max_int + 1];
+            for (orig, int_id) in &vocab.original_to_internal {
+                groups[*int_id].push(*orig);
+            }
+            vocab.internal_to_original = groups
+                .into_iter()
+                .enumerate()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
+                .collect();
+
+            crate::debug!(
+                3,
+                "Terminal DWA reorder complete in {:?}",
+                reorder_start.elapsed(),
+            );
+        }
+
         // Convert the lexical DWA to NWA and build the Parser DWA.
         crate::timing!(
             "PHASE_TIMING: post_precompute1_to_parser_dwa_start = {:?}",
@@ -3946,9 +4079,14 @@ impl GrammarConstraint {
 
         // Post-DWA dimension reordering: permute token and tsid IDs to minimize
         // total range counts in the weight pool.
-        let reorder_enabled = weight_heavy && std::env::var("ENABLE_DWA_REORDER")
-            .map(|v| v != "0")
-            .unwrap_or(true);  // enabled by default in weight-heavy mode
+        // By default, skip if pre-DWA reorder was already applied.
+        // Can be forced on with ENABLE_DWA_REORDER=1.
+        let reorder_env = std::env::var("ENABLE_DWA_REORDER").ok();
+        let reorder_enabled = weight_heavy && match &reorder_env {
+            Some(v) if v == "1" => true,  // explicit on: always run
+            Some(v) if v == "0" => false, // explicit off: never run
+            _ => !did_pre_dwa_reorder,    // default: run only if pre-DWA didn't run
+        };
         if reorder_enabled && num_tsids > 0 {
             crate::debug!(3, "Reordering parser DWA dimensions...");
             let reorder_start = std::time::Instant::now();

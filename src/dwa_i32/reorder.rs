@@ -291,19 +291,8 @@ pub fn reorder_dwa_dimensions(
         num_tsids,
     );
 
-    // Count baseline ranges
-    let baseline_ranges: usize = unique_weights
-        .iter()
-        .map(|w| {
-            let outer: usize = w.map.range_values().count();
-            let inner: usize = w
-                .map
-                .range_values()
-                .map(|(_, ts)| ts.ranges_len())
-                .sum();
-            outer + inner
-        })
-        .sum();
+    // Count baseline ranges (properly deduped: outer by weight Arc, inner by RangeSet Arc)
+    let baseline_ranges = dwa.num_ranges_interned();
 
     // Step 2: Compute tsid permutation
     let tsid_profiles = build_tsid_profiles(&unique_weights, num_tsids);
@@ -347,20 +336,8 @@ pub fn reorder_dwa_dimensions(
         }
     }
 
-    // Count new ranges
-    let new_unique = collect_unique_weights(dwa);
-    let new_ranges: usize = new_unique
-        .iter()
-        .map(|w| {
-            let outer: usize = w.map.range_values().count();
-            let inner: usize = w
-                .map
-                .range_values()
-                .map(|(_, ts)| ts.ranges_len())
-                .sum();
-            outer + inner
-        })
-        .sum();
+    // Count new ranges (properly deduped: outer by weight Arc, inner by RangeSet Arc)
+    let new_ranges = dwa.num_ranges_interned();
 
     crate::debug!(
         3,
@@ -380,6 +357,105 @@ pub fn reorder_dwa_dimensions(
         "reorder_dwa_dimensions: applied permutations in {:?} (total {:?})",
         apply_start.elapsed(),
         start.elapsed()
+    );
+
+    (token_perm, tsid_perm)
+}
+
+// ---------------------------------------------------------------------------
+// Pre-DWA ordering prediction from possible_matches
+// ---------------------------------------------------------------------------
+
+use crate::constraint_vocab::LLMTokenBV;
+use crate::dfa_u8::TokenizerStateID;
+use crate::types::TerminalID;
+
+/// Predict good token and tsid orderings BEFORE the terminal DWA is computed,
+/// using the possible_matches data structure.
+///
+/// `possible_matches[state][terminal]` = set of internal token IDs that can
+/// match that terminal from that state. This is essentially the same
+/// information that ends up encoded in the DWA weights, just transposed.
+///
+/// For **tsid ordering**: two states should be adjacent if similar sets of
+/// tokens match them across terminals.
+///
+/// For **token ordering**: two tokens should be adjacent if they appear in
+/// similar state×terminal contexts.
+///
+/// Returns `(token_perm, tsid_perm)` where `perm[old_id] = new_id`.
+/// `token_perm` has length `max_token + 1`, `tsid_perm` has length `num_states`.
+pub fn predict_orderings_from_possible_matches(
+    possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    max_internal_token: usize,
+    num_states: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let start = std::time::Instant::now();
+    let num_tokens = max_internal_token + 1;
+
+    // Build tsid profiles: for each state, the sorted list of
+    // (context_id) where context_id encodes (terminal, token) pairs.
+    // To keep profiles compact, we use a simpler encoding:
+    // for each state s, collect ALL internal token IDs that appear in
+    // any possible_matches[s][terminal].
+    let mut tsid_profiles: Vec<Vec<u32>> = vec![Vec::new(); num_states];
+    // Build token profiles: for each token, the sorted list of state IDs
+    // where it appears in any possible_matches entry.
+    let mut token_profiles: Vec<Vec<u32>> = vec![Vec::new(); num_tokens];
+
+    for (&state_id, terminal_map) in possible_matches {
+        let sid = state_id.0;
+        if sid >= num_states {
+            continue;
+        }
+        for (_terminal_id, token_bv) in terminal_map {
+            for range in token_bv.ranges() {
+                let lo = *range.start();
+                let hi = *range.end();
+                for tok in lo..=hi.min(max_internal_token) {
+                    token_profiles[tok].push(sid as u32);
+                }
+            }
+            // For tsid profile, collect token IDs
+            for range in token_bv.ranges() {
+                let lo = *range.start();
+                let hi = *range.end();
+                for tok in lo..=hi.min(max_internal_token) {
+                    tsid_profiles[sid].push(tok as u32);
+                }
+            }
+        }
+    }
+
+    // Deduplicate and sort profiles
+    for p in &mut tsid_profiles {
+        p.sort_unstable();
+        p.dedup();
+    }
+    for p in &mut token_profiles {
+        p.sort_unstable();
+        p.dedup();
+    }
+
+    let profile_time = start.elapsed();
+
+    // Run greedy NN on tsid profiles
+    let tsid_perm = greedy_nearest_neighbor(&tsid_profiles);
+    let tsid_time = start.elapsed();
+
+    // Run greedy NN on token profiles
+    let token_perm = greedy_nearest_neighbor(&token_profiles);
+    let total_time = start.elapsed();
+
+    crate::debug!(
+        3,
+        "predict_orderings: profiles={:?}, tsid_nn={:?}, token_nn={:?}, total={:?} (tokens={}, states={})",
+        profile_time,
+        tsid_time - profile_time,
+        total_time - tsid_time,
+        total_time,
+        num_tokens,
+        num_states,
     );
 
     (token_perm, tsid_perm)
