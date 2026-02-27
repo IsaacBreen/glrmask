@@ -225,6 +225,12 @@ impl<'a> GrammarConstraintState<'a> {
             None
         };
         let mut worklist_iters: u64 = 0;
+        let mut wl_expand_ns: u64 = 0;
+        let mut wl_intersect_ns: u64 = 0;
+        let mut wl_gss_ns: u64 = 0;
+        let mut wl_merge_ns: u64 = 0;
+        let mut wl_final_ns: u64 = 0;
+        let mut wl_expand_count: u64 = 0;
         // 2. Main worklist loop
         while let Some((depth, states_at_depth)) = queue.pop_last() {
             for (current_wa_state_id, gss) in states_at_depth {
@@ -234,7 +240,14 @@ impl<'a> GrammarConstraintState<'a> {
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
-                        let final_tokens = &reduced_acc & &final_weight.to_rsb_allow_expansion();
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let final_rsb = final_weight.to_rsb_allow_expansion();
+                        if let Some(t0) = t0 { wl_expand_ns += t0.elapsed().as_nanos() as u64; wl_expand_count += 1; }
+
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let final_tokens = &reduced_acc & &final_rsb;
+                        if let Some(t0) = t0 { wl_final_ns += t0.elapsed().as_nanos() as u64; }
+
                         if !final_tokens.is_empty() {
                             has_accepting = true;
                             crate::debug!(7, "Adding {} tokens from final state {}", final_tokens.ranges_len(), current_wa_state_id);
@@ -247,44 +260,64 @@ impl<'a> GrammarConstraintState<'a> {
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
+                        if let Some(t0) = t0 { wl_gss_ns += t0.elapsed().as_nanos() as u64; }
                         if popped_gss.is_empty() { continue; }
 
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let expanded = trans_weight.to_rsb_allow_expansion();
+                        if let Some(t0) = t0 { wl_expand_ns += t0.elapsed().as_nanos() as u64; wl_expand_count += 1; }
+
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & &trans_weight.to_rsb_allow_expansion();
+                            let new_rsb = rsb & &expanded;
                             if new_rsb.is_empty() { None } else { Some(new_rsb) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
+                        if let Some(t0) = t0 { wl_intersect_ns += t0.elapsed().as_nanos() as u64; }
 
                         if !final_gss.is_empty() {
+                            let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                             queue
                                 .entry(final_gss.max_depth())
                                 .or_default()
                                 .entry(target_wa_state_id)
                                 .and_modify(|existing| *existing = existing.merge(&final_gss))
                                 .or_insert(final_gss);
+                            if let Some(t0) = t0 { wl_merge_ns += t0.elapsed().as_nanos() as u64; }
                         }
                     }
 
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
+                        if let Some(t0) = t0 { wl_gss_ns += t0.elapsed().as_nanos() as u64; }
                         if popped_gss.is_empty() { continue; }
 
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let expanded = trans_weight.to_rsb_allow_expansion();
+                        if let Some(t0) = t0 { wl_expand_ns += t0.elapsed().as_nanos() as u64; wl_expand_count += 1; }
+
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & &trans_weight.to_rsb_allow_expansion();
+                            let new_rsb = rsb & &expanded;
                             if new_rsb.is_empty() { None } else { Some(new_rsb) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
+                        if let Some(t0) = t0 { wl_intersect_ns += t0.elapsed().as_nanos() as u64; }
 
                         if !final_gss.is_empty() {
+                            let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                             queue
                                 .entry(final_gss.max_depth())
                                 .or_default()
                                 .entry(target_wa_state_id)
                                 .and_modify(|existing| *existing = existing.merge(&final_gss))
                                 .or_insert(final_gss);
+                            if let Some(t0) = t0 { wl_merge_ns += t0.elapsed().as_nanos() as u64; }
                         }
                     }
                 }
@@ -295,6 +328,12 @@ impl<'a> GrammarConstraintState<'a> {
         }
         if benchmark_enabled {
             LAST_MASK_WORKLIST_ITER_COUNT.store(worklist_iters, Ordering::Relaxed);
+            LAST_MASK_WL_EXPAND_NS.store(wl_expand_ns, Ordering::Relaxed);
+            LAST_MASK_WL_INTERSECT_NS.store(wl_intersect_ns, Ordering::Relaxed);
+            LAST_MASK_WL_GSS_NS.store(wl_gss_ns, Ordering::Relaxed);
+            LAST_MASK_WL_MERGE_NS.store(wl_merge_ns, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_NS.store(wl_final_ns, Ordering::Relaxed);
+            LAST_MASK_WL_EXPAND_COUNT.store(wl_expand_count, Ordering::Relaxed);
         }
 
         (final_mask_internal, has_accepting)
@@ -321,6 +360,12 @@ impl<'a> GrammarConstraintState<'a> {
                 LAST_MASK_SEED_TIME_NS.store(0, Ordering::Relaxed);
                 LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
                 LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_EXPAND_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_INTERSECT_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_GSS_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_MERGE_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_FINAL_NS.store(0, Ordering::Relaxed);
+                LAST_MASK_WL_EXPAND_COUNT.store(0, Ordering::Relaxed);
             }
             return (final_mask_internal, has_accepting);
         }
@@ -404,6 +449,12 @@ impl<'a> GrammarConstraintState<'a> {
             None
         };
         let mut worklist_iters: u64 = 0;
+        let mut wl_expand_ns: u64 = 0;
+        let mut wl_intersect_ns: u64 = 0;
+        let mut wl_gss_ns: u64 = 0;
+        let mut wl_merge_ns: u64 = 0;
+        let mut wl_final_ns: u64 = 0;
+        let mut wl_expand_count: u64 = 0;
 
         // 2. Main worklist loop — all intersections in N×M space (Weight)
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
@@ -414,6 +465,7 @@ impl<'a> GrammarConstraintState<'a> {
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         // Intersect accumulated N×M weight with final weight (also N×M)
                         let final_nxm = &reduced_acc & final_weight;
                         if !final_nxm.is_empty() {
@@ -421,6 +473,9 @@ impl<'a> GrammarConstraintState<'a> {
                             // Collapse from N×M to N-space by unioning along tsid dimension
                             let collapsed = crate::dwa_i32::weight_expansion::collapse_weight(&final_nxm, num_tsids);
                             final_mask_internal |= &RangeSet::from(collapsed.to_rsb_allow_expansion());
+                        }
+                        if let Some(t0) = t0 {
+                            wl_final_ns += t0.elapsed().as_nanos() as u64;
                         }
                     }
                 }
@@ -431,24 +486,38 @@ impl<'a> GrammarConstraintState<'a> {
 
                     // Helper: process a single transition in N×M space
                     let mut process_transition = |target_wa_state_id: WAStateID, trans_weight: &AbstractWeight| {
+                        wl_expand_count += 1;
+
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
+                        if let Some(t0) = t0 {
+                            wl_gss_ns += t0.elapsed().as_nanos() as u64;
+                        }
                         if popped_gss.is_empty() { return; }
 
                         // Intersect GSS weights with transition weight (both N×M)
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let f = |acc: &Weight| {
                             let new_acc = acc & trans_weight;
                             if new_acc.is_empty() { None } else { Some(new_acc) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
+                        if let Some(t0) = t0 {
+                            wl_intersect_ns += t0.elapsed().as_nanos() as u64;
+                        }
 
                         if !final_gss.is_empty() {
+                            let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                             queue
                                 .entry(final_gss.max_depth())
                                 .or_default()
                                 .entry(target_wa_state_id)
                                 .and_modify(|existing| *existing = existing.merge(&final_gss))
                                 .or_insert(final_gss);
+                            if let Some(t0) = t0 {
+                                wl_merge_ns += t0.elapsed().as_nanos() as u64;
+                            }
                         }
                     };
 
@@ -467,6 +536,12 @@ impl<'a> GrammarConstraintState<'a> {
         }
         if benchmark_enabled {
             LAST_MASK_WORKLIST_ITER_COUNT.store(worklist_iters, Ordering::Relaxed);
+            LAST_MASK_WL_EXPAND_NS.store(wl_expand_ns, Ordering::Relaxed);
+            LAST_MASK_WL_INTERSECT_NS.store(wl_intersect_ns, Ordering::Relaxed);
+            LAST_MASK_WL_GSS_NS.store(wl_gss_ns, Ordering::Relaxed);
+            LAST_MASK_WL_MERGE_NS.store(wl_merge_ns, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_NS.store(wl_final_ns, Ordering::Relaxed);
+            LAST_MASK_WL_EXPAND_COUNT.store(wl_expand_count, Ordering::Relaxed);
         }
 
         (final_mask_internal, has_accepting)
@@ -512,6 +587,12 @@ impl<'a> GrammarConstraintState<'a> {
             LAST_MASK_SEED_TIME_NS.store(0, Ordering::Relaxed);
             LAST_MASK_WORKLIST_TIME_NS.store(0, Ordering::Relaxed);
             LAST_MASK_WORKLIST_ITER_COUNT.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_EXPAND_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_INTERSECT_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_GSS_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_MERGE_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_EXPAND_COUNT.store(0, Ordering::Relaxed);
         }
         let total_start = if benchmark_enabled {
             Some(Instant::now())
