@@ -494,6 +494,7 @@ impl Debug for GLRParserState<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("GLRParserState")
             .field("parser", &self.parser)
+            // .field("stack", &self.stack.to_graph_string(false))
             .finish()
     }
 }
