@@ -6734,3 +6734,50 @@ fn test_github_easy_o63377_false_positive_a() {
     assert!(!mask.contains(0), "Expected token 'b' (local_id=0) to be REJECTED at prefix='aa', but sep1 accepted it (false_positive).");
 }
 
+#[test]
+fn test_duplicate_terminals_are_merged() {
+    // When multiple terminals have the exact same regex pattern, they should be
+    // merged into a single terminal ID so the DWA doesn't treat them separately.
+    //
+    // Grammar:
+    //   s: A B C D E F G H
+    //   A: 'x'
+    //   B: 'x'
+    //   ...
+    //   H: 'x'
+    //
+    // All 8 terminals match 'x', so after dedup the compiled grammar should have
+    // only 1 unique terminal group (regex/pattern).
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark_grammar = indoc! {r#"
+        s: A B C D E F G H
+        A: "x"
+        B: "x"
+        C: "x"
+        D: "x"
+        E: "x"
+        F: "x"
+        G: "x"
+        H: "x"
+    "#};
+
+    let grammar_def = GrammarDefinition::from_lark(lark_grammar).unwrap();
+
+    // All 8 named terminals should map to the same group_id.
+    let group_ids: HashSet<usize> = grammar_def
+        .regex_name_to_group_id
+        .iter()
+        .map(|(_, &gid)| gid)
+        .collect();
+
+    // There should only be one unique terminal group (they all match 'x').
+    assert_eq!(
+        group_ids.len(),
+        1,
+        "Expected all 8 identical terminals to be merged into 1 group, but found {} groups: {:?}",
+        group_ids.len(),
+        grammar_def.regex_name_to_group_id,
+    );
+}
+

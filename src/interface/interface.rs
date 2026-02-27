@@ -2414,6 +2414,97 @@ impl GrammarDefinition {
             .filter(|(name, _)| !terminals.contains_key(name))
             .collect();
 
+        // --- Terminal deduplication ---
+        // Merge terminals with identical expressions into a single canonical name.
+        // This prevents grammar bloat when e.g. a JSON-Schema converter emits many
+        // STR_TERM_N rules that all expand to the same regex.
+        fn rewrite_grammar_expr_refs(
+            expr: &GrammarExpr,
+            rename_map: &HashMap<String, String>,
+        ) -> GrammarExpr {
+            match expr {
+                GrammarExpr::Ref(name) => {
+                    if let Some(canonical) = rename_map.get(name) {
+                        GrammarExpr::Ref(canonical.clone())
+                    } else {
+                        expr.clone()
+                    }
+                }
+                GrammarExpr::Sequence(exprs) => GrammarExpr::Sequence(
+                    exprs.iter().map(|e| rewrite_grammar_expr_refs(e, rename_map)).collect(),
+                ),
+                GrammarExpr::Choice(exprs) => GrammarExpr::Choice(
+                    exprs.iter().map(|e| rewrite_grammar_expr_refs(e, rename_map)).collect(),
+                ),
+                GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(
+                    rewrite_grammar_expr_refs(inner, rename_map),
+                )),
+                GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(
+                    rewrite_grammar_expr_refs(inner, rename_map),
+                )),
+                GrammarExpr::RepeatBounded { min, max, inner } => GrammarExpr::RepeatBounded {
+                    min: *min,
+                    max: *max,
+                    inner: Box::new(rewrite_grammar_expr_refs(inner, rename_map)),
+                },
+                GrammarExpr::Literal(_) | GrammarExpr::CharClass { .. } | GrammarExpr::AnyChar => {
+                    expr.clone()
+                }
+            }
+        }
+
+        let mut terminal_rename_map: HashMap<String, String> = HashMap::new();
+        // Iterate to fixpoint: deduplicating may cause further matches after ref rewriting.
+        for _round in 0..50 {
+            let mut expr_to_canonical: HashMap<GrammarExpr, String> = HashMap::new();
+            let mut new_renames: HashMap<String, String> = HashMap::new();
+            for (name, expr) in &terminals {
+                if let Some(canonical) = expr_to_canonical.get(expr) {
+                    new_renames.insert(name.clone(), canonical.clone());
+                } else {
+                    expr_to_canonical.insert(expr.clone(), name.clone());
+                }
+            }
+            if new_renames.is_empty() {
+                break;
+            }
+            // Remove duplicates from terminals map
+            for dup_name in new_renames.keys() {
+                terminals.remove(dup_name);
+            }
+            // Accumulate into the global rename map (chase chains: if B→A and C→B, then C→A)
+            for (old, new_canonical) in &new_renames {
+                let final_canonical = terminal_rename_map
+                    .get(new_canonical)
+                    .unwrap_or(new_canonical)
+                    .clone();
+                terminal_rename_map.insert(old.clone(), final_canonical);
+            }
+            // Rewrite references in remaining terminals
+            for expr in terminals.values_mut() {
+                *expr = rewrite_grammar_expr_refs(expr, &new_renames);
+            }
+        }
+        // Rewrite references in non-terminal rules
+        let non_terminal_rules: Vec<(String, GrammarExpr)> = if terminal_rename_map.is_empty() {
+            non_terminal_rules
+        } else {
+            // Also update referenced_terminals set
+            let mut new_referenced = HashSet::new();
+            for name in &referenced_terminals {
+                if let Some(canonical) = terminal_rename_map.get(name) {
+                    new_referenced.insert(canonical.clone());
+                } else {
+                    new_referenced.insert(name.clone());
+                }
+            }
+            referenced_terminals = new_referenced;
+            non_terminal_rules
+                .into_iter()
+                .map(|(name, expr)| (name, rewrite_grammar_expr_refs(&expr, &terminal_rename_map)))
+                .collect()
+        };
+
         #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
         enum GroupTerminalRef {
             Name(String),
