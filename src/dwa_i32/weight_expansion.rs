@@ -395,6 +395,38 @@ pub fn collapse_weight(weight: &Weight, num_tsids: usize) -> Weight {
     Weight::from_rsb(collapse_weight_rsb(&weight.to_rsb_allow_expansion(), num_tsids))
 }
 
+/// Collapse a weight from N×M-space directly to a token-space RangeSetBlaze.
+///
+/// For RangeMap weights with token-outer layout, this is a fast path that
+/// simply extracts the outer key ranges (tokens that have any non-empty tsid set).
+/// This avoids the expensive expand_to_rsb → collapse_rsb roundtrip.
+///
+/// For other weight variants, falls back to the standard collapse via flat RSB.
+pub fn collapse_to_token_rsb(weight: &Weight, num_tsids: usize) -> RangeSetBlaze<usize> {
+    use crate::datastructures::abstract_weight::AbstractWeight;
+    use crate::datastructures::rangemap_weight::RangeMapWeight;
+
+    if weight.is_empty() {
+        return RangeSetBlaze::new();
+    }
+    if num_tsids == 0 {
+        return weight.to_rsb_allow_expansion();
+    }
+
+    // Fast path for RangeMap with token-outer layout:
+    // The outer keys ARE the token ranges. Just collect them.
+    if let AbstractWeight::RangeMap(rm) = weight {
+        if !RangeMapWeight::tsid_outer_enabled() {
+            return rm.map.range_values()
+                .map(|(r, _)| *r.start()..=*r.end())
+                .collect();
+        }
+    }
+
+    // Fallback: flatten to RSB and collapse
+    collapse_weight_rsb(&weight.to_rsb_allow_expansion(), num_tsids)
+}
+
 /// Create an initial weight for weight-heavy mode given an active tokenizer state ID.
 /// This creates a weight where position indices are: tsid + n*M for n in 0..N
 pub fn create_initial_weight_for_tsid(tsid: usize, num_tsids: usize, max_llm_token: usize) -> Weight {
@@ -404,13 +436,13 @@ pub fn create_initial_weight_for_tsid(tsid: usize, num_tsids: usize, max_llm_tok
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_expand_weight() {
         // Weight [0, 1, 0, 1] meaning positions 1 and 3 are set
         let weight = Weight::from_iter([1usize, 3]);
         let num_tsids = 3;
-        
+
         // After expansion with M=3:
         // Position 1 -> 3
         // Position 3 -> 9

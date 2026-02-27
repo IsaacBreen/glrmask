@@ -319,7 +319,7 @@ impl<'de> serde::Deserialize<'de> for RangeMapWeight {
 }
 
 impl RangeMapWeight {
-    fn tsid_outer_enabled() -> bool {
+    pub(crate) fn tsid_outer_enabled() -> bool {
         *RANGEMAP_TSID_OUTER
     }
     fn compute_hash(map: &RangeMapBlaze<usize, RangeSet>, num_tsids: usize) -> u64 {

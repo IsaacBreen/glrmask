@@ -550,8 +550,8 @@ impl<'a> GrammarConstraintState<'a> {
                             has_accepting = true;
                             let t1 = if benchmark_enabled { Some(Instant::now()) } else { None };
                             // Collapse from N×M to N-space by unioning along tsid dimension
-                            let collapsed = crate::dwa_i32::weight_expansion::collapse_weight(&final_nxm, num_tsids);
-                            final_mask_internal |= &RangeSet::from(collapsed.to_rsb_allow_expansion());
+                            let collapsed_rsb = crate::dwa_i32::weight_expansion::collapse_to_token_rsb(&final_nxm, num_tsids);
+                            final_mask_internal |= &RangeSet::from(collapsed_rsb);
                             if let Some(t1) = t1 {
                                 wl_final_collapse_ns += t1.elapsed().as_nanos() as u64;
                             }
