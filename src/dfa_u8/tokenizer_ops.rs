@@ -49,7 +49,7 @@ impl Tokenizer {
     
     /// Get the initial state ID.
     pub fn initial_state_id(&self) -> TokenizerStateID {
-        TokenizerStateID(0)
+        TokenizerStateID(self.inner.dfa.start_state)
     }
     
     /// Execute the tokenizer from a given state on a byte slice.
@@ -134,7 +134,7 @@ impl JSONConvertible for Tokenizer {
 
 impl Regex {
     pub fn initial_state_id(&self) -> TokenizerStateID {
-        TokenizerStateID(0)
+        TokenizerStateID(self.dfa.start_state)
     }
 
     pub fn execute_from_state(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {

@@ -1679,20 +1679,30 @@ impl GrammarConstraint {
         // This makes the DWA weights naturally have fewer ranges.
         let pre_dwa_reorder_enabled = weight_heavy_enabled
             && std::env::var("ENABLE_PRE_DWA_REORDER")
-                .map(|v| v != "0")
-                .unwrap_or(true);
+                .map(|v| v == "1")
+                .unwrap_or(false);
         let mut did_pre_dwa_reorder = false;
         if pre_dwa_reorder_enabled {
             let reorder_start = std::time::Instant::now();
             crate::debug!(3, "Pre-DWA reorder: predicting orderings from possible_matches...");
 
             let num_tok_states = tokenizer.dfa().states.len();
-            let (token_perm, tsid_perm) =
+            let (token_perm, mut tsid_perm) =
                 crate::dwa_i32::reorder::predict_orderings_from_possible_matches(
                     &computed_possible_matches,
                     vocab.internal_max_llm_token,
                     num_tok_states,
                 );
+
+            // Pin the tokenizer start state at position 0 to maintain invariants
+            let start_state = tokenizer.initial_state_id().0;
+            if tsid_perm[start_state] != 0 {
+                // Find which old state currently maps to position 0
+                let old_at_zero = tsid_perm.iter().position(|&p| p == 0).unwrap();
+                // Swap so start_state stays at position 0
+                tsid_perm[old_at_zero] = tsid_perm[start_state];
+                tsid_perm[start_state] = 0;
+            }
 
             // Apply tsid permutation: reorder tokenizer DFA states
             tokenizer.reorder_states(&tsid_perm);
@@ -3863,6 +3873,22 @@ impl GrammarConstraint {
                 "Terminal DWA reorder complete in {:?}",
                 reorder_start.elapsed(),
             );
+
+            // Update possible_matches: permute LLMTokenBV values to new internal token IDs
+            for state_matches in possible_matches_precompute1.values_mut() {
+                for bv in state_matches.values_mut() {
+                    let old_rsb = bv.inner.as_ref().clone();
+                    let mut new_rsb = range_set_blaze::RangeSetBlaze::new();
+                    for r in old_rsb.ranges() {
+                        for old_id in *r.start()..=*r.end() {
+                            if old_id < token_perm.len() {
+                                new_rsb.insert(token_perm[old_id]);
+                            }
+                        }
+                    }
+                    *bv = crate::datastructures::hybrid_bitset::RangeSet::from(new_rsb);
+                }
+            }
         }
 
         // Convert the lexical DWA to NWA and build the Parser DWA.
