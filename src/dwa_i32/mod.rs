@@ -26,6 +26,7 @@ pub mod weight_expansion;
 pub mod factored_weight;
 pub mod shared_bdd;
 pub mod heavy_weight;
+pub mod reorder;
 pub mod test_weighted_automata;
 
 #[cfg(test)]

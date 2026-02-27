@@ -33,6 +33,16 @@ static LAST_MASK_WL_MERGE_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_MASK_WL_FINAL_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_MASK_WL_EXPAND_COUNT: AtomicU64 = AtomicU64::new(0);
 
+// Fine-grained sub-counters
+static LAST_MASK_WL_FINAL_INTERSECT_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WL_FINAL_COLLAPSE_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WL_FINAL_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WL_INTERSECT_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WL_MAX_WEIGHT_RANGES: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WL_TOTAL_WEIGHT_RANGES: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WL_MAX_DWA_WEIGHT_RANGES: AtomicU64 = AtomicU64::new(0);
+static LAST_MASK_WL_TOTAL_DWA_WEIGHT_RANGES: AtomicU64 = AtomicU64::new(0);
+
 /// Enable benchmark mode which captures precise timing inside Rust.
 /// Call get_last_mask_time_ns() after each fill_mask_i32 call.
 pub fn set_benchmark_mode(enabled: bool) {
@@ -50,6 +60,14 @@ pub fn set_benchmark_mode(enabled: bool) {
     LAST_MASK_WL_MERGE_NS.store(0, Ordering::Relaxed);
     LAST_MASK_WL_FINAL_NS.store(0, Ordering::Relaxed);
     LAST_MASK_WL_EXPAND_COUNT.store(0, Ordering::Relaxed);
+    LAST_MASK_WL_FINAL_INTERSECT_NS.store(0, Ordering::Relaxed);
+    LAST_MASK_WL_FINAL_COLLAPSE_NS.store(0, Ordering::Relaxed);
+    LAST_MASK_WL_FINAL_COUNT.store(0, Ordering::Relaxed);
+    LAST_MASK_WL_INTERSECT_COUNT.store(0, Ordering::Relaxed);
+    LAST_MASK_WL_MAX_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+    LAST_MASK_WL_TOTAL_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+    LAST_MASK_WL_MAX_DWA_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+    LAST_MASK_WL_TOTAL_DWA_WEIGHT_RANGES.store(0, Ordering::Relaxed);
 }
 
 /// Get the last total mask computation time in nanoseconds.
@@ -116,6 +134,42 @@ pub fn get_last_mask_wl_final_ns() -> u64 {
 /// Get the count of expand operations in last worklist.
 pub fn get_last_mask_wl_expand_count() -> u64 {
     LAST_MASK_WL_EXPAND_COUNT.load(Ordering::Relaxed)
+}
+
+/// Get the final-weight intersection time (subset of wl_final).
+pub fn get_last_mask_wl_final_intersect_ns() -> u64 {
+    LAST_MASK_WL_FINAL_INTERSECT_NS.load(Ordering::Relaxed)
+}
+
+/// Get the final-weight collapse time (subset of wl_final).
+pub fn get_last_mask_wl_final_collapse_ns() -> u64 {
+    LAST_MASK_WL_FINAL_COLLAPSE_NS.load(Ordering::Relaxed)
+}
+
+/// Get the number of final-weight computations in last worklist.
+pub fn get_last_mask_wl_final_count() -> u64 {
+    LAST_MASK_WL_FINAL_COUNT.load(Ordering::Relaxed)
+}
+
+/// Get the count of intersect (apply_and_prune) calls in the worklist.
+pub fn get_last_mask_wl_intersect_count() -> u64 {
+    LAST_MASK_WL_INTERSECT_COUNT.load(Ordering::Relaxed)
+}
+
+/// Get the maximum weight size (in ranges) encountered during the worklist.
+pub fn get_last_mask_wl_max_weight_ranges() -> u64 {
+    LAST_MASK_WL_MAX_WEIGHT_RANGES.load(Ordering::Relaxed)
+}
+
+/// Get the total weight ranges processed during the worklist.
+pub fn get_last_mask_wl_total_weight_ranges() -> u64 {
+    LAST_MASK_WL_TOTAL_WEIGHT_RANGES.load(Ordering::Relaxed)
+}
+pub fn get_last_mask_wl_max_dwa_weight_ranges() -> u64 {
+    LAST_MASK_WL_MAX_DWA_WEIGHT_RANGES.load(Ordering::Relaxed)
+}
+pub fn get_last_mask_wl_total_dwa_weight_ranges() -> u64 {
+    LAST_MASK_WL_TOTAL_DWA_WEIGHT_RANGES.load(Ordering::Relaxed)
 }
 
 impl<'a> GrammarConstraintState<'a> {
@@ -395,8 +449,14 @@ impl<'a> GrammarConstraintState<'a> {
             let possible_matches = &self.parent.possible_matches;
 
             // Build tsid mask for this tokenizer state in N×M space
+            // Use internal tsid if mapping is available, otherwise raw state ID
+            let internal_tsid = if !self.parent.state_to_internal_tsid.is_empty() {
+                self.parent.state_to_internal_tsid[tokenizer_state_id.0]
+            } else {
+                tokenizer_state_id.0
+            };
             let tsid_mask = crate::dwa_i32::weight_expansion::create_tsid_set_mask(
-                std::iter::once(tokenizer_state_id.0),
+                std::iter::once(internal_tsid),
                 num_tsids,
                 max_llm_token,
             );
@@ -455,6 +515,14 @@ impl<'a> GrammarConstraintState<'a> {
         let mut wl_merge_ns: u64 = 0;
         let mut wl_final_ns: u64 = 0;
         let mut wl_expand_count: u64 = 0;
+        let mut wl_final_intersect_ns: u64 = 0;
+        let mut wl_final_collapse_ns: u64 = 0;
+        let mut wl_final_count: u64 = 0;
+        let mut wl_intersect_count: u64 = 0;
+        let mut wl_max_weight_ranges: u64 = 0;
+        let mut wl_total_weight_ranges: u64 = 0;
+        let mut wl_max_dwa_weight_ranges: u64 = 0;
+        let mut wl_total_dwa_weight_ranges: u64 = 0;
 
         // 2. Main worklist loop — all intersections in N×M space (Weight)
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
@@ -468,11 +536,25 @@ impl<'a> GrammarConstraintState<'a> {
                         let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         // Intersect accumulated N×M weight with final weight (also N×M)
                         let final_nxm = &reduced_acc & final_weight;
+                        if let Some(t0) = t0 {
+                            wl_final_intersect_ns += t0.elapsed().as_nanos() as u64;
+                            wl_final_count += 1;
+                            let nr = reduced_acc.num_ranges() as u64;
+                            wl_total_weight_ranges += nr;
+                            if nr > wl_max_weight_ranges { wl_max_weight_ranges = nr; }
+                            let dwa_nr = final_weight.num_ranges() as u64;
+                            wl_total_dwa_weight_ranges += dwa_nr;
+                            if dwa_nr > wl_max_dwa_weight_ranges { wl_max_dwa_weight_ranges = dwa_nr; }
+                        }
                         if !final_nxm.is_empty() {
                             has_accepting = true;
+                            let t1 = if benchmark_enabled { Some(Instant::now()) } else { None };
                             // Collapse from N×M to N-space by unioning along tsid dimension
                             let collapsed = crate::dwa_i32::weight_expansion::collapse_weight(&final_nxm, num_tsids);
                             final_mask_internal |= &RangeSet::from(collapsed.to_rsb_allow_expansion());
+                            if let Some(t1) = t1 {
+                                wl_final_collapse_ns += t1.elapsed().as_nanos() as u64;
+                            }
                         }
                         if let Some(t0) = t0 {
                             wl_final_ns += t0.elapsed().as_nanos() as u64;
@@ -505,6 +587,10 @@ impl<'a> GrammarConstraintState<'a> {
                         let final_gss = popped_gss.apply_and_prune(f);
                         if let Some(t0) = t0 {
                             wl_intersect_ns += t0.elapsed().as_nanos() as u64;
+                            wl_intersect_count += 1;
+                            let dwa_nr = trans_weight.num_ranges() as u64;
+                            wl_total_dwa_weight_ranges += dwa_nr;
+                            if dwa_nr > wl_max_dwa_weight_ranges { wl_max_dwa_weight_ranges = dwa_nr; }
                         }
 
                         if !final_gss.is_empty() {
@@ -542,6 +628,14 @@ impl<'a> GrammarConstraintState<'a> {
             LAST_MASK_WL_MERGE_NS.store(wl_merge_ns, Ordering::Relaxed);
             LAST_MASK_WL_FINAL_NS.store(wl_final_ns, Ordering::Relaxed);
             LAST_MASK_WL_EXPAND_COUNT.store(wl_expand_count, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_INTERSECT_NS.store(wl_final_intersect_ns, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_COLLAPSE_NS.store(wl_final_collapse_ns, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_COUNT.store(wl_final_count, Ordering::Relaxed);
+            LAST_MASK_WL_INTERSECT_COUNT.store(wl_intersect_count, Ordering::Relaxed);
+            LAST_MASK_WL_MAX_WEIGHT_RANGES.store(wl_max_weight_ranges, Ordering::Relaxed);
+            LAST_MASK_WL_TOTAL_WEIGHT_RANGES.store(wl_total_weight_ranges, Ordering::Relaxed);
+            LAST_MASK_WL_MAX_DWA_WEIGHT_RANGES.store(wl_max_dwa_weight_ranges, Ordering::Relaxed);
+            LAST_MASK_WL_TOTAL_DWA_WEIGHT_RANGES.store(wl_total_dwa_weight_ranges, Ordering::Relaxed);
         }
 
         (final_mask_internal, has_accepting)
@@ -593,6 +687,14 @@ impl<'a> GrammarConstraintState<'a> {
             LAST_MASK_WL_MERGE_NS.store(0, Ordering::Relaxed);
             LAST_MASK_WL_FINAL_NS.store(0, Ordering::Relaxed);
             LAST_MASK_WL_EXPAND_COUNT.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_INTERSECT_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_COLLAPSE_NS.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_FINAL_COUNT.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_INTERSECT_COUNT.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_MAX_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_TOTAL_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_MAX_DWA_WEIGHT_RANGES.store(0, Ordering::Relaxed);
+            LAST_MASK_WL_TOTAL_DWA_WEIGHT_RANGES.store(0, Ordering::Relaxed);
         }
         let total_start = if benchmark_enabled {
             Some(Instant::now())

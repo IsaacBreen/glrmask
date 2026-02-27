@@ -1560,6 +1560,16 @@ impl PyGrammarConstraintState {
         self.inner.with_inner(|state| state.print_gss_stats());
     }
 
+    /// Print the GSS (Graph-Structured Stack) to stdout.
+    fn print_gss(&self) {
+        self.inner.with_inner(|state| state.print_gss());
+    }
+
+    /// Return a string representation of the GSS (Graph-Structured Stack).
+    fn format_gss(&self) -> String {
+        self.inner.with_inner(|state| state.format_gss())
+    }
+
     fn compute_commit_maps(
         &self,
         py: Python,
@@ -1851,6 +1861,14 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_last_mask_wl_merge_ns, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_mask_wl_final_ns, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_mask_wl_expand_count, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_final_intersect_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_final_collapse_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_final_count, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_intersect_count, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_max_weight_ranges, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_total_weight_ranges, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_max_dwa_weight_ranges, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_wl_total_dwa_weight_ranges, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
 }
@@ -1940,4 +1958,50 @@ fn get_last_mask_wl_final_ns() -> u64 {
 #[pyfunction]
 fn get_last_mask_wl_expand_count() -> u64 {
     sep1::constraint_fns::get_last_mask_wl_expand_count()
+}
+
+/// Get the final-weight intersection time in nanoseconds (subset of wl_final).
+#[pyfunction]
+fn get_last_mask_wl_final_intersect_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_final_intersect_ns()
+}
+
+/// Get the final-weight collapse time in nanoseconds (subset of wl_final).
+#[pyfunction]
+fn get_last_mask_wl_final_collapse_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_final_collapse_ns()
+}
+
+/// Get the number of final-weight computations in last worklist.
+#[pyfunction]
+fn get_last_mask_wl_final_count() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_final_count()
+}
+
+/// Get the count of intersect (apply_and_prune) operations in last worklist.
+#[pyfunction]
+fn get_last_mask_wl_intersect_count() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_intersect_count()
+}
+
+/// Get the maximum weight size (ranges) encountered during the worklist.
+#[pyfunction]
+fn get_last_mask_wl_max_weight_ranges() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_max_weight_ranges()
+}
+
+/// Get the total weight ranges processed during the worklist.
+#[pyfunction]
+fn get_last_mask_wl_total_weight_ranges() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_total_weight_ranges()
+}
+
+#[pyfunction]
+fn get_last_mask_wl_max_dwa_weight_ranges() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_max_dwa_weight_ranges()
+}
+
+#[pyfunction]
+fn get_last_mask_wl_total_dwa_weight_ranges() -> u64 {
+    sep1::constraint_fns::get_last_mask_wl_total_dwa_weight_ranges()
 }

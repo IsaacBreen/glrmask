@@ -283,6 +283,14 @@ pub struct GrammarConstraint {
     /// When > 0, indicates weight-heavy mode where weights are in N×M space.
     /// When 0, indicates symbol-heavy mode (tsid as initial transition labels).
     pub num_tsids: usize,
+
+    /// Maps raw tokenizer state ID → internal tsid index (0..num_tsids-1).
+    /// In weight-heavy mode, this compresses the tokenizer state space to only
+    /// representative states and (optionally) applies a reordering permutation
+    /// to minimize range counts in DWA weights.
+    /// Empty in symbol-heavy mode.
+    #[serde(default)]
+    pub state_to_internal_tsid: Vec<usize>,
 }
 
 impl GrammarConstraint {
@@ -583,6 +591,7 @@ impl JSONConvertible for GrammarConstraint {
             parser_dwa_vocab: intermediate.vocab,
             eos_token_id,
             num_tsids: intermediate.num_tsids,
+            state_to_internal_tsid: vec![],  // Not available from JSON deserialization
         })
     }
 }
@@ -3910,6 +3919,85 @@ impl GrammarConstraint {
             );
         }
 
+        // Build state_to_internal_tsid mapping: raw tokenizer state ID → internal tsid (0..num_reps-1)
+        // This compresses the tokenizer state space to only representative states.
+        let mut state_to_internal_tsid: Vec<usize> = if weight_heavy {
+            // Build rep → internal index mapping
+            let rep_to_internal: std::collections::HashMap<usize, usize> = representative_states
+                .iter()
+                .enumerate()
+                .map(|(idx, &rep)| (rep, idx))
+                .collect();
+            let num_raw_states = tokenizer.dfa().states.len();
+            let mut mapping = vec![0usize; num_raw_states];
+            for (&state, &rep) in &state_to_rep {
+                if let Some(&internal) = rep_to_internal.get(&rep.0) {
+                    if state.0 < num_raw_states {
+                        mapping[state.0] = internal;
+                    }
+                }
+            }
+            crate::debug!(3, "Built state_to_internal_tsid: {} raw states -> {} internal tsids",
+                num_raw_states, representative_states.len());
+            mapping
+        } else {
+            vec![]
+        };
+
+        // Post-DWA dimension reordering: permute token and tsid IDs to minimize
+        // total range counts in the weight pool.
+        let reorder_enabled = weight_heavy && std::env::var("ENABLE_DWA_REORDER")
+            .map(|v| v != "0")
+            .unwrap_or(true);  // enabled by default in weight-heavy mode
+        if reorder_enabled && num_tsids > 0 {
+            crate::debug!(3, "Reordering parser DWA dimensions...");
+            let reorder_start = std::time::Instant::now();
+            let (token_perm, tsid_perm) = crate::dwa_i32::reorder::reorder_dwa_dimensions(
+                &mut parser_dwa,
+                vocab.internal_max_llm_token,
+                num_tsids,
+            );
+            crate::timing!("TIMING: reorder_dwa_dimensions {:?}", reorder_start.elapsed());
+
+            // Update state_to_internal_tsid: compose with tsid permutation
+            // state → old_internal → new_internal
+            for internal_tsid in state_to_internal_tsid.iter_mut() {
+                *internal_tsid = tsid_perm[*internal_tsid];
+            }
+
+            // Update original_to_internal vocab mapping: compose with token permutation
+            // original → old_internal → new_internal
+            for internal_id in vocab.original_to_internal.values_mut() {
+                *internal_id = token_perm[*internal_id];
+            }
+            // Update internal_to_original: rebuild from the updated original_to_internal
+            vocab.internal_to_original.clear();
+            for (&original, &internal) in &vocab.original_to_internal {
+                vocab.internal_to_original
+                    .entry(internal)
+                    .or_insert_with(|| crate::datastructures::hybrid_bitset::RangeSet::default())
+                    .insert(original);
+            }
+
+            // Update possible_matches: permute LLMTokenBV values to new internal token IDs
+            for state_matches in possible_matches_precompute1.values_mut() {
+                for bv in state_matches.values_mut() {
+                    let old_rsb = bv.inner.as_ref().clone();
+                    let mut new_rsb = range_set_blaze::RangeSetBlaze::new();
+                    for r in old_rsb.ranges() {
+                        for old_id in *r.start()..=*r.end() {
+                            if old_id < token_perm.len() {
+                                new_rsb.insert(token_perm[old_id]);
+                            }
+                        }
+                    }
+                    *bv = crate::datastructures::hybrid_bitset::RangeSet::from(new_rsb);
+                }
+            }
+
+            crate::debug!(3, "DWA dimension reorder complete in {:?}", reorder_start.elapsed());
+        }
+
         crate::debug!(5, "build_internal_to_original_sparse_matrix: start");
         let sparse_start = std::time::Instant::now();
         let internal_to_original_sparse_matrix = timeit!(
@@ -3954,6 +4042,7 @@ impl GrammarConstraint {
             parser_dwa_vocab: vocab,
             eos_token_id,
             num_tsids,
+            state_to_internal_tsid,
         }
     }
 
@@ -4487,11 +4576,18 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn print_gss(&self) {
+        print!("{}", self.format_gss());
+    }
+
+    pub fn format_gss(&self) -> String {
+        use std::fmt::Write;
         let mut memo = HashSet::new();
+        let mut out = String::new();
         for (tsid, state) in self.state.iter() {
-            println!("Tokenizer State ID: {:?}", tsid);
-            println!("{}", state.stack.to_graph_string_with_memo(&mut memo, false));
+            writeln!(out, "Tokenizer State ID: {:?}", tsid).unwrap();
+            writeln!(out, "{}", state.stack.to_graph_string_with_memo(&mut memo, false)).unwrap();
         }
+        out
     }
 
     pub fn explain_stack(&self) {
