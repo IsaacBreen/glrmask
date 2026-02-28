@@ -1290,50 +1290,280 @@ impl GrammarDefinition {
                 Ok((vec![Symbol::NonTerminal(nt)], all_new_productions))
             }
             GrammarExpr::RepeatBounded { min, max, inner } => {
-                // Expand bounded repetition to sequence form:
-                // {min,max} -> inner^min (inner?)^(max-min)
-                // {min,} -> inner^min inner*
-                let mut parts = Vec::new();
-                
-                // Add min required copies
-                for _ in 0..*min {
-                    parts.push((**inner).clone());
+                // Binary decomposition for efficient bounded repetition.
+                // Instead of unrolling inner^N (N copies), we create a chain of
+                // power-of-2 nonterminals:
+                //   pow_0 = inner             (1 copy)
+                //   pow_1: pow_0 pow_0        (2 copies)
+                //   pow_2: pow_1 pow_1        (4 copies)
+                //   pow_k: pow_{k-1} pow_{k-1} (2^k copies)
+                // Then compose from the binary representation of min.
+                // This gives O(log N) auxiliary rules instead of O(N).
+
+                let min_val = *min;
+                let max_val = *max;
+
+                // Handle trivial cases without binary decomposition
+                if min_val == 0 && max_val == Some(0) {
+                    return Self::convert_grammar_expr_to_symbols(
+                        &GrammarExpr::Sequence(vec![]),
+                        current_rule_name_or_path,
+                        literal_to_group_id, nonterminal_names,
+                        regex_name_to_group_id, regex_expr_to_group_id,
+                        next_terminal_group_id, per_base_counters,
+                        all_names, memo, should_optimize,
+                    );
                 }
-                
-                match max {
-                    Some(max_val) => {
-                        // Add (max - min) optional copies
-                        for _ in 0..(max_val - min) {
-                            parts.push(GrammarExpr::Optional(Box::new((**inner).clone())));
-                        }
-                    }
-                    None => {
-                        // Unbounded: add inner*
-                        parts.push(GrammarExpr::Repeat(Box::new((**inner).clone())));
-                    }
-                }
-                
-                let expanded = if parts.is_empty() {
-                    GrammarExpr::Sequence(vec![])
-                } else if parts.len() == 1 {
-                    parts.pop().unwrap()
-                } else {
-                    GrammarExpr::Sequence(parts)
-                };
-                
-                Self::convert_grammar_expr_to_symbols(
-                    &expanded,
+
+                // Step 1: Compile inner expression
+                let inner_base_name = Self::generate_unique_indexed_name(
                     current_rule_name_or_path,
-                    literal_to_group_id,
-                    nonterminal_names,
-                    regex_name_to_group_id,
-                    regex_expr_to_group_id,
-                    next_terminal_group_id,
                     per_base_counters,
                     all_names,
-                    memo,
-                    should_optimize,
-                )
+                );
+                let (inner_symbols, inner_prods) = Self::convert_grammar_expr_to_symbols(
+                    inner,
+                    &inner_base_name,
+                    literal_to_group_id, nonterminal_names,
+                    regex_name_to_group_id, regex_expr_to_group_id,
+                    next_terminal_group_id, per_base_counters,
+                    all_names, memo, should_optimize,
+                )?;
+
+                let mut all_prods = inner_prods;
+
+                // Step 2: Get a single nonterminal for inner (wrap if needed)
+                let inner_nt = if inner_symbols.len() == 1 {
+                    if let Symbol::NonTerminal(nt) = &inner_symbols[0] {
+                        nt.clone()
+                    } else {
+                        // Single terminal: wrap in a nonterminal
+                        let wrap_name = Self::generate_unique_indexed_name(
+                            current_rule_name_or_path,
+                            per_base_counters,
+                            all_names,
+                        );
+                        let wrap_nt = NonTerminal(wrap_name);
+                        all_prods.push(Production {
+                            lhs: wrap_nt.clone(),
+                            rhs: inner_symbols.clone(),
+                        });
+                        wrap_nt
+                    }
+                } else {
+                    // Multiple symbols: wrap in a nonterminal
+                    let wrap_name = Self::generate_unique_indexed_name(
+                        current_rule_name_or_path,
+                        per_base_counters,
+                        all_names,
+                    );
+                    let wrap_nt = NonTerminal(wrap_name);
+                    all_prods.push(Production {
+                        lhs: wrap_nt.clone(),
+                        rhs: inner_symbols.clone(),
+                    });
+                    wrap_nt
+                };
+
+                // Step 3: Build power-of-2 chain
+                // powers[k] is a nonterminal representing 2^k copies of inner
+                let highest_bit = if min_val > 0 {
+                    (usize::BITS - min_val.leading_zeros()) as usize
+                } else {
+                    0
+                };
+
+                let mut powers: Vec<NonTerminal> = vec![inner_nt.clone()]; // powers[0] = inner (1 copy)
+                for k in 1..=highest_bit {
+                    let prev_nt = &powers[k - 1];
+                    let pow_name = Self::generate_unique_indexed_name(
+                        current_rule_name_or_path,
+                        per_base_counters,
+                        all_names,
+                    );
+                    let pow_nt = NonTerminal(pow_name);
+                    all_prods.push(Production {
+                        lhs: pow_nt.clone(),
+                        rhs: vec![
+                            Symbol::NonTerminal(prev_nt.clone()),
+                            Symbol::NonTerminal(prev_nt.clone()),
+                        ],
+                    });
+                    powers.push(pow_nt);
+                }
+
+                // Step 4: Compose the required min copies from binary decomposition
+                let mut seq_symbols: Vec<Symbol> = Vec::new();
+                for k in (0..=highest_bit).rev() {
+                    if min_val & (1 << k) != 0 {
+                        seq_symbols.push(Symbol::NonTerminal(powers[k].clone()));
+                    }
+                }
+
+                // Step 5: Handle the optional part (max - min additional copies)
+                match max_val {
+                    None => {
+                        // Unbounded: add inner*
+                        let star_expr = GrammarExpr::Repeat(Box::new((**inner).clone()));
+                        let star_base = Self::generate_unique_indexed_name(
+                            current_rule_name_or_path,
+                            per_base_counters,
+                            all_names,
+                        );
+                        let (star_symbols, star_prods) = Self::convert_grammar_expr_to_symbols(
+                            &star_expr,
+                            &star_base,
+                            literal_to_group_id, nonterminal_names,
+                            regex_name_to_group_id, regex_expr_to_group_id,
+                            next_terminal_group_id, per_base_counters,
+                            all_names, memo, should_optimize,
+                        )?;
+                        seq_symbols.extend(star_symbols);
+                        all_prods.extend(star_prods);
+                    }
+                    Some(max_v) => {
+                        // Binary decomposition for 0..opt_count optional copies using upto(M).
+                        // GPT 5.2 approach: O(log M) nonterminals.
+                        //
+                        // upto(M) matches 0 to M copies of inner:
+                        //   upto(0) = ε
+                        //   upto(M) = upto(2^k - 1) | pow(2^k) · upto(M - 2^k)
+                        //     where k = highest set bit of M
+                        //   upto(2^k - 1) = upto(2^{k-1} - 1) | pow(2^{k-1}) · upto(2^{k-1} - 1)
+                        //     (special case: power-of-two-minus-one)
+                        //
+                        // We share the pow(2^k) nonterminals with the exact-count decomposition.
+                        let opt_count = max_v - min_val;
+
+                        if opt_count > 0 {
+                            // Extend powers array if needed for the optional part
+                            let opt_highest_bit = (usize::BITS - opt_count.leading_zeros()) as usize;
+                            while powers.len() <= opt_highest_bit {
+                                let k = powers.len();
+                                let prev_nt = &powers[k - 1];
+                                let pow_name = Self::generate_unique_indexed_name(
+                                    current_rule_name_or_path,
+                                    per_base_counters,
+                                    all_names,
+                                );
+                                let pow_nt = NonTerminal(pow_name);
+                                all_prods.push(Production {
+                                    lhs: pow_nt.clone(),
+                                    rhs: vec![
+                                        Symbol::NonTerminal(prev_nt.clone()),
+                                        Symbol::NonTerminal(prev_nt.clone()),
+                                    ],
+                                });
+                                powers.push(pow_nt);
+                            }
+
+                            // Build upto nonterminals using memoization.
+                            // upto_cache maps M -> NonTerminal for "upto(M)" which matches 0..M copies.
+                            let mut upto_cache: std::collections::HashMap<usize, NonTerminal> = std::collections::HashMap::new();
+
+                            fn build_upto(
+                                m: usize,
+                                powers: &[NonTerminal],
+                                upto_cache: &mut std::collections::HashMap<usize, NonTerminal>,
+                                all_prods: &mut Vec<Production>,
+                                current_rule_name_or_path: &str,
+                                per_base_counters: &mut HashMap<String, usize>,
+                                all_names: &mut HashSet<String>,
+                            ) -> NonTerminal {
+                                if let Some(nt) = upto_cache.get(&m) {
+                                    return nt.clone();
+                                }
+
+                                let upto_name = GrammarDefinition::generate_unique_indexed_name(
+                                    current_rule_name_or_path,
+                                    per_base_counters,
+                                    all_names,
+                                );
+                                let upto_nt = NonTerminal(upto_name);
+
+                                if m == 0 {
+                                    // upto(0) = ε (empty production)
+                                    all_prods.push(Production {
+                                        lhs: upto_nt.clone(),
+                                        rhs: vec![],
+                                    });
+                                } else {
+                                    let k = (usize::BITS - m.leading_zeros() - 1) as usize; // highest set bit position
+
+                                    if m == (1 << k) - 1 {
+                                        // Special case: upto(2^k - 1)
+                                        // = upto(2^{k-1} - 1) | pow(2^{k-1}) · upto(2^{k-1} - 1)
+                                        if k == 0 {
+                                            // upto(0) = ε, but we need upto(0) which is just epsilon
+                                            // Actually m = (1<<0) - 1 = 0, handled above
+                                            unreachable!();
+                                        }
+                                        let sub_upto = build_upto(
+                                            (1 << (k - 1)) - 1, // upto(2^{k-1} - 1) -- this is actually wrong for k=1
+                                            powers, upto_cache, all_prods,
+                                            current_rule_name_or_path, per_base_counters, all_names,
+                                        );
+                                        // Alt 1: upto(2^{k-1} - 1)  (same as sub_upto, but we need separate production)
+                                        // Alt 2: pow(2^{k-1}) · upto(2^{k-1} - 1)
+                                        all_prods.push(Production {
+                                            lhs: upto_nt.clone(),
+                                            rhs: vec![Symbol::NonTerminal(sub_upto.clone())],
+                                        });
+                                        all_prods.push(Production {
+                                            lhs: upto_nt.clone(),
+                                            rhs: vec![
+                                                Symbol::NonTerminal(powers[k - 1].clone()),
+                                                Symbol::NonTerminal(sub_upto.clone()),
+                                            ],
+                                        });
+                                    } else {
+                                        // General case: upto(M)
+                                        // = upto(2^k - 1) | pow(2^k) · upto(M - 2^k)
+                                        let prefix_upto = build_upto(
+                                            (1 << k) - 1,
+                                            powers, upto_cache, all_prods,
+                                            current_rule_name_or_path, per_base_counters, all_names,
+                                        );
+                                        let suffix_upto = build_upto(
+                                            m - (1 << k),
+                                            powers, upto_cache, all_prods,
+                                            current_rule_name_or_path, per_base_counters, all_names,
+                                        );
+                                        // Alt 1: upto(2^k - 1)
+                                        all_prods.push(Production {
+                                            lhs: upto_nt.clone(),
+                                            rhs: vec![Symbol::NonTerminal(prefix_upto.clone())],
+                                        });
+                                        // Alt 2: pow(2^k) · upto(M - 2^k)
+                                        all_prods.push(Production {
+                                            lhs: upto_nt.clone(),
+                                            rhs: vec![
+                                                Symbol::NonTerminal(powers[k].clone()),
+                                                Symbol::NonTerminal(suffix_upto.clone()),
+                                            ],
+                                        });
+                                    }
+                                }
+
+                                upto_cache.insert(m, upto_nt.clone());
+                                upto_nt
+                            }
+
+                            let upto_nt = build_upto(
+                                opt_count,
+                                &powers,
+                                &mut upto_cache,
+                                &mut all_prods,
+                                current_rule_name_or_path,
+                                per_base_counters,
+                                all_names,
+                            );
+                            seq_symbols.push(Symbol::NonTerminal(upto_nt));
+                        }
+                    }
+                }
+
+                Ok((seq_symbols, all_prods))
             }
         }
     }

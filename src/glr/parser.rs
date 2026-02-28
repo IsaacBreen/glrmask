@@ -439,8 +439,14 @@ impl GLRParser {
         // Cache: for a given popped GSS, pre-computed edge map: from_id -> [(edge, iso)]
         // Avoids re-iterating 512+ popped edges for each reduce
         let mut popped_edge_map_cache: std::collections::HashMap<usize, BTreeMap<StateID, Vec<(ParseStateEdgeContent, ParserGSS)>>> = std::collections::HashMap::new();
+        // CRITICAL: Keep all consumed state_gss values alive for the duration of this function.
+        // The popn_cache uses Arc pointer addresses (ptr_key) as keys. If a state_gss is dropped
+        // between iterations, its Arc memory can be reused for a new GSS, causing the cache to
+        // return results for a completely different GSS (ABA problem).
+        let mut _gss_anchor: Vec<ParserGSS> = Vec::new();
 
         while let Some((state_id, state_gss)) = heads_by_state.pop_first() {
+            _gss_anchor.push(state_gss.clone());
             if let Some(row) = get_row(&self.table, state_id) {
                 row.handle_shifts_and_reduces_for_terminal(
                     token,
