@@ -2060,6 +2060,41 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner: new_inner }
     }
 
+    /// Push multiple values at once, creating a GSS with one edge per value,
+    /// all pointing to the same current GSS as child. This is equivalent to
+    /// doing N individual pushes followed by merging the results, but O(N)
+    /// instead of O(N log N).
+    pub fn push_many(&self, values: impl IntoIterator<Item = T>) -> Self {
+        if self.is_empty() {
+            return self.clone();
+        }
+        match &*self.inner {
+            Upper::Interface(i) => {
+                let child_entry = OrdMap::unit(i.inner.max_depth, i.inner.clone());
+                let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+                for value in values {
+                    new_children.insert(value, child_entry.clone());
+                }
+                if new_children.is_empty() {
+                    return LeveledGSS::empty();
+                }
+                let new_lower_root = new_lower(new_children, false);
+                LeveledGSS { inner: new_interface(new_lower_root, i.acc.clone()) }
+            }
+            Upper::Branch(_) => {
+                let child_entry = OrdMap::unit(self.inner.max_depth(), self.inner.clone());
+                let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                for value in values {
+                    new_children.insert(value, child_entry.clone());
+                }
+                if new_children.is_empty() {
+                    return LeveledGSS::empty();
+                }
+                LeveledGSS { inner: new_branch(new_children, None) }
+            }
+        }
+    }
+
     pub fn popn(&self, n: isize) -> Self {
         if n <= 0 {
             return self.clone();
@@ -2699,6 +2734,32 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS {
             inner: merged_inner,
         }
+    }
+
+    /// Merge many GSSes efficiently using balanced binary merging.
+    /// For N GSSes with non-overlapping top edges (common case), this is O(N log N).
+    /// Much faster than sequential fold which is O(N²) for deep structures.
+    pub fn merge_many(gsses: impl IntoIterator<Item = Self>) -> Self {
+        let mut items: Vec<Self> = gsses.into_iter().collect();
+        if items.is_empty() {
+            return LeveledGSS::empty();
+        }
+        if items.len() == 1 {
+            return items.into_iter().next().unwrap();
+        }
+        while items.len() > 1 {
+            let mut next = Vec::with_capacity((items.len() + 1) / 2);
+            let mut iter = items.into_iter();
+            while let Some(a) = iter.next() {
+                if let Some(b) = iter.next() {
+                    next.push(a.merge(&b));
+                } else {
+                    next.push(a);
+                }
+            }
+            items = next;
+        }
+        items.into_iter().next().unwrap()
     }
 
     pub fn fuse(&self, levels: Option<isize>) -> Self {

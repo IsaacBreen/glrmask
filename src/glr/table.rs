@@ -1151,7 +1151,7 @@ fn collect_target_states(
 /// Merge states that have identical action and goto tables.
 /// This is similar to LALR state merging but operates on the final table.
 fn merge_identical_rows(
-    table: Table,
+    mut table: Table,
     start_state_id: StateID,
     substring_state_id: StateID,
 ) -> (Table, StateID, StateID) {
@@ -1159,28 +1159,44 @@ fn merge_identical_rows(
     // We need a way to hash/compare Row content
     let mut canonical: BTreeMap<RowSignature, StateID> = BTreeMap::new();
     let mut state_mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
-    
+    // Track which states are being merged into each canonical state
+    let mut merge_groups: BTreeMap<StateID, Vec<StateID>> = BTreeMap::new();
+
     // First pass: identify canonical representatives for each unique row
     for (state_id, row) in &table {
         let sig = compute_row_signature(row);
-        
+
         if let Some(&canonical_id) = canonical.get(&sig) {
             // This row is identical to an existing one
             state_mapping.insert(*state_id, canonical_id);
+            merge_groups.entry(canonical_id).or_default().push(*state_id);
         } else {
             // This is a new unique row
             canonical.insert(sig, *state_id);
             state_mapping.insert(*state_id, *state_id);
         }
     }
-    
+
     // Check if any merging happened
     let unique_states: HashSet<StateID> = state_mapping.values().cloned().collect();
     if unique_states.len() == table.len() {
         // No merging possible
         return (table, start_state_id, substring_state_id);
     }
-    
+
+    // Merge production_ids from non-canonical rows into their canonical representative.
+    // Collect merged rows first to avoid borrow conflicts.
+    for (canonical_id, merged_ids) in &merge_groups {
+        let merged_rows: Vec<Row> = merged_ids.iter()
+            .filter_map(|mid| table.get(mid).cloned())
+            .collect();
+        if let Some(canonical_row) = table.get_mut(canonical_id) {
+            for merged_row in &merged_rows {
+                merge_production_ids(canonical_row, merged_row);
+            }
+        }
+    }
+
     // Second pass: create new table with merged states and remapped references
     let mut new_table: Table = BTreeMap::new();
     
@@ -1219,10 +1235,17 @@ struct RowSignature {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ActionSignature {
     Shift(StateID),
-    Reduce { nonterminal_id: NonTerminalID, len: usize, production_ids: Vec<ProductionID> },
-    Split { 
-        shift: Option<StateID>, 
-        reduces: Vec<(usize, Vec<(NonTerminalID, Vec<ProductionID>)>)>,
+    // NOTE: production_ids are intentionally excluded from the signature.
+    // They are purely informational (used only for debug output) and do not
+    // affect parser semantics: process_reduce only uses (nt_id, len), and
+    // production_ids are dropped during table serialization anyway.
+    // Including them prevented merging of states that differ only in which
+    // alternative was reduced, causing O(variants * elements) GSS blowup
+    // in discriminated-union grammars (e.g. 512 variants × 300 elements).
+    Reduce { nonterminal_id: NonTerminalID, len: usize },
+    Split {
+        shift: Option<StateID>,
+        reduces: Vec<(usize, Vec<NonTerminalID>)>,
     },
 }
 
@@ -1256,11 +1279,10 @@ fn compute_row_signature(row: &Row) -> RowSignature {
 fn compute_action_signature(action: &Stage7ShiftsAndReducesLookaheadValue) -> ActionSignature {
     match action {
         Stage7ShiftsAndReducesLookaheadValue::Shift(s) => ActionSignature::Shift(*s),
-        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-            ActionSignature::Reduce { 
-                nonterminal_id: *nonterminal_id, 
-                len: *len, 
-                production_ids: production_ids.clone() 
+        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+            ActionSignature::Reduce {
+                nonterminal_id: *nonterminal_id,
+                len: *len,
             }
         }
         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
@@ -1269,13 +1291,63 @@ fn compute_action_signature(action: &Stage7ShiftsAndReducesLookaheadValue) -> Ac
                 .map(|(len, nt_map)| {
                     let nt_vec: Vec<_> = nt_map
                         .iter()
-                        .map(|(nt, pids)| (*nt, pids.clone()))
+                        .map(|(nt, _pids)| *nt)
                         .collect();
                     (*len, nt_vec)
                 })
                 .collect();
             ActionSignature::Split { shift: *shift, reduces: reduces_vec }
         }
+    }
+}
+
+/// Merge production_ids from a source row into a destination row.
+/// For each matching Reduce/Split action (by terminal), union the production_ids.
+fn merge_production_ids(dst: &mut Row, src: &Row) {
+    // Merge explicit shift/reduce actions
+    for (tid, dst_action) in dst.shifts_and_reduces_full.iter_mut() {
+        if let Some(src_action) = src.shifts_and_reduces_full.get(tid) {
+            merge_action_production_ids(dst_action, src_action);
+        }
+    }
+    // Merge default_reduce
+    if let (Some(dst_dr), Some(src_dr)) = (&mut dst.default_reduce, &src.default_reduce) {
+        merge_action_production_ids(dst_dr, src_dr);
+    }
+}
+
+fn merge_action_production_ids(
+    dst: &mut Stage7ShiftsAndReducesLookaheadValue,
+    src: &Stage7ShiftsAndReducesLookaheadValue,
+) {
+    match (dst, src) {
+        (
+            Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids: dst_pids, .. },
+            Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids: src_pids, .. },
+        ) => {
+            for pid in src_pids.iter() {
+                if !dst_pids.contains(pid) {
+                    dst_pids.push(*pid);
+                }
+            }
+            dst_pids.sort();
+        }
+        (
+            Stage7ShiftsAndReducesLookaheadValue::Split { reduces: dst_reduces, .. },
+            Stage7ShiftsAndReducesLookaheadValue::Split { reduces: src_reduces, .. },
+        ) => {
+            for (dst_r, src_r) in dst_reduces.iter_mut().zip(src_reduces.iter()) {
+                for (dst_nts, src_nts) in dst_r.1.iter_mut().zip(src_r.1.iter()) {
+                    for pid in src_nts.1.iter() {
+                        if !dst_nts.1.contains(pid) {
+                            dst_nts.1.push(*pid);
+                        }
+                    }
+                    dst_nts.1.sort();
+                }
+            }
+        }
+        _ => {} // Shift or mismatched types — nothing to merge
     }
 }
 
