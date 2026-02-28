@@ -1422,7 +1422,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state = new_overall_state;
 
-        // Fuse GSS levels - no longer need to reset llm_tokens_union since we compute it on-the-fly
+        // Fuse GSS levels
         for glr_state in self.state.values_mut() {
             glr_state.stack = glr_state.stack.fuse(Some(1));
         }

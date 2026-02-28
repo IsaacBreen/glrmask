@@ -1749,6 +1749,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    /// Return a usize that uniquely identifies this GSS's inner Arc pointer.
+    /// Two GSSes with the same ptr_key share the exact same inner structure.
+    pub fn ptr_key(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
+    }
+
     /// For each top-level edge value T, return a usize key that identifies the
     /// structural identity of the sub-tree below that edge (based on Arc pointer).
     /// Two edges with the same key will produce identical GSSes when isolated and popped.

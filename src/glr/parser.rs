@@ -434,13 +434,57 @@ impl GLRParser {
 
         let mut shifted: Vec<ParserGSS> = Vec::new();
 
+        // Cache popn results keyed by (gss inner pointer, pop length)
+        let mut popn_cache: std::collections::HashMap<(usize, isize), ParserGSS> = std::collections::HashMap::new();
+        // Cache: for a given popped GSS, pre-computed edge map: from_id -> [(edge, iso)]
+        // Avoids re-iterating 512+ popped edges for each reduce
+        let mut popped_edge_map_cache: std::collections::HashMap<usize, BTreeMap<StateID, Vec<(ParseStateEdgeContent, ParserGSS)>>> = std::collections::HashMap::new();
+
         while let Some((state_id, state_gss)) = heads_by_state.pop_first() {
             if let Some(row) = get_row(&self.table, state_id) {
                 row.handle_shifts_and_reduces_for_terminal(
                     token,
                     |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
                     |nt_id, len, _pids| {
-                        self.apply_reduces(&state_gss, *len, *nt_id, &mut heads_by_state);
+                        // Get or compute the popped GSS
+                        let pop_key = (state_gss.ptr_key(), *len as isize);
+                        let popped = popn_cache.entry(pop_key).or_insert_with(|| state_gss.popn(*len as isize)).clone();
+                        if popped.is_empty() { return; }
+
+                        // Get or compute the edge map: from_id -> [(edge, isolated_gss)]
+                        let popped_ptr = popped.ptr_key();
+                        let edge_map = popped_edge_map_cache.entry(popped_ptr).or_insert_with(|| {
+                            let mut map: BTreeMap<StateID, Vec<(ParseStateEdgeContent, ParserGSS)>> = BTreeMap::new();
+                            for edge in popped.peek() {
+                                let from_id = edge.state_id;
+                                let iso = popped.isolate(Some(edge));
+                                map.entry(from_id).or_default().push((edge, iso));
+                            }
+                            map
+                        });
+
+                        // Group edges by goto next_id, then use isolate_many + single push per group
+                        let mut next_id_edges: BTreeMap<StateID, Vec<ParseStateEdgeContent>> = BTreeMap::new();
+                        for (from_id, edge_isos) in edge_map.iter() {
+                            if let Some(row) = get_row(&self.table, *from_id) {
+                                if let Some(goto) = row.gotos.get(nt_id) {
+                                    if let Some(next_id) = goto.state_id {
+                                        for (edge, _iso) in edge_isos {
+                                            next_id_edges.entry(next_id).or_default().push(*edge);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        for (next_id, edges) in next_id_edges {
+                            let batch_gss = popped.isolate_many(edges.into_iter().map(Some));
+                            let pushed = batch_gss.push(ParseStateEdgeContent { state_id: next_id });
+                            heads_by_state
+                                .entry(next_id)
+                                .and_modify(|acc| *acc = acc.merge(&pushed))
+                                .or_insert(pushed);
+                        }
                     },
                 );
             }
@@ -449,38 +493,23 @@ impl GLRParser {
         if shifted.is_empty() {
             return LeveledGSS::empty();
         }
-        let mut it = shifted.into_iter();
-        let first = it.next().unwrap();
-        it.fold(first, |acc, g| acc.merge(&g))
-    }
-
-    fn apply_reduces(
-        &self,
-        state_gss: &ParserGSS,
-        len: usize,
-        nt: NonTerminalID,
-        heads_by_state: &mut BTreeMap<StateID, ParserGSS>,
-    ) {
-        let popped = state_gss.popn(len as isize);
-        if popped.is_empty() {
-            return;
+        if shifted.len() == 1 {
+            return shifted.into_iter().next().unwrap();
         }
-
-        for edge in popped.peek() {
-            let from_id = edge.state_id;
-            if let Some(row) = get_row(&self.table, from_id) {
-                if let Some(goto) = row.gotos.get(&nt) {
-                    if let Some(next_id) = goto.state_id {
-                        let iso = popped.isolate(Some(edge));
-                        let pushed = iso.push(ParseStateEdgeContent { state_id: next_id });
-                        heads_by_state
-                            .entry(next_id)
-                            .and_modify(|acc| *acc = acc.merge(&pushed))
-                            .or_insert(pushed);
-                    }
+        // Balanced merge: O(n log n) instead of O(n²)
+        while shifted.len() > 1 {
+            let mut next = Vec::with_capacity((shifted.len() + 1) / 2);
+            let mut iter = shifted.into_iter();
+            while let Some(a) = iter.next() {
+                if let Some(b) = iter.next() {
+                    next.push(a.merge(&b));
+                } else {
+                    next.push(a);
                 }
             }
+            shifted = next;
         }
+        shifted.into_iter().next().unwrap()
     }
 }
 
