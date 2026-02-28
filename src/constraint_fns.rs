@@ -778,50 +778,94 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
 
-                // Process transitions — project transition weights to this tsid
-                // Collect results for balanced merge (avoids O(n²) sequential merge)
-                let mut deferred_results: Vec<(isize, WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>)> = Vec::new();
+// Process transitions — group edges by DWA transition, then use isolate_many + pop
+                // to avoid N×(isolate+pop)+merge. Since (a1 & t) | (a2 & t) = (a1|a2) & t,
+                // we can combine edges sharing a transition and process them as one GSS operation.
+
+                // Phase 1: Group edges by DWA transition (lightweight — no GSS operations)
+                let mut edge_groups: LocalFxHashMap<(WAStateID, usize), Vec<ParseStateEdgeContent>> = LocalFxHashMap::default();
+                let mut group_weights: LocalFxHashMap<(WAStateID, usize), *const AbstractWeight> = LocalFxHashMap::default();
+
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
 
-                    let mut process_transition = |target_wa_state_id: WAStateID, trans_weight: &AbstractWeight| {
-                        wl_expand_count += 1;
-
-                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                        let isolated_gss = gss.isolate(Some(peeked_edge));
-                        let popped_gss = isolated_gss.pop();
-                        if let Some(t0) = t0 {
-                            wl_gss_ns += t0.elapsed().as_nanos() as u64;
-                        }
-                        if popped_gss.is_empty() { return; }
-
-                        // Project transition weight to this tsid's token set (local cache)
-                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                        let trans_tokens = get_proj(trans_weight);
-                        let f = |acc: &RangeSetBlaze<usize>| {
-                            let new_acc = acc & &*trans_tokens;
-                            if new_acc.is_empty() { None } else { Some(new_acc) }
-                        };
-                        let final_gss = popped_gss.apply_and_prune(f);
-                        if let Some(t0) = t0 {
-                            wl_intersect_ns += t0.elapsed().as_nanos() as u64;
-                            wl_intersect_count += 1;
-                        }
-
-                        if !final_gss.is_empty() {
-                            deferred_results.push((final_gss.max_depth(), target_wa_state_id, final_gss));
-                        }
+                    let mut add_to_group = |target_wa_state_id: WAStateID, trans_weight: &AbstractWeight| {
+                        let weight_key = trans_weight.arc_ptr_key();
+                        let group_key = (target_wa_state_id, weight_key);
+                        group_weights.entry(group_key).or_insert(trans_weight as *const AbstractWeight);
+                        edge_groups.entry(group_key).or_default().push(peeked_edge);
                     };
 
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
-                        process_transition(target_wa_state_id, trans_weight);
+                        add_to_group(target_wa_state_id, trans_weight);
                     }
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
-                        process_transition(target_wa_state_id, trans_weight);
+                        add_to_group(target_wa_state_id, trans_weight);
                     }
                 }
 
-                // Balanced merge: group by (depth, target_wa_state_id), then merge in pairs
+                // Phase 2: For each group, isolate+pop per edge, dedup by child structure, then merge
+                let child_dedup = gss.children_dedup_keys();
+                let mut deferred_results: Vec<(isize, WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>)> = Vec::new();
+                for ((target_wa_state_id, weight_key), edges) in &edge_groups {
+                    wl_expand_count += edges.len() as u64;
+
+                    // Isolate+pop per unique child structure (skip edges that share the same sub-tree)
+                    let mut seen_child_keys: LocalFxHashMap<usize, ()> = LocalFxHashMap::default();
+                    let mut gsses: Vec<LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>> = Vec::new();
+                    for &edge in edges {
+                        let child_key = child_dedup.get(&edge).copied().unwrap_or(0);
+                        if seen_child_keys.contains_key(&child_key) {
+                            continue;
+                        }
+                        seen_child_keys.insert(child_key, ());
+
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let isolated_gss = gss.isolate(Some(edge));
+                        let popped_gss = isolated_gss.pop();
+                        if let Some(t0) = t0 { wl_gss_ns += t0.elapsed().as_nanos() as u64; }
+                        if popped_gss.is_empty() { continue; }
+                        gsses.push(popped_gss);
+                    }
+
+                    // Balanced merge of unique popped GSSes
+                    while gsses.len() > 1 {
+                        let mut next = Vec::with_capacity((gsses.len() + 1) / 2);
+                        let mut iter = gsses.into_iter();
+                        while let Some(a) = iter.next() {
+                            if let Some(b) = iter.next() {
+                                next.push(a.merge(&b));
+                            } else {
+                                next.push(a);
+                            }
+                        }
+                        gsses = next;
+                    }
+
+                    if gsses.is_empty() { continue; }
+                    let merged_gss = gsses.into_iter().next().unwrap();
+
+                    // ONE apply_and_prune per group
+                    let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                    // SAFETY: weight pointer valid since DWA state is borrowed for the duration
+                    let trans_weight = unsafe { &*group_weights[&(*target_wa_state_id, *weight_key)] };
+                    let trans_tokens = get_proj(trans_weight);
+                    let f = |acc: &RangeSetBlaze<usize>| {
+                        let new_acc = acc & &*trans_tokens;
+                        if new_acc.is_empty() { None } else { Some(new_acc) }
+                    };
+                    let final_gss = merged_gss.apply_and_prune(f);
+                    if let Some(t0) = t0 {
+                        wl_intersect_ns += t0.elapsed().as_nanos() as u64;
+                        wl_intersect_count += 1;
+                    }
+
+                    if !final_gss.is_empty() {
+                        deferred_results.push((final_gss.max_depth(), *target_wa_state_id, final_gss));
+                    }
+                }
+
+                // Phase 3: Balanced merge of deferred results into queue
                 {
                     deferred_results.sort_by_key(|&(depth, wa, _)| (depth, wa));
                     let mut i = 0;

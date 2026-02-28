@@ -1749,6 +1749,32 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    /// For each top-level edge value T, return a usize key that identifies the
+    /// structural identity of the sub-tree below that edge (based on Arc pointer).
+    /// Two edges with the same key will produce identical GSSes when isolated and popped.
+    /// This enables deduplication: if edges share the same sub-tree, only one
+    /// isolate+pop is needed.
+    pub fn children_dedup_keys(&self) -> StdHashMap<T, usize> {
+        let mut result = StdHashMap::new();
+        let children = match &*self.inner {
+            Upper::Branch(b) => &b.children,
+            Upper::Interface(i) => {
+                // Interface wraps Lower which has untyped children — return empty
+                return result;
+            }
+        };
+        for (v, kids) in children.iter() {
+            // Use combined hash of all Arc child pointers for this edge
+            let mut key: usize = 0;
+            for (depth, child) in kids.iter() {
+                key = key.wrapping_mul(31).wrapping_add(Arc::as_ptr(child) as usize)
+                    .wrapping_mul(31).wrapping_add(*depth as usize);
+            }
+            result.insert(v.clone(), key);
+        }
+        result
+    }
+
     pub fn inner_ptr_eq(&self, other: &Self) -> bool {
         match (&*self.inner, &*other.inner) {
             (Upper::Branch(b1), Upper::Branch(b2)) => Arc::ptr_eq(b1, b2),
