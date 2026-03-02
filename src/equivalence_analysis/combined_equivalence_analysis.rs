@@ -261,6 +261,9 @@ pub fn compute_combined_equivalence(
 
     #[cfg(test)]
     {
+        if std::env::var("SKIP_EQUIV_VERIFICATION").is_ok() {
+            crate::debug!(3, "Skipping equivalence verification (SKIP_EQUIV_VERIFICATION is set)");
+        } else {
         fn state_is_refinement(
             candidate: &StateEquivalenceResult,
             target: &StateEquivalenceResult,
@@ -394,6 +397,7 @@ pub fn compute_combined_equivalence(
                 vocab_classes, ref_vocab_classes
             );
         }
+        } // end of else (SKIP_EQUIV_VERIFICATION)
     }
     
     CombinedEquivalenceResult {

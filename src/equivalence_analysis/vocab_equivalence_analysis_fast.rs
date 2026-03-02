@@ -20,6 +20,7 @@ use crate::dfa_u8::{Regex, Tokenizer};
 use crate::r#macro::is_debug_level_enabled;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
+use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
@@ -110,9 +111,12 @@ struct SuffixScratch {
 // HASH UTILITIES
 // =============================================================================
 
+static HASH_RANDOM_STATE: Lazy<RandomState> =
+    Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
+
 #[inline]
 fn new_hasher() -> AHasher {
-    RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4).build_hasher()
+    HASH_RANDOM_STATE.build_hasher()
 }
 
 #[inline]
@@ -266,6 +270,460 @@ fn precompute_dfa(regex: &Tokenizer) -> PrecomputedDfa {
         completion_hash,
         none_completion_hash,
     }
+}
+
+// =============================================================================
+// PRODUCT DFA
+// =============================================================================
+
+/// Product DFA: simultaneous DFA state tracking across all initial states.
+/// Reduces per-byte cost from O(num_states) DFA lookups to O(1) product lookup
+/// plus O(finalizer_events) for match tracking.
+struct ProductDfa {
+    /// Byte → input equivalence class
+    byte_to_class: [u8; 256],
+    num_classes: usize,
+    /// Transition table: trans[state * num_classes + class] = next_product_state
+    /// PRODUCT_ALL_DEAD means all components dead.
+    trans: Vec<u32>,
+    /// Per-edge finalizer events (flattened).
+    /// For edge (state, class): range = edge_ranges[state * num_classes + class]
+    /// events = &edge_events[range.0..range.1]
+    /// Each event: (component_idx, group_id, is_non_greedy)
+    edge_events: Vec<(u16, u16, bool)>,
+    edge_ranges: Vec<u32>,  // pairs of (start, end) packed: even=start, odd=end
+    /// Initial finalizer events (position 0)
+    initial_events: Vec<(u16, u16, bool)>,
+    /// Per product state × component: DFA state (u32::MAX if dead)
+    comp_dfa_state: Vec<u32>,
+    /// Per product state: whether any alive component has Guarded future mode
+    has_guarded: Vec<bool>,
+    /// Guard info for guarded components: [state] → [(comp_idx, [guard_gids])]
+    guarded_info: Vec<SmallVec<[(u16, SmallVec<[u16; 2]>); 2]>>,
+    num_components: usize,
+    num_states: usize,
+}
+
+const PRODUCT_ALL_DEAD: u32 = u32::MAX;
+
+impl ProductDfa {
+    fn build(pre: &PrecomputedDfa, initial_states: &[usize]) -> Self {
+        let num_components = initial_states.len();
+
+        // Compute byte → input equivalence class mapping
+        let num_dfa_states = pre.transitions.len();
+        let mut sig_to_class: HashMap<u64, u8> = HashMap::new();
+        let mut byte_to_class = [0u8; 256];
+        let mut num_classes: usize = 0;
+        
+        // Hash each byte's transition vector across all DFA states to find equiv classes
+        for b in 0u16..256 {
+            let mut hasher = new_hasher();
+            for s in 0..num_dfa_states {
+                hasher.write_u32(pre.transitions[s][b as usize]);
+            }
+            let sig = hasher.finish();
+            let class = sig_to_class.entry(sig).or_insert_with(|| {
+                let c = num_classes as u8;
+                num_classes += 1;
+                c
+            });
+            byte_to_class[b as usize] = *class;
+        }
+        
+        // Representative byte for each class
+        let mut class_to_byte = vec![0u8; num_classes];
+        for (byte, &class) in byte_to_class.iter().enumerate() {
+            class_to_byte[class as usize] = byte as u8;
+        }
+
+        // BFS to build product states
+        let mut state_map: HashMap<Vec<u32>, u32> = HashMap::new();
+        let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+        let mut all_comp_states: Vec<Vec<u32>> = Vec::new();
+        let mut all_trans: Vec<Vec<u32>> = Vec::new();
+        let mut all_edge_events: Vec<(u16, u16, bool)> = Vec::new();
+        let mut all_edge_ranges: Vec<u32> = Vec::new(); // pairs: start, end
+        let mut all_has_guarded: Vec<bool> = Vec::new();
+        let mut all_guarded_info: Vec<SmallVec<[(u16, SmallVec<[u16; 2]>); 2]>> = Vec::new();
+
+        // Initial product state
+        let init_vec: Vec<u32> = initial_states.iter().map(|&s| s as u32).collect();
+        state_map.insert(init_vec.clone(), 0);
+        all_comp_states.push(init_vec);
+        queue.push_back(0);
+
+        // Collect initial finalizer events (position 0)
+        let mut initial_events: Vec<(u16, u16, bool)> = Vec::new();
+        for (comp_i, &state) in initial_states.iter().enumerate() {
+            for f in &pre.finalizers[state] {
+                if f.gid < pre.num_groups {
+                    initial_events.push((comp_i as u16, f.gid as u16, f.non_greedy));
+                }
+            }
+        }
+
+        while let Some(state_id) = queue.pop_front() {
+            let comp_states = all_comp_states[state_id as usize].clone();
+            let mut trans = vec![PRODUCT_ALL_DEAD; num_classes];
+
+            for class in 0..num_classes {
+                let byte = class_to_byte[class] as usize;
+                let mut next_comp = vec![u32::MAX; num_components];
+                let edge_start = all_edge_events.len() as u32;
+                let mut any_alive = false;
+
+                for (comp_i, &cur_dfa) in comp_states.iter().enumerate() {
+                    if cur_dfa == u32::MAX {
+                        continue; // Already dead
+                    }
+
+                    let next_dfa = pre.transitions[cur_dfa as usize][byte];
+                    if next_dfa == NONE_STATE {
+                        continue; // Dies on this transition, no finalizer
+                    }
+
+                    let next_dfa_usize = next_dfa as usize;
+
+                    // Collect finalizer events
+                    for f in &pre.finalizers[next_dfa_usize] {
+                        if f.gid < pre.num_groups {
+                            all_edge_events.push((comp_i as u16, f.gid as u16, f.non_greedy));
+                        }
+                    }
+
+                    // Check if component stays alive
+                    let dead = match &pre.future_modes[next_dfa_usize] {
+                        FutureMode::AlwaysTerminate => true,
+                        FutureMode::AlwaysContinue => false,
+                        FutureMode::Guarded(_) => false, // Alive for now, check at runtime
+                    } || !pre.has_transitions[next_dfa_usize];
+
+                    if dead {
+                        // Component dies but finalizers already collected above
+                        next_comp[comp_i] = u32::MAX;
+                    } else {
+                        next_comp[comp_i] = next_dfa;
+                        any_alive = true;
+                    }
+                }
+
+                let edge_end = all_edge_events.len() as u32;
+                all_edge_ranges.push(edge_start);
+                all_edge_ranges.push(edge_end);
+
+                if any_alive {
+                    let next_id = *state_map.entry(next_comp.clone()).or_insert_with(|| {
+                        let id = all_comp_states.len() as u32;
+                        all_comp_states.push(next_comp);
+                        queue.push_back(id);
+                        id
+                    });
+                    trans[class] = next_id;
+                }
+                // else: stays PRODUCT_ALL_DEAD
+            }
+
+            // Check for guarded components at this state
+            let mut guarded: SmallVec<[(u16, SmallVec<[u16; 2]>); 2]> = SmallVec::new();
+            for (comp_i, &dfa_state) in comp_states.iter().enumerate() {
+                if dfa_state != u32::MAX {
+                    if let FutureMode::Guarded(ref guard) = pre.future_modes[dfa_state as usize] {
+                        let gids: SmallVec<[u16; 2]> = guard.iter().map(|&g| g as u16).collect();
+                        guarded.push((comp_i as u16, gids));
+                    }
+                }
+            }
+            let hg = !guarded.is_empty();
+            all_has_guarded.push(hg);
+            all_guarded_info.push(guarded);
+
+            all_trans.push(trans);
+        }
+
+        let num_states = all_comp_states.len();
+
+        // Flatten comp_dfa_state
+        let mut comp_dfa_state = Vec::with_capacity(num_states * num_components);
+        for cs in &all_comp_states {
+            comp_dfa_state.extend_from_slice(cs);
+        }
+
+        // Flatten transition table
+        let mut trans_flat = Vec::with_capacity(num_states * num_classes);
+        for t in &all_trans {
+            trans_flat.extend_from_slice(t);
+        }
+
+        if is_debug_level_enabled(3) {
+            crate::debug!(
+                3,
+                "Product DFA: {} product states, {} classes, {} components, {} edge events",
+                num_states,
+                num_classes,
+                num_components,
+                all_edge_events.len(),
+            );
+        }
+
+        ProductDfa {
+            byte_to_class,
+            num_classes,
+            trans: trans_flat,
+            edge_events: all_edge_events,
+            edge_ranges: all_edge_ranges,
+            initial_events,
+            comp_dfa_state,
+            has_guarded: all_has_guarded,
+            guarded_info: all_guarded_info,
+            num_components,
+            num_states,
+        }
+    }
+
+    /// Get the edge's finalizer events
+    #[inline]
+    fn edge_finalizers(&self, state: u32, class: usize) -> &[(u16, u16, bool)] {
+        let edge_idx = (state as usize * self.num_classes + class) * 2;
+        let start = self.edge_ranges[edge_idx] as usize;
+        let end = self.edge_ranges[edge_idx + 1] as usize;
+        &self.edge_events[start..end]
+    }
+
+    /// Get component DFA state at a product state
+    #[inline]
+    fn component_dfa(&self, product_state: u32, comp: usize) -> u32 {
+        self.comp_dfa_state[product_state as usize * self.num_components + comp]
+    }
+}
+
+/// Scratch space for product DFA token processing
+struct ProductScratch {
+    /// Match positions per (component, group). NONE_POS if not matched.
+    match_positions: Vec<u32>,
+    /// Generation counters to avoid clearing match_positions each token
+    match_gen: Vec<u32>,
+    cur_gen: u32,
+    /// Touched groups per component (for signature computation)
+    touched_groups: Vec<GroupList>,
+    /// List of components with non-empty touched_groups
+    touched_comps: Vec<usize>,
+    /// All target positions for suffix computation
+    all_targets: Vec<usize>,
+    seen_target: Vec<bool>,
+    /// Base offset per component in match arrays
+    base_offsets: Vec<usize>,
+    num_components: usize,
+    num_groups: usize,
+}
+
+impl ProductScratch {
+    fn new(num_components: usize, num_groups: usize) -> Self {
+        let total = num_components * num_groups;
+        let base_offsets: Vec<usize> = (0..num_components).map(|i| i * num_groups).collect();
+        ProductScratch {
+            match_positions: vec![0; total],
+            match_gen: vec![0; total],
+            cur_gen: 1,
+            touched_groups: vec![GroupList::new(); num_components],
+            touched_comps: Vec::with_capacity(num_components),
+            all_targets: Vec::with_capacity(16),
+            seen_target: Vec::new(),
+            base_offsets,
+            num_components,
+            num_groups,
+        }
+    }
+
+    fn reset(&mut self, token_len: usize) {
+        self.cur_gen = self.cur_gen.wrapping_add(1);
+        if self.cur_gen == 0 {
+            // Generation wrapped — clear everything
+            self.match_gen.fill(0);
+            self.cur_gen = 1;
+        }
+        for &comp in &self.touched_comps {
+            self.touched_groups[comp].clear();
+        }
+        self.touched_comps.clear();
+        // Clear seen_target for previous targets
+        for &pos in &self.all_targets {
+            if pos < self.seen_target.len() {
+                self.seen_target[pos] = false;
+            }
+        }
+        self.all_targets.clear();
+        if self.seen_target.len() <= token_len {
+            self.seen_target.resize(token_len + 1, false);
+        }
+    }
+
+    /// Record a finalizer match event
+    #[inline]
+    fn record_match(&mut self, comp: usize, gid: usize, position: u32, non_greedy: bool) {
+        let idx = self.base_offsets[comp] + gid;
+        let was_none = self.match_gen[idx] != self.cur_gen;
+        if non_greedy {
+            if was_none {
+                self.match_gen[idx] = self.cur_gen;
+                self.match_positions[idx] = position;
+            }
+        } else {
+            self.match_gen[idx] = self.cur_gen;
+            self.match_positions[idx] = position;
+        }
+        if was_none {
+            let groups = &mut self.touched_groups[comp];
+            if groups.is_empty() {
+                self.touched_comps.push(comp);
+            }
+            groups.push(gid);
+        }
+    }
+
+    /// Get match position for component/group (0 means not matched or matched at pos 0)
+    #[inline]
+    fn get_match_pos(&self, comp: usize, gid: usize) -> Option<u32> {
+        let idx = self.base_offsets[comp] + gid;
+        if self.match_gen[idx] == self.cur_gen {
+            Some(self.match_positions[idx])
+        } else {
+            None
+        }
+    }
+}
+
+/// Process a token through the product DFA and compute its signature.
+fn compute_signature_product(
+    pdfa: &ProductDfa,
+    pre: &PrecomputedDfa,
+    token: &[u8],
+    scratch: &mut ProductScratch,
+    suffix_scratch: &mut SuffixScratch,
+    cache: &mut Vec<Option<u64>>,
+    suffix_group_mask: Option<&[bool]>,
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
+    skip_groups: bool,
+) -> u64 {
+    scratch.reset(token.len());
+
+    // Process initial finalizer events (position 0)
+    for &(comp, gid, non_greedy) in &pdfa.initial_events {
+        scratch.record_match(comp as usize, gid as usize, 0, non_greedy);
+    }
+
+    // Walk token through product DFA
+    let mut state = 0u32;
+    for (pos, &byte) in token.iter().enumerate() {
+        let class = pdfa.byte_to_class[byte as usize] as usize;
+        let position = (pos + 1) as u32;
+
+        // Process finalizer events for this edge
+        let events = pdfa.edge_finalizers(state, class);
+        for &(comp, gid, non_greedy) in events {
+            scratch.record_match(comp as usize, gid as usize, position, non_greedy);
+        }
+
+        // Transition to next product state
+        let next = unsafe {
+            *pdfa.trans.get_unchecked(state as usize * pdfa.num_classes + class)
+        };
+
+        if next == PRODUCT_ALL_DEAD {
+            state = PRODUCT_ALL_DEAD;
+            break;
+        }
+
+        // Handle Guarded termination if needed
+        // (For now, skip if no guarded components at this state - common case)
+        // TODO: implement guarded termination tracking if needed
+
+        state = next;
+    }
+
+    // Collect all_targets for suffix computation
+    let token_len = token.len();
+    for &comp in &scratch.touched_comps {
+        for &gid in &scratch.touched_groups[comp] {
+            if let Some(pos_val) = scratch.get_match_pos(comp, gid) {
+                if pos_val > 0 {
+                    let pos_usize = pos_val as usize;
+                    if pos_usize <= token_len && !scratch.seen_target[pos_usize] {
+                        scratch.seen_target[pos_usize] = true;
+                        scratch.all_targets.push(pos_usize);
+                    }
+                }
+            }
+        }
+    }
+
+    // Compute suffix hashes
+    if !scratch.all_targets.is_empty() {
+        compute_suffix_hashes_incremental(pre, token, &scratch.all_targets, cache, suffix_scratch, suffix_group_mask, group_to_class);
+    }
+
+    // Compute signature
+    let use_projected = ever_allowed_by_group.is_some();
+    let include_groups = pre.num_groups > 0 && !skip_groups;
+    let nc = pdfa.num_components;
+
+    let mut sig: u64 = HASH_SEED3;
+    for i in 0..nc {
+        // Determine completion hash
+        let completion_hash = if state == PRODUCT_ALL_DEAD {
+            // Check if component was alive before final byte made everything dead
+            // The component's end state is None (dead)
+            pre.none_completion_hash
+        } else {
+            let dfa_state = pdfa.component_dfa(state, i);
+            if dfa_state == u32::MAX || !pre.has_transitions[dfa_state as usize] {
+                pre.none_completion_hash
+            } else {
+                pre.completion_hash[dfa_state as usize]
+            }
+        };
+
+        let state_sig = if include_groups && !scratch.touched_groups[i].is_empty() {
+            let groups = &mut scratch.touched_groups[i];
+            if groups.len() > 1 {
+                groups.sort_unstable();
+            }
+            let base = scratch.base_offsets[i];
+            let mut h = new_hasher();
+            h.write_u64(completion_hash);
+            for &gid in groups.iter() {
+                let idx = base + gid;
+                if scratch.match_gen[idx] == scratch.cur_gen {
+                    let pos_val = scratch.match_positions[idx];
+                    if pos_val > 0 {
+                        let target_hash = if use_projected {
+                            let ea = ever_allowed_by_group.unwrap();
+                            compute_projected_suffix_hash(
+                                pos_val as usize,
+                                gid,
+                                ea,
+                                &suffix_scratch.nodes,
+                                &mut suffix_scratch.projected_cache,
+                                group_to_class,
+                            )
+                        } else {
+                            cache[pos_val as usize].unwrap_or(0)
+                        };
+                        h.write_u64(gid as u64);
+                        h.write_u64(target_hash);
+                    }
+                }
+            }
+            h.finish()
+        } else {
+            completion_hash
+        };
+
+        sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
+    }
+
+    sig
 }
 
 // =============================================================================
@@ -1157,42 +1615,44 @@ fn compute_chunk_signature(
     suffix_group_mask: Option<&[bool]>,
     ever_allowed_by_group: Option<&[Vec<bool>]>,
     group_to_class: Option<&[usize]>,
+    skip_groups: bool,
 ) -> u64 {
     compute_pos0_end_states_and_targets(pre, pos0, token, chunk_states);
 
-    compute_suffix_hashes_incremental(pre, token, &pos0.all_targets, cache, suffix_scratch, suffix_group_mask, group_to_class);
+    // Only compute suffix hashes when there are match targets
+    if !pos0.all_targets.is_empty() {
+        compute_suffix_hashes_incremental(pre, token, &pos0.all_targets, cache, suffix_scratch, suffix_group_mask, group_to_class);
+    }
 
     // If ever_allowed_by_group is provided, we'll compute projected hashes
     // that prune suffix edges based on which group was matched at position 0.
     let use_projected = ever_allowed_by_group.is_some();
 
-    // Diagnostic: skip all group matching in the signature (only use completion hashes)
-    let skip_groups = std::env::var("EQUIV_SKIP_GROUPS").is_ok();
-
-    let mut hasher = new_hasher();
     let num_groups = pre.num_groups;
+    let include_groups = num_groups > 0 && !skip_groups;
 
+    // Fast path: combine per-state signatures using wrapping_mul (avoids creating
+    // a top-level AHasher). Only states with group matches need a full hasher.
+    let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
-        let mut state_hasher = new_hasher();
         let completion_hash = pos0.end_states[i]
             .map(|id| pre.completion_hash[id])
             .unwrap_or(pre.none_completion_hash);
-        state_hasher.write_u64(completion_hash);
 
-        if num_groups > 0 && !skip_groups {
-            // Canonicalize gid iteration order without allocating per-state edge lists.
+        let state_sig = if include_groups && !pos0.touched_groups[i].is_empty() {
+            // This state has group matches - hash them
             let groups = &mut pos0.touched_groups[i];
             if groups.len() > 1 {
                 groups.sort_unstable();
             }
             let base = pos0.base_offsets[i];
+            let mut h = new_hasher();
+            h.write_u64(completion_hash);
             for &gid in groups.iter() {
                 let pos_val = pos0.match_positions[base + gid];
                 if pos_val > 0 {
                     let target_hash = if use_projected {
                         let ea = ever_allowed_by_group.unwrap();
-                        // Use projected hash: only include suffix edges
-                        // allowed after group `gid`
                         compute_projected_suffix_hash(
                             pos_val as usize,
                             gid,
@@ -1204,16 +1664,21 @@ fn compute_chunk_signature(
                     } else {
                         cache[pos_val as usize].unwrap_or(0)
                     };
-                    state_hasher.write_u64(gid as u64);
-                    state_hasher.write_u64(target_hash);
+                    h.write_u64(gid as u64);
+                    h.write_u64(target_hash);
                 }
             }
-        }
+            h.finish()
+        } else {
+            // No group matches at this state - just use completion hash directly
+            completion_hash
+        };
 
-        hasher.write_u64(state_hasher.finish());
+        // Order-preserving combination of per-state signatures
+        sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
     }
 
-    hasher.finish()
+    sig
 }
 
 // =============================================================================
@@ -1312,7 +1777,8 @@ pub fn find_vocab_equivalence_classes_with_follow(
 
     let num_groups = pre.num_groups;
 
-    // Check if trie-based processing is enabled
+    // Check diagnostic flags once (not per-token)
+    let skip_groups = std::env::var("EQUIV_SKIP_GROUPS").is_ok();
     let use_trie = std::env::var("USE_TRIE_EQUIV").is_ok();
 
     // Build trie and precompute suffix hashes if using trie path
@@ -1360,6 +1826,14 @@ pub fn find_vocab_equivalence_classes_with_follow(
     // (batch_size * num_groups * 4 bytes per thread) and enable early pruning of singletons.
     let batch_size = if num_states < 200 { num_states } else { 200 };
 
+    // Build product DFA for faster batch processing (all states in one batch)
+    let pdfa_start = std::time::Instant::now();
+    let pdfa = ProductDfa::build(&pre, &reduced_initial_states);
+    let pdfa_build_time = pdfa_start.elapsed();
+    if is_debug_level_enabled(4) {
+        crate::debug!(4, "  Product DFA build: {:?}", pdfa_build_time);
+    }
+
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition: Vec<usize> = vec![0; num_tokens];
     let mut next_class_id = 1usize;
@@ -1379,128 +1853,129 @@ pub fn find_vocab_equivalence_classes_with_follow(
     // Timing accumulators
     let mut total_refine_time = std::time::Duration::ZERO;
 
-    for batch_start in (0..num_states).step_by(batch_size) {
+    // Use product DFA to process ALL states in a single pass (no batching needed)
+    // This is fundamentally faster because per-byte DFA transitions are O(1) instead of O(num_states)
+    {
         if active_indices.is_empty() {
-            break;
-        }
-
-        let batch_end = (batch_start + batch_size).min(num_states);
-        let batch = &reduced_initial_states[batch_start..batch_end];
-
-        // Compute partial signatures for active tokens
-        let batch_start_time = Instant::now();
-        let active_sigs: Vec<(usize, u64)> = if let (Some(ref trie), Some(ref suffix_caches)) = (&trie, &suffix_caches) {
-            // TRIE PATH: process states in parallel through the trie
-            compute_batch_signatures_trie(
-                trie,
-                &pre,
-                batch,
-                strings,
-                &active_indices,
-                suffix_caches,
-                ever_allowed_by_group,
-                group_to_class,
-                num_tokens,
-            )
+            // nothing to do
         } else {
-            // ORIGINAL PATH: process tokens in parallel
-            active_indices
-            .par_iter()
-            .map_init(
-                || {
-                    (
-                        Pos0Scratch::new(batch.len(), num_groups),
-                        SuffixScratch::new(num_groups),
-                        vec![None; 256],
-                    )
-                },
-                |state, &token_idx| {
-                    let (scratch_pos0, scratch_suffix, scratch_cache) = state;
-                    let token = &strings[token_idx];
-                    
-                    // Ensure cache is large enough
-                    if scratch_cache.len() <= token.len() {
-                        scratch_cache.resize(token.len() + 1, None);
+            let batch_start_time = Instant::now();
+            let active_sigs: Vec<(usize, u64)> = if let (Some(ref trie), Some(ref suffix_caches)) = (&trie, &suffix_caches) {
+                // TRIE PATH: process states in parallel through the trie
+                compute_batch_signatures_trie(
+                    trie,
+                    &pre,
+                    &reduced_initial_states,
+                    strings,
+                    &active_indices,
+                    suffix_caches,
+                    ever_allowed_by_group,
+                    group_to_class,
+                    num_tokens,
+                )
+            } else {
+                // PRODUCT DFA PATH: process tokens in parallel using product DFA
+                active_indices
+                .par_iter()
+                .map_init(
+                    || {
+                        (
+                            ProductScratch::new(num_states, num_groups),
+                            SuffixScratch::new(num_groups),
+                            vec![None; 256],
+                        )
+                    },
+                    |state, &token_idx| {
+                        let (scratch_product, scratch_suffix, scratch_cache) = state;
+                        let token = &strings[token_idx];
+
+                        // Ensure cache is large enough
+                        if scratch_cache.len() <= token.len() {
+                            scratch_cache.resize(token.len() + 1, None);
+                        }
+                        // Only clear positions relevant to this token (not entire cache)
+                        for i in 0..=token.len() {
+                            scratch_cache[i] = None;
+                        }
+
+                        let sig = compute_signature_product(&pdfa, &pre, token, scratch_product, scratch_suffix, scratch_cache, suffix_group_mask, ever_allowed_by_group, group_to_class, skip_groups);
+                        (token_idx, sig)
+                    },
+                )
+                .collect()
+            };
+            let batch_compute_time = batch_start_time.elapsed();
+
+            // Group by (old_class, new_signature) to refine partition
+            let refine_start = Instant::now();
+            let mut refinement: HashMap<(usize, u64), Vec<usize>> =
+                HashMap::with_capacity(active_sigs.len() / 2);
+            for (token_idx, sig) in active_sigs {
+                let old_class = partition[token_idx];
+                refinement
+                    .entry((old_class, sig))
+                    .or_insert_with(Vec::new)
+                    .push(token_idx);
+            }
+
+            // Group refinement entries by old_class
+            let mut by_old_class: HashMap<usize, Vec<(u64, Vec<usize>)>> = HashMap::new();
+            for ((old_class, sig), tokens) in refinement {
+                by_old_class
+                    .entry(old_class)
+                    .or_insert_with(Vec::new)
+                    .push((sig, tokens));
+            }
+
+            // Update partition and find still-active tokens
+            let mut new_active_indices = Vec::with_capacity(active_indices.len());
+
+            for (_old_class, sub_groups) in by_old_class {
+                let mut first = true;
+                for (_sig, tokens) in sub_groups {
+                    let class_to_use = if first {
+                        first = false;
+                        _old_class
+                    } else {
+                        let id = next_class_id;
+                        next_class_id += 1;
+                        id
+                    };
+
+                    for &token_idx in &tokens {
+                        partition[token_idx] = class_to_use;
                     }
-                    scratch_cache.iter_mut().for_each(|x| *x = None);
-                    
-                    let sig = compute_chunk_signature(&pre, token, batch, scratch_pos0, scratch_suffix, scratch_cache, suffix_group_mask, ever_allowed_by_group, group_to_class);
-                    (token_idx, sig)
-                },
-            )
-            .collect()
-        };
-        let batch_compute_time = batch_start_time.elapsed();
 
-        // Group by (old_class, new_signature) to refine partition
-        let refine_start = Instant::now();
-        let mut refinement: HashMap<(usize, u64), Vec<usize>> =
-            HashMap::with_capacity(active_sigs.len() / 2);
-        for (token_idx, sig) in active_sigs {
-            let old_class = partition[token_idx];
-            refinement
-                .entry((old_class, sig))
-                .or_insert_with(Vec::new)
-                .push(token_idx);
-        }
-
-        // Group refinement entries by old_class
-        let mut by_old_class: HashMap<usize, Vec<(u64, Vec<usize>)>> = HashMap::new();
-        for ((old_class, sig), tokens) in refinement {
-            by_old_class
-                .entry(old_class)
-                .or_insert_with(Vec::new)
-                .push((sig, tokens));
-        }
-
-        // Update partition and find still-active tokens
-        let mut new_active_indices = Vec::with_capacity(active_indices.len());
-
-        for (_old_class, sub_groups) in by_old_class {
-            let mut first = true;
-            for (_sig, tokens) in sub_groups {
-                let class_to_use = if first {
-                    first = false;
-                    _old_class
-                } else {
-                    let id = next_class_id;
-                    next_class_id += 1;
-                    id
-                };
-
-                for &token_idx in &tokens {
-                    partition[token_idx] = class_to_use;
-                }
-
-                if tokens.len() > 1 {
-                    new_active_indices.extend(tokens);
+                    if tokens.len() > 1 {
+                        new_active_indices.extend(tokens);
+                    }
                 }
             }
-        }
-        total_refine_time += refine_start.elapsed();
+            total_refine_time += refine_start.elapsed();
 
-        active_indices = new_active_indices;
-        batch_count += 1;
+            active_indices = new_active_indices;
+            batch_count += 1;
 
-        if is_debug_level_enabled(5) {
-            let num_classes = {
-                let mut seen: hashbrown::HashSet<usize> = hashbrown::HashSet::new();
-                for &c in &partition {
-                    seen.insert(c);
-                }
-                seen.len()
-            };
-            crate::debug!(
-                5,
-                "    Batch {}: {} active tokens, {} classes, compute={:?}",
-                batch_count,
-                active_indices.len(),
-                num_classes,
-                batch_compute_time,
-            );
-        }
-    }
-    
+            if is_debug_level_enabled(5) {
+                let num_classes = {
+                    let mut seen: hashbrown::HashSet<usize> = hashbrown::HashSet::new();
+                    for &c in &partition {
+                        seen.insert(c);
+                    }
+                    seen.len()
+                };
+                crate::debug!(
+                    5,
+                    "    Batch {}: {} active tokens, {} classes, compute={:?}",
+                    batch_count,
+                    active_indices.len(),
+                    num_classes,
+                    batch_compute_time,
+                );
+            }
+        } // else
+    } // single-pass block
+
     if is_debug_level_enabled(4) {
         crate::debug!(
             4,
@@ -2132,5 +2607,5 @@ pub fn compute_signature_actual(
     let mut suffix_scratch = SuffixScratch::new(pre.num_groups);
     let mut cache = vec![None; slice.len() + 1];
 
-    compute_chunk_signature(&pre, slice, initial_states, &mut pos0, &mut suffix_scratch, &mut cache, None, None, None)
+    compute_chunk_signature(&pre, slice, initial_states, &mut pos0, &mut suffix_scratch, &mut cache, None, None, None, false)
 }
