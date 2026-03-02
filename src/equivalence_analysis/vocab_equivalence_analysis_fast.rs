@@ -52,8 +52,6 @@ struct Scratch {
     active_indices: Vec<usize>,
     end_states: Vec<Option<usize>>,
     match_positions: Vec<u32>,
-    match_gen: Vec<u32>,
-    cur_gen: u32,
     touched_groups: Vec<GroupList>,
     targets: Vec<usize>,
     // Suffix DAG
@@ -168,9 +166,7 @@ impl Scratch {
             done: vec![false; num_states],
             active_indices: Vec::new(),
             end_states: vec![None; num_states],
-            match_positions: vec![0u32; num_states * num_groups],
-            match_gen: vec![0u32; num_states * num_groups],
-            cur_gen: 1,
+            match_positions: vec![NONE; num_states * num_groups],
             touched_groups: vec![GroupList::new(); num_states],
             targets: Vec::new(),
             suffix_match_positions: vec![NONE; num_groups],
@@ -199,11 +195,7 @@ fn run_batch(
     scratch.done.fill(false);
     scratch.active_indices.clear();
     scratch.end_states[..num_states].fill(None);
-    scratch.cur_gen = scratch.cur_gen.wrapping_add(1);
-    if scratch.cur_gen == 0 {
-        scratch.match_gen.fill(0);
-        scratch.cur_gen = 1;
-    }
+    scratch.match_positions[..num_states * num_groups].fill(NONE);
     for tg in scratch.touched_groups[..num_states].iter_mut() {
         tg.clear();
     }
@@ -215,8 +207,7 @@ fn run_batch(
     for (i, &state) in initial_states.iter().enumerate() {
         let base = i * num_groups;
         for f in &dfa.finalizers[state] {
-            if f.gid < num_groups && scratch.match_gen[base + f.gid] != scratch.cur_gen {
-                scratch.match_gen[base + f.gid] = scratch.cur_gen;
+            if f.gid < num_groups && scratch.match_positions[base + f.gid] == NONE {
                 scratch.match_positions[base + f.gid] = 0;
                 scratch.touched_groups[i].push(f.gid);
             }
@@ -248,9 +239,8 @@ fn run_batch(
                     for f in &dfa.finalizers[ns] {
                         if f.gid < num_groups {
                             let ix = base + f.gid;
-                            let was_none = scratch.match_gen[ix] != scratch.cur_gen;
+                            let was_none = scratch.match_positions[ix] == NONE;
                             if !f.non_greedy || was_none {
-                                scratch.match_gen[ix] = scratch.cur_gen;
                                 scratch.match_positions[ix] = position;
                             }
                             if was_none {
