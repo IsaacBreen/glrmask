@@ -1616,47 +1616,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         crate::debug!(4, "Parser DWA average path length: {:.2}", avg_path_len);
     }
 
-    if crate::r#macro::is_debug_level_enabled(3) {
-        let mut terminal_transition_counts: BTreeMap<TerminalID, usize> = BTreeMap::new();
-        for state in &final_dwa.states.0 {
-            for (label, _target) in &state.transitions {
-                if *label < 0 {
-                    continue;
-                }
-                let terminal_id = TerminalID(*label as usize);
-                if parser.terminal_map.get_by_right(&terminal_id).is_some() {
-                    *terminal_transition_counts.entry(terminal_id).or_insert(0) += 1;
-                }
-            }
-        }
-
-        let mut terminal_frequency_rows: Vec<(TerminalID, String, usize)> = terminal_transition_counts
-            .into_iter()
-            .map(|(terminal_id, transition_count)| {
-                let terminal_name = parser
-                    .terminal_map
-                    .get_by_right(&terminal_id)
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| format!("TERMINAL_{}", terminal_id.0));
-                (terminal_id, terminal_name, transition_count)
-            })
-            .collect();
-        terminal_frequency_rows.sort_by(|a, b| {
-            b.2.cmp(&a.2)
-                .then_with(|| a.0.0.cmp(&b.0.0))
-        });
-
-        for (terminal_id, terminal_name, transition_count) in terminal_frequency_rows {
-            crate::debug!(
-                3,
-                "FINAL_DWA_TERMINAL_FREQ terminal_id={} terminal_name={} transition_count={}",
-                terminal_id.0,
-                terminal_name,
-                transition_count
-            );
-        }
-    }
-
     crate::timing!(
         "PHASE_TIMING: parser_dwa::total = {:?}",
         parser_dwa_total_start.elapsed()
