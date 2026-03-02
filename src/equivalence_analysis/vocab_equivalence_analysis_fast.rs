@@ -18,7 +18,6 @@ use std::hash::{BuildHasher, Hasher};
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
 type EdgeList = SmallVec<[(usize, usize); 4]>;
-type GroupList = SmallVec<[usize; 4]>;
 
 const HASH_SEED1: u64 = 0x9e37_79b9_7f4a_7c15;
 const HASH_SEED2: u64 = 0xc2b2_ae3d_27d4_eb4f;
@@ -55,7 +54,6 @@ struct Scratch {
     suffix_match_positions: Vec<u32>,
     dag: HashMap<usize, (u64, EdgeList)>,
     dag_queue: Vec<usize>,
-    cache: Vec<Option<u64>>,
 }
 
 static HASH_RANDOM_STATE: Lazy<RandomState> =
@@ -161,7 +159,6 @@ impl Scratch {
             suffix_match_positions: vec![NONE; num_groups],
             dag: HashMap::new(),
             dag_queue: Vec::new(),
-            cache: vec![None; 256],
         }
     }
 }
@@ -268,14 +265,12 @@ fn run_suffix(
 ) -> (Option<usize>, EdgeList) {
     let num_groups = dfa.num_groups;
     match_positions[..num_groups].fill(NONE);
-    let mut touched = GroupList::new();
     let mut current = dfa.start_state;
     let mut done = dfa.is_dead_end[current];
 
     for f in &dfa.finalizers[current] {
         if f.gid < num_groups && match_positions[f.gid] == NONE {
             match_positions[f.gid] = 0;
-            touched.push(f.gid);
         }
     }
 
@@ -292,12 +287,8 @@ fn run_suffix(
         let position = (idx + 1) as u32;
         for f in &dfa.finalizers[current] {
             if f.gid < num_groups {
-                let was_none = match_positions[f.gid] == NONE;
-                if !f.non_greedy || was_none {
+                if !f.non_greedy || match_positions[f.gid] == NONE {
                     match_positions[f.gid] = position;
-                }
-                if was_none {
-                    touched.push(f.gid);
                 }
             }
         }
@@ -307,10 +298,8 @@ fn run_suffix(
     }
 
     let end_state = if done { None } else { Some(current) };
-    touched.sort_unstable();
-    let edges: EdgeList = touched
-        .iter()
-        .filter_map(|&gid| {
+    let edges: EdgeList = (0..num_groups)
+        .filter_map(|gid| {
             let pv = match_positions[gid];
             (pv != NONE && pv != 0).then(|| (gid, base_pos + pv as usize))
         })
@@ -356,27 +345,16 @@ fn hash_suffixes(
 
     // Hash bottom-up: process deeper positions first
     scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
-    for &pos in &scratch.dag_queue {
-        if scratch.cache.len() <= pos {
-            scratch.cache.resize(pos + 1, None);
+    for idx in 0..scratch.dag_queue.len() {
+        let pos = scratch.dag_queue[idx];
+        let (ch, edges) = scratch.dag[&pos].clone();
+        let mut h = new_hasher();
+        h.write_u64(ch);
+        for &(gid, target) in &edges {
+            h.write_u64(gid as u64);
+            h.write_u64(scratch.dag.get(&target).map_or(0, |e| e.0));
         }
-        if scratch.cache[pos].is_some() {
-            continue;
-        }
-        if let Some((ch, ref edges)) = scratch.dag.get(&pos) {
-            let mut h = new_hasher();
-            h.write_u64(*ch);
-            for &(gid, target) in edges.iter() {
-                h.write_u64(gid as u64);
-                let target_hash = if target < scratch.cache.len() {
-                    scratch.cache[target].unwrap_or(0)
-                } else {
-                    0
-                };
-                h.write_u64(target_hash);
-            }
-            scratch.cache[pos] = Some(h.finish());
-        }
+        scratch.dag.get_mut(&pos).unwrap().0 = h.finish();
     }
 }
 
@@ -411,7 +389,7 @@ fn token_signature(
                 any_match = true;
                 if pv > 0 {
                     h.write_u64(gid as u64);
-                    h.write_u64(scratch.cache[pv as usize].unwrap_or(0));
+                    h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0));
                 }
             }
         }
@@ -466,10 +444,6 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
                 || Scratch::new(batch.len(), num_groups),
                 |scratch, &token_idx| {
                     let token = strings[token_idx].as_ref();
-                    if scratch.cache.len() <= token.len() {
-                        scratch.cache.resize(token.len() + 1, None);
-                    }
-                    scratch.cache.iter_mut().for_each(|x| *x = None);
                     (token_idx, token_signature(&dfa, token, batch, scratch))
                 },
             )
