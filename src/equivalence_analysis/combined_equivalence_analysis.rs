@@ -63,9 +63,9 @@ fn should_run_trellis_verification() -> bool {
 ///
 /// # Returns
 /// Combined result containing vocab classes and state classes.
-pub fn compute_combined_equivalence(
+pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     regex: &Tokenizer,
-    tokens: &[Vec<u8>],
+    tokens: &[S],
     initial_states: &[usize],
     suffix_group_mask: Option<&[bool]>,
     ever_allowed_by_group: Option<&[Vec<bool>]>,
@@ -86,9 +86,11 @@ pub fn compute_combined_equivalence(
     
     // Step 1: State equivalence analysis (if beneficial)
     let (reduced_states, state_classes) = if initial_states.len() > state_reduction_threshold {
+        // Convert to owned tokens for state equivalence (cold path)
+        let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
         let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
             regex,
-            tokens,
+            &owned_tokens,
             initial_states,
         );
         
@@ -189,7 +191,7 @@ pub fn compute_combined_equivalence(
         // Take one representative token from each fast-pass class, then run trellis on those.
         let mut rep_indices: Vec<usize> = vocab_classes.iter().map(|class| class[0]).collect();
         rep_indices.sort_unstable();
-        let rep_tokens: Vec<Vec<u8>> = rep_indices.iter().map(|&i| tokens[i].to_vec()).collect();
+        let rep_tokens: Vec<Vec<u8>> = rep_indices.iter().map(|&i| tokens[i].as_ref().to_vec()).collect();
 
         eprintln!(
             "TRELLIS COMPARISON: Running trellis on {} representative tokens (from {} fast-pass classes) × {} states...",
@@ -304,6 +306,8 @@ pub fn compute_combined_equivalence(
 
         println!("Running combined equivalence analysis verification...");
         // VERIFICATION: Check against reference implementations
+        // Convert to owned tokens for reference/trellis verification (cold path only)
+        let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
         let problem_size = initial_states.len() * tokens.len();
         let use_trellis_verification = should_run_trellis_verification();
         if use_trellis_verification {
@@ -320,7 +324,7 @@ pub fn compute_combined_equivalence(
         if initial_states.len() > state_reduction_threshold {
             let ref_mapping = super::state_equivalence_analysis_reference::find_state_equivalence_classes(
                 regex.as_regex(),
-                tokens,
+                &owned_tokens,
                 initial_states,
             );
             
@@ -333,7 +337,7 @@ pub fn compute_combined_equivalence(
             if use_trellis_verification {
                 let trellis_mapping = super::trellis_equivalence_analysis::find_state_equivalence_classes_trellis(
                     regex.as_regex(),
-                    tokens,
+                    &owned_tokens,
                     initial_states,
                 );
 
@@ -366,7 +370,7 @@ pub fn compute_combined_equivalence(
         // 2. Verify Vocab Equivalence
         let ref_vocab_classes = super::vocab_equivalence_analysis_reference::find_vocab_equivalence_classes(
             regex.as_regex(),
-            tokens,
+            &owned_tokens,
             &reduced_states,
         );
         
@@ -374,7 +378,7 @@ pub fn compute_combined_equivalence(
         if use_trellis_verification {
             let trellis_vocab_classes = super::trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis(
                 regex.as_regex(),
-                tokens,
+                &owned_tokens,
                 &reduced_states,
             );
 
@@ -409,9 +413,9 @@ pub fn compute_combined_equivalence(
 /// Minimized entry point that just returns vocab equivalence classes.
 ///
 /// Use this when you don't need the state mapping information.
-pub fn find_vocab_equivalence_classes_with_state_reduction(
+pub fn find_vocab_equivalence_classes_with_state_reduction<S: AsRef<[u8]> + Sync>(
     regex: &Tokenizer,
-    tokens: &[Vec<u8>],
+    tokens: &[S],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
     compute_combined_equivalence(regex, tokens, initial_states, None, None, None).vocab_classes

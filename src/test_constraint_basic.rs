@@ -5285,10 +5285,12 @@ STR_CHAR: " " | "!" | "#" | "$" | "%" | "&" | "'" | "(" | ")" | "*" | "+" | "," 
     );
 
     let original_id = 48219usize; // token bytes are '\":-'
-    let internal_id = *constraint
+    let internal_id = constraint
         .parser_dwa_vocab
         .original_to_internal
-        .get(&original_id)
+        .get(original_id)
+        .copied()
+        .filter(|&v| v != crate::constraint_vocab::StageVocab::UNMAPPED)
         .expect("Expected internal mapping for token 48219");
 
     let token_bytes = llm_token_map

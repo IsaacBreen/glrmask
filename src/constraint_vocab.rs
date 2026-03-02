@@ -48,7 +48,22 @@ impl LLMVocabTrie {
             max_token_id: max_id,
         }
     }
-    
+
+    /// Build from an owned token map (bytes -> token_id), avoiding clones.
+    pub fn from_token_map_owned(token_map: BTreeMap<Vec<u8>, LLMTokenID>) -> Self {
+        let max_id = token_map.values().map(|id| id.0).max().unwrap_or(0);
+
+        let mut id_to_bytes = vec![None; max_id + 1];
+        for (bytes, id) in token_map {
+            id_to_bytes[id.0] = Some(bytes);
+        }
+
+        Self {
+            id_to_bytes,
+            max_token_id: max_id,
+        }
+    }
+
     /// Create an empty vocabulary.
     pub fn empty(max_token_id: usize) -> Self {
         Self {
@@ -56,12 +71,12 @@ impl LLMVocabTrie {
             max_token_id,
         }
     }
-    
+
     /// Build from the old CommitVocab format (for migration).
     pub fn from_commit_vocab(cv: &CommitVocab) -> Self {
         let mut id_to_bytes = vec![None; cv.original_to_representative.len()];
         let mut max_id = 0usize;
-        
+
         for (orig_id, &rep_idx) in cv.original_to_representative.iter().enumerate() {
             if rep_idx != CommitVocab::INVALID_REPRESENTATIVE {
                 if let Some(bytes) = cv.representatives.get(rep_idx as usize) {
@@ -241,11 +256,18 @@ pub struct LLMVocab {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StageVocab {
-    pub original_to_internal: BTreeMap<usize, usize>,
+    /// Maps original LLM token ID → internal equiv class ID.
+    /// Index = original token ID. Value = internal ID, or UNMAPPED if not in vocabulary.
+    pub original_to_internal: Vec<usize>,
     pub internal_to_original: BTreeMap<usize, LLMTokenBV>,
     pub internal_max_llm_token: usize,
     pub max_original_llm_token_id: usize,
     pub internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
+}
+
+impl StageVocab {
+    /// Sentinel value for unmapped entries in original_to_internal.
+    pub const UNMAPPED: usize = usize::MAX;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -297,9 +319,17 @@ impl JSONConvertible for StageVocab {
             .iter()
             .map(|(k, bv)| (*k, bv.iter_up_to(self.max_original_llm_token_id).collect()))
             .collect();
-        
+
+        // Convert Vec to BTreeMap for JSON serialization
+        let oti_map: BTreeMap<usize, usize> = self.original_to_internal
+            .iter()
+            .enumerate()
+            .filter(|&(_, &v)| v != Self::UNMAPPED)
+            .map(|(k, &v)| (k, v))
+            .collect();
+
         let intermediate = StageVocabJSON {
-            original_to_internal: self.original_to_internal.clone(),
+            original_to_internal: oti_map,
             internal_to_original: ito,
             internal_max_llm_token: self.internal_max_llm_token,
             max_original_llm_token_id: self.max_original_llm_token_id,
@@ -309,21 +339,29 @@ impl JSONConvertible for StageVocab {
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let intermediate = StageVocabJSON::from_json(node)?;
-        
+
         let internal_to_original: BTreeMap<usize, LLMTokenBV> = intermediate
             .internal_to_original
             .into_iter()
             .map(|(k, v)| (k, v.into_iter().collect()))
             .collect();
-        
+
         let internal_to_original_sparse_matrix = Self::build_internal_to_original_sparse_matrix(
             &internal_to_original,
             intermediate.max_original_llm_token_id,
             intermediate.internal_max_llm_token,
         );
 
+        // Convert BTreeMap to Vec for fast lookup
+        let mut oti_vec = vec![Self::UNMAPPED; intermediate.max_original_llm_token_id + 1];
+        for (k, v) in &intermediate.original_to_internal {
+            if *k < oti_vec.len() {
+                oti_vec[*k] = *v;
+            }
+        }
+
         Ok(StageVocab {
-            original_to_internal: intermediate.original_to_internal,
+            original_to_internal: oti_vec,
             internal_to_original,
             internal_max_llm_token: intermediate.internal_max_llm_token,
             max_original_llm_token_id: intermediate.max_original_llm_token_id,
@@ -509,13 +547,18 @@ impl StageVocab {
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = RangeSet::zeros();
         if original_bv.is_all() {
-            for &internal_id in self.original_to_internal.values() {
-                internal_bv.insert(internal_id);
+            for &internal_id in self.original_to_internal.iter() {
+                if internal_id != Self::UNMAPPED {
+                    internal_bv.insert(internal_id);
+                }
             }
         } else {
             for i in original_bv.iter_up_to(self.max_original_llm_token_id) {
-                if let Some(&internal_id) = self.original_to_internal.get(&i) {
-                    internal_bv.insert(internal_id);
+                if i < self.original_to_internal.len() {
+                    let internal_id = self.original_to_internal[i];
+                    if internal_id != Self::UNMAPPED {
+                        internal_bv.insert(internal_id);
+                    }
                 }
             }
         }

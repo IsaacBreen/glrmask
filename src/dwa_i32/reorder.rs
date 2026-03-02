@@ -412,11 +412,14 @@ pub fn reorder_dwa_dimensions(
     num_tsids: usize,
 ) -> (Vec<usize>, Vec<usize>) {
     let start = std::time::Instant::now();
+    let profile = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
 
     // Step 1: Collect unique weights
     let unique_weights_arc = collect_unique_weights(dwa);
     let unique_weights: Vec<&RangeMapWeight> =
         unique_weights_arc.iter().map(|arc| arc.as_ref()).collect();
+    if profile { eprintln!("  reorder: collect_unique_weights = {:?}", start.elapsed()); }
+    let step2_start = std::time::Instant::now();
 
     let num_unique = unique_weights.len();
     crate::debug!(
@@ -444,6 +447,8 @@ pub fn reorder_dwa_dimensions(
         total_tsid_ctx,
     );
     let tsid_perm = greedy_nearest_neighbor(&tsid_profiles);
+    if profile { eprintln!("  reorder: tsid_profiles+perm = {:?}", step2_start.elapsed()); }
+    let step3_start = std::time::Instant::now();
 
     // Step 3: Compute token permutation
     let token_profiles = build_token_profiles(&unique_weights, max_token);
@@ -459,6 +464,7 @@ pub fn reorder_dwa_dimensions(
         total_token_ctx,
     );
     let token_perm = greedy_nearest_neighbor(&token_profiles);
+    if profile { eprintln!("  reorder: token_profiles+perm = {:?}", step3_start.elapsed()); }
 
     crate::debug!(
         3,
@@ -475,6 +481,8 @@ pub fn reorder_dwa_dimensions(
         let new_weight = permute_weight(arc.as_ref(), &token_perm, &tsid_perm);
         weight_map.insert(old_ptr, intern_rangemap(new_weight));
     }
+    if profile { eprintln!("  reorder: build_weight_map = {:?}", apply_start.elapsed()); }
+    let step5_start = std::time::Instant::now();
 
     // Step 5: Apply to all weights in the DWA
     for state in &mut dwa.states.0 {
@@ -493,6 +501,7 @@ pub fn reorder_dwa_dimensions(
             }
         }
     }
+    if profile { eprintln!("  reorder: apply_weights = {:?}", step5_start.elapsed()); }
 
     // Count new ranges (properly deduped: outer by weight Arc, inner by RangeSet Arc)
     let new_ranges = dwa.num_ranges_interned();

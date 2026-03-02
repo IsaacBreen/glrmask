@@ -1699,9 +1699,9 @@ fn compute_chunk_signature(
 ///
 /// # Returns
 /// Sets of token indices that are equivalent (produce identical parsing behavior).
-pub fn find_vocab_equivalence_classes(
+pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
     regex: &Tokenizer,
-    strings: &[Vec<u8>],
+    strings: &[S],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
     find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, None, None, None)
@@ -1718,9 +1718,9 @@ pub fn find_vocab_equivalence_classes(
 /// `ever_allowed_by_group`: if provided, per-group follow masks. `ever_allowed_by_group[g]`
 /// is a bool mask: `mask[h] == true` means group h can follow group g. When this is
 /// provided, suffix hashes use projected computation that prunes edges per-context.
-pub fn find_vocab_equivalence_classes_with_follow(
+pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Tokenizer,
-    strings: &[Vec<u8>],
+    strings: &[S],
     initial_states: &[usize],
     suffix_group_mask: Option<&[bool]>,
     ever_allowed_by_group: Option<&[Vec<bool>]>,
@@ -1728,11 +1728,13 @@ pub fn find_vocab_equivalence_classes_with_follow(
 ) -> VocabEquivalenceResult {
     use std::time::Instant;
     
+    let profile_eq = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
     let total_start = Instant::now();
     let pre = precompute_dfa(regex);
     let precompute_time = total_start.elapsed();
-
-    // Note: State equivalence reduction (if needed) should be done by the caller.
+    if profile_eq {
+        eprintln!("TIMING: equiv::precompute_dfa {:?}", precompute_time);
+    }
     let reduced_initial_states: Vec<usize> = initial_states.to_vec();
 
     if is_debug_level_enabled(3) {
@@ -1805,7 +1807,7 @@ pub fn find_vocab_equivalence_classes_with_follow(
         let caches: Vec<Vec<Option<u64>>> = strings
             .par_iter()
             .map(|token| {
-                precompute_all_suffix_hashes(&pre, token, suffix_group_mask, group_to_class)
+                precompute_all_suffix_hashes(&pre, token.as_ref(), suffix_group_mask, group_to_class)
             })
             .collect();
         if is_debug_level_enabled(3) {
@@ -1882,7 +1884,7 @@ pub fn find_vocab_equivalence_classes_with_follow(
                 },
                 |state, &token_idx| {
                     let (scratch_pos0, scratch_suffix, scratch_cache) = state;
-                    let token = &strings[token_idx];
+                    let token = strings[token_idx].as_ref();
 
                     // Ensure cache is large enough
                     if scratch_cache.len() <= token.len() {
@@ -1967,12 +1969,9 @@ pub fn find_vocab_equivalence_classes_with_follow(
         }
     }
 
-    if is_debug_level_enabled(4) {
-        crate::debug!(
-            4,
-            "  Timing: refine={:?}",
-            total_refine_time,
-        );
+    if profile_eq {
+        eprintln!("TIMING: equiv::batch_compute total={:?} refine={:?} batches={}", 
+            total_start.elapsed(), total_refine_time, batch_count);
     }
 
     // Build final groups from partition
@@ -2015,7 +2014,7 @@ struct TrieNode {
 }
 
 impl VocabTrie {
-    fn build(tokens: &[Vec<u8>]) -> Self {
+    fn build<S: AsRef<[u8]>>(tokens: &[S]) -> Self {
         let mut nodes = Vec::with_capacity(tokens.len() * 2);
         nodes.push(TrieNode {
             children: SmallVec::new(),
@@ -2025,7 +2024,7 @@ impl VocabTrie {
 
         for (idx, token) in tokens.iter().enumerate() {
             let mut current = 0u32;
-            for &byte in token {
+            for &byte in token.as_ref() {
                 let pos = nodes[current as usize]
                     .children
                     .iter()
@@ -2144,11 +2143,11 @@ fn precompute_all_suffix_hashes(
 
 /// Process a single initial state through the trie via DFS.
 /// Returns partial signature (u64) for each token reached.
-fn dfs_single_state(
+fn dfs_single_state<S: AsRef<[u8]> + Sync>(
     trie: &VocabTrie,
     pre: &PrecomputedDfa,
     initial_state: usize,
-    strings: &[Vec<u8>],
+    strings: &[S],
     active: &[bool],
     suffix_caches: &[Vec<Option<u64>>],
     ever_allowed_by_group: Option<&[Vec<bool>]>,
@@ -2406,11 +2405,11 @@ fn compute_dead_state_sig(pre: &PrecomputedDfa) -> u64 {
 /// Compute batch signatures using trie-based prefix sharing.
 /// Each initial state is processed independently through the trie via DFS.
 /// Parallelism is over states (not tokens).
-fn compute_batch_signatures_trie(
+fn compute_batch_signatures_trie<S: AsRef<[u8]> + Sync>(
     trie: &VocabTrie,
     pre: &PrecomputedDfa,
     batch: &[usize],
-    strings: &[Vec<u8>],
+    strings: &[S],
     active_indices: &[usize],
     suffix_caches: &[Vec<Option<u64>>],
     ever_allowed_by_group: Option<&[Vec<bool>]>,

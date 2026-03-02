@@ -3311,6 +3311,13 @@ impl CompiledGrammar {
     pub fn from_definition(definition: Arc<GrammarDefinition>) -> Self {
         let tokenizer_start = std::time::Instant::now();
         let profile_tokenizer = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
+
+        // Start GLR parser build in background thread (independent of tokenizer)
+        let definition_for_glr = definition.clone();
+        let glr_thread = std::thread::spawn(move || {
+            Self::glr_parser_from_definition(&definition_for_glr)
+        });
+
         debug!(3, "Building tokenizer from definition");
         let terminal_expr_start = std::time::Instant::now();
         let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
@@ -3435,10 +3442,9 @@ impl CompiledGrammar {
         }
         crate::timing!("TIMING: build_tokenizer {:?}", tokenizer_total);
 
-        let parser_start = std::time::Instant::now();
-        debug!(3, "Building GLR parser from definition");
-        let glr_parser = Self::glr_parser_from_definition(&definition);
-        crate::timing!("TIMING: build_glr_parser {:?}", parser_start.elapsed());
+        // Join the GLR parser thread
+        let glr_parser = glr_thread.join().expect("GLR parser build thread panicked");
+        crate::timing!("TIMING: build_glr_parser (joined)");
 
         // Report terminal equivalence classes at debug level 5
         // Two terminals are equivalent if they have the same actions in every state

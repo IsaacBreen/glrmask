@@ -715,14 +715,21 @@ impl GrammarConstraint {
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
     ) -> Self {
+        let profile_build = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
+        let outer_start = std::time::Instant::now();
+
         let compiled_grammar = CompiledGrammar::from_definition(grammar_definition.clone());
-        
-        Self::from_compiled_grammar_with_config(
+        if profile_build {
+            eprintln!("PHASE: from_definition (tokenizer+GLR) = {:?}", outer_start.elapsed());
+        }
+
+        let result = Self::from_compiled_grammar_with_config(
             compiled_grammar,
             llm_token_map,
             max_original_llm_token_id,
             config,
-        )
+        );
+        result
     }
 
     /// Combined setup that computes both internal mappings and commit vocab in a single pass.
@@ -737,7 +744,7 @@ impl GrammarConstraint {
         ever_allowed_by_group: Option<&[Vec<bool>]>,
         group_to_class: Option<&[usize]>,
     ) -> (
-        BTreeMap<usize, usize>,
+        Vec<usize>,
         CommitVocab,
         BTreeMap<Vec<u8>, LLMTokenID>,
         VocabEquivalenceResult,
@@ -746,7 +753,7 @@ impl GrammarConstraint {
     ) {
         if llm_token_map.is_empty() {
             return (
-                BTreeMap::new(),
+                Vec::new(),
                 CommitVocab::new(Vec::new(), Vec::new()),
                 BTreeMap::new(),
                 Default::default(),
@@ -773,11 +780,11 @@ impl GrammarConstraint {
         let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
         let sort_start = std::time::Instant::now();
         timeit!("setup_combined::sort_tokens", {
-            sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
+            sorted_tokens.sort_unstable_by_key(|(bytes, _id)| *bytes);
         });
         timing_sort_tokens = sort_start.elapsed();
 
-        let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
+        let mut llm_token_strings: Vec<&[u8]> = Vec::with_capacity(sorted_tokens.len());
         let mut original_ids: Vec<usize> = Vec::with_capacity(sorted_tokens.len());
         let mut highest_original_id = 0usize;
 
@@ -785,7 +792,7 @@ impl GrammarConstraint {
         timeit!("setup_combined::collect_token_strings", {
             for (bytes, id) in &sorted_tokens {
                 highest_original_id = highest_original_id.max(id.0);
-                llm_token_strings.push((*bytes).clone());
+                llm_token_strings.push(bytes.as_slice());
                 original_ids.push(id.0);
             }
         });
@@ -907,18 +914,14 @@ impl GrammarConstraint {
                 }
             }
         });
-        // Convert to BTreeMap for compatibility with rest of code
-        let original_to_internal_map: BTreeMap<usize, usize> = original_to_internal_vec
-            .into_iter()
-            .enumerate()
-            .filter(|&(_, v)| v != usize::MAX)
-            .collect();
+        // Use Vec directly — no BTreeMap conversion needed
+        let original_to_internal_map = original_to_internal_vec;
         timing_build_original_to_internal = build_original_to_internal_start.elapsed();
 
-        // TEMP: disable commit vocab optimization
+        // Commit vocab is legacy — use empty placeholder (vocab_trie is the primary format)
         let commit_vocab_prep_start = std::time::Instant::now();
-        let representatives: Vec<Vec<u8>> = (0..llm_token_strings.len()).map(|i| llm_token_strings[i].clone()).collect();
-        let original_to_representative = (0..llm_token_strings.len()).map(|i| i as u32).collect();
+        let representatives: Vec<Vec<u8>> = Vec::new();
+        let original_to_representative: Vec<u32> = vec![CommitVocab::INVALID_REPRESENTATIVE; highest_original_id + 1];
         timing_commit_vocab_prep = commit_vocab_prep_start.elapsed();
 
         // Build internal_llm_token_map using best representatives we already computed
@@ -931,7 +934,7 @@ impl GrammarConstraint {
                     .into_iter()
                     .enumerate()
                     .map(|(internal_id, string_idx)| {
-                        (llm_token_strings[string_idx].clone(), LLMTokenID(internal_id))
+                        (llm_token_strings[string_idx].to_vec(), LLMTokenID(internal_id))
                     })
                     .collect()
             }
@@ -963,21 +966,21 @@ impl GrammarConstraint {
                 + timing_commit_vocab;
             let other = total.saturating_sub(sum);
 
-            crate::timing!("TIMING: setup_combined::sort_tokens {:?}", timing_sort_tokens);
-            crate::timing!("TIMING: setup_combined::collect_token_strings {:?}", timing_collect_strings);
-            crate::timing!("TIMING: setup_combined::all_states {:?}", timing_all_states);
-            crate::timing!("TIMING: setup_combined::compute_equivalence {:?}", timing_compute_equivalence);
-            crate::timing!("TIMING: setup_combined::build_state_to_rep {:?}", timing_build_state_to_rep);
-            crate::timing!("TIMING: setup_combined::filter_states {:?}", timing_filter_states);
-            crate::timing!("TIMING: setup_combined::build_original_to_internal {:?}", timing_build_original_to_internal);
-            crate::timing!("TIMING: setup_combined::commit_vocab_prep {:?}", timing_commit_vocab_prep);
-            crate::timing!(
+            eprintln!("TIMING: setup_combined::sort_tokens {:?}", timing_sort_tokens);
+            eprintln!("TIMING: setup_combined::collect_token_strings {:?}", timing_collect_strings);
+            eprintln!("TIMING: setup_combined::all_states {:?}", timing_all_states);
+            eprintln!("TIMING: setup_combined::compute_equivalence {:?}", timing_compute_equivalence);
+            eprintln!("TIMING: setup_combined::build_state_to_rep {:?}", timing_build_state_to_rep);
+            eprintln!("TIMING: setup_combined::filter_states {:?}", timing_filter_states);
+            eprintln!("TIMING: setup_combined::build_original_to_internal {:?}", timing_build_original_to_internal);
+            eprintln!("TIMING: setup_combined::commit_vocab_prep {:?}", timing_commit_vocab_prep);
+            eprintln!(
                 "TIMING: setup_combined::build_internal_llm_token_map {:?}",
                 timing_build_internal_llm_token_map
             );
-            crate::timing!("TIMING: setup_combined::commit_vocab {:?}", timing_commit_vocab);
-            crate::timing!("TIMING: setup_combined::other {:?}", other);
-            crate::timing!("TIMING: setup_combined::total {:?}", total);
+            eprintln!("TIMING: setup_combined::commit_vocab {:?}", timing_commit_vocab);
+            eprintln!("TIMING: setup_combined::other {:?}", other);
+            eprintln!("TIMING: setup_combined::total {:?}", total);
         }
         (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep, representative_states)
     }
@@ -1147,6 +1150,10 @@ impl GrammarConstraint {
         grammar_definition: Option<Arc<GrammarDefinition>>,
     ) -> Self {
         crate::debug!(5, "GrammarConstraint build_with_config_inner: start");
+        let profile_build = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok()
+            || std::env::var("PROFILE_SETUP_COMBINED").is_ok();
+        let build_start = std::time::Instant::now();
+        let mut last_phase = build_start;
         let mut tokenizer = tokenizer;
 
         // Epsilon tokens are not supported.
@@ -1172,14 +1179,21 @@ impl GrammarConstraint {
             .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
             .unwrap_or(false);
 
+        // Cache ever_allowed computation (used for suffix_group_mask, ever_allowed_by_group, and later)
+        let ever_allowed_cached: Option<BTreeMap<Terminal, BTreeSet<Terminal>>> = if nwa_follow_prune_disabled {
+            None
+        } else {
+            Some(compute_ever_allowed_terminal_follows(&parser.productions))
+        };
+
         let suffix_group_mask: Option<Vec<bool>> = {
             if nwa_follow_prune_disabled {
                 None
             } else {
-                let ever_allowed = compute_ever_allowed_terminal_follows(&parser.productions);
+                let ever_allowed = ever_allowed_cached.as_ref().unwrap();
                 // Collect all terminals that appear in any follow set (union of all ever_allowed values)
                 let mut suffix_relevant_terminals: std::collections::BTreeSet<Terminal> = std::collections::BTreeSet::new();
-                for (_term, follows) in &ever_allowed {
+                for (_term, follows) in ever_allowed {
                     for follow in follows {
                         suffix_relevant_terminals.insert(follow.clone());
                     }
@@ -1214,12 +1228,12 @@ impl GrammarConstraint {
             if nwa_follow_prune_disabled || vocab_follow_prune_disabled {
                 None
             } else {
-                let ever_allowed = compute_ever_allowed_terminal_follows(&parser.productions);
+                let ever_allowed = ever_allowed_cached.as_ref().unwrap();
                 let max_group_id = token_name_map.right_values().copied().max().unwrap_or(0);
                 let num_groups = max_group_id + 1;
                 let mut masks: Vec<Vec<bool>> = vec![vec![true; num_groups]; num_groups];
                 // For each terminal with follow data, set its mask
-                for (term, follows) in &ever_allowed {
+                for (term, follows) in ever_allowed {
                     if let Some(&gid) = token_name_map.get_by_left(term) {
                         // Replace the all-true default with the actual follow set
                         let mask = &mut masks[gid];
@@ -1328,6 +1342,10 @@ impl GrammarConstraint {
         // Combined equivalence analysis - computes state equivalence, vocab equivalence, and internal mappings
         // State equivalence is computed ONCE and reused for both vocab analysis and building maps
         crate::debug!(5, "setup_combined: start");
+        if profile_build {
+            eprintln!("PHASE: preamble (follow sets, suffix masks, etc.) = {:?}", last_phase.elapsed());
+            last_phase = std::time::Instant::now();
+        }
         let setup_start = std::time::Instant::now();
         let (
             original_to_internal_map,
@@ -1349,6 +1367,10 @@ impl GrammarConstraint {
         });
         crate::timing!("TIMING: setup_combined {:?}", setup_start.elapsed());
         crate::debug!(5, "setup_combined: end");
+        if profile_build {
+            eprintln!("PHASE: setup_combined = {:?}", setup_start.elapsed());
+            last_phase = std::time::Instant::now();
+        }
         let commit_vocab = Arc::new(commit_vocab_data);
 
         if std::env::var("ENABLE_DFA_STATE_REORDER").map(|v| v == "1").unwrap_or(false) {
@@ -1366,83 +1388,51 @@ impl GrammarConstraint {
         }
 
         let internal_max_llm_token = original_to_internal_map
-            .values()
+            .iter()
             .copied()
+            .filter(|&v| v != StageVocab::UNMAPPED)
             .max()
             .unwrap_or(0);
 
-        crate::debug!(4, "Building internal_to_original_map");
-        crate::debug!(5, "build_internal_to_original_map: start");
-        let internal_map_start = std::time::Instant::now();
-        let internal_to_original_map: BTreeMap<usize, LLMTokenBV> = timeit!(
-            "build_internal_to_original_map",
-            {
-                // Optimized: Batch collect then create RangeSets from iterators (faster than individual inserts)
+// Build internal_to_original_map in parallel with vocab_tree + possible_matches
+        let parallel_maps_start = std::time::Instant::now();
+        let (internal_to_original_map, computed_possible_matches) = rayon::join(
+            || {
+                // Build internal_to_original_map
                 let mut groups: Vec<Vec<usize>> = vec![Vec::new(); internal_max_llm_token + 1];
-                for (orig, int_id) in &original_to_internal_map {
-                    groups[*int_id].push(*orig);
+                for (orig, &int_id) in original_to_internal_map.iter().enumerate() {
+                    if int_id != StageVocab::UNMAPPED {
+                        groups[int_id].push(orig);
+                    }
                 }
-                groups
+                let map: BTreeMap<usize, LLMTokenBV> = groups
                     .into_iter()
                     .enumerate()
                     .filter(|(_, v)| !v.is_empty())
                     .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
-                    .collect()
-            }
-        );
-        crate::timing!(
-            "TIMING: build_internal_to_original_map {:?}",
-            internal_map_start.elapsed()
-        );
-        crate::debug!(5, "build_internal_to_original_map: end");
+                    .collect();
+                map
+            },
+            || {
+                // Build vocab tree and possible_matches
+                let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> =
+                    internal_llm_token_map.iter().map(|(b, id)| (id.0, b.clone())).collect();
+                let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
 
-        // internal_llm_token_map was already computed in setup_combined - no need to iterate 50K tokens again!
-
-        // Vocab tree for internal tokens.
-        crate::debug!(4, "Building internal vocab prefix tree");
-        crate::debug!(5, "build_internal_vocab_tree: start");
-        let vocab_tree_start = std::time::Instant::now();
-        let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> =
-            internal_llm_token_map.iter().map(|(b, id)| (id.0, b.clone())).collect();
-        
-        let vocab_tree = timeit!("build_internal_vocab_tree", {
-            VocabPrefixTree::build(&internal_tokens_for_vocab)
-        });
-        crate::timing!(
-            "TIMING: build_internal_vocab_tree {:?}",
-            vocab_tree_start.elapsed()
-        );
-        crate::debug!(5, "build_internal_vocab_tree: end");
-        crate::debug!(4, "Done building internal vocab prefix tree");
-
-        // State equivalence already computed in setup_combined - reuse it
-        crate::debug!(4, "Using precomputed state equivalence: {} representative states", representative_states.len());
-
-        crate::debug!(4, "Computing maps and possible_matches (fast parallel pass)");
-        crate::debug!(5, "build_maps_and_possible_matches: start");
-        let maps_start = std::time::Instant::now();
-        let computed_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> =
-            timeit!("build_maps_and_possible_matches", {
-                // Build group_id -> terminal_index mapping
-                // token_name_map maps Terminal -> group_id (from tokenizer regex)
-                // parser.terminal_map maps Terminal -> TerminalID (index used in DWA)
-                // We need to convert tokenizer group_ids to parser terminal IDs
                 let group_id_to_terminal_idx: BTreeMap<usize, usize> = token_name_map
                     .iter()
                     .filter_map(|(terminal, group_id)| {
                         parser.terminal_map.get_by_left(terminal).map(|tid| (*group_id, tid.0))
                     })
                     .collect();
-                
-                // Only compute for representative states, then expand to non-representatives
+
                 let rep_possible_matches = Self::build_maps_and_matches_for_reps(
                     &tokenizer,
                     &vocab_tree.root,
                     &group_id_to_terminal_idx,
                     &representative_states,
                 );
-                
-                // Expand results to all states via state_to_rep mapping
+
                 let mut computed_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
                 for (s, rep) in &state_to_rep {
                     if let Some(rep_map) = rep_possible_matches.get(rep) {
@@ -1450,12 +1440,16 @@ impl GrammarConstraint {
                     }
                 }
                 computed_possible_matches
-            });
-        crate::timing!(
-            "TIMING: build_maps_and_possible_matches {:?}",
-            maps_start.elapsed()
+            },
         );
-        crate::debug!(5, "build_maps_and_possible_matches: end");
+        crate::timing!(
+            "TIMING: build_internal_maps+possible_matches(parallel) {:?}",
+            parallel_maps_start.elapsed()
+        );
+        if profile_build {
+            eprintln!("PHASE: parallel_maps+possible_matches = {:?}", parallel_maps_start.elapsed());
+            last_phase = std::time::Instant::now();
+        }
 
         let allowed_follows_by_label = Arc::new(Vec::new());
 
@@ -1483,7 +1477,8 @@ impl GrammarConstraint {
 
         // Compute ever-allowed (union of follow sets across all occurrences).
         // The complement gives "never follows" — safe for unconditional pruning.
-        let ever_allowed = compute_ever_allowed_terminal_follows(&parser.productions);
+        // Reuse cached result from setup_combined if available, else compute fresh.
+        let ever_allowed = ever_allowed_cached.unwrap_or_else(|| compute_ever_allowed_terminal_follows(&parser.productions));
         let mut ever_allowed_by_label: Vec<Vec<crate::dwa_i32::Label>> =
             vec![Vec::new(); parser.terminal_map.len()];
         for (term, follows) in &ever_allowed {
@@ -1776,15 +1771,19 @@ impl GrammarConstraint {
             internal_llm_token_map = new_internal_llm_token_map;
 
             // Update original_to_internal
-            for (_orig, int_id) in vocab.original_to_internal.iter_mut() {
-                *int_id = token_perm[*int_id];
+            for int_id in vocab.original_to_internal.iter_mut() {
+                if *int_id != StageVocab::UNMAPPED {
+                    *int_id = token_perm[*int_id];
+                }
             }
 
             // Rebuild internal_to_original
             let max_int = vocab.internal_max_llm_token;
             let mut groups: Vec<Vec<usize>> = vec![Vec::new(); max_int + 1];
-            for (orig, int_id) in &vocab.original_to_internal {
-                groups[*int_id].push(*orig);
+            for (orig, &int_id) in vocab.original_to_internal.iter().enumerate() {
+                if int_id != StageVocab::UNMAPPED {
+                    groups[int_id].push(orig);
+                }
             }
             vocab.internal_to_original = groups
                 .into_iter()
@@ -1805,6 +1804,10 @@ impl GrammarConstraint {
 
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         crate::debug!(5, "run_precompute1: start");
+        if profile_build {
+            eprintln!("PHASE: pre_precompute1 (follow sets, labels, etc.) = {:?}", last_phase.elapsed());
+            last_phase = std::time::Instant::now();
+        }
         let precompute_start = std::time::Instant::now();
         let (mut terminal_dwa, mut possible_matches_precompute1) = timeit!("run_precompute1", {
             run_precompute1_with_possible_matches(
@@ -1826,6 +1829,10 @@ impl GrammarConstraint {
         });
         crate::timing!("TIMING: run_precompute1 {:?}", precompute_start.elapsed());
         crate::debug!(5, "run_precompute1: end");
+        if profile_build {
+            eprintln!("PHASE: run_precompute1 = {:?}", precompute_start.elapsed());
+            last_phase = std::time::Instant::now();
+        }
 
         crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
 
@@ -2082,7 +2089,7 @@ impl GrammarConstraint {
             // Summary comparison with setup_combined
             crate::timing!(
                 "ANALYZE_EQUIV SUMMARY: setup_combined: {} token reps (from {}), {} state reps. Terminal DWA: {} token eq classes, {} TSID eq classes.",
-                vocab.original_to_internal.len(),
+                vocab.original_to_internal.iter().filter(|&&v| v != StageVocab::UNMAPPED).count(),
                 max_token + 1,
                 num_tsids,
                 num_token_eq_classes,
@@ -3887,22 +3894,21 @@ impl GrammarConstraint {
             internal_llm_token_map = new_internal_llm_token_map;
 
             // Update original_to_internal
-            for (_orig, int_id) in vocab.original_to_internal.iter_mut() {
-                *int_id = token_perm[*int_id];
+            for int_id in vocab.original_to_internal.iter_mut() {
+                if *int_id != StageVocab::UNMAPPED {
+                    *int_id = token_perm[*int_id];
+                }
             }
 
-            // Rebuild internal_to_original
-            let max_int = vocab.internal_max_llm_token;
-            let mut groups: Vec<Vec<usize>> = vec![Vec::new(); max_int + 1];
-            for (orig, int_id) in &vocab.original_to_internal {
-                groups[*int_id].push(*orig);
+            // Update internal_to_original: permute keys directly
+            // Much faster than rebuilding from original_to_internal (50K entries)
+            // since internal_to_original has only ~144 entries.
+            let old_i2o: BTreeMap<usize, crate::datastructures::hybrid_bitset::RangeSet> =
+                std::mem::take(&mut vocab.internal_to_original);
+            for (old_internal, original_set) in old_i2o {
+                let new_internal = token_perm[old_internal];
+                vocab.internal_to_original.insert(new_internal, original_set);
             }
-            vocab.internal_to_original = groups
-                .into_iter()
-                .enumerate()
-                .filter(|(_, v)| !v.is_empty())
-                .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
-                .collect();
 
             crate::debug!(
                 3,
@@ -3956,6 +3962,10 @@ impl GrammarConstraint {
         );
         crate::timing!("TIMING: build_parser_dwa {:?}", parser_dwa_start.elapsed());
         crate::debug!(5, "build_parser_dwa: end");
+        if profile_build {
+            eprintln!("PHASE: post_precompute1 + build_parser_dwa = {:?}", last_phase.elapsed());
+            last_phase = std::time::Instant::now();
+        }
 
         if std::env::var("VERIFY_PARSER_DWA_MINIMIZE").is_ok() {
             let before_states = parser_dwa.states.len();
@@ -4093,8 +4103,11 @@ impl GrammarConstraint {
             "TIMING: parser_dwa_trim_weights {:?}",
             trim_start.elapsed()
         );
+        if profile_build {
+            eprintln!("  sub: trim_weights_to_domain = {:?}", trim_start.elapsed());
+        }
         crate::debug!(5, "parser_dwa.trim_weights_to_domain: end");
-        
+
         // Symbol-heavy mode: apply clip_weights and optimize_dwa_and_vocab
         // These optimizations assume N-space weights and reduce the token space
         if !weight_heavy {
@@ -4105,10 +4118,9 @@ impl GrammarConstraint {
                 "TIMING: optimize_dwa_and_vocab {:?}",
                 optimize_start.elapsed()
             );
-        }
-
-        // Weight complexity instrumentation for the parser DWA.
-        if crate::r#macro::is_debug_level_enabled(5) {
+            if profile_build {
+                eprintln!("  sub: optimize_dwa_and_vocab = {:?}", optimize_start.elapsed());
+            }
             crate::debug!(5, "Parser DWA weight complexity (unique): total_ranges_unique={} (total_ranges_all={})", 
                 parser_dwa.num_ranges_interned(),
                 parser_dwa.num_ranges(),
@@ -4128,6 +4140,10 @@ impl GrammarConstraint {
             Some(v) if v == "0" => false, // explicit off: never run
             _ => !did_pre_dwa_reorder,    // default: run only if pre-DWA didn't run
         };
+        if profile_build {
+            eprintln!("  sub: weight_heavy={}, reorder_enabled={}, num_tsids={}, did_pre_dwa_reorder={}",
+                weight_heavy, reorder_enabled, num_tsids, did_pre_dwa_reorder);
+        }
         if reorder_enabled && num_tsids > 0 {
             crate::debug!(3, "Reordering parser DWA dimensions...");
             let reorder_start = std::time::Instant::now();
@@ -4137,6 +4153,8 @@ impl GrammarConstraint {
                 num_tsids,
             );
             crate::timing!("TIMING: reorder_dwa_dimensions {:?}", reorder_start.elapsed());
+            if profile_build { eprintln!("  reorder_fn: {:?}", reorder_start.elapsed()); }
+            let post_reorder_start = std::time::Instant::now();
 
             // Update state_to_internal_tsid: compose with tsid permutation
             // state → old_internal → new_internal
@@ -4146,17 +4164,22 @@ impl GrammarConstraint {
 
             // Update original_to_internal vocab mapping: compose with token permutation
             // original → old_internal → new_internal
-            for internal_id in vocab.original_to_internal.values_mut() {
-                *internal_id = token_perm[*internal_id];
+            for internal_id in vocab.original_to_internal.iter_mut() {
+                if *internal_id != StageVocab::UNMAPPED {
+                    *internal_id = token_perm[*internal_id];
+                }
             }
-            // Update internal_to_original: rebuild from the updated original_to_internal
-            vocab.internal_to_original.clear();
-            for (&original, &internal) in &vocab.original_to_internal {
-                vocab.internal_to_original
-                    .entry(internal)
-                    .or_insert_with(|| crate::datastructures::hybrid_bitset::RangeSet::default())
-                    .insert(original);
+            // Update internal_to_original: permute keys directly
+            // This is much faster than rebuilding from original_to_internal (50K entries)
+            // since internal_to_original has only ~144 entries (one per equiv class).
+            let old_i2o: BTreeMap<usize, crate::datastructures::hybrid_bitset::RangeSet> =
+                std::mem::take(&mut vocab.internal_to_original);
+            for (old_internal, original_set) in old_i2o {
+                let new_internal = token_perm[old_internal];
+                vocab.internal_to_original.insert(new_internal, original_set);
             }
+            if profile_build { eprintln!("  update_vocab_maps: {:?}", post_reorder_start.elapsed()); }
+            let pm_start = std::time::Instant::now();
 
             // Update possible_matches: permute LLMTokenBV values to new internal token IDs
             for state_matches in possible_matches_precompute1.values_mut() {
@@ -4173,38 +4196,38 @@ impl GrammarConstraint {
                     *bv = crate::datastructures::hybrid_bitset::RangeSet::from(new_rsb);
                 }
             }
+            if profile_build { eprintln!("  update_possible_matches: {:?}", pm_start.elapsed()); }
 
             crate::debug!(3, "DWA dimension reorder complete in {:?}", reorder_start.elapsed());
+            if profile_build {
+                eprintln!("  sub: reorder_dwa_dimensions = {:?}", reorder_start.elapsed());
+            }
         }
 
-        crate::debug!(5, "build_internal_to_original_sparse_matrix: start");
-        let sparse_start = std::time::Instant::now();
-        let internal_to_original_sparse_matrix = timeit!(
-            "build_internal_to_original_sparse_matrix",
-            {
+        // Build sparse matrix and vocab trie in parallel
+        let parallel_start = std::time::Instant::now();
+        let (internal_to_original_sparse_matrix, vocab_trie) = rayon::join(
+            || {
                 StageVocab::build_internal_to_original_sparse_matrix(
                     &vocab.internal_to_original,
                     max_original_llm_token_id,
                     vocab.internal_max_llm_token,
                 )
-            }
+            },
+            || {
+                Arc::new(LLMVocabTrie::from_token_map_owned(llm_token_map))
+            },
         );
         crate::timing!(
-            "TIMING: build_internal_to_original_sparse_matrix {:?}",
-            sparse_start.elapsed()
+            "TIMING: build_sparse_matrix+vocab_trie(parallel) {:?}",
+            parallel_start.elapsed()
         );
-        crate::debug!(5, "build_internal_to_original_sparse_matrix: end");
+        if profile_build {
+            eprintln!("PHASE: post_parser_dwa + sparse_matrix+vocab_trie = {:?}", last_phase.elapsed());
+            eprintln!("PHASE: TOTAL build_with_config_inner = {:?}", build_start.elapsed());
+        }
         vocab.max_original_llm_token_id = max_original_llm_token_id;
         vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
-
-        // Build the new trie-based vocab from the LLM token map
-        crate::debug!(5, "LLMVocabTrie::from_token_map: start");
-        let vocab_trie_start = std::time::Instant::now();
-        let vocab_trie = Arc::new(timeit!("LLMVocabTrie::from_token_map", {
-            LLMVocabTrie::from_token_map(&llm_token_map)
-        }));
-        crate::timing!("TIMING: build_vocab_trie {:?}", vocab_trie_start.elapsed());
-        crate::debug!(5, "LLMVocabTrie::from_token_map: end");
         let eos_token_id = find_eos_token_id(&vocab_trie);
         
         crate::debug!(5, "GrammarConstraint build_with_config_inner: end");
@@ -4301,8 +4324,9 @@ impl GrammarConstraint {
     pub fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
         self.parser_dwa_vocab
             .original_to_internal
-            .get(&original_id.0)
-            .map(|v| LLMTokenID(*v))
+            .get(original_id.0)
+            .filter(|&&v| v != StageVocab::UNMAPPED)
+            .map(|&v| LLMTokenID(v))
     }
 
     // -----------------------------------------------------------------------
