@@ -380,20 +380,20 @@ fn token_signature(
         let completion = dfa.completion(scratch.current_states[i]);
 
         let base = i * dfa.num_groups;
-        let mut h = new_hasher();
-        h.write_u64(completion);
-        let mut any_match = false;
-        for gid in 0..dfa.num_groups {
-            let pv = scratch.match_positions[base + gid];
-            if pv != NONE {
-                any_match = true;
-                if pv > 0 {
+        let mp = &scratch.match_positions[base..base + dfa.num_groups];
+        let state_sig = if mp.iter().any(|&pv| pv != NONE) {
+            let mut h = new_hasher();
+            h.write_u64(completion);
+            for (gid, &pv) in mp.iter().enumerate() {
+                if pv != NONE && pv > 0 {
                     h.write_u64(gid as u64);
                     h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0));
                 }
             }
-        }
-        let state_sig = if any_match { h.finish() } else { completion };
+            h.finish()
+        } else {
+            completion
+        };
         sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
     }
     sig
