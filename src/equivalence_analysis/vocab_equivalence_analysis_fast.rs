@@ -27,18 +27,16 @@ const NONE_POS: u32 = u32::MAX;
 
 #[derive(Clone, Copy)]
 struct Finalizer { gid: usize, non_greedy: bool }
-#[derive(Clone)]
-enum FutureMode { AlwaysTerminate, AlwaysContinue, Guarded(GroupList) }
+#[derive(Clone, Copy, PartialEq)]
+enum FutureMode { Terminate, Continue }
 
 struct PrecomputedDfa {
     start_state: usize,
     transitions: Vec<[u32; 256]>,
     finalizers: Vec<FinalizerList>,
     future_modes: Vec<FutureMode>,
-    guard_masks: Vec<Option<Box<[u64]>>>,
     has_transitions: Vec<bool>,
     num_groups: usize,
-    mask_words: usize,
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
 }
@@ -48,8 +46,6 @@ struct Pos0Scratch {
     done: Vec<bool>,
     active_indices: Vec<usize>,
     end_states: Vec<Option<usize>>,
-    matched_bits: Vec<u64>,
-    mask_words: usize,
     match_positions: Vec<u32>,
     match_gen: Vec<u32>,
     cur_gen: u32,
@@ -66,7 +62,6 @@ struct SuffixScratch {
     queue: Vec<usize>,
     order: Vec<usize>,
     nodes: Vec<Option<(u64, EdgeList)>>,
-    projected_cache: HashMap<(usize, usize), u64>,
 }
 
 static HASH_RANDOM_STATE: Lazy<RandomState> =
@@ -98,7 +93,6 @@ fn precompute_dfa(regex: &Tokenizer) -> PrecomputedDfa {
         max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
     }
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
-    let mask_words = (num_groups + 63) / 64;
     let mut transitions = Vec::with_capacity(dfa.states.len());
     let mut finalizers: Vec<FinalizerList> = Vec::with_capacity(dfa.states.len());
     let mut possible_future: Vec<GroupList> = Vec::with_capacity(dfa.states.len());
@@ -123,46 +117,22 @@ fn precompute_dfa(regex: &Tokenizer) -> PrecomputedDfa {
             f.non_greedy = non_greedy_flags.get(f.gid).copied().unwrap_or(false);
         }
     }
-    let mut future_modes = Vec::with_capacity(possible_future.len());
-    let mut guard_masks: Vec<Option<Box<[u64]>>> = Vec::with_capacity(possible_future.len());
-    for future in &possible_future {
-        if future.is_empty() {
-            future_modes.push(FutureMode::AlwaysTerminate);
-            guard_masks.push(None);
-        } else if future.iter().any(|&gid| gid >= num_groups || !non_greedy_flags[gid]) {
-            future_modes.push(FutureMode::AlwaysContinue);
-            guard_masks.push(None);
-        } else {
-            let mut guard: GroupList = future.iter().copied().collect();
-            guard.sort_unstable();
-            guard.dedup();
-            if mask_words == 0 {
-                future_modes.push(FutureMode::AlwaysTerminate);
-                guard_masks.push(None);
-            } else {
-                let mut mask = vec![0u64; mask_words];
-                for &gid in &guard { mask[gid >> 6] |= 1u64 << (gid & 63); }
-                future_modes.push(FutureMode::Guarded(guard));
-                guard_masks.push(Some(mask.into_boxed_slice()));
-            }
-        }
-    }
+    let future_modes: Vec<FutureMode> = possible_future.iter()
+        .map(|f| if f.is_empty() { FutureMode::Terminate } else { FutureMode::Continue })
+        .collect();
     let none_completion_hash = { let mut h = new_hasher(); h.write_u8(0); h.finish() };
     let completion_hash: Vec<u64> = possible_future.iter().map(|v| hash_group_list(v)).collect();
     PrecomputedDfa {
         start_state: dfa.start_state, transitions, finalizers, future_modes,
-        guard_masks, has_transitions, num_groups, mask_words,
-        completion_hash, none_completion_hash,
+        has_transitions, num_groups, completion_hash, none_completion_hash,
     }
 }
 
 impl Pos0Scratch {
     fn new(num_states: usize, num_groups: usize) -> Self {
-        let mask_words = (num_groups + 63) / 64;
         Pos0Scratch {
             current_states: vec![0; num_states], done: vec![false; num_states],
             active_indices: Vec::new(), end_states: vec![None; num_states],
-            matched_bits: vec![0u64; num_states.saturating_mul(mask_words)], mask_words,
             match_positions: vec![0u32; num_states.saturating_mul(num_groups)],
             match_gen: vec![0u32; num_states.saturating_mul(num_groups)], cur_gen: 1,
             touched_groups: vec![GroupList::new(); num_states], touched_states: Vec::new(),
@@ -176,7 +146,6 @@ impl Pos0Scratch {
             self.current_states.resize(len, 0);
             self.done.resize(len, false);
             self.end_states.resize(len, None);
-            self.matched_bits.resize(len.saturating_mul(self.mask_words), 0);
             self.match_positions.resize(len.saturating_mul(num_groups), 0);
             self.match_gen.resize(len.saturating_mul(num_groups), 0);
             self.touched_groups.resize(len, GroupList::new());
@@ -190,11 +159,6 @@ impl Pos0Scratch {
         if self.cur_gen == 0 { self.match_gen.fill(0); self.cur_gen = 1; }
         for &si in &self.touched_states {
             if si < self.touched_groups.len() { self.touched_groups[si].clear(); }
-            if self.mask_words > 0 {
-                let base = si.saturating_mul(self.mask_words);
-                let end = base.saturating_add(self.mask_words);
-                if end <= self.matched_bits.len() { self.matched_bits[base..end].fill(0); }
-            }
         }
         self.touched_states.clear();
     }
@@ -219,12 +183,10 @@ fn compute_pos0(
     let cur_gen = scratch.cur_gen;
     let touched_groups = &mut scratch.touched_groups;
     let touched_states = &mut scratch.touched_states;
-    let matched_bits = &mut scratch.matched_bits;
-    let (mask_words, base_offsets) = (scratch.mask_words, &scratch.base_offsets);
+    let base_offsets = &scratch.base_offsets;
     active_indices.clear();
     let has_bytes = !slice.is_empty();
     let first_byte = if has_bytes { slice[0] } else { 0 };
-    // Process initial finalizers
     for (i, &state) in initial_states.iter().enumerate() {
         let base = base_offsets[i];
         for f in &pre.finalizers[state] {
@@ -234,9 +196,6 @@ fn compute_pos0(
                 let groups = &mut touched_groups[i];
                 if groups.is_empty() { touched_states.push(i); }
                 groups.push(f.gid);
-                if mask_words > 0 {
-                    matched_bits[i * mask_words + (f.gid >> 6)] |= 1u64 << (f.gid & 63);
-                }
             }
         }
         if !pre.has_transitions[state] { done[i] = true; continue; }
@@ -245,7 +204,6 @@ fn compute_pos0(
         }
         active_indices.push(i);
     }
-    // Process each byte (hot path)
     if has_bytes && !active_indices.is_empty() {
         let mut active_len = active_indices.len();
         for (pos, &byte) in slice.iter().enumerate() {
@@ -266,12 +224,7 @@ fn compute_pos0(
                                 let idx = base + f.gid;
                                 let slot_gen = match_gen.get_unchecked_mut(idx);
                                 let was_none = *slot_gen != cur_gen;
-                                if f.non_greedy {
-                                    if was_none {
-                                        *slot_gen = cur_gen;
-                                        *match_positions.get_unchecked_mut(idx) = position;
-                                    }
-                                } else {
+                                if !f.non_greedy || was_none {
                                     *slot_gen = cur_gen;
                                     *match_positions.get_unchecked_mut(idx) = position;
                                 }
@@ -279,26 +232,12 @@ fn compute_pos0(
                                     let groups = touched_groups.get_unchecked_mut(i);
                                     if groups.is_empty() { touched_states.push(i); }
                                     groups.push(f.gid);
-                                    if mask_words > 0 {
-                                        *matched_bits.get_unchecked_mut(
-                                            i * mask_words + (f.gid >> 6),
-                                        ) |= 1u64 << (f.gid & 63);
-                                    }
                                 }
                             }
                         }
-                        let terminate = match pre.future_modes.get_unchecked(ns) {
-                            FutureMode::AlwaysTerminate => true,
-                            FutureMode::AlwaysContinue => false,
-                            FutureMode::Guarded(_) => if mask_words == 0 { true } else {
-                                let gm = pre.guard_masks.get_unchecked(ns).as_ref().unwrap();
-                                let bb = i * mask_words;
-                                (0..mask_words).all(|w|
-                                    *gm.get_unchecked(w) & !*matched_bits.get_unchecked(bb + w) == 0
-                                )
-                            },
-                        };
-                        if terminate { *done.get_unchecked_mut(i) = true; }
+                        if *pre.future_modes.get_unchecked(ns) == FutureMode::Terminate {
+                            *done.get_unchecked_mut(i) = true;
+                        }
                     } else {
                         *done.get_unchecked_mut(i) = true;
                     }
@@ -337,7 +276,7 @@ impl SuffixScratch {
         SuffixScratch {
             match_positions: vec![NONE_POS; num_groups],
             visited: Vec::new(), queue: Vec::new(), order: Vec::new(),
-            nodes: Vec::new(), projected_cache: HashMap::new(),
+            nodes: Vec::new(),
         }
     }
     fn ensure_capacity(&mut self, len: usize) {
@@ -350,7 +289,6 @@ impl SuffixScratch {
         if self.nodes.len() < needed { self.nodes.resize(needed, None); }
         self.queue.clear();
         self.order.clear();
-        self.projected_cache.clear();
     }
 }
 
@@ -381,11 +319,7 @@ fn execute_suffix(
                 if was_none { touched.push(f.gid); }
             }
         }
-        done = match &pre.future_modes[current] {
-            FutureMode::AlwaysTerminate => true,
-            FutureMode::AlwaysContinue => false,
-            FutureMode::Guarded(g) => g.iter().all(|&gid| mpos[gid] != NONE_POS),
-        };
+        done = pre.future_modes[current] == FutureMode::Terminate;
     }
     let end = if done || !pre.has_transitions[current] { None } else { Some(current) };
     touched.sort_unstable();
@@ -442,37 +376,14 @@ fn compute_suffix_hashes(
     scratch.order.clear();
 }
 
-/// Compute projected suffix hash pruning edges by follow-set constraints.
-fn compute_projected_suffix_hash(
-    pos: usize, parent_group: usize, allowed: &[Vec<bool>],
-    nodes: &[Option<(u64, EdgeList)>], cache: &mut HashMap<(usize, usize), u64>,
-) -> u64 {
-    if let Some(&cached) = cache.get(&(pos, parent_group)) { return cached; }
-    let hash = if let Some((ch, ref edges)) = nodes[pos] {
-        let mut h = new_hasher();
-        h.write_u64(ch);
-        let mask = if parent_group < allowed.len() { Some(&allowed[parent_group]) } else { None };
-        for &(gid, target) in edges.iter() {
-            if mask.map_or(true, |m| gid < m.len() && m[gid]) {
-                h.write_u64(gid as u64);
-                h.write_u64(compute_projected_suffix_hash(target, gid, allowed, nodes, cache));
-            }
-        }
-        h.finish()
-    } else { 0 };
-    cache.insert((pos, parent_group), hash);
-    hash
-}
-
 fn compute_chunk_signature(
     pre: &PrecomputedDfa, token: &[u8], chunk_states: &[usize], pos0: &mut Pos0Scratch,
-    suffix: &mut SuffixScratch, cache: &mut Vec<Option<u64>>, ever_allowed: Option<&[Vec<bool>]>,
+    suffix: &mut SuffixScratch, cache: &mut Vec<Option<u64>>,
 ) -> u64 {
     compute_pos0(pre, pos0, token, chunk_states);
     if !pos0.all_targets.is_empty() {
         compute_suffix_hashes(pre, token, &pos0.all_targets, cache, suffix);
     }
-    let use_projected = ever_allowed.is_some();
     let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
         let ch = pos0.end_states[i]
@@ -486,12 +397,8 @@ fn compute_chunk_signature(
             for &gid in groups.iter() {
                 let pv = pos0.match_positions[base + gid];
                 if pv > 0 {
-                    let th = if use_projected {
-                        compute_projected_suffix_hash(pv as usize, gid, ever_allowed.unwrap(),
-                            &suffix.nodes, &mut suffix.projected_cache)
-                    } else { cache[pv as usize].unwrap_or(0) };
                     h.write_u64(gid as u64);
-                    h.write_u64(th);
+                    h.write_u64(cache[pv as usize].unwrap_or(0));
                 }
             }
             h.finish()
@@ -537,7 +444,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
                     let token = strings[ti].as_ref();
                     if sc.len() <= token.len() { sc.resize(token.len() + 1, None); }
                     sc.iter_mut().for_each(|x| *x = None);
-                    (ti, compute_chunk_signature(&pre, token, batch, p0, sf, sc, ever_allowed_by_group))
+                    (ti, compute_chunk_signature(&pre, token, batch, p0, sf, sc))
                 },
             ).collect();
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
