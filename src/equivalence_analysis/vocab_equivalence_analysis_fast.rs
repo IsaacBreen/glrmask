@@ -24,8 +24,7 @@ const HASH_SEED1: u64 = 0x9e37_79b9_7f4a_7c15;
 const HASH_SEED2: u64 = 0xc2b2_ae3d_27d4_eb4f;
 const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
 const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
-const NONE_STATE: u32 = u32::MAX;
-const NONE_POS: u32 = u32::MAX;
+const NONE: u32 = u32::MAX;
 
 #[derive(Clone, Copy)]
 struct Finalizer {
@@ -56,8 +55,7 @@ struct Scratch {
     match_gen: Vec<u32>,
     cur_gen: u32,
     touched_groups: Vec<GroupList>,
-    seen_target: Vec<bool>,
-    all_targets: Vec<usize>,
+    targets: Vec<usize>,
     // Suffix DAG
     suffix_match_positions: Vec<u32>,
     visited: Vec<bool>,
@@ -90,19 +88,18 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
     let dfa = regex.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
-    let mut max_gid: Option<usize> = None;
-    for state in &dfa.states {
-        if let Some(m) = state.finalizers.iter().max() {
-            max_gid = Some(max_gid.map_or(m, |cur| cur.max(m)));
-        }
-        if let Some(m) = state.possible_future_group_ids.iter().max() {
-            max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
-        }
-    }
-    if let Some(m) = dfa.non_greedy_finalizers.iter().max() {
-        max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
-    }
-    let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
+    // Compute num_groups from all group IDs referenced in the DFA
+    let num_groups = dfa
+        .states
+        .iter()
+        .flat_map(|s| {
+            s.finalizers
+                .iter()
+                .chain(s.possible_future_group_ids.iter().copied())
+        })
+        .chain(dfa.non_greedy_finalizers.iter().copied())
+        .max()
+        .map_or(0, |m| m + 1);
 
     let mut non_greedy_flags = vec![false; num_groups];
     for &gid in &dfa.non_greedy_finalizers {
@@ -118,7 +115,7 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
     let mut completion_hash = Vec::with_capacity(dfa.states.len());
 
     for state in &dfa.states {
-        let mut table = [NONE_STATE; 256];
+        let mut table = [NONE; 256];
         for (byte, &target) in state.transitions.iter() {
             table[byte as usize] = target as u32;
         }
@@ -175,9 +172,8 @@ impl Scratch {
             match_gen: vec![0u32; num_states * num_groups],
             cur_gen: 1,
             touched_groups: vec![GroupList::new(); num_states],
-            seen_target: Vec::new(),
-            all_targets: Vec::new(),
-            suffix_match_positions: vec![NONE_POS; num_groups],
+            targets: Vec::new(),
+            suffix_match_positions: vec![NONE; num_groups],
             visited: Vec::new(),
             queue: Vec::new(),
             order: Vec::new(),
@@ -212,17 +208,6 @@ fn run_batch(
         tg.clear();
     }
 
-    // Reset target tracking
-    for &pos in scratch.all_targets.iter() {
-        if pos < scratch.seen_target.len() {
-            scratch.seen_target[pos] = false;
-        }
-    }
-    scratch.all_targets.clear();
-    if scratch.seen_target.len() < len + 1 {
-        scratch.seen_target.resize(len + 1, false);
-    }
-
     let has_bytes = !slice.is_empty();
     let first_byte = if has_bytes { slice[0] } else { 0 };
 
@@ -240,7 +225,7 @@ fn run_batch(
             scratch.done[i] = true;
             continue;
         }
-        if has_bytes && dfa.transitions[state][first_byte as usize] == NONE_STATE {
+        if has_bytes && dfa.transitions[state][first_byte as usize] == NONE {
             scratch.done[i] = true;
             continue;
         }
@@ -257,7 +242,7 @@ fn run_batch(
                 let i = scratch.active_indices[idx];
                 let base = i * num_groups;
                 let next_state = dfa.transitions[scratch.current_states[i]][byte as usize];
-                if next_state != NONE_STATE {
+                if next_state != NONE {
                     let ns = next_state as usize;
                     scratch.current_states[i] = ns;
                     for f in &dfa.finalizers[ns] {
@@ -292,6 +277,7 @@ fn run_batch(
     }
 
     // Collect end states and unique match target positions
+    scratch.targets.clear();
     for i in 0..num_states {
         scratch.end_states[i] = if scratch.done[i]
             || !dfa.has_transitions[scratch.current_states[i]]
@@ -306,14 +292,15 @@ fn run_batch(
                 let pv = scratch.match_positions[base + gid];
                 if pv > 0 {
                     let p = pv as usize;
-                    if p <= len && !scratch.seen_target[p] {
-                        scratch.seen_target[p] = true;
-                        scratch.all_targets.push(p);
+                    if p <= len {
+                        scratch.targets.push(p);
                     }
                 }
             }
         }
     }
+    scratch.targets.sort_unstable();
+    scratch.targets.dedup();
 }
 
 /// Run DFA on a suffix from start_state, returning (end_state, edges to match positions).
@@ -324,13 +311,13 @@ fn run_suffix(
     match_positions: &mut [u32],
 ) -> (Option<usize>, EdgeList) {
     let num_groups = dfa.num_groups;
-    match_positions[..num_groups].fill(NONE_POS);
+    match_positions[..num_groups].fill(NONE);
     let mut touched = GroupList::new();
     let mut current = dfa.start_state;
     let mut done = dfa.is_dead_end[current];
 
     for f in &dfa.finalizers[current] {
-        if f.gid < num_groups && match_positions[f.gid] == NONE_POS {
+        if f.gid < num_groups && match_positions[f.gid] == NONE {
             match_positions[f.gid] = 0;
             touched.push(f.gid);
         }
@@ -341,7 +328,7 @@ fn run_suffix(
             break;
         }
         let ns = dfa.transitions[current][byte as usize];
-        if ns == NONE_STATE {
+        if ns == NONE {
             done = true;
             break;
         }
@@ -349,7 +336,7 @@ fn run_suffix(
         let position = (idx + 1) as u32;
         for f in &dfa.finalizers[current] {
             if f.gid < num_groups {
-                let was_none = match_positions[f.gid] == NONE_POS;
+                let was_none = match_positions[f.gid] == NONE;
                 if !f.non_greedy || was_none {
                     match_positions[f.gid] = position;
                 }
@@ -373,7 +360,7 @@ fn run_suffix(
         .iter()
         .filter_map(|&gid| {
             let pv = match_positions[gid];
-            (pv != NONE_POS && pv != 0).then(|| (gid, base_pos + pv as usize))
+            (pv != NONE && pv != 0).then(|| (gid, base_pos + pv as usize))
         })
         .collect();
     (end_state, edges)
@@ -407,7 +394,7 @@ fn hash_suffixes(
     }
 
     // Seed BFS with target positions
-    for &pos in &scratch.all_targets {
+    for &pos in &scratch.targets {
         if pos <= len && scratch.nodes[pos].is_none() && !scratch.visited[pos] {
             scratch.visited[pos] = true;
             scratch.queue.push(pos);
@@ -464,7 +451,7 @@ fn token_signature(
     scratch: &mut Scratch,
 ) -> u64 {
     run_batch(dfa, scratch, token, chunk_states);
-    if !scratch.all_targets.is_empty() {
+    if !scratch.targets.is_empty() {
         hash_suffixes(dfa, token, scratch);
     }
 
@@ -552,7 +539,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             )
             .collect();
 
-        // Refine partition by (old_class, signature)
+        // Refine partition: group tokens by (old_class, signature)
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
             HashMap::with_capacity(active_sigs.len() / 2);
         for (ti, sig) in active_sigs {
@@ -562,29 +549,26 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
                 .push(ti);
         }
 
-        let mut by_old_class: HashMap<usize, Vec<Vec<usize>>> = HashMap::new();
-        for ((old_class, _), tokens) in refinement {
-            by_old_class.entry(old_class).or_default().push(tokens);
-        }
-
+        // Assign class IDs: first sub-group of each old class keeps the old ID
         let mut new_active = Vec::with_capacity(active_indices.len());
-        for (old_class, sub_groups) in by_old_class {
-            let mut first = true;
-            for tokens in sub_groups {
-                let class_id = if first {
-                    first = false;
-                    old_class
-                } else {
+        let mut first_of_class: HashMap<usize, bool> = HashMap::new();
+        for ((old_class, _), tokens) in refinement {
+            let class_id = {
+                let seen = first_of_class.entry(old_class).or_insert(false);
+                if *seen {
                     let id = next_class_id;
                     next_class_id += 1;
                     id
-                };
-                for &ti in &tokens {
-                    partition[ti] = class_id;
+                } else {
+                    *seen = true;
+                    old_class
                 }
-                if tokens.len() > 1 {
-                    new_active.extend(tokens);
-                }
+            };
+            for &ti in &tokens {
+                partition[ti] = class_id;
+            }
+            if tokens.len() > 1 {
+                new_active.extend(tokens);
             }
         }
         active_indices = new_active;
