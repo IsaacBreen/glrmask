@@ -38,7 +38,6 @@ struct Dfa {
     transitions: Vec<[u32; 256]>,
     finalizers: Vec<SmallVec<[Finalizer; 4]>>,
     is_dead_end: Vec<bool>,
-    has_transitions: Vec<bool>,
     num_groups: usize,
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
@@ -56,10 +55,8 @@ struct Scratch {
     targets: Vec<usize>,
     // Suffix DAG
     suffix_match_positions: Vec<u32>,
-    visited: Vec<bool>,
-    queue: Vec<usize>,
-    order: Vec<usize>,
-    nodes: Vec<Option<(u64, EdgeList)>>,
+    dag: HashMap<usize, (u64, EdgeList)>,
+    dag_queue: Vec<usize>,
     cache: Vec<Option<u64>>,
 }
 
@@ -109,7 +106,6 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
     let mut transitions = Vec::with_capacity(dfa.states.len());
     let mut finalizers = Vec::with_capacity(dfa.states.len());
     let mut is_dead_end = Vec::with_capacity(dfa.states.len());
-    let mut has_transitions = Vec::with_capacity(dfa.states.len());
     let mut completion_hash = Vec::with_capacity(dfa.states.len());
 
     for state in &dfa.states {
@@ -131,7 +127,6 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
         );
 
         is_dead_end.push(state.possible_future_group_ids.is_empty());
-        has_transitions.push(!state.transitions.is_empty());
         completion_hash.push(hash_group_list(
             &state
                 .possible_future_group_ids
@@ -152,7 +147,6 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
         transitions,
         finalizers,
         is_dead_end,
-        has_transitions,
         num_groups,
         completion_hash,
         none_completion_hash,
@@ -170,10 +164,8 @@ impl Scratch {
             touched_groups: vec![GroupList::new(); num_states],
             targets: Vec::new(),
             suffix_match_positions: vec![NONE; num_groups],
-            visited: Vec::new(),
-            queue: Vec::new(),
-            order: Vec::new(),
-            nodes: Vec::new(),
+            dag: HashMap::new(),
+            dag_queue: Vec::new(),
             cache: vec![None; 256],
         }
     }
@@ -212,7 +204,7 @@ fn run_batch(
                 scratch.touched_groups[i].push(f.gid);
             }
         }
-        if !dfa.has_transitions[state] {
+        if dfa.is_dead_end[state] {
             scratch.done[i] = true;
             continue;
         }
@@ -269,9 +261,7 @@ fn run_batch(
     // Collect end states and unique match target positions
     scratch.targets.clear();
     for i in 0..num_states {
-        scratch.end_states[i] = if scratch.done[i]
-            || !dfa.has_transitions[scratch.current_states[i]]
-        {
+        scratch.end_states[i] = if scratch.done[i] {
             None
         } else {
             Some(scratch.current_states[i])
@@ -340,11 +330,7 @@ fn run_suffix(
         }
     }
 
-    let end_state = if done || !dfa.has_transitions[current] {
-        None
-    } else {
-        Some(current)
-    };
+    let end_state = if done { None } else { Some(current) };
     touched.sort_unstable();
     let edges: EdgeList = touched
         .iter()
@@ -363,74 +349,59 @@ fn hash_suffixes(
     scratch: &mut Scratch,
 ) {
     let len = slice.len();
+    scratch.dag.clear();
+    scratch.dag_queue.clear();
 
-    // Reset from previous call
-    for &pos in &scratch.queue {
-        if pos < scratch.visited.len() {
-            scratch.visited[pos] = false;
-        }
-        if pos < scratch.nodes.len() {
-            scratch.nodes[pos] = None;
-        }
-    }
-    scratch.queue.clear();
-    scratch.order.clear();
-    let needed = len + 1;
-    if scratch.visited.len() < needed {
-        scratch.visited.resize(needed, false);
-    }
-    if scratch.nodes.len() < needed {
-        scratch.nodes.resize(needed, None);
-    }
-
-    // Seed BFS with target positions
+    // BFS from target positions: run suffix DFA at each, discover new positions from edges
     for &pos in &scratch.targets {
-        if pos <= len && scratch.nodes[pos].is_none() && !scratch.visited[pos] {
-            scratch.visited[pos] = true;
-            scratch.queue.push(pos);
+        if pos <= len && !scratch.dag.contains_key(&pos) {
+            scratch.dag_queue.push(pos);
+            scratch.dag.insert(pos, (0, EdgeList::new())); // placeholder
         }
     }
-    if scratch.queue.is_empty() {
-        return;
-    }
 
-    // BFS: discover all reachable suffix positions
     let mut cursor = 0;
-    while cursor < scratch.queue.len() {
-        let pos = scratch.queue[cursor];
+    while cursor < scratch.dag_queue.len() {
+        let pos = scratch.dag_queue[cursor];
         cursor += 1;
         let (end_state, edges) =
             run_suffix(dfa, &slice[pos..], pos, &mut scratch.suffix_match_positions);
         for &(_, target) in &edges {
-            if target <= len && scratch.nodes[target].is_none() && !scratch.visited[target] {
-                scratch.visited[target] = true;
-                scratch.queue.push(target);
+            if target <= len && !scratch.dag.contains_key(&target) {
+                scratch.dag_queue.push(target);
+                scratch.dag.insert(target, (0, EdgeList::new()));
             }
         }
         let ch = end_state
             .map(|id| dfa.completion_hash[id])
             .unwrap_or(dfa.none_completion_hash);
-        scratch.nodes[pos] = Some((ch, edges));
-        scratch.order.push(pos);
+        scratch.dag.insert(pos, (ch, edges));
     }
 
-    // Hash bottom-up (deeper positions first)
-    scratch.order.sort_unstable_by(|a, b| b.cmp(a));
-    for &pos in &scratch.order {
+    // Hash bottom-up: process deeper positions first
+    scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
+    for &pos in &scratch.dag_queue {
+        if scratch.cache.len() <= pos {
+            scratch.cache.resize(pos + 1, None);
+        }
         if scratch.cache[pos].is_some() {
             continue;
         }
-        if let Some((ch, ref edges)) = scratch.nodes[pos] {
+        if let Some((ch, ref edges)) = scratch.dag.get(&pos) {
             let mut h = new_hasher();
-            h.write_u64(ch);
+            h.write_u64(*ch);
             for &(gid, target) in edges.iter() {
                 h.write_u64(gid as u64);
-                h.write_u64(scratch.cache[target].unwrap_or(0));
+                let target_hash = if target < scratch.cache.len() {
+                    scratch.cache[target].unwrap_or(0)
+                } else {
+                    0
+                };
+                h.write_u64(target_hash);
             }
             scratch.cache[pos] = Some(h.finish());
         }
     }
-    scratch.order.clear();
 }
 
 /// Compute a token's full signature over a batch of initial states.
