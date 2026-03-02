@@ -1826,14 +1826,6 @@ pub fn find_vocab_equivalence_classes_with_follow(
     // (batch_size * num_groups * 4 bytes per thread) and enable early pruning of singletons.
     let batch_size = if num_states < 200 { num_states } else { 200 };
 
-    // Build product DFA for faster batch processing (all states in one batch)
-    let pdfa_start = std::time::Instant::now();
-    let pdfa = ProductDfa::build(&pre, &reduced_initial_states);
-    let pdfa_build_time = pdfa_start.elapsed();
-    if is_debug_level_enabled(4) {
-        crate::debug!(4, "  Product DFA build: {:?}", pdfa_build_time);
-    }
-
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition: Vec<usize> = vec![0; num_tokens];
     let mut next_class_id = 1usize;
@@ -1853,128 +1845,127 @@ pub fn find_vocab_equivalence_classes_with_follow(
     // Timing accumulators
     let mut total_refine_time = std::time::Duration::ZERO;
 
-    // Use product DFA to process ALL states in a single pass (no batching needed)
-    // This is fundamentally faster because per-byte DFA transitions are O(1) instead of O(num_states)
-    {
+    for batch_start in (0..num_states).step_by(batch_size) {
         if active_indices.is_empty() {
-            // nothing to do
+            break;
+        }
+
+        let batch_end = (batch_start + batch_size).min(num_states);
+        let batch = &reduced_initial_states[batch_start..batch_end];
+
+        // Compute partial signatures for active tokens
+        let batch_start_time = Instant::now();
+        let active_sigs: Vec<(usize, u64)> = if let (Some(ref trie), Some(ref suffix_caches)) = (&trie, &suffix_caches) {
+            // TRIE PATH: process states in parallel through the trie
+            compute_batch_signatures_trie(
+                trie,
+                &pre,
+                batch,
+                strings,
+                &active_indices,
+                suffix_caches,
+                ever_allowed_by_group,
+                group_to_class,
+                num_tokens,
+            )
         } else {
-            let batch_start_time = Instant::now();
-            let active_sigs: Vec<(usize, u64)> = if let (Some(ref trie), Some(ref suffix_caches)) = (&trie, &suffix_caches) {
-                // TRIE PATH: process states in parallel through the trie
-                compute_batch_signatures_trie(
-                    trie,
-                    &pre,
-                    &reduced_initial_states,
-                    strings,
-                    &active_indices,
-                    suffix_caches,
-                    ever_allowed_by_group,
-                    group_to_class,
-                    num_tokens,
-                )
-            } else {
-                // PRODUCT DFA PATH: process tokens in parallel using product DFA
-                active_indices
-                .par_iter()
-                .map_init(
-                    || {
-                        (
-                            ProductScratch::new(num_states, num_groups),
-                            SuffixScratch::new(num_groups),
-                            vec![None; 256],
-                        )
-                    },
-                    |state, &token_idx| {
-                        let (scratch_product, scratch_suffix, scratch_cache) = state;
-                        let token = &strings[token_idx];
+            // ORIGINAL PATH: process tokens in parallel
+            active_indices
+            .par_iter()
+            .map_init(
+                || {
+                    (
+                        Pos0Scratch::new(batch.len(), num_groups),
+                        SuffixScratch::new(num_groups),
+                        vec![None; 256],
+                    )
+                },
+                |state, &token_idx| {
+                    let (scratch_pos0, scratch_suffix, scratch_cache) = state;
+                    let token = &strings[token_idx];
 
-                        // Ensure cache is large enough
-                        if scratch_cache.len() <= token.len() {
-                            scratch_cache.resize(token.len() + 1, None);
-                        }
-                        // Only clear positions relevant to this token (not entire cache)
-                        for i in 0..=token.len() {
-                            scratch_cache[i] = None;
-                        }
-
-                        let sig = compute_signature_product(&pdfa, &pre, token, scratch_product, scratch_suffix, scratch_cache, suffix_group_mask, ever_allowed_by_group, group_to_class, skip_groups);
-                        (token_idx, sig)
-                    },
-                )
-                .collect()
-            };
-            let batch_compute_time = batch_start_time.elapsed();
-
-            // Group by (old_class, new_signature) to refine partition
-            let refine_start = Instant::now();
-            let mut refinement: HashMap<(usize, u64), Vec<usize>> =
-                HashMap::with_capacity(active_sigs.len() / 2);
-            for (token_idx, sig) in active_sigs {
-                let old_class = partition[token_idx];
-                refinement
-                    .entry((old_class, sig))
-                    .or_insert_with(Vec::new)
-                    .push(token_idx);
-            }
-
-            // Group refinement entries by old_class
-            let mut by_old_class: HashMap<usize, Vec<(u64, Vec<usize>)>> = HashMap::new();
-            for ((old_class, sig), tokens) in refinement {
-                by_old_class
-                    .entry(old_class)
-                    .or_insert_with(Vec::new)
-                    .push((sig, tokens));
-            }
-
-            // Update partition and find still-active tokens
-            let mut new_active_indices = Vec::with_capacity(active_indices.len());
-
-            for (_old_class, sub_groups) in by_old_class {
-                let mut first = true;
-                for (_sig, tokens) in sub_groups {
-                    let class_to_use = if first {
-                        first = false;
-                        _old_class
-                    } else {
-                        let id = next_class_id;
-                        next_class_id += 1;
-                        id
-                    };
-
-                    for &token_idx in &tokens {
-                        partition[token_idx] = class_to_use;
+                    // Ensure cache is large enough
+                    if scratch_cache.len() <= token.len() {
+                        scratch_cache.resize(token.len() + 1, None);
                     }
+                    scratch_cache.iter_mut().for_each(|x| *x = None);
 
-                    if tokens.len() > 1 {
-                        new_active_indices.extend(tokens);
-                    }
+                    let sig = compute_chunk_signature(&pre, token, batch, scratch_pos0, scratch_suffix, scratch_cache, suffix_group_mask, ever_allowed_by_group, group_to_class, skip_groups);
+                    (token_idx, sig)
+                },
+            )
+            .collect()
+        };
+        let batch_compute_time = batch_start_time.elapsed();
+
+        // Group by (old_class, new_signature) to refine partition
+        let refine_start = Instant::now();
+        let mut refinement: HashMap<(usize, u64), Vec<usize>> =
+            HashMap::with_capacity(active_sigs.len() / 2);
+        for (token_idx, sig) in active_sigs {
+            let old_class = partition[token_idx];
+            refinement
+                .entry((old_class, sig))
+                .or_insert_with(Vec::new)
+                .push(token_idx);
+        }
+
+        // Group refinement entries by old_class
+        let mut by_old_class: HashMap<usize, Vec<(u64, Vec<usize>)>> = HashMap::new();
+        for ((old_class, sig), tokens) in refinement {
+            by_old_class
+                .entry(old_class)
+                .or_insert_with(Vec::new)
+                .push((sig, tokens));
+        }
+
+        // Update partition and find still-active tokens
+        let mut new_active_indices = Vec::with_capacity(active_indices.len());
+
+        for (_old_class, sub_groups) in by_old_class {
+            let mut first = true;
+            for (_sig, tokens) in sub_groups {
+                let class_to_use = if first {
+                    first = false;
+                    _old_class
+                } else {
+                    let id = next_class_id;
+                    next_class_id += 1;
+                    id
+                };
+
+                for &token_idx in &tokens {
+                    partition[token_idx] = class_to_use;
+                }
+
+                if tokens.len() > 1 {
+                    new_active_indices.extend(tokens);
                 }
             }
-            total_refine_time += refine_start.elapsed();
+        }
+        total_refine_time += refine_start.elapsed();
 
-            active_indices = new_active_indices;
-            batch_count += 1;
+        active_indices = new_active_indices;
+        batch_count += 1;
 
-            if is_debug_level_enabled(5) {
-                let num_classes = {
-                    let mut seen: hashbrown::HashSet<usize> = hashbrown::HashSet::new();
-                    for &c in &partition {
-                        seen.insert(c);
-                    }
-                    seen.len()
-                };
-                crate::debug!(
-                    5,
-                    "    Batch {}: {} active tokens, {} classes, compute={:?}",
-                    batch_count,
-                    active_indices.len(),
-                    num_classes,
-                    batch_compute_time,
-                );
-            }
-        } // else
-    } // single-pass block
+        if is_debug_level_enabled(5) {
+            let num_classes = {
+                let mut seen: hashbrown::HashSet<usize> = hashbrown::HashSet::new();
+                for &c in &partition {
+                    seen.insert(c);
+                }
+                seen.len()
+            };
+            crate::debug!(
+                5,
+                "    Batch {}: {} active tokens, {} classes, compute={:?}",
+                batch_count,
+                active_indices.len(),
+                num_classes,
+                batch_compute_time,
+            );
+        }
+    }
 
     if is_debug_level_enabled(4) {
         crate::debug!(
