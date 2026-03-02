@@ -25,6 +25,7 @@ const HASH_SEED2: u64 = 0xc2b2_ae3d_27d4_eb4f;
 const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
 const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
+const STATE_NONE: usize = usize::MAX;
 
 #[derive(Clone, Copy)]
 struct Finalizer {
@@ -47,11 +48,8 @@ struct Dfa {
 struct Scratch {
     // Batch execution across initial states
     current_states: Vec<usize>,
-    done: Vec<bool>,
     active_indices: Vec<usize>,
-    end_states: Vec<Option<usize>>,
     match_positions: Vec<u32>,
-    touched_groups: Vec<GroupList>,
     targets: Vec<usize>,
     // Suffix DAG
     suffix_match_positions: Vec<u32>,
@@ -157,11 +155,8 @@ impl Scratch {
     fn new(num_states: usize, num_groups: usize) -> Self {
         Scratch {
             current_states: vec![0; num_states],
-            done: vec![false; num_states],
             active_indices: Vec::new(),
-            end_states: vec![None; num_states],
             match_positions: vec![NONE; num_states * num_groups],
-            touched_groups: vec![GroupList::new(); num_states],
             targets: Vec::new(),
             suffix_match_positions: vec![NONE; num_groups],
             dag: HashMap::new(),
@@ -184,13 +179,8 @@ fn run_batch(
 
     // Reset scratch
     scratch.current_states[..num_states].clone_from_slice(initial_states);
-    scratch.done.fill(false);
     scratch.active_indices.clear();
-    scratch.end_states[..num_states].fill(None);
     scratch.match_positions[..num_states * num_groups].fill(NONE);
-    for tg in scratch.touched_groups[..num_states].iter_mut() {
-        tg.clear();
-    }
 
     let has_bytes = !slice.is_empty();
     let first_byte = if has_bytes { slice[0] } else { 0 };
@@ -201,15 +191,14 @@ fn run_batch(
         for f in &dfa.finalizers[state] {
             if f.gid < num_groups && scratch.match_positions[base + f.gid] == NONE {
                 scratch.match_positions[base + f.gid] = 0;
-                scratch.touched_groups[i].push(f.gid);
             }
         }
         if dfa.is_dead_end[state] {
-            scratch.done[i] = true;
+            scratch.current_states[i] = STATE_NONE;
             continue;
         }
         if has_bytes && dfa.transitions[state][first_byte as usize] == NONE {
-            scratch.done[i] = true;
+            scratch.current_states[i] = STATE_NONE;
             continue;
         }
         scratch.active_indices.push(i);
@@ -231,22 +220,18 @@ fn run_batch(
                     for f in &dfa.finalizers[ns] {
                         if f.gid < num_groups {
                             let ix = base + f.gid;
-                            let was_none = scratch.match_positions[ix] == NONE;
-                            if !f.non_greedy || was_none {
+                            if !f.non_greedy || scratch.match_positions[ix] == NONE {
                                 scratch.match_positions[ix] = position;
-                            }
-                            if was_none {
-                                scratch.touched_groups[i].push(f.gid);
                             }
                         }
                     }
                     if dfa.is_dead_end[ns] {
-                        scratch.done[i] = true;
+                        scratch.current_states[i] = STATE_NONE;
                     }
                 } else {
-                    scratch.done[i] = true;
+                    scratch.current_states[i] = STATE_NONE;
                 }
-                if !scratch.done[i] {
+                if scratch.current_states[i] != STATE_NONE {
                     scratch.active_indices[next_len] = i;
                     next_len += 1;
                 }
@@ -258,23 +243,14 @@ fn run_batch(
         }
     }
 
-    // Collect end states and unique match target positions
+    // Collect unique match target positions
     scratch.targets.clear();
-    for i in 0..num_states {
-        scratch.end_states[i] = if scratch.done[i] {
-            None
-        } else {
-            Some(scratch.current_states[i])
-        };
-        if num_groups > 0 {
-            let base = i * num_groups;
-            for &gid in &scratch.touched_groups[i] {
+    if num_groups > 0 {
+        for base in (0..num_states * num_groups).step_by(num_groups) {
+            for gid in 0..num_groups {
                 let pv = scratch.match_positions[base + gid];
-                if pv > 0 {
-                    let p = pv as usize;
-                    if p <= len {
-                        scratch.targets.push(p);
-                    }
+                if pv != NONE && pv > 0 && (pv as usize) <= len {
+                    scratch.targets.push(pv as usize);
                 }
             }
         }
@@ -418,29 +394,28 @@ fn token_signature(
 
     let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
-        let completion = scratch.end_states[i]
-            .map(|id| dfa.completion_hash[id])
-            .unwrap_or(dfa.none_completion_hash);
+        let cs = scratch.current_states[i];
+        let completion = if cs != STATE_NONE {
+            dfa.completion_hash[cs]
+        } else {
+            dfa.none_completion_hash
+        };
 
-        let state_sig = if dfa.num_groups > 0 && !scratch.touched_groups[i].is_empty() {
-            let groups = &mut scratch.touched_groups[i];
-            if groups.len() > 1 {
-                groups.sort_unstable();
-            }
-            let base = i * dfa.num_groups;
-            let mut h = new_hasher();
-            h.write_u64(completion);
-            for &gid in groups.iter() {
-                let pv = scratch.match_positions[base + gid];
+        let base = i * dfa.num_groups;
+        let mut h = new_hasher();
+        h.write_u64(completion);
+        let mut any_match = false;
+        for gid in 0..dfa.num_groups {
+            let pv = scratch.match_positions[base + gid];
+            if pv != NONE {
+                any_match = true;
                 if pv > 0 {
                     h.write_u64(gid as u64);
                     h.write_u64(scratch.cache[pv as usize].unwrap_or(0));
                 }
             }
-            h.finish()
-        } else {
-            completion
-        };
+        }
+        let state_sig = if any_match { h.finish() } else { completion };
         sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
     }
     sig
