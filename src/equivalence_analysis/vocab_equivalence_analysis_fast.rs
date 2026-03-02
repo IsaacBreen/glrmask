@@ -1823,6 +1823,68 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         None
     };
 
+    // === Self-loop trie pruning analysis ===
+    // Build trie and check how many tokens can be skipped via self-loop optimization
+    if profile_eq {
+        let analysis_trie = VocabTrie::build(strings);
+        let mut total_prunable = 0u64;
+        let mut total_checks = 0u64;
+        let mut total_trie_edges = 0u64;
+        let mut total_none_tokens = 0u64;
+        let mut per_state: Vec<(usize, u64, u64, u64, u64)> = Vec::new();
+
+        // Total bytes in flat approach: sum of all token lengths
+        let total_token_bytes: u64 = strings.iter().map(|s| s.as_ref().len() as u64).sum();
+
+        // For each initial state, walk the trie and count prunable tokens
+        for &state_id in &reduced_initial_states {
+            let (prunable, checks, trie_edges, none_tok) = count_selfloop_prunable(
+                &analysis_trie, &pre, state_id, 0,
+            );
+            total_prunable += prunable;
+            total_checks += checks;
+            total_trie_edges += trie_edges;
+            total_none_tokens += none_tok;
+            per_state.push((state_id, prunable, checks, trie_edges, none_tok));
+        }
+
+        let flat_total_transitions = total_token_bytes * num_states as u64;
+        eprintln!(
+            "TIMING: equiv::selfloop_analysis: {} states × {} tokens = {} pairs",
+            num_states, num_tokens, num_states as u64 * num_tokens as u64,
+        );
+        eprintln!(
+            "  tokens prunable={} ({:.1}%), none_state={} ({:.1}%), remaining={} ({:.1}%)",
+            total_prunable,
+            100.0 * total_prunable as f64 / (num_states as f64 * num_tokens as f64),
+            total_none_tokens,
+            100.0 * total_none_tokens as f64 / (num_states as f64 * num_tokens as f64),
+            num_states as u64 * num_tokens as u64 - total_prunable - total_none_tokens,
+            100.0 * (num_states as u64 * num_tokens as u64 - total_prunable - total_none_tokens) as f64 / (num_states as f64 * num_tokens as f64),
+        );
+        eprintln!(
+            "  byte transitions: flat={}, trie_walk={} ({:.1}% of flat), trie_nodes={}",
+            flat_total_transitions,
+            total_trie_edges,
+            100.0 * total_trie_edges as f64 / flat_total_transitions as f64,
+            analysis_trie.num_nodes(),
+        );
+        // Per-state breakdown: show states with highest pruning
+        per_state.sort_by(|a, b| b.1.cmp(&a.1));
+        eprintln!("  Per-state pruning (top 10):");
+        for &(state_id, prunable, checks, trie_edges, none_tok) in per_state.iter().take(10) {
+            let pct = 100.0 * prunable as f64 / num_tokens as f64;
+            let trans = &pre.transitions[state_id];
+            let self_loop_count = (0..256usize).filter(|&b| trans[b] == state_id as u32).count();
+            let non_none_count = (0..256usize).filter(|&b| trans[b] != NONE_STATE).count();
+            let finalizer_groups: Vec<usize> = pre.finalizers[state_id].iter().map(|f| f.gid).collect();
+            eprintln!(
+                "    state={}: prunable={} ({:.1}%), none_st={}, trie_edges={}, self_loop={}/256, non_none={}/256, finalizers={:?}",
+                state_id, prunable, pct, none_tok, trie_edges, self_loop_count, non_none_count, finalizer_groups,
+            );
+        }
+    }
+
     // Process states in batches for memory efficiency.
     // Smaller batches improve cache locality for match_positions array
     // (batch_size * num_groups * 4 bytes per thread) and enable early pruning of singletons.
@@ -2011,6 +2073,9 @@ struct TrieNode {
     token_idx: u32,
     /// Number of tokens reachable from this subtree (for active filtering).
     subtree_size: u32,
+    /// Set of all bytes that appear in this subtree (edges from this node and all descendants).
+    /// Represented as a 256-bit bitset (4 × u64).
+    future_bytes: [u64; 4],
 }
 
 impl VocabTrie {
@@ -2020,6 +2085,7 @@ impl VocabTrie {
             children: SmallVec::new(),
             token_idx: u32::MAX,
             subtree_size: 0,
+            future_bytes: [0u64; 4],
         });
 
         for (idx, token) in tokens.iter().enumerate() {
@@ -2037,6 +2103,7 @@ impl VocabTrie {
                             children: SmallVec::new(),
                             token_idx: u32::MAX,
                             subtree_size: 0,
+                            future_bytes: [0u64; 4],
                         });
                         nodes[current as usize].children.push((byte, new_idx));
                         new_idx
@@ -2051,18 +2118,29 @@ impl VocabTrie {
             node.children.sort_unstable_by_key(|&(b, _)| b);
         }
 
-        // Compute subtree sizes (post-order)
-        fn compute_subtree_size(nodes: &mut [TrieNode], idx: u32) -> u32 {
+        // Compute subtree sizes and future byte sets (post-order)
+        fn compute_subtree_info(nodes: &mut [TrieNode], idx: u32) -> (u32, [u64; 4]) {
             let has_token = if nodes[idx as usize].token_idx != u32::MAX { 1 } else { 0 };
             let children: SmallVec<[(u8, u32); 4]> = nodes[idx as usize].children.clone();
             let mut size = has_token;
-            for &(_, child_idx) in &children {
-                size += compute_subtree_size(nodes, child_idx);
+            let mut future = [0u64; 4];
+            for &(byte, child_idx) in &children {
+                let (child_size, child_future) = compute_subtree_info(nodes, child_idx);
+                size += child_size;
+                // Add edge byte to future set
+                let word = (byte as usize) >> 6;
+                let bit = 1u64 << (byte & 63);
+                future[word] |= bit;
+                // Union with child's future set
+                for i in 0..4 {
+                    future[i] |= child_future[i];
+                }
             }
             nodes[idx as usize].subtree_size = size;
-            size
+            nodes[idx as usize].future_bytes = future;
+            (size, future)
         }
-        compute_subtree_size(&mut nodes, 0);
+        compute_subtree_info(&mut nodes, 0);
 
         VocabTrie { nodes }
     }
@@ -2070,6 +2148,71 @@ impl VocabTrie {
     fn num_nodes(&self) -> usize {
         self.nodes.len()
     }
+
+    /// Check if all bytes in the future byte set have self-loop transitions at the given DFA state.
+    /// Returns true if transitions[state][b] == state for all bytes b in future_bytes.
+    fn all_future_bytes_self_loop(&self, node_idx: u32, transitions: &[[u32; 256]], state: usize) -> bool {
+        let fb = &self.nodes[node_idx as usize].future_bytes;
+        // If no future bytes, trivially true (leaf node)
+        if fb[0] | fb[1] | fb[2] | fb[3] == 0 {
+            return true;
+        }
+        let trans = &transitions[state];
+        let state_u32 = state as u32;
+        for word_idx in 0..4 {
+            let mut bits = fb[word_idx];
+            while bits != 0 {
+                let bit_pos = bits.trailing_zeros() as usize;
+                let byte_val = word_idx * 64 + bit_pos;
+                if trans[byte_val] != state_u32 {
+                    return false;
+                }
+                bits &= bits - 1; // Clear lowest set bit
+            }
+        }
+        true
+    }
+}
+
+/// Count tokens prunable by self-loop optimization for a given initial DFA state.
+/// Returns (prunable_tokens, nodes_checked, trie_edges_walked, none_state_tokens).
+fn count_selfloop_prunable(
+    trie: &VocabTrie,
+    pre: &PrecomputedDfa,
+    initial_state: usize,
+    root_node: u32,
+) -> (u64, u64, u64, u64) {
+    let mut prunable = 0u64;
+    let mut checks = 0u64;
+    let mut trie_edges = 0u64;
+    let mut none_tokens = 0u64;
+
+    // DFS stack: (node_idx, dfa_state)
+    let mut stack: Vec<(u32, usize)> = vec![(root_node, initial_state)];
+
+    while let Some((node_idx, state)) = stack.pop() {
+        checks += 1;
+        let node = &trie.nodes[node_idx as usize];
+
+        // Check self-loop condition: all future bytes self-loop at current state
+        if trie.all_future_bytes_self_loop(node_idx, &pre.transitions, state) {
+            prunable += node.subtree_size as u64;
+            continue;
+        }
+
+        // Not prunable — recurse into children
+        for &(byte, child_idx) in &node.children {
+            let next_state = pre.transitions[state][byte as usize];
+            if next_state != NONE_STATE {
+                trie_edges += 1;
+                stack.push((child_idx, next_state as usize));
+            } else {
+                none_tokens += trie.nodes[child_idx as usize].subtree_size as u64;
+            }
+        }
+    }
+
+    (prunable, checks, trie_edges, none_tokens)
 }
 
 /// Per-state match tracking using sparse representation.
