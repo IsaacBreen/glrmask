@@ -43,6 +43,18 @@ struct Dfa {
     none_completion_hash: u64,
 }
 
+impl Dfa {
+    /// Get completion hash for a state (or none_completion_hash for STATE_NONE).
+    #[inline]
+    fn completion(&self, state: usize) -> u64 {
+        if state < self.completion_hash.len() {
+            self.completion_hash[state]
+        } else {
+            self.none_completion_hash
+        }
+    }
+}
+
 /// Combined scratch space for batch DFA execution and suffix DAG construction.
 struct Scratch {
     // Batch execution across initial states
@@ -51,7 +63,6 @@ struct Scratch {
     match_positions: Vec<u32>,
     targets: Vec<usize>,
     // Suffix DAG
-    suffix_match_positions: Vec<u32>,
     dag: HashMap<usize, (u64, EdgeList)>,
     dag_queue: Vec<usize>,
 }
@@ -65,11 +76,11 @@ fn new_hasher() -> AHasher {
 }
 
 #[inline]
-fn hash_group_list(list: &[usize]) -> u64 {
+fn hash_group_list(iter: impl ExactSizeIterator<Item = usize>) -> u64 {
     let mut h = new_hasher();
     h.write_u8(1);
-    h.write_u64(list.len() as u64);
-    for &v in list {
+    h.write_u64(iter.len() as u64);
+    for v in iter {
         h.write_u64(v as u64);
     }
     h.finish()
@@ -124,11 +135,7 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
 
         is_dead_end.push(state.possible_future_group_ids.is_empty());
         completion_hash.push(hash_group_list(
-            &state
-                .possible_future_group_ids
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
+            state.possible_future_group_ids.iter().copied(),
         ));
     }
 
@@ -156,7 +163,6 @@ impl Scratch {
             active_indices: Vec::new(),
             match_positions: vec![NONE; num_states * num_groups],
             targets: Vec::new(),
-            suffix_match_positions: vec![NONE; num_groups],
             dag: HashMap::new(),
             dag_queue: Vec::new(),
         }
@@ -314,6 +320,7 @@ fn hash_suffixes(
     scratch: &mut Scratch,
 ) {
     let len = slice.len();
+    let mut suffix_mp = vec![NONE; dfa.num_groups];
     scratch.dag.clear();
     scratch.dag_queue.clear();
 
@@ -330,16 +337,14 @@ fn hash_suffixes(
         let pos = scratch.dag_queue[cursor];
         cursor += 1;
         let (end_state, edges) =
-            run_suffix(dfa, &slice[pos..], pos, &mut scratch.suffix_match_positions);
+            run_suffix(dfa, &slice[pos..], pos, &mut suffix_mp);
         for &(_, target) in &edges {
             if target <= len && !scratch.dag.contains_key(&target) {
                 scratch.dag_queue.push(target);
                 scratch.dag.insert(target, (0, EdgeList::new()));
             }
         }
-        let ch = end_state
-            .map(|id| dfa.completion_hash[id])
-            .unwrap_or(dfa.none_completion_hash);
+        let ch = dfa.completion(end_state.unwrap_or(STATE_NONE));
         scratch.dag.insert(pos, (ch, edges));
     }
 
@@ -372,12 +377,7 @@ fn token_signature(
 
     let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
-        let cs = scratch.current_states[i];
-        let completion = if cs != STATE_NONE {
-            dfa.completion_hash[cs]
-        } else {
-            dfa.none_completion_hash
-        };
+        let completion = dfa.completion(scratch.current_states[i]);
 
         let base = i * dfa.num_groups;
         let mut h = new_hasher();
@@ -461,18 +461,14 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
 
         // Assign class IDs: first sub-group of each old class keeps the old ID
         let mut new_active = Vec::with_capacity(active_indices.len());
-        let mut first_of_class: HashMap<usize, bool> = HashMap::new();
+        let mut seen_classes: HashMap<usize, ()> = HashMap::new();
         for ((old_class, _), tokens) in refinement {
-            let class_id = {
-                let seen = first_of_class.entry(old_class).or_insert(false);
-                if *seen {
-                    let id = next_class_id;
-                    next_class_id += 1;
-                    id
-                } else {
-                    *seen = true;
-                    old_class
-                }
+            let class_id = if seen_classes.insert(old_class, ()).is_none() {
+                old_class
+            } else {
+                let id = next_class_id;
+                next_class_id += 1;
+                id
             };
             for &ti in &tokens {
                 partition[ti] = class_id;
