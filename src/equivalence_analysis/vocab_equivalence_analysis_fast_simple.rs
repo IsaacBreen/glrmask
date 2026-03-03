@@ -69,6 +69,10 @@ struct Dfa {
     num_groups: usize,
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
+    /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
+    self_loop_bytes: Vec<[u64; 4]>,
+    /// Precomputed hash for suffix DAG at end-of-token (empty suffix).
+    empty_suffix_hash: u64,
 }
 
 impl Dfa {
@@ -140,6 +144,36 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
         h.finish()
     };
 
+    // Precompute self-loop byte sets per state
+    let self_loop_bytes: Vec<[u64; 4]> = (0..transitions.len())
+        .map(|s| {
+            let mut bits = [0u64; 4];
+            for b in 0..=255u8 {
+                if transitions[s][b as usize] == s as u32 {
+                    bits[b as usize >> 6] |= 1u64 << (b & 63);
+                }
+            }
+            bits
+        })
+        .collect();
+
+    // Precompute empty suffix hash (suffix DAG at end-of-token, where remaining = "")
+    let empty_suffix_hash = {
+        let end = if is_dead_end[dfa.start_state] {
+            STATE_NONE
+        } else {
+            dfa.start_state
+        };
+        let ch = if end < completion_hash.len() {
+            completion_hash[end]
+        } else {
+            none_completion_hash
+        };
+        let mut h = new_hasher();
+        h.write_u64(ch);
+        h.finish()
+    };
+
     Dfa {
         start_state: dfa.start_state,
         transitions,
@@ -148,6 +182,8 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
         num_groups,
         completion_hash,
         none_completion_hash,
+        self_loop_bytes,
+        empty_suffix_hash,
     }
 }
 
@@ -156,6 +192,8 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
 struct TrieNode {
     children: SmallVec<[(u8, u32); 4]>,
     token_idx: u32, // u32::MAX if not a token endpoint
+    /// Bitset of all bytes reachable from descendant edges of this node.
+    subtree_bytes: [u64; 4],
 }
 
 struct VocabTrie {
@@ -167,6 +205,7 @@ impl VocabTrie {
         let mut nodes = vec![TrieNode {
             children: SmallVec::new(),
             token_idx: u32::MAX,
+            subtree_bytes: [0u64; 4],
         }];
 
         for (idx, token) in tokens.iter().enumerate() {
@@ -183,6 +222,7 @@ impl VocabTrie {
                         nodes.push(TrieNode {
                             children: SmallVec::new(),
                             token_idx: u32::MAX,
+                            subtree_bytes: [0u64; 4],
                         });
                         nodes[cur as usize].children.push((byte, new_idx));
                         new_idx
@@ -196,6 +236,22 @@ impl VocabTrie {
         for node in &mut nodes {
             node.children.sort_unstable_by_key(|&(b, _)| b);
         }
+
+        // Compute subtree byte sets (post-order)
+        fn compute_subtree_bytes(nodes: &mut [TrieNode], idx: u32) -> [u64; 4] {
+            let children: SmallVec<[(u8, u32); 4]> = nodes[idx as usize].children.clone();
+            let mut bits = [0u64; 4];
+            for &(byte, child_idx) in &children {
+                bits[byte as usize >> 6] |= 1u64 << (byte & 63);
+                let child_bits = compute_subtree_bytes(nodes, child_idx);
+                for i in 0..4 {
+                    bits[i] |= child_bits[i];
+                }
+            }
+            nodes[idx as usize].subtree_bytes = bits;
+            bits
+        }
+        compute_subtree_bytes(&mut nodes, 0);
 
         VocabTrie { nodes }
     }
@@ -324,6 +380,23 @@ impl Scratch {
 
 // ---- Core: recursive trie walk with inline signature computation ----
 
+/// Check if bitset `a` is a subset of bitset `b` (a ⊆ b).
+#[inline]
+fn u8set_is_subset(a: &[u64; 4], b: &[u64; 4]) -> bool {
+    (a[0] & !b[0]) == 0 && (a[1] & !b[1]) == 0 && (a[2] & !b[2]) == 0 && (a[3] & !b[3]) == 0
+}
+
+/// Assign the same hash to all tokens in a trie subtree.
+fn assign_hash_to_subtree(trie: &VocabTrie, node: u32, hash: u64, hashes: &mut [u64]) {
+    let n = &trie.nodes[node as usize];
+    if n.token_idx != u32::MAX {
+        hashes[n.token_idx as usize] = hash;
+    }
+    for &(_, child) in &n.children {
+        assign_hash_to_subtree(trie, child, hash, hashes);
+    }
+}
+
 /// Walk the trie depth-first, carrying DFA states for all initial states.
 /// At each token leaf, computes the token's signature and writes to `hashes`.
 ///
@@ -444,6 +517,88 @@ fn walk_trie<S: AsRef<[u8]>>(
             }
         }
 
+        // Self-loop optimization: if all alive states self-loop on every byte
+        // reachable from the child subtree, then all tokens in the subtree will
+        // end in the same states and can potentially share one signature.
+        let child_node = &trie.nodes[child as usize];
+        if child_node.subtree_bytes != [0u64; 4] {
+            // Intersect self_loop_bytes across all alive states at child depth
+            let mut sl_inter = [!0u64; 4];
+            let mut any_alive = false;
+            for si in 0..ni {
+                let cs = states[cd * ni + si];
+                if cs != NONE {
+                    any_alive = true;
+                    let sl = &dfa.self_loop_bytes[cs as usize];
+                    for i in 0..4 {
+                        sl_inter[i] &= sl[i];
+                    }
+                }
+            }
+
+            if any_alive && u8set_is_subset(&child_node.subtree_bytes, &sl_inter) {
+                // All alive states self-loop on all descendant bytes.
+                // Check if bulk-assign is safe: every mp > 0 must be for a group
+                // where the current state has a greedy finalizer (so mp advances
+                // to token_length with empty suffix, producing the same hash).
+                let can_bulk = (0..ni).all(|si| {
+                    let cs = states[cd * ni + si];
+                    let base = (cd * ni + si) * ng;
+                    (0..ng).all(|gid| {
+                        let pv = mp[base + gid];
+                        if pv > 0 && pv != NONE {
+                            // For alive states: needs greedy finalizer to advance mp to L.
+                            // For dead states: suffix depends on token content → NOT safe.
+                            cs != NONE
+                                && dfa.finalizers[cs as usize]
+                                    .iter()
+                                    .any(|f| f.gid == gid && !f.non_greedy)
+                        } else {
+                            true
+                        }
+                    })
+                });
+
+                if can_bulk {
+                    // Compute the signature that all tokens in the subtree share.
+                    // End states are the same (self-loop). Greedy mp → L (token length),
+                    // suffix from L is empty → empty_suffix_hash.
+                    let mut hash = HASH_SEED3;
+                    for si in 0..ni {
+                        let es = states[cd * ni + si];
+                        let base = (cd * ni + si) * ng;
+                        let completion = if es == NONE {
+                            dfa.none_completion_hash
+                        } else {
+                            dfa.completion_hash[es as usize]
+                        };
+
+                        let has_any = (0..ng).any(|gid| mp[base + gid] != NONE);
+                        let sig = if has_any {
+                            let mut h = new_hasher();
+                            h.write_u64(completion);
+                            for gid in 0..ng {
+                                let pv = mp[base + gid];
+                                if pv != NONE && pv > 0 {
+                                    // Greedy finalizer: mp will advance to L,
+                                    // suffix from L is empty.
+                                    h.write_u64(gid as u64);
+                                    h.write_u64(dfa.empty_suffix_hash);
+                                }
+                            }
+                            h.finish()
+                        } else {
+                            completion
+                        };
+                        hash = hash.wrapping_mul(HASH_SEED1).wrapping_add(sig);
+                    }
+
+                    assign_hash_to_subtree(trie, child, hash, hashes);
+                    continue;
+                }
+            }
+        }
+
         walk_trie(
             trie, child, dfa, states, mp, cd, ni, ng, max_depth, strings, scratch, hashes,
         );
@@ -548,6 +703,20 @@ pub fn partitions_are_equivalent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dfa_u8::{eat_u8, greedy_group, rep1, Tokenizer};
+    use crate::groups;
+
+    #[test]
+    fn test_a_plus_equivalence() {
+        // Regex: a+ (greedy). Vocab: ["a", "aa"].
+        // Both should be equivalent: same end state, same suffix behavior.
+        let regex = Tokenizer::new(groups![greedy_group(rep1(eat_u8(b'a')))].build());
+        let vocab: Vec<&[u8]> = vec![b"a", b"aa"];
+        let initial_states = vec![regex.dfa().start_state];
+        let result = find_vocab_equivalence_classes(&regex, &vocab, &initial_states);
+        // Both tokens should be in one class
+        assert_eq!(result.len(), 1, "Expected 1 class for a+, got {:?}", result);
+    }
 
     #[test]
     fn test_partition_reflexive() {
