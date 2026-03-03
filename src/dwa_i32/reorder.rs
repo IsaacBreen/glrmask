@@ -1244,13 +1244,21 @@ pub fn reorder_dwa_dimensions(
         token_class_perm_nn
     };
 
-    // Step 3b: Or-opt local search to directly minimize outer range count
+    // Step 3b: Or-opt local search to directly minimize outer range count.
+    // For large dimensions (tsid-outer), use a tight budget — NN ordering
+    // already captures 97%+ of the benefit and the first or-opt iteration
+    // provides most of the remaining improvement.
+    let or_opt_budget = if unique_token_profs.len() > 2000 {
+        std::time::Duration::from_millis(500)
+    } else {
+        std::time::Duration::from_secs(10)
+    };
     let token_class_perm = or_opt_outer_ranges(
         &unique_weights,
         &token_class_perm,
         max_token,
         &token_class_map,
-        std::time::Duration::from_secs(10),
+        or_opt_budget,
     );
     if profile {
         let opt_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm, max_token, &token_class_map);
