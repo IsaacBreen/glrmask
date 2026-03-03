@@ -43,7 +43,7 @@ static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
 static RANGEMAP_TSID_OUTER: Lazy<bool> = Lazy::new(|| {
     env::var("RANGEMAP_TSID_OUTER")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 });
 
 thread_local! {

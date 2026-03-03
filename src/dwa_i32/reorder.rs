@@ -724,6 +724,10 @@ fn or_opt_outer_ranges(
         eprintln!("  or_opt: initial breaks={}", best_breaks);
     }
 
+    // For large dimensions, limit inner-loop search to a window around the
+    // source to avoid O(n²) scanning per iteration. Full scan on first iter.
+    let search_radius = if num_classes > 2000 { 500 } else { num_classes };
+
     let max_iters = 20;
     for iter in 0..max_iters {
         if start.elapsed() > time_limit {
@@ -781,7 +785,13 @@ fn or_opt_outer_ranges(
             // trial[i] = order[i+1] for i >= src_pos
             let trial_len = order.len() - 1;
 
-            for ins_pos in 0..trial_len + 1 {
+            // For large dimensions, limit search to a window around src_pos
+            // to reduce O(n²) scanning to O(n × window). First iteration uses
+            // full scan to find any long-range improvements from NN ordering.
+            let ins_lo = if iter == 0 { 0 } else { src_pos.saturating_sub(search_radius) };
+            let ins_hi = if iter == 0 { trial_len + 1 } else { (src_pos + search_radius + 1).min(trial_len + 1) };
+
+            for ins_pos in ins_lo..ins_hi {
                 // Look up same_col_all for the pair at this insertion position.
                 // ins_pos == 0 or ins_pos == trial_len: boundary → 0
                 // ins_pos in 1..trial_len: depends on mapping back to order indices
@@ -849,14 +859,50 @@ fn or_opt_outer_ranges(
             }
 
             if best_delta < 0 {
-                let cls = order.remove(src_pos);
-                let adjusted_pos = if best_pos > src_pos { best_pos } else { best_pos };
-                let adjusted_pos = adjusted_pos.min(order.len());
-                order.insert(adjusted_pos, cls);
+                let src = src_pos;
+                let cls = order.remove(src);
+                let dst = best_pos.min(order.len());
+                order.insert(dst, cls);
                 improved = true;
 
-                // Rebuild same_col_adj after modification
-                same_col_adj = build_same_col_adj(&order);
+                // Incremental same_col_adj update.
+                // After moving CLS from position `src` to `dst`, only 3 boundary
+                // entries change; the rest shift by ±1 in index space.
+                if dst < src {
+                    // Shift middle entries right: new[i] = old[i-1] for i in [dst+1, src-1]
+                    for i in (dst + 1..src).rev() {
+                        same_col_adj[i] = same_col_adj[i - 1];
+                    }
+                    // Recompute boundary entries
+                    if dst > 0 {
+                        same_col_adj[dst - 1] = same_col_between(order[dst - 1], order[dst]);
+                    }
+                    if dst < same_col_adj.len() {
+                        same_col_adj[dst] = same_col_between(order[dst], order[dst + 1]);
+                    }
+                    if src < same_col_adj.len() {
+                        same_col_adj[src] = same_col_between(order[src], order[src + 1]);
+                    }
+                } else if dst > src {
+                    // Shift middle entries left: new[i] = old[i+1] for i in [src, dst-2]
+                    for i in src..dst.saturating_sub(1) {
+                        same_col_adj[i] = same_col_adj[i + 1];
+                    }
+                    // Recompute boundary entries
+                    if src > 0 {
+                        same_col_adj[src - 1] = same_col_between(order[src - 1], order[src]);
+                    }
+                    if dst > 0 && dst - 1 < same_col_adj.len() {
+                        same_col_adj[dst - 1] = same_col_between(order[dst - 1], order[dst]);
+                    }
+                    if dst < same_col_adj.len() {
+                        same_col_adj[dst] = same_col_between(order[dst], order[dst + 1]);
+                    }
+                }
+
+                // Verify incremental update matches full rebuild (debug only)
+                debug_assert_eq!(same_col_adj, build_same_col_adj(&order),
+                    "incremental same_col_adj update mismatch at src={} dst={}", src, dst);
             }
         }
 
