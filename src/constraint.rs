@@ -206,6 +206,74 @@ fn optimize_dwa_and_vocab(
     crate::debug!(4, "DWA Vocab Optimization: Disabled (AbstractWeight migration)");
 }
 
+/// Permute LLMTokenBV values in possible_matches using token_perm, in parallel.
+///
+/// Strategy: deduplicate by Arc pointer (many states share the same representative's data),
+/// permute unique entries in parallel with rayon, then update all entries.
+fn permute_possible_matches_parallel(
+    possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    token_perm: &[usize],
+) {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    // Step 1: Deduplicate BTreeMap entries by Arc pointer identity.
+    // Many states share the same representative's BTreeMap<TerminalID, LLMTokenBV>,
+    // so we only need to permute each unique inner map once.
+    let mut arc_to_permuted: HashMap<usize, Arc<BTreeMap<TerminalID, LLMTokenBV>>> = HashMap::new();
+
+    // Collect unique inner maps by pointer identity of the inner BTreeMap values' Arc<RangeSetBlaze>
+    // Since we can't easily get a pointer to the BTreeMap itself, we use a composite key
+    // from the first entry's Arc pointer + entry count.
+    // Instead, let's just collect all unique inner maps by value.
+    // Group states by their inner map content (hash by first few entries).
+    // For simplicity and correctness, collect unique inner maps by full equality.
+
+    // Actually, the most efficient approach: just process all entries in parallel.
+    // Convert BTreeMap to Vec for parallel iteration, process, convert back.
+    let mut entries: Vec<(TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>)> =
+        std::mem::take(possible_matches).into_iter().collect();
+
+    entries.par_iter_mut().for_each(|(_, state_matches)| {
+        for bv in state_matches.values_mut() {
+            let old_rsb = bv.inner.as_ref();
+            // Collect permuted IDs, then sort and build RangeSetBlaze efficiently
+            let mut permuted: Vec<usize> = Vec::with_capacity(old_rsb.len() as usize);
+            for r in old_rsb.ranges() {
+                for old_id in *r.start()..=*r.end() {
+                    if old_id < token_perm.len() {
+                        permuted.push(token_perm[old_id]);
+                    }
+                }
+            }
+            permuted.sort_unstable();
+            // Build RangeSetBlaze from sorted values using ranges
+            let new_rsb = if permuted.is_empty() {
+                range_set_blaze::RangeSetBlaze::new()
+            } else {
+                // Convert sorted values to ranges for efficient construction
+                let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
+                let mut start = permuted[0];
+                let mut end = permuted[0];
+                for &val in &permuted[1..] {
+                    if val == end + 1 {
+                        end = val;
+                    } else {
+                        ranges.push(start..=end);
+                        start = val;
+                        end = val;
+                    }
+                }
+                ranges.push(start..=end);
+                ranges.into_iter().collect::<range_set_blaze::RangeSetBlaze<usize>>()
+            };
+            *bv = crate::datastructures::hybrid_bitset::RangeSet::from(new_rsb);
+        }
+    });
+
+    *possible_matches = entries.into_iter().collect();
+}
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -3938,20 +4006,7 @@ impl GrammarConstraint {
             );
 
             // Update possible_matches: permute LLMTokenBV values to new internal token IDs
-            for state_matches in possible_matches_precompute1.values_mut() {
-                for bv in state_matches.values_mut() {
-                    let old_rsb = bv.inner.as_ref().clone();
-                    let mut new_rsb = range_set_blaze::RangeSetBlaze::new();
-                    for r in old_rsb.ranges() {
-                        for old_id in *r.start()..=*r.end() {
-                            if old_id < token_perm.len() {
-                                new_rsb.insert(token_perm[old_id]);
-                            }
-                        }
-                    }
-                    *bv = crate::datastructures::hybrid_bitset::RangeSet::from(new_rsb);
-                }
-            }
+            permute_possible_matches_parallel(&mut possible_matches_precompute1, &token_perm);
         }
 
         // Convert the lexical DWA to NWA and build the Parser DWA.
@@ -4214,20 +4269,7 @@ impl GrammarConstraint {
             let pm_start = std::time::Instant::now();
 
             // Update possible_matches: permute LLMTokenBV values to new internal token IDs
-            for state_matches in possible_matches_precompute1.values_mut() {
-                for bv in state_matches.values_mut() {
-                    let old_rsb = bv.inner.as_ref().clone();
-                    let mut new_rsb = range_set_blaze::RangeSetBlaze::new();
-                    for r in old_rsb.ranges() {
-                        for old_id in *r.start()..=*r.end() {
-                            if old_id < token_perm.len() {
-                                new_rsb.insert(token_perm[old_id]);
-                            }
-                        }
-                    }
-                    *bv = crate::datastructures::hybrid_bitset::RangeSet::from(new_rsb);
-                }
-            }
+            permute_possible_matches_parallel(&mut possible_matches_precompute1, &token_perm);
             if profile_build { eprintln!("  update_possible_matches: {:?}", pm_start.elapsed()); }
 
             crate::debug!(3, "DWA dimension reorder complete in {:?}", reorder_start.elapsed());

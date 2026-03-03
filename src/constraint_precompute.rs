@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
+use rayon::prelude::*;
 use range_set_blaze::RangeSetBlaze;
 use profiler_macro::{time_it, timeit};
 
@@ -653,6 +654,229 @@ pub fn build_reduce_fallback_terminals_by_state(
     }
 
     fallback_by_state
+}
+
+// ---------------------------------------------------------------------------
+// PossibleMatchesComputer - thread-safe PM computation for parallel use
+// ---------------------------------------------------------------------------
+
+/// Standalone possible-matches computer that owns a per-thread cache.
+/// Used by `compute_possible_matches_for_all_states` to parallelize PM computation
+/// across representative tokenizer states. Each rayon thread gets its own instance.
+struct PossibleMatchesComputer<'a> {
+    tokenizer: &'a Tokenizer,
+    terminal_to_greedy_group: &'a [Option<usize>],
+    merge_possible_matches_by_group: bool,
+    merge_possible_matches_globally: bool,
+    cache: HashMap<usize, HashMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>,
+}
+
+impl<'a> PossibleMatchesComputer<'a> {
+    fn new(
+        tokenizer: &'a Tokenizer,
+        terminal_to_greedy_group: &'a [Option<usize>],
+        merge_possible_matches_by_group: bool,
+        merge_possible_matches_globally: bool,
+    ) -> Self {
+        Self {
+            tokenizer,
+            terminal_to_greedy_group,
+            merge_possible_matches_by_group,
+            merge_possible_matches_globally,
+            cache: HashMap::new(),
+        }
+    }
+
+    fn possible_matches(
+        &mut self,
+        vocab_node: &VocabPrefixTreeNode,
+        tokenizer_state_id: TokenizerStateID,
+    ) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
+        let cache_key = vocab_node as *const _ as usize;
+
+        if let Some(cached_for_node) = self.cache.get(&cache_key) {
+            if let Some(cached_result) = cached_for_node.get(&tokenizer_state_id) {
+                return cached_result.clone();
+            }
+        }
+
+        let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
+        let mut blocked_by_terminal: HashMap<GrammarTokenID, LLMTokenBV> = HashMap::new();
+        let tokenizer_dfa = self.tokenizer.dfa();
+        let terminal_to_greedy_group = self.terminal_to_greedy_group;
+        let has_future_in_same_greedy_group = |state_idx: usize, group_idx: usize| -> bool {
+            tokenizer_dfa
+                .states
+                .get(state_idx)
+                .map(|state| {
+                    state
+                        .possible_future_group_ids
+                        .iter()
+                        .any(|future_gid| {
+                            terminal_to_greedy_group
+                                .get(*future_gid)
+                                .and_then(|group| *group)
+                                == Some(group_idx)
+                        })
+                })
+                .unwrap_or(false)
+        };
+        let build_state_by_width =
+            |segment_bytes: &[u8], start_state: TokenizerStateID| -> Vec<Option<usize>> {
+                let mut states_by_width = vec![None; segment_bytes.len() + 1];
+                let mut curr_state = start_state.0;
+                states_by_width[0] = Some(curr_state);
+                for (idx, &byte) in segment_bytes.iter().enumerate() {
+                    let Some(state) = tokenizer_dfa.states.get(curr_state) else {
+                        break;
+                    };
+                    let Some(&next_state) = state.transitions.get(byte) else {
+                        break;
+                    };
+                    curr_state = next_state;
+                    states_by_width[idx + 1] = Some(curr_state);
+                }
+                states_by_width
+            };
+
+        let own_token_id = vocab_node.token_id();
+        if vocab_node.reachable_token_ids().contains(own_token_id) {
+            if let Some(state) = tokenizer_dfa.states.get(tokenizer_state_id.0) {
+                for finalizer_gid in state.finalizers.iter() {
+                    let terminal_id = GrammarTokenID(finalizer_gid);
+                    if self.merge_possible_matches_by_group {
+                        if let Some(Some(group_idx)) =
+                            self.terminal_to_greedy_group.get(terminal_id.0)
+                        {
+                            if has_future_in_same_greedy_group(tokenizer_state_id.0, *group_idx) {
+                                for (blocked_tid, blocked_group) in
+                                    self.terminal_to_greedy_group.iter().enumerate()
+                                {
+                                    if *blocked_group == Some(*group_idx) {
+                                        blocked_by_terminal
+                                            .entry(GrammarTokenID(blocked_tid))
+                                            .or_insert_with(LLMTokenBV::zeros)
+                                            .set(own_token_id, true);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    result_map
+                        .entry(terminal_id)
+                        .or_insert_with(LLMTokenBV::zeros)
+                        .set(own_token_id, true);
+                }
+            }
+        }
+
+        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+            let exec_result =
+                self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
+            let states_by_width = if self.merge_possible_matches_by_group && !exec_result.matches.is_empty() {
+                Some(build_state_by_width(&segment_bytes, tokenizer_state_id))
+            } else {
+                None
+            };
+            for token in &exec_result.matches {
+                let applicable_tokens = child_vocab_node.reachable_token_ids();
+                let applicable_tokens_bv: LLMTokenBV = RangeSet::from(applicable_tokens);
+                if self.merge_possible_matches_by_group {
+                    if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(token.id) {
+                        if let Some(state_idx) = states_by_width
+                            .as_ref()
+                            .and_then(|states| states.get(token.width))
+                            .and_then(|sid| *sid)
+                        {
+                            if has_future_in_same_greedy_group(state_idx, *group_idx) {
+                                for (blocked_tid, blocked_group) in
+                                    self.terminal_to_greedy_group.iter().enumerate()
+                                {
+                                    if *blocked_group == Some(*group_idx) {
+                                        *blocked_by_terminal
+                                            .entry(GrammarTokenID(blocked_tid))
+                                            .or_insert_with(LLMTokenBV::zeros) |=
+                                            applicable_tokens_bv.clone();
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let grammar_token_id = GrammarTokenID(token.id);
+                *result_map
+                    .entry(grammar_token_id)
+                    .or_insert_with(LLMTokenBV::zeros) |=
+                    applicable_tokens_bv;
+            }
+            if let Some(final_state_val) = exec_result.end_state {
+                let matches_possible_from_tokenizer_state: std::collections::BTreeSet<_> = self
+                    .tokenizer
+                    .tokens_accessible_from_state(TokenizerStateID(final_state_val))
+                    .into_iter()
+                    .collect();
+                let matches_here: std::collections::BTreeSet<_> = exec_result
+                    .matches
+                    .iter()
+                    .map(|m| GrammarTokenID(m.id))
+                    .collect();
+                let possible_new_matches =
+                    &matches_possible_from_tokenizer_state - &matches_here;
+                if !possible_new_matches.is_empty() {
+                    let next_results = self.possible_matches(
+                        child_vocab_node,
+                        TokenizerStateID(final_state_val),
+                    );
+                    for (token, bv) in next_results {
+                        *result_map
+                            .entry(token)
+                            .or_insert_with(LLMTokenBV::zeros) |= bv;
+                    }
+                }
+            }
+        }
+
+        if self.merge_possible_matches_by_group && !result_map.is_empty() {
+            let mut group_merged: HashMap<usize, LLMTokenBV> = HashMap::new();
+            for (&tid, bv) in &result_map {
+                if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(tid.0) {
+                    group_merged
+                        .entry(*group_idx)
+                        .or_insert_with(LLMTokenBV::zeros)
+                        .bitor_assign(bv.clone());
+                }
+            }
+            for (tid, bv) in result_map.iter_mut() {
+                if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(tid.0) {
+                    if let Some(merged) = group_merged.get(group_idx) {
+                        *bv = merged.clone();
+                    }
+                }
+                if let Some(blocked) = blocked_by_terminal.get(tid) {
+                    *bv -= blocked;
+                }
+            }
+            result_map.retain(|_, bv| !bv.is_empty());
+        }
+
+        if self.merge_possible_matches_globally && !result_map.is_empty() {
+            let mut merged = LLMTokenBV::zeros();
+            for bv in result_map.values().cloned() {
+                merged |= bv;
+            }
+            result_map.clear();
+            result_map.insert(MERGED_POSSIBLE_MATCH_KEY, merged);
+        }
+
+        self.cache
+            .entry(cache_key)
+            .or_default()
+            .insert(tokenizer_state_id, result_map.clone());
+
+        result_map
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,15 +1944,44 @@ impl<'r> Precomputer1<'r> {
     fn compute_possible_matches_for_all_states(
         &self,
     ) -> BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> {
-        let mut rep_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> =
-            BTreeMap::new();
+        // Collect unique representative states
+        let unique_reps: Vec<TokenizerStateID> = self.state_to_rep.values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
 
-        for rep_state in self.state_to_rep.values() {
-            rep_possible_matches
-                .entry(*rep_state)
-                .or_insert_with(|| self.possible_matches(&self.vocab.root, *rep_state));
-        }
+        // Extract references to shared data before the parallel section
+        // to avoid capturing `self` (which contains non-Send types like RefCell/Rc)
+        let tokenizer = self.tokenizer;
+        let terminal_to_greedy_group = &self.terminal_to_greedy_group;
+        let merge_by_group = self.merge_possible_matches_by_group;
+        let merge_globally = self.merge_possible_matches_globally;
+        let vocab_root = &self.vocab.root;
 
+        // Compute PM for each unique rep in parallel using rayon
+        // Each thread gets its own PossibleMatchesComputer with a per-thread cache
+        let rep_results: Vec<(TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>)> = unique_reps
+            .par_iter()
+            .map_init(
+                || PossibleMatchesComputer::new(
+                    tokenizer,
+                    terminal_to_greedy_group,
+                    merge_by_group,
+                    merge_globally,
+                ),
+                |computer, &rep_state| {
+                    let pm = computer.possible_matches(vocab_root, rep_state);
+                    (rep_state, pm)
+                },
+            )
+            .collect();
+
+        // Build rep_possible_matches from parallel results
+        let rep_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> =
+            rep_results.into_iter().collect();
+
+        // Clone from reps to all states
         let mut all_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>> =
             BTreeMap::new();
         for (state, rep_state) in &self.state_to_rep {
@@ -1960,6 +2213,7 @@ impl<'r> Precomputer1<'r> {
         self.pb.inc(1);
         let mut total_pending_iters = 0usize;
         let base_depth = vocab_node.prefix_length();
+        let skip_pm_prune = true; // Always skip PM during DFS; computed in parallel post-DFS
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             crate::debug!(7, "=== Processing vocab segment: {:?} (token_id={}) ===",
                 String::from_utf8_lossy(segment_bytes), child_vocab_node.token_id());
@@ -2009,7 +2263,8 @@ impl<'r> Precomputer1<'r> {
                       let exec_result = self
                           .tokenizer
                           .execute_from_state(slice, tokenizer_state_id);
-                      let states_by_width = {
+                      // Only compute states_by_width when needed for greedy group suppression
+                      let states_by_width = if !self.terminal_to_greedy_group.is_empty() && !exec_result.matches.is_empty() {
                           let tokenizer_dfa = self.tokenizer.dfa();
                           let mut by_width = vec![None; slice.len() + 1];
                           let mut curr_state = tokenizer_state_id.0;
@@ -2024,7 +2279,9 @@ impl<'r> Precomputer1<'r> {
                               curr_state = next_state;
                               by_width[idx + 1] = Some(curr_state);
                           }
-                          by_width
+                          Some(by_width)
+                      } else {
+                          None
                       };
 
                       crate::debug!(
@@ -2037,7 +2294,11 @@ impl<'r> Precomputer1<'r> {
                         exec_result.end_state,
                     );
 
-                    let possible_matches_at_end = if let Some(end_val) = exec_result.end_state {
+                    let possible_matches_at_end = if skip_pm_prune {
+                        possible_matches_at_end_cache
+                            .entry(TokenizerStateID(usize::MAX))
+                            .or_default()
+                    } else if let Some(end_val) = exec_result.end_state {
                         let ts = TokenizerStateID(end_val);
                         possible_matches_at_end_cache
                             .entry(ts)
@@ -2062,7 +2323,8 @@ impl<'r> Precomputer1<'r> {
                             if next_pos < segment_bytes.len() {
                                 if let Some(Some(group_idx)) = self.terminal_to_greedy_group.get(terminal_id.0) {
                                     if let Some(state_idx) = states_by_width
-                                        .get(match_info.width)
+                                        .as_ref()
+                                        .and_then(|sbw| sbw.get(match_info.width))
                                         .and_then(|sid| *sid)
                                     {
                                         let should_suppress = self
@@ -2417,7 +2679,9 @@ pub fn run_precompute1_with_possible_matches(
     });
     crate::timing!("PHASE_TIMING: precompute1::dfs = {:?}", dfs_start.elapsed());
 
+    let possible_matches_start = std::time::Instant::now();
     let possible_matches = helper.compute_possible_matches_for_all_states();
+    crate::timing!("PHASE_TIMING: precompute1::possible_matches = {:?}", possible_matches_start.elapsed());
 
     let finish_start = std::time::Instant::now();
     let result = timeit!("precompute1::finish", {
