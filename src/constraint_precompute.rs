@@ -947,6 +947,14 @@ pub(crate) struct Precomputer1<'r> {
     dfs_profile_endstate_adds: usize,
     dfs_profile_endstate_events: usize,
     dfs_profile_enabled: bool,
+    // Fast DFS execution tables
+    dfs_flat_transitions: Vec<[u32; 256]>,
+    dfs_finalizers: Vec<Vec<usize>>,
+    dfs_non_greedy: Vec<bool>,
+    dfs_num_groups: usize,
+    dfs_match_gen: Vec<u32>,
+    dfs_match_widths: Vec<usize>,
+    dfs_current_gen: u32,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -1106,6 +1114,55 @@ impl<'r> Precomputer1<'r> {
             dfs_profile_endstate_adds: 0,
             dfs_profile_endstate_events: 0,
             dfs_profile_enabled: false,
+            // Initialize fast DFS tables from DFA
+            dfs_flat_transitions: {
+                let dfa = tokenizer.dfa();
+                dfa.states.iter().map(|state| {
+                    let mut table = [u32::MAX; 256];
+                    for (byte, &target) in state.transitions.iter() {
+                        table[byte as usize] = target as u32;
+                    }
+                    table
+                }).collect()
+            },
+            dfs_finalizers: {
+                let dfa = tokenizer.dfa();
+                dfa.states.iter().map(|state| {
+                    state.finalizers.iter().collect::<Vec<_>>()
+                }).collect()
+            },
+            dfs_non_greedy: {
+                let dfa = tokenizer.dfa();
+                let max_gid = dfa.states.iter()
+                    .flat_map(|s| s.finalizers.iter())
+                    .max().unwrap_or(0);
+                let mut flags = vec![false; max_gid + 1];
+                for &gid in &dfa.non_greedy_finalizers {
+                    if gid < flags.len() { flags[gid] = true; }
+                }
+                flags
+            },
+            dfs_num_groups: {
+                let dfa = tokenizer.dfa();
+                dfa.states.iter()
+                    .flat_map(|s| s.finalizers.iter())
+                    .max().map(|m| m + 1).unwrap_or(0)
+            },
+            dfs_match_gen: {
+                let dfa = tokenizer.dfa();
+                let num_groups = dfa.states.iter()
+                    .flat_map(|s| s.finalizers.iter())
+                    .max().map(|m| m + 1).unwrap_or(0);
+                vec![0u32; num_groups]
+            },
+            dfs_match_widths: {
+                let dfa = tokenizer.dfa();
+                let num_groups = dfa.states.iter()
+                    .flat_map(|s| s.finalizers.iter())
+                    .max().map(|m| m + 1).unwrap_or(0);
+                vec![0usize; num_groups]
+            },
+            dfs_current_gen: 0,
         }
     }
 
@@ -2130,6 +2187,53 @@ impl<'r> Precomputer1<'r> {
         *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= weight;
     }
 
+    /// Fast DFS-specialized tokenizer execution using flat transition tables.
+    /// Avoids BTreeMap/HashMap allocation and should_terminate_early overhead.
+    /// Uses generation-based match tracking to avoid per-call clearing.
+    #[inline]
+    fn execute_from_state_fast(
+        &mut self,
+        text: &[u8],
+        start_state: TokenizerStateID,
+    ) -> crate::dfa_u8::tokenizer_ops::ExecuteResult {
+        use crate::dfa_u8::tokenizer_ops::{ExecuteResult, Token};
+        let start = start_state.0;
+        self.dfs_current_gen = self.dfs_current_gen.wrapping_add(1);
+        let gen = self.dfs_current_gen;
+        let mut current_state = start as u32;
+        let mut done = false;
+
+        for (pos, &byte) in text.iter().enumerate() {
+            let next = self.dfs_flat_transitions[current_state as usize][byte as usize];
+            if next == u32::MAX {
+                done = true;
+                break;
+            }
+            current_state = next;
+            let width = pos + 1;
+            // Check finalizers for this state
+            for &gid in &self.dfs_finalizers[current_state as usize] {
+                if gid < self.dfs_num_groups {
+                    if !self.dfs_non_greedy[gid] || self.dfs_match_gen[gid] != gen {
+                        self.dfs_match_widths[gid] = width;
+                        self.dfs_match_gen[gid] = gen;
+                    }
+                }
+            }
+        }
+
+        // Collect matches (only non-zero width, matching original filter)
+        let mut matches = Vec::new();
+        for gid in 0..self.dfs_num_groups {
+            if self.dfs_match_gen[gid] == gen && self.dfs_match_widths[gid] > 0 {
+                matches.push(Token { id: gid, width: self.dfs_match_widths[gid] });
+            }
+        }
+
+        let end_state = if done { None } else { Some(current_state as usize) };
+        ExecuteResult { matches, end_state }
+    }
+
     #[inline]
     fn add_pending_token_id(
         &mut self,
@@ -2345,9 +2449,7 @@ impl<'r> Precomputer1<'r> {
 
                     let slice = &segment_bytes[pos..];
                       let exec_start = if self.dfs_profile_enabled { Some(std::time::Instant::now()) } else { None };
-                      let exec_result = self
-                          .tokenizer
-                          .execute_from_state(slice, tokenizer_state_id);
+                      let exec_result = self.execute_from_state_fast(slice, tokenizer_state_id);
                       if let Some(t) = exec_start { self.dfs_profile_execute += t.elapsed(); }
                       // Only compute states_by_width when needed for greedy group suppression
                       let states_by_width = if !self.terminal_to_greedy_group.is_empty() && !exec_result.matches.is_empty() {
