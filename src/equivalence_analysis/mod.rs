@@ -25,6 +25,7 @@ mod state_equivalence_analysis_reference;
 mod vocab_equivalence_analysis_fast;
 mod vocab_equivalence_analysis_fast_reference;
 mod vocab_equivalence_analysis_fast_simple;
+mod vocab_equivalence_analysis_flat;
 mod vocab_equivalence_analysis_reference;
 
 // Trellis-based ground truth (very slow, for testing only)

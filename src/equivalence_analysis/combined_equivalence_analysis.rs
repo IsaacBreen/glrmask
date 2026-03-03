@@ -419,6 +419,23 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             );
         }
 
+        // 4. Cross-validate: flat version
+        let flat_vocab_classes = super::vocab_equivalence_analysis_flat::find_vocab_equivalence_classes_with_follow(
+            regex,
+            tokens,
+            &reduced_states,
+            suffix_group_mask,
+            ever_allowed_by_group,
+            group_to_class,
+        );
+        if !vocab_is_comparable(&vocab_classes, &flat_vocab_classes) {
+            panic!(
+                "Vocab equivalence mismatch (simple vs flat not comparable)!\nSimple ({} classes): {:?}\nFlat ({} classes): {:?}",
+                vocab_classes.len(), vocab_classes,
+                flat_vocab_classes.len(), flat_vocab_classes
+            );
+        }
+
         } // end of else (SKIP_EQUIV_VERIFICATION)
     }
     
