@@ -726,7 +726,7 @@ fn or_opt_outer_ranges(
 
     // For large dimensions, limit inner-loop search to a window around the
     // source to avoid O(n²) scanning per iteration. Full scan on first iter.
-    let search_radius = if num_classes > 2000 { 500 } else { num_classes };
+    let search_radius = if num_classes > 2000 { 250 } else { num_classes };
 
     let max_iters = 20;
     for iter in 0..max_iters {
@@ -786,10 +786,10 @@ fn or_opt_outer_ranges(
             let trial_len = order.len() - 1;
 
             // For large dimensions, limit search to a window around src_pos
-            // to reduce O(n²) scanning to O(n × window). First iteration uses
-            // full scan to find any long-range improvements from NN ordering.
-            let ins_lo = if iter == 0 { 0 } else { src_pos.saturating_sub(search_radius) };
-            let ins_hi = if iter == 0 { trial_len + 1 } else { (src_pos + search_radius + 1).min(trial_len + 1) };
+            // to reduce O(n²) scanning to O(n × window). NN ordering already
+            // places similar elements nearby, so most moves are local.
+            let ins_lo = src_pos.saturating_sub(search_radius);
+            let ins_hi = (src_pos + search_radius + 1).min(trial_len + 1);
 
             for ins_pos in ins_lo..ins_hi {
                 // Look up same_col_all for the pair at this insertion position.
