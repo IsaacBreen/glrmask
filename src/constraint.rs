@@ -1459,7 +1459,8 @@ impl GrammarConstraint {
             .collect();
         let always_allowed = compute_always_allowed_terminal_follows(&parser.productions);
         for (term, follows) in &always_allowed {
-            crate::debug!(5, "TERMINAL_ALWAYS_ALLOWED_FOLLOW: {:?} -> {:?}", term, follows);
+            let follows_str: Vec<String> = follows.iter().map(|f| format!("{}", f)).collect();
+            crate::debug!(5, "TERMINAL_ALWAYS_ALLOWED_FOLLOW: {} -> {{{}}}", term, follows_str.join(", "));
         }
         let mut always_allowed_by_label: Vec<Vec<crate::dwa_i32::Label>> =
             vec![Vec::new(); parser.terminal_map.len()];

@@ -2146,7 +2146,13 @@ impl GrammarDefinition {
                 for (group_idx, literals) in merge_groups.iter().enumerate() {
                     let names: Vec<String> = literals
                         .iter()
-                        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                        .map(|bytes| {
+                            if bytes.iter().all(|b| *b >= 0x20 && *b < 0x7f) {
+                                format!("'{}'", String::from_utf8_lossy(bytes))
+                            } else {
+                                format!("Lit[{}]", bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""))
+                            }
+                        })
                         .collect();
                     debug!(5, "  Merge group {}: {}", group_idx, names.join(", "));
                 }
@@ -2204,6 +2210,19 @@ impl GrammarDefinition {
                 group_id_to_expr.insert(merged_group_id, merged_expr);
 
                 let replacement_terminal = regex_name(&merged_name);
+                if crate::r#macro::is_debug_level_enabled(5) {
+                    let member_names: Vec<String> = literals
+                        .iter()
+                        .map(|bytes| {
+                            if bytes.iter().all(|b| *b >= 0x20 && *b < 0x7f) {
+                                format!("'{}'", String::from_utf8_lossy(bytes))
+                            } else {
+                                format!("Lit[{}]", bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""))
+                            }
+                        })
+                        .collect();
+                    debug!(5, "  Merged terminal: {} = {{{}}}", merged_name, member_names.join(", "));
+                }
                 for literal in literals {
                     literal_replacements.insert(literal, replacement_terminal.clone());
                     merged_terminal_count += 1;
