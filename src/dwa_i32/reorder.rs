@@ -94,7 +94,10 @@ fn greedy_nearest_neighbor(profiles: &[Vec<u32>]) -> Vec<usize> {
     }).collect();
 
     // Choose strategy based on scale
-    let order = if active_count > 4000 || num_words > 100 {
+    // Use total work estimate: O(n^2 * num_words) for full NN.
+    // Budget ~10B ops (about 2s on modern hardware).
+    let work_estimate = (active_count as u64) * (active_count as u64) * (num_words as u64);
+    let order = if work_estimate > 10_000_000_000 {
         // Large scale: use lexicographic sort on bitvectors (locality-preserving)
         // then refine with local NN within a window
         greedy_nn_large_scale(&active_bvs, active_count, num_words)
@@ -166,85 +169,719 @@ fn greedy_nn_small_scale(active_bvs: &[Vec<u64>], active_count: usize) -> Vec<us
     order
 }
 
-/// Large-scale NN using lexicographic BV sort + local window refinement.
+/// Large-scale ordering using recursive bisection + 2-opt refinement.
 ///
-/// First sorts elements lexicographically by their bitvector (which tends to
-/// place similar elements nearby), then runs a local NN pass within a window.
-fn greedy_nn_large_scale(active_bvs: &[Vec<u64>], active_count: usize, num_words: usize) -> Vec<usize> {
-    // Step 1: Sort elements by bitvector (lexicographic order on u64 words).
-    // This is a rough spatial locality sort.
-    let mut sorted_indices: Vec<usize> = (0..active_count).collect();
-    sorted_indices.sort_unstable_by(|&a, &b| active_bvs[a].cmp(&active_bvs[b]));
+/// Uses a decision-tree style recursive bisection: at each level, find the 
+/// bitvector bit (context) that most evenly splits the elements, place elements
+/// WITH that bit in the left half and WITHOUT in the right half, then recurse.
+/// This produces orderings where elements sharing contexts are clustered together,
+/// directly optimizing for range contiguity.
+fn greedy_nn_large_scale(active_bvs: &[Vec<u64>], active_count: usize, _num_words: usize) -> Vec<usize> {
+    let profile = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
 
-    // Step 2: Local NN refinement within a window.
-    // Walk through sorted order and for each element, find the best match
-    // within a local window of nearby sorted elements.
-    let window = 200usize.min(active_count);
+    // --- Strategy 1: Recursive bisection ---
+    let bisection_order = recursive_bisection_order(active_bvs, active_count);
+    let bisection_cost = total_adjacent_hamming(&bisection_order, active_bvs);
 
-    let mut visited = vec![false; active_count];
-    let mut order: Vec<usize> = Vec::with_capacity(active_count);
+    // --- Strategy 2: Lexicographic sort (for comparison) ---
+    let mut lex_order: Vec<usize> = (0..active_count).collect();
+    lex_order.sort_unstable_by(|&a, &b| active_bvs[a].cmp(&active_bvs[b]));
+    let lex_cost = total_adjacent_hamming(&lex_order, active_bvs);
 
-    // Map from sorted position to active index
-    let pos_to_active: Vec<usize> = sorted_indices.clone();
-    // Map from active index to sorted position
-    let mut active_to_pos = vec![0usize; active_count];
-    for (pos, &active_idx) in sorted_indices.iter().enumerate() {
-        active_to_pos[active_idx] = pos;
+    // --- Strategy 3: Popcount sort ---
+    let popcnts: Vec<u32> = active_bvs.iter()
+        .map(|bv| bv.iter().map(|w| w.count_ones()).sum())
+        .collect();
+    let mut pop_order: Vec<usize> = (0..active_count).collect();
+    pop_order.sort_unstable_by_key(|&i| popcnts[i]);
+    let pop_cost = total_adjacent_hamming(&pop_order, active_bvs);
+
+    if profile {
+        eprintln!("  reorder: bisection cost={}, lex cost={}, popcount cost={}", bisection_cost, lex_cost, pop_cost);
     }
 
-    // Start with the first element in sorted order
-    let start = pos_to_active[0];
-    visited[start] = true;
-    order.push(start);
+    // Pick best initial ordering
+    let mut order = if bisection_cost <= lex_cost && bisection_cost <= pop_cost {
+        if profile { eprintln!("  reorder: using bisection ordering"); }
+        bisection_order
+    } else if lex_cost <= pop_cost {
+        if profile { eprintln!("  reorder: using lex ordering"); }
+        lex_order
+    } else {
+        if profile { eprintln!("  reorder: using popcount ordering"); }
+        pop_order
+    };
 
-    for _ in 1..active_count {
-        let current = *order.last().unwrap();
-        let current_bv = &active_bvs[current];
-        let current_pos = active_to_pos[current];
+    if profile {
+        let cost = total_adjacent_hamming(&order, active_bvs);
+        eprintln!("  reorder: initial cost={}", cost);
+    }
 
-        let mut best_sim: u32 = 0;
-        let mut best_next: Option<usize> = None;
-        let mut fallback: Option<usize> = None;
+    // --- 2-opt local improvement ---
+    let max_2opt_iters = 10;
+    let max_segment = 500usize.min(order.len() / 2);
+    // Use step>1 for very large problems to keep time bounded
+    let step = if active_count > 10000 { 2 } else { 1 };
+    let time_limit = std::time::Duration::from_secs(5);
+    let opt_start = std::time::Instant::now();
 
-        // Search in a window around current's sorted position
-        let lo = current_pos.saturating_sub(window / 2);
-        let hi = (current_pos + window / 2 + 1).min(active_count);
+    for iter in 0..max_2opt_iters {
+        let iter_start = std::time::Instant::now();
+        let mut improved = false;
+        let mut i = 1;
+        while i < order.len().saturating_sub(2) {
+            let max_j = (i + max_segment).min(order.len() - 1);
+            let mut best_delta: i64 = 0;
+            let mut best_j = 0;
 
-        for pos in lo..hi {
-            let j = pos_to_active[pos];
-            if visited[j] {
-                continue;
-            }
-            if fallback.is_none() {
-                fallback = Some(j);
-            }
-            let inter: u32 = current_bv.iter()
-                .zip(active_bvs[j].iter())
-                .map(|(&a, &b)| (a & b).count_ones())
-                .sum();
-            if inter > best_sim || best_next.is_none() {
-                best_sim = inter;
-                best_next = Some(j);
-            }
-        }
+            let mut j = i + 1;
+            while j <= max_j {
+                let old_cost = bv_hamming(&active_bvs[order[i - 1]], &active_bvs[order[i]])
+                    + if j + 1 < order.len() {
+                        bv_hamming(&active_bvs[order[j]], &active_bvs[order[j + 1]])
+                    } else { 0 };
+                let new_cost = bv_hamming(&active_bvs[order[i - 1]], &active_bvs[order[j]])
+                    + if j + 1 < order.len() {
+                        bv_hamming(&active_bvs[order[i]], &active_bvs[order[j + 1]])
+                    } else { 0 };
+                let delta = old_cost as i64 - new_cost as i64;
 
-        // If no match in window, find any unvisited
-        if best_next.is_none() && fallback.is_none() {
-            for pos in 0..active_count {
-                let j = pos_to_active[pos];
-                if !visited[j] {
-                    best_next = Some(j);
-                    break;
+                if delta > best_delta {
+                    best_delta = delta;
+                    best_j = j;
                 }
+
+                j += step;
             }
+
+            if best_delta > 0 {
+                order[i..=best_j].reverse();
+                improved = true;
+            }
+
+            i += step;
         }
 
-        let next = best_next.or(fallback).unwrap();
-        visited[next] = true;
-        order.push(next);
+        if profile {
+            let cost = total_adjacent_hamming(&order, active_bvs);
+            eprintln!("  reorder: 2-opt iter {} improved={} cost={} ({:?})", iter, improved, cost, iter_start.elapsed());
+        }
+
+        if !improved || opt_start.elapsed() > time_limit {
+            break;
+        }
     }
 
     order
+}
+
+/// Recursive bisection ordering: at each level, find the BV bit that most
+/// evenly splits elements, then recursively order each half.
+fn recursive_bisection_order(bvs: &[Vec<u64>], n: usize) -> Vec<usize> {
+    let indices: Vec<usize> = (0..n).collect();
+    let num_words = bvs.first().map_or(0, |bv| bv.len());
+    let num_bits = num_words * 64;
+    
+    // Precompute per-bit counts: how many elements have each bit set
+    let mut bit_counts = vec![0u32; num_bits];
+    for &idx in &indices {
+        for (w, &word) in bvs[idx].iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let bit_pos = bits.trailing_zeros() as usize;
+                bit_counts[w * 64 + bit_pos] += 1;
+                bits &= bits - 1;
+            }
+        }
+    }
+    
+    // Sort bits by how close they are to a 50/50 split
+    let half = n as u32 / 2;
+    let mut bit_order: Vec<usize> = (0..num_bits)
+        .filter(|&b| bit_counts[b] > 0 && bit_counts[b] < n as u32) // skip all-0 and all-1 bits
+        .collect();
+    bit_order.sort_unstable_by_key(|&b| {
+        let count = bit_counts[b];
+        if count >= half { count - half } else { half - count }
+    });
+    
+    // Limit recursion depth to ~log2(n) using the most balanced bits
+    let max_depth = (n as f64).log2().ceil() as usize + 2;
+    let useful_bits: Vec<usize> = bit_order.into_iter().take(max_depth * 2).collect();
+    
+    let mut order = Vec::with_capacity(n);
+    bisect_recursive(bvs, &indices, &useful_bits, 0, &mut order);
+    order
+}
+
+fn bisect_recursive(
+    bvs: &[Vec<u64>],
+    indices: &[usize],
+    bits: &[usize],
+    depth: usize,
+    order: &mut Vec<usize>,
+) {
+    if indices.len() <= 2 || depth >= bits.len() {
+        // Base case: add in current order
+        order.extend_from_slice(indices);
+        return;
+    }
+    
+    let bit = bits[depth];
+    let word_idx = bit / 64;
+    let bit_mask = 1u64 << (bit % 64);
+    
+    let mut left = Vec::new();  // has bit set
+    let mut right = Vec::new(); // doesn't have bit set
+    
+    for &idx in indices {
+        if bvs[idx].get(word_idx).copied().unwrap_or(0) & bit_mask != 0 {
+            left.push(idx);
+        } else {
+            right.push(idx);
+        }
+    }
+    
+    // If split is too unbalanced (>90/10), skip this bit
+    let threshold = indices.len() / 10;
+    if left.len() < threshold || right.len() < threshold {
+        bisect_recursive(bvs, indices, bits, depth + 1, order);
+        return;
+    }
+    
+    bisect_recursive(bvs, &left, bits, depth + 1, order);
+    bisect_recursive(bvs, &right, bits, depth + 1, order);
+}
+
+/// Count interned ranges broken down into outer (token ranges) and inner (tsid sub-ranges).
+fn count_ranges_breakdown(dwa: &DWA) -> (usize, usize) {
+    use crate::datastructures::AbstractWeight;
+    use std::collections::HashSet;
+
+    let mut seen_weight_ptrs: HashSet<usize> = HashSet::new();
+    let mut seen_rangeset_ptrs: HashSet<usize> = HashSet::new();
+    let mut outer = 0usize;
+    let mut inner = 0usize;
+
+    let mut process = |w: &crate::dwa_i32::dwa::Weight| {
+        if let AbstractWeight::RangeMap(rm) = w {
+            let weight_ptr = Arc::as_ptr(rm) as usize;
+            if seen_weight_ptrs.insert(weight_ptr) {
+                outer += rm.map.range_values().count();
+            }
+            for (_, tsid_set) in rm.map.range_values() {
+                let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
+                if seen_rangeset_ptrs.insert(ptr) {
+                    inner += tsid_set.ranges_len();
+                }
+            }
+        }
+    };
+
+    for state in &dwa.states.0 {
+        if let Some(fw) = &state.final_weight {
+            process(fw);
+        }
+        for w in state.trans_weights.values() {
+            process(w);
+        }
+    }
+
+    (outer, inner)
+}
+
+/// Compute total adjacent Hamming distance for an ordering.
+fn total_adjacent_hamming(order: &[usize], bvs: &[Vec<u64>]) -> u64 {
+    let mut total: u64 = 0;
+    for i in 0..order.len().saturating_sub(1) {
+        total += bv_hamming(&bvs[order[i]], &bvs[order[i + 1]]) as u64;
+    }
+    total
+}
+
+/// Build column-fingerprint sort order for tokens.
+///
+/// For each unique weight, each token maps to a specific column (tsid_set).
+/// The fingerprint for a token is its column ID in each weight, ordered by
+/// weight importance (fewest distinct columns first — these are the weights
+/// where column grouping helps most).
+///
+/// Sorting by this fingerprint groups tokens that share columns in the most
+/// impactful weights together, directly minimizing outer range count.
+fn column_fingerprint_order(
+    unique_weights: &[&RangeMapWeight],
+    num_elements: usize,
+    _dim: &str,
+) -> Vec<usize> {
+    column_fingerprint_order_with_class_map(unique_weights, num_elements, None)
+}
+
+/// Column-fingerprint with optional class map for deduped elements.
+fn column_fingerprint_order_with_class_map(
+    unique_weights: &[&RangeMapWeight],
+    num_classes: usize,
+    class_map: Option<(&[usize], usize)>, // (class_map, max_old_id+1)
+) -> Vec<usize> {
+    let not_present: u32 = u32::MAX;
+    
+    // Compute number of distinct columns per weight
+    let mut weight_info: Vec<(usize, usize)> = Vec::new();
+    for (w_idx, &weight) in unique_weights.iter().enumerate() {
+        let num_entries = weight.map.range_values().count();
+        weight_info.push((w_idx, num_entries));
+    }
+    // Sort by number of distinct columns (ascending) — most constrained first
+    weight_info.sort_unstable_by_key(|&(_, num)| num);
+    
+    // Build fingerprints using top-32 most constrained weights
+    let max_fp_len = 32usize.min(weight_info.len());
+    let selected_weights: Vec<usize> = weight_info.iter().take(max_fp_len).map(|&(idx, _)| idx).collect();
+    
+    let mut fingerprints: Vec<Vec<u32>> = vec![vec![not_present; max_fp_len]; num_classes];
+    
+    for (fp_pos, &w_idx) in selected_weights.iter().enumerate() {
+        let weight = unique_weights[w_idx];
+        let mut col_id: u32 = 0;
+        for (token_range, _) in weight.map.range_values() {
+            for old_elem in *token_range.start()..=*token_range.end() {
+                let elem = if let Some((cmap, max_old)) = class_map {
+                    if old_elem < max_old { cmap[old_elem] } else { continue }
+                } else {
+                    if old_elem < num_classes { old_elem } else { continue }
+                };
+                if elem < num_classes {
+                    fingerprints[elem][fp_pos] = col_id;
+                }
+            }
+            col_id += 1;
+        }
+    }
+    
+    // Sort elements by fingerprint (lexicographic)
+    let mut order: Vec<usize> = (0..num_classes).collect();
+    order.sort_unstable_by(|&a, &b| fingerprints[a].cmp(&fingerprints[b]));
+    order
+}
+
+/// Count outer ranges (token range entries) for a proposed token ordering.
+fn count_outer_ranges_for_ordering(
+    unique_weights: &[&RangeMapWeight],
+    class_perm: &[usize],
+    max_token: usize,
+    class_map: &[usize],
+) -> usize {
+    let perm: Vec<usize> = (0..max_token + 1)
+        .map(|i| class_perm[class_map[i]])
+        .collect();
+    
+    let mut total_entries = 0usize;
+    
+    for &weight in unique_weights {
+        // Use tsid_set Arc pointer as column ID (not entry_idx) so that
+        // adjacent tokens with the same tsid_set merge properly.
+        let mut new_positions: Vec<(usize, usize)> = Vec::new();
+        for (token_range, tsid_set) in weight.map.range_values() {
+            let col_id = Arc::as_ptr(&tsid_set.inner) as usize;
+            for old_token in *token_range.start()..=*token_range.end() {
+                if old_token < perm.len() {
+                    new_positions.push((perm[old_token], col_id));
+                }
+            }
+        }
+        new_positions.sort_unstable();
+        
+        if !new_positions.is_empty() {
+            let mut runs = 1;
+            for i in 1..new_positions.len() {
+                let (pos, col) = new_positions[i];
+                let (prev_pos, prev_col) = new_positions[i - 1];
+                if col != prev_col || pos != prev_pos + 1 {
+                    runs += 1;
+                }
+            }
+            total_entries += runs;
+        }
+    }
+    
+    total_entries
+}
+
+/// Column-fingerprint ordering for the tsid dimension.
+/// For each weight entry, the tsid_set is a set of tsids. We build fingerprints
+/// based on which "row" (token_range entry) each tsid belongs to in each weight.
+fn column_fingerprint_tsid_order(
+    unique_weights: &[&RangeMapWeight],
+    num_classes: usize,
+    class_map: Option<(&[usize], usize)>,
+) -> Vec<usize> {
+    let not_present: u32 = u32::MAX;
+    
+    // Rank weights by number of distinct tsid_sets (fewer = more constrained)
+    let mut weight_info: Vec<(usize, usize)> = Vec::new();
+    for (w_idx, &weight) in unique_weights.iter().enumerate() {
+        // Count distinct tsid_sets in this weight
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (_, tsid_set) in weight.map.range_values() {
+            seen.insert(Arc::as_ptr(&tsid_set.inner) as usize);
+        }
+        weight_info.push((w_idx, seen.len()));
+    }
+    weight_info.sort_unstable_by_key(|&(_, num)| num);
+    
+    let max_fp_len = 32usize.min(weight_info.len());
+    let selected_weights: Vec<usize> = weight_info.iter().take(max_fp_len).map(|&(idx, _)| idx).collect();
+    
+    let mut fingerprints: Vec<Vec<u32>> = vec![vec![not_present; max_fp_len]; num_classes];
+    
+    for (fp_pos, &w_idx) in selected_weights.iter().enumerate() {
+        let weight = unique_weights[w_idx];
+        // Assign each unique tsid_set a column ID
+        let mut set_to_col: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+        let mut next_col: u32 = 0;
+        
+        for (_, tsid_set) in weight.map.range_values() {
+            let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
+            let col_id = *set_to_col.entry(ptr).or_insert_with(|| {
+                let c = next_col;
+                next_col += 1;
+                c
+            });
+            
+            // Map each tsid in this set to the column ID
+            for tsid_range in tsid_set.ranges() {
+                for old_tsid in *tsid_range.start()..=*tsid_range.end() {
+                    let tsid = if let Some((cmap, max_old)) = class_map {
+                        if old_tsid < max_old { cmap[old_tsid] } else { continue }
+                    } else {
+                        if old_tsid < num_classes { old_tsid } else { continue }
+                    };
+                    if tsid < num_classes {
+                        fingerprints[tsid][fp_pos] = col_id;
+                    }
+                }
+            }
+        }
+    }
+    
+    let mut order: Vec<usize> = (0..num_classes).collect();
+    order.sort_unstable_by(|&a, &b| fingerprints[a].cmp(&fingerprints[b]));
+    order
+}
+
+/// Count inner ranges (tsid sub-ranges) for a proposed tsid ordering.
+fn count_inner_ranges_for_ordering(
+    unique_weights: &[&RangeMapWeight],
+    class_perm: &[usize],
+    num_tsids: usize,
+    class_map: &[usize],
+) -> usize {
+    let perm: Vec<usize> = (0..num_tsids)
+        .map(|i| class_perm[class_map[i]])
+        .collect();
+    
+    let mut total_ranges = 0usize;
+    let mut seen_sets: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    
+    for &weight in unique_weights {
+        for (_, tsid_set) in weight.map.range_values() {
+            let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
+            if !seen_sets.insert(ptr) {
+                continue; // Already counted this tsid_set
+            }
+            
+            // Apply permutation and count ranges
+            let mut mapped: Vec<usize> = tsid_set.ranges()
+                .flat_map(|r| *r.start()..=*r.end())
+                .filter(|&v| v < perm.len())
+                .map(|v| perm[v])
+                .collect();
+            mapped.sort_unstable();
+            mapped.dedup();
+            
+            if mapped.is_empty() {
+                continue;
+            }
+            
+            let mut ranges = 1;
+            for i in 1..mapped.len() {
+                if mapped[i] != mapped[i - 1] + 1 {
+                    ranges += 1;
+                }
+            }
+            total_ranges += ranges;
+        }
+    }
+    
+    total_ranges
+}
+
+/// Or-opt local search to directly minimize outer range count for the token dimension.
+///
+/// Given an initial class permutation (from NN), iteratively tries relocating each class
+/// to every other position, accepting moves that reduce the outer range count.
+///
+/// Uses precomputed same-column-neighbor array to handle inactive weights in O(1) per
+/// position. Only active weights (where the element has col≠0) are iterated per position.
+///
+/// Returns the improved class permutation.
+fn or_opt_outer_ranges(
+    unique_weights: &[&RangeMapWeight],
+    initial_perm: &[usize],
+    max_token: usize,
+    class_map: &[usize],
+    time_limit: std::time::Duration,
+) -> Vec<usize> {
+    let profile = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
+    let start = std::time::Instant::now();
+    let num_classes = initial_perm.len();
+    if num_classes <= 2 {
+        return initial_perm.to_vec();
+    }
+
+    // Build the inverse permutation: order[new_pos] = class_id
+    let mut order: Vec<usize> = vec![0; num_classes];
+    for (cls, &new_pos) in initial_perm.iter().enumerate() {
+        if new_pos < num_classes {
+            order[new_pos] = cls;
+        }
+    }
+
+    // Build per-class column assignment matrix.
+    // col_assign[class][weight_idx] = column_id (0 = absent)
+    let num_weights = unique_weights.len();
+    let mut col_assign: Vec<Vec<u16>> = vec![vec![0u16; num_weights]; num_classes];
+
+    for (w_idx, &weight) in unique_weights.iter().enumerate() {
+        let mut ptr_to_col: HashMap<usize, u16> = HashMap::new();
+        let mut next_col: u16 = 1; // 0 = absent
+
+        for (token_range, tsid_set) in weight.map.range_values() {
+            let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
+            let col = *ptr_to_col.entry(ptr).or_insert_with(|| {
+                let c = next_col;
+                next_col = next_col.saturating_add(1);
+                c
+            });
+
+            for old_token in *token_range.start()..=*token_range.end() {
+                if old_token <= max_token {
+                    let cls = class_map[old_token];
+                    if cls < num_classes {
+                        col_assign[cls][w_idx] = col;
+                    }
+                }
+            }
+        }
+    }
+
+    // Count outer ranges (runs of same non-zero column) in current ordering
+    let count_breaks = |order: &[usize]| -> usize {
+        let mut breaks = 0usize;
+        for w_idx in 0..num_weights {
+            let mut in_run = false;
+            let mut prev_col = 0u16;
+            for &cls in order.iter() {
+                let col = col_assign[cls][w_idx];
+                if col == 0 {
+                    in_run = false;
+                } else if !in_run || col != prev_col {
+                    breaks += 1;
+                    in_run = true;
+                }
+                prev_col = col;
+            }
+        }
+        breaks
+    };
+
+    // same_col_between(a, b) = count of weights where col_assign[a][w] == col_assign[b][w] && col_assign[a][w] != 0
+    let same_col_between = |a: usize, b: usize| -> i32 {
+        let mut count = 0i32;
+        let ca = &col_assign[a];
+        let cb = &col_assign[b];
+        for w in 0..num_weights {
+            if ca[w] != 0 && ca[w] == cb[w] {
+                count += 1;
+            }
+        }
+        count
+    };
+
+    // Precompute same_col_adj_all[i] = same_col_between(order[i], order[i+1])
+    // This counts ALL weights where adjacent elements share the same non-zero column.
+    let build_same_col_adj = |order: &[usize]| -> Vec<i32> {
+        let n = order.len();
+        let mut adj = vec![0i32; n.saturating_sub(1)];
+        for i in 0..n.saturating_sub(1) {
+            adj[i] = same_col_between(order[i], order[i + 1]);
+        }
+        adj
+    };
+
+    let mut same_col_adj = build_same_col_adj(&order);
+    let mut best_breaks = count_breaks(&order);
+    if profile {
+        eprintln!("  or_opt: initial breaks={}", best_breaks);
+    }
+
+    let max_iters = 20;
+    for iter in 0..max_iters {
+        if start.elapsed() > time_limit {
+            break;
+        }
+        let mut improved = false;
+
+        for src_pos in 0..order.len() {
+            if start.elapsed() > time_limit {
+                break;
+            }
+
+            let cls = order[src_pos];
+            let mut best_pos = src_pos;
+            let mut best_delta: i64 = 0;
+
+            // Active weights for this class (col != 0)
+            let active_weights: Vec<usize> = (0..num_weights)
+                .filter(|&w| col_assign[cls][w] != 0)
+                .collect();
+
+            // --- REMOVAL SIDE ---
+            // Compute remove_save_active (active weights only)
+            let mut remove_save_active = 0i64;
+            let mut join_same_col_active = 0i32; // active weights where removal neighbors share same non-zero col
+            for &w in &active_weights {
+                let col = col_assign[cls][w];
+                let left_col = if src_pos > 0 { col_assign[order[src_pos - 1]][w] } else { 0 };
+                let right_col = if src_pos + 1 < order.len() { col_assign[order[src_pos + 1]][w] } else { 0 };
+
+                let cur_break_at_src = if col != 0 && (left_col == 0 || left_col != col) { 1 } else { 0 };
+                let cur_break_at_right = if right_col != 0 && (col == 0 || col != right_col) { 1 } else { 0 };
+                let new_break_at_gap = if right_col != 0 && (left_col == 0 || left_col != right_col) { 1 } else { 0 };
+
+                remove_save_active += (cur_break_at_src + cur_break_at_right - new_break_at_gap) as i64;
+
+                // Track active weight contribution to join pair same_col
+                if src_pos > 0 && src_pos + 1 < order.len() && left_col != 0 && left_col == right_col {
+                    join_same_col_active += 1;
+                }
+            }
+
+            // Compute remove_save_inactive = join_same_col_all - join_same_col_active
+            let join_same_col_all = if src_pos > 0 && src_pos + 1 < order.len() {
+                same_col_between(order[src_pos - 1], order[src_pos + 1])
+            } else {
+                0
+            };
+            let remove_save_inactive = (join_same_col_all - join_same_col_active) as i64;
+            let remove_save = remove_save_active + remove_save_inactive;
+
+            // --- INSERTION SIDE ---
+            // Trial positions: 0..order.len()-1 (order with cls removed)
+            // trial[i] = order[i] for i < src_pos
+            // trial[i] = order[i+1] for i >= src_pos
+            let trial_len = order.len() - 1;
+
+            for ins_pos in 0..trial_len + 1 {
+                // Look up same_col_all for the pair at this insertion position.
+                // ins_pos == 0 or ins_pos == trial_len: boundary → 0
+                // ins_pos in 1..trial_len: depends on mapping back to order indices
+                let same_col_all_pair = if ins_pos == 0 || ins_pos == trial_len {
+                    0i32
+                } else if ins_pos < src_pos {
+                    // trial[ins_pos-1] = order[ins_pos-1], trial[ins_pos] = order[ins_pos]
+                    // → same_col_adj[ins_pos - 1]
+                    same_col_adj[ins_pos - 1]
+                } else if ins_pos == src_pos {
+                    // trial[ins_pos-1] = order[src_pos-1], trial[ins_pos] = order[src_pos+1]
+                    // → join pair
+                    join_same_col_all
+                } else {
+                    // ins_pos > src_pos:
+                    // trial[ins_pos-1] = order[ins_pos], trial[ins_pos] = order[ins_pos+1]
+                    // → same_col_adj[ins_pos]
+                    if ins_pos < same_col_adj.len() {
+                        same_col_adj[ins_pos]
+                    } else {
+                        0
+                    }
+                };
+
+                // Get trial neighbor class IDs
+                let ins_left_cls = if ins_pos > 0 {
+                    if ins_pos - 1 < src_pos { order[ins_pos - 1] } else { order[ins_pos] }
+                } else {
+                    usize::MAX
+                };
+                let ins_right_cls = if ins_pos < trial_len {
+                    if ins_pos < src_pos { order[ins_pos] } else { order[ins_pos + 1] }
+                } else {
+                    usize::MAX
+                };
+
+                // Active weight loop: compute full delta + same_col correction
+                let mut insert_cost_active = 0i64;
+                let mut active_same_col_correction = 0i32;
+                for &w in &active_weights {
+                    let col = col_assign[cls][w];
+                    let left_col = if ins_left_cls != usize::MAX { col_assign[ins_left_cls][w] } else { 0 };
+                    let right_col = if ins_right_cls != usize::MAX { col_assign[ins_right_cls][w] } else { 0 };
+
+                    let old_break_at_ins = if right_col != 0 && (left_col == 0 || left_col != right_col) { 1 } else { 0 };
+                    let new_break_at_cls = if col != 0 && (left_col == 0 || left_col != col) { 1 } else { 0 };
+                    let new_break_at_right = if right_col != 0 && (col == 0 || col != right_col) { 1 } else { 0 };
+
+                    insert_cost_active += (new_break_at_cls + new_break_at_right - old_break_at_ins) as i64;
+
+                    // Correction: this active weight's contribution to same_col_all_pair
+                    if left_col != 0 && left_col == right_col {
+                        active_same_col_correction += 1;
+                    }
+                }
+
+                let insert_cost_inactive = (same_col_all_pair - active_same_col_correction) as i64;
+                let total_insert_cost = insert_cost_active + insert_cost_inactive;
+
+                let delta = total_insert_cost - remove_save;
+                if delta < best_delta {
+                    best_delta = delta;
+                    best_pos = ins_pos;
+                }
+            }
+
+            if best_delta < 0 {
+                let cls = order.remove(src_pos);
+                let adjusted_pos = if best_pos > src_pos { best_pos } else { best_pos };
+                let adjusted_pos = adjusted_pos.min(order.len());
+                order.insert(adjusted_pos, cls);
+                improved = true;
+
+                // Rebuild same_col_adj after modification
+                same_col_adj = build_same_col_adj(&order);
+            }
+        }
+
+        best_breaks = count_breaks(&order);
+        if profile {
+            eprintln!("  or_opt: iter {} breaks={} improved={} ({:?})", iter, best_breaks, improved, start.elapsed());
+        }
+
+        if !improved {
+            break;
+        }
+    }
+
+    // Convert order back to permutation: perm[class] = new_position
+    let mut perm = vec![0usize; num_classes];
+    for (new_pos, &cls) in order.iter().enumerate() {
+        perm[cls] = new_pos;
+    }
+    perm
+}
+
+/// Compute Hamming distance between two bitvectors.
+#[inline]
+fn bv_hamming(a: &[u64], b: &[u64]) -> u32 {
+    a.iter().zip(b.iter()).map(|(&x, &y)| (x ^ y).count_ones()).sum()
 }
 
 /// Count the number of common elements in two sorted slices.
@@ -478,7 +1115,29 @@ pub fn reorder_dwa_dimensions(
         max_tsid_profile,
         total_tsid_ctx,
     );
-    let tsid_class_perm = greedy_nearest_neighbor(&unique_tsid_profs);
+    let tsid_class_perm_nn = greedy_nearest_neighbor(&unique_tsid_profs);
+    
+    // Also try column-fingerprint for tsid dimension
+    // For tsids, the "columns" are the token dimension of the TRANSPOSED weight
+    // We need to build tsid-level fingerprints from the weights' tsid_set structure
+    let tsid_class_perm_fp = column_fingerprint_tsid_order(
+        &unique_weights,
+        unique_tsid_profs.len(),
+        Some((&tsid_class_map, num_tsids)),
+    );
+    
+    // Evaluate both by counting inner range breaks
+    let nn_inner = count_inner_ranges_for_ordering(&unique_weights, &tsid_class_perm_nn, num_tsids, &tsid_class_map);
+    let fp_inner = count_inner_ranges_for_ordering(&unique_weights, &tsid_class_perm_fp, num_tsids, &tsid_class_map);
+    
+    let tsid_class_perm = if fp_inner < nn_inner {
+        crate::debug!(3, "reorder_dwa_dimensions: tsid: using fingerprint ordering (inner: {} vs NN: {})", fp_inner, nn_inner);
+        tsid_class_perm_fp 
+    } else {
+        crate::debug!(3, "reorder_dwa_dimensions: tsid: using NN ordering (inner: {} vs fingerprint: {})", nn_inner, fp_inner);
+        tsid_class_perm_nn
+    };
+    
     // Compose: old_tsid → class → reordered_class_position
     let tsid_perm: Vec<usize> = (0..num_tsids)
         .map(|i| tsid_class_perm[tsid_class_map[i]])
@@ -503,7 +1162,40 @@ pub fn reorder_dwa_dimensions(
         max_token_profile,
         total_token_ctx,
     );
-    let token_class_perm = greedy_nearest_neighbor(&unique_token_profs);
+    let token_class_perm_nn = greedy_nearest_neighbor(&unique_token_profs);
+    
+    // Also try column-fingerprint ordering (directly optimizes outer range count)
+    let token_class_perm_fp = column_fingerprint_order_with_class_map(
+        &unique_weights,
+        unique_token_profs.len(),
+        Some((&token_class_map, max_token + 1)),
+    );
+    
+    // Evaluate both by counting actual outer range breaks
+    let nn_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm_nn, max_token, &token_class_map);
+    let fp_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm_fp, max_token, &token_class_map);
+    
+    let token_class_perm = if fp_outer < nn_outer {
+        crate::debug!(3, "reorder_dwa_dimensions: using fingerprint ordering (outer: {} vs NN: {})", fp_outer, nn_outer);
+        token_class_perm_fp
+    } else {
+        crate::debug!(3, "reorder_dwa_dimensions: using NN ordering (outer: {} vs fingerprint: {})", nn_outer, fp_outer);
+        token_class_perm_nn
+    };
+
+    // Step 3b: Or-opt local search to directly minimize outer range count
+    let token_class_perm = or_opt_outer_ranges(
+        &unique_weights,
+        &token_class_perm,
+        max_token,
+        &token_class_map,
+        std::time::Duration::from_secs(10),
+    );
+    if profile {
+        let opt_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm, max_token, &token_class_map);
+        eprintln!("  reorder: after or_opt outer={} (was NN={}, FP={})", opt_outer, nn_outer, fp_outer);
+    }
+
     // Compose: old_token → class → reordered_class_position
     let token_perm: Vec<usize> = (0..max_token + 1)
         .map(|i| token_class_perm[token_class_map[i]])
@@ -549,10 +1241,44 @@ pub fn reorder_dwa_dimensions(
 
     // Count new ranges (properly deduped: outer by weight Arc, inner by RangeSet Arc)
     let new_ranges = dwa.num_ranges_interned();
+    let (new_outer, new_inner) = if profile || crate::r#macro::is_debug_level_enabled(3) {
+        count_ranges_breakdown(dwa)
+    } else { (0, 0) };
+
+    // Compute theoretical minimum outer ranges: for each weight, the minimum is
+    // the number of DISTINCT tsid_set columns. This is achieved when all tokens
+    // with the same column are adjacent.
+    let (min_outer, baseline_outer, baseline_inner) = if profile || crate::r#macro::is_debug_level_enabled(3) {
+        let mut min_out = 0usize;
+        let mut seen = std::collections::HashSet::new();
+        for state in &dwa.states.0 {
+            let mut process = |w: &crate::dwa_i32::dwa::Weight| -> usize {
+                use crate::datastructures::AbstractWeight;
+                if let AbstractWeight::RangeMap(rm) = w {
+                    let ptr = Arc::as_ptr(rm) as usize;
+                    if seen.insert(ptr) {
+                        let mut distinct: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                        for (_, tsid_set) in rm.map.range_values() {
+                            distinct.insert(Arc::as_ptr(&tsid_set.inner) as usize);
+                        }
+                        return distinct.len();
+                    }
+                }
+                0
+            };
+            if let Some(fw) = &state.final_weight {
+                min_out += process(fw);
+            }
+            for w in state.trans_weights.values() {
+                min_out += process(w);
+            }
+        }
+        (min_out, new_outer, new_inner) // Use new_ as baseline since we already permuted
+    } else { (0, 0, 0) };
 
     crate::debug!(
         3,
-        "REORDER_DWA: baseline_ranges={} -> new_ranges={} ({:.1}% reduction) in {:?}",
+        "REORDER_DWA: baseline_ranges={} -> new_ranges={} ({:.1}% reduction, outer={} inner={}, min_outer={}) in {:?}",
         baseline_ranges,
         new_ranges,
         if baseline_ranges > 0 {
@@ -560,6 +1286,9 @@ pub fn reorder_dwa_dimensions(
         } else {
             0.0
         },
+        new_outer,
+        new_inner,
+        min_outer,
         start.elapsed()
     );
 
