@@ -1741,9 +1741,17 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     let _dwa_type_guard = crate::dwa_i32::minimization::graph_coloring::set_current_dwa_type(
         Some("parser"),
     );
-    let dwa = combined_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Parser);
+    let mut dwa = combined_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Parser);
     let det_min_elapsed = det_min_start.elapsed();
     crate::debug!(5, "determinize_and_minimize(Parser) in {:?}", det_min_elapsed);
+
+    // Propagate final_weights through default transitions.
+    // This fixes a correctness bug where deeper recursion depths in rules like
+    // ap_extra_0_c don't inherit the accepting capability from shallower depths.
+    let propagated = dwa.propagate_final_weights_through_defaults();
+    if propagated > 0 {
+        crate::debug!(5, "Parser DWA: propagated final_weights through {} default transitions", propagated);
+    }
     crate::timing!(
         "TIMING: parser_dwa::finalize::determinize_and_minimize {:?}",
         det_min_elapsed

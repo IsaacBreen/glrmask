@@ -804,6 +804,114 @@ impl DWA {
         }
     }
 
+    /// Analyze RangeMapWeight structure for optimization opportunities.
+    /// 
+    /// For each unique RangeMapWeight, examines:
+    /// - Number of outer entries (token ranges)
+    /// - Adjacent entries with different tsid_sets and how they differ
+    /// - Potential range reduction from normalizing tsid_sets
+    pub fn analyze_rangemap_weights(&self) {
+        use crate::datastructures::abstract_weight::AbstractWeight;
+        use crate::datastructures::rangemap_weight::RangeMapWeight;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut unique_rms: HashMap<usize, (&Arc<RangeMapWeight>, usize)> = HashMap::new(); // arc_ptr -> (weight, usage_count)
+        
+        for state in &self.states.0 {
+            let process = |w: &Weight| {
+                if let AbstractWeight::RangeMap(rm) = w {
+                    let key = Arc::as_ptr(rm) as usize;
+                    (key, rm.clone())
+                } else {
+                    (0, Arc::new(RangeMapWeight::from_map(Default::default(), 0)))
+                }
+            };
+            if let Some(fw) = &state.final_weight {
+                if let AbstractWeight::RangeMap(rm) = fw {
+                    let key = Arc::as_ptr(rm) as usize;
+                    unique_rms.entry(key).or_insert((rm, 0)).1 += 1;
+                }
+            }
+            for w in state.trans_weights.values() {
+                if let AbstractWeight::RangeMap(rm) = w {
+                    let key = Arc::as_ptr(rm) as usize;
+                    unique_rms.entry(key).or_insert((rm, 0)).1 += 1;
+                }
+            }
+        }
+
+        if unique_rms.is_empty() {
+            eprintln!("WEIGHT_DIAG: No RangeMapWeights found");
+            return;
+        }
+
+        let total_weights = unique_rms.len();
+        let mut total_outer_ranges = 0usize;
+        let mut total_inner_ranges = 0usize;
+        let mut adjacent_diff_count = 0usize;
+        let mut adjacent_same_count = 0usize;
+        let mut diff_size_histogram: HashMap<usize, usize> = HashMap::new(); // symmetric_diff_size -> count
+        let mut potential_savings = 0usize;
+
+        for (_, (rm, _usage)) in &unique_rms {
+            let entries: Vec<_> = rm.map.range_values().collect();
+            total_outer_ranges += entries.len();
+            for (_, tsid_set) in &entries {
+                total_inner_ranges += tsid_set.ranges_len();
+            }
+
+            // Analyze adjacent entries
+            for i in 1..entries.len() {
+                let (_, prev_tsid_set) = &entries[i-1];
+                let (_, curr_tsid_set) = &entries[i];
+                if prev_tsid_set == curr_tsid_set {
+                    adjacent_same_count += 1;
+                } else {
+                    adjacent_diff_count += 1;
+                    // Compute symmetric difference size
+                    let union = &(**prev_tsid_set) | &(**curr_tsid_set);
+                    let intersection = &(**prev_tsid_set) & &(**curr_tsid_set);
+                    let sym_diff_size = union.len() - intersection.len();
+                    *diff_size_histogram.entry(sym_diff_size).or_insert(0) += 1;
+                    
+                    // If we could merge by widening both to union, how many ranges saved?
+                    // Merging removes 1 outer range entry
+                    potential_savings += 1;
+                }
+            }
+        }
+
+        eprintln!("WEIGHT_DIAG: === RangeMapWeight Analysis ===");
+        eprintln!("WEIGHT_DIAG: Unique weights: {}", total_weights);
+        eprintln!("WEIGHT_DIAG: Total outer ranges (token ranges): {}", total_outer_ranges);
+        eprintln!("WEIGHT_DIAG: Total inner ranges (tsid ranges across all entries): {}", total_inner_ranges);
+        eprintln!("WEIGHT_DIAG: Adjacent pairs same tsid_set: {}", adjacent_same_count);
+        eprintln!("WEIGHT_DIAG: Adjacent pairs different tsid_set: {}", adjacent_diff_count);
+        eprintln!("WEIGHT_DIAG: Max potential savings (if all merges possible): {} outer ranges", potential_savings);
+        
+        let mut diffs: Vec<_> = diff_size_histogram.iter().collect();
+        diffs.sort_by_key(|(size, _)| *size);
+        eprintln!("WEIGHT_DIAG: Symmetric difference size distribution (adjacent pairs):");
+        for (diff_size, count) in diffs.iter().take(20) {
+            eprintln!("WEIGHT_DIAG:   sym_diff={}: {} pairs", diff_size, count);
+        }
+        if diffs.len() > 20 {
+            eprintln!("WEIGHT_DIAG:   ... and {} more categories", diffs.len() - 20);
+        }
+
+        // Analyze how many pairs could merge if we just widened tsid_sets
+        // (i.e., added the "missing" tsids)
+        let small_diff_mergeable: usize = diff_size_histogram.iter()
+            .filter(|(size, _)| **size <= 5)
+            .map(|(_, count)| count)
+            .sum();
+        eprintln!("WEIGHT_DIAG: Pairs with sym_diff <= 5 (easy merges): {} ({:.1}% of different pairs)", 
+            small_diff_mergeable,
+            100.0 * small_diff_mergeable as f64 / adjacent_diff_count.max(1) as f64);
+        eprintln!("WEIGHT_DIAG: ================================");
+    }
+
     pub fn is_cyclic(&self) -> bool {
         let n = self.states.len();
         if n == 0 { return false; }
@@ -1023,6 +1131,110 @@ impl Display for DWA {
             }
         }
         Ok(())
+    }
+}
+
+impl DWA {
+    /// Propagate final_weights through default transitions using transition
+    /// signature matching.
+    ///
+    /// In the parser DWA, deeper stack depths use DEFAULT_TRANSITION_SYMBOL
+    /// transitions to fall through to shallower depths. The determinizer treats
+    /// DEFAULT as a regular label, so DWA states at deeper depths may lack
+    /// final_weight even though semantically equivalent shallower states have it.
+    ///
+    /// The fix: for each state S with DEFAULT → T and no final_weight, find a
+    /// state Q that has the SAME transitions as S but also has final_weight.
+    /// Propagate Q's final_weight to S, and widen the incoming transition
+    /// weights to S so the walk accumulator can carry the accepting tokens.
+    pub fn propagate_final_weights_through_defaults(&mut self) -> usize {
+        let default_label = crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
+
+        // Step 1: Build FULL transition signature → final_weight map.
+        // Signature = ALL transitions (including DEFAULT), i.e. label → target pairs.
+        // This ensures only structurally identical states (same transitions, same targets)
+        // can share final_weight. Using only non-DEFAULT transitions was too coarse
+        // and caused false positive over-acceptance.
+        let mut sig_to_final: std::collections::BTreeMap<
+            BTreeMap<Label, StateID>,
+            Option<Weight>,
+        > = std::collections::BTreeMap::new();
+
+        for state in self.states.iter() {
+            let sig: BTreeMap<Label, StateID> = state
+                .transitions
+                .iter()
+                .map(|(&l, &t)| (l, t))
+                .collect();
+
+            let entry = sig_to_final.entry(sig).or_insert(None);
+            if let Some(fw) = &state.final_weight {
+                if let Some(existing) = entry {
+                    *existing = &*existing | fw;
+                } else {
+                    *entry = Some(fw.clone());
+                }
+            }
+        }
+
+        // Step 2: For each state with DEFAULT but no final_weight, look up
+        // its FULL transition signature. If any state with the same
+        // signature has final_weight, propagate it.
+        let mut propagated_states: Vec<(usize, Weight)> = Vec::new();
+        for sid in 0..self.states.len() {
+            if self.states[sid].final_weight.is_some() {
+                continue;
+            }
+            if !self.states[sid].transitions.contains_key(&default_label) {
+                continue;
+            }
+
+            let own_sig: BTreeMap<Label, StateID> = self.states[sid]
+                .transitions
+                .iter()
+                .map(|(&l, &t)| (l, t))
+                .collect();
+
+            if let Some(Some(fw)) = sig_to_final.get(&own_sig) {
+                if !fw.is_empty() {
+                    self.states[sid].final_weight = Some(fw.clone());
+                    propagated_states.push((sid, fw.clone()));
+                }
+            }
+        }
+
+        // Step 3: Widen incoming transition weights to propagated states.
+        // The DWA transitions leading to propagated states may not carry the
+        // accepting tokens (because the NWA at deeper depths didn't have
+        // final_weight, so subtract_final_weights_from_outgoing didn't account
+        // for them). Widen these transitions so the walk accumulator can carry
+        // the accepting tokens through to the final_weight check.
+        if !propagated_states.is_empty() {
+            let prop_map: std::collections::BTreeMap<usize, &Weight> = propagated_states
+                .iter()
+                .map(|(sid, fw)| (*sid, fw))
+                .collect();
+
+            for src_id in 0..self.states.len() {
+                let targets: Vec<(Label, StateID)> = self.states[src_id]
+                    .transitions
+                    .iter()
+                    .map(|(&l, &t)| (l, t))
+                    .collect();
+
+                for (label, target) in targets {
+                    if let Some(fw) = prop_map.get(&target) {
+                        if let Some(tw) = self.states[src_id].trans_weights.get_mut(&label) {
+                            *tw = &*tw | *fw;
+                        }
+                    }
+                }
+            }
+        }
+
+        let count = propagated_states.len();
+        crate::debug!(5, "propagate_final_weights: {} states, DWA has {} states", count, self.states.len());
+        count
     }
 }
 

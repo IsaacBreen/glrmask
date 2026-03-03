@@ -654,6 +654,22 @@ impl NWA {
         crate::debug!(5, "DWA minimization: {}",
             dwa.stats());
 
+        // RangeMapWeight relaxation pass (always runs when RangeMap weights are present)
+        let relax_start = std::time::Instant::now();
+        let relaxed = if std::env::var("DISABLE_RELAX_RM").is_ok() {
+            false
+        } else {
+            dwa.relax_rangemap_weights()
+        };
+        if relaxed {
+            crate::timing!("TIMING: DWA relax_rangemap_weights {:?}", relax_start.elapsed());
+        }
+
+        // Weight structure analysis (enabled by env var)
+        if std::env::var("ANALYZE_RANGEMAP_WEIGHTS").is_ok() {
+            dwa.analyze_rangemap_weights();
+        }
+
         if let Some((token_id, labels)) = debug_path.as_ref() {
             let weight = if debug_ignore_final {
                 crate::debug_path_weight::check_dwa_path_weight_no_final(&dwa, labels)

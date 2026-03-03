@@ -664,6 +664,7 @@ impl NWA {
             self.states[u].transitions.retain(|_, targets| !targets.is_empty());
         }
     }
+
 }
 
 impl Display for NWA {

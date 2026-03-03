@@ -524,6 +524,7 @@ impl<'a> GrammarConstraintState<'a> {
         let internal_tsid = self.parent.state_to_internal_tsid[tokenizer_state_id.0];
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state_id = dwa.body.start_state;
+        
         let possible_matches = &self.parent.possible_matches;
         let disable_disallowed_filter = std::env::var("DISABLE_TERMINALS_DISALLOWED_FILTER").is_ok();
 
@@ -608,7 +609,7 @@ impl<'a> GrammarConstraintState<'a> {
             let mut current_acc = seed_acc;
             let mut current_wa_state_id = dwa_start_state_id;
 
-            for edge in &edges {
+            for edge in edges.iter() {
                 worklist_iters += 1;
                 let dwa_state = &dwa.states[current_wa_state_id];
                 let parser_state_id = edge.state_id.0 as Label;

@@ -21,6 +21,7 @@
 
 pub mod common;
 mod consolidate_ranges;  // Range consolidation pass (general, works for any DWA)
+mod relax_rangemap;      // RangeMapWeight relaxation pass (weight-heavy mode)
 pub mod dwa_acyclic;
 pub mod dwa_cyclic;
 pub mod graph_coloring;
