@@ -63,6 +63,9 @@ struct Scratch {
     current_states: Vec<usize>,
     active_indices: Vec<usize>,
     match_positions: Vec<u32>,
+    /// Per-state list of group IDs touched during the last run_batch call.
+    /// Used to avoid O(num_states * num_groups) memset and scan.
+    dirty_groups: Vec<SmallVec<[usize; 16]>>,
     targets: Vec<usize>,
     // Suffix DAG
     dag: HashMap<usize, (u64, EdgeList)>,
@@ -178,6 +181,7 @@ impl Scratch {
             current_states: vec![0; num_states],
             active_indices: Vec::new(),
             match_positions: vec![NONE; num_states * num_groups],
+            dirty_groups: vec![SmallVec::new(); num_states],
             targets: Vec::new(),
             dag: HashMap::new(),
             dag_queue: Vec::new(),
@@ -186,6 +190,9 @@ impl Scratch {
 }
 
 /// Run DFA from all initial states on a token, recording end states and match positions.
+/// Uses dirty_groups tracking to avoid O(num_states * num_groups) memset.
+/// INVARIANT: match_positions entries are NONE except for dirty entries from a previous
+/// call that must have been cleaned up by the caller (token_signature does this).
 fn run_batch(
     dfa: &Dfa,
     scratch: &mut Scratch,
@@ -196,10 +203,12 @@ fn run_batch(
     let num_groups = dfa.num_groups;
     let len = slice.len();
 
-    // Reset scratch
+    // Reset scratch — DON'T fill match_positions (maintained by dirty cleanup)
     scratch.current_states[..num_states].clone_from_slice(initial_states);
     scratch.active_indices.clear();
-    scratch.match_positions[..num_states * num_groups].fill(NONE);
+    for dg in scratch.dirty_groups[..num_states].iter_mut() {
+        dg.clear();
+    }
 
     let has_bytes = !slice.is_empty();
     let first_byte = if has_bytes { slice[0] } else { 0 };
@@ -210,6 +219,7 @@ fn run_batch(
         for f in &dfa.finalizers[state] {
             if f.gid < num_groups && scratch.match_positions[base + f.gid] == NONE {
                 scratch.match_positions[base + f.gid] = 0;
+                scratch.dirty_groups[i].push(f.gid);
             }
         }
         if dfa.is_dead_end[state] {
@@ -242,6 +252,7 @@ fn run_batch(
                             if !f.non_greedy || scratch.match_positions[ix] == NONE {
                                 scratch.match_positions[ix] = position;
                             }
+                            scratch.dirty_groups[i].push(f.gid);
                         }
                     }
                     if dfa.is_dead_end[ns] {
@@ -285,6 +296,7 @@ fn run_batch(
                         for f in &dfa.finalizers[s] {
                             if f.gid < num_groups && !f.non_greedy {
                                 scratch.match_positions[base + f.gid] = token_len;
+                                scratch.dirty_groups[i].push(f.gid);
                             }
                         }
                     }
@@ -294,11 +306,12 @@ fn run_batch(
         }
     }
 
-    // Collect unique match target positions
+    // Collect unique match target positions — only from dirty groups
     scratch.targets.clear();
     if num_groups > 0 {
-        for base in (0..num_states * num_groups).step_by(num_groups) {
-            for gid in 0..num_groups {
+        for si in 0..num_states {
+            let base = si * num_groups;
+            for &gid in &scratch.dirty_groups[si] {
                 let pv = scratch.match_positions[base + gid];
                 if pv != NONE && pv > 0 && (pv as usize) <= len {
                     scratch.targets.push(pv as usize);
@@ -412,6 +425,7 @@ fn hash_suffixes(
 }
 
 /// Compute a token's full signature over a batch of initial states.
+/// Also cleans up match_positions for dirty groups (maintaining the NONE invariant).
 fn token_signature(
     dfa: &Dfa,
     token: &[u8],
@@ -423,25 +437,49 @@ fn token_signature(
         hash_suffixes(dfa, token, scratch);
     }
 
+    let num_groups = dfa.num_groups;
     let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
         let completion = dfa.completion(scratch.current_states[i]);
+        let base = i * num_groups;
 
-        let base = i * dfa.num_groups;
-        let mp = &scratch.match_positions[base..base + dfa.num_groups];
-        let state_sig = if mp.iter().any(|&pv| pv != NONE) {
-            let mut h = new_hasher();
-            h.write_u64(completion);
-            for (gid, &pv) in mp.iter().enumerate() {
-                if pv != NONE && pv > 0 {
-                    h.write_u64(gid as u64);
-                    h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0));
+        // Sort and dedup dirty groups for deterministic hashing
+        let dirty = &mut scratch.dirty_groups[i];
+        dirty.sort_unstable();
+        dirty.dedup();
+
+        let state_sig = if !dirty.is_empty() {
+            // Check if any dirty group has a non-zero match position
+            let has_match = dirty.iter().any(|&gid| {
+                let pv = scratch.match_positions[base + gid];
+                pv != NONE && pv > 0
+            });
+            if has_match {
+                let mut h = new_hasher();
+                h.write_u64(completion);
+                for &gid in dirty.iter() {
+                    let pv = scratch.match_positions[base + gid];
+                    if pv != NONE && pv > 0 {
+                        h.write_u64(gid as u64);
+                        h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0));
+                    }
                 }
+                h.finish()
+            } else {
+                // Groups matched at position 0 only — still use hasher for distinction
+                let mut h = new_hasher();
+                h.write_u64(completion);
+                h.finish()
             }
-            h.finish()
         } else {
             completion
         };
+
+        // Clean up: reset match_positions for dirty groups back to NONE
+        for &gid in dirty.iter() {
+            scratch.match_positions[base + gid] = NONE;
+        }
+
         sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
     }
     sig
@@ -476,7 +514,9 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     }
 
     let num_groups = dfa.num_groups;
-    let batch_size = num_states.min(200);
+    // Use large batches now that dirty_groups tracking avoids O(batch_size * ng) memset.
+    // Memory per thread: batch_size * ng * 4 bytes for match_positions (allocated once, sparse use).
+    let batch_size = num_states.min(5000);
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;

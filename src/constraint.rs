@@ -1630,7 +1630,7 @@ impl GrammarConstraint {
         // Number of tokenizer states for weight-heavy encoding.
         // Always use representative count (internal tsid compression).
         let weight_heavy_enabled = crate::constraint_precompute::is_weight_heavy_enabled();
-        let num_tsids = if weight_heavy_enabled {
+        let mut num_tsids = if weight_heavy_enabled {
             representative_states.len()
         } else {
             0
@@ -3870,7 +3870,7 @@ impl GrammarConstraint {
         }
 
         // Build Parser DWA
-        let max_internal_llm_token_id = vocab.internal_max_llm_token;
+        let mut max_internal_llm_token_id = vocab.internal_max_llm_token;
         // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
 
         // Post-terminal-DWA reorder: reorder token and tsid dimensions in the terminal DWA
@@ -3883,12 +3883,17 @@ impl GrammarConstraint {
         if terminal_reorder_enabled && num_tsids > 0 {
             crate::debug!(3, "Reordering terminal DWA dimensions...");
             let reorder_start = std::time::Instant::now();
-            let (token_perm, tsid_perm) = crate::dwa_i32::reorder::reorder_dwa_dimensions(
+            let (token_perm, tsid_perm, new_max_token, new_num_tsids) = crate::dwa_i32::reorder::reorder_dwa_dimensions(
                 &mut terminal_dwa,
                 max_internal_llm_token_id,
                 num_tsids,
             );
             crate::timing!("TIMING: terminal_dwa_reorder {:?}", reorder_start.elapsed());
+
+            // Update max_internal_llm_token_id and num_tsids after equivalence merging
+            max_internal_llm_token_id = new_max_token;
+            num_tsids = new_num_tsids;
+            vocab.internal_max_llm_token = new_max_token;
 
             // Apply tsid_perm to state_to_internal_tsid values.
             // tsid_perm operates on internal space (0..num_tsids-1).
@@ -3911,14 +3916,19 @@ impl GrammarConstraint {
                 }
             }
 
-            // Update internal_to_original: permute keys directly
-            // Much faster than rebuilding from original_to_internal (50K entries)
-            // since internal_to_original has only ~144 entries.
+            // Update internal_to_original: map keys through permutation.
+            // When equivalence merging is active, multiple old internal IDs may map
+            // to the same new internal ID — merge their original sets via union.
             let old_i2o: BTreeMap<usize, crate::datastructures::hybrid_bitset::RangeSet> =
                 std::mem::take(&mut vocab.internal_to_original);
             for (old_internal, original_set) in old_i2o {
                 let new_internal = token_perm[old_internal];
-                vocab.internal_to_original.insert(new_internal, original_set);
+                vocab.internal_to_original
+                    .entry(new_internal)
+                    .and_modify(|existing| {
+                        existing.union_with(&original_set);
+                    })
+                    .or_insert(original_set);
             }
 
             crate::debug!(
@@ -4089,7 +4099,7 @@ impl GrammarConstraint {
         // Check if weight-heavy mode is enabled via environment variable
         let weight_heavy = crate::constraint_precompute::is_weight_heavy_enabled();
         // num_tsids uses the representative count (same as earlier in the build)
-        let num_tsids = if weight_heavy {
+        let mut num_tsids = if weight_heavy {
             representative_states.len()
         } else {
             0
@@ -4158,13 +4168,17 @@ impl GrammarConstraint {
         if reorder_enabled && num_tsids > 0 {
             crate::debug!(3, "Reordering parser DWA dimensions...");
             let reorder_start = std::time::Instant::now();
-            let (token_perm, tsid_perm) = crate::dwa_i32::reorder::reorder_dwa_dimensions(
+            let (token_perm, tsid_perm, new_max_token, new_num_tsids) = crate::dwa_i32::reorder::reorder_dwa_dimensions(
                 &mut parser_dwa,
                 vocab.internal_max_llm_token,
                 num_tsids,
             );
             crate::timing!("TIMING: reorder_dwa_dimensions {:?}", reorder_start.elapsed());
             if profile_build { eprintln!("  reorder_fn: {:?}", reorder_start.elapsed()); }
+
+            // Update max token ID and num_tsids after equivalence merging
+            vocab.internal_max_llm_token = new_max_token;
+            num_tsids = new_num_tsids;
             let post_reorder_start = std::time::Instant::now();
 
             // Update state_to_internal_tsid: compose with tsid permutation
@@ -4183,11 +4197,18 @@ impl GrammarConstraint {
             // Update internal_to_original: permute keys directly
             // This is much faster than rebuilding from original_to_internal (50K entries)
             // since internal_to_original has only ~144 entries (one per equiv class).
+            // When equivalence merging is active, multiple old internal IDs may map
+            // to the same new internal ID — merge their original sets via union.
             let old_i2o: BTreeMap<usize, crate::datastructures::hybrid_bitset::RangeSet> =
                 std::mem::take(&mut vocab.internal_to_original);
             for (old_internal, original_set) in old_i2o {
                 let new_internal = token_perm[old_internal];
-                vocab.internal_to_original.insert(new_internal, original_set);
+                vocab.internal_to_original
+                    .entry(new_internal)
+                    .and_modify(|existing| {
+                        existing.union_with(&original_set);
+                    })
+                    .or_insert(original_set);
             }
             if profile_build { eprintln!("  update_vocab_maps: {:?}", post_reorder_start.elapsed()); }
             let pm_start = std::time::Instant::now();

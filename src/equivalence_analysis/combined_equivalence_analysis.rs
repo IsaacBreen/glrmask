@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::dfa_u8::{Regex, Tokenizer};
 
 use super::state_equivalence_analysis_fast::{self as state_equivalence_analysis, StateEquivalenceResult};
-use super::vocab_equivalence_analysis_flat::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
+use super::vocab_equivalence_analysis_fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
 use super::trellis_equivalence_analysis;
 
 /// Result of combined equivalence analysis.
@@ -71,14 +71,12 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     ever_allowed_by_group: Option<&[Vec<bool>]>,
     group_to_class: Option<&[usize]>,
 ) -> CombinedEquivalenceResult {
-    // State equivalence reduction: only worthwhile when it removes enough states
-    // to offset the cost. For kb_143 (2173 states → 1883, 13% reduction), state
-    // equiv costs 577ms but only saves ~90ms in vocab equiv. Default: disabled.
-    // Set STATE_EQUIV_THRESHOLD=0 to enable.
+    // State equivalence reduction: groups initial states with identical tokenizer
+    // behavior. Enabled by default. Set STATE_EQUIV_THRESHOLD to a high value to disable.
     let state_reduction_threshold = std::env::var("STATE_EQUIV_THRESHOLD")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(usize::MAX);
+        .unwrap_or(0);
 
     let start = std::time::Instant::now();
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
@@ -402,24 +400,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             );
         }
 
-        // 3. Cross-validate: simple version vs old fast version
-        let old_fast_vocab_classes = super::vocab_equivalence_analysis_fast::find_vocab_equivalence_classes_with_follow(
-            regex,
-            tokens,
-            &reduced_states,
-            suffix_group_mask,
-            ever_allowed_by_group,
-            group_to_class,
-        );
-        if !vocab_is_comparable(&vocab_classes, &old_fast_vocab_classes) {
-            panic!(
-                "Vocab equivalence mismatch (simple vs old fast not comparable)!\nSimple ({} classes): {:?}\nOld fast ({} classes): {:?}",
-                vocab_classes.len(), vocab_classes,
-                old_fast_vocab_classes.len(), old_fast_vocab_classes
-            );
-        }
-
-        // 4. Cross-validate: flat (primary) vs simple version
+        // 3. Cross-validate: fast version vs simple version
         let simple_vocab_classes = super::vocab_equivalence_analysis_fast_simple::find_vocab_equivalence_classes_with_follow(
             regex,
             tokens,
@@ -430,9 +411,26 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         );
         if !vocab_is_comparable(&vocab_classes, &simple_vocab_classes) {
             panic!(
-                "Vocab equivalence mismatch (flat vs simple not comparable)!\nFlat ({} classes): {:?}\nSimple ({} classes): {:?}",
+                "Vocab equivalence mismatch (fast vs simple not comparable)!\nFast ({} classes): {:?}\nSimple ({} classes): {:?}",
                 vocab_classes.len(), vocab_classes,
                 simple_vocab_classes.len(), simple_vocab_classes
+            );
+        }
+
+        // 4. Cross-validate: flat version
+        let flat_vocab_classes = super::vocab_equivalence_analysis_flat::find_vocab_equivalence_classes_with_follow(
+            regex,
+            tokens,
+            &reduced_states,
+            suffix_group_mask,
+            ever_allowed_by_group,
+            group_to_class,
+        );
+        if !vocab_is_comparable(&vocab_classes, &flat_vocab_classes) {
+            panic!(
+                "Vocab equivalence mismatch (simple vs flat not comparable)!\nSimple ({} classes): {:?}\nFlat ({} classes): {:?}",
+                vocab_classes.len(), vocab_classes,
+                flat_vocab_classes.len(), flat_vocab_classes
             );
         }
 

@@ -20,6 +20,30 @@ use crate::datastructures::{
 };
 use crate::dwa_i32::dwa::DWA;
 use range_set_blaze::RangeSetBlaze;
+use hashbrown::HashMap;
+
+/// Deduplicate profiles: group identical profiles into equivalence classes.
+///
+/// Returns:
+/// - `mapping[old_id] = class_idx` — maps each element to its equivalence class
+/// - `unique_profiles` — one representative profile per class (class_idx → profile)
+fn dedup_profiles(profiles: &[Vec<u32>]) -> (Vec<usize>, Vec<Vec<u32>>) {
+    let mut class_map: HashMap<&[u32], usize> = HashMap::new();
+    let mut mapping = vec![0usize; profiles.len()];
+    let mut unique_profiles: Vec<Vec<u32>> = Vec::new();
+    for (i, profile) in profiles.iter().enumerate() {
+        let class = if let Some(&c) = class_map.get(profile.as_slice()) {
+            c
+        } else {
+            let c = unique_profiles.len();
+            unique_profiles.push(profile.clone());
+            class_map.insert(profile.as_slice(), c);
+            c
+        };
+        mapping[i] = class;
+    }
+    (mapping, unique_profiles)
+}
 
 /// Compute greedy nearest-neighbor permutation for a dimension.
 ///
@@ -308,6 +332,7 @@ fn permute_rangeset(set: &HybridRangeSet, perm: &[usize]) -> HybridRangeSet {
         .map(|v| perm[v])
         .collect();
     mapped.sort_unstable();
+    mapped.dedup();
     // Build RangeSetBlaze from sorted values
     let rsb = if mapped.is_empty() {
         RangeSetBlaze::new()
@@ -402,15 +427,18 @@ fn collect_unique_weights(dwa: &DWA) -> Vec<Arc<RangeMapWeight>> {
     unique
 }
 
-/// Compute optimal token and tsid permutations for a DWA's weights,
-/// then apply those permutations to all weights in the DWA.
+/// Compute optimal token and tsid mappings for a DWA's weights,
+/// merging equivalent indices and reordering for locality.
 ///
-/// Returns (token_perm, tsid_perm) where perm[old_id] = new_id.
+/// Equivalent indices (those with identical profiles across all weights)
+/// are mapped to the same new ID. Returns (token_mapping, tsid_mapping,
+/// new_max_token, new_num_tsids) where mapping[old_id] = new_id.
+/// The new_max_token and new_num_tsids reflect the reduced dimensions.
 pub fn reorder_dwa_dimensions(
     dwa: &mut DWA,
     max_token: usize,
     num_tsids: usize,
-) -> (Vec<usize>, Vec<usize>) {
+) -> (Vec<usize>, Vec<usize>, usize, usize) {
     let start = std::time::Instant::now();
     let profile = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
 
@@ -433,37 +461,53 @@ pub fn reorder_dwa_dimensions(
     // Count baseline ranges (properly deduped: outer by weight Arc, inner by RangeSet Arc)
     let baseline_ranges = dwa.num_ranges_interned();
 
-    // Step 2: Compute tsid permutation
+    // Step 2: Compute tsid equivalence classes + permutation
     let tsid_profiles = build_tsid_profiles(&unique_weights, num_tsids);
-    let active_tsids = tsid_profiles.iter().filter(|p| !p.is_empty()).count();
-    let max_tsid_profile = tsid_profiles.iter().map(|p| p.len()).max().unwrap_or(0);
-    let total_tsid_ctx = tsid_profiles.iter().map(|p| p.len()).sum::<usize>();
+    let (tsid_class_map, unique_tsid_profs) = dedup_profiles(&tsid_profiles);
+    let new_num_tsids = unique_tsid_profs.len();
+    let active_tsids = unique_tsid_profs.iter().filter(|p| !p.is_empty()).count();
+    let max_tsid_profile = unique_tsid_profs.iter().map(|p| p.len()).max().unwrap_or(0);
+    let total_tsid_ctx = unique_tsid_profs.iter().map(|p| p.len()).sum::<usize>();
     crate::debug!(
         3,
-        "reorder_dwa_dimensions: tsid profiles: {} total, {} active (non-empty), max_profile={}, total_ctx={}",
+        "reorder_dwa_dimensions: tsid profiles: {} total, {} unique (merged {}), {} active (non-empty), max_profile={}, total_ctx={}",
         num_tsids,
+        new_num_tsids,
+        num_tsids - new_num_tsids,
         active_tsids,
         max_tsid_profile,
         total_tsid_ctx,
     );
-    let tsid_perm = greedy_nearest_neighbor(&tsid_profiles);
+    let tsid_class_perm = greedy_nearest_neighbor(&unique_tsid_profs);
+    // Compose: old_tsid → class → reordered_class_position
+    let tsid_perm: Vec<usize> = (0..num_tsids)
+        .map(|i| tsid_class_perm[tsid_class_map[i]])
+        .collect();
     if profile { eprintln!("  reorder: tsid_profiles+perm = {:?}", step2_start.elapsed()); }
     let step3_start = std::time::Instant::now();
 
-    // Step 3: Compute token permutation
+    // Step 3: Compute token equivalence classes + permutation
     let token_profiles = build_token_profiles(&unique_weights, max_token);
-    let active_tokens = token_profiles.iter().filter(|p| !p.is_empty()).count();
-    let max_token_profile = token_profiles.iter().map(|p| p.len()).max().unwrap_or(0);
-    let total_token_ctx = token_profiles.iter().map(|p| p.len()).sum::<usize>();
+    let (token_class_map, unique_token_profs) = dedup_profiles(&token_profiles);
+    let new_max_token = if unique_token_profs.is_empty() { 0 } else { unique_token_profs.len() - 1 };
+    let active_tokens = unique_token_profs.iter().filter(|p| !p.is_empty()).count();
+    let max_token_profile = unique_token_profs.iter().map(|p| p.len()).max().unwrap_or(0);
+    let total_token_ctx = unique_token_profs.iter().map(|p| p.len()).sum::<usize>();
     crate::debug!(
         3,
-        "reorder_dwa_dimensions: token profiles: {} total, {} active (non-empty), max_profile={}, total_ctx={}",
+        "reorder_dwa_dimensions: token profiles: {} total, {} unique (merged {}), {} active (non-empty), max_profile={}, total_ctx={}",
         max_token + 1,
+        unique_token_profs.len(),
+        (max_token + 1) - unique_token_profs.len(),
         active_tokens,
         max_token_profile,
         total_token_ctx,
     );
-    let token_perm = greedy_nearest_neighbor(&token_profiles);
+    let token_class_perm = greedy_nearest_neighbor(&unique_token_profs);
+    // Compose: old_token → class → reordered_class_position
+    let token_perm: Vec<usize> = (0..max_token + 1)
+        .map(|i| token_class_perm[token_class_map[i]])
+        .collect();
     if profile { eprintln!("  reorder: token_profiles+perm = {:?}", step3_start.elapsed()); }
 
     crate::debug!(
@@ -526,7 +570,18 @@ pub fn reorder_dwa_dimensions(
         start.elapsed()
     );
 
-    (token_perm, tsid_perm)
+    crate::debug!(
+        3,
+        "reorder_dwa_dimensions: dimensions: tokens {}→{} (merged {}), tsids {}→{} (merged {})",
+        max_token + 1,
+        new_max_token + 1,
+        (max_token + 1) - (new_max_token + 1),
+        num_tsids,
+        new_num_tsids,
+        num_tsids - new_num_tsids,
+    );
+
+    (token_perm, tsid_perm, new_max_token, new_num_tsids)
 }
 
 // ---------------------------------------------------------------------------
