@@ -955,6 +955,8 @@ pub(crate) struct Precomputer1<'r> {
     dfs_match_gen: Vec<u32>,
     dfs_match_widths: Vec<usize>,
     dfs_current_gen: u32,
+    // Batched leaf_state token IDs for deferred update_live_tokens
+    dfs_leaf_token_ids: RangeSetBlaze<usize>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -1163,6 +1165,7 @@ impl<'r> Precomputer1<'r> {
                 vec![0usize; num_groups]
             },
             dfs_current_gen: 0,
+            dfs_leaf_token_ids: RangeSetBlaze::new(),
         }
     }
 
@@ -2361,6 +2364,14 @@ impl<'r> Precomputer1<'r> {
 
         let dfs_start = std::time::Instant::now();
         self.dfs(&vocab.root, assoc);
+
+        // Finalize batched leaf_state live_tokens update
+        if !self.dfs_leaf_token_ids.is_empty() {
+            let leaf_ids = std::mem::take(&mut self.dfs_leaf_token_ids);
+            let weight = self.expanded_weight_from_rsb_owned(leaf_ids);
+            self.update_live_tokens(self.leaf_state, &weight);
+        }
+
         let dfs_time = dfs_start.elapsed();
         self.vocab = vocab;
         self.pb.finish();
@@ -2642,8 +2653,8 @@ impl<'r> Precomputer1<'r> {
                     }
                     if let Some(t) = match_start { self.dfs_profile_match += t.elapsed(); }
 
-                    if let Some(weight) = leaf_weight.as_ref() {
-                        self.update_live_tokens(self.leaf_state, weight);
+                    if leaf_weight.is_some() {
+                        self.dfs_leaf_token_ids.insert(child_token_id);
                     }
 
                     let pending_start = if self.dfs_profile_enabled { Some(std::time::Instant::now()) } else { None };
@@ -2676,10 +2687,8 @@ impl<'r> Precomputer1<'r> {
                         if !end_labels.is_empty() {
                             self.dfs_profile_endstate_events += 1;
                             self.dfs_profile_endstate_adds += nodes.len() * end_labels.len();
-                            // Create expanded weight once, it's just a single token expanded to N×M space
-                            let single_token_weight = self.expanded_weight_from_item(child_token_id);
-                            let end_idx = self.leaf_state;
-                            self.update_live_tokens(end_idx, &single_token_weight);
+                            // Batch: collect token ID for deferred update_live_tokens
+                            self.dfs_leaf_token_ids.insert(child_token_id);
                             // Pre-size outer Vec to avoid repeated resize checks
                             let max_src = nodes.iter().copied().max().unwrap_or(0);
                             if max_src >= self.pending_token_ids.len() {
