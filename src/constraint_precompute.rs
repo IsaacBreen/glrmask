@@ -906,10 +906,10 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) terminals_count: usize,
     pub(crate) pending_transitions: HashMap<NWAStateID, HashMap<Label, HashMap<NWAStateID, Weight>>>,
     pub(crate) pending_epsilons: HashMap<NWAStateID, HashMap<NWAStateID, Weight>>,
-    pub(crate) pending_token_ids: HashMap<(NWAStateID, Label, NWAStateID), Vec<usize>>,
+    pub(crate) pending_token_ids: Vec<Vec<Vec<usize>>>,  // [src_nwa_state][label_idx] → [token_ids]
     pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
     // Cache for tokens_accessible_from_state - only 389 unique states but called 700k+ times
-    accessible_terminals_cache: HashMap<TokenizerStateID, std::rc::Rc<Vec<GrammarTokenID>>>,
+    accessible_terminals_cache: HashMap<TokenizerStateID, std::rc::Rc<Vec<Label>>>,
     // Cache for expanded single-token weights (indexed by token id)
     expanded_item_cache: Vec<Option<Weight>>,
     // Cache for expanded RangeSetBlaze weights (pointer-keyed, stable sets only)
@@ -932,6 +932,21 @@ pub(crate) struct Precomputer1<'r> {
     nwa_rep_stats_enabled: bool,
     nwa_states_by_rep: BTreeMap<TokenizerStateID, usize>,
     nwa_states_by_rep_depth: BTreeMap<TokenizerStateID, BTreeMap<usize, usize>>,
+    // DFS profiling counters
+    dfs_profile_execute: std::time::Duration,
+    dfs_profile_weight: std::time::Duration,
+    dfs_profile_pending: std::time::Duration,
+    dfs_profile_clone: std::time::Duration,
+    dfs_profile_match: std::time::Duration,
+    dfs_profile_endstate: std::time::Duration,
+    dfs_profile_nodes: usize,
+    dfs_profile_segments: usize,
+    dfs_profile_iters: usize,
+    dfs_profile_state_key_iters: usize,
+    dfs_profile_matches: usize,
+    dfs_profile_endstate_adds: usize,
+    dfs_profile_endstate_events: usize,
+    dfs_profile_enabled: bool,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -1058,7 +1073,7 @@ impl<'r> Precomputer1<'r> {
             terminals_count,
             pending_transitions: HashMap::new(),
             pending_epsilons: HashMap::new(),
-            pending_token_ids: HashMap::new(),
+            pending_token_ids: Vec::new(),  // Will be resized as NWA states are added
             live_tokens: HashMap::new(),
             accessible_terminals_cache: HashMap::new(),
             expanded_item_cache: vec![None; internal_max_llm_token.saturating_add(1)],
@@ -1077,6 +1092,20 @@ impl<'r> Precomputer1<'r> {
             nwa_rep_stats_enabled,
             nwa_states_by_rep,
             nwa_states_by_rep_depth,
+            dfs_profile_execute: std::time::Duration::ZERO,
+            dfs_profile_weight: std::time::Duration::ZERO,
+            dfs_profile_pending: std::time::Duration::ZERO,
+            dfs_profile_clone: std::time::Duration::ZERO,
+            dfs_profile_match: std::time::Duration::ZERO,
+            dfs_profile_endstate: std::time::Duration::ZERO,
+            dfs_profile_nodes: 0,
+            dfs_profile_segments: 0,
+            dfs_profile_iters: 0,
+            dfs_profile_state_key_iters: 0,
+            dfs_profile_matches: 0,
+            dfs_profile_endstate_adds: 0,
+            dfs_profile_endstate_events: 0,
+            dfs_profile_enabled: false,
         }
     }
 
@@ -2106,37 +2135,51 @@ impl<'r> Precomputer1<'r> {
         &mut self,
         src: NWAStateID,
         label: Label,
-        dst: NWAStateID,
+        _dst: NWAStateID,  // Always leaf_state, stored implicitly
         token_id: usize,
     ) {
-        self.pending_token_ids
-            .entry((src, label, dst))
-            .or_default()
-            .push(token_id);
+        let label_idx = label as usize;
+        // Ensure outer Vec is large enough for this src state
+        if src >= self.pending_token_ids.len() {
+            self.pending_token_ids.resize_with(src + 1, Vec::new);
+        }
+        // Ensure inner Vec is large enough for this label
+        let inner = &mut self.pending_token_ids[src];
+        if label_idx >= inner.len() {
+            inner.resize_with(label_idx + 1, Vec::new);
+        }
+        inner[label_idx].push(token_id);
     }
 
     fn flush_pending_token_ids(&mut self) {
-        if self.pending_token_ids.is_empty() {
+        let dst = self.leaf_state;
+        let all_empty = self.pending_token_ids.iter().all(|v| v.is_empty());
+        if all_empty {
             return;
         }
-        for ((src, label, dst), mut token_ids) in std::mem::take(&mut self.pending_token_ids) {
-            token_ids.sort_unstable();
-            token_ids.dedup();
-            let rsb = RangeSetBlaze::from_iter(token_ids.into_iter().map(|t| t..=t));
-            let weight = self.expanded_weight_from_rsb_owned(rsb);
-            if self.direct_insert {
-                let state = &mut self.nwa.states[src];
-                state.transitions.entry(label).or_default().push((dst, weight));
-                continue;
+        let pending = std::mem::take(&mut self.pending_token_ids);
+        for (src, labels_vec) in pending.into_iter().enumerate() {
+            for (label_idx, mut token_ids) in labels_vec.into_iter().enumerate() {
+                if token_ids.is_empty() { continue; }
+                let label = label_idx as Label;
+                token_ids.sort_unstable();
+                token_ids.dedup();
+                let rsb = RangeSetBlaze::from_iter(token_ids.into_iter().map(|t| t..=t));
+                let weight = self.expanded_weight_from_rsb_owned(rsb);
+                if self.direct_insert {
+                    let state = &mut self.nwa.states[src];
+                    state.transitions.entry(label).or_default().push((dst, weight));
+                    continue;
+                }
+                self.pending_transitions
+                    .entry(src)
+                    .or_default()
+                    .entry(label)
+                    .or_default()
+                    .entry(dst)
+                    .and_modify(|w| *w |= &weight)
+                    .or_insert(weight);
             }
-            self.pending_transitions
-                .entry(src)
-                .or_default()
-                .entry(label)
-                .or_default()
-                .entry(dst)
-                .and_modify(|w| *w |= &weight)
-                .or_insert(weight);
         }
     }
 
@@ -2196,11 +2239,48 @@ impl<'r> Precomputer1<'r> {
             eprintln!("Vocab tree has {} nodes", vocab_node_count);
         }
         
+        // Reset DFS profiling counters
+        self.dfs_profile_execute = std::time::Duration::ZERO;
+        self.dfs_profile_weight = std::time::Duration::ZERO;
+        self.dfs_profile_pending = std::time::Duration::ZERO;
+        self.dfs_profile_clone = std::time::Duration::ZERO;
+        self.dfs_profile_match = std::time::Duration::ZERO;
+        self.dfs_profile_endstate = std::time::Duration::ZERO;
+        self.dfs_profile_nodes = 0;
+        self.dfs_profile_segments = 0;
+        self.dfs_profile_iters = 0;
+        self.dfs_profile_state_key_iters = 0;
+        self.dfs_profile_matches = 0;
+        self.dfs_profile_endstate_adds = 0;
+        self.dfs_profile_endstate_events = 0;
+        self.dfs_profile_enabled = std::env::var("PROFILE_DFS").is_ok() || crate::r#macro::is_debug_level_enabled(3);
+
         let dfs_start = std::time::Instant::now();
         self.dfs(&vocab.root, assoc);
         let dfs_time = dfs_start.elapsed();
         self.vocab = vocab;
         self.pb.finish();
+
+        if std::env::var("PROFILE_DFS").is_ok() || crate::r#macro::is_debug_level_enabled(3) {
+            let other = dfs_time.saturating_sub(
+                self.dfs_profile_execute + self.dfs_profile_weight +
+                self.dfs_profile_pending + self.dfs_profile_clone +
+                self.dfs_profile_match + self.dfs_profile_endstate
+            );
+            eprintln!("DFS PROFILE: total={:?}", dfs_time);
+            eprintln!("  execute_from_state: {:?}", self.dfs_profile_execute);
+            eprintln!("  match_processing: {:?}", self.dfs_profile_match);
+            eprintln!("  end_state_handling: {:?}", self.dfs_profile_endstate);
+            eprintln!("  weight_ops: {:?}", self.dfs_profile_weight);
+            eprintln!("  pending_ops: {:?}", self.dfs_profile_pending);
+            eprintln!("  clone_assoc: {:?}", self.dfs_profile_clone);
+            eprintln!("  other: {:?}", other);
+            eprintln!("  nodes={}, segments={}, iters={}, state_key_iters={}, matches={}, endstate_events={}, endstate_adds={}",
+                self.dfs_profile_nodes, self.dfs_profile_segments, self.dfs_profile_iters,
+                self.dfs_profile_state_key_iters, self.dfs_profile_matches,
+                self.dfs_profile_endstate_events, self.dfs_profile_endstate_adds);
+        }
+
         crate::timing!("TIMING: precompute1::run_dfs::dfs {:?}", dfs_time);
         crate::debug!(5, "Precomputation complete");
     }
@@ -2210,7 +2290,6 @@ impl<'r> Precomputer1<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<DfsKey, SourceStates>,
     ) {
-        self.pb.inc(1);
         let mut total_pending_iters = 0usize;
         let base_depth = vocab_node.prefix_length();
         let skip_pm_prune = true; // Always skip PM during DFS; computed in parallel post-DFS
@@ -2224,7 +2303,10 @@ impl<'r> Precomputer1<'r> {
 
             // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
             let mut pending: BTreeMap<usize, BTreeMap<DfsKey, SourceStates>> = BTreeMap::new();
+            let clone_start = if self.dfs_profile_enabled { Some(std::time::Instant::now()) } else { None };
             pending.insert(0, assoc_by_state.clone());
+            if let Some(t) = clone_start { self.dfs_profile_clone += t.elapsed(); }
+            self.dfs_profile_segments += 1;
 
             let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
@@ -2236,12 +2318,14 @@ impl<'r> Precomputer1<'r> {
             > = HashMap::new();
 
             let mut segment_pending_iters = 0usize;
+            self.dfs_profile_nodes += 1;
             loop {
                 let Some((pos, states_at_pos)) = pending.pop_first() else {
                     break;
                 };
                 segment_pending_iters += 1;
                 total_pending_iters += 1;
+                self.dfs_profile_iters += 1;
                 crate::debug!(7, "--- Position {} (segment len={}) ---", pos, segment_bytes.len());
                 crate::debug!(7, "States at pos: {:?}", states_at_pos);
                 
@@ -2260,9 +2344,11 @@ impl<'r> Precomputer1<'r> {
                     let num_sources = nodes.len();
 
                     let slice = &segment_bytes[pos..];
+                      let exec_start = if self.dfs_profile_enabled { Some(std::time::Instant::now()) } else { None };
                       let exec_result = self
                           .tokenizer
                           .execute_from_state(slice, tokenizer_state_id);
+                      if let Some(t) = exec_start { self.dfs_profile_execute += t.elapsed(); }
                       // Only compute states_by_width when needed for greedy group suppression
                       let states_by_width = if !self.terminal_to_greedy_group.is_empty() && !exec_result.matches.is_empty() {
                           let tokenizer_dfa = self.tokenizer.dfa();
@@ -2315,7 +2401,10 @@ impl<'r> Precomputer1<'r> {
                     let mut leaf_labels: Vec<Label> = Vec::new();
                     let mut cont_transitions: Vec<(Label, NWAStateID, Weight)> = Vec::new();
                       let mut leaf_weight: Option<Weight> = None;
+                      self.dfs_profile_state_key_iters += 1;
+                      self.dfs_profile_matches += exec_result.matches.len();
 
+                      let match_start = if self.dfs_profile_enabled { Some(std::time::Instant::now()) } else { None };
                       // 1. Handle Matches -> Transitions to Initial State (per state_key)
                       for match_info in &exec_result.matches {
                           let terminal_id = GrammarTokenID(match_info.id);
@@ -2398,12 +2487,14 @@ impl<'r> Precomputer1<'r> {
 
                         let initial_tsid = self.tokenizer.initial_state_id();
                         // Use expanded weight from rsb
+                        let weight_start = if self.dfs_profile_enabled { Some(std::time::Instant::now()) } else { None };
                         let weight = match final_bv {
                             std::borrow::Cow::Borrowed(rsb) => {
                                 self.expanded_weight_from_rsb(rsb, Some(rsb as *const _ as usize))
                             }
                             std::borrow::Cow::Owned(rsb) => self.expanded_weight_from_rsb_owned(rsb),
                         };
+                        if let Some(t) = weight_start { self.dfs_profile_weight += t.elapsed(); }
 
                         let target_entry = dest_map.entry(DfsKey::new(initial_tsid));
                         let target = match target_entry {
@@ -2447,11 +2538,13 @@ impl<'r> Precomputer1<'r> {
                         );
                         cont_transitions.push((terminal_id.0 as Label, target, weight));
                     }
+                    if let Some(t) = match_start { self.dfs_profile_match += t.elapsed(); }
 
                     if let Some(weight) = leaf_weight.as_ref() {
                         self.update_live_tokens(self.leaf_state, weight);
                     }
 
+                    let pending_start = if self.dfs_profile_enabled { Some(std::time::Instant::now()) } else { None };
                     for &src_node in nodes.iter() {
                         for label in &leaf_labels {
                             self.add_pending_token_id(src_node, *label, self.leaf_state, child_token_id);
@@ -2460,45 +2553,44 @@ impl<'r> Precomputer1<'r> {
                             self.add_pending_transition(src_node, *label, *dst, weight.clone());
                         }
                     }
+                    if let Some(t) = pending_start { self.dfs_profile_pending += t.elapsed(); }
 
                     // 2. Handle End State -> Continuation
                     crate::debug!(7, "  End state handling: end_state={:?}", exec_result.end_state);
+                    let endstate_start = if self.dfs_profile_enabled { Some(std::time::Instant::now()) } else { None };
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
 
-                        let accessible_terminals: std::rc::Rc<Vec<GrammarTokenID>> = if let Some(cached) = self.accessible_terminals_cache.get(&final_tokenizer_state) {
-                            cached.clone() // Rc clone is cheap
+                        // Cache accessible terminal labels directly (avoids 1.93M Vec<Label> allocations)
+                        let end_labels: std::rc::Rc<Vec<Label>> = if let Some(cached) = self.accessible_terminals_cache.get(&final_tokenizer_state) {
+                            cached.clone()
                         } else {
                             let result = std::rc::Rc::new(self.tokenizer.tokens_accessible_from_state(final_tokenizer_state)
-                                .into_iter().collect::<Vec<_>>());
+                                .into_iter().map(|t| t.0 as Label).collect::<Vec<_>>());
                             self.accessible_terminals_cache.insert(final_tokenizer_state, result.clone());
                             result
                         };
 
-                        crate::debug!(7, "    accessible_terminals={:?}", accessible_terminals.as_slice());
-
-                        // Create expanded weight once, it's just a single token expanded to N×M space
-                        let single_token_weight = self.expanded_weight_from_item(child_token_id);
-
-                        let end_idx = self.leaf_state;
-                        let mut end_labels: Vec<Label> = Vec::new();
-                        for terminal_id in accessible_terminals.iter() {
-                            crate::debug!(
-                                7,
-                                "    -> END_STATE transition ({} sources): --{}--> {} (leaf_state), weight={:?}",
-                                num_sources,
-                                terminal_id.0,
-                                end_idx,
-                                single_token_weight,
-                            );
-                            end_labels.push(terminal_id.0 as Label);
-                        }
-
                         if !end_labels.is_empty() {
+                            self.dfs_profile_endstate_events += 1;
+                            self.dfs_profile_endstate_adds += nodes.len() * end_labels.len();
+                            // Create expanded weight once, it's just a single token expanded to N×M space
+                            let single_token_weight = self.expanded_weight_from_item(child_token_id);
+                            let end_idx = self.leaf_state;
                             self.update_live_tokens(end_idx, &single_token_weight);
+                            // Pre-size outer Vec to avoid repeated resize checks
+                            let max_src = nodes.iter().copied().max().unwrap_or(0);
+                            if max_src >= self.pending_token_ids.len() {
+                                self.pending_token_ids.resize_with(max_src + 1, Vec::new);
+                            }
+                            let max_label = *end_labels.iter().max().unwrap() as usize;
                             for &src_node in nodes.iter() {
-                                for label in &end_labels {
-                                    self.add_pending_token_id(src_node, *label, end_idx, child_token_id);
+                                let inner = &mut self.pending_token_ids[src_node];
+                                if max_label >= inner.len() {
+                                    inner.resize_with(max_label + 1, Vec::new);
+                                }
+                                for &label in end_labels.iter() {
+                                    inner[label as usize].push(child_token_id);
                                 }
                             }
                         }
@@ -2508,6 +2600,7 @@ impl<'r> Precomputer1<'r> {
                             .or_insert_with(SmallVec::new);
                         entry.extend(nodes);
                     }
+                    if let Some(t) = endstate_start { self.dfs_profile_endstate += t.elapsed(); }
                 }
             }
 
