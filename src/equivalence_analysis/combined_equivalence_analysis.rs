@@ -72,11 +72,14 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     group_to_class: Option<&[usize]>,
 ) -> CombinedEquivalenceResult {
     // State equivalence reduction: groups initial states with identical tokenizer
-    // behavior. Enabled by default. Set STATE_EQUIV_THRESHOLD to a high value to disable.
+    // behavior. The cost is O(V×S) token walks (same as vocab analysis), so it's
+    // only beneficial when the reduction ratio is high (>50%). For most schemas
+    // the reduction ratio is low (10-20%), making it a net loss. Only enable for
+    // very large state counts where DFA/NWA cost dominates.
     let state_reduction_threshold = std::env::var("STATE_EQUIV_THRESHOLD")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
+        .unwrap_or(5000);
 
     let start = std::time::Instant::now();
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
