@@ -2434,6 +2434,9 @@ impl<'r> Precomputer1<'r> {
 
             let mut segment_pending_iters = 0usize;
             self.dfs_profile_nodes += 1;
+            // Pre-allocate Vecs outside inner loop to avoid 1.98M allocations
+            let mut leaf_labels: Vec<Label> = Vec::new();
+            let mut cont_transitions: Vec<(Label, NWAStateID, Weight)> = Vec::new();
             loop {
                 let Some((pos, states_at_pos)) = pending.pop_first() else {
                     break;
@@ -2511,8 +2514,8 @@ impl<'r> Precomputer1<'r> {
                             .or_default()
                     };
 
-                    let mut leaf_labels: Vec<Label> = Vec::new();
-                    let mut cont_transitions: Vec<(Label, NWAStateID, Weight)> = Vec::new();
+                    leaf_labels.clear();
+                    cont_transitions.clear();
                       let mut leaf_weight: Option<Weight> = None;
                       self.dfs_profile_state_key_iters += 1;
                       self.dfs_profile_matches += exec_result.matches.len();
