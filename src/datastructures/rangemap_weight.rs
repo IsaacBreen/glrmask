@@ -43,7 +43,7 @@ static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
 static RANGEMAP_TSID_OUTER: Lazy<bool> = Lazy::new(|| {
     env::var("RANGEMAP_TSID_OUTER")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    .unwrap_or(false)
+        .unwrap_or(false)
 });
 
 thread_local! {
@@ -897,26 +897,71 @@ impl RangeMapWeight {
         out
     }
 
+    /// Invert a RangeMap from (token_range → tsid_set) to (tsid_range → token_set).
+    ///
+    /// Uses a sweep-line approach over tsid boundaries to avoid expanding individual
+    /// tsid IDs. Complexity: O(B * E * union_cost) where B = number of unique tsid
+    /// boundaries and E = number of (token_range, tsid_range) pairs, vs the old
+    /// approach which was O(sum_of_tsid_range_lengths * BTreeMap_lookup * union_cost).
     fn invert_outer_map(map: &RangeMapBlaze<usize, RangeSet>) -> RangeMapBlaze<usize, RangeSet> {
-        let mut tsid_map: BTreeMap<usize, RangeSet> = BTreeMap::new();
+        // Phase 1: Collect all (tsid_start, tsid_end, token_rangeset) triples
+        // and all unique tsid boundaries.
+        let mut entries: Vec<(usize, usize, RangeSet)> = Vec::new();
+        let mut boundaries: Vec<usize> = Vec::new();
+
         for (token_range, tsid_set) in map.range_values() {
             if tsid_set.is_empty() {
                 continue;
             }
             let token_rs = Self::rangeset_from_ranges([token_range.clone()]);
             for tsid_range in tsid_set.ranges() {
-                for tsid in *tsid_range.start()..=*tsid_range.end() {
-                    let entry = tsid_map.entry(tsid).or_insert_with(RangeSet::zeros);
-                    *entry |= &token_rs;
-                }
+                let a = *tsid_range.start();
+                let b = *tsid_range.end();
+                entries.push((a, b, token_rs.clone()));
+                boundaries.push(a);
+                boundaries.push(b + 1); // exclusive end as next boundary
             }
         }
 
-        if tsid_map.is_empty() {
+        if entries.is_empty() {
             return RangeMapBlaze::new();
         }
 
-        Self::compress_outer_map(tsid_map)
+        // Phase 2: Sort boundaries and deduplicate
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        // Sort entries by tsid_start for early termination in inner loop
+        entries.sort_unstable_by_key(|e| e.0);
+
+        // Phase 3: Sweep over tsid segments between consecutive boundaries.
+        // For each segment [boundaries[i], boundaries[i+1]-1], union all token sets
+        // from entries whose tsid range contains this segment.
+        let mut result = RangeMapBlaze::new();
+
+        for window in boundaries.windows(2) {
+            let seg_start = window[0];
+            let seg_end = window[1] - 1;
+
+            let mut token_set = RangeSet::zeros();
+            let mut any_hit = false;
+            for &(ref a, ref b, ref token_rs) in &entries {
+                // Entries sorted by start: if start > seg_end, no more can overlap
+                if *a > seg_end {
+                    break;
+                }
+                if *a <= seg_start && seg_end <= *b {
+                    token_set |= token_rs;
+                    any_hit = true;
+                }
+            }
+
+            if any_hit {
+                result.ranges_insert(seg_start..=seg_end, token_set);
+            }
+        }
+
+        result
     }
 
     fn from_token_map(map: BTreeMap<usize, RangeSet>, num_tsids: usize) -> Self {

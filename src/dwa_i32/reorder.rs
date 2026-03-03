@@ -1079,6 +1079,21 @@ pub fn reorder_dwa_dimensions(
     let start = std::time::Instant::now();
     let profile = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
 
+    // When RANGEMAP_TSID_OUTER is active, the RangeMap outer key is the tsid dimension
+    // and the inner value is the token dimension. We swap the parameters so the rest
+    // of the function operates generically on "outer" and "inner" dimensions.
+    let tsid_outer = RangeMapWeight::tsid_outer_enabled();
+    let (effective_max_outer, effective_inner_count) = if tsid_outer {
+        (num_tsids.saturating_sub(1), max_token + 1)
+    } else {
+        (max_token, num_tsids)
+    };
+
+    // Shadow with effective values so all downstream code is dimension-generic.
+    // "max_token" now means "max outer key" and "num_tsids" means "inner count".
+    #[allow(unused_variables)]
+    let (max_token, num_tsids) = (effective_max_outer, effective_inner_count);
+
     // Step 1: Collect unique weights
     let unique_weights_arc = collect_unique_weights(dwa);
     let unique_weights: Vec<&RangeMapWeight> =
@@ -1310,7 +1325,15 @@ pub fn reorder_dwa_dimensions(
         num_tsids - new_num_tsids,
     );
 
-    (token_perm, tsid_perm, new_max_token, new_num_tsids)
+    // Map back to caller's dimension semantics.
+    // In the function body, "token_perm" = outer perm, "tsid_perm" = inner perm.
+    // In tsid-outer mode: outer = tsid dimension, inner = token dimension.
+    if tsid_outer {
+        // Swap: return (inner_perm_as_token, outer_perm_as_tsid, inner_max_as_token, outer_count_as_tsid)
+        (tsid_perm, token_perm, new_num_tsids.saturating_sub(1), new_max_token + 1)
+    } else {
+        (token_perm, tsid_perm, new_max_token, new_num_tsids)
+    }
 }
 
 // ---------------------------------------------------------------------------
