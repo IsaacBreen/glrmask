@@ -1458,9 +1458,19 @@ impl GrammarConstraint {
             .map(|tid| tid.0 as crate::dwa_i32::Label)
             .collect();
         let always_allowed = compute_always_allowed_terminal_follows(&parser.productions);
-        for (term, follows) in &always_allowed {
-            let follows_str: Vec<String> = follows.iter().map(|f| format!("{}", f)).collect();
-            crate::debug!(5, "TERMINAL_ALWAYS_ALLOWED_FOLLOW: {} -> {{{}}}", term, follows_str.join(", "));
+        if crate::r#macro::is_debug_level_enabled(5) {
+            let total = always_allowed.len();
+            let non_empty = always_allowed.values().filter(|f| !f.is_empty()).count();
+            let avg_follow = if non_empty > 0 {
+                always_allowed.values().filter(|f| !f.is_empty()).map(|f| f.len()).sum::<usize>() as f64 / non_empty as f64
+            } else {
+                0.0
+            };
+            crate::debug!(5, "Always-allowed terminal follows ({} terminals, {} with non-empty follow sets, avg {:.1}):", total, non_empty, avg_follow);
+            for (term, follows) in &always_allowed {
+                let follows_str: Vec<String> = follows.iter().map(|f| format!("{}", f)).collect();
+                crate::debug!(5, "  {} -> {{{}}}", term, follows_str.join(", "));
+            }
         }
         let mut always_allowed_by_label: Vec<Vec<crate::dwa_i32::Label>> =
             vec![Vec::new(); parser.terminal_map.len()];

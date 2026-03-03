@@ -296,7 +296,8 @@ fn try_bulk_assign_no_selfloop(
 }
 
 /// Advance DFA states by one byte, updating states and match positions.
-/// Uses bitmap finalizers for fast inner loop.
+/// Uses bitmap finalizers for fast inner loop when ng <= 32, falls back to
+/// full finalizer list for larger group counts.
 fn advance_states(
     dfa: &Dfa,
     parent_states: &[u32],
@@ -309,6 +310,7 @@ fn advance_states(
     ng: usize,
 ) {
     child_mp[..ni * ng].copy_from_slice(&parent_mp[..ni * ng]);
+    let use_bitmap = ng <= 32;
     for si in 0..ni {
         let ps = parent_states[si];
         let mp_base = si * ng;
@@ -320,17 +322,28 @@ fn advance_states(
                 child_states[si] = NONE;
             } else {
                 let ns_u = ns as usize;
-                // Use bitmap for fast finalizer processing
-                let fin = dfa.finalizer_bits[ns_u];
-                if fin != 0 {
-                    let greedy = dfa.greedy_bits[ns_u];
-                    let mut bits = fin;
-                    while bits != 0 {
-                        let gid = bits.trailing_zeros() as usize;
-                        bits &= bits - 1; // clear lowest set bit
+                if use_bitmap {
+                    // Fast path: bitmap for ng <= 32
+                    let fin = dfa.finalizer_bits[ns_u];
+                    if fin != 0 {
+                        let greedy = dfa.greedy_bits[ns_u];
+                        let mut bits = fin;
+                        while bits != 0 {
+                            let gid = bits.trailing_zeros() as usize;
+                            bits &= bits - 1;
+                            if gid < ng {
+                                if (greedy >> gid) & 1 == 1 || child_mp[mp_base + gid] == NONE {
+                                    child_mp[mp_base + gid] = depth;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Full finalizer list for ng > 32
+                    for f in &dfa.finalizers[ns_u] {
+                        let gid = f.gid;
                         if gid < ng {
-                            // greedy finalizer: always update; non-greedy: only if not yet set
-                            if (greedy >> gid) & 1 == 1 || child_mp[mp_base + gid] == NONE {
+                            if !f.non_greedy || child_mp[mp_base + gid] == NONE {
                                 child_mp[mp_base + gid] = depth;
                             }
                         }
