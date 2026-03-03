@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::dfa_u8::{Regex, Tokenizer};
 
 use super::state_equivalence_analysis_fast::{self as state_equivalence_analysis, StateEquivalenceResult};
-use super::vocab_equivalence_analysis_fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
+use super::vocab_equivalence_analysis_fast_simple::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
 use super::trellis_equivalence_analysis;
 
 /// Result of combined equivalence analysis.
@@ -401,6 +401,24 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
                 vocab_classes, ref_vocab_classes
             );
         }
+
+        // 3. Cross-validate: simple version vs old fast version
+        let old_fast_vocab_classes = super::vocab_equivalence_analysis_fast::find_vocab_equivalence_classes_with_follow(
+            regex,
+            tokens,
+            &reduced_states,
+            suffix_group_mask,
+            ever_allowed_by_group,
+            group_to_class,
+        );
+        if !vocab_is_comparable(&vocab_classes, &old_fast_vocab_classes) {
+            panic!(
+                "Vocab equivalence mismatch (simple vs old fast not comparable)!\nSimple ({} classes): {:?}\nOld fast ({} classes): {:?}",
+                vocab_classes.len(), vocab_classes,
+                old_fast_vocab_classes.len(), old_fast_vocab_classes
+            );
+        }
+
         } // end of else (SKIP_EQUIV_VERIFICATION)
     }
     

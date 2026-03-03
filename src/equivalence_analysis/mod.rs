@@ -24,6 +24,7 @@ mod state_equivalence_analysis_reference;
 // Vocab equivalence
 mod vocab_equivalence_analysis_fast;
 mod vocab_equivalence_analysis_fast_reference;
+mod vocab_equivalence_analysis_fast_simple;
 mod vocab_equivalence_analysis_reference;
 
 // Trellis-based ground truth (very slow, for testing only)
@@ -32,6 +33,11 @@ mod trellis_equivalence_analysis;
 // Combined analysis
 mod combined_equivalence_analysis;
 
-// Re-exports: use the fast versions by default
-pub use vocab_equivalence_analysis_fast::VocabEquivalenceResult;
+// Re-exports: use the simplified fast version by default
+pub use vocab_equivalence_analysis_fast_simple::VocabEquivalenceResult;
+pub use vocab_equivalence_analysis_fast_simple::{
+    partition_is_at_least_as_fine,
+    partitions_are_comparable,
+    partitions_are_equivalent,
+};
 pub use combined_equivalence_analysis::compute_combined_equivalence;
