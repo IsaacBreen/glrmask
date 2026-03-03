@@ -1160,12 +1160,14 @@ pub fn reorder_dwa_dimensions(
     let baseline_ranges = dwa.num_ranges_interned();
 
     // Step 2: Compute tsid equivalence classes + permutation
+    let sub_t = std::time::Instant::now();
     let tsid_profiles = build_tsid_profiles(&unique_weights, num_tsids);
     let (tsid_class_map, unique_tsid_profs) = dedup_profiles(&tsid_profiles);
     let new_num_tsids = unique_tsid_profs.len();
     let active_tsids = unique_tsid_profs.iter().filter(|p| !p.is_empty()).count();
     let max_tsid_profile = unique_tsid_profs.iter().map(|p| p.len()).max().unwrap_or(0);
     let total_tsid_ctx = unique_tsid_profs.iter().map(|p| p.len()).sum::<usize>();
+    if profile { eprintln!("  reorder: tsid_build_profiles+dedup = {:?} (n_unique={})", sub_t.elapsed(), new_num_tsids); }
     crate::debug!(
         3,
         "reorder_dwa_dimensions: tsid profiles: {} total, {} unique (merged {}), {} active (non-empty), max_profile={}, total_ctx={}",
@@ -1176,27 +1178,38 @@ pub fn reorder_dwa_dimensions(
         max_tsid_profile,
         total_tsid_ctx,
     );
-    let tsid_class_perm_nn = greedy_nearest_neighbor(&unique_tsid_profs);
     
-    // Also try column-fingerprint for tsid dimension
-    // For tsids, the "columns" are the token dimension of the TRANSPOSED weight
-    // We need to build tsid-level fingerprints from the weights' tsid_set structure
+    // Column-fingerprint for tsid dimension (fast O(n log n))
+    let sub_t = std::time::Instant::now();
     let tsid_class_perm_fp = column_fingerprint_tsid_order(
         &unique_weights,
         unique_tsid_profs.len(),
         Some((&tsid_class_map, num_tsids)),
     );
+    if profile { eprintln!("  reorder: tsid_fp = {:?}", sub_t.elapsed()); }
     
-    // Evaluate both by counting inner range breaks
-    let nn_inner = count_inner_ranges_for_ordering(&unique_weights, &tsid_class_perm_nn, num_tsids, &tsid_class_map);
-    let fp_inner = count_inner_ranges_for_ordering(&unique_weights, &tsid_class_perm_fp, num_tsids, &tsid_class_map);
-    
-    let tsid_class_perm = if fp_inner < nn_inner {
-        crate::debug!(3, "reorder_dwa_dimensions: tsid: using fingerprint ordering (inner: {} vs NN: {})", fp_inner, nn_inner);
-        tsid_class_perm_fp 
+    let tsid_class_perm = if unique_tsid_profs.len() <= 2000 {
+        // Small enough for NN
+        let sub_t = std::time::Instant::now();
+        let tsid_class_perm_nn = greedy_nearest_neighbor(&unique_tsid_profs);
+        if profile { eprintln!("  reorder: tsid_nn = {:?}", sub_t.elapsed()); }
+        
+        // Evaluate both
+        let nn_inner = count_inner_ranges_for_ordering(&unique_weights, &tsid_class_perm_nn, num_tsids, &tsid_class_map);
+        let fp_inner = count_inner_ranges_for_ordering(&unique_weights, &tsid_class_perm_fp, num_tsids, &tsid_class_map);
+        
+        if fp_inner < nn_inner {
+            crate::debug!(3, "reorder_dwa_dimensions: tsid: using fingerprint ordering (inner: {} vs NN: {})", fp_inner, nn_inner);
+            tsid_class_perm_fp 
+        } else {
+            crate::debug!(3, "reorder_dwa_dimensions: tsid: using NN ordering (inner: {} vs fingerprint: {})", nn_inner, fp_inner);
+            tsid_class_perm_nn
+        }
     } else {
-        crate::debug!(3, "reorder_dwa_dimensions: tsid: using NN ordering (inner: {} vs fingerprint: {})", nn_inner, fp_inner);
-        tsid_class_perm_nn
+        // Large tsid dimension — skip NN, use FP directly
+        if profile { eprintln!("  reorder: tsid_nn = SKIPPED (n_unique={} > 2000)", new_num_tsids); }
+        crate::debug!(3, "reorder_dwa_dimensions: tsid: using fingerprint ordering (NN skipped, n={})", new_num_tsids);
+        tsid_class_perm_fp
     };
     
     // Compose: old_tsid → class → reordered_class_position
@@ -1207,8 +1220,10 @@ pub fn reorder_dwa_dimensions(
     let step3_start = std::time::Instant::now();
 
     // Step 3: Compute token equivalence classes + permutation
+    let sub_t = std::time::Instant::now();
     let token_profiles = build_token_profiles(&unique_weights, max_token);
     let (token_class_map, unique_token_profs) = dedup_profiles(&token_profiles);
+    if profile { eprintln!("  reorder: token_build_profiles+dedup = {:?} (n_unique={})", sub_t.elapsed(), unique_token_profs.len()); }
     let new_max_token = if unique_token_profs.is_empty() { 0 } else { unique_token_profs.len() - 1 };
     let active_tokens = unique_token_profs.iter().filter(|p| !p.is_empty()).count();
     let max_token_profile = unique_token_profs.iter().map(|p| p.len()).max().unwrap_or(0);
@@ -1223,25 +1238,42 @@ pub fn reorder_dwa_dimensions(
         max_token_profile,
         total_token_ctx,
     );
-    let token_class_perm_nn = greedy_nearest_neighbor(&unique_token_profs);
     
-    // Also try column-fingerprint ordering (directly optimizes outer range count)
+    // Column-fingerprint ordering is much faster than NN (O(n log n) vs O(n²×W))
+    // and produces comparable results when followed by or-opt local search.
+    // For large token dimensions (>500 classes), skip the expensive NN entirely.
+    let sub_t = std::time::Instant::now();
     let token_class_perm_fp = column_fingerprint_order_with_class_map(
         &unique_weights,
         unique_token_profs.len(),
         Some((&token_class_map, max_token + 1)),
     );
+    if profile { eprintln!("  reorder: token_fp = {:?}", sub_t.elapsed()); }
     
-    // Evaluate both by counting actual outer range breaks
-    let nn_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm_nn, max_token, &token_class_map);
-    let fp_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm_fp, max_token, &token_class_map);
-    
-    let token_class_perm = if fp_outer < nn_outer {
-        crate::debug!(3, "reorder_dwa_dimensions: using fingerprint ordering (outer: {} vs NN: {})", fp_outer, nn_outer);
-        token_class_perm_fp
+    let (token_class_perm, nn_outer, fp_outer) = if unique_token_profs.len() <= 2000 {
+        // Small enough for NN to be fast — compute both and pick better
+        let sub_t = std::time::Instant::now();
+        let token_class_perm_nn = greedy_nearest_neighbor(&unique_token_profs);
+        if profile { eprintln!("  reorder: token_nn = {:?}", sub_t.elapsed()); }
+        
+        let sub_t = std::time::Instant::now();
+        let nn_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm_nn, max_token, &token_class_map);
+        let fp_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm_fp, max_token, &token_class_map);
+        if profile { eprintln!("  reorder: token_count_ranges = {:?}", sub_t.elapsed()); }
+        
+        if fp_outer < nn_outer {
+            crate::debug!(3, "reorder_dwa_dimensions: using fingerprint ordering (outer: {} vs NN: {})", fp_outer, nn_outer);
+            (token_class_perm_fp, nn_outer, fp_outer)
+        } else {
+            crate::debug!(3, "reorder_dwa_dimensions: using NN ordering (outer: {} vs fingerprint: {})", nn_outer, fp_outer);
+            (token_class_perm_nn, nn_outer, fp_outer)
+        }
     } else {
-        crate::debug!(3, "reorder_dwa_dimensions: using NN ordering (outer: {} vs fingerprint: {})", nn_outer, fp_outer);
-        token_class_perm_nn
+        // Large token dimension — skip NN (saves O(n²×W)), use FP directly
+        if profile { eprintln!("  reorder: token_nn = SKIPPED (n_unique={} > 2000)", unique_token_profs.len()); }
+        let fp_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm_fp, max_token, &token_class_map);
+        crate::debug!(3, "reorder_dwa_dimensions: using fingerprint ordering (NN skipped, n={}), outer={}", unique_token_profs.len(), fp_outer);
+        (token_class_perm_fp, fp_outer, fp_outer) // use fp_outer for both to avoid confusion
     };
 
     // Step 3b: Or-opt local search to directly minimize outer range count.
