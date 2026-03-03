@@ -202,29 +202,82 @@ struct VocabTrie {
 
 impl VocabTrie {
     fn build<S: AsRef<[u8]>>(tokens: &[S]) -> Self {
-        let mut nodes = vec![TrieNode {
+        // Estimate node count: total bytes across all tokens (upper bound for trie nodes)
+        let total_bytes: usize = tokens.iter().map(|t| t.as_ref().len()).sum();
+        let mut nodes = Vec::with_capacity(total_bytes + 1);
+        nodes.push(TrieNode {
             children: SmallVec::new(),
             token_idx: u32::MAX,
             subtree_bytes: [0u64; 4],
-        }];
+        });
+
+        // Flat lookup tables for root (depth 0) and depth-1 nodes to avoid linear search
+        let mut root_children = [u32::MAX; 256];
+        // d1_children[byte0][byte1] -> node_id at depth 2
+        let mut d1_children = vec![[u32::MAX; 256]; 256];
 
         for (idx, token) in tokens.iter().enumerate() {
-            let mut cur = 0u32;
-            for &byte in token.as_ref() {
-                let pos = nodes[cur as usize]
+            let bytes = token.as_ref();
+            if bytes.is_empty() {
+                nodes[0].token_idx = idx as u32;
+                continue;
+            }
+
+            // Depth 0 → 1: flat O(1) lookup
+            let b0 = bytes[0] as usize;
+            let mut cur = if root_children[b0] != u32::MAX {
+                root_children[b0]
+            } else {
+                let new_idx = nodes.len() as u32;
+                nodes.push(TrieNode {
+                    children: SmallVec::new(),
+                    token_idx: u32::MAX,
+                    subtree_bytes: [0u64; 4],
+                });
+                root_children[b0] = new_idx;
+                new_idx
+            };
+
+            if bytes.len() == 1 {
+                nodes[cur as usize].token_idx = idx as u32;
+                continue;
+            }
+
+            // Depth 1 → 2: flat O(1) lookup
+            let b1 = bytes[1] as usize;
+            cur = if d1_children[b0][b1] != u32::MAX {
+                d1_children[b0][b1]
+            } else {
+                let new_idx = nodes.len() as u32;
+                nodes.push(TrieNode {
+                    children: SmallVec::new(),
+                    token_idx: u32::MAX,
+                    subtree_bytes: [0u64; 4],
+                });
+                d1_children[b0][b1] = new_idx;
+                new_idx
+            };
+
+            if bytes.len() == 2 {
+                nodes[cur as usize].token_idx = idx as u32;
+                continue;
+            }
+
+            // Depth 2+: binary search (children are small at this depth)
+            for &byte in &bytes[2..] {
+                let result = nodes[cur as usize]
                     .children
-                    .iter()
-                    .position(|&(b, _)| b == byte);
-                cur = match pos {
-                    Some(p) => nodes[cur as usize].children[p].1,
-                    None => {
+                    .binary_search_by_key(&byte, |&(b, _)| b);
+                cur = match result {
+                    Ok(p) => nodes[cur as usize].children[p].1,
+                    Err(p) => {
                         let new_idx = nodes.len() as u32;
                         nodes.push(TrieNode {
                             children: SmallVec::new(),
                             token_idx: u32::MAX,
                             subtree_bytes: [0u64; 4],
                         });
-                        nodes[cur as usize].children.push((byte, new_idx));
+                        nodes[cur as usize].children.insert(p, (byte, new_idx));
                         new_idx
                     }
                 };
@@ -232,20 +285,35 @@ impl VocabTrie {
             nodes[cur as usize].token_idx = idx as u32;
         }
 
-        // Sort children for deterministic traversal
-        for node in &mut nodes {
-            node.children.sort_unstable_by_key(|&(b, _)| b);
+        // Convert flat lookup tables to sorted children lists
+        nodes[0].children = (0..=255u8)
+            .filter(|&b| root_children[b as usize] != u32::MAX)
+            .map(|b| (b, root_children[b as usize]))
+            .collect();
+
+        // Depth-1 nodes: build children from d1_children table
+        for b0 in 0..256 {
+            let parent = root_children[b0];
+            if parent != u32::MAX {
+                nodes[parent as usize].children = (0..=255u8)
+                    .filter(|&b| d1_children[b0][b as usize] != u32::MAX)
+                    .map(|b| (b, d1_children[b0][b as usize]))
+                    .collect();
+            }
         }
+
+        // Depth 2+ children are already sorted (inserted via binary_search)
 
         // Compute subtree byte sets (post-order)
         fn compute_subtree_bytes(nodes: &mut [TrieNode], idx: u32) -> [u64; 4] {
-            let children: SmallVec<[(u8, u32); 4]> = nodes[idx as usize].children.clone();
             let mut bits = [0u64; 4];
-            for &(byte, child_idx) in &children {
+            let num_children = nodes[idx as usize].children.len();
+            for i in 0..num_children {
+                let (byte, child_idx) = nodes[idx as usize].children[i];
                 bits[byte as usize >> 6] |= 1u64 << (byte & 63);
                 let child_bits = compute_subtree_bytes(nodes, child_idx);
-                for i in 0..4 {
-                    bits[i] |= child_bits[i];
+                for j in 0..4 {
+                    bits[j] |= child_bits[j];
                 }
             }
             nodes[idx as usize].subtree_bytes = bits;
@@ -311,69 +379,114 @@ fn run_suffix(
 }
 
 /// Build suffix DAG via BFS from target positions and hash bottom-up.
+/// Uses scratch.targets as input positions.
 fn hash_suffixes(
     dfa: &Dfa,
     slice: &[u8],
-    targets: &[usize],
-    dag: &mut HashMap<usize, (u64, EdgeList)>,
-    queue: &mut Vec<usize>,
-    tmp_mp: &mut Vec<u32>,
+    scratch: &mut Scratch,
 ) {
     let len = slice.len();
-    dag.clear();
-    queue.clear();
+    scratch.dag_generation = scratch.dag_generation.wrapping_add(1);
+    scratch.queue.clear();
 
-    for &pos in targets {
-        if pos <= len && !dag.contains_key(&pos) {
-            queue.push(pos);
-            dag.insert(pos, (0, EdgeList::new()));
+    // Ensure dag is large enough
+    if len + 2 > scratch.dag.len() {
+        scratch.dag.resize_with(len + 2, || DagEntry {
+            hash: 0,
+            edges: EdgeList::new(),
+            generation: 0,
+        });
+    }
+
+    for ti in 0..scratch.targets.len() {
+        let pos = scratch.targets[ti];
+        if pos <= len && !scratch.dag_contains(pos) {
+            scratch.queue.push(pos);
+            scratch.dag[pos].hash = 0;
+            scratch.dag[pos].edges.clear();
+            scratch.dag[pos].generation = scratch.dag_generation;
         }
     }
 
     let mut cursor = 0;
-    while cursor < queue.len() {
-        let pos = queue[cursor];
+    while cursor < scratch.queue.len() {
+        let pos = scratch.queue[cursor];
         cursor += 1;
-        let (end, edges) = run_suffix(dfa, &slice[pos..], pos, tmp_mp);
+        let (end, edges) = run_suffix(dfa, &slice[pos..], pos, &mut scratch.tmp_mp);
         for &(_, target) in &edges {
-            if target <= len && !dag.contains_key(&target) {
-                queue.push(target);
-                dag.insert(target, (0, EdgeList::new()));
+            if target <= len && !scratch.dag_contains(target) {
+                scratch.queue.push(target);
+                scratch.dag[target].hash = 0;
+                scratch.dag[target].edges.clear();
+                scratch.dag[target].generation = scratch.dag_generation;
             }
         }
-        dag.insert(pos, (dfa.completion(end.unwrap_or(STATE_NONE)), edges));
+        scratch.dag[pos].hash = dfa.completion(end.unwrap_or(STATE_NONE));
+        scratch.dag[pos].edges = edges;
     }
 
-    queue.sort_unstable_by(|a, b| b.cmp(a));
-    for idx in 0..queue.len() {
-        let pos = queue[idx];
-        let (ch, edges) = dag[&pos].clone();
+    scratch.queue.sort_unstable_by(|a, b| b.cmp(a));
+    for idx in 0..scratch.queue.len() {
+        let pos = scratch.queue[idx];
         let mut h = new_hasher();
-        h.write_u64(ch);
-        for &(gid, target) in &edges {
+        h.write_u64(scratch.dag[pos].hash);
+        // Need to iterate edges without borrowing dag mutably at the same time
+        for ei in 0..scratch.dag[pos].edges.len() {
+            let (gid, target) = scratch.dag[pos].edges[ei];
             h.write_u64(gid as u64);
-            h.write_u64(dag.get(&target).map_or(0, |e| e.0));
+            h.write_u64(scratch.dag_get_hash(target));
         }
-        dag.get_mut(&pos).unwrap().0 = h.finish();
+        scratch.dag[pos].hash = h.finish();
     }
 }
 
 // ---- Scratch workspace ----
 
+struct DagEntry {
+    hash: u64,
+    edges: EdgeList,
+    generation: u32,
+}
+
 struct Scratch {
-    dag: HashMap<usize, (u64, EdgeList)>,
+    dag: Vec<DagEntry>,
+    dag_generation: u32,
     queue: Vec<usize>,
     tmp_mp: Vec<u32>,
     targets: Vec<usize>,
 }
 
 impl Scratch {
-    fn new(ng: usize) -> Self {
+    fn new(ng: usize, max_token_len: usize) -> Self {
+        let cap = max_token_len + 2;
+        let mut dag = Vec::with_capacity(cap);
+        for _ in 0..cap {
+            dag.push(DagEntry {
+                hash: 0,
+                edges: EdgeList::new(),
+                generation: 0,
+            });
+        }
         Scratch {
-            dag: HashMap::new(),
+            dag,
+            dag_generation: 0,
             queue: Vec::new(),
             tmp_mp: vec![NONE; ng],
             targets: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn dag_contains(&self, pos: usize) -> bool {
+        pos < self.dag.len() && self.dag[pos].generation == self.dag_generation
+    }
+
+    #[inline]
+    fn dag_get_hash(&self, pos: usize) -> u64 {
+        if pos < self.dag.len() && self.dag[pos].generation == self.dag_generation {
+            self.dag[pos].hash
+        } else {
+            0
         }
     }
 }
@@ -422,6 +535,7 @@ fn walk_trie<S: AsRef<[u8]>>(
         let ti = n.token_idx as usize;
         let bytes = strings[ti].as_ref();
 
+
         // Collect suffix targets across all initial states
         scratch.targets.clear();
         for si in 0..ni {
@@ -437,14 +551,7 @@ fn walk_trie<S: AsRef<[u8]>>(
         scratch.targets.dedup();
 
         if !scratch.targets.is_empty() {
-            hash_suffixes(
-                dfa,
-                bytes,
-                &scratch.targets,
-                &mut scratch.dag,
-                &mut scratch.queue,
-                &mut scratch.tmp_mp,
-            );
+            hash_suffixes(dfa, bytes, scratch);
         }
 
         // Fold per-state signatures into token hash
@@ -466,9 +573,7 @@ fn walk_trie<S: AsRef<[u8]>>(
                 for (gid, &pv) in mp_slice.iter().enumerate() {
                     if pv != NONE && pv > 0 {
                         h.write_u64(gid as u64);
-                        h.write_u64(
-                            scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0),
-                        );
+                        h.write_u64(scratch.dag_get_hash(pv as usize));
                     }
                 }
                 h.finish()
@@ -634,13 +739,16 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     }
 
     let ng = dfa.num_groups;
+    let t0 = std::time::Instant::now();
     let trie = VocabTrie::build(strings);
+    let t1 = std::time::Instant::now();
     let max_depth: usize = 256;
 
     let mut hashes = vec![HASH_SEED3; nt];
     let mut states = vec![NONE; max_depth * ni];
     let mut mp = vec![NONE; max_depth * ni * ng];
-    let mut scratch = Scratch::new(ng);
+    let max_token_len = strings.iter().map(|s| s.as_ref().len()).max().unwrap_or(0);
+    let mut scratch = Scratch::new(ng, max_token_len);
 
     // Initialize depth 0: set initial DFA states and their finalizers
     for (si, &s) in initial_states.iter().enumerate() {
@@ -653,16 +761,21 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         states[si] = if dfa.is_dead_end[s] { NONE } else { s as u32 };
     }
 
+    let t2 = std::time::Instant::now();
     walk_trie(
         &trie, 0, &dfa, &mut states, &mut mp, 0, ni, ng, max_depth, strings, &mut scratch,
         &mut hashes,
     );
+    let t3 = std::time::Instant::now();
 
     // Group tokens by hash → equivalence classes
     let mut groups: HashMap<u64, Vec<usize>> = HashMap::with_capacity(nt / 4);
     for (ti, &h) in hashes.iter().enumerate() {
         groups.entry(h).or_default().push(ti);
     }
+    let t4 = std::time::Instant::now();
+    crate::debug!(2, "Vocab equiv simple: dfa={:?}, trie={:?}, walk={:?}, group={:?}, total={:?}",
+        t0 - t0, t1 - t0, t3 - t2, t4 - t3, t4 - t0);
     groups.into_values().collect()
 }
 

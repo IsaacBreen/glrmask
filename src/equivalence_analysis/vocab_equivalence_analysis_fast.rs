@@ -41,6 +41,8 @@ struct Dfa {
     num_groups: usize,
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
+    /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
+    self_loop_bytes: Vec<[u64; 4]>,
 }
 
 impl Dfa {
@@ -145,6 +147,19 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
         h.finish()
     };
 
+    // Precompute self-loop byte sets per state
+    let self_loop_bytes: Vec<[u64; 4]> = (0..transitions.len())
+        .map(|s| {
+            let mut bits = [0u64; 4];
+            for b in 0..=255u8 {
+                if transitions[s][b as usize] == s as u32 {
+                    bits[b as usize >> 6] |= 1u64 << (b & 63);
+                }
+            }
+            bits
+        })
+        .collect();
+
     Dfa {
         start_state: dfa.start_state,
         transitions,
@@ -153,6 +168,7 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
         num_groups,
         completion_hash,
         none_completion_hash,
+        self_loop_bytes,
     }
 }
 
@@ -242,6 +258,38 @@ fn run_batch(
             active_len = next_len;
             if active_len == 0 {
                 break;
+            }
+
+            // Self-loop early exit: if all active states self-loop on every remaining byte,
+            // greedy match positions advance to token_length and we can stop.
+            if pos + 1 < len {
+                // Intersect self_loop_bytes for all active states
+                let mut sl = [!0u64; 4];
+                for idx in 0..active_len {
+                    let i = scratch.active_indices[idx];
+                    let s = scratch.current_states[i];
+                    for k in 0..4 {
+                        sl[k] &= dfa.self_loop_bytes[s][k];
+                    }
+                }
+                // Check if all remaining bytes are in the intersection
+                let all_self_loop = slice[pos + 1..].iter().all(|&b| {
+                    sl[b as usize >> 6] & (1u64 << (b & 63)) != 0
+                });
+                if all_self_loop {
+                    let token_len = len as u32;
+                    for idx in 0..active_len {
+                        let i = scratch.active_indices[idx];
+                        let base = i * num_groups;
+                        let s = scratch.current_states[i];
+                        for f in &dfa.finalizers[s] {
+                            if f.gid < num_groups && !f.non_greedy {
+                                scratch.match_positions[base + f.gid] = token_len;
+                            }
+                        }
+                    }
+                    break;
+                }
             }
         }
     }
@@ -417,7 +465,9 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     _ever_allowed_by_group: Option<&[Vec<bool>]>,
     _group_to_class: Option<&[usize]>,
 ) -> VocabEquivalenceResult {
+    let t0 = std::time::Instant::now();
     let dfa = build_dfa(regex);
+    let t1 = std::time::Instant::now();
     let num_tokens = strings.len();
     let num_states = initial_states.len();
 
@@ -438,6 +488,8 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         let batch_end = (batch_start + batch_size).min(num_states);
         let batch = &initial_states[batch_start..batch_end];
 
+        let t_par0 = std::time::Instant::now();
+
         let active_sigs: Vec<(usize, u64)> = active_indices
             .par_iter()
             .map_init(
@@ -448,6 +500,8 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
                 },
             )
             .collect();
+
+        let t_par1 = std::time::Instant::now();
 
         // Refine partition: group tokens by (old_class, signature)
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
@@ -478,11 +532,16 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             }
         }
         active_indices = new_active;
+        crate::debug!(2, "  batch {}: par_iter={:?}, refine={:?}",
+            batch_start, t_par1 - t_par0, std::time::Instant::now() - t_par1);
     }
 
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::with_capacity(next_class_id);
     for (ti, &cid) in partition.iter().enumerate() {
         groups.entry(cid).or_default().push(ti);
     }
+    let t2 = std::time::Instant::now();
+    crate::debug!(2, "Vocab equiv FAST: dfa={:?}, par_compute={:?}, total={:?}",
+        t1 - t0, t2 - t1, t2 - t0);
     groups.into_values().collect()
 }
