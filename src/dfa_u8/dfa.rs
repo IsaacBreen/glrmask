@@ -8,7 +8,7 @@ use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use ahash::AHashMap;
 use profiler_macro::time_it;
 use crate::datastructures::compressed_state_set::{CompressedStateSet, DenseStateSet, SparseStateSet};
@@ -1393,6 +1393,11 @@ impl ExprGroups {
             let prefix = &repeat_infos[&plan[0]].prefix;
             let suffix = &repeat_infos[&plan[0]].suffix;
 
+            // Apply bound cap to per-group values
+            let bound_cap = Expr::repeat_bounded_cap();
+            largest_max = largest_max.min(bound_cap);
+            global_min = global_min.min(bound_cap);
+
             // For unbounded groups, the chain max_val is the largest bounded max_val
             // (the chain self-loops at max_val to handle unbounded)
             let chain_max = if has_unbounded && largest_max == 0 {
@@ -1439,12 +1444,12 @@ impl ExprGroups {
                 }
 
                 let min_pos = match &info.kind {
-                    RepeatKind::Bounded { min, .. } => *min,
-                    RepeatKind::Unbounded { min } => *min,
+                    RepeatKind::Bounded { min, .. } => (*min).min(bound_cap),
+                    RepeatKind::Unbounded { min } => (*min).min(bound_cap),
                 };
 
                 let max_pos = match &info.kind {
-                    RepeatKind::Bounded { max_val, .. } => Some(*max_val),
+                    RepeatKind::Bounded { max_val, .. } => Some((*max_val).min(bound_cap)),
                     RepeatKind::Unbounded { .. } => None,
                 };
 
@@ -1453,7 +1458,7 @@ impl ExprGroups {
 
             // Find the primary group (largest max_val bounded, or any bounded)
             let primary_idx = group_conts.iter().position(|&(gidx, _, _, _)| {
-                matches!(&repeat_infos[&gidx].kind, RepeatKind::Bounded { max_val, .. } if *max_val == chain_max)
+                matches!(&repeat_infos[&gidx].kind, RepeatKind::Bounded { max_val, .. } if (*max_val).min(bound_cap) == chain_max)
             }).unwrap_or(0);
 
             let (_, primary_cont, primary_min, _) = group_conts[primary_idx];
@@ -1587,6 +1592,17 @@ impl Expr {
             Expr::Shared(inner) => Self::repeat_inner_kind(inner.as_ref()),
             _ => "subexpr",
         }
+    }
+
+    fn repeat_bounded_cap() -> usize {
+        static CAP: OnceLock<usize> = OnceLock::new();
+        *CAP.get_or_init(|| {
+            std::env::var("SEP1_REPEAT_BOUNDED_MAX_CAP")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(512)
+        })
     }
 
     fn count_nodes(&self) -> usize {
@@ -1733,9 +1749,23 @@ impl Expr {
             }
 
             Expr::RepeatBounded { inner, min, max } => {
-                let min = *min;
+                let mut min = *min;
                 match *max {
                     Some(max_val) => {
+                        let mut max_val = max_val;
+                        let bound_cap = Self::repeat_bounded_cap();
+                        if min > bound_cap || max_val > bound_cap {
+                            let orig_min = min;
+                            let orig_max = max_val;
+                            min = min.min(bound_cap);
+                            max_val = max_val.min(bound_cap);
+                            if max_val < min {
+                                max_val = min;
+                            }
+                            crate::debug!(3, "RepeatBounded cap applied: {{{}..{}}} -> {{{}..{}}} (cap={})",
+                                orig_min, orig_max, min, max_val, bound_cap);
+                        }
+
                         if min > max_val {
                             return nfa.add_state();
                         }

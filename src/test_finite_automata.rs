@@ -1086,6 +1086,119 @@ mod test_python {
             "NAME token should be matched at position 5"
         );
     }
+
+    /// Test that large RepeatBounded expressions build fast using pre-minimization.
+    #[test]
+    fn test_repeat_bounded_large_fast() {
+        use std::time::Instant;
+
+        // Build (STRING_CHAR | ESCAPE_SEQ){0,65535} where:
+        // STRING_CHAR = any byte except " and \
+        // ESCAPE_SEQ = \ followed by one of: " \ / b f n r t
+        let string_char = eat_u8_set({
+            let mut s = U8Set::all();
+            s.remove(b'"');
+            s.remove(b'\\');
+            s
+        });
+        let escape_seq = seq![
+            eat_u8(b'\\'),
+            eat_u8_set({
+                let mut s = U8Set::none();
+                for &c in &[b'"', b'\\', b'/', b'b', b'f', b'n', b'r', b't'] {
+                    s.insert(c);
+                }
+                s
+            })
+        ];
+        let inner = choice![string_char, escape_seq];
+
+        let start = Instant::now();
+        let regex = Expr::RepeatBounded {
+            inner: Box::new(inner.clone()),
+            min: 0,
+            max: Some(65535),
+        }.build();
+        let build_time = start.elapsed();
+
+        println!("RepeatBounded(0, 65535) DFA: {} states, built in {:.2?}", regex.dfa.states.len(), build_time);
+
+        // Should build in under 5 seconds (previously would take >60s or OOM)
+        assert!(build_time.as_secs() < 5, "Build took too long: {:.2?}", build_time);
+
+        // Correctness: empty string should match (min=0)
+        assert!(regex.definitely_fully_matches(b""));
+        // Single char should match
+        assert!(regex.definitely_fully_matches(b"a"));
+        // Escape sequence should match
+        assert!(regex.definitely_fully_matches(b"\\n"));
+        // Should reject invalid escape
+        assert!(!regex.could_match(b"\\z"));
+        // Should reject quote
+        assert!(!regex.could_match(b"\""));
+    }
+
+    /// Test RepeatBounded in a multi-group tokenizer context (the real bottleneck).
+    #[test]
+    fn test_repeat_bounded_large_multi_group() {
+        use std::time::Instant;
+
+        let string_char = eat_u8_set({
+            let mut s = U8Set::all();
+            s.remove(b'"');
+            s.remove(b'\\');
+            s
+        });
+        let escape_seq = seq![
+            eat_u8(b'\\'),
+            eat_u8_set({
+                let mut s = U8Set::none();
+                for &c in &[b'"', b'\\', b'/', b'b', b'f', b'n', b'r', b't'] {
+                    s.insert(c);
+                }
+                s
+            })
+        ];
+        let inner = choice![string_char, escape_seq];
+
+        let string_terminal = seq![
+            eat_u8(b'"'),
+            Expr::RepeatBounded {
+                inner: Box::new(inner.clone()),
+                min: 0,
+                max: Some(65535),
+            },
+            eat_u8(b'"'),
+        ];
+
+        // Number terminal: [0-9]+
+        let number = rep1(eat_u8_set({
+            let mut s = U8Set::none();
+            for c in b'0'..=b'9' { s.insert(c); }
+            s
+        }));
+
+        // Build combined tokenizer with multiple groups
+        let start = Instant::now();
+        let regex = ExprGroups {
+            groups: vec![
+                ExprGroup { expr: string_terminal, is_non_greedy: false },
+                ExprGroup { expr: number, is_non_greedy: false },
+            ],
+        }.build();
+        let build_time = start.elapsed();
+
+        println!("Multi-group tokenizer with RepeatBounded(0, 65535): {} states, built in {:.2?}",
+            regex.dfa.states.len(), build_time);
+
+        // Should build in under 10 seconds
+        assert!(build_time.as_secs() < 10, "Build took too long: {:.2?}", build_time);
+
+        // String should match group 0
+        assert!(regex.definitely_matches(b"\"hello\""));
+        // Number should match group 1
+        assert!(regex.definitely_matches(b"123"));
+    }
 }
 
 #[cfg(test)]
