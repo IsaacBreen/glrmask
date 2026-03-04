@@ -22,6 +22,14 @@ use crate::dwa_i32::dwa::DWA;
 use range_set_blaze::RangeSetBlaze;
 use hashbrown::HashMap;
 
+/// Read a numeric environment variable, returning `default` if unset or unparseable.
+fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
 /// Deduplicate profiles: group identical profiles into equivalence classes.
 ///
 /// Returns:
@@ -96,8 +104,9 @@ fn greedy_nearest_neighbor(profiles: &[Vec<u32>]) -> Vec<usize> {
     // Choose strategy based on scale
     // Use total work estimate: O(n^2 * num_words) for full NN.
     // Budget ~10B ops (about 2s on modern hardware).
+    let nn_work_budget: u64 = env_or("SEP1_REORDER_NN_WORK_BUDGET", 10_000_000_000);
     let work_estimate = (active_count as u64) * (active_count as u64) * (num_words as u64);
-    let order = if work_estimate > 10_000_000_000 {
+    let order = if work_estimate > nn_work_budget {
         // Large scale: use lexicographic sort on bitvectors (locality-preserving)
         // then refine with local NN within a window
         greedy_nn_large_scale(&active_bvs, active_count, num_words)
@@ -218,11 +227,14 @@ fn greedy_nn_large_scale(active_bvs: &[Vec<u64>], active_count: usize, _num_word
     }
 
     // --- 2-opt local improvement ---
-    let max_2opt_iters = 10;
-    let max_segment = 500usize.min(order.len() / 2);
+    let max_2opt_iters: usize = env_or("SEP1_REORDER_2OPT_MAX_ITERS", 10);
+    let max_segment_default = 500usize.min(order.len() / 2);
+    let max_segment: usize = env_or("SEP1_REORDER_2OPT_MAX_SEGMENT", max_segment_default);
     // Use step>1 for very large problems to keep time bounded
-    let step = if active_count > 10000 { 2 } else { 1 };
-    let time_limit = std::time::Duration::from_secs(5);
+    let step_threshold: usize = env_or("SEP1_REORDER_2OPT_STEP_THRESHOLD", 10000);
+    let step = if active_count > step_threshold { 2 } else { 1 };
+    let time_limit_ms: u64 = env_or("SEP1_REORDER_2OPT_TIME_LIMIT_MS", 5000);
+    let time_limit = std::time::Duration::from_millis(time_limit_ms);
     let opt_start = std::time::Instant::now();
 
     for iter in 0..max_2opt_iters {
@@ -433,12 +445,13 @@ fn column_fingerprint_order_with_class_map(
     // Sort by number of distinct columns (ascending) — most constrained first
     weight_info.sort_unstable_by_key(|&(_, num)| num);
     
-    // Build fingerprints using top-32 most constrained weights
-    let max_fp_len = 32usize.min(weight_info.len());
+    // Build fingerprints using top-N most constrained weights
+    let max_fp_len_cfg: usize = env_or("SEP1_REORDER_MAX_FP_LEN", 32);
+    let max_fp_len = max_fp_len_cfg.min(weight_info.len());
     let selected_weights: Vec<usize> = weight_info.iter().take(max_fp_len).map(|&(idx, _)| idx).collect();
-    
+
     let mut fingerprints: Vec<Vec<u32>> = vec![vec![not_present; max_fp_len]; num_classes];
-    
+
     for (fp_pos, &w_idx) in selected_weights.iter().enumerate() {
         let weight = unique_weights[w_idx];
         let mut col_id: u32 = 0;
@@ -528,7 +541,8 @@ fn column_fingerprint_tsid_order(
     }
     weight_info.sort_unstable_by_key(|&(_, num)| num);
     
-    let max_fp_len = 32usize.min(weight_info.len());
+    let max_fp_len_cfg: usize = env_or("SEP1_REORDER_MAX_FP_LEN", 32);
+    let max_fp_len = max_fp_len_cfg.min(weight_info.len());
     let selected_weights: Vec<usize> = weight_info.iter().take(max_fp_len).map(|&(idx, _)| idx).collect();
     
     let mut fingerprints: Vec<Vec<u32>> = vec![vec![not_present; max_fp_len]; num_classes];
@@ -726,9 +740,11 @@ fn or_opt_outer_ranges(
 
     // For large dimensions, limit inner-loop search to a window around the
     // source to avoid O(n²) scanning per iteration. Full scan on first iter.
-    let search_radius = if num_classes > 2000 { 250 } else { num_classes };
+    let nn_skip_threshold: usize = env_or("SEP1_REORDER_NN_SKIP_THRESHOLD", 2000);
+    let search_radius_default = if num_classes > nn_skip_threshold { 250 } else { num_classes };
+    let search_radius: usize = env_or("SEP1_REORDER_OR_OPT_SEARCH_RADIUS", search_radius_default);
 
-    let max_iters = 20;
+    let max_iters: usize = env_or("SEP1_REORDER_OR_OPT_MAX_ITERS", 20);
     for iter in 0..max_iters {
         if start.elapsed() > time_limit {
             break;
@@ -1124,6 +1140,7 @@ pub fn reorder_dwa_dimensions(
 ) -> (Vec<usize>, Vec<usize>, usize, usize) {
     let start = std::time::Instant::now();
     let profile = std::env::var("PROFILE_BUILD_TOKENIZER").is_ok();
+    let nn_skip_threshold: usize = env_or("SEP1_REORDER_NN_SKIP_THRESHOLD", 2000);
 
     // When RANGEMAP_TSID_OUTER is active, the RangeMap outer key is the tsid dimension
     // and the inner value is the token dimension. We swap the parameters so the rest
@@ -1188,7 +1205,7 @@ pub fn reorder_dwa_dimensions(
     );
     if profile { eprintln!("  reorder: tsid_fp = {:?}", sub_t.elapsed()); }
     
-    let tsid_class_perm = if unique_tsid_profs.len() <= 2000 {
+    let tsid_class_perm = if unique_tsid_profs.len() <= nn_skip_threshold {
         // Small enough for NN
         let sub_t = std::time::Instant::now();
         let tsid_class_perm_nn = greedy_nearest_neighbor(&unique_tsid_profs);
@@ -1207,7 +1224,7 @@ pub fn reorder_dwa_dimensions(
         }
     } else {
         // Large tsid dimension — skip NN, use FP directly
-        if profile { eprintln!("  reorder: tsid_nn = SKIPPED (n_unique={} > 2000)", new_num_tsids); }
+        if profile { eprintln!("  reorder: tsid_nn = SKIPPED (n_unique={} > {})", new_num_tsids, nn_skip_threshold); }
         crate::debug!(3, "reorder_dwa_dimensions: tsid: using fingerprint ordering (NN skipped, n={})", new_num_tsids);
         tsid_class_perm_fp
     };
@@ -1250,7 +1267,7 @@ pub fn reorder_dwa_dimensions(
     );
     if profile { eprintln!("  reorder: token_fp = {:?}", sub_t.elapsed()); }
     
-    let (token_class_perm, nn_outer, fp_outer) = if unique_token_profs.len() <= 2000 {
+    let (token_class_perm, nn_outer, fp_outer) = if unique_token_profs.len() <= nn_skip_threshold {
         // Small enough for NN to be fast — compute both and pick better
         let sub_t = std::time::Instant::now();
         let token_class_perm_nn = greedy_nearest_neighbor(&unique_token_profs);
@@ -1270,7 +1287,7 @@ pub fn reorder_dwa_dimensions(
         }
     } else {
         // Large token dimension — skip NN (saves O(n²×W)), use FP directly
-        if profile { eprintln!("  reorder: token_nn = SKIPPED (n_unique={} > 2000)", unique_token_profs.len()); }
+        if profile { eprintln!("  reorder: token_nn = SKIPPED (n_unique={} > {})", unique_token_profs.len(), nn_skip_threshold); }
         let fp_outer = count_outer_ranges_for_ordering(&unique_weights, &token_class_perm_fp, max_token, &token_class_map);
         crate::debug!(3, "reorder_dwa_dimensions: using fingerprint ordering (NN skipped, n={}), outer={}", unique_token_profs.len(), fp_outer);
         (token_class_perm_fp, fp_outer, fp_outer) // use fp_outer for both to avoid confusion
@@ -1280,10 +1297,12 @@ pub fn reorder_dwa_dimensions(
     // For large dimensions (tsid-outer), use a tight budget — NN ordering
     // already captures 97%+ of the benefit and the first or-opt iteration
     // provides most of the remaining improvement.
-    let or_opt_budget = if unique_token_profs.len() > 2000 {
-        std::time::Duration::from_millis(50)
+    let or_opt_budget_large_ms: u64 = env_or("SEP1_REORDER_OR_OPT_BUDGET_LARGE_MS", 50);
+    let or_opt_budget_small_ms: u64 = env_or("SEP1_REORDER_OR_OPT_BUDGET_SMALL_MS", 100);
+    let or_opt_budget = if unique_token_profs.len() > nn_skip_threshold {
+        std::time::Duration::from_millis(or_opt_budget_large_ms)
     } else {
-        std::time::Duration::from_millis(100)
+        std::time::Duration::from_millis(or_opt_budget_small_ms)
     };
     let token_class_perm = or_opt_outer_ranges(
         &unique_weights,
