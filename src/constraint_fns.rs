@@ -610,7 +610,6 @@ impl<'a> GrammarConstraintState<'a> {
             // where specific and DEFAULT transitions go to different destinations — previously
             // this incorrectly merged accumulators and followed only one destination, losing
             // tokens from the other path.
-            let walk_trace = std::env::var("DEBUG_WALK_TRACE").is_ok();
             // Active pairs: (dwa_state_id, accumulated_tokens)
             // In the common case this has exactly one element (no forks).
             let mut active: Vec<(WAStateID, RangeSetBlaze<usize>)> = vec![(dwa_start_state_id, seed_acc)];
@@ -623,19 +622,11 @@ impl<'a> GrammarConstraintState<'a> {
                 for (current_wa_state_id, current_acc) in &active {
                     let dwa_state = &dwa.states[*current_wa_state_id];
 
-                    if walk_trace {
-                        eprintln!("[WALK] step: dwa_state={}, parser_state_id={}, acc={:?}",
-                            current_wa_state_id, parser_state_id, current_acc);
-                    }
-
                     // Check final weight
                     if let Some(final_weight) = &dwa_state.final_weight {
                         let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                         let final_tokens = get_proj(final_weight);
                         let final_result = current_acc & &*final_tokens;
-                        if walk_trace {
-                            eprintln!("[WALK]   final_weight: tokens={:?}, result={:?}", *final_tokens, final_result);
-                        }
                         if let Some(t0) = t0 {
                             wl_final_intersect_ns += t0.elapsed().as_nanos() as u64;
                             wl_final_count += 1;
@@ -664,10 +655,6 @@ impl<'a> GrammarConstraintState<'a> {
                         if let Some(t0) = t0 {
                             wl_intersect_ns += t0.elapsed().as_nanos() as u64;
                             wl_intersect_count += 1;
-                        }
-                        if walk_trace {
-                            eprintln!("[WALK]   trans: target={}, weight={:?}, intersected={:?}",
-                                target_wa_state_id, *trans_tokens, intersected);
                         }
                         if !intersected.is_empty() {
                             // Merge with existing entry for this target, or create new

@@ -1240,46 +1240,6 @@ impl DWA {
         if chain_propagated > 0 {
             crate::debug!(5, "propagate_final_weights: {} additional states via DEFAULT chain following", chain_propagated);
         }
-        
-        // Debug: count states still lacking final_weight despite having DEFAULT
-        {
-            let mut still_missing = 0usize;
-            let mut chain_examples: Vec<String> = Vec::new();
-            for sid in 0..self.states.len() {
-                if self.states[sid].final_weight.is_some() { continue; }
-                if !self.states[sid].transitions.contains_key(&default_label) { continue; }
-                still_missing += 1;
-                if chain_examples.len() < 5 {
-                    // Follow the DEFAULT chain, also showing non-DEFAULT transitions at each step
-                    let mut chain = Vec::new();
-                    let mut cur = sid;
-                    for _ in 0..15 {
-                        let n_trans = self.states[cur].transitions.len();
-                        let has_default = self.states[cur].transitions.contains_key(&default_label);
-                        let has_fw = self.states[cur].final_weight.is_some();
-                        let non_default_labels: Vec<Label> = self.states[cur].transitions.keys()
-                            .filter(|&&l| l != default_label)
-                            .copied()
-                            .collect();
-                        chain.push(format!("s{}(trans={},def={},fw={},other={:?})", 
-                            cur, n_trans, has_default, has_fw, non_default_labels));
-                        if has_fw { break; }
-                        if let Some(&t) = self.states[cur].transitions.get(&default_label) {
-                            cur = t;
-                        } else {
-                            break;
-                        }
-                    }
-                    chain_examples.push(format!("  chain: {}", chain.join(" -> ")));
-                }
-            }
-            if still_missing > 0 {
-                crate::debug!(5, "propagate_final_weights: {} states STILL missing final_weight with DEFAULT", still_missing);
-                for ex in &chain_examples {
-                    crate::debug!(5, "{}", ex);
-                }
-            }
-        }
 
         // Step 3: Widen incoming transition weights to propagated states.
         // The DWA transitions leading to propagated states may not carry the

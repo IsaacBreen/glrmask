@@ -1613,20 +1613,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     // final_dwa.minimize();
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
 
-    // Debug dump of parser DWA structure (only at debug level >= 6 and small DWAs)
-    if crate::r#macro::is_debug_level_enabled(6) && final_dwa.states.len() <= 30 {
-        eprintln!("=== PARSER DWA DUMP ({} states) ===", final_dwa.states.len());
-        for (i, state) in final_dwa.states.iter().enumerate() {
-            let is_start = i == final_dwa.body.start_state;
-            eprintln!("  State {}{}: final_weight={:?}",
-                i, if is_start { " [START]" } else { "" }, state.final_weight);
-            for (label, dest) in &state.transitions {
-                let weight = state.trans_weights.get(label);
-                eprintln!("    label={} -> dest={} weight={:?}", label, dest, weight);
-            }
-        }
-        eprintln!("=== END PARSER DWA DUMP ===");
-    }
     if let Some(avg_path_len) = final_dwa.average_path_length() {
         crate::debug!(4, "Parser DWA average path length: {:.2}", avg_path_len);
     }
