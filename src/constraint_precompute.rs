@@ -392,18 +392,41 @@ pub(crate) fn prune_nwa_disallowed_follows(
         return false;
     }
 
-    // Precompute disallowed_after[label] = all terminals NOT in ever_allowed[label]
-    // These are terminals that can NEVER follow label L in any production.
-    let all_terminals: HashSet<Label> = (0..terminals_count as Label).collect();
-    let disallowed_after: Vec<HashSet<Label>> = (0..terminals_count)
+    // Use a compact bitset for terminal sets (much faster than HashSet for 157 terminals)
+    let words_needed = (terminals_count + 63) / 64;
+
+    // Inline bitset operations
+    let mut new_bitset = || vec![0u64; words_needed];
+    let set_bit = |bs: &mut [u64], idx: usize| {
+        if idx < terminals_count { bs[idx / 64] |= 1u64 << (idx % 64); }
+    };
+    let test_bit = |bs: &[u64], idx: usize| -> bool {
+        idx < terminals_count && (bs[idx / 64] & (1u64 << (idx % 64))) != 0
+    };
+    let is_empty = |bs: &[u64]| -> bool { bs.iter().all(|&w| w == 0) };
+    let union_into = |dst: &mut [u64], src: &[u64]| {
+        for i in 0..dst.len() { dst[i] |= src[i]; }
+    };
+    let intersect_into = |dst: &mut [u64], src: &[u64]| {
+        for i in 0..dst.len() { dst[i] &= src[i]; }
+    };
+
+    // Precompute disallowed_after[label] as bitsets
+    let mut all_terminals_bs = new_bitset();
+    for i in 0..terminals_count { set_bit(&mut all_terminals_bs, i); }
+
+    let disallowed_after: Vec<Vec<u64>> = (0..terminals_count)
         .map(|idx| {
             if idx < ever_allowed_by_label.len() {
-                let allowed: HashSet<Label> =
-                    ever_allowed_by_label[idx].iter().copied().collect();
-                all_terminals.difference(&allowed).copied().collect()
+                let mut bs = all_terminals_bs.clone();
+                for &allowed_label in &ever_allowed_by_label[idx] {
+                    if (allowed_label as usize) < terminals_count {
+                        bs[allowed_label as usize / 64] &= !(1u64 << (allowed_label as usize % 64));
+                    }
+                }
+                bs
             } else {
-                // Unknown terminal: no follow info, disallow nothing
-                HashSet::new()
+                new_bitset() // no follow info → disallow nothing
             }
         })
         .collect();
@@ -428,46 +451,33 @@ pub(crate) fn prune_nwa_disallowed_follows(
         }
     }
 
-    // At each state: which terminals are disallowed on outgoing transitions.
-    // Use Option to distinguish "not yet visited" from "empty disallowed set".
-    let mut disallowed: Vec<Option<HashSet<Label>>> = vec![None; num_states];
-
-    // Initialize start states with empty disallowed set
-    for &start in &nwa.body.start_states {
-        disallowed[start] = Some(HashSet::new());
-    }
-
     let mut topo_order: Vec<NWAStateID> = Vec::with_capacity(num_states);
+
+    // First pass: union semantics (collect all disallowed)
+    let mut disallowed: Vec<Option<Vec<u64>>> = vec![None; num_states];
+    for &start in &nwa.body.start_states {
+        disallowed[start] = Some(new_bitset());
+    }
 
     while let Some(sid) = topo_queue.pop_front() {
         topo_order.push(sid);
 
-        // Propagate disallowed sets to successors
         let state = &nwa.states[sid];
-        let src_disallowed = disallowed[sid].clone().unwrap_or_default();
+        let src_disallowed = disallowed[sid].clone().unwrap_or_else(|| new_bitset());
 
-        // Epsilon transitions: transmit disallowed set unchanged
         for (dst, _) in &state.epsilons {
-            let dst_set = disallowed[*dst].get_or_insert_with(HashSet::new);
-            // Union: if ANY incoming path disallows a terminal, *we cannot prune it*
-            // because another path might allow it. So we use INTERSECTION semantics:
-            // only disallow a terminal if ALL incoming paths disallow it.
-            // But for first visit, just copy.
-            // Actually, we need intersection: a terminal can only be pruned if
-            // it's disallowed on ALL paths reaching this state.
-            // We'll handle this with a second pass. For now, collect all incoming sets.
-            dst_set.extend(src_disallowed.iter().copied());
+            let dst_set = disallowed[*dst].get_or_insert_with(|| new_bitset());
+            union_into(dst_set, &src_disallowed);
         }
 
-        // Label transitions: transmit disallowed_after[label] to destination
         for (&label, targets) in &state.transitions {
             if label < 0 || label as usize >= terminals_count {
                 continue;
             }
             let label_disallowed = &disallowed_after[label as usize];
             for (dst, _) in targets {
-                let dst_set = disallowed[*dst].get_or_insert_with(HashSet::new);
-                dst_set.extend(label_disallowed.iter().copied());
+                let dst_set = disallowed[*dst].get_or_insert_with(|| new_bitset());
+                union_into(dst_set, label_disallowed);
             }
         }
 
@@ -488,24 +498,22 @@ pub(crate) fn prune_nwa_disallowed_follows(
         }
     }
 
-    // Re-propagate with intersection semantics:
-    // A terminal is disallowed at a state only if ALL incoming edges agree it's disallowed.
-    // We do a second forward pass where we intersect rather than union.
-    let mut disallowed_intersected: Vec<Option<HashSet<Label>>> = vec![None; num_states];
+    // Second pass: intersection semantics
+    let mut disallowed_intersected: Vec<Option<Vec<u64>>> = vec![None; num_states];
     for &start in &nwa.body.start_states {
-        disallowed_intersected[start] = Some(HashSet::new());
+        disallowed_intersected[start] = Some(new_bitset());
     }
 
     for &sid in &topo_order {
         let state = &nwa.states[sid];
-        let src_disallowed = disallowed_intersected[sid].clone().unwrap_or_default();
+        let src_disallowed = disallowed_intersected[sid].clone().unwrap_or_else(|| new_bitset());
 
         for (dst, _) in &state.epsilons {
             let entry = &mut disallowed_intersected[*dst];
             match entry {
                 None => *entry = Some(src_disallowed.clone()),
                 Some(existing) => {
-                    existing.retain(|t| src_disallowed.contains(t));
+                    intersect_into(existing, &src_disallowed);
                 }
             }
         }
@@ -520,7 +528,7 @@ pub(crate) fn prune_nwa_disallowed_follows(
                 match entry {
                     None => *entry = Some(label_disallowed.clone()),
                     Some(existing) => {
-                        existing.retain(|t| label_disallowed.contains(t));
+                        intersect_into(existing, label_disallowed);
                     }
                 }
             }
@@ -532,7 +540,7 @@ pub(crate) fn prune_nwa_disallowed_follows(
     let mut total_pruned = 0usize;
     for sid in 0..num_states {
         let state_disallowed = match &disallowed_intersected[sid] {
-            Some(d) if !d.is_empty() => d,
+            Some(d) if !is_empty(d) => d,
             _ => continue,
         };
 
@@ -540,7 +548,7 @@ pub(crate) fn prune_nwa_disallowed_follows(
         let mut labels_to_remove: Vec<Label> = Vec::new();
 
         for (&label, targets) in state.transitions.iter() {
-            if state_disallowed.contains(&label) {
+            if label >= 0 && (label as usize) < terminals_count && test_bit(state_disallowed, label as usize) {
                 labels_to_remove.push(label);
                 total_pruned += targets.len();
             }

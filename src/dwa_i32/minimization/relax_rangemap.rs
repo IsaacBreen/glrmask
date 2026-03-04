@@ -46,6 +46,22 @@ impl DWA {
             return false;
         }
 
+        // Budget: skip relaxation for very large DWAs where the O(entries × fwd_entries)
+        // merge phase becomes prohibitively expensive (e.g., 16K entries → 31s).
+        // The threshold of 8000 total entries keeps reasonable schemas fast while
+        // avoiding pathological blowup.
+        let budget_max_entries: usize = std::env::var("RELAX_RM_MAX_ENTRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8000);
+        if before_ranges > budget_max_entries {
+            eprintln!(
+                "RELAX_RM: skipped ({} entries > {} budget)",
+                before_ranges, budget_max_entries
+            );
+            return false;
+        }
+
         let t0 = std::time::Instant::now();
 
         // Compute the "all" weight
@@ -55,19 +71,36 @@ impl DWA {
         let forward = self.compute_forward_reach_2d(num_tsids, &all_rm);
         let t_fwd = t0.elapsed();
 
+        // Time budget: abort merge phase if we exceed the budget
+        let merge_budget = std::time::Duration::from_millis(
+            std::env::var("RELAX_RM_BUDGET_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(500),
+        );
+        let merge_start = std::time::Instant::now();
+
         // Widening pass: merge adjacent entries where sym_diff positions are dead
         let mut changed = false;
         let mut weights_modified = 0usize;
         let mut entries_saved = 0usize;
         let mut merges_blocked = 0usize;
+        let mut budget_exceeded = false;
 
         for state_id in 0..self.states.len() {
+            if budget_exceeded {
+                break;
+            }
             let fwd = &forward[state_id];
 
             // Process transition weights
             let labels: Vec<Label> = self.states[state_id].transitions.keys().cloned().collect();
-            for label in labels {
-                if let Some(weight) = self.states[state_id].trans_weights.get(&label).cloned() {
+            for label in &labels {
+                if merge_start.elapsed() > merge_budget {
+                    budget_exceeded = true;
+                    break;
+                }
+                if let Some(weight) = self.states[state_id].trans_weights.get(label).cloned() {
                     if let AbstractWeight::RangeMap(ref rm) = weight {
                         let old_count = rm.map.range_values().count();
                         if old_count <= 1 {
@@ -78,7 +111,7 @@ impl DWA {
                             merges_blocked += blocked;
                             weights_modified += 1;
                             self.states.0[state_id].trans_weights.insert(
-                                label,
+                                *label,
                                 AbstractWeight::RangeMap(intern_rangemap(new_rm)),
                             );
                             changed = true;
@@ -90,19 +123,21 @@ impl DWA {
             }
 
             // Process final weight
-            if let Some(ref fw) = self.states[state_id].final_weight.clone() {
-                if let AbstractWeight::RangeMap(ref rm) = fw {
-                    let old_count = rm.map.range_values().count();
-                    if old_count <= 1 {
-                        continue;
-                    }
-                    if let Some((new_rm, saved, blocked)) = widen_merge_entries(rm, fwd) {
-                        entries_saved += saved;
-                        merges_blocked += blocked;
-                        weights_modified += 1;
-                        self.states.0[state_id].final_weight =
-                            Some(AbstractWeight::RangeMap(intern_rangemap(new_rm)));
-                        changed = true;
+            if !budget_exceeded {
+                if let Some(ref fw) = self.states[state_id].final_weight.clone() {
+                    if let AbstractWeight::RangeMap(ref rm) = fw {
+                        let old_count = rm.map.range_values().count();
+                        if old_count <= 1 {
+                            continue;
+                        }
+                        if let Some((new_rm, saved, blocked)) = widen_merge_entries(rm, fwd) {
+                            entries_saved += saved;
+                            merges_blocked += blocked;
+                            weights_modified += 1;
+                            self.states.0[state_id].final_weight =
+                                Some(AbstractWeight::RangeMap(intern_rangemap(new_rm)));
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -112,7 +147,7 @@ impl DWA {
 
         if std::env::var("ANALYZE_RANGEMAP_WEIGHTS").is_ok() || changed {
             eprintln!(
-                "RELAX_RM: entries {} -> {} ({:.1}% reduction), {} weights modified, {} entries saved, {} merges blocked (fwd={:?})",
+                "RELAX_RM: entries {} -> {} ({:.1}% reduction), {} weights modified, {} entries saved, {} merges blocked (fwd={:?}){}",
                 before_ranges,
                 after_ranges,
                 if before_ranges > 0 {
@@ -124,6 +159,7 @@ impl DWA {
                 entries_saved,
                 merges_blocked,
                 t_fwd,
+                if budget_exceeded { " [BUDGET EXCEEDED]" } else { "" },
             );
         }
 
