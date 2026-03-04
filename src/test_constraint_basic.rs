@@ -6892,3 +6892,50 @@ fn test_simple_schema_build_time() {
     assert!(has_open_brace, "Initial mask should allow '{{' token");
 }
 
+/// Minimal repro for the right-recursive item bug.
+///
+/// Grammar:
+///   D: /[0-9]/
+///   item: "," D ":" D item | ""
+///   start: "{" D ":" D item "}"
+///
+/// Input: {1:2,3:4,5:6
+/// After feeding {1:2,3:4,5:6, comma should be in the mask but is missing.
+///
+/// The bug only manifests when the first KV pair is inlined in the start rule.
+/// Extracting it to a separate rule (body: D ":" D item) fixes it.
+#[test]
+fn test_right_recursive_item_bug() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark_grammar = indoc! {r#"
+        D: /[0-9]/
+        item: "," D ":" D item | ""
+        start: "{" D ":" D item "}"
+    "#};
+
+    let grammar_definition = GrammarDefinition::from_lark(lark_grammar).unwrap();
+
+    // Minimal vocabulary: comma and close brace
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b",".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"}".to_vec(), LLMTokenID(1));
+    let max_id = 1;
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        max_id,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    state.commit_bytes(b"{1:2,3:4,5:6");
+
+    let final_mask = state.get_mask();
+    assert!(
+        final_mask.contains(0),
+        "Comma should be in the mask (bug: right-recursive item loses continuation after 2+ recursions)"
+    );
+}
+

@@ -605,80 +605,96 @@ impl<'a> GrammarConstraintState<'a> {
             let mut wl_max_weight_ranges: u64 = 0;
             let mut wl_total_weight_ranges: u64 = 0;
 
-            // Flat worklist: iterate through DWA transitions following the extracted stack edges
-            let mut current_acc = seed_acc;
-            let mut current_wa_state_id = dwa_start_state_id;
+            // Flat worklist: iterate through DWA transitions following the extracted stack edges.
+            // We track potentially multiple (dwa_state, accumulator) pairs to handle the case
+            // where specific and DEFAULT transitions go to different destinations — previously
+            // this incorrectly merged accumulators and followed only one destination, losing
+            // tokens from the other path.
+            let walk_trace = std::env::var("DEBUG_WALK_TRACE").is_ok();
+            // Active pairs: (dwa_state_id, accumulated_tokens)
+            // In the common case this has exactly one element (no forks).
+            let mut active: Vec<(WAStateID, RangeSetBlaze<usize>)> = vec![(dwa_start_state_id, seed_acc)];
 
             for edge in edges.iter() {
                 worklist_iters += 1;
-                let dwa_state = &dwa.states[current_wa_state_id];
                 let parser_state_id = edge.state_id.0 as Label;
+                let mut next_active: Vec<(WAStateID, RangeSetBlaze<usize>)> = Vec::new();
 
-                // Check final weight
-                if let Some(final_weight) = &dwa_state.final_weight {
-                    let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                    let final_tokens = get_proj(final_weight);
-                    let final_result = &current_acc & &*final_tokens;
-                    if let Some(t0) = t0 {
-                        wl_final_intersect_ns += t0.elapsed().as_nanos() as u64;
-                        wl_final_count += 1;
-                        let nr = current_acc.ranges_len() as u64;
-                        wl_total_weight_ranges += nr;
-                        if nr > wl_max_weight_ranges { wl_max_weight_ranges = nr; }
-                    }
-                    if !final_result.is_empty() {
-                        has_accepting = true;
-                        final_mask_rsb |= final_result;
-                    }
-                    if let Some(t0) = t0 {
-                        wl_final_ns += t0.elapsed().as_nanos() as u64;
-                    }
-                }
+                for (current_wa_state_id, current_acc) in &active {
+                    let dwa_state = &dwa.states[*current_wa_state_id];
 
-                // Process transitions (specific + default)
-                let mut next_state = None;
-                let mut next_acc = RangeSetBlaze::<usize>::new();
-
-                for (target_wa_state_id, trans_weight) in [
-                    dwa_state.get_transition(parser_state_id),
-                    dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL),
-                ].into_iter().flatten() {
-                    let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
-                    let trans_tokens = get_proj(trans_weight);
-                    let intersected = &current_acc & &*trans_tokens;
-                    if let Some(t0) = t0 {
-                        wl_intersect_ns += t0.elapsed().as_nanos() as u64;
-                        wl_intersect_count += 1;
+                    if walk_trace {
+                        eprintln!("[WALK] step: dwa_state={}, parser_state_id={}, acc={:?}",
+                            current_wa_state_id, parser_state_id, current_acc);
                     }
-                    if !intersected.is_empty() {
-                        if next_state.is_none() {
-                            next_state = Some(target_wa_state_id);
-                            next_acc = intersected;
-                        } else {
-                            // Multiple transitions hit — can't stay flat, bail to GSS path
-                            // This shouldn't happen often for single-path GSS
-                            next_acc |= intersected;
-                            // Keep the same target (they should match for single-path)
+
+                    // Check final weight
+                    if let Some(final_weight) = &dwa_state.final_weight {
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let final_tokens = get_proj(final_weight);
+                        let final_result = current_acc & &*final_tokens;
+                        if walk_trace {
+                            eprintln!("[WALK]   final_weight: tokens={:?}, result={:?}", *final_tokens, final_result);
+                        }
+                        if let Some(t0) = t0 {
+                            wl_final_intersect_ns += t0.elapsed().as_nanos() as u64;
+                            wl_final_count += 1;
+                            let nr = current_acc.ranges_len() as u64;
+                            wl_total_weight_ranges += nr;
+                            if nr > wl_max_weight_ranges { wl_max_weight_ranges = nr; }
+                        }
+                        if !final_result.is_empty() {
+                            has_accepting = true;
+                            final_mask_rsb |= final_result;
+                        }
+                        if let Some(t0) = t0 {
+                            wl_final_ns += t0.elapsed().as_nanos() as u64;
+                        }
+                    }
+
+                    // Process transitions: both specific label and DEFAULT.
+                    // Each may go to a different DWA state, so they become separate active entries.
+                    for (target_wa_state_id, trans_weight) in [
+                        dwa_state.get_transition(parser_state_id),
+                        dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL),
+                    ].into_iter().flatten() {
+                        let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
+                        let trans_tokens = get_proj(trans_weight);
+                        let intersected = current_acc & &*trans_tokens;
+                        if let Some(t0) = t0 {
+                            wl_intersect_ns += t0.elapsed().as_nanos() as u64;
+                            wl_intersect_count += 1;
+                        }
+                        if walk_trace {
+                            eprintln!("[WALK]   trans: target={}, weight={:?}, intersected={:?}",
+                                target_wa_state_id, *trans_tokens, intersected);
+                        }
+                        if !intersected.is_empty() {
+                            // Merge with existing entry for this target, or create new
+                            if let Some(existing) = next_active.iter_mut().find(|(s, _)| *s == target_wa_state_id) {
+                                existing.1 |= intersected;
+                            } else {
+                                next_active.push((target_wa_state_id, intersected));
+                            }
                         }
                     }
                 }
 
-                if let Some(ns) = next_state {
-                    current_acc = next_acc;
-                    current_wa_state_id = ns;
-                } else {
-                    break; // Dead end
+                if next_active.is_empty() {
+                    active.clear();
+                    break;
                 }
+                active = next_active;
             }
 
-            // Handle final weight at the last DWA state
-            {
+            // Handle final weight at the last DWA states
+            for (current_wa_state_id, current_acc) in &active {
                 worklist_iters += 1;
-                let dwa_state = &dwa.states[current_wa_state_id];
+                let dwa_state = &dwa.states[*current_wa_state_id];
                 if let Some(final_weight) = &dwa_state.final_weight {
                     let t0 = if benchmark_enabled { Some(Instant::now()) } else { None };
                     let final_tokens = get_proj(final_weight);
-                    let final_result = &current_acc & &*final_tokens;
+                    let final_result = current_acc & &*final_tokens;
                     if let Some(t0) = t0 {
                         wl_final_intersect_ns += t0.elapsed().as_nanos() as u64;
                         wl_final_count += 1;

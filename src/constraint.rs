@@ -1979,6 +1979,21 @@ impl GrammarConstraint {
         crate::debug!(3, "Terminal DWA (final): {}", 
             terminal_dwa.stats());
 
+        // Debug dump of terminal DWA structure
+        if crate::r#macro::is_debug_level_enabled(6) && terminal_dwa.states.len() <= 30 {
+            eprintln!("=== TERMINAL DWA DUMP ({} states) ===", terminal_dwa.states.len());
+            for (i, state) in terminal_dwa.states.iter().enumerate() {
+                let is_start = i == terminal_dwa.body.start_state;
+                eprintln!("  State {}{}: final_weight={:?}",
+                    i, if is_start { " [START]" } else { "" }, state.final_weight);
+                for (label, dest) in &state.transitions {
+                    let weight = state.trans_weights.get(label);
+                    eprintln!("    label={} -> dest={} weight={:?}", label, dest, weight);
+                }
+            }
+            eprintln!("=== END TERMINAL DWA DUMP ===");
+        }
+
         // Analyze effective equivalence classes in the terminal DWA
         if std::env::var("ANALYZE_TERMINAL_DWA_EQUIV").is_ok() {
             use std::collections::{BTreeSet, HashMap, HashSet};
