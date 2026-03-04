@@ -963,6 +963,11 @@ pub(crate) struct Precomputer1<'r> {
     dfs_match_gen: Vec<u32>,
     dfs_match_widths: Vec<usize>,
     dfs_current_gen: u32,
+    /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
+    /// Used for early-exit optimization in execute_from_state_fast.
+    dfs_self_loop_bytes: Vec<[u64; 4]>,
+    /// Reusable buffer for suffix byte sets in execute_from_state_fast.
+    dfs_suffix_bytes: Vec<[u64; 4]>,
     // Batched leaf_state token IDs for deferred update_live_tokens
     dfs_leaf_token_ids: RangeSetBlaze<usize>,
 }
@@ -1173,6 +1178,19 @@ impl<'r> Precomputer1<'r> {
                 vec![0usize; num_groups]
             },
             dfs_current_gen: 0,
+            dfs_self_loop_bytes: {
+                let dfa = tokenizer.dfa();
+                dfa.states.iter().enumerate().map(|(s, state)| {
+                    let mut bits = [0u64; 4];
+                    for (byte, &target) in state.transitions.iter() {
+                        if target == s {
+                            bits[byte as usize >> 6] |= 1u64 << (byte & 63);
+                        }
+                    }
+                    bits
+                }).collect()
+            },
+            dfs_suffix_bytes: Vec::new(),
             dfs_leaf_token_ids: RangeSetBlaze::new(),
         }
     }
@@ -2214,6 +2232,17 @@ impl<'r> Precomputer1<'r> {
         let mut current_state = start as u32;
         let mut done = false;
 
+        // Precompute suffix byte sets for O(1) self-loop subset checks.
+        // suffix_bytes[i] = bitset of all bytes occurring in text[i..].
+        let len = text.len();
+        self.dfs_suffix_bytes.resize(len + 1, [0u64; 4]);
+        self.dfs_suffix_bytes[len] = [0u64; 4];
+        for i in (0..len).rev() {
+            self.dfs_suffix_bytes[i] = self.dfs_suffix_bytes[i + 1];
+            let b = text[i] as usize;
+            self.dfs_suffix_bytes[i][b >> 6] |= 1u64 << (b & 63);
+        }
+
         for (pos, &byte) in text.iter().enumerate() {
             let next = self.dfs_flat_transitions[current_state as usize][byte as usize];
             if next == u32::MAX {
@@ -2229,6 +2258,32 @@ impl<'r> Precomputer1<'r> {
                         self.dfs_match_widths[gid] = width;
                         self.dfs_match_gen[gid] = gen;
                     }
+                }
+            }
+
+            // Self-loop early exit: if the current state self-loops on every
+            // remaining byte in the text, the state won't change and greedy
+            // match positions advance to text.len().
+            if width < len {
+                let sl = &self.dfs_self_loop_bytes[current_state as usize];
+                let suffix = &self.dfs_suffix_bytes[width];
+                // Check: suffix ⊆ self_loop_bytes  (i.e., no bit set in suffix that isn't in sl)
+                let is_subset = (suffix[0] & !sl[0]) == 0
+                    && (suffix[1] & !sl[1]) == 0
+                    && (suffix[2] & !sl[2]) == 0
+                    && (suffix[3] & !sl[3]) == 0;
+                if is_subset {
+                    let final_width = len;
+                    for &gid in &self.dfs_finalizers[current_state as usize] {
+                        if gid < self.dfs_num_groups {
+                            if !self.dfs_non_greedy[gid] || self.dfs_match_gen[gid] != gen {
+                                self.dfs_match_widths[gid] = final_width;
+                                self.dfs_match_gen[gid] = gen;
+                            }
+                        }
+                    }
+                    // State doesn't change (self-loop), so end_state is current_state
+                    break;
                 }
             }
         }
