@@ -1208,17 +1208,307 @@ impl ExprGroups {
         // Start from the compiled prefix (or split point if no prefix)
         nfa.states[0].epsilon_transitions.push(start_state);
 
-        for (group_idx, ExprGroup { expr, is_non_greedy }) in groups.groups.into_iter().enumerate() {
+        // ===== Repeat-chain merge optimization =====
+        // Detect groups with structure: prefix + repeat(INNER) + suffix
+        // where INNER is the same expression (by Shared Arc pointer).
+        // Merge these into a single shared chain NFA.
+
+        const MERGE_THRESHOLD: usize = 64;
+
+        // Extract repeat info from each group
+        #[derive(Debug)]
+        enum RepeatKind {
+            Bounded { min: usize, max_val: usize },
+            Unbounded { min: usize }, // ZeroOrMore (min=0) or OneOrMore (min=1)
+        }
+
+        struct RepeatInfo {
+            /// The prefix expressions (before the repeat)
+            prefix: Vec<Expr>,
+            /// The inner expression being repeated
+            inner: Expr,
+            /// Arc pointer for identity comparison (if inner was Shared)
+            inner_ptr: Option<usize>,
+            /// The kind of repeat
+            kind: RepeatKind,
+            /// The suffix expressions (after the repeat)
+            suffix: Vec<Expr>,
+        }
+
+        fn extract_repeat_info(expr: &Expr) -> Option<RepeatInfo> {
+            // Helper: unwrap Shared wrapper(s) to get the inner expression
+            fn unwrap_shared(e: &Expr) -> &Expr {
+                match e {
+                    Expr::Shared(arc) => unwrap_shared(arc.as_ref()),
+                    _ => e,
+                }
+            }
+
+            // Unwrap top-level Shared wrappers first
+            let unwrapped_top = unwrap_shared(expr);
+            let parts = match unwrapped_top {
+                Expr::Seq(parts) if parts.len() >= 2 => parts,
+                _ => return None,
+            };
+
+            // Find the repeat element in the sequence
+            for (i, part) in parts.iter().enumerate() {
+                let unwrapped = unwrap_shared(part);
+                let (inner, kind) = match unwrapped {
+                    Expr::RepeatBounded { inner, min, max: Some(max_val) } if *max_val > MERGE_THRESHOLD => {
+                        (inner.as_ref(), RepeatKind::Bounded { min: *min, max_val: *max_val })
+                    }
+                    Expr::Quantifier(inner, QuantifierType::ZeroOrMore) => {
+                        (inner.as_ref(), RepeatKind::Unbounded { min: 0 })
+                    }
+                    Expr::Quantifier(inner, QuantifierType::OneOrMore) => {
+                        (inner.as_ref(), RepeatKind::Unbounded { min: 1 })
+                    }
+                    _ => continue,
+                };
+
+                // Unwrap inner too before comparing
+                let inner_unwrapped = unwrap_shared(inner);
+
+                // Get the inner's Arc pointer (if it's Shared)
+                let inner_ptr = match inner {
+                    Expr::Shared(arc) => Some(Arc::as_ptr(arc) as usize),
+                    _ => None,
+                };
+
+                return Some(RepeatInfo {
+                    prefix: parts[..i].to_vec(),
+                    inner: inner_unwrapped.clone(),
+                    inner_ptr,
+                    kind,
+                    suffix: parts[i+1..].to_vec(),
+                });
+            }
+            None
+        }
+
+        // Collect repeat info for each group
+        let group_list: Vec<(usize, ExprGroup)> = groups.groups.into_iter().enumerate().collect();
+
+        // Build merge groups: key = (inner_ptr, prefix_hash, suffix_hash)
+        // For simplicity, only merge when inner is Shared (same Arc pointer)
+        // and prefix/suffix are identical
+        let mut merge_candidates: HashMap<usize, Vec<usize>> = HashMap::new(); // inner_ptr -> [group_idx]
+        let mut repeat_infos: HashMap<usize, RepeatInfo> = HashMap::new(); // group_idx -> RepeatInfo
+
+        // Also group by inner Debug representation for structural comparison
+        let mut merge_candidates_by_debug: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for &(group_idx, ref group) in &group_list {
+            if let Some(info) = extract_repeat_info(&group.expr) {
+                let inner_debug = format!("{:?}", info.inner);
+                crate::debug!(4, "  Group {}: repeat {:?}, inner_ptr={:?}, inner_debug={}",
+                    group_idx, match &info.kind { RepeatKind::Bounded{min,max_val} => format!("{{{},{}}}", min, max_val), RepeatKind::Unbounded{min} => format!("{{{}..}}", min) },
+                    info.inner_ptr, &inner_debug[..inner_debug.len().min(120)]);
+                if let Some(ptr) = info.inner_ptr {
+                    merge_candidates.entry(ptr).or_default().push(group_idx);
+                }
+                merge_candidates_by_debug.entry(inner_debug).or_default().push(group_idx);
+                repeat_infos.insert(group_idx, info);
+            } else {
+                crate::debug!(5, "  Group {}: no repeat info extracted from {:?}",
+                    group_idx, format!("{:?}", &group.expr)[..format!("{:?}", &group.expr).len().min(200)].to_string());
+            }
+        }
+
+        // Log merge candidate groups
+        for (ptr, candidates) in &merge_candidates {
+            if candidates.len() >= 2 {
+                crate::debug!(4, "  Merge candidates by ptr {:#x}: {:?}", ptr, candidates);
+            }
+        }
+        for (debug_key, candidates) in &merge_candidates_by_debug {
+            if candidates.len() >= 2 {
+                crate::debug!(4, "  Merge candidates by debug ({}...): {:?}",
+                    &debug_key[..debug_key.len().min(80)], candidates);
+            }
+        }
+
+        // Filter to groups where we have >= 2 candidates with the same inner AND prefix/suffix
+        // Use debug-based grouping (structural comparison) since inner may not be Shared (no Arc ptr)
+        let mut merged_groups: HashSet<usize> = HashSet::new();
+        let mut merge_plans: Vec<Vec<usize>> = Vec::new(); // each Vec is a set of group indices to merge
+
+        for (_inner_debug, candidates) in &merge_candidates_by_debug {
+            if candidates.len() < 2 {
+                continue;
+            }
+
+            // Sub-group by prefix+suffix structure
+            let mut sub_groups: HashMap<String, Vec<usize>> = HashMap::new();
+            for &gidx in candidates {
+                let info = &repeat_infos[&gidx];
+                let key = format!("{:?}|||{:?}", info.prefix, info.suffix);
+                sub_groups.entry(key).or_default().push(gidx);
+            }
+
+            for (_key, sub_candidates) in sub_groups {
+                if sub_candidates.len() >= 2 {
+                    // Check that at least one has max_val > MERGE_THRESHOLD
+                    let has_large = sub_candidates.iter().any(|&gidx| {
+                        matches!(&repeat_infos[&gidx].kind, RepeatKind::Bounded { max_val, .. } if *max_val > MERGE_THRESHOLD)
+                    });
+                    if has_large {
+                        for &gidx in &sub_candidates {
+                            merged_groups.insert(gidx);
+                        }
+                        merge_plans.push(sub_candidates);
+                    }
+                }
+            }
+        }
+
+        if !merge_plans.is_empty() {
+            crate::debug!(4, "Repeat-chain merge: {} merge plans, {} groups merged", merge_plans.len(), merged_groups.len());
+        }
+
+        // Compile merged groups
+        for plan in &merge_plans {
+            // Find the canonical parameters: largest max_val, whether any is unbounded
+            let mut largest_max: usize = 0;
+            let mut global_min: usize = usize::MAX;
+            let mut has_unbounded = false;
+
+            for &gidx in plan {
+                let info = &repeat_infos[&gidx];
+                match &info.kind {
+                    RepeatKind::Bounded { min, max_val } => {
+                        largest_max = largest_max.max(*max_val);
+                        global_min = global_min.min(*min);
+                    }
+                    RepeatKind::Unbounded { min } => {
+                        has_unbounded = true;
+                        global_min = global_min.min(*min);
+                    }
+                }
+            }
+
+            // The inner expression (same for all in the plan)
+            let inner = &repeat_infos[&plan[0]].inner;
+            let prefix = &repeat_infos[&plan[0]].prefix;
+            let suffix = &repeat_infos[&plan[0]].suffix;
+
+            // For unbounded groups, the chain max_val is the largest bounded max_val
+            // (the chain self-loops at max_val to handle unbounded)
+            let chain_max = if has_unbounded && largest_max == 0 {
+                // All are unbounded with no bounded groups — just compile normally
+                // (no merge benefit since there's no large chain)
+                for &gidx in plan {
+                    merged_groups.remove(&gidx);
+                }
+                continue;
+            } else {
+                largest_max
+            };
+
+            if chain_max <= MERGE_THRESHOLD {
+                // No large chain to merge
+                for &gidx in plan {
+                    merged_groups.remove(&gidx);
+                }
+                continue;
+            }
+
+            crate::debug!(4, "  Merge plan: {} groups, chain_max={}, has_unbounded={}, global_min={}",
+                plan.len(), chain_max, has_unbounded, global_min);
+
+            // Create accept states for each group in the plan
+            // and compile their suffix into the accept state
+            let mut group_conts: Vec<(usize, usize, usize, Option<usize>)> = Vec::new(); // (group_idx, cont_state, min_pos, max_pos)
+
+            for &gidx in plan {
+                let info = &repeat_infos[&gidx];
+                let is_non_greedy = group_list[gidx].1.is_non_greedy;
+
+                // Create accept state for this group
+                let accept = nfa.add_state();
+                nfa.states[accept].finalizers.insert(gidx);
+                if is_non_greedy {
+                    nfa.states[accept].non_greedy_finalizers.insert(gidx);
+                }
+
+                // Compile suffix into the accept state (reverse order for CPS)
+                let mut cont = accept;
+                for suffix_part in suffix.iter().rev() {
+                    cont = Expr::compile_cps(suffix_part, &mut nfa, cont, &mut cache);
+                }
+
+                let min_pos = match &info.kind {
+                    RepeatKind::Bounded { min, .. } => *min,
+                    RepeatKind::Unbounded { min } => *min,
+                };
+
+                let max_pos = match &info.kind {
+                    RepeatKind::Bounded { max_val, .. } => Some(*max_val),
+                    RepeatKind::Unbounded { .. } => None,
+                };
+
+                group_conts.push((gidx, cont, min_pos, max_pos));
+            }
+
+            // Find the primary group (largest max_val bounded, or any bounded)
+            let primary_idx = group_conts.iter().position(|&(gidx, _, _, _)| {
+                matches!(&repeat_infos[&gidx].kind, RepeatKind::Bounded { max_val, .. } if *max_val == chain_max)
+            }).unwrap_or(0);
+
+            let (_, primary_cont, primary_min, _) = group_conts[primary_idx];
+
+            // Build overflow_conts for the other groups
+            let overflow_conts: Vec<(usize, usize, Option<usize>)> = group_conts.iter().enumerate()
+                .filter(|&(i, _)| i != primary_idx)
+                .map(|(_, &(_, cont, min_pos, max_pos))| (cont, min_pos, max_pos))
+                .collect();
+
+            // Build the shared chain NFA
+            let chain_start = Expr::compile_repeat_bounded_direct_ext(
+                inner,
+                primary_min,
+                chain_max,
+                &mut nfa,
+                primary_cont,
+                has_unbounded,
+                &overflow_conts,
+            );
+
+            if let Some(chain_start) = chain_start {
+                // Compile prefix into the chain start
+                let mut entry = chain_start;
+                for prefix_part in prefix.iter().rev() {
+                    entry = Expr::compile_cps(prefix_part, &mut nfa, entry, &mut cache);
+                }
+
+                // Connect from split point to prefix start
+                nfa.add_epsilon_transition(split_point, entry);
+            } else {
+                // Fall back: compile each group individually
+                crate::debug!(4, "  Merge plan failed (compile_repeat_bounded_direct_ext returned None), falling back");
+                for &gidx in plan {
+                    merged_groups.remove(&gidx);
+                }
+            }
+        }
+
+        // Compile non-merged groups normally
+        for (group_idx, ExprGroup { expr, is_non_greedy }) in group_list.into_iter().map(|(i, g)| (i, g)) {
+            if merged_groups.contains(&group_idx) {
+                continue; // Already handled by merge
+            }
+
             // Create accept state for this group
             let accept = nfa.add_state();
             nfa.states[accept].finalizers.insert(group_idx);
             if is_non_greedy {
                 nfa.states[accept].non_greedy_finalizers.insert(group_idx);
             }
-            
+
             // Compile the group expression into the accept state
             let group_start = Expr::compile_cps(&expr, &mut nfa, accept, &mut cache);
-            
+
             // Connect from split point to group start
             nfa.add_epsilon_transition(split_point, group_start);
         }
@@ -1458,6 +1748,17 @@ impl Expr {
                             return s;
                         }
 
+                        // Fast path: for large bounded repeats, build inner DFA
+                        // and directly construct chain states to avoid NFA explosion
+                        const REPEAT_DIRECT_THRESHOLD: usize = 64;
+                        if max_val > REPEAT_DIRECT_THRESHOLD {
+                            if let Some(start) = Self::compile_repeat_bounded_direct(
+                                inner.as_ref(), min, max_val, nfa, cont
+                            ) {
+                                return start;
+                            }
+                        }
+
                         let mut boundaries = Vec::with_capacity(max_val + 1);
                         for _ in 0..=max_val {
                             boundaries.push(nfa.add_state());
@@ -1510,6 +1811,272 @@ impl Expr {
                 start
             }
         }
+    }
+
+    /// Fast path for compiling large bounded repeats (e.g. `expr{0,65535}`).
+    ///
+    /// Instead of creating `max_val` copies of the inner expression in the NFA
+    /// (which can produce millions of NFA states), this method:
+    /// 1. Builds the inner expression as a standalone small DFA
+    /// 2. Directly constructs chain states `(position, inner_dfa_state)` in the main NFA
+    /// 3. Wires deterministic byte transitions (no epsilon transitions within the chain)
+    ///
+    /// Preconditions for the fast path:
+    /// - Inner expression must not match the empty string
+    /// - All accepting states in the inner DFA must have no outgoing transitions
+    ///   (i.e., no match of the inner expr is a proper prefix of another match)
+    ///
+    /// Returns `Some(start_state)` if the fast path succeeds, `None` to fall back.
+    fn compile_repeat_bounded_direct(
+        inner: &Expr,
+        min: usize,
+        max_val: usize,
+        nfa: &mut NFA,
+        cont: usize,
+    ) -> Option<usize> {
+        Self::compile_repeat_bounded_direct_ext(inner, min, max_val, nfa, cont, false, &[])
+    }
+
+    /// Extended version that supports additional "overflow" continuations.
+    /// `overflow_conts` are extra continuation states with per-group [min..max] ranges;
+    /// `max=None` means unbounded (wired through chain max, with optional max self-loop).
+    fn compile_repeat_bounded_direct_ext(
+        inner: &Expr,
+        min: usize,
+        max_val: usize,
+        nfa: &mut NFA,
+        cont: usize,
+        self_loop_at_max: bool,
+        overflow_conts: &[(usize, usize, Option<usize>)], // (cont_state, min_position, max_position)
+    ) -> Option<usize> {
+        // 1. Build inner expression as a standalone DFA
+        let inner_groups = ExprGroups {
+            groups: vec![ExprGroup { expr: inner.clone(), is_non_greedy: false }],
+        };
+        let inner_nfa = inner_groups.build_nfa();
+        let mut inner_dfa = inner_nfa.to_dfa();
+        inner_dfa.minimize();
+
+        let inner_num_states = inner_dfa.states.len();
+        let inner_start = inner_dfa.start_state;
+
+        // 2. Check preconditions
+        // Inner start must NOT be accepting (inner must not match empty string)
+        if inner_dfa.states[inner_start].finalizers.contains(0) {
+            crate::debug!(4, "RepeatBounded direct: inner matches empty string, falling back");
+            return None;
+        }
+
+        // All accepting states must have no outgoing transitions ("clean" DFA)
+        for (i, state) in inner_dfa.states.iter().enumerate() {
+            if state.finalizers.contains(0) && !state.transitions.is_empty() {
+                crate::debug!(4, "RepeatBounded direct: accepting state {} has outgoing transitions, falling back", i);
+                return None;
+            }
+        }
+
+        // 3. Identify active (productive, non-accepting) inner DFA states
+        let accepting: Vec<bool> = inner_dfa.states.iter()
+            .map(|s| s.finalizers.contains(0))
+            .collect();
+
+        // Compute productive states via reverse BFS from accepting states
+        let mut productive = vec![false; inner_num_states];
+        let mut reverse_adj: Vec<Vec<usize>> = vec![vec![]; inner_num_states];
+        for (i, state) in inner_dfa.states.iter().enumerate() {
+            for (_, target) in state.transitions.iter() {
+                reverse_adj[*target].push(i);
+            }
+        }
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for i in 0..inner_num_states {
+            if accepting[i] {
+                productive[i] = true;
+                queue.push_back(i);
+            }
+        }
+        while let Some(s) = queue.pop_front() {
+            for &pred in &reverse_adj[s] {
+                if !productive[pred] {
+                    productive[pred] = true;
+                    queue.push_back(pred);
+                }
+            }
+        }
+
+        // Active states: productive AND non-accepting
+        let active_states: Vec<usize> = (0..inner_num_states)
+            .filter(|&i| productive[i] && !accepting[i])
+            .collect();
+        let num_active = active_states.len();
+
+        if num_active == 0 {
+            return None;
+        }
+
+        // Map inner DFA state → active index
+        let mut inner_to_active: Vec<Option<usize>> = vec![None; inner_num_states];
+        for (idx, &inner_state) in active_states.iter().enumerate() {
+            inner_to_active[inner_state] = Some(idx);
+        }
+
+        // Inner start must be active
+        let active_start = match inner_to_active[inner_start] {
+            Some(idx) => idx,
+            None => return None,
+        };
+
+        let num_chain_states = (max_val + 1) * num_active;
+        let chain_base = nfa.states.len();
+        crate::debug!(4,
+            "RepeatBounded direct: {} inner DFA states, {} active, {} chain states for {{{}..{}}}, NFA base={}",
+            inner_num_states, num_active, num_chain_states, min, max_val, chain_base
+        );
+
+        // 4. Pre-compute transition patterns per active state
+        // Group byte transitions by target, distinguishing accepting vs non-accepting targets
+        enum Target {
+            Accept,
+            NonAccept(usize), // active_idx
+        }
+        let mut patterns: Vec<Vec<(U8Set, Target)>> = Vec::with_capacity(num_active);
+        for &q in &active_states {
+            // Collect transitions from this inner DFA state, grouped by target
+            let mut target_to_bytes: HashMap<usize, U8Set> = HashMap::new();
+            for (byte, target) in inner_dfa.states[q].transitions.iter() {
+                target_to_bytes.entry(*target).or_insert_with(U8Set::none).insert(byte);
+            }
+
+            let mut entries: Vec<(U8Set, Target)> = Vec::new();
+            // Merge all transitions to accepting states into one Accept entry
+            let mut accept_set = U8Set::none();
+            for (&target_q, u8set) in &target_to_bytes {
+                if accepting[target_q] {
+                    accept_set = accept_set.union(u8set);
+                } else if let Some(active_idx) = inner_to_active[target_q] {
+                    entries.push((u8set.clone(), Target::NonAccept(active_idx)));
+                }
+                // Transitions to non-productive states are dead — no NFA transition
+            }
+            if !accept_set.is_empty() {
+                entries.push((accept_set, Target::Accept));
+            }
+            patterns.push(entries);
+        }
+
+        // 5. Create chain NFA states
+        let base = nfa.states.len();
+        nfa.states.reserve(num_chain_states);
+        for _ in 0..num_chain_states {
+            nfa.add_state();
+        }
+
+        let state_id = |p: usize, active_idx: usize| -> usize {
+            base + p * num_active + active_idx
+        };
+
+        // 6. Wire byte transitions
+        for p in 0..=max_val {
+            for (active_idx, pattern) in patterns.iter().enumerate() {
+                let from = state_id(p, active_idx);
+                for (u8set, target) in pattern {
+                    match target {
+                        Target::Accept => {
+                            if p < max_val {
+                                nfa.add_u8set_transition(
+                                    from,
+                                    u8set.clone(),
+                                    state_id(p + 1, active_start),
+                                );
+                            } else if self_loop_at_max {
+                                // At max position with self-loop: loop back to same position
+                                // This allows unbounded matching past the bounded range
+                                nfa.add_u8set_transition(
+                                    from,
+                                    u8set.clone(),
+                                    state_id(max_val, active_start),
+                                );
+                            }
+                        }
+                        Target::NonAccept(target_active_idx) => {
+                            nfa.add_u8set_transition(
+                                from,
+                                u8set.clone(),
+                                state_id(p, *target_active_idx),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Wire exits: can stop matching when position >= min
+        // Instead of adding epsilon from chain states to cont (which bloats the
+        // DFA subset size during NFA→DFA conversion), we inline cont's transitions
+        // directly into the chain states. This avoids adding cont and its epsilon
+        // closure to every DFA state, significantly reducing the DFA size.
+        //
+        // We collect cont's byte transitions AND epsilon transitions. For each
+        // chain state (p, active_start) where p >= min:
+        //   - Add cont's byte transitions as byte transitions
+        //   - Add cont's epsilon transitions as epsilon transitions
+        //   - Also copy finalizers from cont (in case cont is itself accepting)
+        {
+            let cont_byte_transitions: Vec<(U8Set, usize)> = nfa.states[cont].transitions.clone();
+            let cont_epsilon_transitions: Vec<usize> = nfa.states[cont].epsilon_transitions.clone();
+            let cont_finalizers = nfa.states[cont].finalizers.clone();
+            let cont_ng_finalizers = nfa.states[cont].non_greedy_finalizers.clone();
+
+            for p in min..=max_val {
+                let from = state_id(p, active_start);
+                // Inline cont's byte transitions
+                for (u8set, target) in &cont_byte_transitions {
+                    nfa.add_u8set_transition(from, u8set.clone(), *target);
+                }
+                // Inline cont's epsilon transitions
+                for &target in &cont_epsilon_transitions {
+                    nfa.add_epsilon_transition(from, target);
+                }
+                // Copy cont's finalizers (if cont is accepting)
+                if !cont_finalizers.is_empty() {
+                    nfa.states[from].finalizers.union_with(&cont_finalizers);
+                }
+                if !cont_ng_finalizers.is_empty() {
+                    nfa.states[from].non_greedy_finalizers.union_with(&cont_ng_finalizers);
+                }
+            }
+        }
+
+        // 8. Wire overflow continuation exits (for merged groups)
+        for &(overflow_cont, overflow_min, overflow_max) in overflow_conts {
+            let oc_byte_transitions: Vec<(U8Set, usize)> = nfa.states[overflow_cont].transitions.clone();
+            let oc_epsilon_transitions: Vec<usize> = nfa.states[overflow_cont].epsilon_transitions.clone();
+            let oc_finalizers = nfa.states[overflow_cont].finalizers.clone();
+            let oc_ng_finalizers = nfa.states[overflow_cont].non_greedy_finalizers.clone();
+
+            let effective_min = overflow_min.max(min);
+            let effective_max = overflow_max.unwrap_or(max_val).min(max_val);
+            if effective_min > effective_max {
+                continue;
+            }
+            for p in effective_min..=effective_max {
+                let from = state_id(p, active_start);
+                for (u8set, target) in &oc_byte_transitions {
+                    nfa.add_u8set_transition(from, u8set.clone(), *target);
+                }
+                for &target in &oc_epsilon_transitions {
+                    nfa.add_epsilon_transition(from, target);
+                }
+                if !oc_finalizers.is_empty() {
+                    nfa.states[from].finalizers.union_with(&oc_finalizers);
+                }
+                if !oc_ng_finalizers.is_empty() {
+                    nfa.states[from].non_greedy_finalizers.union_with(&oc_ng_finalizers);
+                }
+            }
+        }
+
+        Some(state_id(0, active_start))
     }
 
     // --- Optimizers ---
@@ -2729,6 +3296,11 @@ impl NFA {
             stats.total_subset_size += current_subset_len as u64;
             if dfa_states.len() >= next_log_threshold {
                 crate::debug!(5, "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}", dfa_states.len(), worklist.len(), current_subset_len, stats.max_subset_size, start_time.elapsed());
+                // Every 100K states, log a sample DFA state's NFA composition
+                if dfa_states.len() % 100_000 < 1_000 {
+                    let nfa_ids: Vec<usize> = current_set.iter().collect();
+                    crate::debug!(5, "  Sample DFA state NFA subset (size {}): {:?}", nfa_ids.len(), &nfa_ids);
+                }
                 next_log_threshold += 1_000;
             }
 
@@ -3267,26 +3839,13 @@ impl DFA {
         }
         
         // Use Hopcroft's algorithm for O(n log n) minimization
-        
+
         use rustc_hash::FxHashMap;
-        
-        // Build inverse transition table - grouped by (target, input) to make iteration efficient
-        // inverse[target] = Vec<(input, source)>
-        let mut inverse: Vec<Vec<(u8, u32)>> = vec![Vec::new(); n];
-        for (src, state) in self.states.iter().enumerate() {
-            for (input, &target) in &state.transitions {
-                inverse[target].push((input, src as u32));
-            }
-        }
-        // Sort by input for efficient grouping
-        for inv in &mut inverse {
-            inv.sort_unstable_by_key(|&(input, _)| input);
-        }
-        
+
         // Initial partition: group states by their finalizer set
         let mut partition = vec![0u32; n];  // partition[state] = block_id
         let mut blocks: Vec<Vec<u32>> = Vec::new();  // blocks[block_id] = list of states
-        
+
         {
             let mut finalizer_to_block: FxHashMap<Vec<GroupID>, u32> = FxHashMap::default();
             for (state_idx, state) in self.states.iter().enumerate() {
@@ -3300,17 +3859,214 @@ impl DFA {
                 blocks[block_idx as usize].push(state_idx as u32);
             }
         }
+
+        // Phase 1: Topology-aware pre-refinement
+        // For DAG portions of the DFA (e.g., chain DFA from bounded repeats),
+        // a single reverse-topological-order pass computes the exact minimum
+        // partition in O(n × k) time. For cyclic states, we use coarse labels
+        // as placeholders and let Hopcroft refine them.
+        let topo_start = std::time::Instant::now();
+
+        // Compute DFS post-order and detect back-edges
+        let mut post_order: Vec<usize> = Vec::with_capacity(n);
+        let mut visited = vec![0u8; n]; // 0=unvisited, 1=in_stack, 2=done
+
+        // Pre-compute adjacency lists for efficient DFS
+        let adj: Vec<Vec<usize>> = self.states.iter().map(|state| {
+            let mut targets: Vec<usize> = state.transitions.iter().map(|(_, &t)| t).collect();
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        }).collect();
+
+        let mut dfs_stack: Vec<(usize, usize)> = Vec::new(); // (state, adj_index)
+
+        for root in 0..n {
+            if visited[root] != 0 { continue; }
+            dfs_stack.push((root, 0));
+            visited[root] = 1;
+
+            while let Some((state, ai)) = dfs_stack.last_mut() {
+                let state = *state;
+                if *ai < adj[state].len() {
+                    let target = adj[state][*ai];
+                    *ai += 1;
+                    if visited[target] == 0 {
+                        visited[target] = 1;
+                        dfs_stack.push((target, 0));
+                    }
+                } else {
+                    visited[state] = 2;
+                    post_order.push(state);
+                    dfs_stack.pop();
+                }
+            }
+        }
+
+        // Process in reverse post-order (topological order for DAG edges)
+        // assign labels based on (partition_block, [(byte, target_label)])
+        // Use SCC-aware edge classification to avoid over-splitting cyclic states
         
+        // Step 2: Compute SCCs via Kosaraju's pass 2 (reverse graph DFS in reverse post-order)
+        let mut reverse_adj: Vec<Vec<usize>> = vec![vec![]; n];
+        for (state, targets) in adj.iter().enumerate() {
+            for &target in targets {
+                reverse_adj[target].push(state);
+            }
+        }
+        let mut scc_id = vec![u32::MAX; n];
+        let mut current_scc: u32 = 0;
+        for &state in post_order.iter().rev() {
+            if scc_id[state] != u32::MAX { continue; }
+            let mut scc_stack = vec![state];
+            scc_id[state] = current_scc;
+            while let Some(u) = scc_stack.pop() {
+                for &pred in &reverse_adj[u] {
+                    if scc_id[pred] == u32::MAX {
+                        scc_id[pred] = current_scc;
+                        scc_stack.push(pred);
+                    }
+                }
+            }
+            current_scc += 1;
+        }
+
+        // Step 3: Compute labels in post-order
+        let mut label = vec![u32::MAX; n]; // state → label
+        let mut label_map: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
+        label_map.reserve(n.min(200_000));
+        let mut num_labels: u32 = 0;
+        let mut sig_buf: Vec<u32> = Vec::with_capacity(32);
+
+        for &state in post_order.iter() {
+            sig_buf.clear();
+            sig_buf.push(partition[state]);
+
+            for (byte, &target) in self.states[state].transitions.iter() {
+                sig_buf.push(byte as u32);
+                if scc_id[state] == scc_id[target] {
+                    sig_buf.push(partition[target]);
+                } else if label[target] != u32::MAX {
+                    sig_buf.push(label[target] | 0x8000_0000);
+                } else {
+                    sig_buf.push(partition[target]);
+                }
+            }
+
+            let lbl = match label_map.get(&sig_buf) {
+                Some(&l) => l,
+                None => {
+                    let l = num_labels;
+                    num_labels += 1;
+                    label_map.insert(sig_buf.clone(), l);
+                    l
+                }
+            };
+            label[state] = lbl;
+        }
+
+        // Rebuild partition and blocks from labels
+        partition = vec![0u32; n];
+        blocks = Vec::new();
+        blocks.resize(num_labels as usize, Vec::new());
+        for state in 0..n {
+            let lbl = label[state];
+            partition[state] = lbl;
+            blocks[lbl as usize].push(state as u32);
+        }
+
+        let topo_time = topo_start.elapsed();
+        crate::debug!(4, "Topological pre-refinement: {} states, {} SCCs → {} blocks in {:.2?}", n, current_scc, num_labels, topo_time);
+
+        if num_labels as usize == n {
+            // Check that the DFA is truly a DAG (no self-loops).
+            // The topological pre-refinement is only provably correct for DAGs
+            // because self-loops cause asymmetric label resolution.
+            let has_self_loop = (0..n).any(|s| {
+                self.states[s].transitions.iter().any(|(_, &t)| t == s)
+            });
+
+            if !has_self_loop {
+                // All singletons AND true DAG: DFA is provably already minimal
+                let partition_list: Vec<BTreeSet<usize>> = blocks
+                    .into_iter()
+                    .filter(|b| !b.is_empty())
+                    .map(|b| b.into_iter().map(|s| s as usize).collect())
+                    .collect();
+
+                let (state_mapping, new_states) = self.rebuild_from_partitions(partition_list);
+                self.states = new_states;
+                self.start_state = state_mapping[self.start_state];
+                self.recompute_metadata();
+                crate::debug!(3, "Minimized DFA {} -> {} states in {:.2?} (DAG fast path)",
+                    initial_states, self.states.len(), instant.elapsed());
+                return;
+            }
+            // Self-loops: pre-refinement may over-split, fall through to Hopcroft
+            crate::debug!(4, "Topological pre-refinement: singletons but self-loops, falling back to Hopcroft");
+        }
+
+        // Non-singleton blocks or self-loops: need Hopcroft for correct minimization
+        let non_singletons = blocks.iter().filter(|b| b.len() > 1).count();
+        if non_singletons == 0 {
+            // All blocks are singletons or empty → already minimal
+            let partition_list: Vec<BTreeSet<usize>> = blocks
+                .into_iter()
+                .filter(|b| !b.is_empty())
+                .map(|b| b.into_iter().map(|s| s as usize).collect())
+                .collect();
+
+            let (state_mapping, new_states) = self.rebuild_from_partitions(partition_list);
+            self.states = new_states;
+            self.start_state = state_mapping[self.start_state];
+            self.recompute_metadata();
+            crate::debug!(3, "Minimized DFA {} → {} states in {:.2?}", initial_states, self.states.len(), instant.elapsed());
+            return;
+        }
+
+        crate::debug!(4, "Topological pre-refinement: {} non-singleton blocks remain, running Hopcroft", non_singletons);
+
+        // Phase 2: Hopcroft refinement (fallback for complex DFAs)
+        // Rebuild the partition from scratch (initial finalizer-based blocks)
+        // since the topological pre-refinement may have over-split cyclic states
+        partition = vec![0u32; n];
+        blocks = Vec::new();
+        {
+            let mut finalizer_to_block: FxHashMap<Vec<GroupID>, u32> = FxHashMap::default();
+            for (state_idx, state) in self.states.iter().enumerate() {
+                let key: Vec<GroupID> = state.finalizers.iter().collect();
+                let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
+                    let idx = blocks.len() as u32;
+                    blocks.push(Vec::new());
+                    idx
+                });
+                partition[state_idx] = block_idx;
+                blocks[block_idx as usize].push(state_idx as u32);
+            }
+        }
+
+        // Build inverse transition table
+        let mut inverse: Vec<Vec<(u8, u32)>> = vec![Vec::new(); n];
+        for (src, state) in self.states.iter().enumerate() {
+            for (input, &target) in &state.transitions {
+                inverse[target].push((input, src as u32));
+            }
+        }
+        for inv in &mut inverse {
+            inv.sort_unstable_by_key(|&(input, _)| input);
+        }
+
+        // Use the pre-refined partition and blocks from Moore phase
         // Worklist: blocks to process
         let mut worklist: VecDeque<u32> = (0..blocks.len() as u32).collect();
         let mut in_worklist = vec![true; blocks.len()];
-        
+
         // Reusable arrays for the inner loop
         let mut source_set = vec![false; n];
         let mut sources_to_clear: Vec<u32> = Vec::with_capacity(n.min(10000));
         let mut touched_blocks: Vec<u32> = Vec::with_capacity(1024);
         let mut block_touched = vec![false; blocks.len()];
-        
+
         while let Some(splitter_block) = worklist.pop_front() {
             let splitter_idx = splitter_block as usize;
             if splitter_idx >= in_worklist.len() {
