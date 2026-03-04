@@ -1181,7 +1181,6 @@ impl DWA {
         // its FULL transition signature. If any state with the same
         // signature has final_weight, propagate it.
         let mut propagated_states: Vec<(usize, Weight)> = Vec::new();
-        let mut unmatched_default_states: Vec<usize> = Vec::new();
         for sid in 0..self.states.len() {
             if self.states[sid].final_weight.is_some() {
                 continue;
@@ -1201,44 +1200,7 @@ impl DWA {
                     self.states[sid].final_weight = Some(fw.clone());
                     propagated_states.push((sid, fw.clone()));
                 }
-            } else {
-                unmatched_default_states.push(sid);
             }
-        }
-
-        // Step 2b: Follow DEFAULT chains for unmatched states.
-        // Some states form chains: deep --DEFAULT--> mid --DEFAULT--> shallow.
-        // The signature-based matching in Step 2 may only propagate to mid (from
-        // shallow). Now follow DEFAULT from deep to mid (which now has final_weight).
-        // Iterate until fixed point for arbitrary chain depth.
-        let mut chain_propagated = 0usize;
-        loop {
-            let mut newly_propagated = Vec::new();
-            for &sid in &unmatched_default_states {
-                if self.states[sid].final_weight.is_some() {
-                    continue; // already got it in a previous iteration
-                }
-                let target = match self.states[sid].transitions.get(&default_label) {
-                    Some(&t) => t,
-                    None => continue,
-                };
-                if let Some(fw) = self.states[target].final_weight.clone() {
-                    if !fw.is_empty() {
-                        newly_propagated.push((sid, fw));
-                    }
-                }
-            }
-            if newly_propagated.is_empty() {
-                break;
-            }
-            for (sid, fw) in &newly_propagated {
-                self.states[*sid].final_weight = Some(fw.clone());
-                propagated_states.push((*sid, fw.clone()));
-            }
-            chain_propagated += newly_propagated.len();
-        }
-        if chain_propagated > 0 {
-            crate::debug!(5, "propagate_final_weights: {} additional states via DEFAULT chain following", chain_propagated);
         }
 
         // Step 3: Widen incoming transition weights to propagated states.
