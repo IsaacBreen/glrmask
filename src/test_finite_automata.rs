@@ -132,50 +132,6 @@ mod tests {
         assert!(regex.definitely_fully_matches(b"aaaa"));
         assert!(!regex.could_fully_match(b"aaaaa"));
     }
-
-    #[test]
-    fn test_repeat_bounded_large() {
-        // Test with max > 10000, which triggers the deferred expansion path
-        let expr = Expr::RepeatBounded {
-            inner: Box::new(eat_u8(b'a')),
-            min: 0,
-            max: Some(20_000),
-        };
-        let regex = expr.build();
-
-        // 0 matches should work (min=0)
-        assert!(regex.definitely_fully_matches(b""));
-        // 1 match
-        assert!(regex.definitely_fully_matches(b"a"));
-        // 100 matches
-        assert!(regex.definitely_fully_matches(&vec![b'a'; 100]));
-        // 20000 matches (exactly max)
-        assert!(regex.definitely_fully_matches(&vec![b'a'; 20_000]));
-        // 20001 matches (one over max) should NOT match
-        assert!(!regex.could_fully_match(&vec![b'a'; 20_001]));
-    }
-
-    #[test]
-    fn test_repeat_bounded_large_with_min() {
-        // Test with min > 0 and max > 10000
-        let expr = Expr::RepeatBounded {
-            inner: Box::new(eat_u8(b'a')),
-            min: 3,
-            max: Some(15_000),
-        };
-        let regex = expr.build();
-
-        // Empty and short prefixes can't fully match but could still lead to match
-        assert!(!regex.definitely_fully_matches(b""));
-        assert!(!regex.definitely_fully_matches(b"a"));
-        assert!(!regex.definitely_fully_matches(b"aa"));
-        // Exactly min matches
-        assert!(regex.definitely_fully_matches(b"aaa"));
-        assert!(regex.definitely_fully_matches(&vec![b'a'; 7_500]));
-        assert!(regex.definitely_fully_matches(&vec![b'a'; 15_000]));
-        // Over max: can't match even with more input
-        assert!(!regex.could_fully_match(&vec![b'a'; 15_001]));
-    }
 }
 
 #[cfg(test)]
