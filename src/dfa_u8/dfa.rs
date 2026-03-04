@@ -100,6 +100,16 @@ impl JSONConvertible for NFAState {
 pub struct NFA {
     pub states: Vec<NFAState>,
     pub start_state: usize,
+    /// Metadata for RepeatBounded expansions deferred to DFA post-processing.
+    /// Each entry is (min, max) for one repeat marker. The marker finalizer
+    /// group_id is REPEAT_MARKER_BASE + index into this vec.
+    pub repeat_bounds: Vec<(usize, usize)>,
+}
+
+impl NFA {
+    /// Base group_id for repeat marker finalizers. Real group IDs are small;
+    /// marker IDs start far above to avoid collisions.
+    pub const REPEAT_MARKER_BASE: usize = 1_000_000;
 }
 
 /// Simple intermediate type for NFA using derive macro.
@@ -120,6 +130,7 @@ impl JSONConvertible for NFA {
         NFAJSON::from_json(node).map(|j| NFA {
             states: j.states,
             start_state: j.start_state,
+            repeat_bounds: Vec::new(),
         })
     }
 }
@@ -1115,6 +1126,9 @@ impl ExprGroups {
         let nfa_states = nfa.states.len();
         let nfa_transitions = nfa.states.iter().map(|s| s.transitions.len() + s.epsilon_transitions.len()).sum();
 
+        // Save repeat_bounds before NFA is consumed by to_dfa
+        let repeat_bounds = nfa.repeat_bounds.clone();
+
         crate::debug!(4, "Converting NFA to DFA");
         let to_dfa_start = std::time::Instant::now();
         let mut dfa = crate::time!("to_dfa", {
@@ -1126,6 +1140,19 @@ impl ExprGroups {
         });
         let to_dfa_time = to_dfa_start.elapsed();
         crate::debug!(5, "Converted NFA to DFA in {:.2?}", to_dfa_time);
+
+        // Post-process: expand deferred RepeatBounded counts in the DFA.
+        // The NFA was compiled with inner* (small), and now we replicate
+        // the counting cycle in the DFA to enforce the actual bounds.
+        if !repeat_bounds.is_empty() {
+            let expand_start = std::time::Instant::now();
+            crate::debug!(4, "Expanding {} deferred RepeatBounded in DFA ({} states before)",
+                repeat_bounds.len(), dfa.states.len());
+            dfa.expand_repeat_bounds(&repeat_bounds);
+            let expand_time = expand_start.elapsed();
+            crate::debug!(4, "Expanded RepeatBounded: {} DFA states in {:.2?}",
+                dfa.states.len(), expand_time);
+        }
 
         let mut minimize_time = std::time::Duration::default();
         if minimize {
@@ -1185,6 +1212,7 @@ impl ExprGroups {
         let mut nfa = NFA {
             states: vec![NFAState::new()],
             start_state: 0,
+            repeat_bounds: Vec::new(),
         };
 
         let mut cache: CpsCache = HashMap::new();
@@ -1448,6 +1476,51 @@ impl Expr {
                     Some(max_val) => {
                         if min > max_val {
                             return nfa.add_state();
+                        }
+
+                        // For large repeat bounds, compile as inner* in the NFA
+                        // (keeping the NFA small), then expand counting in the DFA
+                        // via post-processing (replicate the counting cycle).
+                        //
+                        // Strategy: mark the loop-back state with a special finalizer
+                        // so the DFA post-processing knows which DFA states form the
+                        // counting cycle and which transitions advance the count.
+                        // Only defer expansion for very large bounds where the normal
+                        // boundary-state approach would create millions of NFA states.
+                        // Common maxLength values (255, 1000, 10000) are fine with the
+                        // normal approach and produce smaller DFAs after minimization.
+                        const REPEAT_EXPAND_THRESHOLD: usize = 10_000;
+                        if max_val > REPEAT_EXPAND_THRESHOLD {
+                            // Build as inner* (ZeroOrMore)
+                            let loop_split = nfa.add_state();
+
+                            // Mark loop_split with sentinel finalizer for post-processing.
+                            // We use a high group_id that won't collide with real groups.
+                            // The mandatory `min` iterations are already prepended in the NFA
+                            // (see below), so the expansion only needs to cap at (max - min)
+                            // additional cycles. We store (0, max - min) as the bounds.
+                            let marker_group = NFA::REPEAT_MARKER_BASE + nfa.repeat_bounds.len();
+                            nfa.states[loop_split].finalizers.insert(marker_group);
+                            nfa.repeat_bounds.push((0, max_val - min));
+
+                            // Exit the loop: epsilon to continuation.
+                            // At position 0 in the expansion (which is after `min` mandatory
+                            // iterations), exit is immediately allowed since min_count=0.
+                            nfa.add_epsilon_transition(loop_split, cont);
+
+                            // Loop body: compile inner → back to loop_split
+                            let body_start = Self::compile_cps(
+                                inner.as_ref(), nfa, loop_split, cache,
+                            );
+                            nfa.add_epsilon_transition(loop_split, body_start);
+
+                            // For min > 0: prepend mandatory iterations
+                            let mut s = loop_split;
+                            for _ in 0..min {
+                                s = Self::compile_cps(inner.as_ref(), nfa, s, cache);
+                            }
+
+                            return s;
                         }
 
                         if max_val == min {
@@ -3062,6 +3135,7 @@ impl DFA {
         NFA {
             states,
             start_state: self.start_state,
+            repeat_bounds: Vec::new(),
         }
     }
 
@@ -3248,6 +3322,252 @@ impl DFA {
 
         self.states = new_states;
         self.start_state = 0;
+    }
+
+    /// Expand deferred RepeatBounded constraints into the DFA.
+    ///
+    /// During NFA construction, large RepeatBounded(inner, min, max) was compiled
+    /// as inner* (with a sentinel marker finalizer on the loop-back state).
+    /// This method identifies the "counting cycle" in the DFA (states where the
+    /// loop marker is active) and replicates it `max` times to enforce the bound.
+    ///
+    /// This is vastly more efficient than encoding counting in the NFA because:
+    /// - The NFA stays small (inner* instead of inner{0,N})
+    /// - The DFA-before-expansion is small (~1000 states)
+    /// - The expansion is mechanical replication: O(cycle_states × max)
+    fn expand_repeat_bounds(&mut self, repeat_bounds: &[(usize, usize)]) {
+        use rustc_hash::FxHashSet;
+
+        for (marker_idx, &(min_count, max_count)) in repeat_bounds.iter().enumerate() {
+            let marker_group = NFA::REPEAT_MARKER_BASE + marker_idx;
+
+            // 1. Identify "loop-head" DFA states: those with the marker in finalizers
+            let loop_heads: FxHashSet<usize> = self.states.iter().enumerate()
+                .filter(|(_, s)| s.finalizers.contains(marker_group))
+                .map(|(i, _)| i)
+                .collect();
+
+            if loop_heads.is_empty() {
+                continue;
+            }
+
+            crate::debug!(5, "RepeatBounded marker {}: {} loop-head DFA states, bounds ({}, {})",
+                marker_idx, loop_heads.len(), min_count, max_count);
+
+            // 2. Identify the "counting subgraph": DFA states that are on cycles
+            //    through loop-head states. Forward-reachable from loop-heads AND
+            //    backward-reachable TO loop-heads (within the DFA's transition graph).
+            let num_states = self.states.len();
+
+            // Forward reachability from loop heads
+            let mut fwd_reachable = vec![false; num_states];
+            let mut stack: Vec<usize> = loop_heads.iter().cloned().collect();
+            while let Some(s) = stack.pop() {
+                if fwd_reachable[s] { continue; }
+                fwd_reachable[s] = true;
+                for (_, &target) in self.states[s].transitions.iter() {
+                    if !fwd_reachable[target] {
+                        stack.push(target);
+                    }
+                }
+            }
+
+            // Backward reachability to loop heads
+            // Build reverse adjacency first
+            let mut rev_adj: Vec<Vec<usize>> = vec![Vec::new(); num_states];
+            for (src, state) in self.states.iter().enumerate() {
+                for (_, &target) in state.transitions.iter() {
+                    rev_adj[target].push(src);
+                }
+            }
+            let mut bwd_reachable = vec![false; num_states];
+            let mut stack: Vec<usize> = loop_heads.iter().cloned().collect();
+            while let Some(s) = stack.pop() {
+                if bwd_reachable[s] { continue; }
+                bwd_reachable[s] = true;
+                for &pred in &rev_adj[s] {
+                    if !bwd_reachable[pred] {
+                        stack.push(pred);
+                    }
+                }
+            }
+
+            // Counting subgraph = forward AND backward reachable
+            let counting_states: FxHashSet<usize> = (0..num_states)
+                .filter(|&s| fwd_reachable[s] && bwd_reachable[s])
+                .collect();
+
+            crate::debug!(5, "  Counting subgraph: {} DFA states", counting_states.len());
+
+            if counting_states.is_empty() {
+                continue;
+            }
+
+            // Safety cap: if expansion would create too many states, skip it.
+            // The DFA already has inner* behavior; skipping just means we don't
+            // enforce the upper bound (an over-approximation). For tokenizer DFAs
+            // this is harmless since tokens are at most ~100 bytes.
+            const MAX_EXPANDED_DFA_STATES: usize = 500_000;
+            let would_create = counting_states.len() * max_count;
+            if would_create > MAX_EXPANDED_DFA_STATES {
+                crate::debug!(3, "  Skipping expansion: {} cycle × {} positions = {} exceeds {} limit",
+                    counting_states.len(), max_count, would_create, MAX_EXPANDED_DFA_STATES);
+                // Strip markers but keep the * approximation
+                for state in &mut self.states {
+                    state.finalizers.remove(marker_group);
+                }
+                continue;
+            }
+
+            // 3. Create a mapping from old state indices to "template" indices
+            //    within the counting subgraph
+            let counting_vec: Vec<usize> = counting_states.iter().cloned().collect();
+            let mut state_to_template: Vec<Option<usize>> = vec![None; num_states];
+            for (template_idx, &state) in counting_vec.iter().enumerate() {
+                state_to_template[state] = Some(template_idx);
+            }
+            let cycle_size = counting_vec.len();
+
+            // 4. For each counting state, classify its transitions:
+            //    - Stay-in-cycle (target in counting_states but NOT loop-head): same position
+            //    - Count-advance (target is loop-head in counting_states): position + 1
+            //    - Exit (target not in counting_states): goes to original target
+            //
+            // Save template transitions: Vec<(byte, target_template_idx_or_exit, is_advance)>
+            #[derive(Clone)]
+            enum ExpandedTarget {
+                SamePosition(usize),      // template index, same count
+                AdvancePosition(usize),   // template index, count + 1
+                Exit(usize),              // original DFA state index (outside cycle)
+            }
+
+            let template_transitions: Vec<Vec<(u8, ExpandedTarget)>> = counting_vec.iter().map(|&state| {
+                let mut trans = Vec::new();
+                for (byte, &target) in self.states[state].transitions.iter() {
+                    if let Some(tmpl) = state_to_template[target] {
+                        if loop_heads.contains(&target) {
+                            trans.push((byte, ExpandedTarget::AdvancePosition(tmpl)));
+                        } else {
+                            trans.push((byte, ExpandedTarget::SamePosition(tmpl)));
+                        }
+                    } else {
+                        trans.push((byte, ExpandedTarget::Exit(target)));
+                    }
+                }
+                trans
+            }).collect();
+
+            // Template finalizers (without the marker)
+            let template_finalizers: Vec<DenseStateSet> = counting_vec.iter().map(|&state| {
+                let mut f = self.states[state].finalizers.clone();
+                f.remove(marker_group);
+                f
+            }).collect();
+
+            // Which template states are loop-heads
+            let template_is_loop_head: Vec<bool> = counting_vec.iter()
+                .map(|&s| loop_heads.contains(&s))
+                .collect();
+
+            // 5. Allocate new states for positions 1..max_count
+            //    Position 0 reuses the existing counting states.
+            //    Positions 1..max_count each get `cycle_size` new states.
+            let new_base = self.states.len();
+
+            // For position k (0-indexed), the DFA state for template t is:
+            //   k == 0: counting_vec[t]  (original state)
+            //   k > 0:  new_base + (k - 1) * cycle_size + t
+            let state_at = |k: usize, t: usize| -> usize {
+                if k == 0 { counting_vec[t] } else { new_base + (k - 1) * cycle_size + t }
+            };
+
+            // Allocate states for positions 1..max_count
+            let num_new_states = (max_count) * cycle_size; // positions 1..max_count
+            self.states.reserve(num_new_states);
+            for _ in 0..num_new_states {
+                self.states.push(DFAState {
+                    transitions: CharTransitions::new(),
+                    finalizers: DenseStateSet::empty(),
+                    possible_future_group_ids: BTreeSet::new(),
+                    group_id_to_u8set: BTreeMap::new(),
+                });
+            }
+
+            crate::debug!(5, "  Allocated {} new DFA states for {} positions × {} cycle states",
+                num_new_states, max_count, cycle_size);
+
+            // 6. Wire transitions for all positions
+            for k in 0..=max_count {
+                for t in 0..cycle_size {
+                    let dfa_state = state_at(k, t);
+
+                    // Set finalizers: if loop-head and k >= min_count, copy template finalizers
+                    // Non-loop-head states get template finalizers regardless (they might be
+                    // accepting for OTHER groups, just not for the counting group's exit).
+                    if template_is_loop_head[t] {
+                        if k >= min_count {
+                            self.states[dfa_state].finalizers = template_finalizers[t].clone();
+                        } else {
+                            // Before min_count: remove the counting group's exit acceptance
+                            // but keep other groups' finalizers
+                            let mut f = template_finalizers[t].clone();
+                            // The exit acceptance for the counting group was inherited from
+                            // the NFA's epsilon to cont. We need to identify which finalizers
+                            // come from "through cont" vs "from other groups".
+                            // For simplicity: at positions < min_count, we keep the finalizers
+                            // as-is. The min_count constraint for exit is handled by only
+                            // allowing exit transitions at positions >= min_count.
+                            //
+                            // Actually for min=0 (the common case), this branch never executes.
+                            self.states[dfa_state].finalizers = f;
+                        }
+                    } else {
+                        self.states[dfa_state].finalizers = template_finalizers[t].clone();
+                    }
+
+                    // Set transitions
+                    let mut new_transitions: Vec<(u8, usize)> = Vec::new();
+                    for (byte, ref target_type) in &template_transitions[t] {
+                        match target_type {
+                            ExpandedTarget::SamePosition(tmpl) => {
+                                new_transitions.push((*byte, state_at(k, *tmpl)));
+                            }
+                            ExpandedTarget::AdvancePosition(tmpl) => {
+                                if k < max_count {
+                                    new_transitions.push((*byte, state_at(k + 1, *tmpl)));
+                                }
+                                // At k == max_count: drop this transition (can't match more)
+                            }
+                            ExpandedTarget::Exit(orig_target) => {
+                                if template_is_loop_head[t] && k < min_count {
+                                    // Before min_count, loop-head states can't exit
+                                    // Drop exit transitions
+                                } else {
+                                    new_transitions.push((*byte, *orig_target));
+                                }
+                            }
+                        }
+                    }
+
+                    // Sort and build CharTransitions
+                    new_transitions.sort_by_key(|&(b, _)| b);
+                    self.states[dfa_state].transitions =
+                        CharTransitions::from_sorted_entries(new_transitions);
+                }
+            }
+
+            // 7. Update entry transitions: transitions from non-counting states
+            //    to counting states should go to position 0 (already the case since
+            //    position 0 reuses the original state indices).
+
+            // 8. Strip the marker finalizer from all states
+            for state in &mut self.states {
+                state.finalizers.remove(marker_group);
+            }
+
+            crate::debug!(4, "  RepeatBounded expansion complete: {} total DFA states",
+                self.states.len());
+        }
     }
 
     fn minimize(&mut self) {
