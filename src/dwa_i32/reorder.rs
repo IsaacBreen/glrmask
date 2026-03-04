@@ -1281,9 +1281,9 @@ pub fn reorder_dwa_dimensions(
     // already captures 97%+ of the benefit and the first or-opt iteration
     // provides most of the remaining improvement.
     let or_opt_budget = if unique_token_profs.len() > 2000 {
-        std::time::Duration::from_millis(200)
+        std::time::Duration::from_millis(50)
     } else {
-        std::time::Duration::from_millis(500)
+        std::time::Duration::from_millis(100)
     };
     let token_class_perm = or_opt_outer_ranges(
         &unique_weights,

@@ -3385,10 +3385,11 @@ impl CompiledGrammar {
         let skip_minimize = std::env::var("SKIP_TOKENIZER_DFA_MINIMIZE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let force_minimize = std::env::var("FORCE_TOKENIZER_DFA_MINIMIZE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let minimize_dfa = force_minimize && !skip_minimize;
+        // DFA minimization is enabled by default: reduces tokenizer states significantly
+        // (e.g. 4717→2348 for large schemas), speeding up downstream equivalence analysis
+        // and NWA construction. The minimization cost (O(n log n)) is typically recovered
+        // many times over. Set SKIP_TOKENIZER_DFA_MINIMIZE=1 to disable.
+        let minimize_dfa = !skip_minimize;
 
         let (tokenizer_regex, tokenizer_timings) = if profile_tokenizer {
             let (regex, timings) = if minimize_dfa {

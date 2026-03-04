@@ -32,10 +32,21 @@ struct Finalizer {
     non_greedy: bool,
 }
 
-/// Flat DFA with 256-byte transition tables.
+/// Flat DFA with byte-class-compressed transposed transition tables.
+///
+/// Byte equivalence classes group bytes that produce identical transitions across
+/// all DFA states. The transposed layout `trans_by_class[class * num_states + state]`
+/// gives optimal cache locality: for a given byte, all state lookups hit a single
+/// contiguous array chunk that fits in L1 cache.
 struct Dfa {
     start_state: usize,
-    transitions: Vec<[u32; 256]>,
+    num_states: usize,
+    /// Byte-to-class mapping (byte equivalence classes).
+    byte_to_class: [u8; 256],
+    num_classes: usize,
+    /// Transposed transition table: `trans_by_class[class * num_states + state]`.
+    /// For a given byte class, all state transitions are contiguous in memory.
+    trans_by_class: Vec<u32>,
     finalizers: Vec<SmallVec<[Finalizer; 4]>>,
     is_dead_end: Vec<bool>,
     num_groups: usize,
@@ -54,6 +65,13 @@ impl Dfa {
         } else {
             self.none_completion_hash
         }
+    }
+
+    /// Look up transition: given a DFA state and a byte, return the next state (u32).
+    #[inline]
+    fn transition(&self, state: usize, byte: u8) -> u32 {
+        let class = self.byte_to_class[byte as usize] as usize;
+        unsafe { *self.trans_by_class.get_unchecked(class * self.num_states + state) }
     }
 }
 
@@ -163,9 +181,50 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
         })
         .collect();
 
+    // Compute byte equivalence classes: group bytes with identical transitions across all states.
+    let num_dfa_states = transitions.len();
+    let mut byte_to_class = [0u8; 256];
+    let mut class_repr = [0u8; 256]; // representative byte for each class
+    let mut num_classes = 0usize;
+
+    for b in 0..=255u8 {
+        let mut found = false;
+        for c in 0..num_classes {
+            let repr = class_repr[c] as usize;
+            let same = (0..num_dfa_states).all(|s| transitions[s][b as usize] == transitions[s][repr]);
+            if same {
+                byte_to_class[b as usize] = c as u8;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            byte_to_class[b as usize] = num_classes as u8;
+            class_repr[num_classes] = b;
+            num_classes += 1;
+        }
+    }
+
+    // Build transposed transition table: trans_by_class[class * num_states + state]
+    let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
+    for c in 0..num_classes {
+        let repr = class_repr[c] as usize;
+        let base = c * num_dfa_states;
+        for s in 0..num_dfa_states {
+            trans_by_class[base + s] = transitions[s][repr];
+        }
+    }
+
+    crate::debug!(2, "  DFA byte classes: {} classes from 256 bytes ({} states, table={:.1}KB)",
+        num_classes, num_dfa_states,
+        (num_classes * num_dfa_states * 4) as f64 / 1024.0);
+
     Dfa {
         start_state: dfa.start_state,
-        transitions,
+        num_states: num_dfa_states,
+        byte_to_class,
+        num_classes,
+        trans_by_class,
         finalizers,
         is_dead_end,
         num_groups,
@@ -226,7 +285,7 @@ fn run_batch(
             scratch.current_states[i] = STATE_NONE;
             continue;
         }
-        if has_bytes && dfa.transitions[state][first_byte as usize] == NONE {
+        if has_bytes && dfa.transition(state, first_byte) == NONE {
             scratch.current_states[i] = STATE_NONE;
             continue;
         }
@@ -239,10 +298,12 @@ fn run_batch(
         for (pos, &byte) in slice.iter().enumerate() {
             let position = (pos + 1) as u32;
             let mut next_len = 0usize;
+            let class = dfa.byte_to_class[byte as usize] as usize;
+            let class_base = class * dfa.num_states;
             for idx in 0..active_len {
                 let i = scratch.active_indices[idx];
                 let base = i * num_groups;
-                let next_state = dfa.transitions[scratch.current_states[i]][byte as usize];
+                let next_state = unsafe { *dfa.trans_by_class.get_unchecked(class_base + scratch.current_states[i]) };
                 if next_state != NONE {
                     let ns = next_state as usize;
                     scratch.current_states[i] = ns;
@@ -345,7 +406,7 @@ fn run_suffix(
         if done {
             break;
         }
-        let ns = dfa.transitions[current][byte as usize];
+        let ns = dfa.transition(current, byte);
         if ns == NONE {
             done = true;
             break;
