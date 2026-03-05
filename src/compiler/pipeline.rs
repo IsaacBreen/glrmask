@@ -58,6 +58,12 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let parser_dwa = build_parser_dwa(&table, &glr_grammar, &vocab_pre);
 
     // 7. Package as Constraint.
+    let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> = vocab
+        .entries
+        .iter()
+        .map(|(id, bytes)| (*id, bytes.clone()))
+        .collect();
+
     Constraint {
         parser_dwa,
         table,
@@ -68,6 +74,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         possible_matches: vocab_pre.possible_matches,
         max_token: vocab_pre.max_token,
         eos_token_id: vocab.eos_token_id,
+        token_bytes,
     }
 }
 
@@ -125,5 +132,228 @@ mod tests {
         let constraint = compile(&gdef, &vocab);
         assert!(constraint.num_dwa_states() > 0);
         assert!(constraint.num_parser_states() > 0);
+    }
+
+    #[test]
+    fn test_end_to_end_simple_ab() {
+        // Grammar: S → a b
+        // Vocab: token 0 = "a", token 1 = "b"
+        let gdef = simple_ab_grammar();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        // Initial mask: "a" allowed, "b" not.
+        let mask = state.compute_mask(&constraint);
+        assert!(mask.get(0), "token 'a' should be allowed initially");
+        assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
+
+        // Commit "a".
+        state.commit(&constraint, 0).expect("commit 'a' should succeed");
+        assert!(!state.is_accepting(&constraint), "not yet accepting after 'a'");
+
+        // After "a": "b" allowed, "a" not.
+        let mask = state.compute_mask(&constraint);
+        assert!(!mask.get(0), "token 'a' should NOT be allowed after 'a'");
+        assert!(mask.get(1), "token 'b' should be allowed after 'a'");
+
+        // Commit "b".
+        state.commit(&constraint, 1).expect("commit 'b' should succeed");
+        assert!(state.is_accepting(&constraint), "should accept after 'ab'");
+    }
+
+    #[test]
+    fn test_end_to_end_choice() {
+        // Grammar: S → a | b
+        // Vocab: token 0 = "a", token 1 = "b"
+        // Expected: initial mask allows both "a" and "b".
+        let gdef = choice_grammar();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        // Initial mask: should allow both "a" and "b".
+        let mask = state.compute_mask(&constraint);
+        assert!(mask.get(0), "token 'a' should be allowed");
+        assert!(mask.get(1), "token 'b' should be allowed");
+
+        // Commit token "a".
+        state.commit(&constraint, 0).expect("commit 'a' should succeed");
+        assert!(state.is_accepting(&constraint), "parse should accept after 'a'");
+    }
+
+    #[test]
+    fn test_end_to_end_two_nt() {
+        // Grammar: S → A b, A → a
+        // Same as simple_ab but with an intermediate nonterminal.
+        let gdef = two_nt_grammar();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        // Initial: "a" allowed, "b" not.
+        let mask = state.compute_mask(&constraint);
+        assert!(mask.get(0), "token 'a' should be allowed initially");
+        assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
+
+        // Commit "a".
+        state.commit(&constraint, 0).expect("commit 'a' should succeed");
+        assert!(!state.is_accepting(&constraint), "not yet accepting after 'a'");
+
+        // After "a": "b" allowed, "a" not.
+        let mask = state.compute_mask(&constraint);
+        assert!(!mask.get(0), "token 'a' should NOT be allowed after 'a'");
+        assert!(mask.get(1), "token 'b' should be allowed after 'a'");
+
+        // Commit "b".
+        state.commit(&constraint, 1).expect("commit 'b' should succeed");
+        assert!(state.is_accepting(&constraint), "should accept after 'ab'");
+    }
+
+    #[test]
+    fn test_end_to_end_nested_nt() {
+        // Grammar: S → A B, A → a, B → b
+        // Same result as S → a b but with two nonterminal reductions.
+        let gdef = nested_nt_grammar();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        // Initial: "a" allowed, "b" not.
+        let mask = state.compute_mask(&constraint);
+        assert!(mask.get(0), "token 'a' should be allowed initially");
+        assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
+
+        // Commit "a".
+        state.commit(&constraint, 0).expect("commit 'a' should succeed");
+        assert!(!state.is_accepting(&constraint), "not accepting after 'a'");
+
+        // After "a": "b" should be allowed (A reduced, now need B → b).
+        let mask = state.compute_mask(&constraint);
+        assert!(!mask.get(0), "token 'a' should NOT be allowed after 'a'");
+        assert!(mask.get(1), "token 'b' should be allowed after 'a'");
+
+        // Commit "b".
+        state.commit(&constraint, 1).expect("commit 'b' should succeed");
+        assert!(state.is_accepting(&constraint), "should accept after 'ab'");
+    }
+
+    #[test]
+    fn test_end_to_end_three_terminals() {
+        // Grammar: S → a b c
+        let gdef = three_terminal_grammar();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"c".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        // Initial: only "a" allowed.
+        let mask = state.compute_mask(&constraint);
+        assert!(mask.get(0), "token 'a' should be allowed initially");
+        assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
+        assert!(!mask.get(2), "token 'c' should NOT be allowed initially");
+
+        // Commit "a".
+        state.commit(&constraint, 0).expect("commit 'a'");
+
+        // After "a": only "b" allowed.
+        let mask = state.compute_mask(&constraint);
+        assert!(!mask.get(0), "no 'a' after 'a'");
+        assert!(mask.get(1), "'b' after 'a'");
+        assert!(!mask.get(2), "no 'c' after 'a'");
+
+        // Commit "b".
+        state.commit(&constraint, 1).expect("commit 'b'");
+
+        // After "ab": only "c" allowed.
+        let mask = state.compute_mask(&constraint);
+        assert!(!mask.get(0), "no 'a' after 'ab'");
+        assert!(!mask.get(1), "no 'b' after 'ab'");
+        assert!(mask.get(2), "'c' after 'ab'");
+
+        // Commit "c".
+        state.commit(&constraint, 2).expect("commit 'c'");
+        assert!(state.is_accepting(&constraint), "should accept after 'abc'");
+    }
+
+    #[test]
+    fn test_end_to_end_nested_two_rhs() {
+        // Grammar: S → A c, A → a b
+        // Exercises reduce with pop_count=2.
+        let gdef = nested_two_rhs_grammar();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"c".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        // Initial: only "a" allowed.
+        let mask = state.compute_mask(&constraint);
+        assert!(mask.get(0), "token 'a' should be allowed initially");
+        assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
+        assert!(!mask.get(2), "token 'c' should NOT be allowed initially");
+
+        // Commit "a".
+        state.commit(&constraint, 0).expect("commit 'a'");
+
+        // After "a": only "b" allowed (still in A → a • b).
+        let mask = state.compute_mask(&constraint);
+        assert!(!mask.get(0), "no 'a' after 'a'");
+        assert!(mask.get(1), "'b' after 'a'");
+        assert!(!mask.get(2), "no 'c' after 'a'");
+
+        // Commit "b".
+        state.commit(&constraint, 1).expect("commit 'b'");
+
+        // After "ab": "c" should be allowed (A reduced, S → A • c).
+        let mask = state.compute_mask(&constraint);
+        assert!(!mask.get(0), "no 'a' after 'ab'");
+        assert!(!mask.get(1), "no 'b' after 'ab'");
+        assert!(mask.get(2), "'c' after 'ab'");
+
+        // Commit "c".
+        state.commit(&constraint, 2).expect("commit 'c'");
+        assert!(state.is_accepting(&constraint), "should accept after 'abc'");
     }
 }

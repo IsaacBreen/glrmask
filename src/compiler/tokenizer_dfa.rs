@@ -95,11 +95,10 @@ impl TokenizerDfa {
     }
 
     /// Execute the tokenizer on a byte string from a given state.
-    /// Returns (final_state, set of matched terminal IDs along the way).
+    /// Returns (final_state, set of matched terminal IDs at the end).
     ///
     /// This does maximal-munch tokenization: feeds all bytes and returns
-    /// terminals matched at the final state. For actual tokenization,
-    /// the runtime tracks matches at every byte position.
+    /// terminals matched at the final state.
     pub fn execute(&self, input: &[u8], start: u32) -> (u32, BTreeSet<TerminalId>) {
         let mut state = start;
         for &b in input {
@@ -111,6 +110,58 @@ impl TokenizerDfa {
         let matched = self.matched_terminals(state);
         (state, matched)
     }
+
+    /// Execute the tokenizer on a byte string, tracking matches at every prefix.
+    ///
+    /// Returns a list of `(byte_offset, matched_terminals)` for each prefix
+    /// where at least one terminal matches. `byte_offset` is the number of
+    /// bytes consumed (1-indexed). Also returns the final DFA state after
+    /// processing all bytes and its matched terminals (if any).
+    ///
+    /// This is used during commit to find all intermediate terminal matches
+    /// within a single LLM token's byte sequence.
+    pub fn execute_all_matches(
+        &self,
+        input: &[u8],
+        start: u32,
+    ) -> TokenizerResult {
+        let mut state = start;
+        let mut matches = Vec::new();
+
+        for (i, &b) in input.iter().enumerate() {
+            state = self.dfa.get_transition(state, b);
+            if state == crate::automata::dfa::DEAD {
+                return TokenizerResult {
+                    end_state: state,
+                    matches,
+                };
+            }
+            let matched = self.matched_terminals(state);
+            if !matched.is_empty() {
+                matches.push((i + 1, matched));
+            }
+        }
+
+        TokenizerResult {
+            end_state: state,
+            matches,
+        }
+    }
+
+    /// The initial DFA state (always 0).
+    pub fn initial_state(&self) -> u32 {
+        0
+    }
+}
+
+/// Result of executing the tokenizer with intermediate match tracking.
+#[derive(Debug, Clone)]
+pub struct TokenizerResult {
+    /// The DFA state after processing all bytes.
+    pub end_state: u32,
+    /// Matches found at each prefix: `(byte_offset, matched_terminals)`.
+    /// `byte_offset` is 1-indexed (number of bytes consumed).
+    pub matches: Vec<(usize, BTreeSet<TerminalId>)>,
 }
 
 // ---------------------------------------------------------------------------

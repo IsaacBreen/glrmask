@@ -120,6 +120,58 @@ pub(crate) mod tests {
         }
     }
 
+    /// Helper: build a grammar "S → A B, A → a, B → b" with 3 nonterminals.
+    pub fn nested_nt_grammar() -> GrammarDef {
+        // NT 0 = S, NT 1 = A, NT 2 = B
+        // T 0 = a, T 1 = b
+        GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(1)] },
+            ],
+            start: 0,
+            terminals: vec![
+                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
+                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+            ],
+        }
+    }
+
+    /// Helper: build a grammar "S → a b c" with 3 terminals.
+    pub fn three_terminal_grammar() -> GrammarDef {
+        GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2)],
+            }],
+            start: 0,
+            terminals: vec![
+                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
+                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+                TerminalDef { id: 2, name: "c".into(), pattern: "c".into() },
+            ],
+        }
+    }
+
+    /// Helper: build a grammar "S → A c, A → a b" with a nonterminal that produces two terminals.
+    pub fn nested_two_rhs_grammar() -> GrammarDef {
+        // NT 0 = S, NT 1 = A
+        // T 0 = a, T 1 = b, T 2 = c
+        GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)] },
+            ],
+            start: 0,
+            terminals: vec![
+                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
+                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+                TerminalDef { id: 2, name: "c".into(), pattern: "c".into() },
+            ],
+        }
+    }
+
     #[test]
     fn test_grammar_def_basics() {
         let g = simple_ab_grammar();

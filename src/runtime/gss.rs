@@ -1,62 +1,104 @@
-//! Graph-Structured Stack (GSS).
+//! Graph-Structured Stack (GSS) — simplified list-of-stacks.
 //!
-//! Used during GLR parsing to handle nondeterminism efficiently.
-//! Multiple parse stacks share common prefixes via a DAG structure.
+//! In GLR parsing, nondeterminism creates multiple parse stacks that may
+//! share common prefixes. A full GSS represents this as a DAG, but for
+//! simplicity we start with an explicit list of stacks (Vec of Vec).
+//!
+//! Each "stack" is a sequence of parser state IDs, bottom to top.
+//! The top of the stack is `stack.last()`.
 
 #![allow(dead_code)]
 
-/// A node in the Graph-Structured Stack.
+use std::collections::BTreeSet;
+
+/// A collection of GLR parse stacks for a single tokenizer state.
+///
+/// Each stack is a Vec<u32> of parser state IDs, ordered bottom-to-top.
 #[derive(Debug, Clone)]
-pub struct GssNode {
-    /// The state at this stack level.
-    pub state: u32,
-    /// Links to predecessor nodes (shared prefixes).
-    pub predecessors: Vec<u32>,
+pub struct GlrStacks {
+    stacks: Vec<Vec<u32>>,
 }
 
-/// A Graph-Structured Stack.
-#[derive(Debug, Clone)]
-pub struct Gss {
-    /// All nodes in the GSS.
-    nodes: Vec<GssNode>,
-    /// Active frontier node IDs.
-    frontier: Vec<u32>,
-}
-
-impl Gss {
-    /// Create a new GSS with an initial node at the given state.
+impl GlrStacks {
+    /// Create a new GlrStacks with a single stack containing one state.
     pub fn new(initial_state: u32) -> Self {
         Self {
-            nodes: vec![GssNode {
-                state: initial_state,
-                predecessors: Vec::new(),
-            }],
-            frontier: vec![0],
+            stacks: vec![vec![initial_state]],
         }
     }
 
-    /// Get the active frontier.
-    pub fn frontier(&self) -> &[u32] {
-        &self.frontier
+    /// Create from a list of stacks.
+    pub fn from_stacks(stacks: Vec<Vec<u32>>) -> Self {
+        Self { stacks }
     }
 
-    /// Get a node by ID.
-    pub fn get_node(&self, id: u32) -> &GssNode {
-        &self.nodes[id as usize]
+    /// Create empty (no stacks).
+    pub fn empty() -> Self {
+        Self { stacks: Vec::new() }
     }
 
-    /// Add a new node and return its ID.
-    pub fn add_node(&mut self, state: u32, predecessors: Vec<u32>) -> u32 {
-        let id = self.nodes.len() as u32;
-        self.nodes.push(GssNode {
-            state,
-            predecessors,
-        });
-        id
+    /// Whether there are no stacks (all paths died).
+    pub fn is_empty(&self) -> bool {
+        self.stacks.is_empty()
     }
 
-    /// Set the frontier.
-    pub fn set_frontier(&mut self, frontier: Vec<u32>) {
-        self.frontier = frontier;
+    /// Number of active stacks.
+    pub fn len(&self) -> usize {
+        self.stacks.len()
+    }
+
+    /// Iterate over stacks.
+    pub fn iter(&self) -> impl Iterator<Item = &Vec<u32>> {
+        self.stacks.iter()
+    }
+
+    /// Get the top parser state of each stack.
+    pub fn tops(&self) -> BTreeSet<u32> {
+        self.stacks
+            .iter()
+            .filter_map(|s| s.last().copied())
+            .collect()
+    }
+
+    /// Add a stack.
+    pub fn push(&mut self, stack: Vec<u32>) {
+        self.stacks.push(stack);
+    }
+
+    /// Merge with another GlrStacks (union of stacks).
+    /// Deduplicates identical stacks.
+    pub fn merge(&mut self, other: &GlrStacks) {
+        let existing: BTreeSet<Vec<u32>> = self.stacks.drain(..).collect();
+        let mut all: BTreeSet<Vec<u32>> = existing;
+        for s in &other.stacks {
+            all.insert(s.clone());
+        }
+        self.stacks = all.into_iter().collect();
+    }
+
+    /// Take ownership of the stacks.
+    pub fn into_stacks(self) -> Vec<Vec<u32>> {
+        self.stacks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_glr_stacks_basic() {
+        let gs = GlrStacks::new(0);
+        assert_eq!(gs.len(), 1);
+        assert!(!gs.is_empty());
+        assert_eq!(gs.tops(), BTreeSet::from([0]));
+    }
+
+    #[test]
+    fn test_glr_stacks_merge_dedup() {
+        let mut gs1 = GlrStacks::from_stacks(vec![vec![0, 1], vec![0, 2]]);
+        let gs2 = GlrStacks::from_stacks(vec![vec![0, 1], vec![0, 3]]);
+        gs1.merge(&gs2);
+        assert_eq!(gs1.len(), 3); // [0,1], [0,2], [0,3] — deduped [0,1]
     }
 }

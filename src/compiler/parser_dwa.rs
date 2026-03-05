@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::automata::weighted::dwa::CompDwa;
+use crate::automata::weighted::dwa::{CompDwa, CompDwaState};
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::minimize_acyclic;
 use crate::automata::weighted::nwa::Nwa;
@@ -30,6 +30,9 @@ use crate::compiler::vocab_pre::VocabPreprocessing;
 use crate::ds::rangeset::RangeSet;
 
 /// A special label that matches any parser state ("wildcard" / "default").
+/// No longer used in NWA construction (expanded to explicit transitions),
+/// but kept for reference and potential use in runtime DEFAULT handling.
+#[allow(dead_code)]
 pub const DEFAULT_LABEL: i32 = i32::MAX - 1;
 
 // ---------------------------------------------------------------------------
@@ -152,11 +155,69 @@ fn characterize_terminal(
 // NWA construction from characterizations
 // ---------------------------------------------------------------------------
 
+/// Compute all valid revealed states for a nonterminal, following rereduce chains.
+///
+/// A revealed state `r` is valid for nonterminal `nt` if, starting from `nt`,
+/// there exists a chain of rereduces (with pop_count=1, which re-reveal the same
+/// state) that eventually leads to an nt_escape at `r`.
+fn compute_valid_revealed(
+    start_nt: NonterminalId,
+    tc: &TerminalCharacterization,
+) -> BTreeSet<u32> {
+    let mut valid = BTreeSet::new();
+    let mut visited: BTreeSet<(NonterminalId, u32)> = BTreeSet::new();
+    let mut queue: VecDeque<(NonterminalId, u32)> = VecDeque::new();
+
+    // Seed: direct escapes from start_nt.
+    for &(n, r, _, _) in &tc.nt_escapes {
+        if n == start_nt {
+            valid.insert(r);
+        }
+    }
+
+    // Seed: rereduces with pop_count=1 from start_nt.
+    for &(n, r, pop2, nt_to) in &tc.nt_rereduces {
+        if n == start_nt && pop2 == 1 {
+            queue.push_back((nt_to, r));
+        }
+    }
+
+    while let Some((nt, r)) = queue.pop_front() {
+        if !visited.insert((nt, r)) {
+            continue;
+        }
+
+        // Check if (nt, r) has a direct escape.
+        for &(n, er, _, _) in &tc.nt_escapes {
+            if n == nt && er == r {
+                valid.insert(r);
+            }
+        }
+
+        // Follow rereduces with pop_count=1 at (nt, r).
+        for &(n, rr, pop2, nt_to) in &tc.nt_rereduces {
+            if n == nt && rr == r && pop2 == 1 {
+                queue.push_back((nt_to, r));
+            }
+        }
+    }
+
+    valid
+}
+
 /// Build the parser NWA from terminal characterizations and vocab preprocessing.
 ///
 /// The NWA labels are parser state IDs (non-negative i32).
-/// DEFAULT_LABEL is used as a wildcard that matches any parser state.
 /// The weights encode which LLM tokens are valid, in TSID × token space.
+///
+/// The NWA reads the parser stack **bottom-to-top**. For a reduce at `from_state`
+/// with pop_count `p` revealing state `revealed`, the stack word is:
+///   [...prefix, revealed, skip{p-1}, from_state]
+/// where skip{p-1} are the p-1 intermediate states between revealed and from_state.
+///
+/// Instead of using DEFAULT_LABEL (wildcard), self-loop transitions are
+/// expanded to explicit transitions for all parser states. This ensures
+/// the standard determinizer handles them correctly.
 pub fn build_parser_nwa(
     table: &GlrTable,
     grammar: &GlrGrammar,
@@ -166,13 +227,24 @@ pub fn build_parser_nwa(
 
     let num_tsids = vocab.num_tsids;
     let max_token = vocab.max_token;
+    let num_parser_states = table.num_states;
     let mut nwa = Nwa::new(num_tsids, max_token);
     let max_pos = nwa.max_position();
 
-    // Start state (already state 0 in Nwa::new).
-    let start = 0;
+    // Create the start state and register it.
+    let start = nwa.add_state();
+    nwa.start_states.push(start);
 
     let w_all = Weight::all(max_pos, num_tsids);
+
+    // Helper: add a "skip any parser state" self-loop by expanding to all
+    // concrete parser state labels. This replaces DEFAULT_LABEL self-loops
+    // so the determinizer handles it correctly.
+    let add_skip_self_loop = |nwa: &mut Nwa, q: u32, w: &Weight| {
+        for s in 0..num_parser_states {
+            nwa.add_transition(q, s as i32, q, w.clone());
+        }
+    };
 
     // For each characterized terminal, build NWA paths.
     for (&terminal, tc) in &characterizations {
@@ -187,51 +259,91 @@ pub fn build_parser_nwa(
             let q_final = nwa.add_state();
 
             nwa.add_epsilon(start, q, w_all.clone());
-            nwa.add_transition(q, DEFAULT_LABEL, q, w_all.clone());
+            add_skip_self_loop(&mut nwa, q, &w_all);
             nwa.add_transition(q, from_state as i32, q_final, token_weight.clone());
             nwa.set_final_weight(q_final, token_weight.clone());
         }
 
-        // --- Initial reduces + NT escapes/rereduces ---
-        let mut nt_states: BTreeMap<NonterminalId, u32> = BTreeMap::new();
+        // --- Initial reduces ---
+        // For each reduce (from_state, pop_count, nt), find all valid revealed
+        // states (via nt_escapes and rereduce chains with pop_count=1) and build
+        // explicit NWA paths.
+        //
+        // The NWA reads the stack bottom-to-top. For a reduce that pops `p` states
+        // from `from_state`, revealing state `r`, the word pattern is:
+        //   [self-loop*, r, any{p-1}, from_state]
+        //
+        // This means: match arbitrary prefix, then the revealed state, then p-1
+        // intermediate states (any label), then from_state at the top.
+        for &(from_state, pop_count, nt) in &tc.reduces {
+            let valid_revealed = compute_valid_revealed(nt, tc);
 
-        for &nt in &tc.all_nts {
-            let ns = nwa.add_state();
-            nt_states.insert(nt, ns);
-        }
+            for r in valid_revealed {
+                let q = nwa.add_state();
+                nwa.add_epsilon(start, q, w_all.clone());
+                add_skip_self_loop(&mut nwa, q, &w_all);
 
-        for &(from_state, _pop_count, nt) in &tc.reduces {
-            let q = nwa.add_state();
-            nwa.add_epsilon(start, q, w_all.clone());
-            nwa.add_transition(q, DEFAULT_LABEL, q, w_all.clone());
+                // Read revealed state.
+                let mut current = nwa.add_state();
+                nwa.add_transition(q, r as i32, current, w_all.clone());
 
-            let after_read = nwa.add_state();
-            nwa.add_transition(q, from_state as i32, after_read, w_all.clone());
-
-            let nt_target = *nt_states.get(&nt).unwrap();
-            nwa.add_epsilon(after_read, nt_target, w_all.clone());
-        }
-
-        // --- NT escapes ---
-        for &(nt, revealed, _goto_state, _shift_to) in &tc.nt_escapes {
-            if let Some(&nt_state) = nt_states.get(&nt) {
-                let q_final = nwa.add_state();
-                nwa.add_transition(nt_state, revealed as i32, q_final, token_weight.clone());
-                nwa.set_final_weight(q_final, token_weight.clone());
-            }
-        }
-
-        // --- NT rereduces ---
-        for &(nt_from, revealed, _pop2, nt_to) in &tc.nt_rereduces {
-            if let Some(&from_state) = nt_states.get(&nt_from) {
-                if let Some(&to_state) = nt_states.get(&nt_to) {
-                    nwa.add_transition(from_state, revealed as i32, to_state, w_all.clone());
+                // Skip pop_count - 1 intermediate states (any label).
+                for _ in 0..pop_count.saturating_sub(1) {
+                    let next = nwa.add_state();
+                    for s in 0..num_parser_states {
+                        nwa.add_transition(current, s as i32, next, w_all.clone());
+                    }
+                    current = next;
                 }
+
+                // Read from_state at the top → accept with token weight.
+                let final_q = nwa.add_state();
+                nwa.add_transition(current, from_state as i32, final_q, token_weight.clone());
+                nwa.set_final_weight(final_q, token_weight.clone());
             }
         }
     }
 
     nwa
+}
+
+/// Check if a CompDwa is acyclic (no self-loops or back-edges).
+fn is_acyclic(dwa: &CompDwa) -> bool {
+    let n = dwa.states.len();
+    // Quick check: any self-loops?
+    for (i, st) in dwa.states.iter().enumerate() {
+        for (target, _) in st.transitions.values() {
+            if *target as usize == i {
+                return false;
+            }
+        }
+    }
+    // Full DFS cycle check.
+    let mut color = vec![0u8; n]; // 0=white, 1=gray, 2=black
+    fn dfs(u: usize, states: &[CompDwaState], color: &mut [u8]) -> bool {
+        color[u] = 1;
+        for (target, _) in states[u].transitions.values() {
+            let v = *target as usize;
+            if v >= color.len() { continue; }
+            match color[v] {
+                1 => return false, // back edge → cycle
+                0 => {
+                    if !dfs(v, states, color) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        color[u] = 2;
+        true
+    }
+    for i in 0..n {
+        if color[i] == 0 && !dfs(i, &dwa.states, &mut color) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Convert a terminal ID to a weight: the set of tokens that match this terminal
@@ -268,10 +380,13 @@ pub fn build_parser_dwa(
     // Determinize: NWA → CompDwa (general, handles cycles).
     let dwa = determinize(&nwa);
 
-    // Minimize: CompDwa → CompDwa.
-    let dwa = minimize_acyclic(&dwa);
-
-    dwa
+    // Minimize only if the DWA is acyclic. The skip-all-labels self-loops
+    // in the NWA produce cyclic DWAs, and minimize_acyclic breaks on cycles.
+    if is_acyclic(&dwa) {
+        minimize_acyclic(&dwa)
+    } else {
+        dwa
+    }
 }
 
 // ====================================================================
