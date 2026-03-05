@@ -8363,4 +8363,90 @@ fn test_twfs_steven_full_coverage() {
     assert_eq!(ids, vec![5, 7], "'ste' + 'ven' covers all of 'steven'");
 }
 
+// ---- Performance micro-benchmarks ----
+
+/// Micro-benchmark for force() on a long deterministic grammar.
+/// This measures the fast path (tokenizer DFA) vs slow path (DWA) behavior.
+#[test]
+fn test_force_perf_long_deterministic() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Build a grammar with a long deterministic literal (100 chars)
+    let long_str: String = (0..100).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    let ebnf = format!("s ::= LONG;\nLONG ::= '{}';", long_str);
+
+    let mut token_map = LLMTokenMap::new();
+    for b in 0u8..=127 {
+        token_map.insert(vec![b], LLMTokenID(b as usize));
+    }
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(128));
+
+    let constraint = build_constraint_for_force(&ebnf, token_map, 128);
+    let state = constraint.init();
+
+    // Warm up
+    let _ = state.force();
+
+    // Measure
+    let start = std::time::Instant::now();
+    let iterations = 100;
+    for _ in 0..iterations {
+        let _ = state.force();
+    }
+    let elapsed = start.elapsed();
+    let per_call_us = elapsed.as_micros() as f64 / iterations as f64;
+
+    let forced = state.force();
+    eprintln!(
+        "force() on 100-char deterministic: {:.1}us/call, {} tokens forced",
+        per_call_us,
+        forced.len()
+    );
+    assert!(!forced.is_empty(), "Should force some tokens");
+}
+
+/// Micro-benchmark for force() on a grammar with ambiguity.
+#[test]
+fn test_force_perf_shared_prefix() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = r#"
+        s ::= HELLO_WORLD | HELLO_THERE;
+        HELLO_WORLD ::= 'h' 'e' 'l' 'l' 'o' ' ' 'w' 'o' 'r' 'l' 'd';
+        HELLO_THERE ::= 'h' 'e' 'l' 'l' 'o' ' ' 't' 'h' 'e' 'r' 'e';
+    "#;
+
+    let mut token_map = LLMTokenMap::new();
+    for b in 0u8..=127 {
+        token_map.insert(vec![b], LLMTokenID(b as usize));
+    }
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(128));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 128);
+    let state = constraint.init();
+
+    let _ = state.force();
+
+    let start = std::time::Instant::now();
+    let iterations = 100;
+    for _ in 0..iterations {
+        let _ = state.force();
+    }
+    let elapsed = start.elapsed();
+    let per_call_us = elapsed.as_micros() as f64 / iterations as f64;
+
+    let forced = state.force();
+    let forced_bytes: Vec<u8> = forced.iter().filter_map(|t| {
+        constraint.vocab_trie.token_bytes(*t).and_then(|b| b.first().copied())
+    }).collect();
+    eprintln!(
+        "force() on shared prefix ('hello '): {:.1}us/call, {} tokens, bytes={:?}",
+        per_call_us,
+        forced.len(),
+        String::from_utf8_lossy(&forced_bytes)
+    );
+    // Should force "hello " (6 bytes = 6 single-byte tokens)
+    assert_eq!(forced.len(), 6, "Should force 6 tokens for 'hello '");
+}
+
 

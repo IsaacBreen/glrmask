@@ -5130,70 +5130,111 @@ impl<'a> GrammarConstraintState<'a> {
                 break;
             }
 
-            // ---- FAST PATH: Check tokenizer DFA for deterministic byte ----
-            // If ALL active tokenizer states have transitions, and ALL transitions
-            // across all states agree on a single byte, then the tokenizer DFA
-            // is deterministic at this point. We can skip the expensive DWA
-            // worklist computation.
-            //
-            // The key insight: if the tokenizer allows only one byte, then every
-            // allowed token must start with that byte. The DWA mask would only
-            // confirm this or return empty (dead state). Either way, the forced
-            // byte is determined by the tokenizer alone.
-            //
-            // Exceptions where we must fall through to the DWA slow path:
-            // - fast_path_ok is false (previous iteration had a terminal fire)
-            // - Source tokenizer state has finalizers (terminal already matches)
-            let mut tokenizer_unique_byte: Option<u8> = None;
-            let mut tokenizer_deterministic = fast_path_ok && !state.state.is_empty();
-
-            if tokenizer_deterministic {
-                'outer: for (&tsid, _) in &state.state {
-                    let dfa_state = &dfa.states[tsid.0];
-                    if dfa_state.transitions.is_empty() {
-                        tokenizer_deterministic = false;
-                        break;
-                    }
-                    for (byte, _target) in dfa_state.transitions.iter() {
-                        match tokenizer_unique_byte {
-                            None => tokenizer_unique_byte = Some(byte),
-                            Some(prev) if prev == byte => {}
-                            _ => {
-                                tokenizer_deterministic = false;
-                                break 'outer;
-                            }
-                        }
-                    }
+            // ---- FAST PATH: Batch deterministic bytes via tokenizer DFA walk ----
+            // Walk the tokenizer DFA without modifying constraint state to find
+            // the longest run of deterministic bytes (single valid byte at each
+            // step across all active states). Stop at the first finalizer or
+            // ambiguity. Commit the entire run in one batch for efficiency.
+            if fast_path_ok && !state.state.is_empty() {
+                // Quick EOS check: if parse is already complete, stop.
+                if state.parent.eos_token_id.is_some() && state.is_complete() {
+                    break;
                 }
-            }
 
-            if tokenizer_deterministic {
-                if let Some(b) = tokenizer_unique_byte {
-                    // Quick EOS check: if parse is already complete, stop.
-                    if state.parent.eos_token_id.is_some() && state.is_complete() {
-                        break;
+                // Walk DFA ahead
+                let mut run = Vec::new();
+                let mut cur_states: Vec<usize> = state.state.keys().map(|k| k.0).collect();
+                let mut finalizer_byte: Option<u8> = None;
+                let remaining = MAX_FORCED_BYTES - bytes.len();
+
+                'walk: for _ in 0..remaining {
+                    // Check if all current states agree on one byte
+                    let mut unique_byte: Option<u8> = None;
+                    let mut deterministic = true;
+
+                    for &sid in &cur_states {
+                        let dfa_state = &dfa.states[sid];
+                        if dfa_state.transitions.is_empty() {
+                            deterministic = false;
+                            break;
+                        }
+                        for (byte, _) in dfa_state.transitions.iter() {
+                            match unique_byte {
+                                None => unique_byte = Some(byte),
+                                Some(prev) if prev == byte => {}
+                                _ => {
+                                    deterministic = false;
+                                    break;
+                                }
+                            }
+                            if !deterministic { break; }
+                        }
+                        if !deterministic { break; }
                     }
 
-                    // Check if target state (after byte b) has finalizers.
-                    // If so, a terminal will fire during commit, changing parser state.
-                    // We still commit (it's the only valid byte), but we force the
-                    // NEXT iteration to use the DWA slow path for validation.
-                    let any_target_has_finalizers = state.state.keys().any(|tsid| {
-                        dfa.states[tsid.0].transitions.get(b).map_or(false, |target_id| {
+                    if !deterministic {
+                        break 'walk;
+                    }
+
+                    let b = match unique_byte {
+                        Some(b) => b,
+                        None => break 'walk,
+                    };
+
+                    // Check if target state has finalizers
+                    let target_has_finalizers = cur_states.iter().any(|&sid| {
+                        dfa.states[sid].transitions.get(b).map_or(false, |target_id| {
                             !dfa.states[*target_id].finalizers.is_empty()
                         })
                     });
 
-                    bytes.push(b);
-                    state.commit_bytes(&[b]);
-                    if !state.is_active() {
-                        // Parser killed all paths — last byte was invalid.
-                        bytes.pop();
-                        break;
+                    if target_has_finalizers {
+                        // Stop batch here; handle finalizer byte separately
+                        finalizer_byte = Some(b);
+                        break 'walk;
                     }
 
-                    // If a terminal fired, force DWA validation next iteration.
-                    fast_path_ok = !any_target_has_finalizers;
+                    run.push(b);
+
+                    // Advance simulated states
+                    let mut new_states = Vec::with_capacity(cur_states.len());
+                    for &sid in &cur_states {
+                        if let Some(&target) = dfa.states[sid].transitions.get(b) {
+                            if !new_states.contains(&target) {
+                                new_states.push(target);
+                            }
+                        }
+                    }
+                    if new_states.is_empty() {
+                        break 'walk;
+                    }
+                    cur_states = new_states;
+                }
+
+                if !run.is_empty() || finalizer_byte.is_some() {
+                    // Batch commit non-finalizer bytes (safe: no terminal fires)
+                    if !run.is_empty() {
+                        state.commit_bytes(&run);
+                        if !state.is_active() {
+                            // Entire run was invalid (shouldn't happen if tokenizer
+                            // DFA was correct, but be safe).
+                            break;
+                        }
+                        bytes.extend_from_slice(&run);
+                    }
+
+                    // Commit finalizer byte separately (terminal will fire)
+                    if let Some(fb) = finalizer_byte {
+                        bytes.push(fb);
+                        state.commit_bytes(&[fb]);
+                        if !state.is_active() {
+                            bytes.pop();
+                            break;
+                        }
+                        // Terminal fired; force DWA validation next iteration
+                        fast_path_ok = false;
+                    }
+
                     continue;
                 }
             }
