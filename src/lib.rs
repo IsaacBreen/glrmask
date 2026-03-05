@@ -1,14 +1,107 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+//! GLRMask: Efficient Grammar-Constrained Decoding
+//!
+//! This library compiles context-free grammars and tokenizers into deterministic
+//! weighted automata (DWAs), enabling microsecond-scale mask computation during
+//! LLM inference.
+//!
+//! # Quick Start
+//!
+//! ```rust,ignore
+//! use glrmask::{Constraint, Vocab};
+//!
+//! let vocab = Vocab::new(entries, Some(eos_id));
+//! let constraint = Constraint::from_ebnf(grammar, &vocab)?;
+//! let mut state = constraint.start();
+//! let mut buf = vec![0u32; constraint.mask_len()];
+//!
+//! loop {
+//!     let forced = state.force();
+//!     state.commit_tokens(&forced);
+//!     if state.is_finished() { break; }
+//!
+//!     state.fill_mask(&mut buf);
+//!     let token = sample(logits, &buf);
+//!     state.commit(token);
+//! }
+//! ```
+//!
+//! # Module Organization
+//!
+//! - [`compiler`]: Compilation pipeline (grammar → DWA → constraint)
+//! - [`frontend`]: Grammar parsing (EBNF, Lark, JSON Schema)
+//! - [`runtime`]: Mask computation and state management
+//! - [`automata`]: Finite automata (DFA, NFA, DWA, NWA)
+//! - [`ds`]: Data structures (bitset, rangeset)
+
+#![deny(warnings)]
+
+pub mod automata;
+pub mod compiler;
+pub mod ds;
+pub mod frontend;
+pub mod runtime;
+
+// Re-export public API types
+pub use runtime::{Constraint, ConstraintState};
+
+use thiserror::Error;
+
+/// Errors that can occur during grammar compilation or constraint operations.
+#[derive(Error, Debug)]
+pub enum GlrMaskError {
+    #[error("Grammar parse error: {0}")]
+    GrammarParse(String),
+
+    #[error("Compilation error: {0}")]
+    Compilation(String),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub type Result<T> = std::result::Result<T, GlrMaskError>;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+/// The vocabulary: token ID → byte sequence mapping.
+///
+/// Tokens carry their own IDs — the index in `entries` is NOT the token ID.
+/// This allows sparse vocabularies (e.g., special tokens with high IDs).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Vocab {
+    /// (token_id, byte_sequence) pairs.
+    pub entries: Vec<(u32, Vec<u8>)>,
+    /// End-of-sequence token ID, if any.
+    pub eos_token_id: Option<u32>,
+}
+
+impl Vocab {
+    /// Create a new vocabulary from (id, bytes) pairs.
+    pub fn new(entries: Vec<(u32, Vec<u8>)>, eos_token_id: Option<u32>) -> Self {
+        Self {
+            entries,
+            eos_token_id,
+        }
+    }
+
+    /// Number of tokens in the vocabulary.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the vocabulary is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Maximum token ID + 1 (determines bitvector size for masks).
+    pub fn max_token_id(&self) -> u32 {
+        self.entries
+            .iter()
+            .map(|(id, _)| *id)
+            .max()
+            .map(|id| id + 1)
+            .unwrap_or(0)
     }
 }
