@@ -56,6 +56,24 @@ pub struct Constraint {
 }
 
 impl Constraint {
+    /// Compile a constraint from an EBNF grammar string.
+    pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        let gdef = crate::frontend::ebnf::parse_ebnf(ebnf)?;
+        Ok(crate::compiler::pipeline::compile(&gdef, vocab))
+    }
+
+    /// Compile a constraint from a Lark grammar string.
+    pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        let gdef = crate::frontend::lark::parse_lark(lark)?;
+        Ok(crate::compiler::pipeline::compile(&gdef, vocab))
+    }
+
+    /// Compile a constraint from a JSON Schema string.
+    pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        let gdef = crate::frontend::json_schema::json_schema_to_grammar(schema)?;
+        Ok(crate::compiler::pipeline::compile(&gdef, vocab))
+    }
+
     /// Number of DWA states.
     pub fn num_dwa_states(&self) -> u32 {
         self.parser_dwa.num_states()
