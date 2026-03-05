@@ -302,6 +302,94 @@ fn find_eos_token_id(vocab_trie: &LLMVocabTrie) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// Byte trie for efficient tokenization in force()
+// ---------------------------------------------------------------------------
+
+/// Simple byte trie for greedy tokenization with stop.
+/// Each node has up to 256 children (one per byte) and an optional token ID.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ByteTrie {
+    nodes: Vec<ByteTrieNode>,
+}
+
+#[derive(Debug, Clone)]
+struct ByteTrieNode {
+    children: [u32; 256], // 0 = no child, >0 = node index (1-based)
+    token_id: Option<usize>,
+}
+
+impl Default for ByteTrieNode {
+    fn default() -> Self {
+        ByteTrieNode {
+            children: [0; 256],
+            token_id: None,
+        }
+    }
+}
+
+impl ByteTrie {
+    fn new() -> Self {
+        ByteTrie {
+            nodes: vec![ByteTrieNode::default()], // root node at index 0
+        }
+    }
+
+    fn insert(&mut self, bytes: &[u8], token_id: usize) {
+        let mut node_idx = 0;
+        for &b in bytes {
+            let child = self.nodes[node_idx].children[b as usize];
+            if child == 0 {
+                let new_idx = self.nodes.len();
+                self.nodes.push(ByteTrieNode::default());
+                self.nodes[node_idx].children[b as usize] = new_idx as u32;
+                node_idx = new_idx;
+            } else {
+                node_idx = child as usize;
+            }
+        }
+        // Keep the longest token ID if there's a collision (shouldn't happen
+        // with unique bytes→id mapping, but be safe).
+        self.nodes[node_idx].token_id = Some(token_id);
+    }
+
+    /// Walk the trie on `bytes[pos..]`, returning:
+    /// - longest_match: (token_id, length) of the longest complete token match
+    /// - can_extend_beyond: true if any path in the trie has a prefix matching
+    ///   all remaining bytes AND extends further (i.e., there's a child at the
+    ///   end of remaining bytes).
+    #[inline]
+    fn walk(&self, bytes: &[u8], pos: usize) -> (Option<(usize, usize)>, bool) {
+        let remaining = bytes.len() - pos;
+        let mut node_idx = 0usize;
+        let mut longest_match: Option<(usize, usize)> = None;
+        let mut can_extend_beyond = false;
+
+        for i in 0..remaining {
+            let b = bytes[pos + i];
+            let child = self.nodes[node_idx].children[b as usize];
+            if child == 0 {
+                return (longest_match, false);
+            }
+            node_idx = child as usize;
+            if let Some(token_id) = self.nodes[node_idx].token_id {
+                longest_match = Some((token_id, i + 1));
+            }
+        }
+
+        // We consumed all remaining bytes. Check if trie has children beyond.
+        // If yes, a token could extend past the forced prefix.
+        for &child in &self.nodes[node_idx].children {
+            if child != 0 {
+                can_extend_beyond = true;
+                break;
+            }
+        }
+
+        (longest_match, can_extend_beyond)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main structure
 // ---------------------------------------------------------------------------
 
@@ -358,6 +446,18 @@ pub struct GrammarConstraint {
     /// Initialized lazily on first use.
     #[serde(skip)]
     pub(crate) cached_tsid_masks: OnceLock<Vec<crate::dwa_i32::common::Weight>>,
+
+    /// Cached first-byte table for force() optimization.
+    /// Maps internal token ID → first byte info:
+    ///   0..=255 = unique first byte, 256 = no tokens, 257 = mixed first bytes.
+    /// Initialized lazily on first use.
+    #[serde(skip)]
+    pub(crate) cached_internal_first_byte: OnceLock<Vec<u16>>,
+
+    /// Cached byte trie for efficient tokenization in force().
+    /// Built lazily from vocab_trie on first use.
+    #[serde(skip)]
+    pub(crate) cached_byte_trie: OnceLock<ByteTrie>,
 }
 
 impl GrammarConstraint {
@@ -376,6 +476,60 @@ impl GrammarConstraint {
                 .collect()
         });
         &masks[internal_tsid]
+    }
+
+    /// Get the cached internal first-byte table for force() optimization.
+    /// Maps internal token ID → first byte info:
+    ///   0..=255 = unique first byte, 256 = no tokens, 257 = mixed first bytes.
+    pub(crate) fn get_internal_first_byte(&self) -> &[u16] {
+        self.cached_internal_first_byte.get_or_init(|| {
+            let max_internal = self.parser_dwa_vocab.internal_max_llm_token;
+            let max_orig = self.parser_dwa_vocab.max_original_llm_token_id;
+            let mut table: Vec<u16> = vec![256; max_internal + 1];
+            for (&internal_id, original_bv) in &self.parser_dwa_vocab.internal_to_original {
+                if internal_id > max_internal {
+                    continue;
+                }
+                let mut fb: Option<u8> = None;
+                let mut mixed = false;
+                for orig_id in original_bv.iter_up_to(max_orig) {
+                    if let Some(token_bytes) = self.vocab_trie.token_bytes(LLMTokenID(orig_id)) {
+                        if let Some(&b) = token_bytes.first() {
+                            match fb {
+                                None => fb = Some(b),
+                                Some(prev) if prev == b => {}
+                                _ => {
+                                    mixed = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if mixed {
+                    table[internal_id] = 257;
+                } else if let Some(b) = fb {
+                    table[internal_id] = b as u16;
+                }
+            }
+            table
+        })
+    }
+
+    /// Get the cached byte trie for efficient tokenization in force().
+    /// Built lazily from vocab_trie, excluding EOS token bytes.
+    pub(crate) fn get_byte_trie(&self) -> &ByteTrie {
+        self.cached_byte_trie.get_or_init(|| {
+            let mut trie = ByteTrie::new();
+            for (id, bytes) in self.vocab_trie.iter() {
+                // Skip empty tokens and EOS token
+                if bytes.is_empty() || bytes == EOS_TOKEN_BYTES {
+                    continue;
+                }
+                trie.insert(bytes, id);
+            }
+            trie
+        })
     }
 
     /// Save GrammarConstraint to a binary cache file using bincode + LZ4 compression.
@@ -701,6 +855,8 @@ impl JSONConvertible for GrammarConstraint {
             num_tsids: intermediate.num_tsids,
             state_to_internal_tsid: intermediate.state_to_internal_tsid,
             cached_tsid_masks: OnceLock::new(),
+            cached_internal_first_byte: OnceLock::new(),
+            cached_byte_trie: OnceLock::new(),
         })
     }
 }
@@ -4320,6 +4476,8 @@ impl GrammarConstraint {
             num_tsids,
             state_to_internal_tsid,
             cached_tsid_masks: OnceLock::new(),
+            cached_internal_first_byte: OnceLock::new(),
+            cached_byte_trie: OnceLock::new(),
         }
     }
 
@@ -4955,38 +5113,9 @@ impl<'a> GrammarConstraintState<'a> {
     /// conversion). Uses DWA-based completion check for EOS.
     pub(crate) fn compute_forced_byte_prefix(&self) -> Vec<u8> {
         let max_internal = self.parent.parser_dwa_vocab.internal_max_llm_token;
-        let max_orig = self.parent.parser_dwa_vocab.max_original_llm_token_id;
 
-        // Precompute first byte per internal token ID.
-        // 0..=255 = unique first byte, 256 = no tokens, 257 = mixed first bytes.
-        let mut internal_first_byte: Vec<u16> = vec![256; max_internal + 1];
-        for (&internal_id, original_bv) in &self.parent.parser_dwa_vocab.internal_to_original {
-            if internal_id > max_internal {
-                continue;
-            }
-            let mut fb: Option<u8> = None;
-            let mut mixed = false;
-            for orig_id in original_bv.iter_up_to(max_orig) {
-                if let Some(token_bytes) = self.parent.vocab_trie.token_bytes(LLMTokenID(orig_id))
-                {
-                    if let Some(&b) = token_bytes.first() {
-                        match fb {
-                            None => fb = Some(b),
-                            Some(prev) if prev == b => {}
-                            _ => {
-                                mixed = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if mixed {
-                internal_first_byte[internal_id] = 257;
-            } else if let Some(b) = fb {
-                internal_first_byte[internal_id] = b as u16;
-            }
-        }
+        // Use cached first-byte table (computed lazily once per GrammarConstraint).
+        let internal_first_byte = self.parent.get_internal_first_byte();
 
         let mut bytes = Vec::new();
         let mut state = self.clone();
@@ -5000,7 +5129,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
 
             // Compute internal mask directly (skip full original-mask conversion).
-            let (internal_mask, _has_accepting, is_complete_dwa) =
+            let (internal_mask, has_accepting, is_complete_dwa) =
                 if state.parent.num_tsids > 0 {
                     state.compute_internal_mask_weight_heavy()
                 } else {
@@ -5010,9 +5139,10 @@ impl<'a> GrammarConstraintState<'a> {
             // Check EOS: if parse can complete here, stop forcing.
             // is_complete_dwa can have false negatives after byte-level commits,
             // so fall back to the more expensive is_complete() worklist check.
+            // But only call is_complete() if has_accepting is true — if the DWA
+            // worklist has no accepting states, the parse can't be complete.
             if state.parent.eos_token_id.is_some() {
-                let is_complete = is_complete_dwa || state.is_complete();
-                if is_complete {
+                if is_complete_dwa || (has_accepting && state.is_complete()) {
                     break;
                 }
             }
@@ -5074,50 +5204,26 @@ impl<'a> GrammarConstraintState<'a> {
     /// extends beyond), we stop — we can't determine the true longest match
     /// without seeing the continuation.
     ///
+    /// Uses a cached byte trie for O(max_token_len) per position instead of
+    /// O(V * max_token_len) from iterating all vocab entries.
+    ///
     /// This single function replaces the old greedy_tokenize + safe_cutoff pair.
     pub(crate) fn tokenize_forced_with_stop(&self, forced_bytes: &[u8]) -> Vec<LLMTokenID> {
+        let trie = self.parent.get_byte_trie();
         let mut tokens = Vec::new();
         let mut pos = 0;
 
         while pos < forced_bytes.len() {
-            let remaining = forced_bytes.len() - pos;
-            let mut best_match: Option<(LLMTokenID, usize)> = None;
-            let mut could_extend_beyond = false;
+            let (longest_match, can_extend_beyond) = trie.walk(forced_bytes, pos);
 
-            for (token_id, token_bytes) in self.parent.vocab_trie.iter() {
-                if token_bytes.is_empty() {
-                    continue;
-                }
-
-                if token_bytes.len() <= remaining {
-                    // Token fits within forced bytes — check if it matches
-                    if forced_bytes[pos..pos + token_bytes.len()] == *token_bytes {
-                        match best_match {
-                            None => best_match = Some((LLMTokenID(token_id), token_bytes.len())),
-                            Some((_, prev_len)) if token_bytes.len() > prev_len => {
-                                best_match = Some((LLMTokenID(token_id), token_bytes.len()));
-                            }
-                            _ => {}
-                        }
-                    }
-                } else {
-                    // Token extends beyond forced bytes. If the remaining forced
-                    // bytes match its prefix, this token *might* be the longest
-                    // match — we'd need more bytes to know. Stop here.
-                    if token_bytes[..remaining] == forced_bytes[pos..] {
-                        could_extend_beyond = true;
-                    }
-                }
-            }
-
-            if could_extend_beyond {
+            if can_extend_beyond {
                 // Can't determine longest match — a longer token might exist.
                 break;
             }
 
-            match best_match {
+            match longest_match {
                 Some((token_id, len)) => {
-                    tokens.push(token_id);
+                    tokens.push(LLMTokenID(token_id));
                     pos += len;
                 }
                 None => break, // No matching token at this position
