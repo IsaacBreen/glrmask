@@ -6939,3 +6939,255 @@ fn test_right_recursive_item_bug() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// force() tests
+// ---------------------------------------------------------------------------
+
+/// Helper: build a constraint from an EBNF grammar string, an LLM token map, and the
+/// maximum token ID.  Locks the global dims mutex (same pattern as existing tests).
+fn build_constraint_for_force(
+    ebnf: &str,
+    token_map: LLMTokenMap,
+    max_id: usize,
+) -> GrammarConstraint {
+    GrammarConstraint::new_from_grammar_definition(
+        Arc::new(GrammarDefinition::from_ebnf(ebnf).unwrap()),
+        token_map,
+        max_id,
+        &GrammarConstraintConfig::default(),
+    )
+}
+
+/// Grammar: S -> "abc"
+/// Vocab: "a"=0, "b"=1, "c"=2
+/// Every byte is forced: a, b, c.
+/// All boundaries are safe (single-byte tokens, nothing spans across).
+/// force() should return [0, 1, 2].
+#[test]
+fn test_force_fully_determined() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABC;
+        ABC ::= 'a' 'b' 'c';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 2);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(forced_ids, vec![0, 1, 2], "All three bytes should be forced");
+}
+
+/// Grammar: S -> "a" | "b"
+/// Vocab: "a"=0, "b"=1
+/// First byte is ambiguous (could be 'a' or 'b').
+/// force() should return [].
+#[test]
+fn test_force_ambiguous_first_byte() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= A | B;
+        A ::= 'a';
+        B ::= 'b';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 1);
+    let state = constraint.init();
+
+    let forced = state.force();
+    assert!(forced.is_empty(), "Ambiguous first byte means nothing forced");
+}
+
+/// Grammar: S -> "ab" | "ac"
+/// Vocab: "a"=0, "b"=1, "c"=2
+/// First byte 'a' is forced (both alternatives start with 'a').
+/// Second byte is ambiguous ('b' or 'c').
+/// force() should return [0] (just the 'a' token).
+#[test]
+fn test_force_partial_prefix() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= AB | AC;
+        AB ::= 'a' 'b';
+        AC ::= 'a' 'c';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 2);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(forced_ids, vec![0], "Only 'a' is forced");
+}
+
+/// Grammar: S -> "abc"
+/// Vocab: "ab"=0, "c"=1, "abc"=2
+/// Forced bytes: a, b, c (all forced).
+/// Greedy tokenization: "abc" -> token 2 (longest match).
+/// Boundary at 3 (end): safe (nothing extends past 3).
+/// force() should return [2].
+#[test]
+fn test_force_greedy_picks_longest() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABC;
+        ABC ::= 'a' 'b' 'c';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(3));
+    token_map.insert(b"abc".to_vec(), LLMTokenID(4));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 4);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(forced_ids, vec![4], "Greedy should pick 'abc' (longest)");
+}
+
+/// Grammar: S -> "abc"
+/// Vocab: "ab"=0, "c"=1, "cdef"=2
+/// Forced bytes: a, b, c.
+/// Greedy tokenization: "ab" + "c".
+/// Boundary after "ab" (pos 2): safe — no token starts before pos 2 and extends past it.
+/// Boundary after "c" (pos 3): NOT safe — token "cdef" starts at pos 2 and extends past 3.
+/// force() should return [0] (just "ab").
+#[test]
+fn test_force_tokenization_safe_cutoff() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABC;
+        ABC ::= 'a' 'b' 'c';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(3));
+    token_map.insert(b"cdef".to_vec(), LLMTokenID(4));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 4);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(forced_ids, vec![3], "Only 'ab' emitted due to safe cutoff");
+}
+
+/// Grammar: S -> "ab"
+/// Vocab: "a"=0, "b"=1, "abc"=2
+/// Forced bytes: a, b.
+/// Greedy: "a" + "b".
+/// Boundary after "a" (pos 1): check — token "abc" starts at pos 0, prefix "a" matches,
+///   len 3 > 1. NOT safe.
+/// force() should return [] (can't safely cut even after first token).
+#[test]
+fn test_force_cutoff_blocks_everything() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= AB;
+        AB ::= 'a' 'b';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"abc".to_vec(), LLMTokenID(2));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 2);
+    let state = constraint.init();
+
+    let forced = state.force();
+    assert!(
+        forced.is_empty(),
+        "Token 'abc' makes boundary at pos 1 unsafe, so nothing can be forced"
+    );
+}
+
+/// After committing some bytes, force() should work from the mid-parse state.
+/// Grammar: S -> "ab" "cd"
+/// Vocab: "a"=0, "b"=1, "c"=2, "d"=3
+/// After committing "ab", the remaining "cd" is fully forced.
+#[test]
+fn test_force_after_partial_commit() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= AB CD;
+        AB ::= 'a' 'b';
+        CD ::= 'c' 'd';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 3);
+    let mut state = constraint.init();
+
+    // Force from initial state — should force all 4 tokens
+    let forced_initial = state.force();
+    let forced_initial_ids: Vec<usize> = forced_initial.iter().map(|t| t.0).collect();
+    assert_eq!(forced_initial_ids, vec![0, 1, 2, 3]);
+
+    // Commit "a" and "b", then check force from mid-parse
+    state.commit(LLMTokenID(0)).unwrap();
+    state.commit(LLMTokenID(1)).unwrap();
+
+    let forced_mid = state.force();
+    let forced_mid_ids: Vec<usize> = forced_mid.iter().map(|t| t.0).collect();
+    assert_eq!(forced_mid_ids, vec![2, 3], "After committing 'ab', 'cd' is forced");
+}
+
+/// force() should not mutate the state.
+/// Grammar: S -> "abc"
+/// Vocab: "a"=0, "b"=1, "c"=2
+/// Calling force() twice should give the same result, and get_mask() before and after
+/// should also be the same.
+#[test]
+fn test_force_is_readonly() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABC;
+        ABC ::= 'a' 'b' 'c';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 2);
+    let state = constraint.init();
+
+    let mask_before = state.get_mask();
+    let force1 = state.force();
+    let mask_after = state.get_mask();
+    let force2 = state.force();
+
+    assert_eq!(mask_before, mask_after, "Mask should not change after force()");
+    assert_eq!(force1, force2, "force() should return same result when called twice");
+}
+
+

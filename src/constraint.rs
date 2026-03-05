@@ -4912,6 +4912,176 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 
+    // -----------------------------------------------------------------------
+    // force() — byte-level forced prefix with tokenization-safe cutoff
+    // -----------------------------------------------------------------------
+
+    /// Compute the byte-level forced prefix and return it as a sequence of LLM
+    /// token IDs using greedy tokenization with tokenization-safe cutoff.
+    ///
+    /// A byte is "forced" at a given position if every token in the current mask
+    /// starts with that byte (i.e., the grammar has only one possible next byte).
+    ///
+    /// This is a brute-force implementation that computes `get_mask()` at each
+    /// byte step, then applies greedy tokenization and a safety cutoff.
+    ///
+    /// Returns an empty `Vec` if nothing can be forced (e.g., ambiguous first
+    /// byte, parse is complete with EOS available, or empty mask).
+    ///
+    /// This method does NOT mutate `self`. The caller must `commit()` each
+    /// returned token individually.
+    pub fn force(&self) -> Vec<LLMTokenID> {
+        // Step 1: Find the forced byte prefix
+        let forced_bytes = self.compute_forced_byte_prefix();
+        if forced_bytes.is_empty() {
+            return Vec::new();
+        }
+
+        // Step 2: Greedy left-to-right tokenization
+        let greedy_tokens = self.greedy_tokenize_forced(&forced_bytes);
+        if greedy_tokens.is_empty() {
+            return Vec::new();
+        }
+
+        // Step 3: Tokenization-safe cutoff — only emit tokens up to a safe boundary
+        self.apply_tokenization_safe_cutoff(&forced_bytes, &greedy_tokens)
+    }
+
+    /// Walk the constraint state byte-by-byte to find the longest prefix where
+    /// each byte is uniquely determined.
+    fn compute_forced_byte_prefix(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut state = self.clone();
+
+        loop {
+            let mask = state.get_mask();
+
+            // If EOS is in the mask, the parse can end here — nothing is forced.
+            if let Some(eos_id) = state.parent.eos_token_id {
+                if mask.contains(eos_id) {
+                    break;
+                }
+            }
+
+            let mut forced_byte: Option<u8> = None;
+            let mut any_token = false;
+
+            for token_id in mask.iter_indices() {
+                if let Some(token_bytes) =
+                    state.parent.vocab_trie.token_bytes(LLMTokenID(token_id))
+                {
+                    if token_bytes.is_empty() {
+                        continue;
+                    }
+                    any_token = true;
+                    let first_byte = token_bytes[0];
+                    match forced_byte {
+                        None => forced_byte = Some(first_byte),
+                        Some(prev) if prev == first_byte => {} // same byte
+                        Some(_) => {
+                            // Different byte — not forced
+                            forced_byte = None;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            match forced_byte {
+                Some(b) if any_token => {
+                    bytes.push(b);
+                    state.commit_bytes(&[b]);
+                    if !state.is_active() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        bytes
+    }
+
+    /// Greedy left-to-right tokenization of a byte sequence using the LLM vocab.
+    /// Returns a list of `(LLMTokenID, end_position)` pairs.
+    fn greedy_tokenize_forced(&self, forced_bytes: &[u8]) -> Vec<(LLMTokenID, usize)> {
+        let mut tokens = Vec::new();
+        let mut pos = 0;
+
+        while pos < forced_bytes.len() {
+            let mut best: Option<(LLMTokenID, usize)> = None;
+
+            for (token_id, token_bytes) in self.parent.vocab_trie.iter() {
+                let len = token_bytes.len();
+                if len == 0 || pos + len > forced_bytes.len() {
+                    continue;
+                }
+                if forced_bytes[pos..pos + len] == *token_bytes {
+                    match best {
+                        None => best = Some((LLMTokenID(token_id), len)),
+                        Some((_, prev_len)) if len > prev_len => {
+                            best = Some((LLMTokenID(token_id), len));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            match best {
+                Some((token_id, len)) => {
+                    pos += len;
+                    tokens.push((token_id, pos));
+                }
+                None => break, // No matching token at this position
+            }
+        }
+
+        tokens
+    }
+
+    /// Apply the tokenization-safe cutoff: only return tokens whose boundaries
+    /// are "safe" — i.e., no vocab token could span across the boundary.
+    ///
+    /// A position `k` is safe if no vocab token starts at any position `j < k`
+    /// with its first `k - j` bytes matching `forced_bytes[j..k]` and has total
+    /// length greater than `k - j` (meaning it would extend past the boundary).
+    fn apply_tokenization_safe_cutoff(
+        &self,
+        forced_bytes: &[u8],
+        greedy_tokens: &[(LLMTokenID, usize)],
+    ) -> Vec<LLMTokenID> {
+        let mut result = Vec::new();
+
+        for &(token_id, end_pos) in greedy_tokens {
+            if self.is_safe_boundary(forced_bytes, end_pos) {
+                result.push(token_id);
+            } else {
+                break;
+            }
+        }
+
+        result
+    }
+
+    /// Check whether position `boundary` in `forced_bytes` is a safe cut point.
+    fn is_safe_boundary(&self, forced_bytes: &[u8], boundary: usize) -> bool {
+        for (_, token_bytes) in self.parent.vocab_trie.iter() {
+            if token_bytes.is_empty() {
+                continue;
+            }
+            for j in 0..boundary {
+                let prefix_len = boundary - j;
+                if token_bytes.len() > prefix_len
+                    && token_bytes[..prefix_len] == forced_bytes[j..boundary]
+                {
+                    // This token starts at j and would extend past the boundary.
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Check if the current state represents a complete valid parse.
     /// Returns true if the generated text so far is a complete valid string
     /// in the grammar, meaning EOS should be a valid token.
