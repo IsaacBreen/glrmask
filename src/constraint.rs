@@ -4917,13 +4917,16 @@ impl<'a> GrammarConstraintState<'a> {
     // -----------------------------------------------------------------------
 
     /// Compute the byte-level forced prefix and return it as a sequence of LLM
-    /// token IDs using greedy tokenization with tokenization-safe cutoff.
+    /// token IDs using greedy tokenization that stops when the tokenizer would
+    /// need bytes beyond the forced prefix.
     ///
     /// A byte is "forced" at a given position if every token in the current mask
     /// starts with that byte (i.e., the grammar has only one possible next byte).
     ///
-    /// This is a brute-force implementation that computes `get_mask()` at each
-    /// byte step, then applies greedy tokenization and a safety cutoff.
+    /// Tokenization: greedy left-to-right, longest match. If at any position a
+    /// vocab token could extend beyond the forced bytes (its prefix matches but
+    /// it's longer than what remains), we stop — can't determine the true longest
+    /// match without more context.
     ///
     /// Returns an empty `Vec` if nothing can be forced (e.g., ambiguous first
     /// byte, parse is complete with EOS available, or empty mask).
@@ -4937,19 +4940,54 @@ impl<'a> GrammarConstraintState<'a> {
             return Vec::new();
         }
 
-        // Step 2: Greedy left-to-right tokenization
-        let greedy_tokens = self.greedy_tokenize_forced(&forced_bytes);
-        if greedy_tokens.is_empty() {
-            return Vec::new();
-        }
-
-        // Step 3: Tokenization-safe cutoff — only emit tokens up to a safe boundary
-        self.apply_tokenization_safe_cutoff(&forced_bytes, &greedy_tokens)
+        // Step 2: Tokenize with stop — greedy left-to-right tokenization that
+        // stops when the tokenizer would need to see bytes beyond the forced
+        // prefix to determine the longest match. This replaces the old
+        // greedy_tokenize + safe_cutoff approach with a single clean pass.
+        self.tokenize_forced_with_stop(&forced_bytes)
     }
 
     /// Walk the constraint state byte-by-byte to find the longest prefix where
     /// each byte is uniquely determined.
+    ///
+    /// Optimized: computes the internal mask directly and checks first bytes
+    /// per internal token (skipping the expensive internal→original bit-vector
+    /// conversion). Uses DWA-based completion check for EOS.
     fn compute_forced_byte_prefix(&self) -> Vec<u8> {
+        let max_internal = self.parent.parser_dwa_vocab.internal_max_llm_token;
+        let max_orig = self.parent.parser_dwa_vocab.max_original_llm_token_id;
+
+        // Precompute first byte per internal token ID.
+        // 0..=255 = unique first byte, 256 = no tokens, 257 = mixed first bytes.
+        let mut internal_first_byte: Vec<u16> = vec![256; max_internal + 1];
+        for (&internal_id, original_bv) in &self.parent.parser_dwa_vocab.internal_to_original {
+            if internal_id > max_internal {
+                continue;
+            }
+            let mut fb: Option<u8> = None;
+            let mut mixed = false;
+            for orig_id in original_bv.iter_up_to(max_orig) {
+                if let Some(token_bytes) = self.parent.vocab_trie.token_bytes(LLMTokenID(orig_id))
+                {
+                    if let Some(&b) = token_bytes.first() {
+                        match fb {
+                            None => fb = Some(b),
+                            Some(prev) if prev == b => {}
+                            _ => {
+                                mixed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if mixed {
+                internal_first_byte[internal_id] = 257;
+            } else if let Some(b) = fb {
+                internal_first_byte[internal_id] = b as u16;
+            }
+        }
+
         let mut bytes = Vec::new();
         let mut state = self.clone();
         // Safety limit to prevent infinite loops (e.g., with Kleene star grammars
@@ -4960,37 +4998,57 @@ impl<'a> GrammarConstraintState<'a> {
             if bytes.len() >= MAX_FORCED_BYTES {
                 break;
             }
-            let mask = state.get_mask();
 
-            // If EOS is in the mask, the parse can end here — nothing is forced.
-            if let Some(eos_id) = state.parent.eos_token_id {
-                if mask.contains(eos_id) {
+            // Compute internal mask directly (skip full original-mask conversion).
+            let (internal_mask, _has_accepting, is_complete_dwa) =
+                if state.parent.num_tsids > 0 {
+                    state.compute_internal_mask_weight_heavy()
+                } else {
+                    state.compute_internal_mask()
+                };
+
+            // Check EOS: if parse can complete here, stop forcing.
+            if state.parent.eos_token_id.is_some() {
+                let is_complete = if state.parent.num_tsids > 0 {
+                    is_complete_dwa
+                } else {
+                    state.is_complete()
+                };
+                if is_complete {
                     break;
                 }
             }
 
+            // Check if all internal tokens share the same first byte.
             let mut forced_byte: Option<u8> = None;
             let mut any_token = false;
+            let mut ambiguous = false;
 
-            for token_id in mask.iter_indices() {
-                if let Some(token_bytes) =
-                    state.parent.vocab_trie.token_bytes(LLMTokenID(token_id))
-                {
-                    if token_bytes.is_empty() {
-                        continue;
-                    }
-                    any_token = true;
-                    let first_byte = token_bytes[0];
-                    match forced_byte {
-                        None => forced_byte = Some(first_byte),
-                        Some(prev) if prev == first_byte => {} // same byte
-                        Some(_) => {
-                            // Different byte — not forced
-                            forced_byte = None;
-                            break;
+            for internal_id in internal_mask.iter_up_to(max_internal) {
+                let fb = internal_first_byte[internal_id];
+                match fb {
+                    256 => {} // no original tokens, skip
+                    257 => {
+                        ambiguous = true;
+                        break;
+                    } // mixed first bytes
+                    b => {
+                        any_token = true;
+                        let b = b as u8;
+                        match forced_byte {
+                            None => forced_byte = Some(b),
+                            Some(prev) if prev == b => {} // same
+                            _ => {
+                                ambiguous = true;
+                                break;
+                            }
                         }
                     }
                 }
+            }
+
+            if ambiguous {
+                break;
             }
 
             match forced_byte {
@@ -5008,84 +5066,67 @@ impl<'a> GrammarConstraintState<'a> {
         bytes
     }
 
-    /// Greedy left-to-right tokenization of a byte sequence using the LLM vocab.
-    /// Returns a list of `(LLMTokenID, end_position)` pairs.
-    fn greedy_tokenize_forced(&self, forced_bytes: &[u8]) -> Vec<(LLMTokenID, usize)> {
+    /// Greedy left-to-right tokenization of forced bytes, stopping when the
+    /// tokenizer would need to look beyond the forced prefix to determine the
+    /// longest match.
+    ///
+    /// At each position, we find the longest vocab token matching at that
+    /// position within the forced bytes. But if any vocab token could potentially
+    /// be even longer (i.e., its prefix matches the remaining forced bytes and
+    /// extends beyond), we stop — we can't determine the true longest match
+    /// without seeing the continuation.
+    ///
+    /// This single function replaces the old greedy_tokenize + safe_cutoff pair.
+    fn tokenize_forced_with_stop(&self, forced_bytes: &[u8]) -> Vec<LLMTokenID> {
         let mut tokens = Vec::new();
         let mut pos = 0;
 
         while pos < forced_bytes.len() {
-            let mut best: Option<(LLMTokenID, usize)> = None;
+            let remaining = forced_bytes.len() - pos;
+            let mut best_match: Option<(LLMTokenID, usize)> = None;
+            let mut could_extend_beyond = false;
 
             for (token_id, token_bytes) in self.parent.vocab_trie.iter() {
-                let len = token_bytes.len();
-                if len == 0 || pos + len > forced_bytes.len() {
+                if token_bytes.is_empty() {
                     continue;
                 }
-                if forced_bytes[pos..pos + len] == *token_bytes {
-                    match best {
-                        None => best = Some((LLMTokenID(token_id), len)),
-                        Some((_, prev_len)) if len > prev_len => {
-                            best = Some((LLMTokenID(token_id), len));
+
+                if token_bytes.len() <= remaining {
+                    // Token fits within forced bytes — check if it matches
+                    if forced_bytes[pos..pos + token_bytes.len()] == *token_bytes {
+                        match best_match {
+                            None => best_match = Some((LLMTokenID(token_id), token_bytes.len())),
+                            Some((_, prev_len)) if token_bytes.len() > prev_len => {
+                                best_match = Some((LLMTokenID(token_id), token_bytes.len()));
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                    }
+                } else {
+                    // Token extends beyond forced bytes. If the remaining forced
+                    // bytes match its prefix, this token *might* be the longest
+                    // match — we'd need more bytes to know. Stop here.
+                    if token_bytes[..remaining] == forced_bytes[pos..] {
+                        could_extend_beyond = true;
                     }
                 }
             }
 
-            match best {
+            if could_extend_beyond {
+                // Can't determine longest match — a longer token might exist.
+                break;
+            }
+
+            match best_match {
                 Some((token_id, len)) => {
+                    tokens.push(token_id);
                     pos += len;
-                    tokens.push((token_id, pos));
                 }
                 None => break, // No matching token at this position
             }
         }
 
         tokens
-    }
-
-    /// Apply the tokenization-safe cutoff: only return tokens whose boundaries
-    /// are "safe" — i.e., no vocab token could span across the boundary.
-    ///
-    /// A position `k` is safe if no vocab token starts at any position `j < k`
-    /// with its first `k - j` bytes matching `forced_bytes[j..k]` and has total
-    /// length greater than `k - j` (meaning it would extend past the boundary).
-    fn apply_tokenization_safe_cutoff(
-        &self,
-        forced_bytes: &[u8],
-        greedy_tokens: &[(LLMTokenID, usize)],
-    ) -> Vec<LLMTokenID> {
-        let mut result = Vec::new();
-
-        for &(token_id, end_pos) in greedy_tokens {
-            if self.is_safe_boundary(forced_bytes, end_pos) {
-                result.push(token_id);
-            } else {
-                break;
-            }
-        }
-
-        result
-    }
-
-    /// Check whether position `boundary` in `forced_bytes` is a safe cut point.
-    fn is_safe_boundary(&self, forced_bytes: &[u8], boundary: usize) -> bool {
-        for (_, token_bytes) in self.parent.vocab_trie.iter() {
-            if token_bytes.is_empty() {
-                continue;
-            }
-            for j in 0..boundary {
-                let prefix_len = boundary - j;
-                if token_bytes.len() > prefix_len
-                    && token_bytes[..prefix_len] == forced_bytes[j..boundary]
-                {
-                    // This token starts at j and would extend past the boundary.
-                    return false;
-                }
-            }
-        }
-        true
     }
 
     /// Check if the current state represents a complete valid parse.

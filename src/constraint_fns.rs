@@ -227,7 +227,7 @@ impl<'a> GrammarConstraintState<'a> {
 
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
     /// This is the core computation shared by get_mask and fill_mask_i32.
-    fn compute_internal_mask(&self) -> (RangeSet, bool, bool) {
+    pub(crate) fn compute_internal_mask(&self) -> (RangeSet, bool, bool) {
         let benchmark_enabled = BENCHMARK_MODE.load(Ordering::Relaxed);
         let mut final_mask_internal = RangeSet::zeros();
         let mut has_accepting = false;
@@ -446,7 +446,7 @@ impl<'a> GrammarConstraintState<'a> {
     /// - No tsid transitions at DWA start (all items start at the same start state)
     /// - GSS accumulators carry N×M-space Weight values throughout
     /// - Only collapsed to N-space (vocab) when collecting final mask
-    fn compute_internal_mask_weight_heavy(&self) -> (RangeSet, bool, bool) {
+    pub(crate) fn compute_internal_mask_weight_heavy(&self) -> (RangeSet, bool, bool) {
         // Projected N-space fast path: process each tokenizer state independently.
         // Each state maps to a single TSID, so we project DWA weights to that TSID's
         // column and work entirely in N-space (token-space). Results are unioned.

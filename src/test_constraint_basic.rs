@@ -7077,6 +7077,42 @@ fn test_force_greedy_picks_longest() {
     assert_eq!(forced_ids, vec![4], "Greedy should pick 'abc' as longest match");
 }
 
+/// Grammar: S -> "abcdef" (deterministic, 6 bytes)
+/// Vocab: a(0), b(1), c(2), d(3), e(4), f(5), ab(6), cdef(7).
+///
+/// Forced bytes: a, b, c, d, e, f (all 6 — grammar is fully deterministic).
+/// Tokenize-with-stop: pos 0 → longest match = "ab" (2 bytes), no token
+/// extends beyond. pos 2 → longest match = "cdef" (4 bytes), no token extends
+/// beyond. Result: [ab(6), cdef(7)].
+///
+/// Tests that multi-byte vocab tokens spanning the middle of the forced prefix
+/// are picked up correctly.
+#[test]
+fn test_force_greedy_picks_cdef() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABCDEF;
+        ABCDEF ::= 'a' 'b' 'c' 'd' 'e' 'f';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+    token_map.insert(b"e".to_vec(), LLMTokenID(4));
+    token_map.insert(b"f".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(6));
+    token_map.insert(b"cdef".to_vec(), LLMTokenID(7));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 7);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(forced_ids, vec![6, 7], "Greedy should pick 'ab' + 'cdef'");
+}
+
 // ---- The user's steve/steven example ----
 
 /// THE motivating example for byte-level (not token-level) forcing.
@@ -7092,10 +7128,10 @@ fn test_force_greedy_picks_longest() {
 ///   - Forced bytes: s, t, e, v, e (5 bytes = "steve")
 ///     - After "steve", EOS is in the mask (parse complete for "steve" branch)
 ///       and "n" is available (for "steven" branch). EOS stops forcing.
-///   - Greedy tokenization of "steve": "ste" (3 bytes) + "ve" (2 bytes)
-///   - Boundary after "ste" (pos 3): safe (no token starts before pos 3 and extends past)
-///   - Boundary after "ve" (pos 5): NOT safe — token "ven" starts at pos 3 with
-///     prefix "ve" and length 3 > 2. It could extend past the boundary.
+///   - Tokenize-with-stop on "steve":
+///     pos 0: longest = "ste" (3 bytes). No token starting with "steve" extends beyond 5 → emit.
+///     pos 3: longest = "ve" (2 bytes). But "ven" starts with "ve" and is 3 bytes
+///            > 2 remaining → could extend beyond. STOP.
 ///   - Result: force() returns [ste] only.
 ///
 /// The remaining forced bytes ("ve") are picked up by the next mask/force call.
@@ -7139,7 +7175,8 @@ fn test_force_steve_steven_with_eos() {
 /// Without EOS, after "steve" the "steve" branch can't signal completion,
 /// so only the "steven" branch contributes tokens. This means byte 'n' is
 /// also forced, giving forced bytes = "steven" (6 bytes).
-/// Greedy: "ste" + "ven". Both boundaries should be safe → force returns [ste, ven].
+/// Tokenize-with-stop: "ste" (3) + "ven" (3). At each position, no token
+/// extends beyond the 6 forced bytes → both emitted. Result: [ste, ven].
 #[test]
 fn test_force_steve_steven_no_eos() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -7173,18 +7210,18 @@ fn test_force_steve_steven_no_eos() {
     );
 }
 
-// ---- Tokenization-safe cutoff ----
+// ---- Tokenize-with-stop ----
 
 /// Grammar: "abc" | "abcdef"
 /// Vocab: ab, c, d, e, f, cde (single-byte d/e/f + multi-byte ab, c, cde) + EOS.
 ///
-/// Forced bytes: a, b, c (3 bytes). After "abc", EOS is available (grammar
-/// completes for "abc") and "d" continues (for "abcdef"). EOS stops forcing.
+/// Forced bytes: a, b, c (3 bytes). After "abc", EOS is available → stop.
 ///
-/// Greedy tokenization of "abc": "ab"(pos 2) + "c"(pos 3).
-/// Boundary after "ab" (pos 2): safe (no token spans across).
-/// Boundary after "c" (pos 3): "cde" starts at pos 2, prefix "c" matches,
-///   len 3 > 1 → spans across. NOT safe.
+/// Tokenize-with-stop on "abc":
+///   pos 0: longest match = "ab" (2 bytes). No token starting with "abc" extends
+///          beyond 3 bytes → emit "ab".
+///   pos 2: longest match = "c" (1 byte). But "cde" starts with "c" and is 3 bytes
+///          > 1 remaining → could extend beyond. STOP.
 ///
 /// Result: [ab] only.
 ///
@@ -7215,18 +7252,18 @@ fn test_force_cutoff_realistic_grammar() {
 
     let forced = state.force();
     let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
-    // "cde" spans across boundary at pos 3, so only "ab" is safe.
-    assert_eq!(forced_ids, vec![6], "Only 'ab' is safe; 'c' boundary blocked by 'cde'");
+    // At pos 2, "cde" could extend beyond → stop after "ab".
+    assert_eq!(forced_ids, vec![6], "Only 'ab' emitted; 'cde' could extend beyond at pos 2");
 }
 
-/// Cutoff blocks ALL tokens.
+/// Tokenize-with-stop blocks at first position.
 /// Grammar: "ab" | "abcd"
 /// Vocab: a, b, c, d, abc + EOS
 ///
 /// Forced bytes: a, b (after "ab", EOS available → stop).
-/// Greedy: "a" + "b".
-/// Boundary after "a" (pos 1): token "abc" starts at pos 0, prefix "a" matches,
-///   len 3 > 1. NOT safe.
+/// Tokenize-with-stop on "ab":
+///   pos 0: longest match = "a" (1 byte). But "abc" starts with "ab" and is
+///          3 bytes > 2 remaining → could extend beyond. STOP.
 ///
 /// Result: [] (nothing safe to force).
 ///
@@ -7257,7 +7294,7 @@ fn test_force_cutoff_blocks_everything() {
     assert_eq!(
         forced_ids,
         Vec::<usize>::new(),
-        "Token 'abc' makes boundary at pos 1 unsafe; nothing can be forced"
+        "Token 'abc' could extend beyond at pos 0; nothing can be forced"
     );
 }
 
@@ -7267,8 +7304,8 @@ fn test_force_cutoff_blocks_everything() {
 /// Vocab: a, b, c + EOS.
 ///
 /// Forced bytes: a, b. After "ab", EOS available → stop.
-/// Greedy: "a" + "b". Both boundaries safe (no token > 1 byte except EOS which
-/// doesn't match). Result: [a, b].
+/// Tokenize-with-stop on "ab": "a" (1 byte, no extension), "b" (1 byte, no extension).
+/// Result: [a, b].
 ///
 /// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
 /// byte-level commits, so force() continues past "ab" to force "abc".
@@ -7328,7 +7365,7 @@ fn test_force_empty_after_complete() {
 /// Vocab: "ab" (2 bytes) and "a" (1 byte) and "b" (1 byte).
 /// All tokens in the initial mask start with 'a': token "a" and token "ab" both start
 /// with 'a'. Forced byte: 'a'. Then forced byte: 'b'.
-/// Greedy of "ab": token "ab" (longest match, 2 bytes). Safe boundary. Result: [ab].
+/// Tokenize-with-stop on "ab": "ab" (2 bytes, exact fit). No token extends beyond. Result: [ab].
 #[test]
 fn test_force_multi_byte_same_first_byte() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
