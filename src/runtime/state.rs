@@ -18,7 +18,7 @@ use crate::GlrMaskError;
 ///
 /// Immutable after creation. Thread-safe (`Send + Sync`).
 /// Create [`ConstraintState`] instances from this to track per-sequence state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 pub struct Constraint {
     /// The compiled parser DWA.
@@ -72,6 +72,33 @@ impl Constraint {
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         let gdef = crate::frontend::json_schema::json_schema_to_grammar(schema)?;
         Ok(crate::compiler::pipeline::compile(&gdef, vocab))
+    }
+
+    /// Serialize this constraint to a byte vector (bincode format).
+    pub fn save(&self) -> crate::Result<Vec<u8>> {
+        bincode::serialize(self)
+            .map_err(|e| crate::GlrMaskError::Serialization(format!("serialize: {e}")))
+    }
+
+    /// Deserialize a constraint from bytes (bincode format).
+    pub fn load(bytes: &[u8]) -> crate::Result<Self> {
+        bincode::deserialize(bytes)
+            .map_err(|e| crate::GlrMaskError::Serialization(format!("deserialize: {e}")))
+    }
+
+    /// Save to a file.
+    pub fn save_to_file(&self, path: &std::path::Path) -> crate::Result<()> {
+        let bytes = self.save()?;
+        std::fs::write(path, bytes)
+            .map_err(|e| crate::GlrMaskError::Serialization(format!("write: {e}")))?;
+        Ok(())
+    }
+
+    /// Load from a file.
+    pub fn load_from_file(path: &std::path::Path) -> crate::Result<Self> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| crate::GlrMaskError::Serialization(format!("read: {e}")))?;
+        Self::load(&bytes)
     }
 
     /// Number of DWA states.

@@ -145,7 +145,7 @@ impl WeightTable {
 ///
 /// A "position" in the flat DWA weight space is
 /// `token_id * num_tsids + tsid`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Weight {
     /// Sorted entries: `(tsid_lo, tsid_hi, token_set)` with **inclusive**
     /// ranges.  Non-overlapping and sorted by `tsid_lo`.

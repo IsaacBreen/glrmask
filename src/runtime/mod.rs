@@ -3,7 +3,7 @@
 //! This module contains the hot path: `ConstraintState` processes tokens
 //! and computes allowed-token masks in microseconds.
 
-mod force;
+pub mod force;
 mod gss;
 mod mask;
 mod state;

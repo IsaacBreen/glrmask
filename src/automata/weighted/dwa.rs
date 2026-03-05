@@ -20,7 +20,7 @@ use super::weight::{Weight, WeightTable};
 // ---------------------------------------------------------------------------
 
 /// A single state in the compilation-time DWA.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompDwaState {
     /// Label → (target_state, transition_weight).
     pub transitions: BTreeMap<Label, (u32, Weight)>,
@@ -41,7 +41,7 @@ impl Default for CompDwaState {
 ///
 /// Each `(state, label)` maps to at most one `(target, weight)`.  The weights
 /// are full [`Weight`] sets that track which (token, TSID) positions survive.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompDwa {
     /// All states.
     pub states: Vec<CompDwaState>,

@@ -14,7 +14,9 @@ use crate::ds::u8set::U8Set;
 /// A tokenizer built from terminal patterns.
 ///
 /// Wraps a multi-group DFA where each group corresponds to a terminal.
-#[derive(Debug, Clone)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizerDfa {
     /// The underlying multi-group DFA.
     pub dfa: Dfa,
@@ -155,7 +157,7 @@ impl TokenizerDfa {
 }
 
 /// Result of executing the tokenizer with intermediate match tracking.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizerResult {
     /// The DFA state after processing all bytes.
     pub end_state: u32,
