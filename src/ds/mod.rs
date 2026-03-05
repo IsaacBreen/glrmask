@@ -3,3 +3,5 @@
 pub mod bitset;
 pub mod rangeset;
 pub mod u8set;
+
+pub use rangeset::RangeSet;
