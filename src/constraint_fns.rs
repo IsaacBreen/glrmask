@@ -1203,11 +1203,10 @@ impl<'a> GrammarConstraintState<'a> {
         if let Some(eos_id) = self.parent.eos_token_id {
             // Treat EOS as a reserved token: only allow it when the parse is complete.
             mask.remove(eos_id);
-            let is_complete = if self.parent.num_tsids > 0 {
-                is_complete_dwa
-            } else {
-                self.is_complete()
-            };
+            // is_complete_dwa is a fast check from the DWA worklist, but it can
+            // return false negatives after byte-level commits. Fall back to the
+            // more expensive (but always correct) is_complete() worklist check.
+            let is_complete = is_complete_dwa || self.is_complete();
             if is_complete {
                 mask.insert(eos_id);
             }
@@ -1286,13 +1285,10 @@ impl<'a> GrammarConstraintState<'a> {
             let bit_idx = eos_id % 32;
             if word_idx < out.len() {
                 out[word_idx] &= !(1i32 << bit_idx);
-                // Use DWA-based completion check (fast, avoids expensive to_stacks())
-                // Fall back to is_complete() for symbol-heavy mode where DWA info isn't available
-                let is_complete = if self.parent.num_tsids > 0 {
-                    is_complete_dwa
-                } else {
-                    self.is_complete()
-                };
+                // is_complete_dwa is a fast check from the DWA worklist, but it can
+                // return false negatives after byte-level commits. Fall back to the
+                // more expensive (but always correct) is_complete() worklist check.
+                let is_complete = is_complete_dwa || self.is_complete();
                 if is_complete {
                     out[word_idx] |= 1i32 << bit_idx;
                 }

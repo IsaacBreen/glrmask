@@ -7618,4 +7618,761 @@ fn test_force_long_shared_prefix() {
     );
 }
 
+// ===========================================================================
+// force() component tests: compute_forced_byte_prefix and tokenize_forced_with_stop
+// ===========================================================================
+
+/// Context for force component tests: holds both actual-vocab and single-byte-vocab constraints.
+struct ForceTestContext {
+    actual: GrammarConstraint,
+    single_byte: GrammarConstraint,
+}
+
+/// Build two constraints from the same grammar:
+/// 1. `actual` — uses the provided token_map
+/// 2. `single_byte` — uses bytes 0..=255 as token IDs 0..=255, plus EOS as token 256
+///    if the actual vocab contains EOS.
+fn build_force_test_pair(
+    grammar: &str,
+    token_map: LLMTokenMap,
+    max_id: usize,
+    is_lark: bool,
+) -> ForceTestContext {
+    let grammar_def = if is_lark {
+        GrammarDefinition::from_lark(grammar).unwrap()
+    } else {
+        GrammarDefinition::from_ebnf(grammar).unwrap()
+    };
+    let grammar_def = Arc::new(grammar_def);
+
+    // Check if the actual vocab has EOS
+    let has_eos = token_map.contains_key(&b"<|endoftext|>".to_vec());
+
+    let actual = GrammarConstraint::new_from_grammar_definition(
+        grammar_def.clone(),
+        token_map,
+        max_id,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut single_byte_map = LLMTokenMap::new();
+    for b in 0u8..=255u8 {
+        single_byte_map.insert(vec![b], LLMTokenID(b as usize));
+    }
+    let sb_max_id = if has_eos {
+        single_byte_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(256));
+        256
+    } else {
+        255
+    };
+
+    let single_byte = GrammarConstraint::new_from_grammar_definition(
+        grammar_def,
+        single_byte_map,
+        sb_max_id,
+        &GrammarConstraintConfig::default(),
+    );
+
+    ForceTestContext { actual, single_byte }
+}
+
+/// Reference implementation of forced byte prefix using get_mask + commit on
+/// a single-byte-vocab constraint. This is the ground truth.
+fn reference_forced_prefix(
+    state: &crate::constraint::GrammarConstraintState<'_>,
+) -> Vec<u8> {
+    let mut state = state.clone();
+    let eos_id = state.parent.eos_token_id;
+    let mut bytes = Vec::new();
+
+    for _ in 0..10_000 {
+        let mask = state.get_mask();
+
+        // If EOS is available, parse can end here — stop.
+        if let Some(eid) = eos_id {
+            if mask.contains(eid) {
+                break;
+            }
+        }
+
+        let mut byte: Option<u8> = None;
+        let mut found = false;
+
+        for token_id in mask.iter_indices() {
+            if Some(token_id) == eos_id {
+                continue;
+            }
+            if let Some(tb) = state.parent.vocab_trie.token_bytes(LLMTokenID(token_id)) {
+                if tb.is_empty() {
+                    continue;
+                }
+                found = true;
+                let b = tb[0];
+                match byte {
+                    None => byte = Some(b),
+                    Some(prev) if prev == b => {}
+                    _ => {
+                        byte = None;
+                        break;
+                    }
+                }
+            }
+        }
+
+        match byte {
+            Some(b) if found => {
+                bytes.push(b);
+                state.commit_bytes(&[b]);
+                if !state.is_active() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    bytes
+}
+
+/// Run the forced byte prefix test: compare compute_forced_byte_prefix on the
+/// actual-vocab constraint against the reference (get_mask+commit loop) on the
+/// single-byte-vocab constraint.
+///
+/// If `expected_prefix` is given, also assert it matches.
+/// If `prefix_bytes` is given, commit those bytes first (to test forcing after
+/// a partial commit).
+fn assert_forced_prefix(
+    ctx: &ForceTestContext,
+    prefix_bytes: &[u8],
+    expected_prefix: Option<&[u8]>,
+    label: &str,
+) {
+    let mut actual_state = ctx.actual.init();
+    let mut sb_state = ctx.single_byte.init();
+
+    // Commit prefix bytes to both states
+    for &b in prefix_bytes {
+        actual_state.commit_bytes(&[b]);
+        sb_state.commit_bytes(&[b]);
+    }
+
+    let ref_prefix = reference_forced_prefix(&sb_state);
+    let computed_prefix = actual_state.compute_forced_byte_prefix();
+
+    // The computed prefix on actual vocab should match the reference on single-byte vocab
+    assert_eq!(
+        computed_prefix, ref_prefix,
+        "{}: compute_forced_byte_prefix disagrees with reference.\n  computed: {:?}\n  reference: {:?}",
+        label,
+        String::from_utf8_lossy(&computed_prefix),
+        String::from_utf8_lossy(&ref_prefix),
+    );
+
+    if let Some(expected) = expected_prefix {
+        assert_eq!(
+            computed_prefix,
+            expected.to_vec(),
+            "{}: forced prefix doesn't match expected.\n  got: {:?}\n  expected: {:?}",
+            label,
+            String::from_utf8_lossy(&computed_prefix),
+            String::from_utf8_lossy(expected),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// compute_forced_byte_prefix tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cfbp_deterministic_string() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABC;
+        ABC ::= 'a' 'b' 'c';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(3));
+    token_map.insert(b"abc".to_vec(), LLMTokenID(4));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(5));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 5, false);
+    assert_forced_prefix(&ctx, &[], Some(b"abc"), "deterministic 'abc'");
+}
+
+#[test]
+fn test_cfbp_ambiguous_from_start() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= A | B;
+        A ::= 'a';
+        B ::= 'b';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(2));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 2, false);
+    assert_forced_prefix(&ctx, &[], Some(b""), "ambiguous 'a' | 'b'");
+}
+
+#[test]
+fn test_cfbp_shared_prefix_then_branch() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABC | ABD;
+        ABC ::= 'a' 'b' 'c';
+        ABD ::= 'a' 'b' 'd';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(4));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 4, false);
+    assert_forced_prefix(&ctx, &[], Some(b"ab"), "shared prefix 'ab' then branch");
+}
+
+#[test]
+fn test_cfbp_eos_stops_forcing() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Grammar: "ab" | "abc". After "ab", EOS is available.
+    let lark = indoc! {r#"
+        start: AB | ABC
+        AB: "ab"
+        ABC: "abc"
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(3));
+
+    let ctx = build_force_test_pair(lark, token_map, 3, true);
+    // After "ab", EOS available → forced prefix is just "ab"
+    assert_forced_prefix(&ctx, &[], Some(b"ab"), "EOS stops forcing at 'ab'");
+}
+
+/// Diagnostic test: check EOS detection mechanism after byte-level commits
+#[test]
+fn test_eos_detection_after_byte_commits() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark = indoc! {r#"
+        start: AB | ABC
+        AB: "ab"
+        ABC: "abc"
+    "#};
+
+    // Single-byte vocab with EOS
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(3));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(GrammarDefinition::from_lark(lark).unwrap()),
+        token_map,
+        3,
+        &GrammarConstraintConfig::default(),
+    );
+
+    // Commit via token (normal path — commit the 2-byte token "ab")
+    let mut state_token = constraint.init();
+    let mask_initial = state_token.get_mask();
+    eprintln!("Initial mask tokens: {:?}",
+        mask_initial.iter_indices().collect::<Vec<_>>());
+
+    // Commit "a" then "b" via bytes
+    state_token.commit_bytes(b"a");
+    let mask_after_a = state_token.get_mask();
+    eprintln!("After 'a', mask tokens: {:?}",
+        mask_after_a.iter_indices().collect::<Vec<_>>());
+
+    state_token.commit_bytes(b"b");
+    let mask_after_ab = state_token.get_mask();
+    eprintln!("After 'ab', mask tokens: {:?}",
+        mask_after_ab.iter_indices().collect::<Vec<_>>());
+    eprintln!("After 'ab', state keys: {:?}",
+        state_token.state.keys().map(|k| k.0).collect::<Vec<_>>());
+    eprintln!("After 'ab', is_complete: {:?}", state_token.is_complete());
+    eprintln!("After 'ab', num_tsids: {:?}", constraint.num_tsids);
+    eprintln!("After 'ab', eos_token_id: {:?}", constraint.eos_token_id);
+    eprintln!("After 'ab', EOS in mask: {:?}", mask_after_ab.contains(3));
+
+    // The critical assertion: after committing "ab" byte-by-byte, EOS should be in the mask
+    assert!(
+        mask_after_ab.contains(3),
+        "EOS (id=3) should be in the mask after committing 'ab' byte-by-byte.\n\
+         is_complete={}, mask has {} tokens",
+        state_token.is_complete(),
+        mask_after_ab.iter_indices().count(),
+    );
+}
+
+#[test]
+fn test_cfbp_steve_steven_with_eos() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark = indoc! {r#"
+        start: STEVE | STEVEN
+        STEVE: "steve"
+        STEVEN: "steven"
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"s".to_vec(), LLMTokenID(0));
+    token_map.insert(b"t".to_vec(), LLMTokenID(1));
+    token_map.insert(b"e".to_vec(), LLMTokenID(2));
+    token_map.insert(b"v".to_vec(), LLMTokenID(3));
+    token_map.insert(b"n".to_vec(), LLMTokenID(4));
+    token_map.insert(b"ste".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ve".to_vec(), LLMTokenID(6));
+    token_map.insert(b"ven".to_vec(), LLMTokenID(7));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(8));
+
+    let ctx = build_force_test_pair(lark, token_map, 8, true);
+    // Forced prefix: "steve" (5 bytes). After "steve", EOS available (for "steve" branch).
+    assert_forced_prefix(&ctx, &[], Some(b"steve"), "steve/steven: forced 'steve'");
+}
+
+#[test]
+fn test_cfbp_steve_steven_no_eos() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark = indoc! {r#"
+        start: STEVE | STEVEN
+        STEVE: "steve"
+        STEVEN: "steven"
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"s".to_vec(), LLMTokenID(0));
+    token_map.insert(b"t".to_vec(), LLMTokenID(1));
+    token_map.insert(b"e".to_vec(), LLMTokenID(2));
+    token_map.insert(b"v".to_vec(), LLMTokenID(3));
+    token_map.insert(b"n".to_vec(), LLMTokenID(4));
+    token_map.insert(b"ste".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ve".to_vec(), LLMTokenID(6));
+    token_map.insert(b"ven".to_vec(), LLMTokenID(7));
+
+    let ctx = build_force_test_pair(lark, token_map, 7, true);
+    // Without EOS, "steve" branch can't signal completion — only "steven" continues.
+    // All 6 bytes forced.
+    assert_forced_prefix(&ctx, &[], Some(b"steven"), "steve/steven no EOS: forced all 'steven'");
+}
+
+#[test]
+fn test_cfbp_after_partial_commit() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABCDE;
+        ABCDE ::= 'a' 'b' 'c' 'd' 'e';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+    token_map.insert(b"e".to_vec(), LLMTokenID(4));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(5));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 5, false);
+    // After committing "ab", the remaining forced prefix should be "cde"
+    assert_forced_prefix(&ctx, b"ab", Some(b"cde"), "after partial 'ab', forced 'cde'");
+}
+
+#[test]
+fn test_cfbp_empty_when_complete() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= AB;
+        AB ::= 'a' 'b';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(2));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 2, false);
+    // After committing "ab", parse is complete, EOS available → nothing to force
+    assert_forced_prefix(&ctx, b"ab", Some(b""), "complete parse: nothing to force");
+}
+
+#[test]
+fn test_cfbp_long_deterministic() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= LONG;
+        LONG ::= 'a' 'b' 'c' 'd' 'e' 'f' 'g' 'h' 'i' 'j' 'k' 'l' 'm' 'n' 'o' 'p';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    for (i, b) in b"abcdefghijklmnop".iter().enumerate() {
+        token_map.insert(vec![*b], LLMTokenID(i));
+    }
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(16));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 16, false);
+    assert_forced_prefix(&ctx, &[], Some(b"abcdefghijklmnop"), "16-byte deterministic");
+}
+
+#[test]
+fn test_cfbp_single_char_grammar() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= X;
+        X ::= 'x';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"x".to_vec(), LLMTokenID(0));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(1));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 1, false);
+    assert_forced_prefix(&ctx, &[], Some(b"x"), "single char 'x'");
+}
+
+#[test]
+fn test_cfbp_repetition_no_eos() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Grammar: one or more 'a's. Without EOS, the grammar always wants more 'a's.
+    // Forced prefix: 'a' repeated up to MAX_FORCED_BYTES.
+    let lark = indoc! {r#"
+        start: AS
+        AS: /a+/
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+
+    let ctx = build_force_test_pair(lark, token_map, 0, true);
+    let state = ctx.actual.init();
+    let prefix = state.compute_forced_byte_prefix();
+    // Without EOS, should force many 'a's up to the safety limit
+    assert!(prefix.len() > 100, "repetition without EOS: should force many bytes, got {}", prefix.len());
+    assert!(prefix.iter().all(|&b| b == b'a'), "all bytes should be 'a'");
+}
+
+#[test]
+fn test_cfbp_repetition_with_eos() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Grammar: one or more 'a's. With EOS, after the first 'a', EOS is available.
+    let lark = indoc! {r#"
+        start: AS
+        AS: /a+/
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(1));
+
+    let ctx = build_force_test_pair(lark, token_map, 1, true);
+    // First 'a' is forced (only option). After that, EOS should be available → stop.
+    assert_forced_prefix(&ctx, &[], Some(b"a"), "repetition with EOS: only first 'a' forced");
+}
+
+#[test]
+fn test_cfbp_abcdef_with_multibyte_tokens() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= ABCDEF;
+        ABCDEF ::= 'a' 'b' 'c' 'd' 'e' 'f';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+    token_map.insert(b"e".to_vec(), LLMTokenID(4));
+    token_map.insert(b"f".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(6));
+    token_map.insert(b"cdef".to_vec(), LLMTokenID(7));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(8));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 8, false);
+    assert_forced_prefix(&ctx, &[], Some(b"abcdef"), "abcdef with multi-byte tokens");
+}
+
+#[test]
+fn test_cfbp_alternation_shared_long_prefix() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Two options that share a 5-byte prefix, differ at byte 6
+    let ebnf = indoc! {r#"
+        s ::= OPT1 | OPT2;
+        OPT1 ::= 'h' 'e' 'l' 'l' 'o' 'a';
+        OPT2 ::= 'h' 'e' 'l' 'l' 'o' 'b';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"h".to_vec(), LLMTokenID(0));
+    token_map.insert(b"e".to_vec(), LLMTokenID(1));
+    token_map.insert(b"l".to_vec(), LLMTokenID(2));
+    token_map.insert(b"o".to_vec(), LLMTokenID(3));
+    token_map.insert(b"a".to_vec(), LLMTokenID(4));
+    token_map.insert(b"b".to_vec(), LLMTokenID(5));
+    token_map.insert(b"hello".to_vec(), LLMTokenID(6));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(7));
+
+    let ctx = build_force_test_pair(ebnf, token_map, 7, false);
+    assert_forced_prefix(&ctx, &[], Some(b"hello"), "two alternations sharing 'hello' prefix");
+}
+
+// ---------------------------------------------------------------------------
+// tokenize_forced_with_stop tests
+// ---------------------------------------------------------------------------
+
+/// Helper: build a constraint just for testing tokenization (grammar is fixed,
+/// we only vary the vocab).
+fn build_tokenize_test_constraint(
+    token_map: LLMTokenMap,
+    max_id: usize,
+) -> GrammarConstraint {
+    // Use a simple deterministic grammar that allows enough bytes for testing.
+    let ebnf = indoc! {r#"
+        s ::= BYTES;
+        BYTES ::= 'a' 'b' 'c' 'd' 'e' 'f' 'g' 'h' 'i' 'j' 'k' 'l' 'm' 'n' 'o' 'p';
+    "#};
+    GrammarConstraint::new_from_grammar_definition(
+        Arc::new(GrammarDefinition::from_ebnf(ebnf).unwrap()),
+        token_map,
+        max_id,
+        &GrammarConstraintConfig::default(),
+    )
+}
+
+#[test]
+fn test_twfs_single_byte_tokens() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    for (i, b) in b"abcdef".iter().enumerate() {
+        token_map.insert(vec![*b], LLMTokenID(i));
+    }
+    let constraint = build_tokenize_test_constraint(token_map, 5);
+    let state = constraint.init();
+
+    let tokens = state.tokenize_forced_with_stop(b"abcdef");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, vec![0, 1, 2, 3, 4, 5], "each byte → its own token");
+}
+
+#[test]
+fn test_twfs_greedy_longest_match() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(3));
+    token_map.insert(b"abc".to_vec(), LLMTokenID(4));
+    let constraint = build_tokenize_test_constraint(token_map, 4);
+    let state = constraint.init();
+
+    let tokens = state.tokenize_forced_with_stop(b"abc");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, vec![4], "greedy picks 'abc' (longest)");
+}
+
+#[test]
+fn test_twfs_stop_when_token_extends_beyond() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"cde".to_vec(), LLMTokenID(3));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(4));
+    let constraint = build_tokenize_test_constraint(token_map, 4);
+    let state = constraint.init();
+
+    // Forced bytes: "abc". At pos 2, "c" matches (1 byte) but "cde" starts with "c"
+    // and extends beyond → stop.
+    let tokens = state.tokenize_forced_with_stop(b"abc");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, vec![4], "stop at pos 2 because 'cde' extends beyond; only 'ab' emitted");
+}
+
+#[test]
+fn test_twfs_stop_at_first_position() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"abc".to_vec(), LLMTokenID(2));
+    let constraint = build_tokenize_test_constraint(token_map, 2);
+    let state = constraint.init();
+
+    // Forced bytes: "ab". Token "abc" starts with "ab" and extends beyond → stop immediately.
+    let tokens = state.tokenize_forced_with_stop(b"ab");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, Vec::<usize>::new(), "stop at pos 0 because 'abc' extends beyond 'ab'");
+}
+
+#[test]
+fn test_twfs_multibyte_middle() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+    token_map.insert(b"e".to_vec(), LLMTokenID(4));
+    token_map.insert(b"f".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(6));
+    token_map.insert(b"cdef".to_vec(), LLMTokenID(7));
+    let constraint = build_tokenize_test_constraint(token_map, 7);
+    let state = constraint.init();
+
+    let tokens = state.tokenize_forced_with_stop(b"abcdef");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, vec![6, 7], "'ab' + 'cdef'");
+}
+
+#[test]
+fn test_twfs_exact_fit_no_extension() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"abc".to_vec(), LLMTokenID(0));
+    token_map.insert(b"def".to_vec(), LLMTokenID(1));
+    let constraint = build_tokenize_test_constraint(token_map, 1);
+    let state = constraint.init();
+
+    // "abcdef" is exactly covered by "abc" + "def" — no token extends beyond.
+    let tokens = state.tokenize_forced_with_stop(b"abcdef");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, vec![0, 1], "exact fit: 'abc' + 'def'");
+}
+
+#[test]
+fn test_twfs_empty_input() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    let constraint = build_tokenize_test_constraint(token_map, 0);
+    let state = constraint.init();
+
+    let tokens = state.tokenize_forced_with_stop(b"");
+    assert!(tokens.is_empty(), "empty input → empty output");
+}
+
+#[test]
+fn test_twfs_no_matching_token() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"x".to_vec(), LLMTokenID(0));
+    token_map.insert(b"y".to_vec(), LLMTokenID(1));
+    let constraint = build_tokenize_test_constraint(token_map, 1);
+    let state = constraint.init();
+
+    // No token matches 'a' at the start
+    let tokens = state.tokenize_forced_with_stop(b"abc");
+    assert!(tokens.is_empty(), "no matching token at pos 0 → empty");
+}
+
+#[test]
+fn test_twfs_partial_coverage() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    // No "c" token
+    let constraint = build_tokenize_test_constraint(token_map, 1);
+    let state = constraint.init();
+
+    // "abc": "a" + "b" then no match for "c" → stop after "ab"
+    let tokens = state.tokenize_forced_with_stop(b"abc");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, vec![0, 1], "'a' + 'b', then no match for 'c'");
+}
+
+#[test]
+fn test_twfs_ven_extends_beyond() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    // The steve/steven tokenization scenario
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"s".to_vec(), LLMTokenID(0));
+    token_map.insert(b"t".to_vec(), LLMTokenID(1));
+    token_map.insert(b"e".to_vec(), LLMTokenID(2));
+    token_map.insert(b"v".to_vec(), LLMTokenID(3));
+    token_map.insert(b"ste".to_vec(), LLMTokenID(4));
+    token_map.insert(b"ve".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ven".to_vec(), LLMTokenID(6));
+
+    // Use a grammar that allows "steve"
+    let ebnf = indoc! {r#"
+        s ::= STEVE;
+        STEVE ::= 's' 't' 'e' 'v' 'e';
+    "#};
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(GrammarDefinition::from_ebnf(ebnf).unwrap()),
+        token_map,
+        6,
+        &GrammarConstraintConfig::default(),
+    );
+    let state = constraint.init();
+
+    // Forced bytes: "steve" (5 bytes).
+    // At pos 0: longest=ste(3). No token > 5 starting with "steve". Emit.
+    // At pos 3: longest=ve(2). But "ven" starts with "ve" and is 3 > 2 remaining. STOP.
+    let tokens = state.tokenize_forced_with_stop(b"steve");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, vec![4], "only 'ste' emitted; 'ven' could extend beyond at pos 3");
+}
+
+#[test]
+fn test_twfs_steven_full_coverage() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"s".to_vec(), LLMTokenID(0));
+    token_map.insert(b"t".to_vec(), LLMTokenID(1));
+    token_map.insert(b"e".to_vec(), LLMTokenID(2));
+    token_map.insert(b"v".to_vec(), LLMTokenID(3));
+    token_map.insert(b"n".to_vec(), LLMTokenID(4));
+    token_map.insert(b"ste".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ve".to_vec(), LLMTokenID(6));
+    token_map.insert(b"ven".to_vec(), LLMTokenID(7));
+
+    let ebnf = indoc! {r#"
+        s ::= STEVEN;
+        STEVEN ::= 's' 't' 'e' 'v' 'e' 'n';
+    "#};
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(GrammarDefinition::from_ebnf(ebnf).unwrap()),
+        token_map,
+        7,
+        &GrammarConstraintConfig::default(),
+    );
+    let state = constraint.init();
+
+    // Forced bytes: "steven" (6 bytes).
+    // pos 0: ste(3), no extension beyond 6. Emit.
+    // pos 3: ven(3), no extension beyond 6. Emit.
+    let tokens = state.tokenize_forced_with_stop(b"steven");
+    let ids: Vec<usize> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(ids, vec![5, 7], "'ste' + 'ven' covers all of 'steven'");
+}
+
 

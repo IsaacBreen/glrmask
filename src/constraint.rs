@@ -4953,7 +4953,7 @@ impl<'a> GrammarConstraintState<'a> {
     /// Optimized: computes the internal mask directly and checks first bytes
     /// per internal token (skipping the expensive internal→original bit-vector
     /// conversion). Uses DWA-based completion check for EOS.
-    fn compute_forced_byte_prefix(&self) -> Vec<u8> {
+    pub(crate) fn compute_forced_byte_prefix(&self) -> Vec<u8> {
         let max_internal = self.parent.parser_dwa_vocab.internal_max_llm_token;
         let max_orig = self.parent.parser_dwa_vocab.max_original_llm_token_id;
 
@@ -5008,12 +5008,10 @@ impl<'a> GrammarConstraintState<'a> {
                 };
 
             // Check EOS: if parse can complete here, stop forcing.
+            // is_complete_dwa can have false negatives after byte-level commits,
+            // so fall back to the more expensive is_complete() worklist check.
             if state.parent.eos_token_id.is_some() {
-                let is_complete = if state.parent.num_tsids > 0 {
-                    is_complete_dwa
-                } else {
-                    state.is_complete()
-                };
+                let is_complete = is_complete_dwa || state.is_complete();
                 if is_complete {
                     break;
                 }
@@ -5077,7 +5075,7 @@ impl<'a> GrammarConstraintState<'a> {
     /// without seeing the continuation.
     ///
     /// This single function replaces the old greedy_tokenize + safe_cutoff pair.
-    fn tokenize_forced_with_stop(&self, forced_bytes: &[u8]) -> Vec<LLMTokenID> {
+    pub(crate) fn tokenize_forced_with_stop(&self, forced_bytes: &[u8]) -> Vec<LLMTokenID> {
         let mut tokens = Vec::new();
         let mut pos = 0;
 
