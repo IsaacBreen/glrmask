@@ -8,6 +8,15 @@ use std::{
     sync::{Arc, OnceLock},
 };
 use std::collections::BTreeMap as StdMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Lazy env var: when `SEP1_VERIFY_FORCING=1`, every `commit()` also runs a
+/// brute-force forcing verification to compare against the optimised `force()`.
+static VERIFY_FORCING: once_cell::sync::Lazy<bool> = once_cell::sync::Lazy::new(|| {
+    std::env::var("SEP1_VERIFY_FORCING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+});
 
 use bimap::BiBTreeMap;
 use json_convertible_derive::JSONConvertible;
@@ -5035,6 +5044,11 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) -> Result<(), String> {
+        // Verify forcing before modifying state (if enabled).
+        if *VERIFY_FORCING {
+            self.verify_forcing();
+        }
+
         let token_bytes = self
             .parent
             .vocab_trie
@@ -5103,6 +5117,144 @@ impl<'a> GrammarConstraintState<'a> {
         // prefix to determine the longest match. This replaces the old
         // greedy_tokenize + safe_cutoff approach with a single clean pass.
         self.tokenize_forced_with_stop(&forced_bytes)
+    }
+
+    // -----------------------------------------------------------------------
+    // bruteforce_force() — reference implementation for verification
+    // -----------------------------------------------------------------------
+
+    /// Brute-force implementation of forced byte prefix computation.
+    /// Computes the full token mask at each step and checks whether all allowed
+    /// tokens share a common first byte. This is slow but simple and serves as
+    /// the ground truth for verifying the optimised `compute_forced_byte_prefix()`.
+    fn bruteforce_compute_forced_byte_prefix(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut state = self.clone();
+        const MAX_FORCED_BYTES: usize = 10_000;
+
+        loop {
+            if bytes.len() >= MAX_FORCED_BYTES {
+                break;
+            }
+
+            // Compute the full original token mask.
+            let mask = state.get_mask();
+            if mask.is_empty() {
+                break;
+            }
+
+            // If EOS is allowed, stop forcing (grammar accepts here).
+            if let Some(eos_id) = state.parent.eos_token_id {
+                if mask.contains(eos_id) {
+                    break;
+                }
+            }
+
+            // Check if all tokens in the mask share the same first byte.
+            let mut forced_byte: Option<u8> = None;
+            let mut ambiguous = false;
+            for token_id in mask.iter_indices() {
+                if let Some(token_bytes) = state.parent.vocab_trie.token_bytes(LLMTokenID(token_id)) {
+                    if token_bytes.is_empty() {
+                        continue; // skip empty tokens
+                    }
+                    let fb = token_bytes[0];
+                    match forced_byte {
+                        None => forced_byte = Some(fb),
+                        Some(prev) if prev == fb => {} // same
+                        _ => {
+                            ambiguous = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if ambiguous {
+                break;
+            }
+
+            match forced_byte {
+                Some(b) => {
+                    bytes.push(b);
+                    state.commit_bytes(&[b]);
+                    if !state.is_active() {
+                        bytes.pop(); // Last byte killed the state, remove it
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        bytes
+    }
+
+    // -----------------------------------------------------------------------
+    // verify_forcing() — compare optimised force() against bruteforce
+    // -----------------------------------------------------------------------
+
+    /// Run forcing verification: compare the optimised `compute_forced_byte_prefix()`
+    /// against the brute-force implementation. Panics if they disagree.
+    fn verify_forcing(&self) {
+        let opt_bytes = self.compute_forced_byte_prefix();
+        let bf_bytes = self.bruteforce_compute_forced_byte_prefix();
+
+        // The forced byte prefix must match exactly.
+        if opt_bytes != bf_bytes {
+            // Find the first divergence point.
+            let common = opt_bytes.iter().zip(&bf_bytes).take_while(|(a, b)| a == b).count();
+
+            // Replay to the divergence point and compute masks for debugging.
+            let mut state = self.clone();
+            for &b in &opt_bytes[..common] {
+                state.commit_bytes(&[b]);
+            }
+            let mask_at_divergence = state.get_mask();
+            let mask_count = mask_at_divergence.len();
+            let is_complete = state.is_complete();
+            let eos_in_mask = state.parent.eos_token_id
+                .map(|eos| mask_at_divergence.contains(eos))
+                .unwrap_or(false);
+
+            // Collect unique first bytes from the full mask.
+            let mut first_bytes_set = std::collections::BTreeSet::new();
+            for token_id in mask_at_divergence.iter_indices() {
+                if let Some(tb) = state.parent.vocab_trie.token_bytes(LLMTokenID(token_id)) {
+                    if !tb.is_empty() {
+                        first_bytes_set.insert(tb[0]);
+                    }
+                }
+            }
+            let first_bytes_vec: Vec<(u8, char)> = first_bytes_set.iter().map(|&b| (b, b as char)).collect();
+
+            panic!(
+                "SEP1_VERIFY_FORCING: forced byte prefix mismatch!\n\
+                 Optimised ({} bytes): {:?} (as str: {:?})\n\
+                 Bruteforce ({} bytes): {:?} (as str: {:?})\n\
+                 First divergence at byte index {}.\n\
+                 Optimised byte: {:?}\n\
+                 Bruteforce byte: {:?}\n\
+                 --- State at divergence ---\n\
+                 Mask contains {} tokens\n\
+                 is_complete: {}\n\
+                 EOS in mask: {}\n\
+                 Unique first bytes in mask: {:?}",
+                opt_bytes.len(),
+                &opt_bytes[..opt_bytes.len().min(200)],
+                String::from_utf8_lossy(&opt_bytes[..opt_bytes.len().min(200)]),
+                bf_bytes.len(),
+                &bf_bytes[..bf_bytes.len().min(200)],
+                String::from_utf8_lossy(&bf_bytes[..bf_bytes.len().min(200)]),
+                common,
+                opt_bytes.get(common),
+                bf_bytes.get(common),
+                mask_count,
+                is_complete,
+                eos_in_mask,
+                first_bytes_vec,
+            );
+        }
     }
 
     /// Walk the constraint state byte-by-byte to find the longest prefix where
@@ -5312,6 +5464,7 @@ impl<'a> GrammarConstraintState<'a> {
                     bytes.push(b);
                     state.commit_bytes(&[b]);
                     if !state.is_active() {
+                        bytes.pop();
                         break;
                     }
 
