@@ -4033,7 +4033,23 @@ impl DFA {
                 return;
             }
             // Self-loops: pre-refinement may over-split, fall through to Hopcroft
+            // Hopcroft will rebuild partition from scratch anyway
             crate::debug!(4, "Topological pre-refinement: singletons but self-loops, falling back to Hopcroft");
+            partition = vec![0u32; n];
+            blocks = Vec::new();
+            {
+                let mut finalizer_to_block: FxHashMap<Vec<GroupID>, u32> = FxHashMap::default();
+                for (state_idx, state) in self.states.iter().enumerate() {
+                    let key: Vec<GroupID> = state.finalizers.iter().collect();
+                    let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
+                        let idx = blocks.len() as u32;
+                        blocks.push(Vec::new());
+                        idx
+                    });
+                    partition[state_idx] = block_idx;
+                    blocks[block_idx as usize].push(state_idx as u32);
+                }
+            }
         }
 
         // Non-singleton blocks or self-loops: need Hopcroft for correct minimization
