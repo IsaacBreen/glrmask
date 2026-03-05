@@ -5122,12 +5122,86 @@ impl<'a> GrammarConstraintState<'a> {
         // Safety limit to prevent infinite loops (e.g., with Kleene star grammars
         // where EOS detection may not trigger during byte-level commits).
         const MAX_FORCED_BYTES: usize = 10_000;
+        let dfa = state.parent.tokenizer.dfa();
+        let mut fast_path_ok = true;
 
         loop {
             if bytes.len() >= MAX_FORCED_BYTES {
                 break;
             }
 
+            // ---- FAST PATH: Check tokenizer DFA for deterministic byte ----
+            // If ALL active tokenizer states have transitions, and ALL transitions
+            // across all states agree on a single byte, then the tokenizer DFA
+            // is deterministic at this point. We can skip the expensive DWA
+            // worklist computation.
+            //
+            // The key insight: if the tokenizer allows only one byte, then every
+            // allowed token must start with that byte. The DWA mask would only
+            // confirm this or return empty (dead state). Either way, the forced
+            // byte is determined by the tokenizer alone.
+            //
+            // Exceptions where we must fall through to the DWA slow path:
+            // - fast_path_ok is false (previous iteration had a terminal fire)
+            // - Source tokenizer state has finalizers (terminal already matches)
+            let mut tokenizer_unique_byte: Option<u8> = None;
+            let mut tokenizer_deterministic = fast_path_ok && !state.state.is_empty();
+
+            if tokenizer_deterministic {
+                'outer: for (&tsid, _) in &state.state {
+                    let dfa_state = &dfa.states[tsid.0];
+                    if dfa_state.transitions.is_empty() {
+                        tokenizer_deterministic = false;
+                        break;
+                    }
+                    for (byte, _target) in dfa_state.transitions.iter() {
+                        match tokenizer_unique_byte {
+                            None => tokenizer_unique_byte = Some(byte),
+                            Some(prev) if prev == byte => {}
+                            _ => {
+                                tokenizer_deterministic = false;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if tokenizer_deterministic {
+                if let Some(b) = tokenizer_unique_byte {
+                    // Quick EOS check: if parse is already complete, stop.
+                    if state.parent.eos_token_id.is_some() && state.is_complete() {
+                        break;
+                    }
+
+                    // Check if target state (after byte b) has finalizers.
+                    // If so, a terminal will fire during commit, changing parser state.
+                    // We still commit (it's the only valid byte), but we force the
+                    // NEXT iteration to use the DWA slow path for validation.
+                    let any_target_has_finalizers = state.state.keys().any(|tsid| {
+                        dfa.states[tsid.0].transitions.get(b).map_or(false, |target_id| {
+                            !dfa.states[*target_id].finalizers.is_empty()
+                        })
+                    });
+
+                    bytes.push(b);
+                    state.commit_bytes(&[b]);
+                    if !state.is_active() {
+                        // Parser killed all paths — last byte was invalid.
+                        bytes.pop();
+                        break;
+                    }
+
+                    // If a terminal fired, force DWA validation next iteration.
+                    fast_path_ok = !any_target_has_finalizers;
+                    continue;
+                }
+            }
+
+            // Reset fast_path_ok for next iteration after slow path validates.
+            fast_path_ok = true;
+
+            // ---- SLOW PATH: Full DWA mask computation ----
             // Compute internal mask directly (skip full original-mask conversion).
             let (internal_mask, has_accepting, is_complete_dwa) =
                 if state.parent.num_tsids > 0 {
@@ -5181,10 +5255,23 @@ impl<'a> GrammarConstraintState<'a> {
 
             match forced_byte {
                 Some(b) if any_token => {
+                    // Check if target state has finalizers (terminal will fire).
+                    // If so, force DWA validation on next iteration.
+                    let any_target_has_finalizers = state.state.keys().any(|tsid| {
+                        dfa.states[tsid.0].transitions.get(b).map_or(false, |target_id| {
+                            !dfa.states[*target_id].finalizers.is_empty()
+                        })
+                    });
+
                     bytes.push(b);
                     state.commit_bytes(&[b]);
                     if !state.is_active() {
                         break;
+                    }
+
+                    // If a terminal fired, force DWA next iteration.
+                    if any_target_has_finalizers {
+                        fast_path_ok = false;
                     }
                 }
                 _ => break,
