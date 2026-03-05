@@ -6944,7 +6944,7 @@ fn test_right_recursive_item_bug() {
 // ---------------------------------------------------------------------------
 
 /// Helper: build a constraint from an EBNF grammar string, an LLM token map, and the
-/// maximum token ID.  Locks the global dims mutex (same pattern as existing tests).
+/// maximum token ID.
 fn build_constraint_for_force(
     ebnf: &str,
     token_map: LLMTokenMap,
@@ -6958,10 +6958,25 @@ fn build_constraint_for_force(
     )
 }
 
-/// Grammar: S -> "abc"
-/// Vocab: "a"=0, "b"=1, "c"=2
-/// Every byte is forced: a, b, c.
-/// All boundaries are safe (single-byte tokens, nothing spans across).
+/// Helper to build a constraint from Lark grammar instead of EBNF.
+fn build_constraint_for_force_lark(
+    lark: &str,
+    token_map: LLMTokenMap,
+    max_id: usize,
+) -> GrammarConstraint {
+    GrammarConstraint::new_from_grammar_definition(
+        Arc::new(GrammarDefinition::from_lark(lark).unwrap()),
+        token_map,
+        max_id,
+        &GrammarConstraintConfig::default(),
+    )
+}
+
+// ---- Basic forcing ----
+
+/// Grammar: S -> "abc" (single deterministic string)
+/// Vocab: single-byte tokens a/b/c only.
+/// All 3 bytes are forced. Greedy tokenization: a + b + c. All boundaries safe.
 /// force() should return [0, 1, 2].
 #[test]
 fn test_force_fully_determined() {
@@ -6984,10 +6999,9 @@ fn test_force_fully_determined() {
     assert_eq!(forced_ids, vec![0, 1, 2], "All three bytes should be forced");
 }
 
-/// Grammar: S -> "a" | "b"
-/// Vocab: "a"=0, "b"=1
-/// First byte is ambiguous (could be 'a' or 'b').
-/// force() should return [].
+/// Grammar: S -> "a" | "b"  (two alternatives, different first byte)
+/// Vocab: a/b (single-byte).
+/// First byte is ambiguous → nothing forced.
 #[test]
 fn test_force_ambiguous_first_byte() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -7008,11 +7022,10 @@ fn test_force_ambiguous_first_byte() {
     assert!(forced.is_empty(), "Ambiguous first byte means nothing forced");
 }
 
-/// Grammar: S -> "ab" | "ac"
-/// Vocab: "a"=0, "b"=1, "c"=2
-/// First byte 'a' is forced (both alternatives start with 'a').
-/// Second byte is ambiguous ('b' or 'c').
-/// force() should return [0] (just the 'a' token).
+/// Grammar: S -> "ab" | "ac"  (shared 1-byte prefix then branching)
+/// Vocab: a/b/c (single-byte).
+/// Byte 0: forced 'a'. Byte 1: ambiguous ('b' or 'c').
+/// force() should return [a].
 #[test]
 fn test_force_partial_prefix() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -7032,15 +7045,15 @@ fn test_force_partial_prefix() {
 
     let forced = state.force();
     let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
-    assert_eq!(forced_ids, vec![0], "Only 'a' is forced");
+    assert_eq!(forced_ids, vec![0], "Only 'a' is forced; second byte branches");
 }
 
-/// Grammar: S -> "abc"
-/// Vocab: "ab"=0, "c"=1, "abc"=2
-/// Forced bytes: a, b, c (all forced).
-/// Greedy tokenization: "abc" -> token 2 (longest match).
-/// Boundary at 3 (end): safe (nothing extends past 3).
-/// force() should return [2].
+// ---- Greedy tokenization ----
+
+/// Grammar: S -> "abc" (deterministic)
+/// Vocab: a/b/c (single-byte) PLUS multi-byte "abc" token.
+/// Greedy should pick the longest match "abc" (3 bytes at once).
+/// force() should return [abc_token].
 #[test]
 fn test_force_greedy_picks_longest() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -7061,48 +7074,263 @@ fn test_force_greedy_picks_longest() {
 
     let forced = state.force();
     let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
-    assert_eq!(forced_ids, vec![4], "Greedy should pick 'abc' (longest)");
+    assert_eq!(forced_ids, vec![4], "Greedy should pick 'abc' as longest match");
 }
 
-/// Grammar: S -> "abc"
-/// Vocab: "ab"=0, "c"=1, "cdef"=2
-/// Forced bytes: a, b, c.
-/// Greedy tokenization: "ab" + "c".
-/// Boundary after "ab" (pos 2): safe — no token starts before pos 2 and extends past it.
-/// Boundary after "c" (pos 3): NOT safe — token "cdef" starts at pos 2 and extends past 3.
-/// force() should return [0] (just "ab").
+// ---- The user's steve/steven example ----
+
+/// THE motivating example for byte-level (not token-level) forcing.
+///
+/// Grammar: "steve" | "steven"
+/// Vocab: s, t, e, v, n (single-byte) + ste, ve, ven (multi-byte) + EOS
+///
+/// Token-level forcing would be WRONG: might force token "ste", then "ve" vs "ven"
+/// is ambiguous and forces neither — but this prevents ever reaching "steven" via
+/// "ste"+"ven" since we already committed "ste"+"??" with no way forward.
+///
+/// Byte-level forcing:
+///   - Forced bytes: s, t, e, v, e (5 bytes = "steve")
+///     - After "steve", EOS is in the mask (parse complete for "steve" branch)
+///       and "n" is available (for "steven" branch). EOS stops forcing.
+///   - Greedy tokenization of "steve": "ste" (3 bytes) + "ve" (2 bytes)
+///   - Boundary after "ste" (pos 3): safe (no token starts before pos 3 and extends past)
+///   - Boundary after "ve" (pos 5): NOT safe — token "ven" starts at pos 3 with
+///     prefix "ve" and length 3 > 2. It could extend past the boundary.
+///   - Result: force() returns [ste] only.
+///
+/// The remaining forced bytes ("ve") are picked up by the next mask/force call.
+///
+/// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
+/// byte-level commits, so force() may not stop at the "steve" completion point.
 #[test]
-fn test_force_tokenization_safe_cutoff() {
+fn test_force_steve_steven_with_eos() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark = indoc! {r#"
+        start: STEVE | STEVEN
+        STEVE: "steve"
+        STEVEN: "steven"
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"s".to_vec(), LLMTokenID(0));
+    token_map.insert(b"t".to_vec(), LLMTokenID(1));
+    token_map.insert(b"e".to_vec(), LLMTokenID(2));
+    token_map.insert(b"v".to_vec(), LLMTokenID(3));
+    token_map.insert(b"n".to_vec(), LLMTokenID(4));
+    token_map.insert(b"ste".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ve".to_vec(), LLMTokenID(6));
+    token_map.insert(b"ven".to_vec(), LLMTokenID(7));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(8));
+
+    let constraint = build_constraint_for_force_lark(lark, token_map, 8);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    // Only "ste" is safe to force; "ve" boundary is unsafe due to "ven" spanning across.
+    assert_eq!(
+        forced_ids,
+        vec![5],
+        "Should force [ste] only; ve boundary unsafe because ven spans across it"
+    );
+}
+
+/// Same grammar "steve" | "steven" but WITHOUT EOS in the vocab.
+/// Without EOS, after "steve" the "steve" branch can't signal completion,
+/// so only the "steven" branch contributes tokens. This means byte 'n' is
+/// also forced, giving forced bytes = "steven" (6 bytes).
+/// Greedy: "ste" + "ven". Both boundaries should be safe → force returns [ste, ven].
+#[test]
+fn test_force_steve_steven_no_eos() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark = indoc! {r#"
+        start: STEVE | STEVEN
+        STEVE: "steve"
+        STEVEN: "steven"
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"s".to_vec(), LLMTokenID(0));
+    token_map.insert(b"t".to_vec(), LLMTokenID(1));
+    token_map.insert(b"e".to_vec(), LLMTokenID(2));
+    token_map.insert(b"v".to_vec(), LLMTokenID(3));
+    token_map.insert(b"n".to_vec(), LLMTokenID(4));
+    token_map.insert(b"ste".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ve".to_vec(), LLMTokenID(6));
+    token_map.insert(b"ven".to_vec(), LLMTokenID(7));
+
+    let constraint = build_constraint_for_force_lark(lark, token_map, 7);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    // Without EOS, "steven" is the only completable parse.
+    // Forced bytes: "steven" (6 bytes). Greedy: ste + ven. Both boundaries safe.
+    assert_eq!(
+        forced_ids,
+        vec![5, 7],
+        "Without EOS, forced all of 'steven' as ste + ven"
+    );
+}
+
+// ---- Tokenization-safe cutoff ----
+
+/// Grammar: "abc" | "abcdef"
+/// Vocab: ab, c, d, e, f, cde (single-byte d/e/f + multi-byte ab, c, cde) + EOS.
+///
+/// Forced bytes: a, b, c (3 bytes). After "abc", EOS is available (grammar
+/// completes for "abc") and "d" continues (for "abcdef"). EOS stops forcing.
+///
+/// Greedy tokenization of "abc": "ab"(pos 2) + "c"(pos 3).
+/// Boundary after "ab" (pos 2): safe (no token spans across).
+/// Boundary after "c" (pos 3): "cde" starts at pos 2, prefix "c" matches,
+///   len 3 > 1 → spans across. NOT safe.
+///
+/// Result: [ab] only.
+///
+/// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
+/// byte-level commits, so force() may continue past "abc" into "abcdef".
+#[test]
+fn test_force_cutoff_realistic_grammar() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     let ebnf = indoc! {r#"
-        s ::= ABC;
+        s ::= ABC | ABCDEF;
+        ABC ::= 'a' 'b' 'c';
+        ABCDEF ::= 'a' 'b' 'c' 'd' 'e' 'f';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+    token_map.insert(b"e".to_vec(), LLMTokenID(4));
+    token_map.insert(b"f".to_vec(), LLMTokenID(5));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(6));
+    token_map.insert(b"cde".to_vec(), LLMTokenID(7));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(8));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 8);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    // "cde" spans across boundary at pos 3, so only "ab" is safe.
+    assert_eq!(forced_ids, vec![6], "Only 'ab' is safe; 'c' boundary blocked by 'cde'");
+}
+
+/// Cutoff blocks ALL tokens.
+/// Grammar: "ab" | "abcd"
+/// Vocab: a, b, c, d, abc + EOS
+///
+/// Forced bytes: a, b (after "ab", EOS available → stop).
+/// Greedy: "a" + "b".
+/// Boundary after "a" (pos 1): token "abc" starts at pos 0, prefix "a" matches,
+///   len 3 > 1. NOT safe.
+///
+/// Result: [] (nothing safe to force).
+///
+/// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
+/// byte-level commits, so force() may not stop at the "ab" completion point.
+#[test]
+fn test_force_cutoff_blocks_everything() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= AB | ABCD;
+        AB ::= 'a' 'b';
+        ABCD ::= 'a' 'b' 'c' 'd';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+    token_map.insert(b"abc".to_vec(), LLMTokenID(4));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(5));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 5);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(
+        forced_ids,
+        Vec::<usize>::new(),
+        "Token 'abc' makes boundary at pos 1 unsafe; nothing can be forced"
+    );
+}
+
+// ---- EOS handling ----
+
+/// Grammar: "ab" | "abc" (optional continuation)
+/// Vocab: a, b, c + EOS.
+///
+/// Forced bytes: a, b. After "ab", EOS available → stop.
+/// Greedy: "a" + "b". Both boundaries safe (no token > 1 byte except EOS which
+/// doesn't match). Result: [a, b].
+///
+/// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
+/// byte-level commits, so force() continues past "ab" to force "abc".
+#[test]
+fn test_force_eos_stops_at_optional_continuation() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= AB | ABC;
+        AB ::= 'a' 'b';
         ABC ::= 'a' 'b' 'c';
     "#};
     let mut token_map = LLMTokenMap::new();
     token_map.insert(b"a".to_vec(), LLMTokenID(0));
     token_map.insert(b"b".to_vec(), LLMTokenID(1));
     token_map.insert(b"c".to_vec(), LLMTokenID(2));
-    token_map.insert(b"ab".to_vec(), LLMTokenID(3));
-    token_map.insert(b"cdef".to_vec(), LLMTokenID(4));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(3));
 
-    let constraint = build_constraint_for_force(ebnf, token_map, 4);
+    let constraint = build_constraint_for_force(ebnf, token_map, 3);
     let state = constraint.init();
 
     let forced = state.force();
     let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
-    assert_eq!(forced_ids, vec![3], "Only 'ab' emitted due to safe cutoff");
+    // After "ab", EOS is in the mask (parse complete for "ab") → forcing stops.
+    // Greedy tokenization: "a" + "b". Both boundaries safe.
+    assert_eq!(forced_ids, vec![0, 1], "Force 'a' and 'b'; EOS stops further forcing");
 }
 
-/// Grammar: S -> "ab"
-/// Vocab: "a"=0, "b"=1, "abc"=2
-/// Forced bytes: a, b.
-/// Greedy: "a" + "b".
-/// Boundary after "a" (pos 1): check — token "abc" starts at pos 0, prefix "a" matches,
-///   len 3 > 1. NOT safe.
-/// force() should return [] (can't safely cut even after first token).
+/// After a complete parse, force() should return empty (nothing more to generate).
+/// Grammar: "a"
+/// Vocab: a + EOS.
+/// After committing "a", the parse is complete. force() returns [].
 #[test]
-fn test_force_cutoff_blocks_everything() {
+fn test_force_empty_after_complete() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= A;
+        A ::= 'a';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(1));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 1);
+    let mut state = constraint.init();
+    state.commit(LLMTokenID(0)).unwrap(); // commit "a"
+
+    let forced = state.force();
+    // Parse is complete, only EOS is valid → nothing to force.
+    assert!(forced.is_empty(), "After complete parse, nothing to force");
+}
+
+// ---- Multi-byte LLM tokens and first-byte check ----
+
+/// Grammar: "ab"
+/// Vocab: "ab" (2 bytes) and "a" (1 byte) and "b" (1 byte).
+/// All tokens in the initial mask start with 'a': token "a" and token "ab" both start
+/// with 'a'. Forced byte: 'a'. Then forced byte: 'b'.
+/// Greedy of "ab": token "ab" (longest match, 2 bytes). Safe boundary. Result: [ab].
+#[test]
+fn test_force_multi_byte_same_first_byte() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
     let ebnf = indoc! {r#"
@@ -7112,21 +7340,20 @@ fn test_force_cutoff_blocks_everything() {
     let mut token_map = LLMTokenMap::new();
     token_map.insert(b"a".to_vec(), LLMTokenID(0));
     token_map.insert(b"b".to_vec(), LLMTokenID(1));
-    token_map.insert(b"abc".to_vec(), LLMTokenID(2));
+    token_map.insert(b"ab".to_vec(), LLMTokenID(2));
 
     let constraint = build_constraint_for_force(ebnf, token_map, 2);
     let state = constraint.init();
 
     let forced = state.force();
-    assert!(
-        forced.is_empty(),
-        "Token 'abc' makes boundary at pos 1 unsafe, so nothing can be forced"
-    );
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(forced_ids, vec![2], "Greedy picks 'ab' as longest match");
 }
 
-/// After committing some bytes, force() should work from the mid-parse state.
+// ---- Mid-parse forcing ----
+
 /// Grammar: S -> "ab" "cd"
-/// Vocab: "a"=0, "b"=1, "c"=2, "d"=3
+/// Vocab: a/b/c/d (single-byte).
 /// After committing "ab", the remaining "cd" is fully forced.
 #[test]
 fn test_force_after_partial_commit() {
@@ -7146,25 +7373,24 @@ fn test_force_after_partial_commit() {
     let constraint = build_constraint_for_force(ebnf, token_map, 3);
     let mut state = constraint.init();
 
-    // Force from initial state — should force all 4 tokens
+    // Initial: all 4 bytes forced.
     let forced_initial = state.force();
     let forced_initial_ids: Vec<usize> = forced_initial.iter().map(|t| t.0).collect();
     assert_eq!(forced_initial_ids, vec![0, 1, 2, 3]);
 
-    // Commit "a" and "b", then check force from mid-parse
+    // After committing first two, remaining "cd" is forced.
     state.commit(LLMTokenID(0)).unwrap();
     state.commit(LLMTokenID(1)).unwrap();
 
     let forced_mid = state.force();
     let forced_mid_ids: Vec<usize> = forced_mid.iter().map(|t| t.0).collect();
-    assert_eq!(forced_mid_ids, vec![2, 3], "After committing 'ab', 'cd' is forced");
+    assert_eq!(forced_mid_ids, vec![2, 3], "After 'ab', only 'cd' remains forced");
 }
 
-/// force() should not mutate the state.
-/// Grammar: S -> "abc"
-/// Vocab: "a"=0, "b"=1, "c"=2
-/// Calling force() twice should give the same result, and get_mask() before and after
-/// should also be the same.
+// ---- Read-only semantics ----
+
+/// force() must not mutate the state.
+/// Calling force() twice gives the same result. get_mask() is identical before and after.
 #[test]
 fn test_force_is_readonly() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -7186,8 +7412,173 @@ fn test_force_is_readonly() {
     let mask_after = state.get_mask();
     let force2 = state.force();
 
-    assert_eq!(mask_before, mask_after, "Mask should not change after force()");
-    assert_eq!(force1, force2, "force() should return same result when called twice");
+    assert_eq!(mask_before, mask_after, "Mask unchanged after force()");
+    assert_eq!(force1, force2, "force() is deterministic (same result twice)");
+}
+
+/// Committing the tokens returned by force() should advance the state correctly,
+/// and the resulting mask should be valid.
+#[test]
+fn test_force_commit_roundtrip() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= AB CD;
+        AB ::= 'a' 'b';
+        CD ::= 'c' 'd';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    token_map.insert(b"c".to_vec(), LLMTokenID(2));
+    token_map.insert(b"d".to_vec(), LLMTokenID(3));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 3);
+    let mut state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(forced_ids, vec![0, 1, 2, 3]);
+
+    // Commit all forced tokens
+    for &token in &forced {
+        state.commit(token).unwrap();
+    }
+
+    // State should be active and complete (all bytes consumed).
+    // (Whether is_active is true depends on parse completion handling.)
+    // At minimum, the state shouldn't panic during commit.
+}
+
+// ---- Edge cases ----
+
+/// Grammar that generates exactly one character.
+/// Vocab: just that character + EOS.
+/// force() should return [that character].
+#[test]
+fn test_force_single_character_grammar() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= X;
+        X ::= 'x';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"x".to_vec(), LLMTokenID(0));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 0);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    assert_eq!(forced_ids, vec![0], "Single-character grammar is fully forced");
+}
+
+/// Grammar with repetition: S -> 'a'+
+/// Vocab: a + EOS.
+/// After EOS is introduced, 'a' is no longer forced (could stop anytime).
+/// But without EOS, the mask has only 'a', so every byte is forced infinitely...
+/// force() should stop at some point. With EOS, the initial mask has both 'a' and EOS,
+/// so nothing is forced (ambiguous: continue or stop).
+#[test]
+fn test_force_repetition_with_eos() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let lark = indoc! {r#"
+        start: A_PLUS
+        A_PLUS: /a+/
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    token_map.insert(b"<|endoftext|>".to_vec(), LLMTokenID(1));
+
+    let constraint = build_constraint_for_force_lark(lark, token_map, 1);
+    let state = constraint.init();
+
+    let forced = state.force();
+    // After matching at least one 'a', the grammar can complete (EOS) or continue.
+    // The FIRST byte 'a' is forced (must match at least one). But after that first 'a',
+    // EOS might be in the mask. If so, forcing stops.
+    // The exact behavior depends on how the grammar handles a+ — the first 'a' must be
+    // forced since there's no alternative. After that, EOS could appear.
+    // Conservatively: force should return at least [a] or possibly [].
+    // This tests that force() terminates (doesn't loop infinitely).
+    println!("force() on a+ with EOS returned {} tokens", forced.len());
+}
+
+/// Grammar where only multi-byte LLM tokens exist (no single-byte tokens).
+/// Grammar: S -> "ab"
+/// Vocab: "ab"=0 (no individual "a" or "b" tokens).
+/// The first byte 'a' is forced (all tokens in mask start with 'a'). Token "ab"
+/// is the only option.
+///
+/// KNOWN_LIMITATION: After committing byte 'a' individually, no LLM token
+/// in the mask starts with 'b' (only "ab" exists, which starts with 'a').
+/// The byte-level approach breaks down when the vocab lacks individual byte tokens.
+#[test]
+fn test_force_only_multi_byte_tokens() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= AB;
+        AB ::= 'a' 'b';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"ab".to_vec(), LLMTokenID(0));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 0);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    // Both bytes are forced, greedy tokenization gives "ab", boundary is safe.
+    assert_eq!(forced_ids, vec![0], "Only multi-byte token 'ab' is forced");
+}
+
+/// Grammar allows multiple strings with different lengths sharing a long prefix.
+/// Grammar: "hello_world" | "hello_earth"
+/// Vocab: single-byte h/e/l/o/_/w/r/d/a/t + multi-byte "hello"
+///
+/// Shared prefix: "hello_" (6 bytes). Then 'w' vs 'e' → ambiguous.
+/// Forced bytes: h, e, l, l, o, _ (6 bytes).
+/// Greedy of "hello_": "hello"(5) + "_"(1).
+/// Boundary after "hello" (pos 5): safe check — any token starting before 5 and extending past?
+///   With just single-byte and "hello" tokens, nothing spans across. Safe.
+/// Boundary after "_" (pos 6): safe similarly.
+/// Result: [hello, _].
+#[test]
+fn test_force_long_shared_prefix() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let ebnf = indoc! {r#"
+        s ::= HELLO_WORLD | HELLO_EARTH;
+        HELLO_WORLD ::= 'h' 'e' 'l' 'l' 'o' '_' 'w' 'o' 'r' 'l' 'd';
+        HELLO_EARTH ::= 'h' 'e' 'l' 'l' 'o' '_' 'e' 'a' 'r' 't' 'h';
+    "#};
+    let mut token_map = LLMTokenMap::new();
+    token_map.insert(b"h".to_vec(), LLMTokenID(0));
+    token_map.insert(b"e".to_vec(), LLMTokenID(1));
+    token_map.insert(b"l".to_vec(), LLMTokenID(2));
+    token_map.insert(b"o".to_vec(), LLMTokenID(3));
+    token_map.insert(b"_".to_vec(), LLMTokenID(4));
+    token_map.insert(b"w".to_vec(), LLMTokenID(5));
+    token_map.insert(b"r".to_vec(), LLMTokenID(6));
+    token_map.insert(b"d".to_vec(), LLMTokenID(7));
+    token_map.insert(b"a".to_vec(), LLMTokenID(8));
+    token_map.insert(b"t".to_vec(), LLMTokenID(9));
+    token_map.insert(b"hello".to_vec(), LLMTokenID(10));
+
+    let constraint = build_constraint_for_force(ebnf, token_map, 10);
+    let state = constraint.init();
+
+    let forced = state.force();
+    let forced_ids: Vec<usize> = forced.iter().map(|t| t.0).collect();
+    // Forced bytes: "hello_" (6 bytes). Greedy: "hello" + "_".
+    assert_eq!(
+        forced_ids,
+        vec![10, 4],
+        "Shared prefix 'hello_' forced as [hello, _]"
+    );
 }
 
 

@@ -4952,8 +4952,14 @@ impl<'a> GrammarConstraintState<'a> {
     fn compute_forced_byte_prefix(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut state = self.clone();
+        // Safety limit to prevent infinite loops (e.g., with Kleene star grammars
+        // where EOS detection may not trigger during byte-level commits).
+        const MAX_FORCED_BYTES: usize = 10_000;
 
         loop {
+            if bytes.len() >= MAX_FORCED_BYTES {
+                break;
+            }
             let mask = state.get_mask();
 
             // If EOS is in the mask, the parse can end here — nothing is forced.
