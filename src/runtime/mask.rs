@@ -1,22 +1,8 @@
 //! Hot-path mask computation.
+//!
+//! Phase 4 will implement the full mask computation algorithm:
+//! 1. For each (TSID, GSS head), walk the parser DWA reading stack entries
+//! 2. Project DWA weights to current TSID column
+//! 3. Union all projected token sets into a bitvector mask
 
-use crate::automata::weighted::dwa::Dwa;
-use crate::ds::bitset::BitSet;
-
-/// Compute the allowed-token mask for a given DWA state.
-///
-/// For each token `t`, looks up `tsid = vocab_mapping[t]`, then checks
-/// whether `dwa.step(state, tsid)` leads to a non-dead state with non-negative weight.
-///
-/// This is the innermost hot loop at inference time.
-pub fn compute_mask(dwa: &Dwa, state: u32, vocab_mapping: &[u32], vocab_size: usize) -> BitSet {
-    let mut mask = BitSet::new(vocab_size);
-    for token_id in 0..vocab_size {
-        let tsid = vocab_mapping[token_id];
-        let (target, weight) = dwa.step(state, tsid);
-        if target != u32::MAX && weight >= 0 {
-            mask.set(token_id);
-        }
-    }
-    mask
-}
+// This module will be filled in during Phase 4.

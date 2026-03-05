@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// A grammar definition consisting of production rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrammarDef {
-    /// Production rules indexed by nonterminal ID.
+    /// Production rules.
     pub rules: Vec<Rule>,
     /// The start nonterminal.
     pub start: NonterminalId,
@@ -32,7 +32,7 @@ pub struct Rule {
 }
 
 /// A symbol in a production rule's right-hand side.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Symbol {
     /// A terminal symbol.
     Terminal(TerminalId),
@@ -49,4 +49,81 @@ pub struct TerminalDef {
     pub name: String,
     /// Regex pattern that this terminal matches.
     pub pattern: String,
+}
+
+impl GrammarDef {
+    /// Number of terminals.
+    pub fn num_terminals(&self) -> u32 {
+        self.terminals.len() as u32
+    }
+
+    /// Number of nonterminals (determined by scanning rules).
+    pub fn num_nonterminals(&self) -> u32 {
+        let max = self
+            .rules
+            .iter()
+            .map(|r| r.lhs)
+            .max()
+            .unwrap_or(0);
+        max + 1
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// Helper: build a tiny grammar "S → a b" with 1 rule, 2 terminals.
+    pub fn simple_ab_grammar() -> GrammarDef {
+        GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+            }],
+            start: 0,
+            terminals: vec![
+                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
+                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+            ],
+        }
+    }
+
+    /// Helper: build a grammar with a choice: "S → a | b".
+    pub fn choice_grammar() -> GrammarDef {
+        GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },
+            ],
+            start: 0,
+            terminals: vec![
+                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
+                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+            ],
+        }
+    }
+
+    /// Helper: build a grammar "S → A b, A → a" with 2 nonterminals.
+    pub fn two_nt_grammar() -> GrammarDef {
+        // NT 0 = S, NT 1 = A
+        // T 0 = a, T 1 = b
+        GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+            ],
+            start: 0,
+            terminals: vec![
+                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
+                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_grammar_def_basics() {
+        let g = simple_ab_grammar();
+        assert_eq!(g.num_terminals(), 2);
+        assert_eq!(g.num_nonterminals(), 1);
+    }
 }

@@ -1,14 +1,14 @@
-//! Acyclic NWA → CompDwa determinization.
+//! NWA → CompDwa determinization.
 //!
-//! Converts a [`Nwa`] (assumed acyclic) into a [`CompDwa`] via weighted
-//! subset construction.  The algorithm proceeds in two phases:
+//! Provides two flavors:
 //!
-//! 1. **Unweighted exploration** – discover the DWA state space using
-//!    unweighted ε-closures and subset construction.
-//! 2. **Weight computation** – for each discovered DWA state compute
-//!    weighted ε-closures and assign transition / final weights.
+//! - [`determinize`] – general-purpose weighted subset construction that
+//!   handles arbitrary NWAs (including those with cycles).
+//! - [`determinize_acyclic`] – optimised two-phase algorithm for acyclic
+//!   NWAs.  Returns an error if the NWA contains cycles.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::hash::{Hash, Hasher};
 
 use rustc_hash::FxHashMap;
 
@@ -20,6 +20,226 @@ use crate::GlrMaskError;
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Determinize an NWA into a compilation-time DWA.
+///
+/// Works for arbitrary NWAs (acyclic or cyclic).  Uses a worklist-based
+/// weighted subset construction with fixed-point ε-closures.
+pub fn determinize(nwa: &Nwa) -> CompDwa {
+    let n = nwa.states.len();
+    if n == 0 {
+        return CompDwa::new(nwa.num_tsids, nwa.max_token);
+    }
+
+    let nt = nwa.num_tsids;
+    let max_tok = nwa.max_token;
+    let max_pos = nwa.max_position();
+
+    // ---------------------------------------------------------------
+    // Epsilon closure via fixed-point iteration (handles cycles)
+    // ---------------------------------------------------------------
+
+    fn epsilon_closure(nwa: &Nwa, subset: &BTreeMap<u32, Weight>) -> BTreeMap<u32, Weight> {
+        let mut closure: BTreeMap<u32, Weight> = subset.clone();
+        let mut worklist: VecDeque<u32> = subset.keys().copied().collect();
+
+        while let Some(u) = worklist.pop_front() {
+            let u_weight = closure.get(&u).unwrap().clone();
+            if (u as usize) >= nwa.states.len() {
+                continue;
+            }
+            for (v, eps_weight) in &nwa.states[u as usize].epsilons {
+                let v_new_weight = u_weight.intersection(eps_weight);
+                if v_new_weight.is_empty() {
+                    continue;
+                }
+                let needs_enqueue = match closure.get(v) {
+                    Some(existing) => {
+                        let combined = existing.union(&v_new_weight);
+                        if combined != *existing {
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    None => true,
+                };
+                if needs_enqueue {
+                    let e = closure.entry(*v).or_insert_with(|| Weight::empty(nwa.num_tsids));
+                    *e = e.union(&v_new_weight);
+                    worklist.push_back(*v);
+                }
+            }
+        }
+        closure
+    }
+
+    // ---------------------------------------------------------------
+    // Subset hashing – use sorted (state, weight) pairs for identity
+    // ---------------------------------------------------------------
+
+    /// A weighted subset that can be used as a HashMap key.
+    #[derive(Clone)]
+    struct WeightedSubset {
+        /// Sorted by NWA state ID.
+        entries: Vec<(u32, Weight)>,
+    }
+
+    impl PartialEq for WeightedSubset {
+        fn eq(&self, other: &Self) -> bool {
+            self.entries == other.entries
+        }
+    }
+
+    impl Eq for WeightedSubset {}
+
+    impl Hash for WeightedSubset {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.entries.len().hash(state);
+            for (id, w) in &self.entries {
+                id.hash(state);
+                w.hash(state);
+            }
+        }
+    }
+
+    impl WeightedSubset {
+        fn from_btree(map: &BTreeMap<u32, Weight>) -> Self {
+            let entries: Vec<(u32, Weight)> = map
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            Self { entries }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Initial state
+    // ---------------------------------------------------------------
+
+    let mut start_map: BTreeMap<u32, Weight> = BTreeMap::new();
+    for &s in &nwa.start_states {
+        if (s as usize) < n {
+            start_map
+                .entry(s)
+                .and_modify(|w| *w = w.union(&Weight::all(max_pos, nt)))
+                .or_insert_with(|| Weight::all(max_pos, nt));
+        }
+    }
+
+    let initial_closure = epsilon_closure(nwa, &start_map);
+    if initial_closure.is_empty() {
+        return CompDwa::new(nt, max_tok);
+    }
+
+    // ---------------------------------------------------------------
+    // Worklist-based subset construction
+    // ---------------------------------------------------------------
+
+    let mut states: Vec<CompDwaState> = Vec::new();
+    let mut subset_map: FxHashMap<WeightedSubset, u32> = FxHashMap::default();
+    let mut closures: Vec<BTreeMap<u32, Weight>> = Vec::new(); // closures[dwa_id]
+    let mut worklist: VecDeque<u32> = VecDeque::new();
+
+    let initial_key = WeightedSubset::from_btree(&initial_closure);
+    let start_id = states.len() as u32;
+    states.push(CompDwaState::default());
+    closures.push(initial_closure);
+    subset_map.insert(initial_key, start_id);
+    worklist.push_back(start_id);
+
+    while let Some(dwa_sid) = worklist.pop_front() {
+        let merged = closures[dwa_sid as usize].clone();
+
+        // --- Final weight ---
+        let mut final_w: Option<Weight> = None;
+        for (nwa_st, w_acc) in &merged {
+            if let Some(fw) = &nwa.states[*nwa_st as usize].final_weight {
+                let c = w_acc.intersection(fw);
+                if !c.is_empty() {
+                    final_w = Some(match final_w {
+                        Some(e) => e.union(&c),
+                        None => c,
+                    });
+                }
+            }
+        }
+        states[dwa_sid as usize].final_weight = final_w;
+
+        // --- Collect transitions ---
+        // For each (nwa_state, path_weight) in merged, for each (label, targets),
+        // compute next_path_weight = path_weight ∩ trans_weight.
+        let mut by_label: BTreeMap<Label, BTreeMap<u32, Weight>> = BTreeMap::new();
+        let mut edge_weights: BTreeMap<Label, Weight> = BTreeMap::new();
+
+        for (nwa_u, w_u) in &merged {
+            for (label, targets) in &nwa.states[*nwa_u as usize].transitions {
+                for (nwa_v, w_trans) in targets {
+                    let next_w = w_u.intersection(w_trans);
+                    if next_w.is_empty() {
+                        continue;
+                    }
+                    // Accumulate edge weight (union of all contributions for this label).
+                    edge_weights
+                        .entry(*label)
+                        .and_modify(|e| *e = e.union(&next_w))
+                        .or_insert_with(|| next_w.clone());
+
+                    // Accumulate the target pre-closure subset.
+                    by_label
+                        .entry(*label)
+                        .or_default()
+                        .entry(*nwa_v)
+                        .and_modify(|e| *e = e.union(&next_w))
+                        .or_insert_with(|| next_w.clone());
+                }
+            }
+        }
+
+        // --- Build DWA edges ---
+        for (label, next_pre_closure) in by_label {
+            let next_closure = epsilon_closure(nwa, &next_pre_closure);
+            if next_closure.is_empty() {
+                continue;
+            }
+
+            let w_edge = edge_weights.remove(&label).unwrap();
+
+            // Normalize: divide each weight in the closure by w_edge.
+            // In Boolean semiring: w / v = w | !v
+            let mut normalized: BTreeMap<u32, Weight> = BTreeMap::new();
+            for (id, w) in &next_closure {
+                let norm = w.divide(&w_edge, max_tok);
+                if !norm.is_empty() {
+                    normalized.insert(*id, norm);
+                }
+            }
+
+            let key = WeightedSubset::from_btree(&normalized);
+            let target_id = if let Some(&existing) = subset_map.get(&key) {
+                existing
+            } else {
+                let new_id = states.len() as u32;
+                states.push(CompDwaState::default());
+                closures.push(normalized);
+                subset_map.insert(key, new_id);
+                worklist.push_back(new_id);
+                new_id
+            };
+
+            states[dwa_sid as usize]
+                .transitions
+                .insert(label, (target_id, w_edge));
+        }
+    }
+
+    CompDwa {
+        states,
+        start_state: start_id,
+        num_tsids: nt,
+        max_token: max_tok,
+    }
+}
 
 /// Determinize an acyclic NWA into a compilation-time DWA.
 ///
