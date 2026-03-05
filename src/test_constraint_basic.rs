@@ -7135,9 +7135,6 @@ fn test_force_greedy_picks_cdef() {
 ///   - Result: force() returns [ste] only.
 ///
 /// The remaining forced bytes ("ve") are picked up by the next mask/force call.
-///
-/// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
-/// byte-level commits, so force() may not stop at the "steve" completion point.
 #[test]
 fn test_force_steve_steven_with_eos() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -7224,9 +7221,6 @@ fn test_force_steve_steven_no_eos() {
 ///          > 1 remaining → could extend beyond. STOP.
 ///
 /// Result: [ab] only.
-///
-/// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
-/// byte-level commits, so force() may continue past "abc" into "abcdef".
 #[test]
 fn test_force_cutoff_realistic_grammar() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -7266,9 +7260,6 @@ fn test_force_cutoff_realistic_grammar() {
 ///          3 bytes > 2 remaining → could extend beyond. STOP.
 ///
 /// Result: [] (nothing safe to force).
-///
-/// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
-/// byte-level commits, so force() may not stop at the "ab" completion point.
 #[test]
 fn test_force_cutoff_blocks_everything() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -7306,9 +7297,6 @@ fn test_force_cutoff_blocks_everything() {
 /// Forced bytes: a, b. After "ab", EOS available → stop.
 /// Tokenize-with-stop on "ab": "a" (1 byte, no extension), "b" (1 byte, no extension).
 /// Result: [a, b].
-///
-/// KNOWN_BUG: EOS detection via is_complete() doesn't work correctly after
-/// byte-level commits, so force() continues past "ab" to force "abc".
 #[test]
 fn test_force_eos_stops_at_optional_continuation() {
     let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
