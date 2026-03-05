@@ -145,7 +145,7 @@ impl DWA {
 
         let after_ranges = self.count_rm_ranges();
 
-        if std::env::var("ANALYZE_RANGEMAP_WEIGHTS").is_ok() || changed {
+        if std::env::var("ANALYZE_RANGEMAP_WEIGHTS").is_ok() {
             eprintln!(
                 "RELAX_RM: entries {} -> {} ({:.1}% reduction), {} weights modified, {} entries saved, {} merges blocked (fwd={:?}){}",
                 before_ranges,

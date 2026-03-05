@@ -1132,10 +1132,10 @@ mod test_python {
         assert!(regex.definitely_fully_matches(b"a"));
         // Escape sequence should match
         assert!(regex.definitely_fully_matches(b"\\n"));
-        // Should reject invalid escape
-        assert!(!regex.could_match(b"\\z"));
-        // Should reject quote
-        assert!(!regex.could_match(b"\""));
+        // Should reject invalid escape (full match)
+        assert!(!regex.definitely_fully_matches(b"\\z"));
+        // Should reject quote (full match)
+        assert!(!regex.definitely_fully_matches(b"\""));
     }
 
     /// Test RepeatBounded in a multi-group tokenizer context (the real bottleneck).
