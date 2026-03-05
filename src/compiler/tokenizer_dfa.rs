@@ -14,7 +14,7 @@ use crate::ds::u8set::U8Set;
 /// A tokenizer built from terminal patterns.
 ///
 /// Wraps a multi-group DFA where each group corresponds to a terminal.
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizerDfa {
@@ -122,11 +122,7 @@ impl TokenizerDfa {
     ///
     /// This is used during commit to find all intermediate terminal matches
     /// within a single LLM token's byte sequence.
-    pub fn execute_all_matches(
-        &self,
-        input: &[u8],
-        start: u32,
-    ) -> TokenizerResult {
+    pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
         let mut state = start;
         let mut matches = Vec::new();
 
@@ -322,10 +318,7 @@ fn parse_atom(input: &[u8], mut pos: usize) -> (Expr, usize) {
         b'(' => {
             pos += 1;
             let (expr, next) = parse_alternation(input, pos);
-            assert!(
-                next < input.len() && input[next] == b')',
-                "Expected ')'"
-            );
+            assert!(next < input.len() && input[next] == b')', "Expected ')'");
             (expr, next + 1)
         }
         b'[' => parse_char_class(input, pos),
@@ -386,10 +379,7 @@ fn parse_char_class(input: &[u8], mut pos: usize) -> (Expr, usize) {
             } else {
                 set.insert(ch);
             }
-        } else if pos + 2 < input.len()
-            && input[pos + 1] == b'-'
-            && input[pos + 2] != b']'
-        {
+        } else if pos + 2 < input.len() && input[pos + 1] == b'-' && input[pos + 2] != b']' {
             let lo = input[pos];
             let hi = input[pos + 2];
             for b in lo..=hi {
@@ -444,10 +434,7 @@ fn parse_escape(input: &[u8], pos: usize) -> (Expr, usize) {
         }
         b'x' => {
             // \xHH
-            assert!(
-                next + 3 <= input.len(),
-                "\\x requires two hex digits"
-            );
+            assert!(next + 3 <= input.len(), "\\x requires two hex digits");
             let hi = hex_digit(input[next + 1]);
             let lo = hex_digit(input[next + 2]);
             let byte = (hi << 4) | lo;
@@ -506,7 +493,10 @@ mod tests {
     #[test]
     fn test_parse_regex_literal() {
         let expr = parse_regex("abc");
-        let r = ExprGroup { expr, is_non_greedy: false };
+        let r = ExprGroup {
+            expr,
+            is_non_greedy: false,
+        };
         let regex = ExprGroups { groups: vec![r] }.build();
         assert!(regex.is_match(b"abc"));
         assert!(!regex.is_match(b"ab"));
@@ -516,7 +506,10 @@ mod tests {
     #[test]
     fn test_parse_regex_class() {
         let expr = parse_regex("[a-z]+");
-        let r = ExprGroup { expr, is_non_greedy: false };
+        let r = ExprGroup {
+            expr,
+            is_non_greedy: false,
+        };
         let regex = ExprGroups { groups: vec![r] }.build();
         assert!(regex.is_match(b"hello"));
         assert!(!regex.is_match(b"Hello"));
@@ -526,7 +519,10 @@ mod tests {
     #[test]
     fn test_parse_regex_alternation() {
         let expr = parse_regex("cat|dog");
-        let r = ExprGroup { expr, is_non_greedy: false };
+        let r = ExprGroup {
+            expr,
+            is_non_greedy: false,
+        };
         let regex = ExprGroups { groups: vec![r] }.build();
         assert!(regex.is_match(b"cat"));
         assert!(regex.is_match(b"dog"));
@@ -536,18 +532,24 @@ mod tests {
     #[test]
     fn test_parse_regex_quantifiers() {
         let expr = parse_regex("a*b+c?");
-        let r = ExprGroup { expr, is_non_greedy: false };
+        let r = ExprGroup {
+            expr,
+            is_non_greedy: false,
+        };
         let regex = ExprGroups { groups: vec![r] }.build();
-        assert!(regex.is_match(b"bc"));      // a* = empty, b+ = b, c? = c
-        assert!(regex.is_match(b"aaab"));    // a* = aaa, b+ = b, c? = empty
-        assert!(regex.is_match(b"bbc"));     // a* = empty, b+ = bb, c? = c
-        assert!(!regex.is_match(b"a"));      // b+ needs at least one b
+        assert!(regex.is_match(b"bc")); // a* = empty, b+ = b, c? = c
+        assert!(regex.is_match(b"aaab")); // a* = aaa, b+ = b, c? = empty
+        assert!(regex.is_match(b"bbc")); // a* = empty, b+ = bb, c? = c
+        assert!(!regex.is_match(b"a")); // b+ needs at least one b
     }
 
     #[test]
     fn test_parse_regex_escapes() {
         let expr = parse_regex(r"\d+");
-        let r = ExprGroup { expr, is_non_greedy: false };
+        let r = ExprGroup {
+            expr,
+            is_non_greedy: false,
+        };
         let regex = ExprGroups { groups: vec![r] }.build();
         assert!(regex.is_match(b"123"));
         assert!(!regex.is_match(b"abc"));
@@ -556,7 +558,10 @@ mod tests {
     #[test]
     fn test_parse_regex_group() {
         let expr = parse_regex("(ab)+");
-        let r = ExprGroup { expr, is_non_greedy: false };
+        let r = ExprGroup {
+            expr,
+            is_non_greedy: false,
+        };
         let regex = ExprGroups { groups: vec![r] }.build();
         assert!(regex.is_match(b"ab"));
         assert!(regex.is_match(b"abab"));
@@ -573,8 +578,16 @@ mod tests {
             }],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "b".into(),
+                    pattern: "b".into(),
+                },
             ],
         };
         let tok = TokenizerDfa::from_grammar_def(&gdef);
@@ -592,11 +605,22 @@ mod tests {
     fn test_tokenizer_dfa_multichar() {
         // Terminals: "if" and "[a-z]+"
         let gdef = GrammarDef {
-            rules: vec![Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] }],
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "if".into(), pattern: "if".into() },
-                TerminalDef { id: 1, name: "ident".into(), pattern: "[a-z]+".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "if".into(),
+                    pattern: "if".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "ident".into(),
+                    pattern: "[a-z]+".into(),
+                },
             ],
         };
         let tok = TokenizerDfa::from_grammar_def(&gdef);
@@ -615,7 +639,10 @@ mod tests {
     #[test]
     fn test_tokenizer_dfa_repetition() {
         let expr = parse_regex("a{2,4}");
-        let r = ExprGroup { expr, is_non_greedy: false };
+        let r = ExprGroup {
+            expr,
+            is_non_greedy: false,
+        };
         let regex = ExprGroups { groups: vec![r] }.build();
         assert!(!regex.is_match(b"a"));
         assert!(regex.is_match(b"aa"));

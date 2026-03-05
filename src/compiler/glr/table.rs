@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::grammar::{GlrGrammar, EOF};
+use super::grammar::{EOF, GlrGrammar};
 use crate::compiler::grammar_def::{NonterminalId, Rule, Symbol, TerminalId};
 
 // ---------------------------------------------------------------------------
@@ -132,9 +132,7 @@ fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<It
 /// Returns:
 /// - `item_sets[state_id]` = the canonical item set.
 /// - `transitions[state_id]` = map from symbol → target state_id.
-fn build_lr0_item_sets(
-    grammar: &GlrGrammar,
-) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
+fn build_lr0_item_sets(grammar: &GlrGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
     let rules = &grammar.rules;
 
     // State 0: closure of [S' → · S].
@@ -197,8 +195,7 @@ fn build_slr1_table(
     let num_states = item_sets.len() as u32;
     let mut action: Vec<BTreeMap<TerminalId, Vec<Action>>> =
         vec![BTreeMap::new(); num_states as usize];
-    let mut goto: Vec<BTreeMap<NonterminalId, u32>> =
-        vec![BTreeMap::new(); num_states as usize];
+    let mut goto: Vec<BTreeMap<NonterminalId, u32>> = vec![BTreeMap::new(); num_states as usize];
 
     for (sid, items) in item_sets.iter().enumerate() {
         // Shifts: from transitions on terminals.
@@ -225,10 +222,7 @@ fn build_slr1_table(
 
             if rule_idx == 0 {
                 // Augmented start rule: reduce = accept on $.
-                action[sid]
-                    .entry(EOF)
-                    .or_default()
-                    .push(Action::Accept);
+                action[sid].entry(EOF).or_default().push(Action::Accept);
             } else {
                 // SLR(1): reduce on FOLLOW(lhs).
                 let lhs = rules[rule_idx as usize].lhs;
@@ -307,10 +301,15 @@ mod tests {
     fn test_table_accept() {
         // S → a.  After reading 'a', reduce to S, then accept on $.
         let gdef = GrammarDef {
-            rules: vec![Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] }],
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
             start: 0,
             terminals: vec![crate::compiler::grammar_def::TerminalDef {
-                id: 0, name: "a".into(), pattern: "a".into(),
+                id: 0,
+                name: "a".into(),
+                pattern: "a".into(),
             }],
         };
         let gg = GlrGrammar::from_grammar_def(&gdef);
@@ -319,7 +318,10 @@ mod tests {
         // Walk: s0 --shift(a)--> s1 --reduce(S→a)--> s0 --goto(S)--> s2 --accept($)
         // Check that after shifting 'a', there's a reduce on $.
         let a0 = table.actions(0, 0);
-        let s1 = match &a0[0] { Action::Shift(s) => *s, _ => panic!() };
+        let s1 = match &a0[0] {
+            Action::Shift(s) => *s,
+            _ => panic!(),
+        };
         let a1 = table.actions(s1, EOF);
         assert!(a1.iter().any(|a| matches!(a, Action::Reduce(_))));
     }
@@ -341,19 +343,31 @@ mod tests {
         let gdef = GrammarDef {
             rules: vec![
                 // r1: E → E + E
-                Rule { lhs: 0, rhs: vec![
-                    Symbol::Nonterminal(0), Symbol::Terminal(1), Symbol::Nonterminal(0),
-                ]},
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Nonterminal(0),
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(0),
+                    ],
+                },
                 // r2: E → a
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
             ],
             start: 0,
             terminals: vec![
                 crate::compiler::grammar_def::TerminalDef {
-                    id: 0, name: "a".into(), pattern: "a".into(),
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
                 },
                 crate::compiler::grammar_def::TerminalDef {
-                    id: 1, name: "+".into(), pattern: "\\+".into(),
+                    id: 1,
+                    name: "+".into(),
+                    pattern: "\\+".into(),
                 },
             ],
         };
@@ -370,6 +384,9 @@ mod tests {
             let has_reduce = acts.iter().any(|a| matches!(a, Action::Reduce(_)));
             has_shift && has_reduce
         });
-        assert!(has_conflict, "Expected shift/reduce conflict for ambiguous grammar");
+        assert!(
+            has_conflict,
+            "Expected shift/reduce conflict for ambiguous grammar"
+        );
     }
 }

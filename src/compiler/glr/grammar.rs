@@ -152,8 +152,7 @@ fn compute_first(
                     Symbol::Nonterminal(nt) => {
                         let nt_idx = *nt as usize;
                         if nt_idx < n {
-                            let ext: Vec<TerminalId> =
-                                first[nt_idx].iter().copied().collect();
+                            let ext: Vec<TerminalId> = first[nt_idx].iter().copied().collect();
                             for t in ext {
                                 if first[lhs].insert(t) {
                                     changed = true;
@@ -221,8 +220,7 @@ fn compute_follow(
                         Symbol::Nonterminal(b) => {
                             let b_idx = *b as usize;
                             if b_idx < n {
-                                let ext: Vec<TerminalId> =
-                                    first[b_idx].iter().copied().collect();
+                                let ext: Vec<TerminalId> = first[b_idx].iter().copied().collect();
                                 for t in ext {
                                     if follow[nt_idx].insert(t) {
                                         changed = true;
@@ -239,8 +237,7 @@ fn compute_follow(
 
                 // If β is empty or entirely nullable → FOLLOW(nt) ∪= FOLLOW(lhs)
                 if beta_nullable && lhs < n {
-                    let ext: Vec<TerminalId> =
-                        follow[lhs].iter().copied().collect();
+                    let ext: Vec<TerminalId> = follow[lhs].iter().copied().collect();
                     for t in ext {
                         if follow[nt_idx].insert(t) {
                             changed = true;

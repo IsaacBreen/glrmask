@@ -7,11 +7,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::Vocab;
 use crate::automata::dfa::DEAD;
 use crate::compiler::grammar_def::TerminalId;
 use crate::compiler::tokenizer_dfa::TokenizerDfa;
 use crate::ds::rangeset::RangeSet;
-use crate::Vocab;
 
 /// Result of vocabulary preprocessing.
 #[derive(Debug, Clone)]
@@ -86,7 +86,7 @@ impl VocabPreprocessing {
                 for terminal in matched {
                     possible_matches[tsid]
                         .entry(terminal)
-                        .or_insert_with(RangeSet::new)
+                        .or_default()
                         .insert(token_id);
                 }
             }
@@ -123,8 +123,16 @@ mod tests {
             }],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "b".into(),
+                    pattern: "b".into(),
+                },
             ],
         };
         let tok = TokenizerDfa::from_grammar_def(&gdef);

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::GlrMaskError;
 use crate::automata::dfa::DEAD;
 use crate::automata::weighted::dwa::CompDwa;
 use crate::compiler::glr::table::{Action, GlrTable};
@@ -12,7 +13,6 @@ use crate::compiler::grammar_def::TerminalId;
 use crate::compiler::tokenizer_dfa::TokenizerDfa;
 use crate::ds::bitset::BitSet;
 use crate::ds::rangeset::RangeSet;
-use crate::GlrMaskError;
 
 /// A compiled grammar constraint, ready for inference.
 ///
@@ -108,7 +108,7 @@ impl Constraint {
 
     /// Number of parser states (GLR table states).
     pub fn num_parser_states(&self) -> u32 {
-        self.table.num_states as u32
+        self.table.num_states
     }
 
     /// Number of token-set IDs.
@@ -225,7 +225,9 @@ impl ConstraintState {
                 }
 
                 // Run tokenizer on remaining bytes.
-                let result = constraint.tokenizer.execute_all_matches(remaining, tok_state);
+                let result = constraint
+                    .tokenizer
+                    .execute_all_matches(remaining, tok_state);
 
                 // Process each intermediate match.
                 for (match_offset, matched_terminals) in &result.matches {
@@ -233,21 +235,14 @@ impl ConstraintState {
 
                     for &terminal_id in matched_terminals {
                         // Step GLR parser on this terminal for each stack.
-                        let new_stacks = step_glr_all(
-                            &constraint.table,
-                            &stacks,
-                            terminal_id,
-                        );
+                        let new_stacks = step_glr_all(&constraint.table, &stacks, terminal_id);
 
                         if !new_stacks.is_empty() {
                             // After matching a terminal, reset tokenizer to initial state.
                             let initial_tok = constraint.tokenizer.initial_state();
                             if abs_offset == token_bytes.len() {
                                 // All bytes consumed — add directly to new state.
-                                new_state
-                                    .entry(initial_tok)
-                                    .or_default()
-                                    .extend(new_stacks);
+                                new_state.entry(initial_tok).or_default().extend(new_stacks);
                             } else {
                                 // More bytes to process.
                                 queue
@@ -293,11 +288,7 @@ impl ConstraintState {
 ///
 /// For each stack, applies shift/reduce actions and returns the resulting stacks.
 /// Stacks that can't consume this terminal are discarded.
-fn step_glr_all(
-    table: &GlrTable,
-    stacks: &[Vec<u32>],
-    terminal: TerminalId,
-) -> Vec<Vec<u32>> {
+fn step_glr_all(table: &GlrTable, stacks: &[Vec<u32>], terminal: TerminalId) -> Vec<Vec<u32>> {
     let mut result_stacks = Vec::new();
 
     for stack in stacks {
@@ -312,11 +303,7 @@ fn step_glr_all(
 ///
 /// Returns all resulting stacks after processing the terminal (may be 0, 1, or many
 /// due to GLR nondeterminism from shift-reduce or reduce-reduce conflicts).
-fn step_glr_single(
-    table: &GlrTable,
-    stack: &[u32],
-    terminal: TerminalId,
-) -> Vec<Vec<u32>> {
+fn step_glr_single(table: &GlrTable, stack: &[u32], terminal: TerminalId) -> Vec<Vec<u32>> {
     if stack.is_empty() {
         return Vec::new();
     }

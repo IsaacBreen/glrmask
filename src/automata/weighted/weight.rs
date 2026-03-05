@@ -239,7 +239,7 @@ impl Weight {
         // TSIDs 0..=max_tsid get all tokens 0..=max_token.
         entries.push((0, max_tsid, full_tokens));
         // TSIDs max_tsid+1..=num_tsids-1 get tokens 0..=max_token-1.
-        if max_token > 0 && max_tsid + 1 <= num_tsids - 1 {
+        if max_token > 0 && max_tsid < num_tsids - 1 {
             let prefix_tokens = RangeSet::from_range(0, max_token - 1);
             entries.push((max_tsid + 1, num_tsids - 1, prefix_tokens));
         }
@@ -274,7 +274,7 @@ impl Weight {
                     tsid_tokens[tsid as usize].push((lo_token, lo_token));
                 }
                 // Middle tokens (full TSID range).
-                if lo_token + 1 <= hi_token.saturating_sub(1) {
+                if lo_token < hi_token.saturating_sub(1) {
                     for bucket in tsid_tokens.iter_mut() {
                         bucket.push((lo_token + 1, hi_token - 1));
                     }
@@ -368,8 +368,7 @@ impl Weight {
     pub fn contains(&self, pos: u32) -> bool {
         let token = pos / self.num_tsids;
         let tsid = pos % self.num_tsids;
-        self.get_value(tsid)
-            .map_or(false, |rs| rs.contains(token))
+        self.get_value(tsid).is_some_and(|rs| rs.contains(token))
     }
 
     /// Iterate over entries as `(tsid_lo, tsid_hi, &token_set)`.
@@ -400,10 +399,7 @@ impl Weight {
                     // Partial TSID range ⇒ per-token blocks.
                     for token in t_lo..=t_hi {
                         let base = token.saturating_mul(nt);
-                        ranges.push((
-                            base.saturating_add(*tsid_lo),
-                            base.saturating_add(*tsid_hi),
-                        ));
+                        ranges.push((base.saturating_add(*tsid_lo), base.saturating_add(*tsid_hi)));
                     }
                 }
             }

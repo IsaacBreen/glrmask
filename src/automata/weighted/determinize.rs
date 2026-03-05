@@ -17,6 +17,8 @@ use super::nwa::{Label, Nwa};
 use super::weight::Weight;
 use crate::GlrMaskError;
 
+type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -56,16 +58,14 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
                 let needs_enqueue = match closure.get(v) {
                     Some(existing) => {
                         let combined = existing.union(&v_new_weight);
-                        if combined != *existing {
-                            true
-                        } else {
-                            false
-                        }
+                        combined != *existing
                     }
                     None => true,
                 };
                 if needs_enqueue {
-                    let e = closure.entry(*v).or_insert_with(|| Weight::empty(nwa.num_tsids));
+                    let e = closure
+                        .entry(*v)
+                        .or_insert_with(|| Weight::empty(nwa.num_tsids));
                     *e = e.union(&v_new_weight);
                     worklist.push_back(*v);
                 }
@@ -105,10 +105,7 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
 
     impl WeightedSubset {
         fn from_btree(map: &BTreeMap<u32, Weight>) -> Self {
-            let entries: Vec<(u32, Weight)> = map
-                .iter()
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
+            let entries: Vec<(u32, Weight)> = map.iter().map(|(k, v)| (*k, v.clone())).collect();
             Self { entries }
         }
     }
@@ -363,10 +360,7 @@ fn unweighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeSet<u32>> {
 /// Returns:
 /// - `subsets[dwa_id]` = set of NWA states forming that DWA state.
 /// - `transitions[dwa_id]` = vec of (label, target_dwa_id).
-fn unweighted_subset_construction(
-    nwa: &Nwa,
-    eps_uw: &[BTreeSet<u32>],
-) -> (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>) {
+fn unweighted_subset_construction(nwa: &Nwa, eps_uw: &[BTreeSet<u32>]) -> SubsetTransitions {
     let mut subsets: Vec<BTreeSet<u32>> = Vec::new();
     let mut transitions: Vec<Vec<(Label, u32)>> = Vec::new();
     let mut seen: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
@@ -378,8 +372,13 @@ fn unweighted_subset_construction(
         start_set.extend(eps_uw[s as usize].iter().copied());
     }
 
-    let _start_id =
-        intern_subset(&start_set, &mut subsets, &mut transitions, &mut seen, &mut queue);
+    let _start_id = intern_subset(
+        &start_set,
+        &mut subsets,
+        &mut transitions,
+        &mut seen,
+        &mut queue,
+    );
 
     while let Some(sid) = queue.pop_front() {
         let subset = subsets[sid as usize].clone();
@@ -496,9 +495,7 @@ fn build_comp_dwa(
     let max_tok = nwa.max_token;
 
     let num_dwa = subsets.len();
-    let mut states: Vec<CompDwaState> = (0..num_dwa)
-        .map(|_| CompDwaState::default())
-        .collect();
+    let mut states: Vec<CompDwaState> = (0..num_dwa).map(|_| CompDwaState::default()).collect();
 
     for (sid, subset) in subsets.iter().enumerate() {
         // Merge the weighted closures for all NWA states in this DWA state.
@@ -545,9 +542,7 @@ fn build_comp_dwa(
                 }
             }
             if let Some(w) = tw {
-                states[sid]
-                    .transitions
-                    .insert(label, (target_dwa, w));
+                states[sid].transitions.insert(label, (target_dwa, w));
             }
         }
     }

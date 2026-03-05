@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use super::table::{Action, GlrTable};
 use super::grammar::EOF;
+use super::table::{Action, GlrTable};
 use crate::compiler::grammar_def::TerminalId;
 
 /// GLR parser backed by an SLR(1) table.
@@ -50,11 +50,7 @@ impl GlrParser {
     ///
     /// Returns (new_stacks_after_shift, did_any_accept).
     /// Reduces are processed exhaustively before shifts.
-    pub fn step(
-        &self,
-        stacks: &[Vec<u32>],
-        token: TerminalId,
-    ) -> (Vec<Vec<u32>>, bool) {
+    pub fn step(&self, stacks: &[Vec<u32>], token: TerminalId) -> (Vec<Vec<u32>>, bool) {
         let mut shifted: Vec<Vec<u32>> = Vec::new();
         let mut accepted = false;
 
@@ -133,29 +129,29 @@ mod tests {
     fn test_parse_simple_ab() {
         let gdef = simple_ab_grammar(); // S → a b
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0, 1]));  // "a b" — accepted
-        assert!(!parser.parse(&[0]));    // "a" alone — rejected
+        assert!(parser.parse(&[0, 1])); // "a b" — accepted
+        assert!(!parser.parse(&[0])); // "a" alone — rejected
         assert!(!parser.parse(&[1, 0])); // "b a" — rejected
-        assert!(!parser.parse(&[]));     // empty — rejected
+        assert!(!parser.parse(&[])); // empty — rejected
     }
 
     #[test]
     fn test_parse_choice() {
         let gdef = choice_grammar(); // S → a | b
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0]));     // "a"
-        assert!(parser.parse(&[1]));     // "b"
+        assert!(parser.parse(&[0])); // "a"
+        assert!(parser.parse(&[1])); // "b"
         assert!(!parser.parse(&[0, 1])); // "a b" — too long
-        assert!(!parser.parse(&[]));     // empty
+        assert!(!parser.parse(&[])); // empty
     }
 
     #[test]
     fn test_parse_two_nt() {
         let gdef = two_nt_grammar(); // S → A b, A → a
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0, 1]));  // "a b"
-        assert!(!parser.parse(&[0]));    // "a" alone
-        assert!(!parser.parse(&[1]));    // "b" alone
+        assert!(parser.parse(&[0, 1])); // "a b"
+        assert!(!parser.parse(&[0])); // "a" alone
+        assert!(!parser.parse(&[1])); // "b" alone
     }
 
     #[test]
@@ -163,23 +159,39 @@ mod tests {
         // E → E + E | a
         let gdef = GrammarDef {
             rules: vec![
-                Rule { lhs: 0, rhs: vec![
-                    Symbol::Nonterminal(0), Symbol::Terminal(1), Symbol::Nonterminal(0),
-                ]},
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Nonterminal(0),
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(0),
+                    ],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
             ],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "+".into(), pattern: "\\+".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "+".into(),
+                    pattern: "\\+".into(),
+                },
             ],
         };
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0]));              // "a"
-        assert!(parser.parse(&[0, 1, 0]));        // "a + a"
-        assert!(parser.parse(&[0, 1, 0, 1, 0]));  // "a + a + a"
-        assert!(!parser.parse(&[1]));              // "+" alone
-        assert!(!parser.parse(&[0, 1]));           // "a +"
+        assert!(parser.parse(&[0])); // "a"
+        assert!(parser.parse(&[0, 1, 0])); // "a + a"
+        assert!(parser.parse(&[0, 1, 0, 1, 0])); // "a + a + a"
+        assert!(!parser.parse(&[1])); // "+" alone
+        assert!(!parser.parse(&[0, 1])); // "a +"
     }
 
     #[test]
@@ -187,18 +199,29 @@ mod tests {
         // S → A, A → a | ε
         let gdef = GrammarDef {
             rules: vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
-                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
-                Rule { lhs: 1, rhs: vec![] }, // ε
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![],
+                }, // ε
             ],
             start: 0,
-            terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-            ],
+            terminals: vec![TerminalDef {
+                id: 0,
+                name: "a".into(),
+                pattern: "a".into(),
+            }],
         };
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[]));     // empty (S → A → ε)
-        assert!(parser.parse(&[0]));    // "a" (S → A → a)
+        assert!(parser.parse(&[])); // empty (S → A → ε)
+        assert!(parser.parse(&[0])); // "a" (S → A → a)
         assert!(!parser.parse(&[0, 0])); // "a a" — too long
     }
 

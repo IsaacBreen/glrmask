@@ -12,16 +12,12 @@
 //! let vocab = Vocab::new(entries, Some(eos_id));
 //! let constraint = Constraint::from_ebnf(grammar, &vocab)?;
 //! let mut state = constraint.start();
-//! let mut buf = vec![0u32; constraint.mask_len()];
 //!
 //! loop {
-//!     let forced = state.force();
-//!     state.commit_tokens(&forced);
-//!     if state.is_finished() { break; }
-//!
-//!     state.fill_mask(&mut buf);
-//!     let token = sample(logits, &buf);
-//!     state.commit(token);
+//!     let mask = state.compute_mask(&constraint);
+//!     if state.is_accepting(&constraint) { break; }
+//!     let token = sample(logits, &mask);
+//!     state.commit(&constraint, token)?;
 //! }
 //! ```
 //!
@@ -42,6 +38,7 @@ pub mod frontend;
 pub mod runtime;
 
 // Re-export public API types
+pub use ds::bitset::BitSet;
 pub use runtime::{Constraint, ConstraintState};
 
 use thiserror::Error;

@@ -12,6 +12,7 @@
 //! 6. Determinize + minimize → parser DWA
 //! 7. Package as `Constraint`
 
+use crate::Vocab;
 use crate::compiler::glr::grammar::GlrGrammar;
 use crate::compiler::glr::table::GlrTable;
 use crate::compiler::grammar_def::GrammarDef;
@@ -19,7 +20,6 @@ use crate::compiler::parser_dwa::build_parser_dwa;
 use crate::compiler::tokenizer_dfa::TokenizerDfa;
 use crate::compiler::vocab_pre::VocabPreprocessing;
 use crate::runtime::Constraint;
-use crate::Vocab;
 
 /// Compile a grammar definition and vocabulary into a `Constraint`.
 ///
@@ -90,13 +90,7 @@ mod tests {
     #[test]
     fn test_compile_simple_ab() {
         let gdef = simple_ab_grammar(); // S → a b
-        let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-            ],
-            None,
-        );
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         assert!(constraint.num_dwa_states() > 0);
@@ -106,13 +100,7 @@ mod tests {
     #[test]
     fn test_compile_choice() {
         let gdef = choice_grammar(); // S → a | b
-        let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-            ],
-            None,
-        );
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         assert!(constraint.num_dwa_states() > 0);
@@ -121,13 +109,7 @@ mod tests {
     #[test]
     fn test_compile_two_nt() {
         let gdef = two_nt_grammar(); // S → A b, A → a
-        let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-            ],
-            None,
-        );
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         assert!(constraint.num_dwa_states() > 0);
@@ -139,13 +121,7 @@ mod tests {
         // Grammar: S → a b
         // Vocab: token 0 = "a", token 1 = "b"
         let gdef = simple_ab_grammar();
-        let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-            ],
-            None,
-        );
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
@@ -156,8 +132,13 @@ mod tests {
         assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
 
         // Commit "a".
-        state.commit(&constraint, 0).expect("commit 'a' should succeed");
-        assert!(!state.is_accepting(&constraint), "not yet accepting after 'a'");
+        state
+            .commit(&constraint, 0)
+            .expect("commit 'a' should succeed");
+        assert!(
+            !state.is_accepting(&constraint),
+            "not yet accepting after 'a'"
+        );
 
         // After "a": "b" allowed, "a" not.
         let mask = state.compute_mask(&constraint);
@@ -165,7 +146,9 @@ mod tests {
         assert!(mask.get(1), "token 'b' should be allowed after 'a'");
 
         // Commit "b".
-        state.commit(&constraint, 1).expect("commit 'b' should succeed");
+        state
+            .commit(&constraint, 1)
+            .expect("commit 'b' should succeed");
         assert!(state.is_accepting(&constraint), "should accept after 'ab'");
     }
 
@@ -175,13 +158,7 @@ mod tests {
         // Vocab: token 0 = "a", token 1 = "b"
         // Expected: initial mask allows both "a" and "b".
         let gdef = choice_grammar();
-        let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-            ],
-            None,
-        );
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
@@ -192,8 +169,13 @@ mod tests {
         assert!(mask.get(1), "token 'b' should be allowed");
 
         // Commit token "a".
-        state.commit(&constraint, 0).expect("commit 'a' should succeed");
-        assert!(state.is_accepting(&constraint), "parse should accept after 'a'");
+        state
+            .commit(&constraint, 0)
+            .expect("commit 'a' should succeed");
+        assert!(
+            state.is_accepting(&constraint),
+            "parse should accept after 'a'"
+        );
     }
 
     #[test]
@@ -201,13 +183,7 @@ mod tests {
         // Grammar: S → A b, A → a
         // Same as simple_ab but with an intermediate nonterminal.
         let gdef = two_nt_grammar();
-        let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-            ],
-            None,
-        );
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
@@ -218,8 +194,13 @@ mod tests {
         assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
 
         // Commit "a".
-        state.commit(&constraint, 0).expect("commit 'a' should succeed");
-        assert!(!state.is_accepting(&constraint), "not yet accepting after 'a'");
+        state
+            .commit(&constraint, 0)
+            .expect("commit 'a' should succeed");
+        assert!(
+            !state.is_accepting(&constraint),
+            "not yet accepting after 'a'"
+        );
 
         // After "a": "b" allowed, "a" not.
         let mask = state.compute_mask(&constraint);
@@ -227,7 +208,9 @@ mod tests {
         assert!(mask.get(1), "token 'b' should be allowed after 'a'");
 
         // Commit "b".
-        state.commit(&constraint, 1).expect("commit 'b' should succeed");
+        state
+            .commit(&constraint, 1)
+            .expect("commit 'b' should succeed");
         assert!(state.is_accepting(&constraint), "should accept after 'ab'");
     }
 
@@ -236,13 +219,7 @@ mod tests {
         // Grammar: S → A B, A → a, B → b
         // Same result as S → a b but with two nonterminal reductions.
         let gdef = nested_nt_grammar();
-        let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-            ],
-            None,
-        );
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
@@ -253,7 +230,9 @@ mod tests {
         assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
 
         // Commit "a".
-        state.commit(&constraint, 0).expect("commit 'a' should succeed");
+        state
+            .commit(&constraint, 0)
+            .expect("commit 'a' should succeed");
         assert!(!state.is_accepting(&constraint), "not accepting after 'a'");
 
         // After "a": "b" should be allowed (A reduced, now need B → b).
@@ -262,7 +241,9 @@ mod tests {
         assert!(mask.get(1), "token 'b' should be allowed after 'a'");
 
         // Commit "b".
-        state.commit(&constraint, 1).expect("commit 'b' should succeed");
+        state
+            .commit(&constraint, 1)
+            .expect("commit 'b' should succeed");
         assert!(state.is_accepting(&constraint), "should accept after 'ab'");
     }
 
@@ -271,11 +252,7 @@ mod tests {
         // Grammar: S → a b c
         let gdef = three_terminal_grammar();
         let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-                (2, b"c".to_vec()),
-            ],
+            vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
             None,
         );
 
@@ -317,11 +294,7 @@ mod tests {
         // Exercises reduce with pop_count=2.
         let gdef = nested_two_rhs_grammar();
         let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-                (2, b"c".to_vec()),
-            ],
+            vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
             None,
         );
 

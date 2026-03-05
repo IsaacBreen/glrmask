@@ -26,9 +26,9 @@
 //! TERMINAL_NAME     // terminal reference
 //! ```
 
-use crate::compiler::grammar_def::GrammarDef;
-use crate::frontend::grammar_expr::{lower, GrammarExpr, NamedGrammar};
 use crate::GlrMaskError;
+use crate::compiler::grammar_def::GrammarDef;
+use crate::frontend::grammar_expr::{GrammarExpr, NamedGrammar, lower};
 
 // ---------------------------------------------------------------------------
 // Tokenizer
@@ -36,10 +36,10 @@ use crate::GlrMaskError;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Ident(String),     // lowercase rule name
-    Terminal(String),  // UPPERCASE terminal name
-    Literal(String),   // "string"
-    Regex(String),     // /regex/
+    Ident(String),    // lowercase rule name
+    Terminal(String), // UPPERCASE terminal name
+    Literal(String),  // "string"
+    Regex(String),    // /regex/
     LParen,
     RParen,
     LBracket,
@@ -51,10 +51,10 @@ enum Token {
     Colon,
     Newline,
     Dot,
-    Tilde,  // ~
+    Tilde, // ~
     Number(usize),
     Comma,
-    Arrow,  // ->
+    Arrow, // ->
 }
 
 struct Lexer<'a> {
@@ -113,14 +113,10 @@ impl<'a> Lexer<'a> {
                         s.push('\\');
                         s.push(c as char);
                     }
-                    None => {
-                        return Err(GlrMaskError::GrammarParse("unterminated escape".into()))
-                    }
+                    None => return Err(GlrMaskError::GrammarParse("unterminated escape".into())),
                 },
                 Some(b) => s.push(b as char),
-                None => {
-                    return Err(GlrMaskError::GrammarParse("unterminated string".into()))
-                }
+                None => return Err(GlrMaskError::GrammarParse("unterminated string".into())),
             }
         }
     }
@@ -137,9 +133,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 Some(b) => s.push(b as char),
-                None => {
-                    return Err(GlrMaskError::GrammarParse("unterminated regex".into()))
-                }
+                None => return Err(GlrMaskError::GrammarParse("unterminated regex".into())),
             }
         }
     }
@@ -196,17 +190,50 @@ impl<'a> Lexer<'a> {
                     let s = self.lex_string(b'"')?;
                     tokens.push(Token::Literal(s));
                 }
-                Some(b'(') => { self.pos += 1; tokens.push(Token::LParen); }
-                Some(b')') => { self.pos += 1; tokens.push(Token::RParen); }
-                Some(b'[') => { self.pos += 1; tokens.push(Token::LBracket); }
-                Some(b']') => { self.pos += 1; tokens.push(Token::RBracket); }
-                Some(b'|') => { self.pos += 1; tokens.push(Token::Pipe); }
-                Some(b'*') => { self.pos += 1; tokens.push(Token::Star); }
-                Some(b'+') => { self.pos += 1; tokens.push(Token::Plus); }
-                Some(b'?') => { self.pos += 1; tokens.push(Token::Question); }
-                Some(b'.') => { self.pos += 1; tokens.push(Token::Dot); }
-                Some(b'~') => { self.pos += 1; tokens.push(Token::Tilde); }
-                Some(b',') => { self.pos += 1; tokens.push(Token::Comma); }
+                Some(b'(') => {
+                    self.pos += 1;
+                    tokens.push(Token::LParen);
+                }
+                Some(b')') => {
+                    self.pos += 1;
+                    tokens.push(Token::RParen);
+                }
+                Some(b'[') => {
+                    self.pos += 1;
+                    tokens.push(Token::LBracket);
+                }
+                Some(b']') => {
+                    self.pos += 1;
+                    tokens.push(Token::RBracket);
+                }
+                Some(b'|') => {
+                    self.pos += 1;
+                    tokens.push(Token::Pipe);
+                }
+                Some(b'*') => {
+                    self.pos += 1;
+                    tokens.push(Token::Star);
+                }
+                Some(b'+') => {
+                    self.pos += 1;
+                    tokens.push(Token::Plus);
+                }
+                Some(b'?') => {
+                    self.pos += 1;
+                    tokens.push(Token::Question);
+                }
+                Some(b'.') => {
+                    self.pos += 1;
+                    tokens.push(Token::Dot);
+                }
+                Some(b'~') => {
+                    self.pos += 1;
+                    tokens.push(Token::Tilde);
+                }
+                Some(b',') => {
+                    self.pos += 1;
+                    tokens.push(Token::Comma);
+                }
                 Some(b'-') => {
                     self.pos += 1;
                     if self.peek() == Some(b'>') {
@@ -216,11 +243,17 @@ impl<'a> Lexer<'a> {
                         return Err(GlrMaskError::GrammarParse("unexpected '-'".into()));
                     }
                 }
-                Some(b':') => { self.pos += 1; tokens.push(Token::Colon); }
+                Some(b':') => {
+                    self.pos += 1;
+                    tokens.push(Token::Colon);
+                }
                 Some(b) if b.is_ascii_alphabetic() || b == b'_' => {
                     self.pos += 1;
                     let ident = self.lex_ident(b);
-                    if ident.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+                    if ident
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                    {
                         tokens.push(Token::Terminal(ident));
                     } else {
                         tokens.push(Token::Ident(ident));
@@ -235,7 +268,7 @@ impl<'a> Lexer<'a> {
                     return Err(GlrMaskError::GrammarParse(format!(
                         "unexpected character '{}' at position {}",
                         b as char, self.pos
-                    )))
+                    )));
                 }
             }
         }
@@ -271,10 +304,12 @@ impl Parser {
         match self.advance() {
             Some(ref tok) if tok == expected => Ok(()),
             Some(tok) => Err(GlrMaskError::GrammarParse(format!(
-                "expected {:?}, got {:?}", expected, tok
+                "expected {:?}, got {:?}",
+                expected, tok
             ))),
             None => Err(GlrMaskError::GrammarParse(format!(
-                "expected {:?}, got end of input", expected
+                "expected {:?}, got end of input",
+                expected
             ))),
         }
     }
@@ -295,8 +330,9 @@ impl Parser {
                 Some(Token::Terminal(s)) => s,
                 Some(other) => {
                     return Err(GlrMaskError::GrammarParse(format!(
-                        "expected rule name, got {:?}", other
-                    )))
+                        "expected rule name, got {:?}",
+                        other
+                    )));
                 }
                 None => break,
             };
@@ -404,9 +440,7 @@ impl Parser {
 
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         match self.advance() {
-            Some(Token::Ident(name)) | Some(Token::Terminal(name)) => {
-                Ok(GrammarExpr::Ref(name))
-            }
+            Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(s)) => Ok(GrammarExpr::Literal(s.into_bytes())),
             Some(Token::Regex(rx)) => {
                 // Treat regex as a char class terminal.
@@ -427,7 +461,8 @@ impl Parser {
                 Ok(GrammarExpr::Optional(Box::new(expr)))
             }
             other => Err(GlrMaskError::GrammarParse(format!(
-                "expected atom, got {:?}", other
+                "expected atom, got {:?}",
+                other
             ))),
         }
     }

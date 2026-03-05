@@ -6,9 +6,9 @@
 //! Supports: object, array, string, number, integer, boolean, null,
 //! enum, const, oneOf/anyOf/allOf, and `$ref` (simple same-document refs).
 
-use crate::compiler::grammar_def::GrammarDef;
-use crate::frontend::grammar_expr::{lower, GrammarExpr, NamedGrammar};
 use crate::GlrMaskError;
+use crate::compiler::grammar_def::GrammarDef;
+use crate::frontend::grammar_expr::{GrammarExpr, NamedGrammar, lower};
 
 /// Convert a JSON Schema (as a JSON string) into a `GrammarDef`.
 pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskError> {
@@ -70,7 +70,9 @@ impl SchemaCtx {
             return if b {
                 Ok(self.json_value())
             } else {
-                Err(GlrMaskError::GrammarParse("schema is false (matches nothing)".into()))
+                Err(GlrMaskError::GrammarParse(
+                    "schema is false (matches nothing)".into(),
+                ))
             };
         }
 
@@ -94,7 +96,11 @@ impl SchemaCtx {
         }
 
         // Handle oneOf / anyOf.
-        if let Some(variants) = obj.get("oneOf").or(obj.get("anyOf")).and_then(|v| v.as_array()) {
+        if let Some(variants) = obj
+            .get("oneOf")
+            .or(obj.get("anyOf"))
+            .and_then(|v| v.as_array())
+        {
             let mut alts = Vec::new();
             for v in variants {
                 alts.push(self.convert_schema(v)?);
@@ -120,7 +126,7 @@ impl SchemaCtx {
                 GrammarExpr::Literal(b"false".to_vec()),
             ])),
             "null" => Ok(GrammarExpr::Literal(b"null".to_vec())),
-            "any" | _ => Ok(self.json_value()),
+            _ => Ok(self.json_value()),
         }
     }
 

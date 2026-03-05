@@ -18,8 +18,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::automata::weighted::dwa::{CompDwa, CompDwaState};
 use crate::automata::weighted::determinize::determinize;
+use crate::automata::weighted::dwa::{CompDwa, CompDwaState};
 use crate::automata::weighted::minimize::minimize_acyclic;
 use crate::automata::weighted::nwa::Nwa;
 use crate::automata::weighted::weight::Weight;
@@ -160,10 +160,7 @@ fn characterize_terminal(
 /// A revealed state `r` is valid for nonterminal `nt` if, starting from `nt`,
 /// there exists a chain of rereduces (with pop_count=1, which re-reveal the same
 /// state) that eventually leads to an nt_escape at `r`.
-fn compute_valid_revealed(
-    start_nt: NonterminalId,
-    tc: &TerminalCharacterization,
-) -> BTreeSet<u32> {
+fn compute_valid_revealed(start_nt: NonterminalId, tc: &TerminalCharacterization) -> BTreeSet<u32> {
     let mut valid = BTreeSet::new();
     let mut visited: BTreeSet<(NonterminalId, u32)> = BTreeSet::new();
     let mut queue: VecDeque<(NonterminalId, u32)> = VecDeque::new();
@@ -218,11 +215,7 @@ fn compute_valid_revealed(
 /// Instead of using DEFAULT_LABEL (wildcard), self-loop transitions are
 /// expanded to explicit transitions for all parser states. This ensures
 /// the standard determinizer handles them correctly.
-pub fn build_parser_nwa(
-    table: &GlrTable,
-    grammar: &GlrGrammar,
-    vocab: &VocabPreprocessing,
-) -> Nwa {
+pub fn build_parser_nwa(table: &GlrTable, grammar: &GlrGrammar, vocab: &VocabPreprocessing) -> Nwa {
     let characterizations = characterize_terminal(table, grammar);
 
     let num_tsids = vocab.num_tsids;
@@ -324,7 +317,9 @@ fn is_acyclic(dwa: &CompDwa) -> bool {
         color[u] = 1;
         for (target, _) in states[u].transitions.values() {
             let v = *target as usize;
-            if v >= color.len() { continue; }
+            if v >= color.len() {
+                continue;
+            }
             match color[v] {
                 1 => return false, // back edge → cycle
                 0 => {
@@ -355,10 +350,10 @@ fn terminal_to_weight(terminal: TerminalId, vocab: &VocabPreprocessing) -> Weigh
     let mut entries: Vec<(u32, u32, RangeSet)> = Vec::new();
 
     for tsid in 0..num_tsids {
-        if let Some(rs) = vocab.possible_matches[tsid as usize].get(&terminal) {
-            if !rs.is_empty() {
-                entries.push((tsid, tsid, rs.clone()));
-            }
+        if let Some(rs) = vocab.possible_matches[tsid as usize].get(&terminal)
+            && !rs.is_empty()
+        {
+            entries.push((tsid, tsid, rs.clone()));
         }
     }
 
@@ -396,13 +391,15 @@ pub fn build_parser_dwa(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::glr::grammar::GlrGrammar;
-    use crate::compiler::grammar_def::tests::*;
-    use crate::compiler::grammar_def::GrammarDef;
-    use crate::compiler::tokenizer_dfa::TokenizerDfa;
     use crate::Vocab;
+    use crate::compiler::glr::grammar::GlrGrammar;
+    use crate::compiler::grammar_def::GrammarDef;
+    use crate::compiler::grammar_def::tests::*;
+    use crate::compiler::tokenizer_dfa::TokenizerDfa;
 
-    fn make_vocab_and_preprocessing(gdef: &GrammarDef) -> (Vocab, TokenizerDfa, VocabPreprocessing) {
+    fn make_vocab_and_preprocessing(
+        gdef: &GrammarDef,
+    ) -> (Vocab, TokenizerDfa, VocabPreprocessing) {
         let tok = TokenizerDfa::from_grammar_def(gdef);
         // Build vocab: one token per terminal pattern.
         let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();

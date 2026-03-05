@@ -353,8 +353,13 @@ impl ExprGroups {
         let mut nfa = Nfa::new(1); // state 0 = split point
         let mut cache = HashMap::new();
 
-        for (group_idx, ExprGroup { expr, is_non_greedy: _ }) in
-            self.groups.into_iter().enumerate()
+        for (
+            group_idx,
+            ExprGroup {
+                expr,
+                is_non_greedy: _,
+            },
+        ) in self.groups.into_iter().enumerate()
         {
             // Create accept state for this group
             let accept = nfa.add_state();
@@ -576,14 +581,8 @@ mod tests {
         let shared_part = Arc::new(seq(vec![byte(b'a'), byte(b'b')]));
 
         let r = choice(vec![
-            seq(vec![
-                Expr::Shared(shared_part.clone()),
-                byte(b'c'),
-            ]),
-            seq(vec![
-                Expr::Shared(shared_part.clone()),
-                byte(b'd'),
-            ]),
+            seq(vec![Expr::Shared(shared_part.clone()), byte(b'c')]),
+            seq(vec![Expr::Shared(shared_part.clone()), byte(b'd')]),
         ])
         .build();
 
@@ -606,8 +605,17 @@ mod tests {
     #[test]
     fn test_lots_of_words() {
         let words: Vec<&[u8]> = vec![
-            b"if", b"else", b"while", b"for", b"return", b"break",
-            b"continue", b"int", b"float", b"void", b"char",
+            b"if",
+            b"else",
+            b"while",
+            b"for",
+            b"return",
+            b"break",
+            b"continue",
+            b"int",
+            b"float",
+            b"void",
+            b"char",
         ];
         let groups: Vec<ExprGroup> = words
             .iter()

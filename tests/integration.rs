@@ -147,7 +147,10 @@ fn test_json_schema_boolean() {
     let s = c.start();
     let mask = s.compute_mask(&c);
     // "t" (token 0) or "f" (token 4) should be allowed.
-    assert!(mask.get(0) || mask.get(4), "boolean start: 't' or 'f' should be allowed");
+    assert!(
+        mask.get(0) || mask.get(4),
+        "boolean start: 't' or 'f' should be allowed"
+    );
 }
 
 #[test]
@@ -212,7 +215,10 @@ fn test_commit_invalid_token() {
     if result.is_ok() {
         let mask = s.compute_mask(&c);
         // Should have no valid tokens after an invalid commit.
-        assert!(!mask.get(0) && !mask.get(1), "no tokens after invalid commit");
+        assert!(
+            !mask.get(0) && !mask.get(1),
+            "no tokens after invalid commit"
+        );
     }
 }
 

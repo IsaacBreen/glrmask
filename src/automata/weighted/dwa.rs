@@ -20,21 +20,12 @@ use super::weight::{Weight, WeightTable};
 // ---------------------------------------------------------------------------
 
 /// A single state in the compilation-time DWA.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompDwaState {
     /// Label → (target_state, transition_weight).
     pub transitions: BTreeMap<Label, (u32, Weight)>,
     /// Accepting weight, or `None` if the state is non-accepting.
     pub final_weight: Option<Weight>,
-}
-
-impl Default for CompDwaState {
-    fn default() -> Self {
-        Self {
-            transitions: BTreeMap::new(),
-            final_weight: None,
-        }
-    }
 }
 
 /// Compilation-time DWA.
@@ -127,11 +118,7 @@ impl CompDwa {
         match &self.states[state as usize].final_weight {
             Some(fw) => {
                 let result = acc.intersection(fw);
-                if result.is_empty() {
-                    empty
-                } else {
-                    result
-                }
+                if result.is_empty() { empty } else { result }
             }
             None => empty,
         }
@@ -159,9 +146,7 @@ impl PartialEq for CompDwa {
                 .states
                 .iter()
                 .zip(other.states.iter())
-                .all(|(a, b)| {
-                    a.final_weight == b.final_weight && a.transitions == b.transitions
-                })
+                .all(|(a, b)| a.final_weight == b.final_weight && a.transitions == b.transitions)
     }
 }
 
@@ -219,10 +204,7 @@ impl Dwa {
 
     /// Whether a state is accepting.
     pub fn is_accepting(&self, state: u32) -> bool {
-        self.accepting
-            .get(state as usize)
-            .copied()
-            .unwrap_or(false)
+        self.accepting.get(state as usize).copied().unwrap_or(false)
     }
 }
 

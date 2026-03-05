@@ -59,12 +59,7 @@ impl GrammarDef {
 
     /// Number of nonterminals (determined by scanning rules).
     pub fn num_nonterminals(&self) -> u32 {
-        let max = self
-            .rules
-            .iter()
-            .map(|r| r.lhs)
-            .max()
-            .unwrap_or(0);
+        let max = self.rules.iter().map(|r| r.lhs).max().unwrap_or(0);
         max + 1
     }
 }
@@ -82,8 +77,16 @@ pub(crate) mod tests {
             }],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "b".into(),
+                    pattern: "b".into(),
+                },
             ],
         }
     }
@@ -92,13 +95,27 @@ pub(crate) mod tests {
     pub fn choice_grammar() -> GrammarDef {
         GrammarDef {
             rules: vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
             ],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "b".into(),
+                    pattern: "b".into(),
+                },
             ],
         }
     }
@@ -109,13 +126,27 @@ pub(crate) mod tests {
         // T 0 = a, T 1 = b
         GrammarDef {
             rules: vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)] },
-                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
             ],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "b".into(),
+                    pattern: "b".into(),
+                },
             ],
         }
     }
@@ -126,14 +157,31 @@ pub(crate) mod tests {
         // T 0 = a, T 1 = b
         GrammarDef {
             rules: vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)] },
-                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
-                Rule { lhs: 2, rhs: vec![Symbol::Terminal(1)] },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
             ],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "b".into(),
+                    pattern: "b".into(),
+                },
             ],
         }
     }
@@ -143,13 +191,29 @@ pub(crate) mod tests {
         GrammarDef {
             rules: vec![Rule {
                 lhs: 0,
-                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2)],
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Terminal(1),
+                    Symbol::Terminal(2),
+                ],
             }],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
-                TerminalDef { id: 2, name: "c".into(), pattern: "c".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "b".into(),
+                    pattern: "b".into(),
+                },
+                TerminalDef {
+                    id: 2,
+                    name: "c".into(),
+                    pattern: "c".into(),
+                },
             ],
         }
     }
@@ -160,14 +224,32 @@ pub(crate) mod tests {
         // T 0 = a, T 1 = b, T 2 = c
         GrammarDef {
             rules: vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2)] },
-                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)] },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+                },
             ],
             start: 0,
             terminals: vec![
-                TerminalDef { id: 0, name: "a".into(), pattern: "a".into() },
-                TerminalDef { id: 1, name: "b".into(), pattern: "b".into() },
-                TerminalDef { id: 2, name: "c".into(), pattern: "c".into() },
+                TerminalDef {
+                    id: 0,
+                    name: "a".into(),
+                    pattern: "a".into(),
+                },
+                TerminalDef {
+                    id: 1,
+                    name: "b".into(),
+                    pattern: "b".into(),
+                },
+                TerminalDef {
+                    id: 2,
+                    name: "c".into(),
+                    pattern: "c".into(),
+                },
             ],
         }
     }

@@ -106,9 +106,7 @@ impl RangeSet {
 
     /// Iterate over all values in the set.
     pub fn iter_values(&self) -> impl Iterator<Item = u32> + '_ {
-        self.ranges
-            .iter()
-            .flat_map(|&(lo, hi)| lo..=hi)
+        self.ranges.iter().flat_map(|&(lo, hi)| lo..=hi)
     }
 
     /// Access the underlying ranges slice.
@@ -123,7 +121,9 @@ impl RangeSet {
         if lo > hi {
             Self::new()
         } else {
-            Self { ranges: vec![(lo, hi)] }
+            Self {
+                ranges: vec![(lo, hi)],
+            }
         }
     }
 

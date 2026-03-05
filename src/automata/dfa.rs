@@ -216,7 +216,11 @@ fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
             let ref_sig: Vec<u32> = (0..=255u8)
                 .map(|byte| {
                     let t = dfa.get_transition(reference as u32, byte);
-                    if t == DEAD { u32::MAX } else { partition[t as usize] }
+                    if t == DEAD {
+                        u32::MAX
+                    } else {
+                        partition[t as usize]
+                    }
                 })
                 .collect();
 
@@ -226,7 +230,11 @@ fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
                 let sig: Vec<u32> = (0..=255u8)
                     .map(|byte| {
                         let t = dfa.get_transition(s as u32, byte);
-                        if t == DEAD { u32::MAX } else { partition[t as usize] }
+                        if t == DEAD {
+                            u32::MAX
+                        } else {
+                            partition[t as usize]
+                        }
                     })
                     .collect();
                 if sig != ref_sig {
@@ -234,7 +242,7 @@ fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
                 }
             }
 
-            for (_sig, states) in &split_groups {
+            for states in split_groups.values() {
                 let new_class = new_num_classes;
                 new_num_classes += 1;
                 for &s in states {
@@ -256,11 +264,11 @@ fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
     class_remap[start_class as usize] = 0;
     let mut next_id = 1u32;
     for c in 0..num_classes {
-        if class_remap[c as usize] == u32::MAX {
-            if reachable_states.iter().any(|&s| partition[s] == c) {
-                class_remap[c as usize] = next_id;
-                next_id += 1;
-            }
+        if class_remap[c as usize] == u32::MAX
+            && reachable_states.iter().any(|&s| partition[s] == c)
+        {
+            class_remap[c as usize] = next_id;
+            next_id += 1;
         }
     }
     let final_num_states = next_id as usize;

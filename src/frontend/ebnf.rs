@@ -23,9 +23,9 @@
 //! rule_name       # rule reference
 //! ```
 
-use crate::compiler::grammar_def::GrammarDef;
-use crate::frontend::grammar_expr::{lower, GrammarExpr, NamedGrammar};
 use crate::GlrMaskError;
+use crate::compiler::grammar_def::GrammarDef;
+use crate::frontend::grammar_expr::{GrammarExpr, NamedGrammar, lower};
 
 // ---------------------------------------------------------------------------
 // Tokenizer
@@ -118,14 +118,14 @@ impl<'a> Lexer<'a> {
                     None => {
                         return Err(GlrMaskError::GrammarParse(
                             "unexpected end of input in string escape".into(),
-                        ))
+                        ));
                     }
                 },
                 Some(b) => s.push(b as char),
                 None => {
                     return Err(GlrMaskError::GrammarParse(
                         "unterminated string literal".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -155,7 +155,7 @@ impl<'a> Lexer<'a> {
                 None => {
                     return Err(GlrMaskError::GrammarParse(
                         "unterminated character class".into(),
-                    ))
+                    ));
                 }
             }
             first = false;
@@ -249,7 +249,7 @@ impl<'a> Lexer<'a> {
                     return Err(GlrMaskError::GrammarParse(format!(
                         "unexpected character '{}' (0x{:02x}) at position {}",
                         b as char, b, self.pos
-                    )))
+                    )));
                 }
             }
         }
@@ -325,7 +325,7 @@ impl Parser {
                     return Err(GlrMaskError::GrammarParse(format!(
                         "expected rule name, got {:?}",
                         other
-                    )))
+                    )));
                 }
                 None => break,
             };

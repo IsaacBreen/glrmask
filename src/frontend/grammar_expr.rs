@@ -5,8 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::compiler::grammar_def::{GrammarDef, NonterminalId, Rule, Symbol, TerminalDef, TerminalId};
 use crate::GlrMaskError;
+use crate::compiler::grammar_def::{
+    GrammarDef, NonterminalId, Rule, Symbol, TerminalDef, TerminalId,
+};
 
 // ---------------------------------------------------------------------------
 // AST
@@ -265,10 +267,9 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         }
     }
 
-    let start = *lowerer
-        .nt_map
-        .get(&grammar.start)
-        .ok_or_else(|| GlrMaskError::GrammarParse(format!("start rule '{}' not found", grammar.start)))?;
+    let start = *lowerer.nt_map.get(&grammar.start).ok_or_else(|| {
+        GlrMaskError::GrammarParse(format!("start rule '{}' not found", grammar.start))
+    })?;
 
     Ok(GrammarDef {
         rules: lowerer.rules,
@@ -311,10 +312,13 @@ mod tests {
     #[test]
     fn test_lower_simple_sequence() {
         let g = NamedGrammar {
-            rules: vec![("start".into(), GrammarExpr::Sequence(vec![
-                GrammarExpr::Literal(b"a".to_vec()),
-                GrammarExpr::Literal(b"b".to_vec()),
-            ]))],
+            rules: vec![(
+                "start".into(),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"a".to_vec()),
+                    GrammarExpr::Literal(b"b".to_vec()),
+                ]),
+            )],
             start: "start".into(),
         };
         let gdef = lower(&g).unwrap();
@@ -326,10 +330,13 @@ mod tests {
     #[test]
     fn test_lower_choice() {
         let g = NamedGrammar {
-            rules: vec![("start".into(), GrammarExpr::Choice(vec![
-                GrammarExpr::Literal(b"a".to_vec()),
-                GrammarExpr::Literal(b"b".to_vec()),
-            ]))],
+            rules: vec![(
+                "start".into(),
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b"a".to_vec()),
+                    GrammarExpr::Literal(b"b".to_vec()),
+                ]),
+            )],
             start: "start".into(),
         };
         let gdef = lower(&g).unwrap();
@@ -341,9 +348,10 @@ mod tests {
     #[test]
     fn test_lower_optional() {
         let g = NamedGrammar {
-            rules: vec![("start".into(), GrammarExpr::Optional(
-                Box::new(GrammarExpr::Literal(b"a".to_vec())),
-            ))],
+            rules: vec![(
+                "start".into(),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
+            )],
             start: "start".into(),
         };
         let gdef = lower(&g).unwrap();
@@ -354,9 +362,10 @@ mod tests {
     #[test]
     fn test_lower_repeat() {
         let g = NamedGrammar {
-            rules: vec![("start".into(), GrammarExpr::RepeatOne(
-                Box::new(GrammarExpr::Literal(b"a".to_vec())),
-            ))],
+            rules: vec![(
+                "start".into(),
+                GrammarExpr::RepeatOne(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
+            )],
             start: "start".into(),
         };
         let gdef = lower(&g).unwrap();
@@ -368,14 +377,20 @@ mod tests {
     fn test_lower_multi_rule() {
         let g = NamedGrammar {
             rules: vec![
-                ("start".into(), GrammarExpr::Sequence(vec![
-                    GrammarExpr::Ref("item".into()),
-                    GrammarExpr::Literal(b".".to_vec()),
-                ])),
-                ("item".into(), GrammarExpr::Choice(vec![
-                    GrammarExpr::Literal(b"a".to_vec()),
-                    GrammarExpr::Literal(b"b".to_vec()),
-                ])),
+                (
+                    "start".into(),
+                    GrammarExpr::Sequence(vec![
+                        GrammarExpr::Ref("item".into()),
+                        GrammarExpr::Literal(b".".to_vec()),
+                    ]),
+                ),
+                (
+                    "item".into(),
+                    GrammarExpr::Choice(vec![
+                        GrammarExpr::Literal(b"a".to_vec()),
+                        GrammarExpr::Literal(b"b".to_vec()),
+                    ]),
+                ),
             ],
             start: "start".into(),
         };

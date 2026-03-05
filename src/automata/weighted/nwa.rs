@@ -16,7 +16,7 @@ use super::weight::Weight;
 pub type Label = i32;
 
 /// A single NWA state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NwaState {
     /// Optional final (accepting) weight.  `Some(w)` means the state is
     /// accepting and the set of surviving positions is `w`.
@@ -25,16 +25,6 @@ pub struct NwaState {
     pub transitions: BTreeMap<Label, Vec<(u32, Weight)>>,
     /// ε-transitions: (target, weight).
     pub epsilons: Vec<(u32, Weight)>,
-}
-
-impl Default for NwaState {
-    fn default() -> Self {
-        Self {
-            final_weight: None,
-            transitions: BTreeMap::new(),
-            epsilons: Vec::new(),
-        }
-    }
 }
 
 /// A Nondeterministic Weighted Automaton.
@@ -96,9 +86,7 @@ impl Nwa {
     pub fn num_transitions(&self) -> usize {
         self.states
             .iter()
-            .map(|s| {
-                s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len()
-            })
+            .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
             .sum()
     }
 

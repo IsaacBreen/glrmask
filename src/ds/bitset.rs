@@ -16,7 +16,7 @@ pub struct BitSet {
 impl BitSet {
     /// Create a new bitset that can hold at least `len` bits, all initially zero.
     pub fn new(len: usize) -> Self {
-        let num_words = (len + 63) / 64;
+        let num_words = len.div_ceil(64);
         Self {
             words: vec![0u64; num_words],
             len,

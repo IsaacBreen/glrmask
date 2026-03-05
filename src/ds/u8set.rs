@@ -211,11 +211,11 @@ impl fmt::Display for U8Set {
         // Display as byte ranges like [a-z0-9]
         let mut ranges: Vec<(u8, u8)> = Vec::new();
         for b in self.iter() {
-            if let Some(last) = ranges.last_mut() {
-                if b == last.1 + 1 {
-                    last.1 = b;
-                    continue;
-                }
+            if let Some(last) = ranges.last_mut()
+                && b == last.1 + 1
+            {
+                last.1 = b;
+                continue;
             }
             ranges.push((b, b));
         }

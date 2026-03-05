@@ -46,7 +46,7 @@ pub fn minimize_acyclic(dwa: &CompDwa) -> CompDwa {
     // Signature → canonical id.
     let mut sig_map: FxHashMap<Sig, u32> = FxHashMap::default();
 
-    for (_height, states_at_h) in &by_height {
+    for states_at_h in by_height.values() {
         for &sid in states_at_h {
             let st = &dwa.states[sid as usize];
             let sig = state_signature(st, &class);
@@ -61,14 +61,14 @@ pub fn minimize_acyclic(dwa: &CompDwa) -> CompDwa {
                 class[sid as usize] = cid;
 
                 // Build the canonical CompDwaState with remapped targets.
-                let mut new_st = CompDwaState::default();
-                new_st.final_weight = st.final_weight.clone();
+                let mut transitions = BTreeMap::new();
                 for (&label, (target, w)) in &st.transitions {
-                    new_st
-                        .transitions
-                        .insert(label, (class[*target as usize], w.clone()));
+                    transitions.insert(label, (class[*target as usize], w.clone()));
                 }
-                canon_states.push(new_st);
+                canon_states.push(CompDwaState {
+                    final_weight: st.final_weight.clone(),
+                    transitions,
+                });
             }
         }
     }
