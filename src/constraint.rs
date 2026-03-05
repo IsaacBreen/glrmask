@@ -5108,9 +5108,14 @@ impl<'a> GrammarConstraintState<'a> {
     /// Walk the constraint state byte-by-byte to find the longest prefix where
     /// each byte is uniquely determined.
     ///
-    /// Optimized: computes the internal mask directly and checks first bytes
-    /// per internal token (skipping the expensive internal→original bit-vector
-    /// conversion). Uses DWA-based completion check for EOS.
+    /// Two-tier optimization:
+    /// - **Fast path**: Walk the tokenizer DFA directly to batch deterministic
+    ///   bytes (single valid next byte across all active states). Commits the
+    ///   entire run in one call, avoiding the DWA entirely. Falls back to slow
+    ///   path after terminal finalizations for parser validation.
+    /// - **Slow path**: Compute the internal DWA mask and check first bytes per
+    ///   internal token (skipping the expensive internal→original bit-vector
+    ///   conversion). Uses DWA-based + worklist-based completion check for EOS.
     pub(crate) fn compute_forced_byte_prefix(&self) -> Vec<u8> {
         let max_internal = self.parent.parser_dwa_vocab.internal_max_llm_token;
 
