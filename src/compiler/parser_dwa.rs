@@ -204,6 +204,7 @@ pub fn build_parser_nwa(
     let characterizations = characterize_terminal(table, grammar);
     let terminal_dwa = build_terminal_dwa(tokenizer, vocab, vocab_pre, grammar);
     debug_assert_eq!(terminal_dwa.nwa.start_states.len(), terminal_dwa.tsid_roots.len());
+
     let used_terminals = terminals_present_in_terminal_dwa(&terminal_dwa);
     let template_bundles = build_template_bundles(&characterizations, &used_terminals);
     let mut nwa = build_template_nwa_from_bundles(
@@ -216,7 +217,9 @@ pub fn build_parser_nwa(
     nwa
 }
 
-/// Check if a CompDwa is acyclic (no self-loops or back-edges).
+/// Check if a CompDwa is acyclic (no self-loops or back-edges) over *all* states.
+///
+/// Used to decide whether `minimize_acyclic` can be applied.
 fn is_acyclic(dwa: &CompDwa) -> bool {
     let n = dwa.states.len();
     // Quick check: any self-loops?
@@ -257,6 +260,76 @@ fn is_acyclic(dwa: &CompDwa) -> bool {
     true
 }
 
+/// Detect cycles in the non-accepting subgraph that are **reachable from the
+/// DWA's start state**.
+///
+/// This checks whether any cycle can actually arise during constrained
+/// generation.  Accepting states are treated as sinks: once the DWA enters
+/// an accepting state the characterisation is done.  Unreachable states
+/// (disconnected from the start state) are excluded, so structural cycles
+/// that can never appear in a real execution do not trigger this check.
+///
+/// Returns `Some(cycle_path)` if a reachable cycle is found (state indices
+/// starting and ending at the cycle entry point), `None` if acyclic.
+fn find_cycle_in_non_accepting_states(dwa: &CompDwa) -> Option<Vec<usize>> {
+    let n = dwa.states.len();
+    let non_accepting: Vec<bool> = dwa.states.iter().map(|s| s.final_weight.is_none()).collect();
+    let start = dwa.start_state as usize;
+    if start >= n || !non_accepting[start] {
+        return None; // start is accepting or out-of-bounds — nothing to check
+    }
+
+    let mut color = vec![0u8; n]; // 0=white, 1=gray(on path), 2=black(done)
+    let mut parent = vec![usize::MAX; n];
+
+    fn dfs(
+        u: usize,
+        states: &[CompDwaState],
+        non_accepting: &[bool],
+        color: &mut [u8],
+        parent: &mut [usize],
+    ) -> Option<usize> {
+        color[u] = 1;
+        for (v, _) in states[u].transitions.values() {
+            let v = *v as usize;
+            if v >= color.len() || !non_accepting[v] {
+                continue; // accepting states are sinks — don't recurse
+            }
+            match color[v] {
+                1 => {
+                    parent[v] = u;
+                    return Some(v); // back edge → v is the cycle entry
+                }
+                0 => {
+                    parent[v] = u;
+                    if let Some(cs) = dfs(v, states, non_accepting, color, parent) {
+                        return Some(cs);
+                    }
+                }
+                _ => {}
+            }
+        }
+        color[u] = 2;
+        None
+    }
+
+    // Only start from `start_state` — this restricts the search to states
+    // actually reachable in execution.
+    if let Some(cycle_start) = dfs(start, &dwa.states, &non_accepting, &mut color, &mut parent) {
+        // Reconstruct cycle: walk parent pointers back to cycle_start.
+        let mut path = vec![cycle_start];
+        let mut cur = parent[cycle_start];
+        while cur != cycle_start && cur != usize::MAX {
+            path.push(cur);
+            cur = parent[cur];
+        }
+        path.push(cycle_start);
+        path.reverse();
+        return Some(path);
+    }
+    None
+}
+
 /// Build the full parser DWA by constructing the NWA, determinizing, and minimizing.
 pub fn build_parser_dwa(
     table: &GlrTable,
@@ -278,18 +351,43 @@ pub fn build_parser_dwa(
     let dwa = determinize(&nwa);
     eprintln!("[glrmask::dwa] Determinize:    {:.3}s ({} states)", t.elapsed().as_secs_f64(), dwa.num_states());
 
-    // The composed parser DWA may have self-loops in the accepting state due to
-    // tokenizer continuation semantics (multi-byte tokens that stay accepting while
-    // more parser-stack states are consumed).  Only acyclicity of the template DFAs
-    // is guaranteed by grammar normalization (and asserted in build_template_dfa).
-    // Here we minimize only if the DWA happens to be acyclic; otherwise use as-is.
+    // Acyclicity check for non-accepting states — reachable from the DWA start state only.
+    //
+    // The grammar normalization pipeline (ε-elimination + right-recursion elimination)
+    // guarantees that no reachable execution path through non-accepting states can cycle.
+    // Structurally present cycles among states unreachable from the start state are
+    // harmless artefacts and are ignored.
+    //
+    // Cycles that pass through accepting states are also excluded: once the DWA enters
+    // an accepting state the constraint decision is made, so these loops are unreachable
+    // in valid constrained generation.
+    if let Some(cycle) = find_cycle_in_non_accepting_states(&dwa) {
+        panic!(
+            "parser DWA has a graph-reachable cycle in non-accepting states — \
+             the grammar normalization pipeline (epsilon elimination + right recursion elimination) \
+             must ensure no execution-reachable non-accepting cycle exists; \
+             this indicates unbounded consecutive reductions (construction bug)\n\
+             cycle path (state indices): {:?}\n\
+             cycle states:\n{}",
+            cycle,
+            cycle.iter().map(|&s| {
+                let st = &dwa.states[s];
+                let accepting = if st.final_weight.is_some() { "ACCEPTING" } else { "non-accepting" };
+                let edges: Vec<_> = st.transitions.iter().map(|(k, (t, _))| format!("  --[{}]--> {}", k, t)).collect();
+                format!("  s{} [{}]:\n{}", s, accepting, edges.join("\n"))
+            }).collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    // Minimize if the DWA is globally acyclic; use as-is when DLR/continuation cycles are present
+    // (minimize_acyclic requires a globally acyclic DWA).
     let t = Instant::now();
     if is_acyclic(&dwa) {
         let result = minimize_acyclic(&dwa);
         eprintln!("[glrmask::dwa] Minimize:       {:.3}s ({} → {} states)", t.elapsed().as_secs_f64(), dwa.num_states(), result.num_states());
         result
     } else {
-        eprintln!("[glrmask::dwa] Minimize:       skipped (cyclic — continuation semantics)");
+        eprintln!("[glrmask::dwa] Minimize:       skipped (cyclic DWA — DLR/continuation semantics)");
         dwa
     }
 }

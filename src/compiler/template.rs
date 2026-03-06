@@ -7,7 +7,7 @@
 //! should at least build the parser-side bundles explicitly instead of hiding
 //! that structure inside `parser_dwa.rs`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::CompDwa;
@@ -20,8 +20,8 @@ use crate::compiler::parser_dwa::TerminalCharacterization;
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::terminal_dwa::TerminalDwa;
 
-#[derive(Debug, Clone)]
-struct CachedTemplateFragment {
+#[derive(Debug)]
+struct TemplateFragment {
     start_states: Vec<u32>,
     final_states: Vec<(u32, Weight)>,
 }
@@ -31,7 +31,6 @@ struct TemplateCompositionContext<'a> {
     terminal_dwa: &'a TerminalDwa,
     combined: Nwa,
     template_by_terminal: BTreeMap<TerminalId, usize>,
-    instantiation_cache: HashMap<(usize, Weight), CachedTemplateFragment>,
 }
 
 impl<'a> TemplateCompositionContext<'a> {
@@ -53,47 +52,50 @@ impl<'a> TemplateCompositionContext<'a> {
             terminal_dwa,
             combined: Nwa::new(num_tsids, max_token),
             template_by_terminal,
-            instantiation_cache: HashMap::new(),
         }
     }
 
-    fn cached_fragment(
+    fn fresh_fragment(
         &mut self,
         bundle_idx: usize,
         transition_weight: &Weight,
         num_tsids: u32,
         max_token: u32,
-    ) -> CachedTemplateFragment {
-        self.instantiation_cache
-            .entry((bundle_idx, transition_weight.clone()))
-            .or_insert_with(|| {
-                let fragment = instantiate_template_dfa(
-                    &self.bundles[bundle_idx].template_dfa,
-                    transition_weight,
-                    num_tsids,
-                    max_token,
-                );
-                let offset = append_nwa(&mut self.combined, &fragment);
-                let start_states = fragment
-                    .start_states
-                    .iter()
-                    .map(|state| offset + *state)
-                    .collect();
-                let mut final_states = Vec::new();
-                for (fragment_sid, fragment_state) in fragment.states.iter().enumerate() {
-                    let Some(final_weight) = &fragment_state.final_weight else {
-                        continue;
-                    };
-                    let combined_state = offset + fragment_sid as u32;
-                    self.combined.states[combined_state as usize].final_weight = None;
-                    final_states.push((combined_state, final_weight.clone()));
-                }
-                CachedTemplateFragment {
-                    start_states,
-                    final_states,
-                }
-            })
-            .clone()
+    ) -> TemplateFragment {
+        // Always instantiate a fresh fragment rather than caching by (bundle, weight).
+        // Sharing fragment states across multiple terminal-DWA transitions that use
+        // the same template creates cycles in the combined NWA: if transition A→B and
+        // B→C both use the same fragment F, then compose_terminal_state adds
+        //   body_B → F.start  (from A→B)  and  F.final → body_B  (from B→C)
+        // which, combined with the F-internal path F.start →…→ F.final, forms a cycle.
+        // Fresh instantiation gives each transition its own independent states,
+        // eliminating the back-edge opportunity while preserving correct semantics
+        // (determinization + minimization recover the shared structure).
+        let fragment = instantiate_template_dfa(
+            &self.bundles[bundle_idx].template_dfa,
+            transition_weight,
+            num_tsids,
+            max_token,
+        );
+        let offset = append_nwa(&mut self.combined, &fragment);
+        let start_states = fragment
+            .start_states
+            .iter()
+            .map(|state| offset + *state)
+            .collect();
+        let mut final_states = Vec::new();
+        for (fragment_sid, fragment_state) in fragment.states.iter().enumerate() {
+            let Some(final_weight) = &fragment_state.final_weight else {
+                continue;
+            };
+            let combined_state = offset + fragment_sid as u32;
+            self.combined.states[combined_state as usize].final_weight = None;
+            final_states.push((combined_state, final_weight.clone()));
+        }
+        TemplateFragment {
+            start_states,
+            final_states,
+        }
     }
 
     fn compose_terminal_state(
@@ -125,7 +127,7 @@ impl<'a> TemplateCompositionContext<'a> {
             };
 
             for (dest, transition_weight) in targets {
-                let fragment = self.cached_fragment(bundle_idx, transition_weight, num_tsids, max_token);
+                let fragment = self.fresh_fragment(bundle_idx, transition_weight, num_tsids, max_token);
                 let dest_start = self.compose_terminal_state(*dest, body_cache, num_tsids, max_token);
                 for start in &fragment.start_states {
                     self.combined.add_epsilon(body_start, *start, w_all.clone());
