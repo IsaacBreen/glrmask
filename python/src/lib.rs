@@ -7,6 +7,7 @@ use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -77,74 +78,122 @@ impl PyConstraint {
 }
 
 // ---------------------------------------------------------------------------
+// OwnedState — encapsulated unsafe for PyConstraintState
+//
+// Problem: `ConstraintState<'a>` borrows `&'a Constraint`. PyO3 pyclass structs
+// cannot carry lifetime parameters, so we cannot store `ConstraintState<'_>`
+// directly in a pyclass field.
+//
+// Solution: borrow through the `Arc`'s stable heap pointer and manage drop order
+// manually.  The invariants are:
+//
+//   I1. `*constraint` is heap-allocated and never moves (Arc guarantee).
+//   I2. `state` holds a raw pointer to `*constraint`, disguised as the `'static`
+//       lifetime by transmutation.
+//   I3. `state` is dropped BEFORE `constraint`. We enforce this with
+//       `ManuallyDrop<ConstraintState<'static>>` and an explicit `Drop` impl on
+//       `OwnedState` that calls `drop(state)` before `drop(constraint)`.
+//   I4. No borrow of `state` escapes `OwnedState` with a lifetime longer than
+//       `&self`.  Every `ConstraintState` borrow in this module is scoped.
+//
+// Aliasing model: there is exactly one live borrow of `*constraint` at a time —
+// through the `&'static Constraint` stored in `state.constraint`.  The `Arc`
+// itself never mutates `*constraint` after the `Constraint` is constructed.
+// `ConstraintState` only reads from `*constraint`; no mutation of the pointed-to
+// `Constraint` ever occurs through the `state` path.
+// ---------------------------------------------------------------------------
+
+struct OwnedState {
+    state: ManuallyDrop<glrmask::ConstraintState<'static>>,
+    constraint: Arc<glrmask::Constraint>,
+}
+
+impl OwnedState {
+    /// Create a new initial state pinned to `constraint`.
+    fn new(constraint: Arc<glrmask::Constraint>) -> Self {
+        // SAFETY: see struct-level comment.  Arc ensures `*constraint` lives at a
+        // fixed address for at least as long as this `OwnedState` exists (because
+        // we store the Arc here).  `state` is wrapped in ManuallyDrop and dropped
+        // first in `OwnedState::drop`.
+        let state = unsafe {
+            let c: &'static glrmask::Constraint =
+                &*(Arc::as_ptr(&constraint) as *const glrmask::Constraint);
+            ManuallyDrop::new(c.start())
+        };
+        OwnedState { state, constraint }
+    }
+
+    /// Reset to the initial parse position.
+    fn reset(&mut self) {
+        // Drop the existing state first (so the old borrow is released),
+        // then create a fresh one.
+        unsafe { ManuallyDrop::drop(&mut self.state); }
+        let fresh = unsafe {
+            let c: &'static glrmask::Constraint =
+                &*(Arc::as_ptr(&self.constraint) as *const glrmask::Constraint);
+            ManuallyDrop::new(c.start())
+        };
+        self.state = fresh;
+    }
+}
+
+impl Drop for OwnedState {
+    fn drop(&mut self) {
+        // I3: drop `state` (which holds the borrow) BEFORE `constraint` (the owner).
+        unsafe { ManuallyDrop::drop(&mut self.state); }
+        // `self.constraint` (the Arc) drops at the end of this function, after `state`.
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PyConstraintState
-//
-// `ConstraintState<'a>` borrows from `Constraint`. PyO3 pyclass structs must
-// own all their data (no lifetime parameters). We resolve this with an unsafe
-// 'static transmute backed by an Arc:
-//
-// SAFETY invariants:
-//  1. `state` is declared before `constraint` in the struct so it drops first.
-//  2. `Arc` keeps `*constraint` at a stable heap address for the Arc's lifetime.
-//  3. No reference to `state` escapes `PyConstraintState` with an extended lifetime.
 // ---------------------------------------------------------------------------
 
 /// Mutable per-sequence state.
 #[pyclass(name = "ConstraintState")]
 pub struct PyConstraintState {
-    // `state` must be declared BEFORE `constraint` so it drops first.
-    state: glrmask::ConstraintState<'static>,
-    constraint: Arc<glrmask::Constraint>,
+    inner: OwnedState,
     max_token: u32,
-}
-
-impl PyConstraintState {
-    fn make_state(constraint: &Arc<glrmask::Constraint>) -> glrmask::ConstraintState<'static> {
-        // SAFETY: See struct-level comment. The Arc keeps the Constraint at a
-        // stable address for at least as long as this PyConstraintState lives.
-        let c_ref: &glrmask::Constraint = &**constraint;
-        let c_static: &'static glrmask::Constraint =
-            unsafe { &*(c_ref as *const glrmask::Constraint) };
-        c_static.start()
-    }
 }
 
 #[pymethods]
 impl PyConstraintState {
     #[new]
     fn new(constraint: &PyConstraint) -> Self {
-        let state = Self::make_state(&constraint.inner);
-        Self { state, constraint: constraint.inner.clone(), max_token: constraint.max_token }
+        Self {
+            inner: OwnedState::new(constraint.inner.clone()),
+            max_token: constraint.max_token,
+        }
     }
 
     /// Reset to the initial state without recompiling.
     fn reset(&mut self) {
-        self.state = Self::make_state(&self.constraint);
+        self.inner.reset();
     }
 
     /// Commit a token ID (infallible — unknown token leads to empty next mask).
     fn commit(&mut self, token_id: u32) {
-        self.state.commit(token_id);
+        self.inner.state.commit(token_id);
     }
 
     /// Commit raw bytes through the tokenizer DFA.
     fn commit_bytes(&mut self, data: &[u8]) {
-        self.state.commit_bytes(data);
+        self.inner.state.commit_bytes(data);
     }
 
     /// Commit a list of token IDs.
     fn commit_tokens(&mut self, token_ids: Vec<u32>) {
-        self.state.commit_tokens(&token_ids);
+        self.inner.state.commit_tokens(&token_ids);
     }
 
     /// Get the allowed-token mask as a PyBitset.
     fn get_mask_bv(&self) -> PyBitset {
-        PyBitset { words: self.state.mask(), total_tokens: self.max_token + 1 }
+        PyBitset { words: self.inner.state.mask(), total_tokens: self.max_token + 1 }
     }
 
     /// Get the allowed-token mask as a boolean numpy array.
     fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let words = self.state.mask();
+        let words = self.inner.state.mask();
         let n = (self.max_token + 1) as usize;
         let mut bools = vec![false; n];
         for i in 0..n {
@@ -165,7 +214,7 @@ impl PyConstraintState {
             *v = 0;
         }
         let mut buf = vec![0u32; slice.len()];
-        self.state.fill_mask(&mut buf);
+        self.inner.state.fill_mask(&mut buf);
         for (dst, src) in slice.iter_mut().zip(buf.iter()) {
             *dst = *src as i32;
         }
@@ -174,22 +223,22 @@ impl PyConstraintState {
 
     /// Number of i32 words needed for `fill_next_token_bitmask`.
     fn mask_buffer_size_i32(&self) -> usize {
-        self.constraint.mask_len()
+        self.inner.constraint.mask_len()
     }
 
     /// Whether the grammar is fully satisfied (EOS valid).
     fn is_accepting(&self) -> bool {
-        self.state.is_finished()
+        self.inner.state.is_finished()
     }
 
     /// Whether any continuation token is currently allowed.
     fn is_active(&self) -> bool {
-        self.state.mask().iter().any(|&w| w != 0) || self.state.is_finished()
+        self.inner.state.mask().iter().any(|&w| w != 0) || self.inner.state.is_finished()
     }
 
     /// List of deterministically forced token IDs.
     fn get_forced_tokens(&self) -> Vec<u32> {
-        self.state.force()
+        self.inner.state.force()
     }
 }
 
