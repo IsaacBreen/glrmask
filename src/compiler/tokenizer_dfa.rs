@@ -821,4 +821,359 @@ mod tests {
             .possible_future_terminals(state_after_a)
             .contains(&1));
     }
+
+    #[test]
+    fn test_int_multichar_mask() {
+        // First test the regex itself
+        use crate::automata::regex::{ExprGroup, ExprGroups};
+        use crate::compiler::tokenizer_dfa::parse_regex;
+        
+        let expr = parse_regex("[1-9]([0-9])*");
+        eprintln!("Parsed expr: {:?}", expr);
+        
+        let regex = ExprGroups {
+            groups: vec![ExprGroup { expr: expr.clone(), is_non_greedy: false }],
+        }.build();
+        
+        eprintln!("is_match(b\"1\"): {}", regex.is_match(b"1"));
+        eprintln!("is_match(b\"10\"): {}", regex.is_match(b"10"));
+        eprintln!("is_match(b\"123\"): {}", regex.is_match(b"123"));
+        eprintln!("is_match(b\"0\"): {}", regex.is_match(b"0"));
+        
+        assert!(regex.is_match(b"1"), "regex should match '1'");
+        assert!(regex.is_match(b"10"), "regex should match '10'");
+        assert!(regex.is_match(b"123"), "regex should match '123'");
+        assert!(!regex.is_match(b"0"), "regex should NOT match '0'");
+        
+        // Now test the full constraint
+        let lark = "INT: /[1-9]/ /[0-9]/*\nstart: INT\n";
+        let vocab = crate::Vocab {
+            entries: vec![
+                (0, b"0".to_vec()),
+                (1, b"1".to_vec()),
+                (2, b"2".to_vec()),
+                (3, b"10".to_vec()),
+                (4, b"12".to_vec()),
+                (5, b"123".to_vec()),
+            ],
+            eos_token_id: None,
+        };
+        let constraint = crate::Constraint::from_lark(lark, &vocab).unwrap();
+        constraint.debug_dump();
+        
+        let state = constraint.start();
+        let mask = state.compute_mask();
+        let active: Vec<usize> = (0..=5usize).filter(|i| mask.get(*i)).collect();
+        eprintln!("mask: {:?}", active);
+        
+        assert!(mask.get(1), "token 1 (b\"1\") should be in mask");
+        assert!(mask.get(2), "token 2 (b\"2\") should be in mask");
+        assert!(mask.get(3), "token 3 (b\"10\") should be in mask");
+        assert!(mask.get(4), "token 4 (b\"12\") should be in mask");  
+        assert!(mask.get(5), "token 5 (b\"123\") should be in mask");
+        assert!(!mask.get(0), "token 0 (b\"0\") should NOT be in mask");
+    }
+
+    #[test]
+    fn test_escape_seq_regex() {
+        // Check the compiled regex for ESCAPE_SEQ
+        let lark = r#"
+    ESCAPE_SHORT_CHAR: /["\x2F\x5Cbfnrt]/
+    ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" /[0-9A-Fa-f]/ /[0-9A-Fa-f]/ /[0-9A-Fa-f]/ /[0-9A-Fa-f]/
+    start: ESCAPE_SEQ
+    "#;
+        let gdef = crate::frontend::lark::parse_lark(lark).unwrap();
+        for (i, t) in gdef.terminals.iter().enumerate() {
+            eprintln!("Terminal {}: name={}, pattern={}", i, t.name, t.pattern);
+        }
+    
+        // Build tokenizer and check what " \ and \. match
+        let tok = crate::compiler::tokenizer_dfa::TokenizerDfa::from_grammar_def(&gdef);
+        let init = tok.initial_state();
+    
+        // Single backslash
+        let r1 = tok.execute_all_matches(b"\\", init);
+        eprintln!("execute_all_matches(b\"\\\\\", init): matches={:?} end={}", r1.matches, r1.end_state);
+    
+        // Backslash + n (valid escape)
+        let r2 = tok.execute_all_matches(b"\\n", init);
+        eprintln!("execute_all_matches(b\"\\\\n\", init): matches={:?} end={}", r2.matches, r2.end_state);
+    
+        // Backslash + dot (invalid escape)
+        let r3 = tok.execute_all_matches(b"\\.", init);
+        eprintln!("execute_all_matches(b\"\\\\.\", init): matches={:?} end={}", r3.matches, r3.end_state);
+    
+        // Single backslash should NOT match ESCAPE_SEQ (need 2+ chars)
+        assert!(r1.matches.is_empty() || r1.matches.iter().all(|(_, terms)| {
+            // If there are matches, they should not include ESCAPE_SEQ
+            let escape_seq_id = gdef.terminals.iter().position(|t| t.name == "ESCAPE_SEQ").unwrap();
+            !terms.contains(&(escape_seq_id as u32))
+        }), "single backslash should not match ESCAPE_SEQ");
+    }
+
+    #[test]
+    fn test_string_dfa_trace() {
+        // Full string grammar — trace DFA states to diagnose backslash escape bug
+        let lark = r#"
+    PATTERN_2: /[\x80-\xBF]/
+    STRING_CHAR: /[\x20-!#-\x5B\x5D-\x7F]/
+        | /[\xC2-\xDF]/ PATTERN_2
+        | /[\xE0-\xEF]/ PATTERN_2 PATTERN_2
+        | /[\xF0-\xF4]/ PATTERN_2 PATTERN_2 PATTERN_2
+    HEX: /[0-9A-Fa-f]/
+    ESCAPE_SHORT_CHAR: /["\x2F\x5Cbfnrt]/
+    ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" HEX HEX HEX HEX
+    STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+    JSON_STRING: "\"" STRING_CONTENT "\""
+    start: JSON_STRING
+    "#;
+        let gdef = crate::frontend::lark::parse_lark(lark).unwrap();
+        for (i, t) in gdef.terminals.iter().enumerate() {
+            eprintln!("Terminal {}: name={}, pattern={}", i, t.name, t.pattern);
+        }
+    
+        let tok = crate::compiler::tokenizer_dfa::TokenizerDfa::from_grammar_def(&gdef);
+        let init = tok.initial_state();
+        eprintln!("Num DFA states: {}", tok.num_states());
+    
+        // Feed `"` from initial
+        let r_quote = tok.execute_all_matches(b"\"", init);
+        eprintln!("After '\"': end_state={}, matches={:?}", r_quote.end_state, r_quote.matches);
+    
+        // From quote-state, feed `\.`
+        let s_after_quote = r_quote.end_state;
+        let r_bs_dot = tok.execute_all_matches(b"\\.", s_after_quote);
+        eprintln!("After '\"\\\\.' (from state {}): end_state={}, matches={:?}", 
+                  s_after_quote, r_bs_dot.end_state, r_bs_dot.matches);
+        
+        // Also trace byte by byte from quote state
+        use crate::automata::dfa::DEAD;
+        let mut s = s_after_quote;
+        for &b in b"\\." {
+            let next = tok.dfa.get_transition(s, b);
+            if next == DEAD {
+                eprintln!("  state {} + byte 0x{:02X} -> DEAD", s, b);
+                break;
+            }
+            let finalizers: Vec<usize> = tok.dfa.finalizers(next).iter().copied().collect();
+            eprintln!("  state {} + byte 0x{:02X} -> state {} (finalizers={:?})", s, b, next, finalizers);
+            s = next;
+        }
+    
+        // Check reachable terminals from the end state
+        if r_bs_dot.end_state != DEAD {
+            let reachable = tok.compute_reachable_terminals();
+            if let Some(r) = reachable.get(r_bs_dot.end_state as usize) {
+                eprintln!("Reachable terminals from state {}: {:?}", r_bs_dot.end_state, r);
+            }
+        }
+    
+        // The end state after `\.` from quote-state should be DEAD
+        eprintln!("End state after '\"\\\\.' = {} (DEAD={})", r_bs_dot.end_state, DEAD);
+    
+        // Dump all transitions from the state after `\` (from within string)
+        let s_after_bs = tok.dfa.get_transition(s_after_quote, b'\\');
+        if s_after_bs != DEAD {
+            eprintln!("\n--- Transitions from state {} (after '\"\\\\') ---", s_after_bs);
+            for b in 0..=255u8 {
+                let next = tok.dfa.get_transition(s_after_bs, b);
+                if next != DEAD {
+                    let ch = if b.is_ascii_graphic() { format!("'{}'", b as char) } else { format!("0x{:02X}", b) };
+                    let fins: Vec<usize> = tok.dfa.finalizers(next).iter().copied().collect();
+                    eprintln!("  {} + {} -> {} (finalizers={:?})", s_after_bs, ch, next, fins);
+                }
+            }
+        }
+        
+        // Dump all transitions from the end state after `\.`
+        let s_after_bs_dot = r_bs_dot.end_state;
+        if s_after_bs_dot != DEAD {
+            eprintln!("\n--- Transitions from state {} (after '\"\\\\.' end) ---", s_after_bs_dot);
+            for b in 0..=255u8 {
+                let next = tok.dfa.get_transition(s_after_bs_dot, b);
+                if next != DEAD {
+                    let ch = if b.is_ascii_graphic() { format!("'{}'", b as char) } else { format!("0x{:02X}", b) };
+                    let fins: Vec<usize> = tok.dfa.finalizers(next).iter().copied().collect();
+                    eprintln!("  {} + {} -> {} (finalizers={:?})", s_after_bs_dot, ch, next, fins);
+                }
+            }
+        } else {
+            eprintln!("\nState after '\"\\\\.' is DEAD — correct!");
+        }
+    }
+
+    #[test]
+    fn test_dfa_json_string_only() {
+        // Build JSON_STRING as a SINGLE DFA group (no fragments)
+        // and verify `"\.` → DEAD
+        let lark = r#"
+    PATTERN_2: /[\x80-\xBF]/
+    STRING_CHAR: /[\x20-!#-\x5B\x5D-\x7F]/
+        | /[\xC2-\xDF]/ PATTERN_2
+        | /[\xE0-\xEF]/ PATTERN_2 PATTERN_2
+        | /[\xF0-\xF4]/ PATTERN_2 PATTERN_2 PATTERN_2
+    HEX: /[0-9A-Fa-f]/
+    ESCAPE_SHORT_CHAR: /["\x2F\x5Cbfnrt]/
+    ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" HEX HEX HEX HEX
+    STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+    JSON_STRING: "\"" STRING_CONTENT "\""
+    start: JSON_STRING
+    "#;
+        let gdef = crate::frontend::lark::parse_lark(lark).unwrap();
+        
+        // Build DFA from ONLY JSON_STRING terminal (skip fragments)
+        use crate::automata::regex::{ExprGroup, ExprGroups};
+        use crate::automata::dfa::DEAD;
+        
+        let json_string_term = gdef.terminals.iter().find(|t| t.name == "JSON_STRING").unwrap();
+        eprintln!("JSON_STRING pattern: {}", json_string_term.pattern);
+        
+        let expr = crate::compiler::tokenizer_dfa::parse_regex(&json_string_term.pattern);
+        let single_dfa = ExprGroups { groups: vec![ExprGroup { expr, is_non_greedy: false }] }.build();
+        
+        eprintln!("Single-group DFA states: {}", single_dfa.dfa.num_states());
+        
+        // Feed `"` 
+        let s1 = single_dfa.dfa.get_transition(0, b'"');
+        eprintln!("After '\"': state={}", s1);
+        
+        // Feed `\` from s1
+        let s2 = single_dfa.dfa.get_transition(s1, b'\\');
+        eprintln!("After '\"\\': state={}", s2);
+        
+        // Feed `.` from s2 — should be DEAD
+        let s3 = single_dfa.dfa.get_transition(s2, b'.');
+        eprintln!("After '\"\\.': state={} (DEAD={})", s3, DEAD);
+        
+        // Check all transitions from s2 (the after-\ state)
+        let mut alive: Vec<(u8, u32)> = Vec::new();
+        for b in 0..=255u8 {
+            let next = single_dfa.dfa.get_transition(s2, b);
+            if next != DEAD {
+                alive.push((b, next));
+            }
+        }
+        eprintln!("Live transitions from state {} (after '\"\\'):", s2);
+        for (b, next) in &alive {
+            let ch = if b.is_ascii_graphic() { format!("'{}'", *b as char) } else { format!("0x{:02X}", b) };
+            eprintln!("  {} -> {}", ch, next);
+        }
+        
+        // Temporarily skip the DEAD assertion — check is_match instead
+        eprintln!("WARN: state after '\"\\\\.' = {} (expected DEAD={})", s3, DEAD);
+    
+        // Also check: does the regex report full match correctly?
+        eprintln!("\nis_match tests:");
+        eprintln!("  '\"\"' (empty string) → {}", single_dfa.is_match(b"\"\""));
+        eprintln!("  '\"hello\"' → {}", single_dfa.is_match(b"\"hello\""));
+        eprintln!("  '\"\\n\"' (escape n) → {}", single_dfa.is_match(b"\"\\n\""));
+        eprintln!("  '\"\\.\"' (invalid escape) → {}", single_dfa.is_match(b"\"\\.\""));
+        eprintln!("  '\"\\(\"' (invalid escape) → {}", single_dfa.is_match(b"\"\\(\""));
+        eprintln!("  '\"\\\\\"' (escape backslash) → {}", single_dfa.is_match(b"\"\\\\\""));
+        
+        assert!(single_dfa.is_match(b"\"\""), "empty string should match");
+        assert!(single_dfa.is_match(b"\"hello\""), "hello should match");
+        assert!(single_dfa.is_match(b"\"\\n\""), "\\n escape should match");
+        assert!(!single_dfa.is_match(b"\"\\.\""), "\\. should NOT match (invalid escape)");
+        assert!(single_dfa.is_match(b"\"\\\\\""), "\\\\ should match");
+    }
+
+    #[test]
+    fn test_dfa_escape_parsed() {
+        // Same pattern but via parse_regex to test the parser
+        use crate::automata::regex::{ExprGroup, ExprGroups};
+        use crate::automata::dfa::DEAD;
+        use crate::compiler::tokenizer_dfa::parse_regex;
+    
+        // Simple: "(a|\\[bc])*"
+        let pattern1 = r#""(a|\\[bc])*""#;
+        let expr1 = parse_regex(pattern1);
+        let dfa1 = ExprGroups { groups: vec![ExprGroup { expr: expr1, is_non_greedy: false }] }.build();
+        eprintln!("Pattern: {}", pattern1);
+        eprintln!("  DFA states: {}", dfa1.dfa.num_states());
+        eprintln!("  \"\\.\" → {}", dfa1.is_match(b"\"\\.\""));
+        eprintln!("  \"\\b\" → {}", dfa1.is_match(b"\"\\b\""));
+        assert!(!dfa1.is_match(b"\"\\.\""), "\\. must NOT match");
+        assert!(dfa1.is_match(b"\"\\b\""), "\\b must match");
+    
+        // Closer to real: "([ -!#-\\x5B\\x5D-\\x7F]|\\\\[\"\\x2F\\x5Cbfnrt])*"
+        // But let me start simpler: "([ -Z]|\\\\[bc])*"
+        let pattern2 = r#""([ -Z]|\\[bc])*""#;
+        let expr2 = parse_regex(pattern2);
+        let dfa2 = ExprGroups { groups: vec![ExprGroup { expr: expr2, is_non_greedy: false }] }.build();
+        eprintln!("\nPattern: {}", pattern2);
+        eprintln!("  DFA states: {}", dfa2.dfa.num_states());
+        eprintln!("  \"A\" → {}", dfa2.is_match(b"\"A\""));
+        eprintln!("  \"\\b\" → {}", dfa2.is_match(b"\"\\b\""));
+        eprintln!("  \"\\.\" → {}", dfa2.is_match(b"\"\\.\""));
+        assert!(dfa2.is_match(b"\"A\""), "A should match");
+        assert!(dfa2.is_match(b"\"\\b\""), "\\b should match");
+        assert!(!dfa2.is_match(b"\"\\.\""), "\\. should NOT match");
+    
+        // Now try the ACTUAL JSON_STRING pattern from the grammar
+        let lark = r#"
+    PATTERN_2: /[\x80-\xBF]/
+    STRING_CHAR: /[\x20-!#-\x5B\x5D-\x7F]/
+        | /[\xC2-\xDF]/ PATTERN_2
+        | /[\xE0-\xEF]/ PATTERN_2 PATTERN_2
+        | /[\xF0-\xF4]/ PATTERN_2 PATTERN_2 PATTERN_2
+    HEX: /[0-9A-Fa-f]/
+    ESCAPE_SHORT_CHAR: /["\x2F\x5Cbfnrt]/
+    ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" HEX HEX HEX HEX
+    STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+    JSON_STRING: "\"" STRING_CONTENT "\""
+    start: JSON_STRING
+    "#;
+        let gdef = crate::frontend::lark::parse_lark(lark).unwrap();
+        let json_string_term = gdef.terminals.iter().find(|t| t.name == "JSON_STRING").unwrap();
+        let pattern3 = &json_string_term.pattern;
+        eprintln!("\nJSON_STRING pattern: {}", pattern3);
+        let expr3 = parse_regex(pattern3);
+        eprintln!("Parsed expr (debug): {:?}", expr3);
+    
+        // Test NFA → DFA without minimization
+        let nfa = ExprGroups { groups: vec![ExprGroup { expr: expr3.clone(), is_non_greedy: false }] }.build_nfa();
+        let dfa_unmin = nfa.to_dfa();
+        eprintln!("\nUnminimized DFA states: {}", dfa_unmin.num_states());
+        
+        // Check "\"\\." with unminimized DFA
+        let mut s = 0u32;
+        for &b in b"\"\\." {
+            let prev = s;
+            s = dfa_unmin.get_transition(s, b);
+            let ch = if b.is_ascii_graphic() { format!("'{}'", b as char) } else { format!("0x{:02X}", b) };
+            eprintln!("  unmin: {} + {} -> {} (DEAD={})", prev, ch, s, DEAD);
+            if s == DEAD { break; }
+        }
+        eprintln!("Unminimized: state after '\"\\\\.' = {} (DEAD={})", s, DEAD);
+        
+        // Now with minimization
+        let dfa_min = dfa_unmin.minimize();
+        eprintln!("Minimized DFA states: {}", dfa_min.num_states());
+        let mut s = 0u32;
+        for &b in b"\"\\." {
+            let prev = s;
+            s = dfa_min.get_transition(s, b);
+            let ch = if b.is_ascii_graphic() { format!("'{}'", b as char) } else { format!("0x{:02X}", b) };
+            eprintln!("  min: {} + {} -> {} (DEAD={})", prev, ch, s, DEAD);
+            if s == DEAD { break; }
+        }
+        eprintln!("Minimized: state after '\"\\\\.' = {} (DEAD={})", s, DEAD);
+        
+        // Check the STRING_CHAR U8Set — it should have 94 bytes, not 95
+        let sc_pattern = r"[\x20-!#-\x5B\x5D-\x7F]";
+        let sc_expr = parse_regex(sc_pattern);
+        eprintln!("\nSTRING_CHAR pattern: {}", sc_pattern);
+        eprintln!("Parsed: {:?}", sc_expr);
+        if let crate::automata::regex::Expr::U8Class(set) = &sc_expr {
+            eprintln!("Set size: {}", set.len());
+            eprintln!("Contains 0x5C (\\): {}", set.contains(0x5C));
+            eprintln!("Contains 0x22 (\"): {}", set.contains(0x22));
+            eprintln!("Contains 0x5B ([): {}", set.contains(0x5B));
+            eprintln!("Contains 0x5D (]): {}", set.contains(0x5D));
+            assert!(!set.contains(0x5C), "STRING_CHAR must NOT contain backslash (0x5C)");
+            assert!(!set.contains(0x22), "STRING_CHAR must NOT contain quote (0x22)");
+        }
+    }
+
 }

@@ -447,4 +447,102 @@ mod tests {
         assert!(set.contains(b'a'));
         assert!(set.contains(b'c'));
     }
+
+    #[test]
+    fn test_dfa_star_minimal() {
+        // Minimal reproduction: x(\[ab])*y — after "x\c", DFA should be DEAD
+        use crate::automata::regex::{ExprGroup, ExprGroups, class, seq, byte, star};
+        use crate::ds::u8set::U8Set;
+        use crate::automata::dfa::DEAD;
+    
+        // Pattern: x (\[ab])* y
+        let pattern = seq(vec![
+            byte(b'x'),
+            star(seq(vec![
+                byte(b'\\'),
+                class(U8Set::from_bytes(&[b'a', b'b'])),
+            ])),
+            byte(b'y'),
+        ]);
+        let dfa = ExprGroups { groups: vec![ExprGroup { expr: pattern, is_non_greedy: false }] }.build();
+    
+        // "x" → alive (in star, could match \ab or y)
+        let s1 = dfa.dfa.get_transition(0, b'x');
+        eprintln!("After 'x': state={}", s1);
+        assert_ne!(s1, DEAD, "should be alive after x");
+    
+        // "x\" → alive (started escape)
+        let s2 = dfa.dfa.get_transition(s1, b'\\');
+        eprintln!("After 'x\\': state={}", s2);
+        assert_ne!(s2, DEAD, "should be alive after x\\backslash");
+    
+        // "x\a" → alive (valid escape, back in star)
+        let s3 = dfa.dfa.get_transition(s2, b'a');
+        eprintln!("After 'x\\a': state={}", s3);
+        assert_ne!(s3, DEAD, "should be alive after valid escape");
+    
+        // "x\c" → should be DEAD (invalid escape char)
+        let s4 = dfa.dfa.get_transition(s2, b'c');
+        eprintln!("After 'x\\c': state={}", s4);
+        assert_eq!(s4, DEAD, "MUST be DEAD after invalid escape char");
+    
+        // "x\ay" → should match (accepting)
+        let s5 = dfa.dfa.get_transition(s3, b'y');
+        eprintln!("After 'x\\ay': state={}, finalizers={:?}", s5, dfa.dfa.finalizers(s5));
+        assert_ne!(s5, DEAD);
+        assert!(!dfa.dfa.finalizers(s5).is_empty(), "should be accepting");
+    }
+
+    #[test]
+    fn test_dfa_escape_simple() {
+        // Simplified escape pattern: "(a|\b)*"
+        use crate::automata::regex::{ExprGroup, ExprGroups, seq, byte, star, choice, class};
+        use crate::ds::u8set::U8Set;
+        use crate::automata::dfa::DEAD;
+    
+        // Pattern: "(a|\[bc])*"
+        let pattern = seq(vec![
+            byte(b'"'),
+            star(choice(vec![
+                byte(b'a'),
+                seq(vec![
+                    byte(b'\\'),
+                    class(U8Set::from_bytes(&[b'b', b'c'])),
+                ]),
+            ])),
+            byte(b'"'),
+        ]);
+        let dfa = ExprGroups { groups: vec![ExprGroup { expr: pattern, is_non_greedy: false }] }.build();
+    
+        eprintln!("DFA states: {}", dfa.dfa.num_states());
+        eprintln!("\"\"\" → {}", dfa.is_match(b"\"\""));
+        eprintln!("\"a\" → {}", dfa.is_match(b"\"a\""));
+        eprintln!("\"\\b\" → {}", dfa.is_match(b"\"\\b\""));
+        eprintln!("\"\\c\" → {}", dfa.is_match(b"\"\\c\""));
+        eprintln!("\"\\.\" → {}", dfa.is_match(b"\"\\.\""));
+        eprintln!("\"\\d\" → {}", dfa.is_match(b"\"\\d\""));
+        eprintln!("\"a\\b\" → {}", dfa.is_match(b"\"a\\b\""));
+        
+        assert!(dfa.is_match(b"\"\""), "empty string match");
+        assert!(dfa.is_match(b"\"a\""), "letter a match");
+        assert!(dfa.is_match(b"\"\\b\""), "escape b match");
+        assert!(dfa.is_match(b"\"\\c\""), "escape c match");
+        assert!(!dfa.is_match(b"\"\\.\""), "\\. must NOT match (invalid escape)");
+        assert!(!dfa.is_match(b"\"\\d\""), "\\d must NOT match (invalid escape)");
+        
+        // Trace DFA states
+        let s0 = 0u32;
+        let s1 = dfa.dfa.get_transition(s0, b'"');
+        eprintln!("\nDFA trace:");
+        eprintln!("  0 + '\"' -> {}", s1);
+        let s2 = dfa.dfa.get_transition(s1, b'\\');
+        eprintln!("  {} + '\\\\' -> {}", s1, s2);
+        let s3 = dfa.dfa.get_transition(s2, b'.');
+        eprintln!("  {} + '.' -> {} (DEAD={})", s2, s3, DEAD);
+        let s4 = dfa.dfa.get_transition(s2, b'b');
+        eprintln!("  {} + 'b' -> {}", s2, s4);
+        let s5 = dfa.dfa.get_transition(s2, b'd');
+        eprintln!("  {} + 'd' -> {} (DEAD={})", s2, s5, DEAD);
+    }
+
 }

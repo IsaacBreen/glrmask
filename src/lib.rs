@@ -32,21 +32,22 @@
 //! buf[i as usize / 32] & (1u32 << (i as usize % 32)) != 0
 //! ```
 //!
-//! # Module Organization
+//! # Module Organization (internal)
 //!
-//! - [`compiler`]: Compilation pipeline (grammar → DWA → constraint)
-//! - [`frontend`]: Grammar parsing (EBNF, Lark, JSON Schema)
-//! - [`runtime`]: Mask computation and state management
-//! - [`automata`]: Finite automata (DFA, NFA, DWA, NWA)
-//! - [`ds`]: Data structures (bitset, rangeset)
+//! - `compiler`: Compilation pipeline (grammar → DWA → constraint)
+//! - `frontend`: Grammar parsing (EBNF, Lark, JSON Schema)
+//! - `runtime`: Mask computation and state management
+//! - `automata`: Finite automata (DFA, NFA, DWA, NWA)
+//! - `ds`: Data structures (bitset, rangeset)
 
 #![deny(warnings)]
+#![allow(dead_code)] // internal modules contain general-purpose building blocks
 
-pub mod automata;
-pub mod compiler;
-pub mod ds;
-pub mod frontend;
-pub mod runtime;
+pub(crate) mod automata;
+pub(crate) mod compiler;
+pub(crate) mod ds;
+pub(crate) mod frontend;
+pub(crate) mod runtime;
 
 // Re-export public API types
 pub use runtime::{Constraint, ConstraintState};
