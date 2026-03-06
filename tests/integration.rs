@@ -251,7 +251,7 @@ fn test_save_load_roundtrip() {
     let c = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
 
     // Serialize and deserialize.
-    let bytes = c.save().unwrap();
+    let bytes = c.save();
     assert!(!bytes.is_empty());
     let c2 = Constraint::load(&bytes).unwrap();
 

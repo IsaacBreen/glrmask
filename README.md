@@ -67,7 +67,7 @@ Compiled constraints can be saved and loaded to avoid recompilation:
 
 ```rust
 // Save
-let bytes = constraint.save()?;
+let bytes = constraint.save();
 constraint.save_to_file(std::path::Path::new("grammar.bin"))?;
 
 // Load

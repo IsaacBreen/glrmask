@@ -88,9 +88,11 @@ impl Constraint {
     }
 
     /// Serialize this constraint to a byte vector (bincode format).
-    pub fn save(&self) -> crate::Result<Vec<u8>> {
+    ///
+    /// Infallible — panics only if memory is exhausted (which will crash anyway).
+    pub fn save(&self) -> Vec<u8> {
         bincode::serialize(self)
-            .map_err(|e| crate::GlrMaskError::Serialization(format!("serialize: {e}")))
+            .expect("Constraint serialization should never fail for a well-formed constraint")
     }
 
     /// Deserialize a constraint from bytes (bincode format).
@@ -102,7 +104,7 @@ impl Constraint {
     /// Save to a file.
     #[doc(hidden)]
     pub fn save_to_file(&self, path: &std::path::Path) -> crate::Result<()> {
-        let bytes = self.save()?;
+        let bytes = self.save();
         std::fs::write(path, bytes)
             .map_err(|e| crate::GlrMaskError::Serialization(format!("write: {e}")))?;
         Ok(())
