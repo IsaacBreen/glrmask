@@ -55,7 +55,7 @@ impl DWA {
             .and_then(|s| s.parse().ok())
             .unwrap_or(8000);
         if before_ranges > budget_max_entries {
-            eprintln!(
+            crate::debug!(4,
                 "RELAX_RM: skipped ({} entries > {} budget)",
                 before_ranges, budget_max_entries
             );
