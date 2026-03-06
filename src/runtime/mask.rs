@@ -78,13 +78,12 @@ fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, num_tsids: u32) ->
     let mut dwa_state = dwa.start_state;
 
     // Read stack bottom-to-top.
-    for &parser_state in stack {
+    for (_i, &parser_state) in stack.iter().enumerate() {
         let label: Label = parser_state as i32;
         if let Some(&(next_state, ref weight)) =
             dwa.states[dwa_state as usize].transitions.get(&label)
         {
             if next_state as usize >= dwa.states.len() {
-                // Dead state — no valid path.
                 return RangeSet::new();
             }
             acc = acc.intersection(weight);

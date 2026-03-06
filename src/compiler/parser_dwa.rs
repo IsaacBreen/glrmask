@@ -266,9 +266,29 @@ pub fn build_parser_nwa(table: &GlrTable, grammar: &GlrGrammar, vocab: &VocabPre
         // from `from_state`, revealing state `r`, the word pattern is:
         //   [self-loop*, r, any{p-1}, from_state]
         //
+        // Special case: pop_count=0 (ε-production). The revealed state IS from_state
+        // (popping 0 doesn't change the stack top). The pattern is just:
+        //   [self-loop*, from_state]
+        //
         // This means: match arbitrary prefix, then the revealed state, then p-1
         // intermediate states (any label), then from_state at the top.
         for &(from_state, pop_count, nt) in &tc.reduces {
+            if pop_count == 0 {
+                // ε-production: from_state is the revealed state.
+                // Only need to check that from_state is a valid revealed state
+                // (i.e., goto(from_state, nt) leads to an escape or rereduce).
+                let valid_revealed = compute_valid_revealed(nt, tc);
+                if valid_revealed.contains(&from_state) {
+                    let q = nwa.add_state();
+                    let q_final = nwa.add_state();
+                    nwa.add_epsilon(start, q, w_all.clone());
+                    add_skip_self_loop(&mut nwa, q, &w_all);
+                    nwa.add_transition(q, from_state as i32, q_final, token_weight.clone());
+                    nwa.set_final_weight(q_final, token_weight.clone());
+                }
+                continue;
+            }
+
             let valid_revealed = compute_valid_revealed(nt, tc);
 
             for r in valid_revealed {

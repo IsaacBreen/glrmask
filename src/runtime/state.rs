@@ -248,10 +248,23 @@ impl ConstraintState {
     /// 2. Post-filter: simulate `commit()` for each candidate to remove false positives
     pub fn compute_mask(&self, constraint: &Constraint) -> BitSet {
         // Phase 1: DWA overapproximation.
-        let stacks_map: BTreeMap<u32, Vec<Vec<u32>>> = self.state.iter().map(|(&tok_state, gss)| {
+        let mut stacks_map: BTreeMap<u32, Vec<Vec<u32>>> = self.state.iter().map(|(&tok_state, gss)| {
             let stacks: Vec<Vec<u32>> = gss.to_stacks().into_iter().map(|(s, _acc)| s).collect();
             (tok_state, stacks)
         }).collect();
+
+        // ε-reduce closure: extend stacks at initial tokenizer state.
+        // After a commit, stacks may have un-reduced ε-productions at the top.
+        // The DWA expects fully-reduced stacks, so apply all possible ε-reductions
+        // (pop_count=0 rules) to produce additional stack variants.
+        let initial_tok = constraint.tokenizer.initial_state();
+        if let Some(stacks) = stacks_map.get_mut(&initial_tok) {
+            let mut extra: Vec<Vec<u32>> = Vec::new();
+            for stack in stacks.iter() {
+                epsilon_reduce_stacks(&constraint.table, stack, &mut extra);
+            }
+            stacks.extend(extra);
+        }
 
         let mut mask = super::mask::compute_mask(
             &stacks_map,
@@ -271,39 +284,83 @@ impl ConstraintState {
         let reachable = constraint.tokenizer.compute_reachable_terminals();
         let initial_tok = constraint.tokenizer.initial_state();
         let candidates: Vec<usize> = mask.iter_ones().collect();
-        let dwa_count = candidates.len();
-        let mut filtered = 0usize;
+        let _dwa_count = candidates.len();
+        let mut _filtered = 0usize;
         for token_id in candidates {
+            // Skip EOS token in post-filter — handled separately below.
+            if constraint.eos_token_id == Some(token_id as u32) {
+                continue;
+            }
             let mut trial = self.clone();
             if trial.commit(constraint, token_id as u32).is_err() {
                 mask.clear(token_id);
-                filtered += 1;
+                _filtered += 1;
                 continue;
             }
             let viable = has_viable_state(&trial.state, &constraint.table, &reachable, initial_tok);
             if !viable {
                 mask.clear(token_id);
-                filtered += 1;
+                _filtered += 1;
             }
-            // Debug: print info for specific suspicious tokens
-            if token_id == 17405 || token_id == 16792 {
-                let token_bytes = constraint.token_bytes.get(&(token_id as u32));
-                eprintln!(
-                    "[debug] token_id={} bytes={:?} trial_state_entries={} viable={} self_state_entries={}",
-                    token_id,
-                    token_bytes,
-                    trial.state.len(),
-                    viable,
-                    self.state.len(),
-                );
-                for (&ts, gss) in &trial.state {
-                    let stacks = gss.to_stacks();
-                    eprintln!("  tok_state={} num_stacks={} stacks={:?}", ts, stacks.len(), stacks.iter().map(|(s,_)| s.clone()).collect::<Vec<_>>());
+
+        }
+
+
+        // Phase 3: Rescue — trial-commit tokens that the DWA might have missed.
+        //
+        // The DWA overapproximation can miss tokens when cascading reduces
+        // (e.g., _star → _star "," JSON_INTEGER with pop_count > 0) create
+        // stack patterns the determinized DWA doesn't represent.
+        //
+        // For each TSID in the current state, collect all token IDs from
+        // possible_matches that are NOT already in the mask, then trial-commit
+        // each to verify viability.
+        {
+            let mut rescue_candidates = BitSet::new(constraint.max_token as usize + 1);
+            for &tok_state in self.state.keys() {
+                let tsid = if (tok_state as usize) < constraint.state_to_tsid.len() {
+                    constraint.state_to_tsid[tok_state as usize]
+                } else {
+                    continue;
+                };
+                if tsid == u32::MAX || (tsid as usize) >= constraint.possible_matches.len() {
+                    continue;
+                }
+                for token_set in constraint.possible_matches[tsid as usize].values() {
+                    for token_id in token_set.iter_values() {
+                        if token_id <= constraint.max_token && !mask.get(token_id as usize) {
+                            rescue_candidates.set(token_id as usize);
+                        }
+                    }
                 }
             }
+
+            let mut _rescued = 0usize;
+            for token_id in rescue_candidates.iter_ones() {
+                // Skip EOS — handled separately below.
+                if constraint.eos_token_id == Some(token_id as u32) {
+                    continue;
+                }
+                let mut trial = self.clone();
+                if trial.commit(constraint, token_id as u32).is_err() {
+                    continue;
+                }
+                if has_viable_state(&trial.state, &constraint.table, &reachable, initial_tok) {
+                    mask.set(token_id);
+                    _rescued += 1;
+                }
+            }
+
         }
-        if filtered > 0 {
-            eprintln!("[post-filter] DWA candidates: {}, filtered out: {}, remaining: {}", dwa_count, filtered, dwa_count - filtered);
+
+        // EOS token handling: EOS is not a regular byte-sequence token.
+        // Remove it from the DWA/post-filter result and add it back only
+        // when the current state is accepting (grammar allows end-of-input).
+        if let Some(eos_id) = constraint.eos_token_id {
+            mask.clear(eos_id as usize);
+            if self.is_accepting(constraint) {
+                mask.set(eos_id as usize);
+            }
         }
 
         mask
@@ -313,9 +370,13 @@ impl ConstraintState {
     ///
     /// This checks if any of the current parser stacks can reach an Accept
     /// action by processing EOF (which may require reduce cascades first).
+    ///
+    /// Only checks stacks at the initial tokenizer state (clean terminal boundary).
+    /// Stacks at non-initial tokenizer states are mid-match and cannot accept.
     pub fn is_accepting(&self, constraint: &Constraint) -> bool {
         let eof = crate::compiler::glr::grammar::EOF;
-        for gss in self.state.values() {
+        let initial_tok = constraint.tokenizer.initial_state();
+        if let Some(gss) = self.state.get(&initial_tok) {
             for (stack, _acc) in gss.to_stacks() {
                 if can_accept(&constraint.table, &stack, eof) {
                     return true;
@@ -543,6 +604,46 @@ fn step_glr_gss(table: &GlrTable, gss: &ParserGSS, terminal: TerminalId) -> Pars
         shifted = next;
     }
     shifted.into_iter().next().unwrap()
+}
+
+/// Compute ε-reduce closure for a single stack.
+///
+/// For each ε-production (pop_count=0 rule) that can fire at the top state,
+/// push the goto state to produce a new extended stack. This is applied
+/// recursively until no more ε-reductions are possible.
+///
+/// The original stack is NOT included in `out` — only newly produced variants.
+fn epsilon_reduce_stacks(table: &GlrTable, stack: &[u32], out: &mut Vec<Vec<u32>>) {
+    let mut worklist: Vec<Vec<u32>> = vec![stack.to_vec()];
+    let mut seen_tops: std::collections::BTreeSet<Vec<u32>> = std::collections::BTreeSet::new();
+    seen_tops.insert(stack.to_vec());
+
+    while let Some(current) = worklist.pop() {
+        let top_state = match current.last() {
+            Some(&s) => s,
+            None => continue,
+        };
+
+        // Check all terminals for ε-reduce actions at the top state.
+        for t in 0..table.num_terminals {
+            for action in table.actions(top_state, t) {
+                if let Action::Reduce(rule_idx) = action {
+                    let rule = &table.rules[*rule_idx as usize];
+                    if rule.rhs.len() == 0 {
+                        // ε-production: pop 0, goto from top_state for the LHS nonterminal.
+                        if let Some(goto_state) = table.goto_target(top_state, rule.lhs) {
+                            let mut extended = current.clone();
+                            extended.push(goto_state);
+                            if seen_tops.insert(extended.clone()) {
+                                out.push(extended.clone());
+                                worklist.push(extended);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Check if a stack can reach Accept via EOF (possibly after reduce cascades).

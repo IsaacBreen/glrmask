@@ -74,11 +74,22 @@ pub struct Vocab {
 }
 
 impl Vocab {
+    /// Well-known EOS token byte sequence (GPT-2 / GPT-NeoX / LLaMA / etc.).
+    const EOS_BYTES: &[u8] = b"<|endoftext|>";
+
     /// Create a new vocabulary from (id, bytes) pairs.
+    ///
+    /// If `eos_token_id` is `None`, auto-detects by looking for a token whose
+    /// bytes are `<|endoftext|>`.
     pub fn new(entries: Vec<(u32, Vec<u8>)>, eos_token_id: Option<u32>) -> Self {
+        let eos = eos_token_id.or_else(|| {
+            entries.iter().find_map(|(id, bytes)| {
+                if bytes == Self::EOS_BYTES { Some(*id) } else { None }
+            })
+        });
         Self {
             entries,
-            eos_token_id,
+            eos_token_id: eos,
         }
     }
 

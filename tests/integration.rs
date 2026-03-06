@@ -821,3 +821,82 @@ start: JSON_STRING
         assert!(!set.contains(0x22), "STRING_CHAR must NOT contain quote (0x22)");
     }
 }
+
+#[test]
+fn test_array_int_comma_after_digit() {
+    // Test that after "[" then "1", the mask includes "," and "]"
+    let lark = r#"
+DIGIT: /[0-9]/
+NONZERO_DIGIT: /[1-9]/
+INT_PART: "0" | NONZERO_DIGIT DIGIT*
+JSON_INTEGER: "-"? INT_PART
+start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
+"#;
+    // Vocab: 0="[", 1="]", 2=",", 3="1", 4="0", 5="-", 6="23", 7=",-"
+    let entries: Vec<(u32, Vec<u8>)> = vec![
+        (0, b"[".to_vec()),
+        (1, b"]".to_vec()),
+        (2, b",".to_vec()),
+        (3, b"1".to_vec()),
+        (4, b"0".to_vec()),
+        (5, b"-".to_vec()),
+        (6, b"23".to_vec()),
+        (7, b",-".to_vec()),
+    ];
+    let vocab = Vocab::new(entries, None);
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+
+    // Step 0: should allow "[" 
+    let mask0 = s.compute_mask(&c);
+    eprintln!("Step 0 mask: {:?}", mask0.iter_ones().collect::<Vec<_>>());
+    assert!(mask0.get(0), "'[' should be allowed");
+
+    // Commit "["
+    s.commit(&c, 0).unwrap();
+
+    // Step 1: should allow digits and "-"
+    let mask1 = s.compute_mask(&c);
+    eprintln!("Step 1 mask: {:?}", mask1.iter_ones().collect::<Vec<_>>());
+    assert!(mask1.get(3), "'1' should be allowed after '['");
+
+    // Commit "1" — trace what the tokenizer does
+    eprintln!("\n--- Tracing tokenizer for '1' ---");
+    c.debug_tokenizer(b"1", c.tokenizer_initial_state());
+    
+    // Also trace ",", "]"
+    eprintln!("\n--- Tracing tokenizer for ',' ---");
+    c.debug_tokenizer(b",", c.tokenizer_initial_state());
+    eprintln!("\n--- Tracing tokenizer for ']' ---");
+    c.debug_tokenizer(b"]", c.tokenizer_initial_state());
+    
+    // Debug dump to see terminal IDs and DFA structure
+    c.debug_dump();
+    
+    s.commit(&c, 3).unwrap();
+
+    // Step 2: should allow ",", "]", ",-", and digit tokens
+    let mask2 = s.compute_mask(&c);
+    let allowed: Vec<usize> = mask2.iter_ones().collect();
+    eprintln!("\nStep 2 mask after '[1': {:?}", allowed);
+    
+    assert!(mask2.get(2), "',' (id=2) should be allowed after '[1'");
+    assert!(mask2.get(1), "']' (id=1) should be allowed after '[1'");
+    assert!(mask2.get(7), "',-' (id=7) should be allowed after '[1'");
+
+    // Commit ","
+    s.commit(&c, 2).unwrap();
+    let mask3 = s.compute_mask(&c);
+    eprintln!("Step 3 mask after '[1,': {:?}", mask3.iter_ones().collect::<Vec<_>>());
+    assert!(mask3.get(3), "'1' should be allowed after ','");
+
+    // Commit "2" (using token "1" which is id=3 with bytes "1")
+    // Actually, let's commit token 3 (bytes="1") representing a second digit
+    s.commit(&c, 3).unwrap();
+    let mask4 = s.compute_mask(&c);
+    let allowed4: Vec<usize> = mask4.iter_ones().collect();
+    eprintln!("Step 4 mask after '[1,1': {:?}", allowed4);
+    assert!(mask4.get(2), "',' (id=2) should be allowed after '[1,1'");
+    assert!(mask4.get(1), "']' (id=1) should be allowed after '[1,1'");
+    assert!(mask4.get(7), "',-' (id=7) should be allowed after '[1,1'");
+}
