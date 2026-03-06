@@ -2,13 +2,60 @@
 //!
 //! Exposes `Constraint` and `ConstraintState` to Python, matching the interface
 //! expected by the CFA (constraint-framework-analysis) benchmarking harness.
+//!
+//! # Lifetime handling
+//!
+//! `glrmask::ConstraintState<'a>` borrows `&'a Constraint`. PyO3 pyclass structs
+//! must be `'static`, so we cannot store a `ConstraintState<'_>` directly.
+//!
+//! Solution: pair the `ConstraintState<'a>` with its `Arc<Constraint>` owner inside
+//! a [`self_cell::self_cell!`] struct (`OwnedState`). `self_cell` generates the
+//! necessary unsafe bookkeeping internally (owner outlives dependent, stable
+//! address via heap allocation) and exposes a fully safe public API. No handwritten
+//! `unsafe` blocks appear in this file.
 
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::mem::ManuallyDrop;
+use self_cell::self_cell;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// OwnedState — `self_cell`-generated safe owner/dependent pair.
+//
+// Owner: `Arc<glrmask::Constraint>` — heap-stable, cheap to clone (for reset).
+// Dependent: `glrmask::ConstraintState<'owner>` — borrows the dereffed Constraint.
+//
+// `#[not_covariant]` is required here because we need mutable access via
+// `with_dependent_mut`. (Declaring a covariant type as not_covariant is safe —
+// it just forgoes the covariance optimisation.)
+//
+// `self_cell!` requires the dependent to be a plain identifier, so we introduce
+// a type alias below.
+// ---------------------------------------------------------------------------
+
+// Type alias required by `self_cell!` macro (it expects `$Dependent:ident`).
+type ConstraintState<'a> = glrmask::ConstraintState<'a>;
+
+self_cell!(
+    struct OwnedState {
+        owner: Arc<glrmask::Constraint>,
+        #[not_covariant]
+        dependent: ConstraintState,
+    }
+);
+
+impl OwnedState {
+    /// Build a fresh initial state from the given `Arc`.
+    fn from_arc(arc: Arc<glrmask::Constraint>) -> Self {
+        // `arc_ref` is `&Arc<Constraint>`; deref into `&Constraint` via `Arc::Deref`.
+        // The resulting `ConstraintState<'_>` borrows through `arc_ref` whose
+        // lifetime is tied to the cell — `self_cell` ensures `owner` outlives
+        // `dependent`.
+        OwnedState::new(arc, |arc_ref| arc_ref.start())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PyConstraint
@@ -31,7 +78,7 @@ impl PyConstraint {
         token_to_id: &Bound<'_, PyDict>,
         max_token_id: u32,
     ) -> PyResult<Self> {
-        let vocab = dict_to_vocab(token_to_id, max_token_id)?;
+        let vocab = dict_to_vocab(token_to_id)?;
         let constraint = glrmask::Constraint::from_lark(lark_source, &vocab)
             .map_err(|e| PyValueError::new_err(format!("{e}")))?;
         Ok(Self { inner: Arc::new(constraint), max_token: max_token_id })
@@ -44,7 +91,7 @@ impl PyConstraint {
         token_to_id: &Bound<'_, PyDict>,
         max_token_id: u32,
     ) -> PyResult<Self> {
-        let vocab = dict_to_vocab(token_to_id, max_token_id)?;
+        let vocab = dict_to_vocab(token_to_id)?;
         let constraint = glrmask::Constraint::from_ebnf(ebnf_source, &vocab)
             .map_err(|e| PyValueError::new_err(format!("{e}")))?;
         Ok(Self { inner: Arc::new(constraint), max_token: max_token_id })
@@ -57,18 +104,18 @@ impl PyConstraint {
         token_to_id: &Bound<'_, PyDict>,
         max_token_id: u32,
     ) -> PyResult<Self> {
-        let vocab = dict_to_vocab(token_to_id, max_token_id)?;
+        let vocab = dict_to_vocab(token_to_id)?;
         let constraint = glrmask::Constraint::from_json_schema(schema, &vocab)
             .map_err(|e| PyValueError::new_err(format!("{e}")))?;
         Ok(Self { inner: Arc::new(constraint), max_token: max_token_id })
     }
 
-    /// Save to bytes (bincode). Infallible.
+    /// Serialise to bytes (bincode). Infallible.
     fn save(&self) -> Vec<u8> {
         self.inner.save()
     }
 
-    /// Load from bytes (bincode).
+    /// Deserialise from bytes (bincode).
     #[staticmethod]
     fn load(data: &[u8], max_token_id: u32) -> PyResult<Self> {
         let constraint = glrmask::Constraint::load(data)
@@ -78,78 +125,10 @@ impl PyConstraint {
 }
 
 // ---------------------------------------------------------------------------
-// OwnedState — encapsulated unsafe for PyConstraintState
-//
-// Problem: `ConstraintState<'a>` borrows `&'a Constraint`. PyO3 pyclass structs
-// cannot carry lifetime parameters, so we cannot store `ConstraintState<'_>`
-// directly in a pyclass field.
-//
-// Solution: borrow through the `Arc`'s stable heap pointer and manage drop order
-// manually.  The invariants are:
-//
-//   I1. `*constraint` is heap-allocated and never moves (Arc guarantee).
-//   I2. `state` holds a raw pointer to `*constraint`, disguised as the `'static`
-//       lifetime by transmutation.
-//   I3. `state` is dropped BEFORE `constraint`. We enforce this with
-//       `ManuallyDrop<ConstraintState<'static>>` and an explicit `Drop` impl on
-//       `OwnedState` that calls `drop(state)` before `drop(constraint)`.
-//   I4. No borrow of `state` escapes `OwnedState` with a lifetime longer than
-//       `&self`.  Every `ConstraintState` borrow in this module is scoped.
-//
-// Aliasing model: there is exactly one live borrow of `*constraint` at a time —
-// through the `&'static Constraint` stored in `state.constraint`.  The `Arc`
-// itself never mutates `*constraint` after the `Constraint` is constructed.
-// `ConstraintState` only reads from `*constraint`; no mutation of the pointed-to
-// `Constraint` ever occurs through the `state` path.
-// ---------------------------------------------------------------------------
-
-struct OwnedState {
-    state: ManuallyDrop<glrmask::ConstraintState<'static>>,
-    constraint: Arc<glrmask::Constraint>,
-}
-
-impl OwnedState {
-    /// Create a new initial state pinned to `constraint`.
-    fn new(constraint: Arc<glrmask::Constraint>) -> Self {
-        // SAFETY: see struct-level comment.  Arc ensures `*constraint` lives at a
-        // fixed address for at least as long as this `OwnedState` exists (because
-        // we store the Arc here).  `state` is wrapped in ManuallyDrop and dropped
-        // first in `OwnedState::drop`.
-        let state = unsafe {
-            let c: &'static glrmask::Constraint =
-                &*(Arc::as_ptr(&constraint) as *const glrmask::Constraint);
-            ManuallyDrop::new(c.start())
-        };
-        OwnedState { state, constraint }
-    }
-
-    /// Reset to the initial parse position.
-    fn reset(&mut self) {
-        // Drop the existing state first (so the old borrow is released),
-        // then create a fresh one.
-        unsafe { ManuallyDrop::drop(&mut self.state); }
-        let fresh = unsafe {
-            let c: &'static glrmask::Constraint =
-                &*(Arc::as_ptr(&self.constraint) as *const glrmask::Constraint);
-            ManuallyDrop::new(c.start())
-        };
-        self.state = fresh;
-    }
-}
-
-impl Drop for OwnedState {
-    fn drop(&mut self) {
-        // I3: drop `state` (which holds the borrow) BEFORE `constraint` (the owner).
-        unsafe { ManuallyDrop::drop(&mut self.state); }
-        // `self.constraint` (the Arc) drops at the end of this function, after `state`.
-    }
-}
-
-// ---------------------------------------------------------------------------
 // PyConstraintState
 // ---------------------------------------------------------------------------
 
-/// Mutable per-sequence state.
+/// Mutable per-sequence parse state.
 #[pyclass(name = "ConstraintState")]
 pub struct PyConstraintState {
     inner: OwnedState,
@@ -161,39 +140,42 @@ impl PyConstraintState {
     #[new]
     fn new(constraint: &PyConstraint) -> Self {
         Self {
-            inner: OwnedState::new(constraint.inner.clone()),
+            inner: OwnedState::from_arc(constraint.inner.clone()),
             max_token: constraint.max_token,
         }
     }
 
-    /// Reset to the initial state without recompiling.
+    /// Reset to the initial parse position.
     fn reset(&mut self) {
-        self.inner.reset();
+        // Clone the Arc (O(1)), then replace the cell with a fresh initial state.
+        let arc = self.inner.borrow_owner().clone();
+        self.inner = OwnedState::from_arc(arc);
     }
 
-    /// Commit a token ID (infallible — unknown token leads to empty next mask).
+    /// Commit a token ID (infallible — unknown token leads to an empty next mask).
     fn commit(&mut self, token_id: u32) {
-        self.inner.state.commit(token_id);
+        self.inner.with_dependent_mut(|_owner, state| state.commit(token_id));
     }
 
     /// Commit raw bytes through the tokenizer DFA.
     fn commit_bytes(&mut self, data: &[u8]) {
-        self.inner.state.commit_bytes(data);
+        self.inner.with_dependent_mut(|_owner, state| state.commit_bytes(data));
     }
 
     /// Commit a list of token IDs.
     fn commit_tokens(&mut self, token_ids: Vec<u32>) {
-        self.inner.state.commit_tokens(&token_ids);
+        self.inner.with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids));
     }
 
-    /// Get the allowed-token mask as a PyBitset.
+    /// Get the allowed-token mask as a `Bitset` object.
     fn get_mask_bv(&self) -> PyBitset {
-        PyBitset { words: self.inner.state.mask(), total_tokens: self.max_token + 1 }
+        let words = self.inner.with_dependent(|_owner, state| state.mask());
+        PyBitset { words, total_tokens: self.max_token + 1 }
     }
 
     /// Get the allowed-token mask as a boolean numpy array.
     fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let words = self.inner.state.mask();
+        let words = self.inner.with_dependent(|_owner, state| state.mask());
         let n = (self.max_token + 1) as usize;
         let mut bools = vec![false; n];
         for i in 0..n {
@@ -213,8 +195,9 @@ impl PyConstraintState {
         for v in slice.iter_mut() {
             *v = 0;
         }
-        let mut buf = vec![0u32; slice.len()];
-        self.inner.state.fill_mask(&mut buf);
+        let n = slice.len();
+        let mut buf = vec![0u32; n];
+        self.inner.with_dependent(|_owner, state| state.fill_mask(&mut buf));
         for (dst, src) in slice.iter_mut().zip(buf.iter()) {
             *dst = *src as i32;
         }
@@ -223,22 +206,24 @@ impl PyConstraintState {
 
     /// Number of i32 words needed for `fill_next_token_bitmask`.
     fn mask_buffer_size_i32(&self) -> usize {
-        self.inner.constraint.mask_len()
+        self.inner.borrow_owner().mask_len()
     }
 
-    /// Whether the grammar is fully satisfied (EOS valid).
+    /// Whether the grammar is fully satisfied (EOS is valid next token).
     fn is_accepting(&self) -> bool {
-        self.inner.state.is_finished()
+        self.inner.with_dependent(|_owner, state| state.is_finished())
     }
 
-    /// Whether any continuation token is currently allowed.
+    /// Whether any continuation token is currently allowed (or EOS is valid).
     fn is_active(&self) -> bool {
-        self.inner.state.mask().iter().any(|&w| w != 0) || self.inner.state.is_finished()
+        self.inner.with_dependent(|_owner, state| {
+            state.mask().iter().any(|&w| w != 0) || state.is_finished()
+        })
     }
 
-    /// List of deterministically forced token IDs.
+    /// List of deterministically forced token IDs (or empty if ambiguous/blocked).
     fn get_forced_tokens(&self) -> Vec<u32> {
-        self.inner.state.force()
+        self.inner.with_dependent(|_owner, state| state.force())
     }
 }
 
@@ -256,34 +241,47 @@ pub struct PyBitset {
 
 #[pymethods]
 impl PyBitset {
-    /// Return sorted list of allowed token IDs.
+    /// Return a sorted list of allowed token IDs.
     fn to_indices(&self) -> Vec<usize> {
         let limit = self.total_tokens as usize;
         let mut out = Vec::new();
         for (wi, &word) in self.words.iter().enumerate() {
-            if word == 0 { continue; }
+            if word == 0 {
+                continue;
+            }
             for bit in 0..32u32 {
                 if (word >> bit) & 1 != 0 {
                     let id = wi * 32 + bit as usize;
-                    if id < limit { out.push(id); }
+                    if id < limit {
+                        out.push(id);
+                    }
                 }
             }
         }
         out
     }
 
-    /// Return list of (start, end) inclusive ranges of allowed token IDs.
+    /// Return list of `(start, end)` inclusive ranges of allowed token IDs.
     fn to_ranges(&self) -> Vec<(usize, usize)> {
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         let mut run: Option<(usize, usize)> = None;
         for id in self.to_indices() {
             match run {
-                None => { run = Some((id, id)); }
-                Some((s, e)) if id == e + 1 => { run = Some((s, id)); }
-                Some((s, e)) => { ranges.push((s, e)); run = Some((id, id)); }
+                None => {
+                    run = Some((id, id));
+                }
+                Some((s, e)) if id == e + 1 => {
+                    run = Some((s, id));
+                }
+                Some((s, e)) => {
+                    ranges.push((s, e));
+                    run = Some((id, id));
+                }
             }
         }
-        if let Some((s, e)) = run { ranges.push((s, e)); }
+        if let Some((s, e)) = run {
+            ranges.push((s, e));
+        }
         ranges
     }
 
@@ -299,8 +297,11 @@ impl PyBitset {
     fn __repr__(&self) -> String {
         let ones: Vec<usize> = self.to_indices().into_iter().take(10).collect();
         let total = self.__len__();
-        if total <= 10 { format!("Bitset({ones:?})") }
-        else { format!("Bitset({ones:?}... [{total} set])") }
+        if total <= 10 {
+            format!("Bitset({ones:?})")
+        } else {
+            format!("Bitset({ones:?}... [{total} set])")
+        }
     }
 }
 
@@ -308,7 +309,7 @@ impl PyBitset {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>, _max_token_id: u32) -> PyResult<glrmask::Vocab> {
+fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     let mut entries = Vec::new();
     for (key, value) in token_to_id.iter() {
         let token_bytes: Vec<u8> = key.extract()?;
