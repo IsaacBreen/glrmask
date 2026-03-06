@@ -106,8 +106,8 @@ mod tests {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
-        assert!(constraint.num_dwa_states() > 0);
-        assert!(constraint.num_tsids() > 0);
+        assert!(constraint.parser_dwa.num_states() > 0);
+        assert!(constraint.num_tsids > 0);
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
-        assert!(constraint.num_dwa_states() > 0);
+        assert!(constraint.parser_dwa.num_states() > 0);
     }
 
     #[test]
@@ -125,8 +125,8 @@ mod tests {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
-        assert!(constraint.num_dwa_states() > 0);
-        assert!(constraint.num_parser_states() > 0);
+        assert!(constraint.parser_dwa.num_states() > 0);
+        assert!(constraint.table.num_states > 0);
     }
 
     #[test]

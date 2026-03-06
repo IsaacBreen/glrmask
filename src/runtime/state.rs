@@ -114,21 +114,6 @@ impl Constraint {
         Self::load(&bytes)
     }
 
-    /// Number of DWA states.
-    pub fn num_dwa_states(&self) -> u32 {
-        self.parser_dwa.num_states()
-    }
-
-    /// Number of parser states (GLR table states).
-    pub fn num_parser_states(&self) -> u32 {
-        self.table.num_states
-    }
-
-    /// Number of token-set IDs.
-    pub fn num_tsids(&self) -> u32 {
-        self.num_tsids
-    }
-
     /// Create a new `ConstraintState` at the start position.
     pub fn start(&self) -> ConstraintState {
         // The initial parser state is 0.
@@ -241,11 +226,6 @@ pub struct ConstraintState {
 }
 
 impl ConstraintState {
-    /// Whether the constraint is still active (has valid parse stacks).
-    pub fn is_active(&self) -> bool {
-        !self.state.is_empty()
-    }
-
     /// Compute the allowed-token mask.
     ///
     /// Returns a BitSet where bit `i` is set iff token `i` is allowed.
