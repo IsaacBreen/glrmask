@@ -275,7 +275,7 @@ impl<'a> ConstraintState<'a> {
             }
             let mut trial = self.clone();
             trial.commit(token_id as u32);
-            let viable = has_viable_state(&trial.state, &self.constraint.table, &reachable, initial_tok);
+            let viable = has_viable_state(&trial.state, &self.constraint.table, &reachable, initial_tok, &self.constraint.tokenizer.dfa);
             if !viable {
                 mask.clear(token_id);
                 _filtered += 1;
@@ -321,7 +321,8 @@ impl<'a> ConstraintState<'a> {
                 }
                 let mut trial = self.clone();
                 trial.commit(token_id as u32);
-                if has_viable_state(&trial.state, &self.constraint.table, &reachable, initial_tok) {
+                let viable = has_viable_state(&trial.state, &self.constraint.table, &reachable, initial_tok, &self.constraint.tokenizer.dfa);
+                if viable {
                     mask.set(token_id);
                     _rescued += 1;
                 }
@@ -763,6 +764,7 @@ fn has_viable_state(
     table: &GlrTable,
     reachable: &[std::collections::BTreeSet<crate::compiler::grammar_def::TerminalId>],
     initial_tok_state: u32,
+    tok_dfa: &crate::automata::dfa::Dfa,
 ) -> bool {
     if state.is_empty() {
         return false;
@@ -783,15 +785,31 @@ fn has_viable_state(
 
         // Non-initial tok state: check if any reachable terminal from this
         // tokenizer state has valid parser actions for any top state.
+        //
+        // IMPORTANT: use terminals reachable by reading AT LEAST ONE MORE BYTE
+        // from tok_state (not tok_state's own accepted terminals). The current
+        // tok_state may itself be accepting (it fired a terminal that brought us
+        // here), but that terminal has already been processed. What matters is
+        // whether further bytes can deliver more terminals to the parser.
         let top_states = gss.peek();
 
-        if let Some(reachable_terms) = reachable.get(tok_state as usize) {
-            for &terminal in reachable_terms {
-                for &top in &top_states {
-                    let actions = table.actions(top, terminal);
-                    if !actions.is_empty() {
-                        return true;
-                    }
+        // Collect reachable terminals via at least one transition from tok_state.
+        let mut reachable_via_transition: std::collections::BTreeSet<crate::compiler::grammar_def::TerminalId> = std::collections::BTreeSet::new();
+        for byte in 0u8..=255 {
+            let next = tok_dfa.get_transition(tok_state, byte);
+            if next == crate::automata::dfa::DEAD || next as usize >= reachable.len() {
+                continue;
+            }
+            if let Some(terms) = reachable.get(next as usize) {
+                reachable_via_transition.extend(terms);
+            }
+        }
+
+        for &terminal in &reachable_via_transition {
+            for &top in &top_states {
+                let actions = table.actions(top, terminal);
+                if !actions.is_empty() {
+                    return true;
                 }
             }
         }

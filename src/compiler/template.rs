@@ -290,12 +290,14 @@ fn build_template_dfa(characterization: &TerminalCharacterization) -> TemplateDf
     let mut nwa = build_template_structure_nwa(characterization);
     resolve_negative_codes_in_nwa(&mut nwa);
     let dfa = determinize(&nwa);
+    assert!(
+        is_acyclic(&dfa),
+        "template DFA is cyclic after determinization — \
+         the grammar normalization pipeline (epsilon elimination + right recursion elimination) \
+         must produce an acyclic NWA/DWA; a cyclic result indicates a construction bug"
+    );
     TemplateDfa {
-        dfa: if is_acyclic(&dfa) {
-            minimize_acyclic(&dfa)
-        } else {
-            dfa
-        },
+        dfa: minimize_acyclic(&dfa),
     }
 }
 

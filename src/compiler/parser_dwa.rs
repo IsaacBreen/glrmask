@@ -278,15 +278,18 @@ pub fn build_parser_dwa(
     let dwa = determinize(&nwa);
     eprintln!("[glrmask::dwa] Determinize:    {:.3}s ({} states)", t.elapsed().as_secs_f64(), dwa.num_states());
 
-    // Minimize only if the DWA is acyclic. The skip-all-labels self-loops
-    // in the NWA produce cyclic DWAs, and minimize_acyclic breaks on cycles.
+    // The composed parser DWA may have self-loops in the accepting state due to
+    // tokenizer continuation semantics (multi-byte tokens that stay accepting while
+    // more parser-stack states are consumed).  Only acyclicity of the template DFAs
+    // is guaranteed by grammar normalization (and asserted in build_template_dfa).
+    // Here we minimize only if the DWA happens to be acyclic; otherwise use as-is.
     let t = Instant::now();
     if is_acyclic(&dwa) {
         let result = minimize_acyclic(&dwa);
         eprintln!("[glrmask::dwa] Minimize:       {:.3}s ({} → {} states)", t.elapsed().as_secs_f64(), dwa.num_states(), result.num_states());
         result
     } else {
-        eprintln!("[glrmask::dwa] Minimize:       skipped (cyclic)");
+        eprintln!("[glrmask::dwa] Minimize:       skipped (cyclic — continuation semantics)");
         dwa
     }
 }

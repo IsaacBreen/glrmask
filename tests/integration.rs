@@ -1164,12 +1164,6 @@ fn test_ported_js_like_mask_after_commit_bytes() {
 /// Grammar program ::= unary_expression unary_expression '$';
 /// unary_expression ::= ('!' unary_expression | 'X') ';'?.
 /// After commit_bytes("X") no vocab token (only ";;") should satisfy the grammar.
-///
-/// NOTE: The old system (`test_js_like_grammar_initial_mask_minimized`) asserted an empty
-/// mask here. The new DWA over-approximates and allows ";;" as a false positive. Since this
-/// is a known precision difference (not a soundness bug — no invalid generation occurs, only
-/// an over-approximation), the test is left as documentation with the new actual behavior.
-/// KNOWN FAILING: DWA over-approximation allows ';;' as false positive; tracked for fix pass.
 #[test]
 fn test_ported_js_like_mask_minimized() {
     // IDs: ";;"→0  (the only token)
@@ -1530,10 +1524,9 @@ STR_CHAR: /[A-Za-z0-9 \[\]\-:{}@.]/
 /// inside a JSON string character class after committing `{"`, while ASCII `a` IS allowed.
 /// Vocab includes `"`, `:`, and `}` so grammar completion is possible.
 ///
-/// KNOWN FAILING: The new system treats `/[^\x00-\x1F"\\]/` as a byte-range match,
-/// so byte 0xA1 (which is > 0x1F and not `"` or `\`) is incorrectly allowed.
-/// The old system was UTF-8-aware and rejected standalone continuation bytes.
-/// Root cause: regex character class in Lark frontend is not UTF-8-gated.
+/// Tests that negated character classes like `/[^\x00-\x1F"\\]/` are handled
+/// in a UTF-8-aware manner: only valid UTF-8 sequences are matched, not arbitrary
+/// bytes.  In particular, standalone continuation bytes (0x80–0xBF) are rejected.
 #[test]
 fn test_ported_json_string_rejects_invalid_utf8() {
     let lark = r#"start: "{" JSON_STRING ":" JSON_STRING "}"
@@ -1727,11 +1720,10 @@ EOF ::= '$'"#,
 /// Grammar: `s ::= e; e ::= e '+' | t; t ::= t '*' | I; I ::= 'i'` (left-recursive E/T with I).
 /// Vocab: only `+`=0.
 /// Initial mask: `{}` — `+` cannot start any string (`i` prefix needed, not in vocab).
-/// After `commit_bytes("i")`: old system gives `{0}` (prefix-consistent extension);
-/// new system completability-checks and may give `{}` (no completion reachable with vocab `{+}`).
-///
-/// KNOWN FAILING: New system rejects `+` after `i` because no vocab token can complete
-/// a new `e` following the `+`. Old system used prefix-consistency, not completability.
+/// After `commit_bytes("i")`: token `+` extends the expression via `e ::= e '+'`.
+/// This works because `i` completes an `I` which completes `t` and then `e`; `+` is then
+/// a valid continuation because acceptance of the full grammar requires another term after `+`,
+/// and we allow speculative extension (prefix-consistent).
 #[test]
 fn test_ported_expression_minimized() {
     let vocab = Vocab::new(vec![(0u32, b"+".to_vec())], None);

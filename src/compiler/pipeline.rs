@@ -13,7 +13,7 @@
 //! 7. Package as `Constraint`
 
 use crate::Vocab;
-use crate::compiler::glr::grammar::GlrGrammar;
+use crate::compiler::glr::grammar::{GlrGrammar, normalize_for_mask};
 use crate::compiler::glr::table::GlrTable;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::compiler::parser_dwa::build_parser_dwa;
@@ -44,27 +44,30 @@ use crate::runtime::Constraint;
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     use std::time::Instant;
 
-    // 1. Build augmented GLR grammar.
+    // 1. Normalize grammar for mask computation (epsilon elimination + right recursion elimination).
     let t = Instant::now();
-    let glr_grammar = GlrGrammar::from_grammar_def(grammar);
+    let normalized_grammar = normalize_for_mask(grammar);
+
+    // 2. Build augmented GLR grammar.
+    let glr_grammar = GlrGrammar::from_grammar_def(&normalized_grammar);
     eprintln!("[glrmask::compile] GLR grammar: {:.3}s ({} rules)", t.elapsed().as_secs_f64(), glr_grammar.rules.len());
 
-    // 2. Build SLR(1) parse table.
+    // 3. Build SLR(1) parse table.
     let t = Instant::now();
     let table = GlrTable::build(&glr_grammar);
     eprintln!("[glrmask::compile] SLR table:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), table.num_states);
 
-    // 3. Build tokenizer DFA.
+    // 4. Build tokenizer DFA.
     let t = Instant::now();
-    let tokenizer = TokenizerDfa::from_grammar_def(grammar);
+    let tokenizer = TokenizerDfa::from_grammar_def(grammar);  // use original grammar for tokenizer
     eprintln!("[glrmask::compile] Tokenizer:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), tokenizer.dfa.num_states());
 
-    // 4. Compute vocabulary preprocessing.
+    // 5. Compute vocabulary preprocessing.
     let t = Instant::now();
     let vocab_pre = VocabPreprocessing::compute(&tokenizer, vocab);
     eprintln!("[glrmask::compile] Vocab pre:   {:.3}s ({} TSIDs)", t.elapsed().as_secs_f64(), vocab_pre.num_tsids);
 
-    // 5–6. Build parser DWA (NWA → determinize → minimize).
+    // 6–7. Build parser DWA (NWA → determinize → minimize).
     let t = Instant::now();
     let parser_dwa = build_parser_dwa(&table, &glr_grammar, &tokenizer, vocab, &vocab_pre);
     eprintln!("[glrmask::compile] DWA build:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), parser_dwa.num_states());

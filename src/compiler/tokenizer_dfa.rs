@@ -489,6 +489,83 @@ fn parse_char_class(input: &[u8], mut pos: usize) -> (Expr, usize) {
     pos += 1;
 
     if negate {
+        // If the excluded set is entirely ASCII (≤ 0x7F), build a UTF-8-aware
+        // expression instead of a raw byte complement.
+        //
+        // A raw byte complement incorrectly admits continuation bytes (0x80–0xBF)
+        // as standalone tokens, which is never valid UTF-8.  The Lark convention
+        // (e.g. /[^\x00-\x1F"\\]/) means "any Unicode character not in the set",
+        // which in UTF-8 expansion means:
+        //   - ASCII characters not in the excluded set  (single-byte 0x20–0x7F minus exclusions)
+        //   - All valid 2-, 3-, 4-byte UTF-8 lead sequences              (multi-byte)
+        //
+        // This matches the reference implementation in grammars2024.
+        let excluded_is_ascii = set.iter().all(|b| b <= 0x7F);
+        if excluded_is_ascii {
+            let ascii_allowed = U8Set::from_predicate(|b| b <= 0x7F && !set.contains(b));
+            let cont = U8Set::from_range(0x80, 0xBF);
+
+            let mut choices: Vec<Expr> = Vec::new();
+
+            // ASCII (single-byte) chars not excluded.
+            if !ascii_allowed.is_empty() {
+                choices.push(Expr::U8Class(ascii_allowed));
+            }
+
+            // Valid UTF-8 2-byte: C2–DF 80–BF
+            choices.push(Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xC2, 0xDF)),
+                Expr::U8Class(cont),
+            ]));
+            // Valid UTF-8 3-byte: E0 A0–BF 80–BF
+            choices.push(Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xE0, 0xE0)),
+                Expr::U8Class(U8Set::from_range(0xA0, 0xBF)),
+                Expr::U8Class(cont),
+            ]));
+            // E1–EC 80–BF 80–BF
+            choices.push(Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xE1, 0xEC)),
+                Expr::U8Class(cont),
+                Expr::U8Class(cont),
+            ]));
+            // ED 80–9F 80–BF  (excludes surrogates D800–DFFF)
+            choices.push(Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xED, 0xED)),
+                Expr::U8Class(U8Set::from_range(0x80, 0x9F)),
+                Expr::U8Class(cont),
+            ]));
+            // EE–EF 80–BF 80–BF
+            choices.push(Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xEE, 0xEF)),
+                Expr::U8Class(cont),
+                Expr::U8Class(cont),
+            ]));
+            // Valid UTF-8 4-byte: F0 90–BF 80–BF 80–BF
+            choices.push(Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xF0, 0xF0)),
+                Expr::U8Class(U8Set::from_range(0x90, 0xBF)),
+                Expr::U8Class(cont),
+                Expr::U8Class(cont),
+            ]));
+            // F1–F3 80–BF 80–BF 80–BF
+            choices.push(Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xF1, 0xF3)),
+                Expr::U8Class(cont),
+                Expr::U8Class(cont),
+                Expr::U8Class(cont),
+            ]));
+            // F4 80–8F 80–BF 80–BF  (U+10FFFF max)
+            choices.push(Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xF4, 0xF4)),
+                Expr::U8Class(U8Set::from_range(0x80, 0x8F)),
+                Expr::U8Class(cont),
+                Expr::U8Class(cont),
+            ]));
+
+            return (Expr::Choice(choices), pos);
+        }
+
         set = !set;
     }
 
