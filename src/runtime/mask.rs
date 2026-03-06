@@ -69,6 +69,8 @@ pub fn compute_mask(
 /// intersects the running accumulator with the transition weight.
 /// The final result is the projection of (accumulated ∩ final_weight) to TSID.
 fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, num_tsids: u32) -> RangeSet {
+    use crate::compiler::parser_dwa::DEFAULT_LABEL;
+
     if stack.is_empty() || dwa.states.is_empty() {
         return RangeSet::new();
     }
@@ -80,9 +82,22 @@ fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, num_tsids: u32) ->
     // Read stack bottom-to-top.
     for (_i, &parser_state) in stack.iter().enumerate() {
         let label: Label = parser_state as i32;
+        // Try specific transition first.
         if let Some(&(next_state, ref weight)) =
             dwa.states[dwa_state as usize].transitions.get(&label)
         {
+            if next_state as usize >= dwa.states.len() {
+                return RangeSet::new();
+            }
+            acc = acc.intersection(weight);
+            if acc.is_empty() {
+                return RangeSet::new();
+            }
+            dwa_state = next_state;
+        } else if let Some(&(next_state, ref weight)) =
+            dwa.states[dwa_state as usize].transitions.get(&DEFAULT_LABEL)
+        {
+            // DEFAULT fallback: matches any parser state not explicitly listed.
             if next_state as usize >= dwa.states.len() {
                 return RangeSet::new();
             }

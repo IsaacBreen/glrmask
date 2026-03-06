@@ -30,9 +30,11 @@ use crate::compiler::vocab_pre::VocabPreprocessing;
 use crate::ds::rangeset::RangeSet;
 
 /// A special label that matches any parser state ("wildcard" / "default").
-/// No longer used in NWA construction (expanded to explicit transitions),
-/// but kept for reference and potential use in runtime DEFAULT handling.
-#[allow(dead_code)]
+///
+/// In the NWA, this replaces explicit per-state self-loops and "any state"
+/// transitions.  During determinization it is treated as a regular label.
+/// At runtime, the DWA walker checks `DEFAULT_LABEL` as a fallback when
+/// no specific transition exists for a parser state.
 pub const DEFAULT_LABEL: i32 = i32::MAX - 1;
 
 // ---------------------------------------------------------------------------
@@ -212,15 +214,22 @@ fn compute_valid_revealed(start_nt: NonterminalId, tc: &TerminalCharacterization
 ///   [...prefix, revealed, skip{p-1}, from_state]
 /// where skip{p-1} are the p-1 intermediate states between revealed and from_state.
 ///
-/// Instead of using DEFAULT_LABEL (wildcard), self-loop transitions are
-/// expanded to explicit transitions for all parser states. This ensures
-/// the standard determinizer handles them correctly.
+/// Instead of using explicit per-state self-loops (which create O(num_states)
+/// transitions and cause the NWA to be cyclic), we use DEFAULT_LABEL as a
+/// single wildcard transition.  The determinizer treats DEFAULT as a normal
+/// label.  At runtime, the DWA walker falls back to DEFAULT when no specific
+/// transition matches.
+///
+/// NWA patterns:
+/// - **Shift**: `skip_start --[DEFAULT]--> skip_start` (self-loop, matches any prefix)
+///              `skip_start --[from_state]--> accept(token_weight)`
+/// - **Reduce** (pop_count=P, revealed=R, from_state=S):
+///              `skip_start --[R]--> mid_0 --[DEFAULT]--> mid_1 ... --[S]--> accept`
 pub fn build_parser_nwa(table: &GlrTable, grammar: &GlrGrammar, vocab: &VocabPreprocessing) -> Nwa {
     let characterizations = characterize_terminal(table, grammar);
 
     let num_tsids = vocab.num_tsids;
     let max_token = vocab.max_token;
-    let num_parser_states = table.num_states;
     let mut nwa = Nwa::new(num_tsids, max_token);
     let max_pos = nwa.max_position();
 
@@ -230,14 +239,15 @@ pub fn build_parser_nwa(table: &GlrTable, grammar: &GlrGrammar, vocab: &VocabPre
 
     let w_all = Weight::all(max_pos, num_tsids);
 
-    // Helper: add a "skip any parser state" self-loop by expanding to all
-    // concrete parser state labels. This replaces DEFAULT_LABEL self-loops
-    // so the determinizer handles it correctly.
-    let add_skip_self_loop = |nwa: &mut Nwa, q: u32, w: &Weight| {
-        for s in 0..num_parser_states {
-            nwa.add_transition(q, s as i32, q, w.clone());
-        }
-    };
+    // ---------------------------------------------------------------
+    // Shared skip state with DEFAULT self-loop
+    // ---------------------------------------------------------------
+    // A single self-loop on DEFAULT_LABEL replaces O(num_parser_states)
+    // explicit self-loops.  At runtime, DEFAULT acts as a fallback
+    // matching any parser state not explicitly listed.
+    let skip_start = nwa.add_state();
+    nwa.add_epsilon(start, skip_start, w_all.clone());
+    nwa.add_transition(skip_start, DEFAULT_LABEL, skip_start, w_all.clone());
 
     // For each characterized terminal, build NWA paths.
     for (&terminal, tc) in &characterizations {
@@ -247,43 +257,21 @@ pub fn build_parser_nwa(table: &GlrTable, grammar: &GlrGrammar, vocab: &VocabPre
         }
 
         // --- Initial shifts ---
+        // Pattern: [skip_start*, from_state] → accept with token_weight
         for &(from_state, _to_state) in &tc.shifts {
-            let q = nwa.add_state();
             let q_final = nwa.add_state();
-
-            nwa.add_epsilon(start, q, w_all.clone());
-            add_skip_self_loop(&mut nwa, q, &w_all);
-            nwa.add_transition(q, from_state as i32, q_final, token_weight.clone());
+            nwa.add_transition(skip_start, from_state as i32, q_final, token_weight.clone());
             nwa.set_final_weight(q_final, token_weight.clone());
         }
 
         // --- Initial reduces ---
-        // For each reduce (from_state, pop_count, nt), find all valid revealed
-        // states (via nt_escapes and rereduce chains with pop_count=1) and build
-        // explicit NWA paths.
-        //
-        // The NWA reads the stack bottom-to-top. For a reduce that pops `p` states
-        // from `from_state`, revealing state `r`, the word pattern is:
-        //   [self-loop*, r, any{p-1}, from_state]
-        //
-        // Special case: pop_count=0 (ε-production). The revealed state IS from_state
-        // (popping 0 doesn't change the stack top). The pattern is just:
-        //   [self-loop*, from_state]
-        //
-        // This means: match arbitrary prefix, then the revealed state, then p-1
-        // intermediate states (any label), then from_state at the top.
         for &(from_state, pop_count, nt) in &tc.reduces {
             if pop_count == 0 {
                 // ε-production: from_state is the revealed state.
-                // Only need to check that from_state is a valid revealed state
-                // (i.e., goto(from_state, nt) leads to an escape or rereduce).
                 let valid_revealed = compute_valid_revealed(nt, tc);
                 if valid_revealed.contains(&from_state) {
-                    let q = nwa.add_state();
                     let q_final = nwa.add_state();
-                    nwa.add_epsilon(start, q, w_all.clone());
-                    add_skip_self_loop(&mut nwa, q, &w_all);
-                    nwa.add_transition(q, from_state as i32, q_final, token_weight.clone());
+                    nwa.add_transition(skip_start, from_state as i32, q_final, token_weight.clone());
                     nwa.set_final_weight(q_final, token_weight.clone());
                 }
                 continue;
@@ -292,20 +280,17 @@ pub fn build_parser_nwa(table: &GlrTable, grammar: &GlrGrammar, vocab: &VocabPre
             let valid_revealed = compute_valid_revealed(nt, tc);
 
             for r in valid_revealed {
-                let q = nwa.add_state();
-                nwa.add_epsilon(start, q, w_all.clone());
-                add_skip_self_loop(&mut nwa, q, &w_all);
-
-                // Read revealed state.
+                // Pattern: [skip_start*, r, any{pop_count-1}, from_state] → accept
+                // Read revealed state from skip_start.
                 let mut current = nwa.add_state();
-                nwa.add_transition(q, r as i32, current, w_all.clone());
+                nwa.add_transition(skip_start, r as i32, current, w_all.clone());
 
-                // Skip pop_count - 1 intermediate states (any label).
+                // Skip pop_count - 1 intermediate states using DEFAULT.
+                // One DEFAULT transition replaces O(num_parser_states) explicit
+                // "any" transitions per intermediate step.
                 for _ in 0..pop_count.saturating_sub(1) {
                     let next = nwa.add_state();
-                    for s in 0..num_parser_states {
-                        nwa.add_transition(current, s as i32, next, w_all.clone());
-                    }
+                    nwa.add_transition(current, DEFAULT_LABEL, next, w_all.clone());
                     current = next;
                 }
 
@@ -390,16 +375,28 @@ pub fn build_parser_dwa(
     grammar: &GlrGrammar,
     vocab: &VocabPreprocessing,
 ) -> CompDwa {
+    use std::time::Instant;
+
+    let t = Instant::now();
     let nwa = build_parser_nwa(table, grammar, vocab);
+    eprintln!("[glrmask::dwa] NWA build:      {:.3}s ({} states, {} transitions)",
+        t.elapsed().as_secs_f64(), nwa.states.len(),
+        nwa.states.iter().map(|s| s.transitions.len()).sum::<usize>());
 
     // Determinize: NWA → CompDwa (general, handles cycles).
+    let t = Instant::now();
     let dwa = determinize(&nwa);
+    eprintln!("[glrmask::dwa] Determinize:    {:.3}s ({} states)", t.elapsed().as_secs_f64(), dwa.num_states());
 
     // Minimize only if the DWA is acyclic. The skip-all-labels self-loops
     // in the NWA produce cyclic DWAs, and minimize_acyclic breaks on cycles.
+    let t = Instant::now();
     if is_acyclic(&dwa) {
-        minimize_acyclic(&dwa)
+        let result = minimize_acyclic(&dwa);
+        eprintln!("[glrmask::dwa] Minimize:       {:.3}s ({} → {} states)", t.elapsed().as_secs_f64(), dwa.num_states(), result.num_states());
+        result
     } else {
+        eprintln!("[glrmask::dwa] Minimize:       skipped (cyclic)");
         dwa
     }
 }

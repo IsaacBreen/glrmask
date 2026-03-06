@@ -11,6 +11,7 @@ rustc-hash = "1"
 ahash = "0.8"
 smallvec = "1"
 im = "15"
+range-set-blaze = "0.3.0"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

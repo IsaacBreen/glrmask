@@ -90,6 +90,8 @@ impl CompDwa {
     /// Returns the intersection of all transition weights and the final weight
     /// of the last state (empty weight if any step fails).
     pub fn eval_word(&self, word: &[Label]) -> Weight {
+        use crate::compiler::parser_dwa::DEFAULT_LABEL;
+
         let empty = Weight::empty(self.num_tsids);
         if self.states.is_empty() {
             return empty;
@@ -103,7 +105,12 @@ impl CompDwa {
         let mut acc = Weight::all(max_pos, self.num_tsids);
 
         for &label in word {
-            match self.states[state as usize].transitions.get(&label) {
+            // Try specific transition first, then DEFAULT fallback.
+            let resolved = self.states[state as usize]
+                .transitions
+                .get(&label)
+                .or_else(|| self.states[state as usize].transitions.get(&DEFAULT_LABEL));
+            match resolved {
                 Some(&(target, ref w)) => {
                     acc = acc.intersection(w);
                     if acc.is_empty() {

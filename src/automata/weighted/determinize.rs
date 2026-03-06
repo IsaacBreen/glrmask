@@ -163,28 +163,77 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
         }
         states[dwa_sid as usize].final_weight = final_w;
 
-        // --- Collect transitions ---
-        // For each (nwa_state, path_weight) in merged, for each (label, targets),
-        // compute next_path_weight = path_weight ∩ trans_weight.
+        // --- Collect transitions with DEFAULT_LABEL expansion ---
+        //
+        // DEFAULT_LABEL acts as a wildcard: when an NWA state has a DEFAULT
+        // transition but no specific transition for label L, the DEFAULT
+        // transition applies for L.  We fold DEFAULT into every specific
+        // label so that the DWA only uses DEFAULT for labels that have NO
+        // specific NWA transitions at all.
+        use crate::compiler::parser_dwa::DEFAULT_LABEL;
+
+        // First, collect all specific labels across the entire subset,
+        // and record which NWA states have DEFAULT transitions.
+        let mut specific_labels: BTreeSet<Label> = BTreeSet::new();
+        for (nwa_u, _) in &merged {
+            for (label, _) in &nwa.states[*nwa_u as usize].transitions {
+                if *label != DEFAULT_LABEL {
+                    specific_labels.insert(*label);
+                }
+            }
+        }
+
         let mut by_label: BTreeMap<Label, BTreeMap<u32, Weight>> = BTreeMap::new();
         let mut edge_weights: BTreeMap<Label, Weight> = BTreeMap::new();
 
+        // For each specific label: use specific transition if available,
+        // otherwise fall back to DEFAULT transition.
+        for &label in &specific_labels {
+            for (nwa_u, w_u) in &merged {
+                let st = &nwa.states[*nwa_u as usize];
+                let targets = st
+                    .transitions
+                    .get(&label)
+                    .or_else(|| st.transitions.get(&DEFAULT_LABEL));
+                if let Some(targets) = targets {
+                    for (nwa_v, w_trans) in targets {
+                        let next_w = w_u.intersection(w_trans);
+                        if next_w.is_empty() {
+                            continue;
+                        }
+                        edge_weights
+                            .entry(label)
+                            .and_modify(|e| *e = e.union(&next_w))
+                            .or_insert_with(|| next_w.clone());
+                        by_label
+                            .entry(label)
+                            .or_default()
+                            .entry(*nwa_v)
+                            .and_modify(|e| *e = e.union(&next_w))
+                            .or_insert_with(|| next_w.clone());
+                    }
+                }
+            }
+        }
+
+        // Build a DEFAULT DWA transition from pure-DEFAULT contributions.
+        // Applies to any label not in specific_labels.
         for (nwa_u, w_u) in &merged {
-            for (label, targets) in &nwa.states[*nwa_u as usize].transitions {
+            if let Some(targets) = nwa.states[*nwa_u as usize]
+                .transitions
+                .get(&DEFAULT_LABEL)
+            {
                 for (nwa_v, w_trans) in targets {
                     let next_w = w_u.intersection(w_trans);
                     if next_w.is_empty() {
                         continue;
                     }
-                    // Accumulate edge weight (union of all contributions for this label).
                     edge_weights
-                        .entry(*label)
+                        .entry(DEFAULT_LABEL)
                         .and_modify(|e| *e = e.union(&next_w))
                         .or_insert_with(|| next_w.clone());
-
-                    // Accumulate the target pre-closure subset.
                     by_label
-                        .entry(*label)
+                        .entry(DEFAULT_LABEL)
                         .or_default()
                         .entry(*nwa_v)
                         .and_modify(|e| *e = e.union(&next_w))

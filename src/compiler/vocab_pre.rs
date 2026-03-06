@@ -40,6 +40,9 @@ impl VocabPreprocessing {
     /// run the token's bytes through the tokenizer and record which
     /// terminals match.
     pub fn compute(tokenizer: &TokenizerDfa, vocab: &Vocab) -> Self {
+        use std::time::Instant;
+        let t_start = Instant::now();
+
         let num_dfa_states = tokenizer.num_states();
         let vocab_size = vocab.entries.len();
         let max_token = if vocab_size > 0 {
@@ -49,27 +52,31 @@ impl VocabPreprocessing {
         };
 
         // Phase 1: Find all reachable DFA states.
-        // Start from state 0 (initial state), then find all states reachable
-        // after running any token's bytes from any already-reachable state.
+        let t = Instant::now();
         let mut reachable: BTreeSet<u32> = BTreeSet::new();
         reachable.insert(tokenizer.start_state());
 
-        // Fixed-point: keep discovering new end states.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let current_reachable: Vec<u32> = reachable.iter().copied().collect();
-            for &start_state in &current_reachable {
+        // BFS: only process newly discovered states each round.
+        let mut frontier: Vec<u32> = vec![tokenizer.start_state()];
+        let mut iterations = 0u32;
+        while !frontier.is_empty() {
+            iterations += 1;
+            let mut next_frontier = Vec::new();
+            for &start_state in &frontier {
                 for (_token_id, token_bytes) in &vocab.entries {
                     let (end_state, _) = tokenizer.execute(token_bytes, start_state);
                     if end_state != DEAD && reachable.insert(end_state) {
-                        changed = true;
+                        next_frontier.push(end_state);
                     }
                 }
             }
+            frontier = next_frontier;
         }
+        eprintln!("[vocab_pre] Phase 1 (reachable): {:.3}s ({} states, {} iters, {} DFA states)",
+            t.elapsed().as_secs_f64(), reachable.len(), iterations, num_dfa_states);
 
         // Phase 2: Assign TSID indices.
+        let t = Instant::now();
         let mut state_to_tsid = vec![u32::MAX; num_dfa_states as usize];
         let mut tsid_to_state: Vec<u32> = Vec::new();
         for &state in &reachable {
@@ -78,59 +85,96 @@ impl VocabPreprocessing {
             tsid_to_state.push(state);
         }
         let num_tsids = tsid_to_state.len() as u32;
+        eprintln!("[vocab_pre] Phase 2 (TSID):      {:.3}s ({} TSIDs)", t.elapsed().as_secs_f64(), num_tsids);
 
         // Phase 3: For each TSID, run all tokens and collect matches.
-        //
-        // Use execute_all_matches to find ALL intermediate terminal matches,
-        // not just the final-state match. This is critical because:
-        // 1. Multi-terminal tokens (e.g., "[]") match terminal "[" at byte 1,
-        //    then die. The commit function handles this by restarting the
-        //    tokenizer after each match.
-        // 2. Prefix tokens (e.g., "tr" for "true") don't match any terminal
-        //    but their end state can reach valid terminals.
+        // Parallelized across TSIDs with rayon for ~8-10x speedup.
+        let t = Instant::now();
         let reachable = tokenizer.compute_reachable_terminals();
-        let mut possible_matches: Vec<BTreeMap<TerminalId, RangeSet>> =
-            vec![BTreeMap::new(); num_tsids as usize];
-        let mut passthrough_tokens: Vec<RangeSet> =
-            vec![RangeSet::new(); num_tsids as usize];
 
-        for (tsid, &dfa_state) in tsid_to_state.iter().enumerate() {
-            for &(token_id, ref token_bytes) in &vocab.entries {
-                let result = tokenizer.execute_all_matches(token_bytes, dfa_state);
-
-                // Collect ALL terminals matched at ANY intermediate position.
-                // The commit function tries all matches, so a token is valid
-                // if ANY of its matches produce a valid parser continuation.
-                let mut all_matched = BTreeSet::new();
-                for (_offset, terminals) in &result.matches {
-                    for &terminal in terminals {
-                        all_matched.insert(terminal);
-                        possible_matches[tsid]
-                            .entry(terminal)
-                            .or_default()
-                            .insert(token_id);
-                    }
-                }
-
-                // Record prefix matches: the token reaches a non-dead end
-                // state that can eventually lead to specific terminals.
-                if result.end_state != DEAD {
-                    if let Some(rt) = reachable.get(result.end_state as usize) {
-                        for &reachable_terminal in rt {
-                            if !all_matched.contains(&reachable_terminal) {
-                                possible_matches[tsid]
-                                    .entry(reachable_terminal)
-                                    .or_default()
-                                    .insert(token_id);
+        #[cfg(feature = "rayon")]
+        let (possible_matches, passthrough_tokens) = {
+            use rayon::prelude::*;
+            let results: Vec<(BTreeMap<TerminalId, RangeSet>, RangeSet)> = tsid_to_state
+                .par_iter()
+                .map(|&dfa_state| {
+                    let mut pm: BTreeMap<TerminalId, RangeSet> = BTreeMap::new();
+                    let mut pt = RangeSet::new();
+                    for &(token_id, ref token_bytes) in &vocab.entries {
+                        let result = tokenizer.execute_all_matches(token_bytes, dfa_state);
+                        let mut all_matched = BTreeSet::new();
+                        for (_offset, terminals) in &result.matches {
+                            for &terminal in terminals {
+                                all_matched.insert(terminal);
+                                pm.entry(terminal).or_default().insert(token_id);
+                            }
+                        }
+                        if result.end_state != DEAD {
+                            if let Some(rt) = reachable.get(result.end_state as usize) {
+                                for &reachable_terminal in rt {
+                                    if !all_matched.contains(&reachable_terminal) {
+                                        pm.entry(reachable_terminal).or_default().insert(token_id);
+                                    }
+                                }
+                            }
+                            if all_matched.is_empty() {
+                                pt.insert(token_id);
                             }
                         }
                     }
-                    if all_matched.is_empty() {
-                        passthrough_tokens[tsid].insert(token_id);
+                    (pm, pt)
+                })
+                .collect();
+            let mut possible_matches = Vec::with_capacity(num_tsids as usize);
+            let mut passthrough_tokens = Vec::with_capacity(num_tsids as usize);
+            for (pm, pt) in results {
+                possible_matches.push(pm);
+                passthrough_tokens.push(pt);
+            }
+            (possible_matches, passthrough_tokens)
+        };
+
+        #[cfg(not(feature = "rayon"))]
+        let (possible_matches, passthrough_tokens) = {
+            let mut possible_matches: Vec<BTreeMap<TerminalId, RangeSet>> =
+                vec![BTreeMap::new(); num_tsids as usize];
+            let mut passthrough_tokens: Vec<RangeSet> =
+                vec![RangeSet::new(); num_tsids as usize];
+            for (tsid, &dfa_state) in tsid_to_state.iter().enumerate() {
+                for &(token_id, ref token_bytes) in &vocab.entries {
+                    let result = tokenizer.execute_all_matches(token_bytes, dfa_state);
+                    let mut all_matched = BTreeSet::new();
+                    for (_offset, terminals) in &result.matches {
+                        for &terminal in terminals {
+                            all_matched.insert(terminal);
+                            possible_matches[tsid]
+                                .entry(terminal)
+                                .or_default()
+                                .insert(token_id);
+                        }
+                    }
+                    if result.end_state != DEAD {
+                        if let Some(rt) = reachable.get(result.end_state as usize) {
+                            for &reachable_terminal in rt {
+                                if !all_matched.contains(&reachable_terminal) {
+                                    possible_matches[tsid]
+                                        .entry(reachable_terminal)
+                                        .or_default()
+                                        .insert(token_id);
+                                }
+                            }
+                        }
+                        if all_matched.is_empty() {
+                            passthrough_tokens[tsid].insert(token_id);
+                        }
                     }
                 }
             }
-        }
+            (possible_matches, passthrough_tokens)
+        };
+
+        eprintln!("[vocab_pre] Phase 3 (matches):   {:.3}s", t.elapsed().as_secs_f64());
+        eprintln!("[vocab_pre] Total:                {:.3}s", t_start.elapsed().as_secs_f64());
 
         Self {
             possible_matches,
