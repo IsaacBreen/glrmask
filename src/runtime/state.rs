@@ -117,7 +117,7 @@ impl Constraint {
     }
 
     /// Create a new `ConstraintState` at the start position.
-    pub fn start(&self) -> ConstraintState {
+    pub fn start(&self) -> ConstraintState<'_> {
         // The initial parser state is 0.
         // The initial tokenizer state is 0 (initial DFA state).
         let initial_parser_state = 0u32;
@@ -127,7 +127,7 @@ impl Constraint {
         let gss = LeveledGSS::from_stacks(&[(vec![initial_parser_state], terminals_disallowed_fresh())]);
         state.insert(initial_tok_state, gss);
 
-        ConstraintState { state }
+        ConstraintState { constraint: self, state }
     }
 
     /// Debug dump of internal state for troubleshooting.
@@ -206,7 +206,7 @@ impl Constraint {
 
     /// Number of `u32` words required in a mask buffer for this vocabulary.
     ///
-    /// Allocate the buffer with `vec![0u32; constraint.mask_len()]`.
+    /// Allocate the buffer with `vec![0u32; self.constraint.mask_len()]`.
     /// Token `i` is allowed iff `buf[i / 32] & (1u32 << (i % 32)) != 0`.
     pub fn mask_len(&self) -> usize {
         (self.max_token as usize / 32) + 1
@@ -225,12 +225,14 @@ impl Constraint {
 /// State is a map from tokenizer DFA state → GSS of parser stacks.
 /// The GSS provides structural sharing for efficient GLR parsing.
 #[derive(Debug, Clone)]
-pub struct ConstraintState {
+pub struct ConstraintState<'a> {
+    /// Borrowed reference to the compiled constraint.
+    pub(crate) constraint: &'a Constraint,
     /// tokenizer DFA state → GSS of parser state stacks.
     pub(crate) state: BTreeMap<u32, ParserGSS>,
 }
 
-impl ConstraintState {
+impl<'a> ConstraintState<'a> {
     /// Compute the allowed-token mask.
     ///
     /// Returns a BitSet where bit `i` is set iff token `i` is allowed.
@@ -242,7 +244,7 @@ impl ConstraintState {
     /// **Note**: prefer [`mask`] or [`fill_mask`] which return `u32` words matching the
     /// plan's public API. This method is retained for white-box tests only.
     #[doc(hidden)]
-    pub fn compute_mask(&self, constraint: &Constraint) -> BitSet {
+    pub fn compute_mask(&self) -> BitSet {
         // Phase 1: DWA overapproximation.
         let mut stacks_map: BTreeMap<u32, Vec<Vec<u32>>> = self.state.iter().map(|(&tok_state, gss)| {
             let stacks: Vec<Vec<u32>> = gss.to_stacks().into_iter().map(|(s, _acc)| s).collect();
@@ -253,21 +255,21 @@ impl ConstraintState {
         // After a commit, stacks may have un-reduced ε-productions at the top.
         // The DWA expects fully-reduced stacks, so apply all possible ε-reductions
         // (pop_count=0 rules) to produce additional stack variants.
-        let initial_tok = constraint.tokenizer.initial_state();
+        let initial_tok = self.constraint.tokenizer.initial_state();
         if let Some(stacks) = stacks_map.get_mut(&initial_tok) {
             let mut extra: Vec<Vec<u32>> = Vec::new();
             for stack in stacks.iter() {
-                epsilon_reduce_stacks(&constraint.table, stack, &mut extra);
+                epsilon_reduce_stacks(&self.constraint.table, stack, &mut extra);
             }
             stacks.extend(extra);
         }
 
         let mut mask = super::mask::compute_mask(
             &stacks_map,
-            &constraint.parser_dwa,
-            &constraint.state_to_tsid,
-            constraint.max_token,
-            constraint.num_tsids,
+            &self.constraint.parser_dwa,
+            &self.constraint.state_to_tsid,
+            self.constraint.max_token,
+            self.constraint.num_tsids,
         );
 
         // Phase 2: Post-filter by simulating commit for each candidate token.
@@ -277,19 +279,19 @@ impl ConstraintState {
         // - Has stacks at the initial tokenizer state (clean terminal boundary), OR
         // - Has passthrough stacks where the tokenizer can still reach terminals
         //   that the parser can consume (verified via reachable_terminals).
-        let reachable = constraint.tokenizer.compute_reachable_terminals();
-        let initial_tok = constraint.tokenizer.initial_state();
+        let reachable = self.constraint.tokenizer.compute_reachable_terminals();
+        let initial_tok = self.constraint.tokenizer.initial_state();
         let candidates: Vec<usize> = mask.iter_ones().collect();
         let _dwa_count = candidates.len();
         let mut _filtered = 0usize;
         for token_id in candidates {
             // Skip EOS token in post-filter — handled separately below.
-            if constraint.eos_token_id == Some(token_id as u32) {
+            if self.constraint.eos_token_id == Some(token_id as u32) {
                 continue;
             }
             let mut trial = self.clone();
-            trial.commit(constraint, token_id as u32);
-            let viable = has_viable_state(&trial.state, &constraint.table, &reachable, initial_tok);
+            trial.commit(token_id as u32);
+            let viable = has_viable_state(&trial.state, &self.constraint.table, &reachable, initial_tok);
             if !viable {
                 mask.clear(token_id);
                 _filtered += 1;
@@ -308,19 +310,19 @@ impl ConstraintState {
         // possible_matches that are NOT already in the mask, then trial-commit
         // each to verify viability.
         {
-            let mut rescue_candidates = BitSet::new(constraint.max_token as usize + 1);
+            let mut rescue_candidates = BitSet::new(self.constraint.max_token as usize + 1);
             for &tok_state in self.state.keys() {
-                let tsid = if (tok_state as usize) < constraint.state_to_tsid.len() {
-                    constraint.state_to_tsid[tok_state as usize]
+                let tsid = if (tok_state as usize) < self.constraint.state_to_tsid.len() {
+                    self.constraint.state_to_tsid[tok_state as usize]
                 } else {
                     continue;
                 };
-                if tsid == u32::MAX || (tsid as usize) >= constraint.possible_matches.len() {
+                if tsid == u32::MAX || (tsid as usize) >= self.constraint.possible_matches.len() {
                     continue;
                 }
-                for token_set in constraint.possible_matches[tsid as usize].values() {
+                for token_set in self.constraint.possible_matches[tsid as usize].values() {
                     for token_id in token_set.iter_values() {
-                        if token_id <= constraint.max_token && !mask.get(token_id as usize) {
+                        if token_id <= self.constraint.max_token && !mask.get(token_id as usize) {
                             rescue_candidates.set(token_id as usize);
                         }
                     }
@@ -330,12 +332,12 @@ impl ConstraintState {
             let mut _rescued = 0usize;
             for token_id in rescue_candidates.iter_ones() {
                 // Skip EOS — handled separately below.
-                if constraint.eos_token_id == Some(token_id as u32) {
+                if self.constraint.eos_token_id == Some(token_id as u32) {
                     continue;
                 }
                 let mut trial = self.clone();
-                trial.commit(constraint, token_id as u32);
-                if has_viable_state(&trial.state, &constraint.table, &reachable, initial_tok) {
+                trial.commit(token_id as u32);
+                if has_viable_state(&trial.state, &self.constraint.table, &reachable, initial_tok) {
                     mask.set(token_id);
                     _rescued += 1;
                 }
@@ -346,9 +348,9 @@ impl ConstraintState {
         // EOS token handling: EOS is not a regular byte-sequence token.
         // Remove it from the DWA/post-filter result and add it back only
         // when the current state is accepting (grammar allows end-of-input).
-        if let Some(eos_id) = constraint.eos_token_id {
+        if let Some(eos_id) = self.constraint.eos_token_id {
             mask.clear(eos_id as usize);
-            if self.is_accepting(constraint) {
+            if self.is_accepting() {
                 mask.set(eos_id as usize);
             }
         }
@@ -367,12 +369,12 @@ impl ConstraintState {
     /// **Note**: prefer [`is_finished`] which matches the plan's public API.
     /// This method is retained for white-box tests only.
     #[doc(hidden)]
-    pub fn is_accepting(&self, constraint: &Constraint) -> bool {
+    pub fn is_accepting(&self) -> bool {
         let eof = crate::compiler::glr::grammar::EOF;
-        let initial_tok = constraint.tokenizer.initial_state();
+        let initial_tok = self.constraint.tokenizer.initial_state();
         if let Some(gss) = self.state.get(&initial_tok) {
             for (stack, _acc) in gss.to_stacks() {
-                if can_accept(&constraint.table, &stack, eof) {
+                if can_accept(&self.constraint.table, &stack, eof) {
                     return true;
                 }
             }
@@ -388,12 +390,11 @@ impl ConstraintState {
     /// after any bytes that *were* successfully committed.
     pub fn commit(
         &mut self,
-        constraint: &Constraint,
         token_id: u32,
     ) {
-        if let Some(bytes) = constraint.token_bytes.get(&token_id) {
+        if let Some(bytes) = self.constraint.token_bytes.get(&token_id) {
             let bytes = bytes.clone();
-            self.process_bytes_raw(constraint, &bytes);
+            self.process_bytes_raw(&bytes);
         }
         // Unknown token_id → no-op (caller should only commit tokens from the mask)
     }
@@ -406,41 +407,41 @@ impl ConstraintState {
     ///
     /// Token `i` is allowed iff `result[i / 32] & (1u32 << (i % 32)) != 0`.
     /// Allocate the buffer with [`Constraint::mask_len`] words.
-    pub fn mask(&self, constraint: &Constraint) -> Vec<u32> {
-        let bitset = self.compute_mask(constraint);
-        let mut buf = vec![0u32; constraint.mask_len()];
+    pub fn mask(&self) -> Vec<u32> {
+        let bitset = self.compute_mask();
+        let mut buf = vec![0u32; self.constraint.mask_len()];
         bitset.fill_u32_mask(&mut buf);
         buf
     }
 
     /// Fill a pre-allocated mask buffer.
     ///
-    /// `buf` must be at least `constraint.mask_len()` words long.
+    /// `buf` must be at least `self.constraint.mask_len()` words long.
     /// Token `i` is allowed iff `buf[i / 32] & (1u32 << (i % 32)) != 0`.
-    pub fn fill_mask(&self, constraint: &Constraint, buf: &mut [u32]) {
-        let bitset = self.compute_mask(constraint);
+    pub fn fill_mask(&self, buf: &mut [u32]) {
+        let bitset = self.compute_mask();
         bitset.fill_u32_mask(buf);
     }
 
     /// Whether the grammar has been fully satisfied (EOS is valid at current position).
-    pub fn is_finished(&self, constraint: &Constraint) -> bool {
-        self.is_accepting(constraint)
+    pub fn is_finished(&self) -> bool {
+        self.is_accepting()
     }
 
     /// Commit raw bytes, advancing tokenizer and parser state.
     ///
     /// Infallible. If the bytes produce no valid parse continuations the next
     /// mask will simply be empty.
-    pub fn commit_bytes(&mut self, constraint: &Constraint, bytes: &[u8]) {
-        self.process_bytes_raw(constraint, bytes);
+    pub fn commit_bytes(&mut self, bytes: &[u8]) {
+        self.process_bytes_raw(bytes);
     }
 
     /// Commit multiple tokens in sequence (batch convenience wrapper).
     ///
     /// Equivalent to calling [`commit`] for each token ID in order.
-    pub fn commit_tokens(&mut self, constraint: &Constraint, tokens: &[u32]) {
+    pub fn commit_tokens(&mut self, tokens: &[u32]) {
         for &token in tokens {
-            self.commit(constraint, token);
+            self.commit(token);
         }
     }
 
@@ -453,13 +454,13 @@ impl ConstraintState {
     ///
     /// The caller is responsible for committing the returned tokens via
     /// [`commit_tokens`].
-    pub fn force(&self, constraint: &Constraint) -> Vec<u32> {
+    pub fn force(&self) -> Vec<u32> {
         let mut result = Vec::new();
         let mut trial = self.clone();
         loop {
-            let bitset = trial.compute_mask(constraint);
+            let bitset = trial.compute_mask();
             // Build a copy with the EOS bit cleared so we see only real tokens.
-            let forced_token = if let Some(eos_id) = constraint.eos_token_id {
+            let forced_token = if let Some(eos_id) = self.constraint.eos_token_id {
                 let mut without_eos = bitset.clone();
                 without_eos.clear(eos_id as usize);
                 if without_eos.count_ones() == 1 {
@@ -477,7 +478,7 @@ impl ConstraintState {
 
             let Some(token) = forced_token else { break };
             result.push(token);
-            trial.commit(constraint, token);
+            trial.commit(token);
             if trial.state.is_empty() {
                 break;
             }
@@ -490,7 +491,7 @@ impl ConstraintState {
     // -----------------------------------------------------------------------
 
     /// Core byte-processing engine shared by `commit` and `commit_bytes`.
-    fn process_bytes_raw(&mut self, constraint: &Constraint, bytes: &[u8]) {
+    fn process_bytes_raw(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
@@ -513,7 +514,7 @@ impl ConstraintState {
                     continue;
                 }
 
-                let result = constraint
+                let result = self.constraint
                     .tokenizer
                     .execute_all_matches(remaining, tok_state);
 
@@ -521,10 +522,10 @@ impl ConstraintState {
                     let abs_offset = offset + match_offset;
 
                     for &terminal_id in matched_terminals {
-                        let new_gss = step_glr_gss(&constraint.table, &gss, terminal_id);
+                        let new_gss = step_glr_gss(&self.constraint.table, &gss, terminal_id);
 
                         if !new_gss.is_empty() {
-                            let initial_tok = constraint.tokenizer.initial_state();
+                            let initial_tok = self.constraint.tokenizer.initial_state();
                             if abs_offset == bytes_len {
                                 new_state
                                     .entry(initial_tok)

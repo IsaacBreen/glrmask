@@ -16,14 +16,14 @@
 //!
 //! loop {
 //!     // Commit any deterministically forced tokens first.
-//!     let forced = state.force(&constraint);
-//!     state.commit_tokens(&constraint, &forced);
-//!     if state.is_finished(&constraint) { break; }
+//!     let forced = state.force();
+//!     state.commit_tokens(&forced);
+//!     if state.is_finished() { break; }
 //!
 //!     // Sample from the allowed-token mask.
-//!     state.fill_mask(&constraint, &mut buf);
+//!     state.fill_mask(&mut buf);
 //!     let token = sample(logits, &buf);
-//!     state.commit(&constraint, token);
+//!     state.commit(token);
 //! }
 //! ```
 //!

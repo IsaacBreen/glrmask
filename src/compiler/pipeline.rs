@@ -140,27 +140,27 @@ mod tests {
         let mut state = constraint.start();
 
         // Initial mask: "a" allowed, "b" not.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(mask.get(0), "token 'a' should be allowed initially");
         assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
 
         // Commit "a".
         state
-            .commit(&constraint, 0);
+            .commit(0);
         assert!(
-            !state.is_accepting(&constraint),
+            !state.is_accepting(),
             "not yet accepting after 'a'"
         );
 
         // After "a": "b" allowed, "a" not.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(!mask.get(0), "token 'a' should NOT be allowed after 'a'");
         assert!(mask.get(1), "token 'b' should be allowed after 'a'");
 
         // Commit "b".
         state
-            .commit(&constraint, 1);
-        assert!(state.is_accepting(&constraint), "should accept after 'ab'");
+            .commit(1);
+        assert!(state.is_accepting(), "should accept after 'ab'");
     }
 
     #[test]
@@ -175,15 +175,15 @@ mod tests {
         let mut state = constraint.start();
 
         // Initial mask: should allow both "a" and "b".
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(mask.get(0), "token 'a' should be allowed");
         assert!(mask.get(1), "token 'b' should be allowed");
 
         // Commit token "a".
         state
-            .commit(&constraint, 0);
+            .commit(0);
         assert!(
-            state.is_accepting(&constraint),
+            state.is_accepting(),
             "parse should accept after 'a'"
         );
     }
@@ -199,27 +199,27 @@ mod tests {
         let mut state = constraint.start();
 
         // Initial: "a" allowed, "b" not.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(mask.get(0), "token 'a' should be allowed initially");
         assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
 
         // Commit "a".
         state
-            .commit(&constraint, 0);
+            .commit(0);
         assert!(
-            !state.is_accepting(&constraint),
+            !state.is_accepting(),
             "not yet accepting after 'a'"
         );
 
         // After "a": "b" allowed, "a" not.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(!mask.get(0), "token 'a' should NOT be allowed after 'a'");
         assert!(mask.get(1), "token 'b' should be allowed after 'a'");
 
         // Commit "b".
         state
-            .commit(&constraint, 1);
-        assert!(state.is_accepting(&constraint), "should accept after 'ab'");
+            .commit(1);
+        assert!(state.is_accepting(), "should accept after 'ab'");
     }
 
     #[test]
@@ -233,24 +233,24 @@ mod tests {
         let mut state = constraint.start();
 
         // Initial: "a" allowed, "b" not.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(mask.get(0), "token 'a' should be allowed initially");
         assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
 
         // Commit "a".
         state
-            .commit(&constraint, 0);
-        assert!(!state.is_accepting(&constraint), "not accepting after 'a'");
+            .commit(0);
+        assert!(!state.is_accepting(), "not accepting after 'a'");
 
         // After "a": "b" should be allowed (A reduced, now need B → b).
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(!mask.get(0), "token 'a' should NOT be allowed after 'a'");
         assert!(mask.get(1), "token 'b' should be allowed after 'a'");
 
         // Commit "b".
         state
-            .commit(&constraint, 1);
-        assert!(state.is_accepting(&constraint), "should accept after 'ab'");
+            .commit(1);
+        assert!(state.is_accepting(), "should accept after 'ab'");
     }
 
     #[test]
@@ -266,32 +266,32 @@ mod tests {
         let mut state = constraint.start();
 
         // Initial: only "a" allowed.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(mask.get(0), "token 'a' should be allowed initially");
         assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
         assert!(!mask.get(2), "token 'c' should NOT be allowed initially");
 
         // Commit "a".
-        state.commit(&constraint, 0);
+        state.commit(0);
 
         // After "a": only "b" allowed.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(!mask.get(0), "no 'a' after 'a'");
         assert!(mask.get(1), "'b' after 'a'");
         assert!(!mask.get(2), "no 'c' after 'a'");
 
         // Commit "b".
-        state.commit(&constraint, 1);
+        state.commit(1);
 
         // After "ab": only "c" allowed.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(!mask.get(0), "no 'a' after 'ab'");
         assert!(!mask.get(1), "no 'b' after 'ab'");
         assert!(mask.get(2), "'c' after 'ab'");
 
         // Commit "c".
-        state.commit(&constraint, 2);
-        assert!(state.is_accepting(&constraint), "should accept after 'abc'");
+        state.commit(2);
+        assert!(state.is_accepting(), "should accept after 'abc'");
     }
 
     #[test]
@@ -308,31 +308,31 @@ mod tests {
         let mut state = constraint.start();
 
         // Initial: only "a" allowed.
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(mask.get(0), "token 'a' should be allowed initially");
         assert!(!mask.get(1), "token 'b' should NOT be allowed initially");
         assert!(!mask.get(2), "token 'c' should NOT be allowed initially");
 
         // Commit "a".
-        state.commit(&constraint, 0);
+        state.commit(0);
 
         // After "a": only "b" allowed (still in A → a • b).
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(!mask.get(0), "no 'a' after 'a'");
         assert!(mask.get(1), "'b' after 'a'");
         assert!(!mask.get(2), "no 'c' after 'a'");
 
         // Commit "b".
-        state.commit(&constraint, 1);
+        state.commit(1);
 
         // After "ab": "c" should be allowed (A reduced, S → A • c).
-        let mask = state.compute_mask(&constraint);
+        let mask = state.compute_mask();
         assert!(!mask.get(0), "no 'a' after 'ab'");
         assert!(!mask.get(1), "no 'b' after 'ab'");
         assert!(mask.get(2), "'c' after 'ab'");
 
         // Commit "c".
-        state.commit(&constraint, 2);
-        assert!(state.is_accepting(&constraint), "should accept after 'abc'");
+        state.commit(2);
+        assert!(state.is_accepting(), "should accept after 'abc'");
     }
 }

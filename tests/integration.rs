@@ -22,17 +22,17 @@ fn test_ebnf_simple_literal() {
     let c = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
     let mut s = c.start();
 
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     assert!(mask.get(0), "'a' should be allowed first");
     assert!(!mask.get(1), "'b' should NOT be allowed first");
 
-    s.commit(&c, 0);
-    let mask = s.compute_mask(&c);
+    s.commit(0);
+    let mask = s.compute_mask();
     assert!(!mask.get(0), "'a' should NOT be allowed after 'a'");
     assert!(mask.get(1), "'b' should be allowed after 'a'");
 
-    s.commit(&c, 1);
-    assert!(s.is_accepting(&c), "should accept after 'ab'");
+    s.commit(1);
+    assert!(s.is_accepting(), "should accept after 'ab'");
 }
 
 #[test]
@@ -41,13 +41,13 @@ fn test_ebnf_choice() {
     let c = Constraint::from_ebnf(r#"start ::= "x" | "y""#, &vocab).unwrap();
     let mut s = c.start();
 
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     assert!(mask.get(0), "'x' allowed");
     assert!(mask.get(1), "'y' allowed");
     assert!(!mask.get(2), "'z' not allowed");
 
-    s.commit(&c, 0);
-    assert!(s.is_accepting(&c), "accept after 'x'");
+    s.commit(0);
+    assert!(s.is_accepting(), "accept after 'x'");
 }
 
 #[test]
@@ -63,17 +63,17 @@ fn test_ebnf_multi_rule() {
     .unwrap();
     let mut s = c.start();
 
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     assert!(mask.get(0), "'a' allowed initially");
     assert!(mask.get(1), "'b' allowed initially");
     assert!(!mask.get(2), "'.' not allowed initially");
 
-    s.commit(&c, 0); // commit "a"
-    let mask = s.compute_mask(&c);
+    s.commit(0); // commit "a"
+    let mask = s.compute_mask();
     assert!(mask.get(2), "'.' allowed after 'a'");
 
-    s.commit(&c, 2); // commit "."
-    assert!(s.is_accepting(&c), "accept after 'a.'");
+    s.commit(2); // commit "."
+    assert!(s.is_accepting(), "accept after 'a.'");
 }
 
 #[test]
@@ -83,19 +83,19 @@ fn test_ebnf_sequence_of_three() {
     let mut s = c.start();
 
     // Step through a → b → c.
-    let m = s.compute_mask(&c);
+    let m = s.compute_mask();
     assert!(m.get(0) && !m.get(1) && !m.get(2));
-    s.commit(&c, 0);
+    s.commit(0);
 
-    let m = s.compute_mask(&c);
+    let m = s.compute_mask();
     assert!(!m.get(0) && m.get(1) && !m.get(2));
-    s.commit(&c, 1);
+    s.commit(1);
 
-    let m = s.compute_mask(&c);
+    let m = s.compute_mask();
     assert!(!m.get(0) && !m.get(1) && m.get(2));
-    s.commit(&c, 2);
+    s.commit(2);
 
-    assert!(s.is_accepting(&c));
+    assert!(s.is_accepting());
 }
 
 // ====================================================================
@@ -114,15 +114,15 @@ fn test_lark_simple() {
     .unwrap();
     let mut s = c.start();
 
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     assert!(mask.get(0), "'a' allowed first");
-    s.commit(&c, 0);
+    s.commit(0);
 
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     assert!(mask.get(1), "'b' allowed after 'a'");
-    s.commit(&c, 1);
+    s.commit(1);
 
-    assert!(s.is_accepting(&c));
+    assert!(s.is_accepting());
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn test_lark_choice() {
     let c = Constraint::from_lark(r#"start: "a" | "b""#, &vocab).unwrap();
     let s = c.start();
 
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     assert!(mask.get(0) && mask.get(1));
 }
 
@@ -145,7 +145,7 @@ fn test_json_schema_boolean() {
     let vocab = make_vocab(&["t", "r", "u", "e", "f", "a", "l", "s"]);
     let c = Constraint::from_json_schema(r#"{"type": "boolean"}"#, &vocab).unwrap();
     let s = c.start();
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     // "t" (token 0) or "f" (token 4) should be allowed.
     assert!(
         mask.get(0) || mask.get(4),
@@ -158,15 +158,15 @@ fn test_json_schema_null() {
     let vocab = make_vocab(&["n", "u", "l"]);
     let c = Constraint::from_json_schema(r#"{"type": "null"}"#, &vocab).unwrap();
     let mut s = c.start();
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     assert!(mask.get(0), "'n' allowed for null");
 
     // Commit "n", "u", "l", "l"
-    s.commit(&c, 0); // n
-    s.commit(&c, 1); // u
-    s.commit(&c, 2); // l
-    s.commit(&c, 2); // l
-    assert!(s.is_accepting(&c), "accept after 'null'");
+    s.commit(0); // n
+    s.commit(1); // u
+    s.commit(2); // l
+    s.commit(2); // l
+    assert!(s.is_accepting(), "accept after 'null'");
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn test_json_schema_enum() {
     let vocab = make_vocab(&["\"", "a", "b"]);
     let c = Constraint::from_json_schema(r#"{"enum": ["\"a\"", "\"b\""]}"#, &vocab).unwrap();
     let s = c.start();
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     // Note: the enum values are JSON strings, so they include quotes.
     // The grammar should start with '"'.
     assert!(mask.get(0), "'\"' allowed for enum start");
@@ -211,8 +211,8 @@ fn test_commit_invalid_token() {
     let mut s = c.start();
 
     // Token 99 is not in the vocabulary at all — should be a no-op.
-    s.commit(&c, 99);
-    let mask = s.compute_mask(&c);
+    s.commit(99);
+    let mask = s.compute_mask();
     // State unchanged: "a" still the only valid next token.
     assert!(mask.get(0), "'a' still allowed after no-op commit");
     assert!(!mask.get(1), "'b' still not allowed");
@@ -225,20 +225,20 @@ fn test_multiple_independent_sequences() {
     let c = Constraint::from_ebnf(r#"start ::= "a" "b" | "c" "d""#, &vocab).unwrap();
     let mut s = c.start();
 
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
     assert!(mask.get(0), "'a' allowed initially");
     assert!(mask.get(2), "'c' allowed initially");
     assert!(!mask.get(1), "'b' not allowed initially");
     assert!(!mask.get(3), "'d' not allowed initially");
 
     // Choose "a" path.
-    s.commit(&c, 0);
-    let mask = s.compute_mask(&c);
+    s.commit(0);
+    let mask = s.compute_mask();
     assert!(mask.get(1), "'b' allowed after 'a'");
     assert!(!mask.get(3), "'d' not allowed after 'a'");
 
-    s.commit(&c, 1);
-    assert!(s.is_accepting(&c), "accept after 'ab'");
+    s.commit(1);
+    assert!(s.is_accepting(), "accept after 'ab'");
 }
 
 // ====================================================================
@@ -257,16 +257,16 @@ fn test_save_load_roundtrip() {
 
     // The reloaded constraint should behave identically.
     let mut s = c2.start();
-    let mask = s.compute_mask(&c2);
+    let mask = s.compute_mask();
     assert!(mask.get(0));
     assert!(!mask.get(1));
 
-    s.commit(&c2, 0);
-    let mask = s.compute_mask(&c2);
+    s.commit(0);
+    let mask = s.compute_mask();
     assert!(mask.get(1));
 
-    s.commit(&c2, 1);
-    assert!(s.is_accepting(&c2));
+    s.commit(1);
+    assert!(s.is_accepting());
 }
 
 #[test]
@@ -280,13 +280,13 @@ fn test_save_load_file_roundtrip() {
 
     // Verify behavior matches.
     let mut s = c2.start();
-    let mask = s.compute_mask(&c2);
+    let mask = s.compute_mask();
     assert!(mask.get(0), "'x' allowed");
     assert!(mask.get(2), "'z' allowed");
 
     // Take the "z" path.
-    s.commit(&c2, 2);
-    assert!(s.is_accepting(&c2), "accept after 'z'");
+    s.commit(2);
+    assert!(s.is_accepting(), "accept after 'z'");
 
     // Cleanup.
     let _ = std::fs::remove_file(&path);
@@ -309,7 +309,7 @@ fn test_forced_token_detection() {
     let vocab = make_vocab(&["a", "b"]);
     let c = Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
     let s = c.start();
-    let mask = s.compute_mask(&c);
+    let mask = s.compute_mask();
 
     // Only "a" should be valid — forced token should be 0.
     assert_eq!(forced_token(&mask), Some(0));
@@ -356,7 +356,7 @@ fn test_int_multichar_mask() {
     constraint.debug_dump();
     
     let state = constraint.start();
-    let mask = state.compute_mask(&constraint);
+    let mask = state.compute_mask();
     let active: Vec<usize> = (0..=5usize).filter(|i| mask.get(*i)).collect();
     eprintln!("mask: {:?}", active);
     
@@ -436,15 +436,15 @@ start: JSON_STRING
 
     // Initial state: only " token should be allowed (to start the string)
     let state = constraint.start();
-    let mask = state.compute_mask(&constraint);
+    let mask = state.compute_mask();
     eprintln!("Initial mask: {:?}", (1..=6).filter(|i| mask.get(*i)).collect::<Vec<_>>());
     assert!(mask.get(1), "token 1 (\") should start string");
 
     // After committing ", we're inside the string
     let mut state = constraint.start();
-    state.commit(&constraint, 1); // commit "
+    state.commit(1); // commit "
 
-    let mask = state.compute_mask(&constraint);
+    let mask = state.compute_mask();
     let active: Vec<usize> = (1..=6).filter(|i| mask.get(*i)).collect();
     eprintln!("After \": {:?}", active);
 
@@ -843,15 +843,15 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     let mut s = c.start();
 
     // Step 0: should allow "[" 
-    let mask0 = s.compute_mask(&c);
+    let mask0 = s.compute_mask();
     eprintln!("Step 0 mask: {:?}", mask0.iter_ones().collect::<Vec<_>>());
     assert!(mask0.get(0), "'[' should be allowed");
 
     // Commit "["
-    s.commit(&c, 0);
+    s.commit(0);
 
     // Step 1: should allow digits and "-"
-    let mask1 = s.compute_mask(&c);
+    let mask1 = s.compute_mask();
     eprintln!("Step 1 mask: {:?}", mask1.iter_ones().collect::<Vec<_>>());
     assert!(mask1.get(3), "'1' should be allowed after '['");
 
@@ -868,10 +868,10 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     // Debug dump to see terminal IDs and DFA structure
     c.debug_dump();
     
-    s.commit(&c, 3);
+    s.commit(3);
 
     // Step 2: should allow ",", "]", ",-", and digit tokens
-    let mask2 = s.compute_mask(&c);
+    let mask2 = s.compute_mask();
     let allowed: Vec<usize> = mask2.iter_ones().collect();
     eprintln!("\nStep 2 mask after '[1': {:?}", allowed);
     
@@ -880,15 +880,15 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     assert!(mask2.get(7), "',-' (id=7) should be allowed after '[1'");
 
     // Commit ","
-    s.commit(&c, 2);
-    let mask3 = s.compute_mask(&c);
+    s.commit(2);
+    let mask3 = s.compute_mask();
     eprintln!("Step 3 mask after '[1,': {:?}", mask3.iter_ones().collect::<Vec<_>>());
     assert!(mask3.get(3), "'1' should be allowed after ','");
 
     // Commit "2" (using token "1" which is id=3 with bytes "1")
     // Actually, let's commit token 3 (bytes="1") representing a second digit
-    s.commit(&c, 3);
-    let mask4 = s.compute_mask(&c);
+    s.commit(3);
+    let mask4 = s.compute_mask();
     let allowed4: Vec<usize> = mask4.iter_ones().collect();
     eprintln!("Step 4 mask after '[1,1': {:?}", allowed4);
     assert!(mask4.get(2), "',' (id=2) should be allowed after '[1,1'");
@@ -916,24 +916,24 @@ fn test_plan_api_mask_and_is_finished() {
     assert!((len - 1) * 32 < 32 * len, "mask_len sanity");
 
     // mask() returns the same information as compute_mask().
-    let bitmask = s.compute_mask(&c);
-    let words = s.mask(&c);
+    let bitmask = s.compute_mask();
+    let words = s.mask();
     assert_eq!(words.len(), len);
     assert!((words[0] >> 0) & 1 == 1, "token 0 ('a') should be set");
     assert!((words[0] >> 1) & 1 == 0, "token 1 ('b') should not be set");
 
     // fill_mask() must agree with mask().
     let mut buf = vec![0u32; len];
-    s.fill_mask(&c, &mut buf);
+    s.fill_mask(&mut buf);
     assert_eq!(buf, words);
 
     // is_finished() before completion.
-    assert!(!s.is_finished(&c));
+    assert!(!s.is_finished());
 
     // Advance to completion.
-    s.commit(&c, 0);
-    s.commit(&c, 1);
-    assert!(s.is_finished(&c));
+    s.commit(0);
+    s.commit(1);
+    assert!(s.is_finished());
     let _ = bitmask; // suppress unused warning
 }
 
@@ -948,14 +948,14 @@ fn test_plan_api_commit_bytes() {
     let mut s = c.start();
 
     // commit_bytes is infallible and processes raw bytes directly.
-    s.commit_bytes(&c, b"x");
-    let mask = s.mask(&c);
+    s.commit_bytes(b"x");
+    let mask = s.mask();
     // After "x", only "y" (token 1) is allowed.
     assert!((mask[0] >> 0) & 1 == 0, "token 0 ('x') must not be set after 'x'");
     assert!((mask[0] >> 1) & 1 == 1, "token 1 ('y') must be set after 'x'");
 
-    s.commit_bytes(&c, b"y");
-    assert!(s.is_finished(&c));
+    s.commit_bytes(b"y");
+    assert!(s.is_finished());
 }
 
 /// Verify `commit_tokens()` is equivalent to sequential `commit()`.
@@ -968,8 +968,8 @@ fn test_plan_api_commit_tokens() {
     let c = Constraint::from_ebnf(r#"start ::= "a" "b" "c""#, &vocab).unwrap();
     let mut s = c.start();
 
-    s.commit_tokens(&c, &[0, 1, 2]);
-    assert!(s.is_finished(&c));
+    s.commit_tokens(&[0, 1, 2]);
+    assert!(s.is_finished());
 }
 
 /// Verify `force()` returns the forced token sequence for a deterministic grammar.
@@ -984,13 +984,13 @@ fn test_plan_api_force_deterministic() {
     let s = c.start();
 
     // force() greedily collects the entire deterministic sequence.
-    let forced = s.force(&c);
+    let forced = s.force();
     assert_eq!(forced, vec![0, 1, 2], "all three tokens are forced in sequence");
 
     // Committing the forced tokens reaches the finished state.
     let mut s2 = c.start();
-    s2.commit_tokens(&c, &forced);
-    assert!(s2.is_finished(&c));
+    s2.commit_tokens(&forced);
+    assert!(s2.is_finished());
 }
 
 /// Verify `force()` returns empty when multiple tokens are possible.
@@ -1003,6 +1003,6 @@ fn test_plan_api_force_nondeterministic() {
     let c = Constraint::from_ebnf(r#"start ::= "x" | "y""#, &vocab).unwrap();
     let s = c.start();
 
-    let forced = s.force(&c);
+    let forced = s.force();
     assert!(forced.is_empty(), "no token forced when two are possible");
 }

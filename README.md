@@ -22,15 +22,15 @@ let constraint = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
 
 // Create mutable state and step through tokens.
 let mut state = constraint.start();
-let mask = state.mask(&constraint);
+let mask = state.mask();
 assert!(mask[0] & 1 != 0); // "a" allowed (token 0, bit 0)
 
-state.commit(&constraint, 0); // commit "a"
-let mask = state.mask(&constraint);
+state.commit(0); // commit "a"
+let mask = state.mask();
 assert!(mask[0] & 2 != 0); // "b" now allowed (token 1, bit 1)
 
-state.commit(&constraint, 1); // commit "b"
-assert!(state.is_finished(&constraint));
+state.commit(1); // commit "b"
+assert!(state.is_finished());
 ```
 
 ## Grammar Formats
