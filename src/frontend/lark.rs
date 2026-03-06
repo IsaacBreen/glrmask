@@ -107,8 +107,23 @@ impl<'a> Lexer<'a> {
                 Some(b'\\') => match self.advance() {
                     Some(b'n') => s.push('\n'),
                     Some(b't') => s.push('\t'),
+                    Some(b'r') => s.push('\r'),
                     Some(b'\\') => s.push('\\'),
                     Some(b'"') => s.push('"'),
+                    Some(b'x') => {
+                        // Hex escape: \xHH
+                        let h1 = self.advance().ok_or_else(|| {
+                            GlrMaskError::GrammarParse("unterminated \\x escape".into())
+                        })?;
+                        let h2 = self.advance().ok_or_else(|| {
+                            GlrMaskError::GrammarParse("unterminated \\x escape".into())
+                        })?;
+                        let hex_str = format!("{}{}", h1 as char, h2 as char);
+                        let byte = u8::from_str_radix(&hex_str, 16).map_err(|_| {
+                            GlrMaskError::GrammarParse(format!("invalid \\x escape: \\x{hex_str}"))
+                        })?;
+                        s.push(byte as char);
+                    }
                     Some(c) => {
                         s.push('\\');
                         s.push(c as char);
@@ -181,6 +196,11 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 Some(b'#') => self.skip_comment(),
+                Some(b'%') => {
+                    // Skip %ignore and other directives (rest of line).
+                    self.pos += 1;
+                    self.skip_comment();
+                }
                 Some(b'\n') => {
                     self.pos += 1;
                     tokens.push(Token::Newline);
@@ -277,6 +297,46 @@ impl<'a> Lexer<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// Tilde repetition desugaring
+// ---------------------------------------------------------------------------
+
+/// Desugar `expr~min` (exact) or `expr~min..max` (bounded) into existing
+/// GrammarExpr types.
+///
+/// - `expr~N`       → `Seq([expr; N])`
+/// - `expr~min..max` → `Seq([expr; min] ++ nested_optional(expr, max-min))`
+///
+/// When `max` is `None`, it means exact repetition with count `min`.
+fn desugar_tilde(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
+    let max = max.unwrap_or(min);
+    assert!(max >= min, "tilde max must be >= min");
+
+    let mut parts: Vec<GrammarExpr> = Vec::with_capacity(max);
+    // Mandatory copies.
+    for _ in 0..min {
+        parts.push(atom.clone());
+    }
+    // Optional tail: nested right-to-left.
+    let extra = max - min;
+    if extra > 0 {
+        let mut tail = GrammarExpr::Optional(Box::new(atom.clone()));
+        for _ in 1..extra {
+            tail = GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                atom.clone(),
+                tail,
+            ])));
+        }
+        parts.push(tail);
+    }
+
+    match parts.len() {
+        0 => GrammarExpr::Sequence(vec![]),
+        1 => parts.into_iter().next().unwrap(),
+        _ => GrammarExpr::Sequence(parts),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parser: tokens → NamedGrammar
 // ---------------------------------------------------------------------------
 
@@ -359,7 +419,12 @@ impl Parser {
             return Err(GlrMaskError::GrammarParse("empty grammar".into()));
         }
 
-        let start = rules[0].0.clone();
+        // Prefer a rule named "start"; fall back to the first rule.
+        let start = if rules.iter().any(|(name, _)| name == "start") {
+            "start".to_string()
+        } else {
+            rules[0].0.clone()
+        };
         Ok(NamedGrammar { rules, start })
     }
 
@@ -367,9 +432,28 @@ impl Parser {
         let first = self.parse_sequence()?;
         let mut alts = vec![first];
 
-        while self.peek() == Some(&Token::Pipe) {
-            self.pos += 1;
-            alts.push(self.parse_sequence()?);
+        loop {
+            // Direct pipe continuation.
+            if self.peek() == Some(&Token::Pipe) {
+                self.pos += 1;
+                alts.push(self.parse_sequence()?);
+                continue;
+            }
+            // Multi-line continuation: newline(s) then pipe.
+            let saved = self.pos;
+            let mut saw_newline = false;
+            while self.peek() == Some(&Token::Newline) {
+                self.pos += 1;
+                saw_newline = true;
+            }
+            if saw_newline && self.peek() == Some(&Token::Pipe) {
+                self.pos += 1;
+                alts.push(self.parse_sequence()?);
+                continue;
+            }
+            // Not a continuation — restore position.
+            self.pos = saved;
+            break;
         }
 
         if alts.len() == 1 {
@@ -425,14 +509,35 @@ impl Parser {
                 Ok(GrammarExpr::Optional(Box::new(atom)))
             }
             Some(Token::Tilde) => {
-                // Bounded repetition: expr ~ N or expr ~ N..M
+                // Bounded repetition: expr~N or expr~N..M
                 self.pos += 1;
-                let _n = match self.advance() {
+                let min = match self.advance() {
                     Some(Token::Number(n)) => n,
                     _ => return Err(GlrMaskError::GrammarParse("expected number after ~".into())),
                 };
-                // For now, treat ~ as repeat. Full bounded repetition is complex.
-                Ok(GrammarExpr::RepeatOne(Box::new(atom)))
+                // Check for ..M
+                let max = if self.peek() == Some(&Token::Dot) {
+                    let saved = self.pos;
+                    self.pos += 1;
+                    if self.peek() == Some(&Token::Dot) {
+                        self.pos += 1;
+                        match self.advance() {
+                            Some(Token::Number(m)) => Some(m),
+                            _ => {
+                                return Err(GlrMaskError::GrammarParse(
+                                    "expected number after ..".into(),
+                                ))
+                            }
+                        }
+                    } else {
+                        // Single dot — not a range; restore.
+                        self.pos = saved;
+                        None
+                    }
+                } else {
+                    None
+                };
+                Ok(desugar_tilde(atom, min, max))
             }
             _ => Ok(atom),
         }
@@ -443,11 +548,8 @@ impl Parser {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(s)) => Ok(GrammarExpr::Literal(s.into_bytes())),
             Some(Token::Regex(rx)) => {
-                // Treat regex as a char class terminal.
-                Ok(GrammarExpr::CharClass {
-                    def: rx,
-                    negate: false,
-                })
+                // Use RawRegex to preserve the pattern as-is (avoids double-wrapping brackets).
+                Ok(GrammarExpr::RawRegex(rx))
             }
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
             Some(Token::LParen) => {

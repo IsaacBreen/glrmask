@@ -1,0 +1,13 @@
+[package]
+name = "_glrmask"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "_glrmask"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24.2", features = ["extension-module"] }
+numpy = "0.24.0"
+glrmask = { path = ".." }

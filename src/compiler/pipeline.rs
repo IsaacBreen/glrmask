@@ -72,6 +72,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         state_to_tsid: vocab_pre.state_to_tsid.clone(),
         tsid_to_state: vocab_pre.tsid_to_state.clone(),
         possible_matches: vocab_pre.possible_matches,
+        passthrough_tokens: vocab_pre.passthrough_tokens,
         max_token: vocab_pre.max_token,
         eos_token_id: vocab.eos_token_id,
         token_bytes,

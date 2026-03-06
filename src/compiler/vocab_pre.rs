@@ -19,6 +19,10 @@ pub struct VocabPreprocessing {
     /// `possible_matches[tsid]` = map from terminal_id → RangeSet of token positions.
     /// A "token position" is just the token index in the vocab.
     pub possible_matches: Vec<BTreeMap<TerminalId, RangeSet>>,
+    /// `passthrough_tokens[tsid]` = RangeSet of tokens that reach a non-dead
+    /// tokenizer state from this TSID but don't match any terminal.
+    /// These tokens just advance the tokenizer without triggering parser actions.
+    pub passthrough_tokens: Vec<RangeSet>,
     /// Number of unique TSIDs.
     pub num_tsids: u32,
     /// `state_to_tsid[dfa_state]` = compacted TSID (u32::MAX if unreachable).
@@ -76,24 +80,61 @@ impl VocabPreprocessing {
         let num_tsids = tsid_to_state.len() as u32;
 
         // Phase 3: For each TSID, run all tokens and collect matches.
+        //
+        // Use execute_all_matches to find ALL intermediate terminal matches,
+        // not just the final-state match. This is critical because:
+        // 1. Multi-terminal tokens (e.g., "[]") match terminal "[" at byte 1,
+        //    then die. The commit function handles this by restarting the
+        //    tokenizer after each match.
+        // 2. Prefix tokens (e.g., "tr" for "true") don't match any terminal
+        //    but their end state can reach valid terminals.
+        let reachable = tokenizer.compute_reachable_terminals();
         let mut possible_matches: Vec<BTreeMap<TerminalId, RangeSet>> =
             vec![BTreeMap::new(); num_tsids as usize];
+        let mut passthrough_tokens: Vec<RangeSet> =
+            vec![RangeSet::new(); num_tsids as usize];
 
         for (tsid, &dfa_state) in tsid_to_state.iter().enumerate() {
             for &(token_id, ref token_bytes) in &vocab.entries {
-                let (end_state, matched) = tokenizer.execute(token_bytes, dfa_state);
-                let _ = end_state;
-                for terminal in matched {
-                    possible_matches[tsid]
-                        .entry(terminal)
-                        .or_default()
-                        .insert(token_id);
+                let result = tokenizer.execute_all_matches(token_bytes, dfa_state);
+
+                // Collect ALL terminals matched at ANY intermediate position.
+                // The commit function tries all matches, so a token is valid
+                // if ANY of its matches produce a valid parser continuation.
+                let mut all_matched = BTreeSet::new();
+                for (_offset, terminals) in &result.matches {
+                    for &terminal in terminals {
+                        all_matched.insert(terminal);
+                        possible_matches[tsid]
+                            .entry(terminal)
+                            .or_default()
+                            .insert(token_id);
+                    }
+                }
+
+                // Record prefix matches: the token reaches a non-dead end
+                // state that can eventually lead to specific terminals.
+                if result.end_state != DEAD {
+                    if let Some(rt) = reachable.get(result.end_state as usize) {
+                        for &reachable_terminal in rt {
+                            if !all_matched.contains(&reachable_terminal) {
+                                possible_matches[tsid]
+                                    .entry(reachable_terminal)
+                                    .or_default()
+                                    .insert(token_id);
+                            }
+                        }
+                    }
+                    if all_matched.is_empty() {
+                        passthrough_tokens[tsid].insert(token_id);
+                    }
                 }
             }
         }
 
         Self {
             possible_matches,
+            passthrough_tokens,
             num_tsids,
             state_to_tsid,
             tsid_to_state,
@@ -158,11 +199,11 @@ mod tests {
         let matches = &vp.possible_matches[tsid_0 as usize];
 
         // Terminal 0 should match token 0 ("a")
-        assert!(matches.get(&0).map_or(false, |rs| rs.contains(0)));
+        assert!(matches.get(&0).is_some_and(|rs| rs.contains(0)));
         // Terminal 1 should match token 1 ("b")
-        assert!(matches.get(&1).map_or(false, |rs| rs.contains(1)));
+        assert!(matches.get(&1).is_some_and(|rs| rs.contains(1)));
         // Token 2 ("c") should not match terminal 0 or 1
-        assert!(!matches.get(&0).map_or(false, |rs| rs.contains(2)));
-        assert!(!matches.get(&1).map_or(false, |rs| rs.contains(2)));
+        assert!(!matches.get(&0).is_some_and(|rs| rs.contains(2)));
+        assert!(!matches.get(&1).is_some_and(|rs| rs.contains(2)));
     }
 }

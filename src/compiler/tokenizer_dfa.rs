@@ -96,6 +96,56 @@ impl TokenizerDfa {
         self.dfa.num_states() as u32
     }
 
+    /// Compute which terminals are reachable from each DFA state.
+    ///
+    /// `reachable_terminals[state]` = set of terminal IDs that can be reached
+    /// (via some sequence of bytes) from `state`.
+    ///
+    /// This is a backward reachability analysis: start from accepting states,
+    /// then propagate backward through transitions.
+    pub fn compute_reachable_terminals(&self) -> Vec<BTreeSet<TerminalId>> {
+        let n = self.num_states() as usize;
+        let mut reachable: Vec<BTreeSet<TerminalId>> = vec![BTreeSet::new(); n];
+
+        // Seed: each accepting state reaches its matched terminals.
+        for s in 0..n {
+            let s32 = s as u32;
+            if s32 == crate::automata::dfa::DEAD {
+                continue;
+            }
+            for &gid in self.dfa.finalizers(s32) {
+                reachable[s].insert(gid as TerminalId);
+            }
+        }
+
+        // Fixed-point backward propagation.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for s in 0..n {
+                let s32 = s as u32;
+                if s32 == crate::automata::dfa::DEAD {
+                    continue;
+                }
+                for byte in 0..=255u8 {
+                    let next = self.dfa.get_transition(s32, byte);
+                    if next == crate::automata::dfa::DEAD || next as usize >= n {
+                        continue;
+                    }
+                    // If next can reach terminal T, then s can reach T too.
+                    let next_reachable = reachable[next as usize].clone();
+                    for t in next_reachable {
+                        if reachable[s].insert(t) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        reachable
+    }
+
     /// Execute the tokenizer on a byte string from a given state.
     /// Returns (final_state, set of matched terminal IDs at the end).
     ///
@@ -381,11 +431,19 @@ fn parse_char_class(input: &[u8], mut pos: usize) -> (Expr, usize) {
             }
         } else if pos + 2 < input.len() && input[pos + 1] == b'-' && input[pos + 2] != b']' {
             let lo = input[pos];
-            let hi = input[pos + 2];
+            pos += 2; // skip lo and '-'
+            let hi = if input[pos] == b'\\' {
+                let h = parse_escape_byte(input, pos);
+                pos += escape_len(input, pos);
+                h
+            } else {
+                let h = input[pos];
+                pos += 1;
+                h
+            };
             for b in lo..=hi {
                 set.insert(b);
             }
-            pos += 3;
         } else {
             set.insert(input[pos]);
             pos += 1;
@@ -649,5 +707,62 @@ mod tests {
         assert!(regex.is_match(b"aaa"));
         assert!(regex.is_match(b"aaaa"));
         assert!(!regex.is_match(b"aaaaa"));
+    }
+
+    #[test]
+    fn test_reachable_terminals_boolean() {
+        use crate::frontend::lark::parse_lark;
+
+        let lark = "JSON_BOOL: \"true\" | \"false\"\nstart: JSON_BOOL\n";
+        let grammar = parse_lark(lark).unwrap();
+        let terminals: Vec<_> = grammar.terminals.iter().map(|td| (td.id, parse_regex(&td.pattern))).collect();
+        eprintln!("Terminals: {:?}", terminals.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+        let tokenizer = TokenizerDfa::from_exprs(&terminals);
+        eprintln!("DFA states: {}", tokenizer.dfa.num_states());
+
+        // Check reachable terminals
+        let reachable = tokenizer.compute_reachable_terminals();
+        for (s, r) in reachable.iter().enumerate() {
+            if !r.is_empty() {
+                eprintln!("  State {}: reachable {:?}", s, r);
+            }
+        }
+
+        let start = tokenizer.start_state();
+        eprintln!("Start state: {}", start);
+
+        // execute("t")
+        let (es_t, m_t) = tokenizer.execute(b"t", start);
+        eprintln!("execute(b\"t\") => state={}, matched={:?}", es_t, m_t);
+        if es_t != crate::automata::dfa::DEAD {
+            eprintln!("  reachable: {:?}", reachable.get(es_t as usize));
+        }
+
+        // execute("tr")
+        let (es_tr, m_tr) = tokenizer.execute(b"tr", start);
+        eprintln!("execute(b\"tr\") => state={}, matched={:?}", es_tr, m_tr);
+        if es_tr != crate::automata::dfa::DEAD {
+            eprintln!("  reachable: {:?}", reachable.get(es_tr as usize));
+        }
+
+        // execute("true")
+        let (es_true, m_true) = tokenizer.execute(b"true", start);
+        eprintln!("execute(b\"true\") => state={}, matched={:?}", es_true, m_true);
+
+        // execute("f")
+        let (es_f, m_f) = tokenizer.execute(b"f", start);
+        eprintln!("execute(b\"f\") => state={}, matched={:?}", es_f, m_f);
+        if es_f != crate::automata::dfa::DEAD {
+            eprintln!("  reachable: {:?}", reachable.get(es_f as usize));
+        }
+
+        // The start state should be able to reach JSON_BOOL
+        assert!(reachable[start as usize].contains(&0), "JSON_BOOL should be reachable from start");
+        // After "t", JSON_BOOL should still be reachable
+        assert_ne!(es_t, crate::automata::dfa::DEAD, "t should not be dead");
+        assert!(
+            reachable[es_t as usize].contains(&0),
+            "JSON_BOOL should be reachable from state after 't'"
+        );
     }
 }
