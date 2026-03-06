@@ -1332,3 +1332,134 @@ fn test_ported_force_partial_prefix() {
     let forced = s.force();
     assert_eq!(forced, vec![0u32], "only 'a' (id=0) is forced; second byte branches");
 }
+
+// ===========================================================================
+// Ported force() tests — third batch (token-level, read-only, edge cases)
+// ===========================================================================
+
+/// After committing the single token "a" the grammar is complete.
+/// force() on the finished state returns empty (no more tokens to force).
+#[test]
+fn test_ported_force_empty_after_complete() {
+    // IDs: "a"→0, "<|endoftext|>"→1 (EOS; auto-detected)
+    let vocab = make_vocab(&["a", "<|endoftext|>"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= A
+           A ::= 'a'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+    s.commit(0); // commit "a" → parse complete
+
+    let forced = s.force();
+    assert!(forced.is_empty(), "after complete parse, force() must return [] not {:?}", forced);
+}
+
+/// Grammar: s ::= AB CD (four distinct single-byte tokens in sequence).
+/// Initial force gives all four. After committing the first two, mid-parse force gives the last two.
+#[test]
+fn test_ported_force_after_partial_commit() {
+    // IDs: "a"→0, "b"→1, "c"→2, "d"→3
+    let vocab = make_vocab(&["a", "b", "c", "d"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= AB CD
+           AB ::= 'a' 'b'
+           CD ::= 'c' 'd'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    // Initially all four bytes are forced.
+    let forced = s.force();
+    assert_eq!(forced, vec![0u32, 1, 2, 3], "all tokens forced initially");
+
+    // After committing 'a' and 'b', the remaining 'c' and 'd' are forced.
+    s.commit(0);
+    s.commit(1);
+    let forced_mid = s.force();
+    assert_eq!(forced_mid, vec![2u32, 3], "after 'ab', 'cd' is forced");
+}
+
+/// force() must not mutate the state: two consecutive calls must agree,
+/// and mask() must be identical before and after.
+#[test]
+fn test_ported_force_is_readonly() {
+    // IDs: "a"→0, "b"→1, "c"→2
+    let vocab = make_vocab(&["a", "b", "c"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= ABC
+           ABC ::= 'a' 'b' 'c'"#,
+        &vocab,
+    )
+    .unwrap();
+    let s = c.start();
+
+    let mask_before = s.mask();
+    let force1 = s.force();
+    let mask_after = s.mask();
+    let force2 = s.force();
+
+    assert_eq!(mask_before, mask_after, "mask unchanged after force()");
+    assert_eq!(force1, force2, "force() is deterministic when called twice");
+}
+
+/// Committing the tokens returned by force() must advance the parser correctly.
+/// Grammar: s ::= AB CD; vocab: a/b/c/d (single byte). Expected force = [0,1,2,3].
+#[test]
+fn test_ported_force_commit_roundtrip() {
+    // IDs: "a"→0, "b"→1, "c"→2, "d"→3
+    let vocab = make_vocab(&["a", "b", "c", "d"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= AB CD
+           AB ::= 'a' 'b'
+           CD ::= 'c' 'd'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let forced = s.force();
+    assert_eq!(forced, vec![0u32, 1, 2, 3]);
+
+    // Committing all forced tokens must succeed without panic.
+    for token in &forced {
+        s.commit(*token);
+    }
+    assert!(s.is_finished(), "should be finished after committing forced sequence");
+}
+
+/// Grammar: s ::= 'x' | no alternatives. Vocab: x=0 only.
+/// The single character is forced immediately in the initial state.
+#[test]
+fn test_ported_force_single_character_grammar() {
+    let vocab = make_vocab(&["x"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= X
+           X ::= 'x'"#,
+        &vocab,
+    )
+    .unwrap();
+    let s = c.start();
+
+    let forced = s.force();
+    assert_eq!(forced, vec![0u32], "single-character grammar is fully forced");
+}
+
+/// Grammar: s ::= 'a' 'b'. Vocab: only "ab"=0 (no individual byte tokens).
+/// With exactly one token in the mask, force() should return [0].
+#[test]
+fn test_ported_force_only_multibyte_token() {
+    let vocab = Vocab::new(vec![(0u32, b"ab".to_vec())], None);
+    let c = Constraint::from_ebnf(
+        r#"s ::= AB
+           AB ::= 'a' 'b'"#,
+        &vocab,
+    )
+    .unwrap();
+    let s = c.start();
+
+    let forced = s.force();
+    assert_eq!(forced, vec![0u32], "only multi-byte 'ab' token; exactly one in mask → forced");
+}
