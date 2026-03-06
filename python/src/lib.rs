@@ -3,7 +3,6 @@
 //! Exposes `Constraint` and `ConstraintState` to Python, matching the interface
 //! expected by the CFA (constraint-framework-analysis) benchmarking harness.
 
-use glrmask::ds::bitset::BitSet;
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -15,13 +14,6 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// Compiled grammar constraint. Immutable, thread-safe.
-///
-/// Create from a Lark grammar string + vocabulary:
-///
-/// ```python
-/// vocab = {b"hello": 0, b"world": 1}
-/// c = Constraint.from_lark("start: \"hello\" \"world\"", vocab, 1)
-/// ```
 #[pyclass(name = "Constraint")]
 #[derive(Clone)]
 pub struct PyConstraint {
@@ -32,11 +24,6 @@ pub struct PyConstraint {
 #[pymethods]
 impl PyConstraint {
     /// Build from a Lark grammar string.
-    ///
-    /// Args:
-    ///     lark_source: Lark-format grammar string.
-    ///     token_to_id: dict mapping `bytes -> int` (token bytes to token ID).
-    ///     max_token_id: maximum token ID in the vocabulary.
     #[staticmethod]
     fn from_lark(
         lark_source: &str,
@@ -46,10 +33,7 @@ impl PyConstraint {
         let vocab = dict_to_vocab(token_to_id, max_token_id)?;
         let constraint = glrmask::Constraint::from_lark(lark_source, &vocab)
             .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token: max_token_id,
-        })
+        Ok(Self { inner: Arc::new(constraint), max_token: max_token_id })
     }
 
     /// Build from an EBNF grammar string.
@@ -62,10 +46,7 @@ impl PyConstraint {
         let vocab = dict_to_vocab(token_to_id, max_token_id)?;
         let constraint = glrmask::Constraint::from_ebnf(ebnf_source, &vocab)
             .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token: max_token_id,
-        })
+        Ok(Self { inner: Arc::new(constraint), max_token: max_token_id })
     }
 
     /// Build from a JSON Schema string.
@@ -78,17 +59,12 @@ impl PyConstraint {
         let vocab = dict_to_vocab(token_to_id, max_token_id)?;
         let constraint = glrmask::Constraint::from_json_schema(schema, &vocab)
             .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token: max_token_id,
-        })
+        Ok(Self { inner: Arc::new(constraint), max_token: max_token_id })
     }
 
-    /// Save to bytes (bincode).
-    fn save(&self) -> PyResult<Vec<u8>> {
-        self.inner
-            .save()
-            .map_err(|e| PyValueError::new_err(format!("{e}")))
+    /// Save to bytes (bincode). Infallible.
+    fn save(&self) -> Vec<u8> {
+        self.inner.save()
     }
 
     /// Load from bytes (bincode).
@@ -96,124 +72,124 @@ impl PyConstraint {
     fn load(data: &[u8], max_token_id: u32) -> PyResult<Self> {
         let constraint = glrmask::Constraint::load(data)
             .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token: max_token_id,
-        })
+        Ok(Self { inner: Arc::new(constraint), max_token: max_token_id })
     }
 }
 
 // ---------------------------------------------------------------------------
 // PyConstraintState
+//
+// `ConstraintState<'a>` borrows from `Constraint`. PyO3 pyclass structs must
+// own all their data (no lifetime parameters). We resolve this with an unsafe
+// 'static transmute backed by an Arc:
+//
+// SAFETY invariants:
+//  1. `state` is declared before `constraint` in the struct so it drops first.
+//  2. `Arc` keeps `*constraint` at a stable heap address for the Arc's lifetime.
+//  3. No reference to `state` escapes `PyConstraintState` with an extended lifetime.
 // ---------------------------------------------------------------------------
 
 /// Mutable per-sequence state.
-///
-/// ```python
-/// state = ConstraintState(constraint)
-/// mask = state.get_mask_bv()
-/// state.commit(token_id)
-/// ```
 #[pyclass(name = "ConstraintState")]
 pub struct PyConstraintState {
+    // `state` must be declared BEFORE `constraint` so it drops first.
+    state: glrmask::ConstraintState<'static>,
     constraint: Arc<glrmask::Constraint>,
-    state: glrmask::ConstraintState,
     max_token: u32,
+}
+
+impl PyConstraintState {
+    fn make_state(constraint: &Arc<glrmask::Constraint>) -> glrmask::ConstraintState<'static> {
+        // SAFETY: See struct-level comment. The Arc keeps the Constraint at a
+        // stable address for at least as long as this PyConstraintState lives.
+        let c_ref: &glrmask::Constraint = &**constraint;
+        let c_static: &'static glrmask::Constraint =
+            unsafe { &*(c_ref as *const glrmask::Constraint) };
+        c_static.start()
+    }
 }
 
 #[pymethods]
 impl PyConstraintState {
     #[new]
     fn new(constraint: &PyConstraint) -> Self {
-        let state = constraint.inner.start();
-        Self {
-            constraint: constraint.inner.clone(),
-            state,
-            max_token: constraint.max_token,
-        }
+        let state = Self::make_state(&constraint.inner);
+        Self { state, constraint: constraint.inner.clone(), max_token: constraint.max_token }
     }
 
-    /// Commit a token ID to advance the state.
-    fn commit(&mut self, token_id: u32) -> PyResult<()> {
-        self.state
-            .commit(&self.constraint, token_id)
-            .map_err(|e| PyValueError::new_err(format!("{e}")))
+    /// Reset to the initial state without recompiling.
+    fn reset(&mut self) {
+        self.state = Self::make_state(&self.constraint);
     }
 
-    /// Commit raw bytes (processes each byte through the tokenizer).
-    fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
-        // Process bytes one token at a time by finding the matching token
-        // For now, commit each byte as if it were a single-byte token
-        // This is a simplified version; a full implementation would do
-        // tokenizer matching.
-        for &_b in data {
-            // Find token with these bytes
-            // For now just error — the CFA adapter uses commit(token_id) path
-            return Err(PyValueError::new_err(
-                "commit_bytes not yet implemented; use commit(token_id) instead",
-            ));
-        }
-        let _ = data;
-        Ok(())
+    /// Commit a token ID (infallible — unknown token leads to empty next mask).
+    fn commit(&mut self, token_id: u32) {
+        self.state.commit(token_id);
     }
 
-    /// Get the token mask as a `PyBitset`.
+    /// Commit raw bytes through the tokenizer DFA.
+    fn commit_bytes(&mut self, data: &[u8]) {
+        self.state.commit_bytes(data);
+    }
+
+    /// Commit a list of token IDs.
+    fn commit_tokens(&mut self, token_ids: Vec<u32>) {
+        self.state.commit_tokens(&token_ids);
+    }
+
+    /// Get the allowed-token mask as a PyBitset.
     fn get_mask_bv(&self) -> PyBitset {
-        let mask = self.state.compute_mask(&self.constraint);
-        PyBitset { inner: mask }
+        PyBitset { words: self.state.mask(), total_tokens: self.max_token + 1 }
     }
 
-    /// Get the token mask as a boolean numpy array.
+    /// Get the allowed-token mask as a boolean numpy array.
     fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let mask = self.state.compute_mask(&self.constraint);
+        let words = self.state.mask();
         let n = (self.max_token + 1) as usize;
         let mut bools = vec![false; n];
         for i in 0..n {
-            if mask.get(i) {
+            let (wi, bi) = (i / 32, i % 32);
+            if wi < words.len() && (words[wi] >> bi) & 1 != 0 {
                 bools[i] = true;
             }
         }
         Ok(PyArray1::from_vec(py, bools))
     }
 
-    /// Fill a pre-allocated int32 numpy array with the bitmask.
-    ///
-    /// Compatible with llguidance bitmask format: little-endian bit packing.
+    /// Fill a pre-allocated int32 numpy array with the packed bitmask.
     fn fill_next_token_bitmask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
         })?;
-        let mask = self.state.compute_mask(&self.constraint);
-        // Zero the output first
         for v in slice.iter_mut() {
             *v = 0;
         }
-        // Pack bits into i32 words (little-endian bit order)
-        for i in 0..mask.len() {
-            if mask.get(i) {
-                let word_idx = i / 32;
-                let bit_idx = i % 32;
-                if word_idx < slice.len() {
-                    slice[word_idx] |= 1i32 << bit_idx;
-                }
-            }
+        let mut buf = vec![0u32; slice.len()];
+        self.state.fill_mask(&mut buf);
+        for (dst, src) in slice.iter_mut().zip(buf.iter()) {
+            *dst = *src as i32;
         }
         Ok(())
     }
 
-    /// Returns the required buffer size in i32 elements for the mask.
+    /// Number of i32 words needed for `fill_next_token_bitmask`.
     fn mask_buffer_size_i32(&self) -> usize {
-        ((self.max_token as usize + 1) + 31) / 32
+        self.constraint.mask_len()
     }
 
-    /// Whether the state is accepting (grammar fully matched).
+    /// Whether the grammar is fully satisfied (EOS valid).
     fn is_accepting(&self) -> bool {
-        self.state.is_accepting(&self.constraint)
+        self.state.is_finished()
     }
 
-    /// Whether the state is active (has any valid parse stacks).
+    /// Whether any continuation token is currently allowed.
     fn is_active(&self) -> bool {
-        self.state.is_active()
+        self.state.mask().iter().any(|&w| w != 0) || self.state.is_finished()
+    }
+
+    /// List of deterministically forced token IDs.
+    fn get_forced_tokens(&self) -> Vec<u32> {
+        self.state.force()
     }
 }
 
@@ -221,65 +197,61 @@ impl PyConstraintState {
 // PyBitset
 // ---------------------------------------------------------------------------
 
-/// Wraps a BitSet for Python.
+/// Packed bitmask returned by `get_mask_bv()`.
 #[pyclass(name = "Bitset")]
 #[derive(Clone)]
 pub struct PyBitset {
-    inner: BitSet,
+    words: Vec<u32>,
+    total_tokens: u32,
 }
 
 #[pymethods]
 impl PyBitset {
-    /// Return list of indices where the bit is set.
+    /// Return sorted list of allowed token IDs.
     fn to_indices(&self) -> Vec<usize> {
-        self.inner.iter_ones().collect()
-    }
-
-    /// Return list of (start, end) ranges (inclusive on both ends).
-    fn to_ranges(&self) -> Vec<(usize, usize)> {
-        let mut ranges = Vec::new();
-        let mut start: Option<usize> = None;
-        let mut end: usize = 0;
-
-        for i in self.inner.iter_ones() {
-            match start {
-                None => {
-                    start = Some(i);
-                    end = i;
-                }
-                Some(_) => {
-                    if i == end + 1 {
-                        end = i;
-                    } else {
-                        ranges.push((start.unwrap(), end));
-                        start = Some(i);
-                        end = i;
-                    }
+        let limit = self.total_tokens as usize;
+        let mut out = Vec::new();
+        for (wi, &word) in self.words.iter().enumerate() {
+            if word == 0 { continue; }
+            for bit in 0..32u32 {
+                if (word >> bit) & 1 != 0 {
+                    let id = wi * 32 + bit as usize;
+                    if id < limit { out.push(id); }
                 }
             }
         }
-        if let Some(s) = start {
-            ranges.push((s, end));
+        out
+    }
+
+    /// Return list of (start, end) inclusive ranges of allowed token IDs.
+    fn to_ranges(&self) -> Vec<(usize, usize)> {
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        let mut run: Option<(usize, usize)> = None;
+        for id in self.to_indices() {
+            match run {
+                None => { run = Some((id, id)); }
+                Some((s, e)) if id == e + 1 => { run = Some((s, id)); }
+                Some((s, e)) => { ranges.push((s, e)); run = Some((id, id)); }
+            }
         }
+        if let Some((s, e)) = run { ranges.push((s, e)); }
         ranges
     }
 
     fn __len__(&self) -> usize {
-        self.inner.count_ones()
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
 
     fn __contains__(&self, i: usize) -> bool {
-        i < self.inner.len() && self.inner.get(i)
+        let (wi, bi) = (i / 32, i % 32);
+        wi < self.words.len() && (self.words[wi] >> bi) & 1 != 0
     }
 
     fn __repr__(&self) -> String {
-        let ones: Vec<usize> = self.inner.iter_ones().take(10).collect();
-        let total = self.inner.count_ones();
-        if total <= 10 {
-            format!("Bitset({ones:?})")
-        } else {
-            format!("Bitset({ones:?}... [{total} set])")
-        }
+        let ones: Vec<usize> = self.to_indices().into_iter().take(10).collect();
+        let total = self.__len__();
+        if total <= 10 { format!("Bitset({ones:?})") }
+        else { format!("Bitset({ones:?}... [{total} set])") }
     }
 }
 
@@ -287,11 +259,7 @@ impl PyBitset {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a Python dict[bytes, int] to a glrmask::Vocab.
-fn dict_to_vocab(
-    token_to_id: &Bound<'_, PyDict>,
-    _max_token_id: u32,
-) -> PyResult<glrmask::Vocab> {
+fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>, _max_token_id: u32) -> PyResult<glrmask::Vocab> {
     let mut entries = Vec::new();
     for (key, value) in token_to_id.iter() {
         let token_bytes: Vec<u8> = key.extract()?;
