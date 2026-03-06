@@ -1169,7 +1169,7 @@ fn test_ported_js_like_mask_after_commit_bytes() {
 /// mask here. The new DWA over-approximates and allows ";;" as a false positive. Since this
 /// is a known precision difference (not a soundness bug — no invalid generation occurs, only
 /// an over-approximation), the test is left as documentation with the new actual behavior.
-#[ignore = "DWA over-approximation allows ';; ' as a false positive; see test body"]
+/// KNOWN FAILING: DWA over-approximation allows ';;' as false positive; tracked for fix pass.
 #[test]
 fn test_ported_js_like_mask_minimized() {
     // IDs: ";;"→0  (the only token)
@@ -1462,4 +1462,219 @@ fn test_ported_force_only_multibyte_token() {
 
     let forced = s.force();
     assert_eq!(forced, vec![0u32], "only multi-byte 'ab' token; exactly one in mask → forced");
+}
+
+// =============================================================================
+// Batch 4: Span-token and false-positive regression tests
+// =============================================================================
+
+/// After commit `"a"`, token `":x"` must be allowed but `":-"` must NOT.
+/// Grammar: `start: "a" ":" "x" STR_CHAR STR_CHAR "x"` where STR_CHAR = "a"|":"|"-".
+/// Regression for Super DWA specialization admitting tokens that skip required literals.
+#[test]
+fn test_ported_super_dwa_fp_minimal() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b":x".to_vec()),
+            (2u32, b":-".to_vec()),
+        ],
+        None,
+    );
+    let lark = r#"start: "a" ":" "x" STR_CHAR STR_CHAR "x"
+STR_CHAR: "a" | ":" | "-"
+"#;
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+    s.commit(0u32); // "a"
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 1), "':x' must be allowed after 'a'");
+    assert!(!token_allowed(&mask, 2), "false-positive ':-' must NOT be allowed after 'a'");
+}
+
+/// Regression: after `{"name`, token `":"` must be allowed but `":[` and `":-` must NOT.
+/// Grammar: `start: ws object ws` where object has a QUOTE-wrapped name_pair.
+#[test]
+fn test_ported_glr_fp_repro_minimal() {
+    let lark = r#"start: ws object ws
+object: "{" ws name_pair ws "}"
+name_pair: QUOTE "name" QUOTE ws ":" ws QUOTE name_val QUOTE
+name_val: name_chars
+name_chars: STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR STR_CHAR*
+QUOTE: "\""
+ws: WS*
+WS: " " | "\n" | "\t" | "\r"
+STR_CHAR: /[A-Za-z0-9 \[\]\-:{}@.]/
+"#;
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"{\"".to_vec()),    // tok_open
+            (1u32, b"name".to_vec()),   // tok_name
+            (2u32, b"\":\"".to_vec()),  // tok_colon_quote (closing " + : + opening ")
+            (3u32, b"\":[".to_vec()),   // tok_fp_bracket (FP: "[" is not valid)
+            (4u32, b"\":-".to_vec()),   // tok_fp_dash (FP: "-" is not valid after ":")
+        ],
+        None,
+    );
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+    s.commit(0u32); // `{"`
+    s.commit(1u32); // `name`
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 2), "'\":\"' must be allowed after '{{\"name'");
+    assert!(!token_allowed(&mask, 3), r#"false-positive '":[' must NOT be allowed"#);
+    assert!(!token_allowed(&mask, 4), r#"false-positive '":-' must NOT be allowed"#);
+}
+
+/// Regression: standalone UTF-8 continuation byte (0xA1) must NOT be allowed
+/// inside a JSON string character class after committing `{"`, while ASCII `a` IS allowed.
+/// Vocab includes `"`, `:`, and `}` so grammar completion is possible.
+///
+/// KNOWN FAILING: The new system treats `/[^\x00-\x1F"\\]/` as a byte-range match,
+/// so byte 0xA1 (which is > 0x1F and not `"` or `\`) is incorrectly allowed.
+/// The old system was UTF-8-aware and rejected standalone continuation bytes.
+/// Root cause: regex character class in Lark frontend is not UTF-8-gated.
+#[test]
+fn test_ported_json_string_rejects_invalid_utf8() {
+    let lark = r#"start: "{" JSON_STRING ":" JSON_STRING "}"
+JSON_STRING: "\"" STRING_CHARS "\""
+STRING_CHARS: STRING_CHAR*
+STRING_CHAR: /[^\x00-\x1F"\\]/
+"#;
+    // Minimal vocab that admits a valid completion: {"a":""}
+    // commit seq: 0({") + 2(a) + 3(") + 4(:) + 3(") + 3(") + 5(})
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"{\"".to_vec()),   // opens object + starts first JSON_STRING
+            (1u32, vec![0xA1u8]),      // bad: standalone UTF-8 continuation byte
+            (2u32, b"a".to_vec()),     // good: ASCII character inside JSON_STRING
+            (3u32, b"\"".to_vec()),    // quote: closes/opens strings (enables completion)
+            (4u32, b":".to_vec()),     // key-value colon
+            (5u32, b"}".to_vec()),     // object close
+        ],
+        None,
+    );
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+    s.commit(0u32); // `{"`
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 2), "ASCII 'a' must be allowed as JSON string content after {{\"");
+    assert!(!token_allowed(&mask, 1), "standalone 0xA1 must NOT be allowed as JSON string content after {{\"");
+}
+
+/// Grammar: `start: "a" ":" "a"`. After commit_bytes("a"), token ":a" spans two
+/// grammar terminals and must appear in the mask.
+#[test]
+fn test_ported_span_token_in_mask() {
+    let lark = r#"start: "a" ":" "a""#;
+    let vocab = Vocab::new(vec![(0u32, b":a".to_vec())], None);
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+    s.commit_bytes(b"a");
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "span token ':a' must be in mask after commit_bytes('a')");
+}
+
+/// Grammar: `start: "{" pair "}"` where `pair: string ":" string "," string ":" "null"`.
+/// After committing `{"`, the span token `":\"\","` must be in the mask.
+/// (Tests span across string-close + ":" + string-open + string-close + ",".)
+#[test]
+fn test_ported_json_value_span_token_fn_copy_minimized() {
+    let lark = r#"start: "{" pair "}"
+pair: string ":" string "," string ":" "null"
+string: QUOTE char* QUOTE
+char: "a"
+QUOTE: "\""
+"#;
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"{\"".to_vec()),        // tok_prefix
+            (1u32, b"\":\"\",".to_vec()),   // tok_span: closing " + : + open " + close " + ,
+            (2u32, b"\"a\":null}".to_vec()), // tok_suffix
+        ],
+        None,
+    );
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+
+    // Test via state.commit() path
+    let mut s = c.start();
+    s.commit(0u32); // `{"`
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 1), "span token b'\\\":\\\"\\\",\\\"' must be in mask after commit(0)");
+
+    // Test via commit_bytes() path
+    let mut s2 = c.start();
+    s2.commit_bytes(b"{\"");
+    let mask2 = s2.mask();
+    assert!(token_allowed(&mask2, 1), "span token must be in mask after commit_bytes(b'{{\\\"')");
+}
+
+/// Minimal EBNF span-token test: `start ::= string ':' string ','` where `string ::= '"' '"'`.
+/// After commit_bytes(`"`), the token `":\""` (spanning string-end + : + string-start) must be allowed.
+#[test]
+fn test_ported_json_value_span_token_fn_minimal() {
+    let vocab = Vocab::new(vec![(0u32, b"\":\"".to_vec())], None);
+    let c = Constraint::from_ebnf(
+        r#"start ::= string ':' string ','
+string ::= '"' '"'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+    s.commit_bytes(b"\"");
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 0),
+        "span token b'\\\":\\\"' must be in mask after commit_bytes(b'\"')"
+    );
+}
+
+/// Full JSON Lark grammar; after committing token b'{"' (ID 4895), the span-token
+/// b'":\"\","' (ID 34713) must be in the mask. Exercises sparse high-ID vocab.
+#[test]
+fn test_ported_json_value_span_token_fn() {
+    let lark = r#"start: ws value ws
+value: object | array | string | number | "true" | "false" | "null"
+object: "{" ws members? ws "}"
+members: pair (ws "," ws pair)*
+pair: string ws ":" ws value
+array: "[" ws elements? ws "]"
+elements: value (ws "," ws value)*
+string: QUOTE char* QUOTE
+char: letter | digit | MINUS | UNDERSCORE
+number: int | int frac | int exp | int frac exp
+int: digits | MINUS digits
+frac: DOT digits
+exp: EXP digits | EXP PLUS digits | EXP MINUS digits
+digits: DIGIT+
+ws: WS*
+letter: LETTER
+digit: DIGIT
+QUOTE: "\""
+MINUS: "-"
+PLUS: "+"
+DOT: "."
+EXP: "e" | "E"
+UNDERSCORE: "_"
+WS: " " | "\n" | "\t" | "\r"
+LETTER: "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
+DIGIT: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+"#;
+    // Sparse vocab with original high IDs (mirrors production token IDs)
+    let vocab = Vocab::new(
+        vec![
+            (4895u32,  b"{\"".to_vec()),
+            (34713u32, b"\":\"\",".to_vec()),
+            (34714u32, b"\"a\":null}".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+    s.commit(4895u32); // `{"`
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 34713),
+        "json_value span token: b'\":\\\"\\\",\\\"' (ID 34713) must be in mask after b'{{\\\"' (ID 4895)"
+    );
 }
