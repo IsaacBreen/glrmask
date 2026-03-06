@@ -557,3 +557,482 @@ fn test_plan_api_force_nondeterministic() {
     let forced = s.force();
     assert!(forced.is_empty(), "no token forced when two are possible");
 }
+
+// ===========================================================================
+// Ported tests from grammars2024/src/test_constraint_basic.rs
+// ===========================================================================
+
+/// Trivial 2-token grammar: s ::= A EOF; A ::= 'a'; EOF ::= '$'.
+/// Initial mask = {0("a")}; after commit "a" → {1("$")}; after commit "$" → is_finished().
+#[test]
+fn test_ported_trivial() {
+    // IDs: "a"→0, "$"→1
+    let vocab = make_vocab(&["a", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= A EOF
+           A ::= 'a'
+           EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
+    assert!(!token_allowed(&mask, 1), "'$' should NOT be allowed initially");
+
+    s.commit(0); // commit "a"
+    let mask = s.mask();
+    assert!(!token_allowed(&mask, 0), "'a' should NOT be allowed after 'a'");
+    assert!(token_allowed(&mask, 1), "'$' should be allowed after 'a'");
+
+    s.commit(1); // commit "$"
+    assert!(s.is_finished(), "should be finished after 'a$'");
+}
+
+/// Grammar with two paths: s ::= x EOF; x ::= A B_OR_C | AB.
+/// Multi-byte LLM tokens ("ab", "ac") each match a grammar token sequence.
+#[test]
+fn test_ported_simple() {
+    // IDs: "ab"→0, "ac"→1, "$"→2
+    let vocab = make_vocab(&["ab", "ac", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= x EOF
+           x ::= A B_OR_C | AB
+           A ::= 'a'
+           AB ::= 'ab'
+           B_OR_C ::= 'b' | 'c'
+           EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'ab' should be allowed initially");
+    assert!(token_allowed(&mask, 1), "'ac' should be allowed initially");
+    assert!(!token_allowed(&mask, 2), "'$' should NOT be allowed initially");
+
+    s.commit(0); // commit "ab"
+    let mask = s.mask();
+    assert!(!token_allowed(&mask, 0), "'ab' not allowed after 'ab'");
+    assert!(!token_allowed(&mask, 1), "'ac' not allowed after 'ab'");
+    assert!(token_allowed(&mask, 2), "'$' should be allowed after 'ab'");
+}
+
+/// Minimal path: s ::= x EOF; x ::= A — one token then EOF.
+#[test]
+fn test_ported_simple_minimized() {
+    // IDs: "a"→0, "$"→1
+    let vocab = make_vocab(&["a", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= x EOF
+           x ::= A
+           A ::= 'a'
+           EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
+    assert!(!token_allowed(&mask, 1), "'$' should NOT be allowed initially");
+
+    s.commit(0);
+    let mask = s.mask();
+    assert!(!token_allowed(&mask, 0), "'a' NOT allowed after 'a'");
+    assert!(token_allowed(&mask, 1), "'$' should be allowed after 'a'");
+
+    s.commit(1);
+    assert!(s.is_finished());
+}
+
+/// Optional-statement grammar: program ::= expression_statement expression_statement? EOF.
+/// Verifies comma/semicolon/EOF interactions across multi-step sequences.
+#[test]
+fn test_ported_x_semicolon_x() {
+    // IDs: "x"→0, ";"→1, "$"→2
+    let vocab = make_vocab(&["x", ";", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"program ::= expression_statement expression_statement? EOF
+           expression_statement ::= expression ';'?
+           expression ::= 'x'
+           EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask0 = s.mask();
+    assert!(token_allowed(&mask0, 0), "x should be allowed initially");
+    assert!(!token_allowed(&mask0, 1), "';' NOT initially");
+    assert!(!token_allowed(&mask0, 2), "'$' NOT initially");
+
+    s.commit(0); // "x"
+    let mask1 = s.mask();
+    assert!(token_allowed(&mask1, 1), "';' should be allowed after x");
+    assert!(token_allowed(&mask1, 0), "x should be allowed after x (second stmt)");
+    assert!(token_allowed(&mask1, 2), "'$' should be allowed after x");
+
+    s.commit(1); // ";"
+    let mask2 = s.mask();
+    assert!(token_allowed(&mask2, 0), "x should be allowed after x;");
+    assert!(token_allowed(&mask2, 2), "'$' should be allowed after x;");
+
+    s.commit(0); // second "x"
+    let mask3 = s.mask();
+    assert!(token_allowed(&mask3, 2), "'$' should be allowed after x;x");
+
+    s.commit(2); // "$"
+    assert!(s.is_finished(), "should be finished after x;x$");
+}
+
+/// Left-recursive expression grammar: e → e '+' t | t; t → t '*' f | f; f → '(' e ')' | 'i'.
+/// Verifies initial mask and mask after multi-byte token "(i".
+#[test]
+fn test_ported_expression() {
+    // IDs: "i"→0, "+"→1, "*"→2, "("→3, ")"→4, "(i"→5, "+i"→6
+    let vocab = make_vocab(&["i", "+", "*", "(", ")", "(i", "+i"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= e
+           e ::= e PLUS t | t
+           t ::= t TIMES f | f
+           f ::= LPAREN e RPAREN | I
+           PLUS ::= '+'
+           TIMES ::= '*'
+           LPAREN ::= '('
+           RPAREN ::= ')'
+           I ::= 'i'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    // Can start with: "i" (0), "(" (3), "(i" (5)
+    assert!(token_allowed(&mask, 0), "'i' should be allowed initially");
+    assert!(!token_allowed(&mask, 1), "'+' should NOT be allowed initially");
+    assert!(!token_allowed(&mask, 2), "'*' should NOT be allowed initially");
+    assert!(token_allowed(&mask, 3), "'(' should be allowed initially");
+    assert!(!token_allowed(&mask, 4), "')' should NOT be allowed initially");
+    assert!(token_allowed(&mask, 5), "'(i' should be allowed initially");
+    assert!(!token_allowed(&mask, 6), "'+i' should NOT be allowed initially");
+
+    s.commit(5); // commit "(i"
+    let mask = s.mask();
+    // After "(i": can follow with '+' (1), '*' (2), ')' (4), '+i' (6)
+    assert!(!token_allowed(&mask, 0), "'i' should NOT be allowed after '(i'");
+    assert!(token_allowed(&mask, 1), "'+' should be allowed after '(i'");
+    assert!(token_allowed(&mask, 2), "'*' should be allowed after '(i'");
+    assert!(!token_allowed(&mask, 3), "'(' should NOT be allowed after '(i'");
+    assert!(token_allowed(&mask, 4), "')' should be allowed after '(i'");
+    assert!(!token_allowed(&mask, 5), "'(i' should NOT be allowed after '(i'");
+    assert!(token_allowed(&mask, 6), "'+i' should be allowed after '(i'");
+}
+
+/// Grammar: s ::= A; A ::= 'a'+.
+/// Committing "a" three times should produce the same mask as committing "aaa" once.
+#[test]
+fn test_ported_a_plus_commit_equivalence() {
+    // IDs: "a"→0, "aaa"→1
+    let vocab = make_vocab(&["a", "aaa"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= A
+           A ::= 'a'+"#,
+        &vocab,
+    )
+    .unwrap();
+
+    // Scenario 1: commit "a" three times
+    let mut s1 = c.start();
+    s1.commit(0);
+    s1.commit(0);
+    s1.commit(0);
+    let mask1 = s1.mask();
+
+    // Scenario 2: commit "aaa" once
+    let mut s2 = c.start();
+    s2.commit(1);
+    let mask2 = s2.mask();
+
+    assert_eq!(
+        mask1, mask2,
+        "mask after 3×'a' vs 'aaa' should be equivalent"
+    );
+    assert_eq!(
+        s1.is_finished(),
+        s2.is_finished(),
+        "finished state should be equivalent"
+    );
+}
+
+/// Ambiguous grammar: s ::= FSTRING_MIDDLE FSTRING_MIDDLE; FSTRING_MIDDLE ::= 'a'+.
+/// With only "a" in vocab the constraint should keep token 0 allowed across many commits.
+#[test]
+fn test_ported_hideous_ambiguity() {
+    let vocab = make_vocab(&["a"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= FSTRING_MIDDLE FSTRING_MIDDLE
+           FSTRING_MIDDLE ::= 'a'+"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    // Commit "a" up to 10 times; token 0 must remain allowed at every step
+    for i in 0..10 {
+        let mask = s.mask();
+        if !token_allowed(&mask, 0) {
+            // Acceptable only once we're finished (not before 2 commits)
+            assert!(
+                s.is_finished() || i >= 2,
+                "token 'a' should remain allowed at iteration {i}"
+            );
+            break;
+        }
+        s.commit(0);
+    }
+}
+
+/// Grammar: s ::= DEF_T; DEF_T ::= "def".
+/// Verifies that the multi-byte vocab token "def" is allowed at token id 0.
+#[test]
+fn test_ported_def_token() {
+    let vocab = make_vocab(&["def"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= DEF_T
+           DEF_T ::= "def""#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'def' (id=0) should be allowed initially");
+    s.commit(0);
+    assert!(s.is_finished(), "should be finished after 'def'");
+}
+
+/// Grammar: s ::= HASH_OPT_A | HASH_OPT_A A; A ::= 'a'; HASH_OPT_A ::= '#' 'a'?.
+/// Verifies that commit("#") then commit("a") yields the same mask as commit("#a").
+#[test]
+fn test_ported_hash_restart() {
+    // IDs: "#"→0, "a"→1, "#a"→2
+    let vocab = make_vocab(&["#", "a", "#a"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= HASH_OPT_A | HASH_OPT_A A
+           A ::= 'a'
+           HASH_OPT_A ::= '#' 'a'?"#,
+        &vocab,
+    )
+    .unwrap();
+
+    // Scenario 1: separate tokens
+    let mut s1 = c.start();
+    s1.commit(0); // "#"
+    s1.commit(1); // "a"
+    let mask1 = s1.mask();
+
+    // Scenario 2: combined token "#a"
+    let mut s2 = c.start();
+    s2.commit(2); // "#a"
+    let mask2 = s2.mask();
+
+    assert_eq!(
+        mask1, mask2,
+        "commit('#','a') and commit('#a') should yield equivalent masks"
+    );
+}
+
+/// Grammar: s ::= HASH_OPT_AA | HASH_OPT_AA A A; HASH_OPT_AA ::= '#' ('a' 'a')?.
+/// Verifies that "#","a","a" and "#aa" yield the same final mask.
+#[test]
+fn test_ported_multi_commit_hash() {
+    // IDs: "#"→0, "a"→1, "#aa"→2
+    let vocab = make_vocab(&["#", "a", "#aa"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= HASH_OPT_AA | HASH_OPT_AA A A
+           A ::= 'a'
+           HASH_OPT_AA ::= '#' ('a' 'a')?"#,
+        &vocab,
+    )
+    .unwrap();
+
+    // Scenario 1: three separate commits
+    let mut s1 = c.start();
+    s1.commit(0); // "#"
+    s1.commit(1); // "a"
+    s1.commit(1); // "a"
+    let mask1 = s1.mask();
+
+    // Scenario 2: one combined token
+    let mut s2 = c.start();
+    s2.commit(2); // "#aa"
+    let mask2 = s2.mask();
+
+    assert_eq!(
+        mask1, mask2,
+        "commit('#','a','a') and commit('#aa') should yield equivalent masks"
+    );
+}
+
+/// Indirect recursion: s_prime ::= s EOF; s ::= A e | B; e ::= s.
+/// Equivalent to s → a* b; valid strings are "b", "ab", "aab", …
+#[test]
+fn test_ported_indirect_recursion() {
+    // IDs: "a"→0, "b"→1, "$"→2
+    let vocab = make_vocab(&["a", "b", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"s_prime ::= s EOF
+           s ::= A e | B
+           e ::= s
+           A ::= 'a'
+           B ::= 'b'
+           EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
+    assert!(token_allowed(&mask, 1), "'b' should be allowed initially");
+    assert!(!token_allowed(&mask, 2), "'$' should NOT be allowed initially");
+
+    s.commit(0); // "a"
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' allowed after 'a' (recursive)");
+    assert!(token_allowed(&mask, 1), "'b' allowed after 'a'");
+    assert!(!token_allowed(&mask, 2), "'$' NOT allowed after 'a'");
+
+    s.commit(1); // "b"
+    let mask = s.mask();
+    assert!(!token_allowed(&mask, 0), "'a' NOT allowed after 'ab'");
+    assert!(!token_allowed(&mask, 1), "'b' NOT allowed after 'ab'");
+    assert!(token_allowed(&mask, 2), "'$' should be allowed after 'ab'");
+}
+
+/// Left-recursive repetition: s_prime ::= s; s ::= s A | ε.
+/// Equivalent to A*; "a" must remain allowed after each commit.
+#[test]
+fn test_ported_repetition_left_recursive() {
+    let vocab = make_vocab(&["a"]);
+    let c = Constraint::from_ebnf(
+        r#"s_prime ::= s
+           s ::= s A |
+           A ::= 'a'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
+
+    s.commit(0);
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' should be allowed after first 'a'");
+}
+
+/// Token "i(" spans grammar terminals [I, LPAREN] but after I only EOF is valid.
+/// Therefore "i(" is always forbidden, and "$" is forbidden at start → empty mask.
+#[test]
+fn test_ported_split_token_invalid() {
+    // IDs: "i("→0, "$"→1
+    let vocab = make_vocab(&["i(", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= e EOF
+           e ::= LPAREN e | I
+           LPAREN ::= '('
+           I ::= 'i'
+           EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+    let s = c.start();
+
+    let mask = s.mask();
+    assert!(
+        !token_allowed(&mask, 0),
+        "'i(' should NOT be allowed (invalid token sequence)"
+    );
+    assert!(
+        !token_allowed(&mask, 1),
+        "'$' should NOT be allowed at start"
+    );
+}
+
+/// Indirect expression: s ::= e EOF; e ::= f; f ::= LPAREN e | I.
+/// '(' may recurse indefinitely; after "(i" only '$' remains.
+#[test]
+fn test_ported_trivial_indirect_expression() {
+    // IDs: "i"→0, "("→1, "(i"→2, "$"→3
+    let vocab = make_vocab(&["i", "(", "(i", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= e EOF
+           e ::= f
+           f ::= LPAREN e | I
+           LPAREN ::= '('
+           I ::= 'i'
+           EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'i' should be allowed initially");
+    assert!(token_allowed(&mask, 1), "'(' should be allowed initially");
+    assert!(token_allowed(&mask, 2), "'(i' should be allowed initially");
+    assert!(!token_allowed(&mask, 3), "'$' should NOT be allowed initially");
+
+    s.commit(1); // "("
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'i' after '('");
+    assert!(token_allowed(&mask, 1), "'(' after '(' (recursive)");
+    assert!(token_allowed(&mask, 2), "'(i' after '('");
+    assert!(!token_allowed(&mask, 3), "'$' NOT after '('");
+
+    s.commit(0); // "i"
+    let mask = s.mask();
+    assert!(!token_allowed(&mask, 0), "'i' NOT after '(i'");
+    assert!(!token_allowed(&mask, 1), "'(' NOT after '(i'");
+    assert!(!token_allowed(&mask, 2), "'(i' NOT after '(i'");
+    assert!(token_allowed(&mask, 3), "'$' should be allowed after '(i'");
+}
+
+/// Direct left-recursive expression: s ::= e EOF; e ::= LPAREN e | I.
+/// Same behavioural expectations as the indirect version above.
+#[test]
+fn test_ported_trivial_direct_expression() {
+    // IDs: "i"→0, "("→1, "(i"→2, "$"→3
+    let vocab = make_vocab(&["i", "(", "(i", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"s ::= e EOF
+           e ::= LPAREN e | I
+           LPAREN ::= '('
+           I ::= 'i'
+           EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'i' should be allowed initially");
+    assert!(token_allowed(&mask, 1), "'(' should be allowed initially");
+    assert!(token_allowed(&mask, 2), "'(i' should be allowed initially");
+    assert!(!token_allowed(&mask, 3), "'$' should NOT be allowed initially");
+
+    s.commit(1); // "("
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'i' after '('");
+    assert!(token_allowed(&mask, 1), "'(' after '(' (recursive)");
+    assert!(token_allowed(&mask, 2), "'(i' after '('");
+    assert!(!token_allowed(&mask, 3), "'$' NOT after '('");
+
+    s.commit(0); // "i"
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 3), "'$' should be allowed after '(i'");
+}
