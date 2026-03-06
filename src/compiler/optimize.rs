@@ -7,7 +7,8 @@
 
 use crate::automata::weighted::dwa::Dwa;
 
-/// Apply all optimization passes to a DWA.
+#[allow(dead_code)]
+    /// Apply all optimization passes to a DWA.
 pub fn optimize(dwa: Dwa) -> Dwa {
     // TODO: Implement optimization passes
     dwa

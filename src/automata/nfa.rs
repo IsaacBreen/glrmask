@@ -2,6 +2,7 @@
 //!
 //! Supports epsilon transitions and U8Set-based byte transitions.
 //! Can be converted to a DFA via subset construction.
+#![allow(dead_code)]
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 

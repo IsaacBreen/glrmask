@@ -6,6 +6,7 @@
 //! Each DFA state has:
 //! - A 256-entry transition table (one per byte)
 //! - A set of "finalizer" group IDs (which regex groups are matched at this state)
+#![allow(dead_code)]
 
 use std::collections::BTreeSet;
 

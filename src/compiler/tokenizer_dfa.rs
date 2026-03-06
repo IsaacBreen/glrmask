@@ -68,6 +68,7 @@ impl TokenizerDfa {
         0
     }
 
+    #[allow(dead_code)]
     /// Step from `state` on `byte`. Returns the next state, or `None` if dead.
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
         let next = self.dfa.get_transition(state, byte);
@@ -77,6 +78,7 @@ impl TokenizerDfa {
         Some(next)
     }
 
+    #[allow(dead_code)]
     /// Feed a byte string, return the final state.
     pub fn run(&self, input: &[u8]) -> u32 {
         self.dfa.run(input)
@@ -118,6 +120,7 @@ impl TokenizerDfa {
             .collect()
     }
 
+    #[allow(dead_code)]
     /// Check if a specific terminal matches at the given state.
     pub fn terminal_matches(&self, state: u32, terminal: TerminalId) -> bool {
         self.dfa.finalizers(state).contains(&(terminal as usize))

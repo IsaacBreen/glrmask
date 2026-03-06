@@ -41,7 +41,6 @@
 //! - `ds`: Data structures (bitset, rangeset)
 
 #![deny(warnings)]
-#![allow(dead_code)] // internal modules contain general-purpose building blocks
 
 pub(crate) mod automata;
 pub(crate) mod compiler;
@@ -65,9 +64,6 @@ pub enum GlrMaskError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
-
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
 }
 
 pub type Result<T> = std::result::Result<T, GlrMaskError>;

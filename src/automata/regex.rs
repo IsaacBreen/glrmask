@@ -11,6 +11,7 @@
 //!
 //! Compilation uses CPS (Continuation-Passing Style) to build NFA fragments,
 //! then subset construction + Hopcroft minimization to produce a minimal DFA.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::Arc;

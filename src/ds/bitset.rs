@@ -1,6 +1,7 @@
 //! Dense bitvector implementation.
 //!
 //! Used for token masks and set operations on token IDs.
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 

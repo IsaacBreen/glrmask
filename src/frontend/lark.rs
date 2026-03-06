@@ -583,7 +583,8 @@ pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     lower(&named)
 }
 
-/// Parse a Lark grammar string into a `NamedGrammar`.
+#[allow(dead_code)]
+    /// Parse a Lark grammar string into a `NamedGrammar`.
 pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;

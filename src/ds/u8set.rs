@@ -2,6 +2,7 @@
 //!
 //! `U8Set` represents a set of byte values (0..=255) using two `u128` words.
 //! This is the fundamental building block for byte-level automata transitions.
+#![allow(dead_code)]
 
 use std::fmt;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};

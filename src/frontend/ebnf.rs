@@ -445,7 +445,8 @@ pub fn parse_ebnf(input: &str) -> Result<GrammarDef, GlrMaskError> {
     lower(&named)
 }
 
-/// Parse an EBNF grammar string into a `NamedGrammar` (intermediate form).
+#[allow(dead_code)]
+    /// Parse an EBNF grammar string into a `NamedGrammar` (intermediate form).
 pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;

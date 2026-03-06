@@ -7,6 +7,7 @@
 //! Transition labels are `i32` (grammar symbol IDs).  Weights are
 //! [`Weight`](super::weight::Weight) sets representing which
 //! (token, TSID) positions survive a transition.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 

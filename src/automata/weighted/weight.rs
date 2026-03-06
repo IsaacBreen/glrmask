@@ -9,6 +9,7 @@
 //!
 //! The **RangeMap** is a generic sorted-interval-to-value map used for
 //! vocabulary preprocessing (token → TSID mapping).
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 

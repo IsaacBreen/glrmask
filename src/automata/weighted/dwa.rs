@@ -7,6 +7,7 @@
 //! - **[`Dwa`]** – runtime DWA backed by a flat [`WeightTable`].  Produced at
 //!   the end of compilation and used for fast mask computation during
 //!   inference.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 

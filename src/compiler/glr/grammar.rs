@@ -16,6 +16,7 @@ pub const EOF: TerminalId = u32::MAX;
 pub struct GlrGrammar {
     /// All production rules (augmented start is at index 0).
     pub rules: Vec<Rule>,
+    #[allow(dead_code)]
     /// Start nonterminal of the augmented grammar.
     pub start: NonterminalId,
     /// Number of real terminals (not counting EOF).

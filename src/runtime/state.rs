@@ -101,23 +101,6 @@ impl Constraint {
             .map_err(|e| crate::GlrMaskError::Serialization(format!("deserialize: {e}")))
     }
 
-    /// Save to a file.
-    #[doc(hidden)]
-    pub fn save_to_file(&self, path: &std::path::Path) -> crate::Result<()> {
-        let bytes = self.save();
-        std::fs::write(path, bytes)
-            .map_err(|e| crate::GlrMaskError::Serialization(format!("write: {e}")))?;
-        Ok(())
-    }
-
-    /// Load from a file.
-    #[doc(hidden)]
-    pub fn load_from_file(path: &std::path::Path) -> crate::Result<Self> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| crate::GlrMaskError::Serialization(format!("read: {e}")))?;
-        Self::load(&bytes)
-    }
-
     /// Create a new `ConstraintState` at the start position.
     pub fn start(&self) -> ConstraintState<'_> {
         // The initial parser state is 0.
@@ -132,9 +115,9 @@ impl Constraint {
         ConstraintState { constraint: self, state }
     }
 
+    #[allow(dead_code)]
     /// Debug dump of internal state for troubleshooting.
-    #[doc(hidden)]
-    pub fn debug_dump(&self) {
+    pub(crate) fn debug_dump(&self) {
         eprintln!("--- Constraint Debug Dump ---");
         eprintln!("num_tsids: {}", self.num_tsids);
         eprintln!("max_token: {}", self.max_token);
@@ -171,9 +154,9 @@ impl Constraint {
         eprintln!("--- End Debug Dump ---");
     }
 
+    #[allow(dead_code)]
     /// Debug: trace tokenizer behavior for specific bytes from a given starting state.
-    #[doc(hidden)]
-    pub fn debug_tokenizer(&self, input: &[u8], start_state: u32) {
+    pub(crate) fn debug_tokenizer(&self, input: &[u8], start_state: u32) {
         let result = self.tokenizer.execute_all_matches(input, start_state);
         eprintln!(
             "[debug_tokenizer] input={:?} start={} -> end={} matches={:?}",
@@ -200,9 +183,9 @@ impl Constraint {
         }
     }
 
+    #[allow(dead_code)]
     /// Get the tokenizer's initial state (for debugging).
-    #[doc(hidden)]
-    pub fn tokenizer_initial_state(&self) -> u32 {
+    pub(crate) fn tokenizer_initial_state(&self) -> u32 {
         self.tokenizer.initial_state()
     }
 
@@ -245,8 +228,7 @@ impl<'a> ConstraintState<'a> {
     ///
     /// **Note**: prefer [`mask`] or [`fill_mask`] which return `u32` words matching the
     /// plan's public API. This method is retained for white-box tests only.
-    #[doc(hidden)]
-    pub fn compute_mask(&self) -> BitSet {
+    pub(crate) fn compute_mask(&self) -> BitSet {
         // Phase 1: DWA overapproximation.
         let mut stacks_map: BTreeMap<u32, Vec<Vec<u32>>> = self.state.iter().map(|(&tok_state, gss)| {
             let stacks: Vec<Vec<u32>> = gss.to_stacks().into_iter().map(|(s, _acc)| s).collect();
@@ -370,8 +352,7 @@ impl<'a> ConstraintState<'a> {
     ///
     /// **Note**: prefer [`is_finished`] which matches the plan's public API.
     /// This method is retained for white-box tests only.
-    #[doc(hidden)]
-    pub fn is_accepting(&self) -> bool {
+    pub(crate) fn is_accepting(&self) -> bool {
         let eof = crate::compiler::glr::grammar::EOF;
         let initial_tok = self.constraint.tokenizer.initial_state();
         if let Some(gss) = self.state.get(&initial_tok) {

@@ -13,10 +13,12 @@ use crate::compiler::grammar_def::TerminalId;
 /// GLR parser backed by an SLR(1) table.
 ///
 /// Handles ambiguous grammars by maintaining multiple parse stacks.
+#[allow(dead_code)]
 pub struct GlrParser {
     pub table: GlrTable,
 }
 
+#[allow(dead_code)]
 impl GlrParser {
     /// Create a new parser from a table.
     pub fn new(table: GlrTable) -> Self {

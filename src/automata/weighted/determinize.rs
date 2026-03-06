@@ -6,6 +6,7 @@
 //!   handles arbitrary NWAs (including those with cycles).
 //! - [`determinize_acyclic`] – optimised two-phase algorithm for acyclic
 //!   NWAs.  Returns an error if the NWA contains cycles.
+#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
