@@ -146,8 +146,7 @@ mod tests {
 
         // Commit "a".
         state
-            .commit(&constraint, 0)
-            .expect("commit 'a' should succeed");
+            .commit(&constraint, 0);
         assert!(
             !state.is_accepting(&constraint),
             "not yet accepting after 'a'"
@@ -160,8 +159,7 @@ mod tests {
 
         // Commit "b".
         state
-            .commit(&constraint, 1)
-            .expect("commit 'b' should succeed");
+            .commit(&constraint, 1);
         assert!(state.is_accepting(&constraint), "should accept after 'ab'");
     }
 
@@ -183,8 +181,7 @@ mod tests {
 
         // Commit token "a".
         state
-            .commit(&constraint, 0)
-            .expect("commit 'a' should succeed");
+            .commit(&constraint, 0);
         assert!(
             state.is_accepting(&constraint),
             "parse should accept after 'a'"
@@ -208,8 +205,7 @@ mod tests {
 
         // Commit "a".
         state
-            .commit(&constraint, 0)
-            .expect("commit 'a' should succeed");
+            .commit(&constraint, 0);
         assert!(
             !state.is_accepting(&constraint),
             "not yet accepting after 'a'"
@@ -222,8 +218,7 @@ mod tests {
 
         // Commit "b".
         state
-            .commit(&constraint, 1)
-            .expect("commit 'b' should succeed");
+            .commit(&constraint, 1);
         assert!(state.is_accepting(&constraint), "should accept after 'ab'");
     }
 
@@ -244,8 +239,7 @@ mod tests {
 
         // Commit "a".
         state
-            .commit(&constraint, 0)
-            .expect("commit 'a' should succeed");
+            .commit(&constraint, 0);
         assert!(!state.is_accepting(&constraint), "not accepting after 'a'");
 
         // After "a": "b" should be allowed (A reduced, now need B → b).
@@ -255,8 +249,7 @@ mod tests {
 
         // Commit "b".
         state
-            .commit(&constraint, 1)
-            .expect("commit 'b' should succeed");
+            .commit(&constraint, 1);
         assert!(state.is_accepting(&constraint), "should accept after 'ab'");
     }
 
@@ -279,7 +272,7 @@ mod tests {
         assert!(!mask.get(2), "token 'c' should NOT be allowed initially");
 
         // Commit "a".
-        state.commit(&constraint, 0).expect("commit 'a'");
+        state.commit(&constraint, 0);
 
         // After "a": only "b" allowed.
         let mask = state.compute_mask(&constraint);
@@ -288,7 +281,7 @@ mod tests {
         assert!(!mask.get(2), "no 'c' after 'a'");
 
         // Commit "b".
-        state.commit(&constraint, 1).expect("commit 'b'");
+        state.commit(&constraint, 1);
 
         // After "ab": only "c" allowed.
         let mask = state.compute_mask(&constraint);
@@ -297,7 +290,7 @@ mod tests {
         assert!(mask.get(2), "'c' after 'ab'");
 
         // Commit "c".
-        state.commit(&constraint, 2).expect("commit 'c'");
+        state.commit(&constraint, 2);
         assert!(state.is_accepting(&constraint), "should accept after 'abc'");
     }
 
@@ -321,7 +314,7 @@ mod tests {
         assert!(!mask.get(2), "token 'c' should NOT be allowed initially");
 
         // Commit "a".
-        state.commit(&constraint, 0).expect("commit 'a'");
+        state.commit(&constraint, 0);
 
         // After "a": only "b" allowed (still in A → a • b).
         let mask = state.compute_mask(&constraint);
@@ -330,7 +323,7 @@ mod tests {
         assert!(!mask.get(2), "no 'c' after 'a'");
 
         // Commit "b".
-        state.commit(&constraint, 1).expect("commit 'b'");
+        state.commit(&constraint, 1);
 
         // After "ab": "c" should be allowed (A reduced, S → A • c).
         let mask = state.compute_mask(&constraint);
@@ -339,7 +332,7 @@ mod tests {
         assert!(mask.get(2), "'c' after 'ab'");
 
         // Commit "c".
-        state.commit(&constraint, 2).expect("commit 'c'");
+        state.commit(&constraint, 2);
         assert!(state.is_accepting(&constraint), "should accept after 'abc'");
     }
 }

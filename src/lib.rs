@@ -23,7 +23,7 @@
 //!     // Sample from the allowed-token mask.
 //!     state.fill_mask(&constraint, &mut buf);
 //!     let token = sample(logits, &buf);
-//!     state.commit(&constraint, token).expect("token should be valid");
+//!     state.commit(&constraint, token);
 //! }
 //! ```
 //!
@@ -49,7 +49,6 @@ pub mod frontend;
 pub mod runtime;
 
 // Re-export public API types
-pub use ds::bitset::BitSet;
 pub use runtime::{Constraint, ConstraintState};
 
 use thiserror::Error;

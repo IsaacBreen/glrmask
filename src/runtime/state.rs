@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::GlrMaskError;
 use crate::automata::dfa::DEAD;
 use crate::automata::weighted::dwa::CompDwa;
 use crate::compiler::glr::table::{Action, GlrTable};
@@ -300,11 +299,7 @@ impl ConstraintState {
                 continue;
             }
             let mut trial = self.clone();
-            if trial.commit(constraint, token_id as u32).is_err() {
-                mask.clear(token_id);
-                _filtered += 1;
-                continue;
-            }
+            trial.commit(constraint, token_id as u32);
             let viable = has_viable_state(&trial.state, &constraint.table, &reachable, initial_tok);
             if !viable {
                 mask.clear(token_id);
@@ -350,9 +345,7 @@ impl ConstraintState {
                     continue;
                 }
                 let mut trial = self.clone();
-                if trial.commit(constraint, token_id as u32).is_err() {
-                    continue;
-                }
+                trial.commit(constraint, token_id as u32);
                 if has_viable_state(&trial.state, &constraint.table, &reachable, initial_tok) {
                     mask.set(token_id);
                     _rescued += 1;
@@ -396,23 +389,20 @@ impl ConstraintState {
 
     /// Commit a token: advance the constraint state.
     ///
-    /// Processes the token's byte sequence through the tokenizer to find
-    /// matched terminals, then steps the GLR parser accordingly using the GSS.
+    /// Infallible. If `token_id` is not in the vocabulary, the method is a
+    /// no-op and the parser state is left unchanged. The next call to
+    /// [`mask`] / [`fill_mask`] will reflect whatever state the parser is in
+    /// after any bytes that *were* successfully committed.
     pub fn commit(
         &mut self,
         constraint: &Constraint,
         token_id: u32,
-    ) -> std::result::Result<(), GlrMaskError> {
-        let token_bytes = constraint
-            .token_bytes
-            .get(&token_id)
-            .ok_or_else(|| {
-                GlrMaskError::InvalidInput(format!("Token ID {} not in vocabulary", token_id))
-            })?
-            .clone();
-
-        self.process_bytes_raw(constraint, &token_bytes);
-        Ok(())
+    ) {
+        if let Some(bytes) = constraint.token_bytes.get(&token_id) {
+            let bytes = bytes.clone();
+            self.process_bytes_raw(constraint, &bytes);
+        }
+        // Unknown token_id → no-op (caller should only commit tokens from the mask)
     }
 
     // -----------------------------------------------------------------------
@@ -454,10 +444,10 @@ impl ConstraintState {
 
     /// Commit multiple tokens in sequence (batch convenience wrapper).
     ///
-    /// Equivalent to calling `commit(constraint, token)` for each token.
+    /// Equivalent to calling [`commit`] for each token ID in order.
     pub fn commit_tokens(&mut self, constraint: &Constraint, tokens: &[u32]) {
         for &token in tokens {
-            let _ = self.commit(constraint, token);
+            self.commit(constraint, token);
         }
     }
 
@@ -494,7 +484,7 @@ impl ConstraintState {
 
             let Some(token) = forced_token else { break };
             result.push(token);
-            let _ = trial.commit(constraint, token);
+            trial.commit(constraint, token);
             if trial.state.is_empty() {
                 break;
             }
