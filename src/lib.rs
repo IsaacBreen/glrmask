@@ -12,13 +12,24 @@
 //! let vocab = Vocab::new(entries, Some(eos_id));
 //! let constraint = Constraint::from_ebnf(grammar, &vocab)?;
 //! let mut state = constraint.start();
+//! let mut buf = vec![0u32; constraint.mask_len()];
 //!
 //! loop {
-//!     let mask = state.compute_mask(&constraint);
-//!     if state.is_accepting(&constraint) { break; }
-//!     let token = sample(logits, &mask);
-//!     state.commit(&constraint, token)?;
+//!     // Commit any deterministically forced tokens first.
+//!     let forced = state.force(&constraint);
+//!     state.commit_tokens(&constraint, &forced);
+//!     if state.is_finished(&constraint) { break; }
+//!
+//!     // Sample from the allowed-token mask.
+//!     state.fill_mask(&constraint, &mut buf);
+//!     let token = sample(logits, &buf);
+//!     state.commit(&constraint, token).expect("token should be valid");
 //! }
+//! ```
+//!
+//! Bit-checking convention (token `i` allowed iff):
+//! ```rust,ignore
+//! buf[i as usize / 32] & (1u32 << (i as usize % 32)) != 0
 //! ```
 //!
 //! # Module Organization

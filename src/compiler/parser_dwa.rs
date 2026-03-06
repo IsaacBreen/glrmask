@@ -13,7 +13,8 @@
 //! # Algorithm overview
 //!
 //! 1. **Characterize** each terminal: find all stack patterns that make it valid.
-//! 2. **Build NWA** from characterizations (labels = parser state IDs, weights = token sets).
+//! 2. **Bundle equivalent templates** so parser-side structure is shared.
+//! 3. **Build NWA** from template bundles (labels = parser state IDs, weights = token sets).
 //! 3. **Determinize + minimize** → CompDwa → Dwa.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -22,20 +23,35 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::{CompDwa, CompDwaState};
 use crate::automata::weighted::minimize::minimize_acyclic;
 use crate::automata::weighted::nwa::Nwa;
-use crate::automata::weighted::weight::Weight;
 use crate::compiler::glr::grammar::GlrGrammar;
 use crate::compiler::glr::table::{Action, GlrTable};
 use crate::compiler::grammar_def::{NonterminalId, TerminalId};
+use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
+use crate::compiler::terminal_dwa::build_terminal_dwa;
+use crate::compiler::template::{build_template_bundles, build_template_nwa_from_bundles};
+use crate::compiler::tokenizer_dfa::TokenizerDfa;
 use crate::compiler::vocab_pre::VocabPreprocessing;
-use crate::ds::rangeset::RangeSet;
+use crate::Vocab;
 
-/// A special label that matches any parser state ("wildcard" / "default").
-///
-/// In the NWA, this replaces explicit per-state self-loops and "any state"
-/// transitions.  During determinization it is treated as a regular label.
-/// At runtime, the DWA walker checks `DEFAULT_LABEL` as a fallback when
-/// no specific transition exists for a parser state.
-pub const DEFAULT_LABEL: i32 = i32::MAX - 1;
+pub use crate::compiler::labels::DEFAULT_LABEL;
+
+#[cfg(test)]
+use crate::automata::weighted::weight::Weight;
+#[cfg(test)]
+use crate::compiler::labels::{encode_negative_label, is_negative_label};
+
+fn terminals_present_in_terminal_dwa(terminal_dwa: &crate::compiler::terminal_dwa::TerminalDwa) -> BTreeSet<TerminalId> {
+    let mut terminals = BTreeSet::new();
+    for state in &terminal_dwa.nwa.states {
+        for &label in state.transitions.keys() {
+            let Ok(terminal) = TerminalId::try_from(label) else {
+                continue;
+            };
+            terminals.insert(terminal);
+        }
+    }
+    terminals
+}
 
 // ---------------------------------------------------------------------------
 // Terminal characterization
@@ -55,22 +71,22 @@ type NtEscape = (NonterminalId, u32, u32, u32);
 
 /// After reducing to nonterminal `nt_from`, if the revealed state is `revealed`,
 /// goto(revealed, nt_from) = `goto_state`, and from `goto_state`, terminal T
-/// causes another reduction with `pop_count` and `nt_to`.
 type NtRereduce = (NonterminalId, u32, usize, NonterminalId);
 
 /// Stack pattern characterization for a single terminal.
-#[derive(Debug, Clone)]
-struct TerminalCharacterization {
-    shifts: Vec<InitialShift>,
-    reduces: Vec<InitialReduce>,
-    nt_escapes: Vec<NtEscape>,
-    nt_rereduces: Vec<NtRereduce>,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TerminalCharacterization {
+    pub(crate) shifts: Vec<InitialShift>,
+    pub(crate) reduces: Vec<InitialReduce>,
+    pub(crate) nt_escapes: Vec<NtEscape>,
+    pub(crate) nt_rereduces: Vec<NtRereduce>,
     /// All nonterminals involved in reduce cascades.
-    all_nts: BTreeSet<NonterminalId>,
+    pub(crate) all_nts: BTreeSet<NonterminalId>,
 }
 
+
 /// Characterize a single terminal: find all stack patterns that allow it.
-fn characterize_terminal(
+pub(crate) fn characterize_terminal(
     table: &GlrTable,
     grammar: &GlrGrammar,
 ) -> BTreeMap<TerminalId, TerminalCharacterization> {
@@ -157,53 +173,6 @@ fn characterize_terminal(
 // NWA construction from characterizations
 // ---------------------------------------------------------------------------
 
-/// Compute all valid revealed states for a nonterminal, following rereduce chains.
-///
-/// A revealed state `r` is valid for nonterminal `nt` if, starting from `nt`,
-/// there exists a chain of rereduces (with pop_count=1, which re-reveal the same
-/// state) that eventually leads to an nt_escape at `r`.
-fn compute_valid_revealed(start_nt: NonterminalId, tc: &TerminalCharacterization) -> BTreeSet<u32> {
-    let mut valid = BTreeSet::new();
-    let mut visited: BTreeSet<(NonterminalId, u32)> = BTreeSet::new();
-    let mut queue: VecDeque<(NonterminalId, u32)> = VecDeque::new();
-
-    // Seed: direct escapes from start_nt.
-    for &(n, r, _, _) in &tc.nt_escapes {
-        if n == start_nt {
-            valid.insert(r);
-        }
-    }
-
-    // Seed: rereduces with pop_count=1 from start_nt.
-    for &(n, r, pop2, nt_to) in &tc.nt_rereduces {
-        if n == start_nt && pop2 == 1 {
-            queue.push_back((nt_to, r));
-        }
-    }
-
-    while let Some((nt, r)) = queue.pop_front() {
-        if !visited.insert((nt, r)) {
-            continue;
-        }
-
-        // Check if (nt, r) has a direct escape.
-        for &(n, er, _, _) in &tc.nt_escapes {
-            if n == nt && er == r {
-                valid.insert(r);
-            }
-        }
-
-        // Follow rereduces with pop_count=1 at (nt, r).
-        for &(n, rr, pop2, nt_to) in &tc.nt_rereduces {
-            if n == nt && rr == r && pop2 == 1 {
-                queue.push_back((nt_to, r));
-            }
-        }
-    }
-
-    valid
-}
-
 /// Build the parser NWA from terminal characterizations and vocab preprocessing.
 ///
 /// The NWA labels are parser state IDs (non-negative i32).
@@ -225,83 +194,25 @@ fn compute_valid_revealed(start_nt: NonterminalId, tc: &TerminalCharacterization
 ///              `skip_start --[from_state]--> accept(token_weight)`
 /// - **Reduce** (pop_count=P, revealed=R, from_state=S):
 ///              `skip_start --[R]--> mid_0 --[DEFAULT]--> mid_1 ... --[S]--> accept`
-pub fn build_parser_nwa(table: &GlrTable, grammar: &GlrGrammar, vocab: &VocabPreprocessing) -> Nwa {
+pub fn build_parser_nwa(
+    table: &GlrTable,
+    grammar: &GlrGrammar,
+    tokenizer: &TokenizerDfa,
+    vocab: &Vocab,
+    vocab_pre: &VocabPreprocessing,
+) -> Nwa {
     let characterizations = characterize_terminal(table, grammar);
-
-    let num_tsids = vocab.num_tsids;
-    let max_token = vocab.max_token;
-    let mut nwa = Nwa::new(num_tsids, max_token);
-    let max_pos = nwa.max_position();
-
-    // Create the start state and register it.
-    let start = nwa.add_state();
-    nwa.start_states.push(start);
-
-    let w_all = Weight::all(max_pos, num_tsids);
-
-    // ---------------------------------------------------------------
-    // Shared skip state with DEFAULT self-loop
-    // ---------------------------------------------------------------
-    // A single self-loop on DEFAULT_LABEL replaces O(num_parser_states)
-    // explicit self-loops.  At runtime, DEFAULT acts as a fallback
-    // matching any parser state not explicitly listed.
-    let skip_start = nwa.add_state();
-    nwa.add_epsilon(start, skip_start, w_all.clone());
-    nwa.add_transition(skip_start, DEFAULT_LABEL, skip_start, w_all.clone());
-
-    // For each characterized terminal, build NWA paths.
-    for (&terminal, tc) in &characterizations {
-        let token_weight = terminal_to_weight(terminal, vocab);
-        if token_weight.is_empty() {
-            continue; // No tokens match this terminal.
-        }
-
-        // --- Initial shifts ---
-        // Pattern: [skip_start*, from_state] → accept with token_weight
-        for &(from_state, _to_state) in &tc.shifts {
-            let q_final = nwa.add_state();
-            nwa.add_transition(skip_start, from_state as i32, q_final, token_weight.clone());
-            nwa.set_final_weight(q_final, token_weight.clone());
-        }
-
-        // --- Initial reduces ---
-        for &(from_state, pop_count, nt) in &tc.reduces {
-            if pop_count == 0 {
-                // ε-production: from_state is the revealed state.
-                let valid_revealed = compute_valid_revealed(nt, tc);
-                if valid_revealed.contains(&from_state) {
-                    let q_final = nwa.add_state();
-                    nwa.add_transition(skip_start, from_state as i32, q_final, token_weight.clone());
-                    nwa.set_final_weight(q_final, token_weight.clone());
-                }
-                continue;
-            }
-
-            let valid_revealed = compute_valid_revealed(nt, tc);
-
-            for r in valid_revealed {
-                // Pattern: [skip_start*, r, any{pop_count-1}, from_state] → accept
-                // Read revealed state from skip_start.
-                let mut current = nwa.add_state();
-                nwa.add_transition(skip_start, r as i32, current, w_all.clone());
-
-                // Skip pop_count - 1 intermediate states using DEFAULT.
-                // One DEFAULT transition replaces O(num_parser_states) explicit
-                // "any" transitions per intermediate step.
-                for _ in 0..pop_count.saturating_sub(1) {
-                    let next = nwa.add_state();
-                    nwa.add_transition(current, DEFAULT_LABEL, next, w_all.clone());
-                    current = next;
-                }
-
-                // Read from_state at the top → accept with token weight.
-                let final_q = nwa.add_state();
-                nwa.add_transition(current, from_state as i32, final_q, token_weight.clone());
-                nwa.set_final_weight(final_q, token_weight.clone());
-            }
-        }
-    }
-
+    let terminal_dwa = build_terminal_dwa(tokenizer, vocab, vocab_pre, grammar);
+    debug_assert_eq!(terminal_dwa.nwa.start_states.len(), terminal_dwa.tsid_roots.len());
+    let used_terminals = terminals_present_in_terminal_dwa(&terminal_dwa);
+    let template_bundles = build_template_bundles(&characterizations, &used_terminals);
+    let mut nwa = build_template_nwa_from_bundles(
+        &template_bundles,
+        &terminal_dwa,
+        vocab_pre.num_tsids,
+        vocab_pre.max_token,
+    );
+    resolve_negative_codes_in_nwa(&mut nwa);
     nwa
 }
 
@@ -346,39 +257,18 @@ fn is_acyclic(dwa: &CompDwa) -> bool {
     true
 }
 
-/// Convert a terminal ID to a weight: the set of tokens that match this terminal
-/// across all TSIDs.
-fn terminal_to_weight(terminal: TerminalId, vocab: &VocabPreprocessing) -> Weight {
-    let num_tsids = vocab.num_tsids;
-
-    // Collect (tsid, token_set) pairs.
-    let mut entries: Vec<(u32, u32, RangeSet)> = Vec::new();
-
-    for tsid in 0..num_tsids {
-        if let Some(rs) = vocab.possible_matches[tsid as usize].get(&terminal)
-            && !rs.is_empty()
-        {
-            entries.push((tsid, tsid, rs.clone()));
-        }
-    }
-
-    if entries.is_empty() {
-        Weight::empty(num_tsids)
-    } else {
-        Weight::from_entries(entries, num_tsids)
-    }
-}
-
 /// Build the full parser DWA by constructing the NWA, determinizing, and minimizing.
 pub fn build_parser_dwa(
     table: &GlrTable,
     grammar: &GlrGrammar,
-    vocab: &VocabPreprocessing,
+    tokenizer: &TokenizerDfa,
+    vocab: &Vocab,
+    vocab_pre: &VocabPreprocessing,
 ) -> CompDwa {
     use std::time::Instant;
 
     let t = Instant::now();
-    let nwa = build_parser_nwa(table, grammar, vocab);
+    let nwa = build_parser_nwa(table, grammar, tokenizer, vocab, vocab_pre);
     eprintln!("[glrmask::dwa] NWA build:      {:.3}s ({} states, {} transitions)",
         t.elapsed().as_secs_f64(), nwa.states.len(),
         nwa.states.iter().map(|s| s.transitions.len()).sum::<usize>());
@@ -413,6 +303,7 @@ mod tests {
     use crate::compiler::grammar_def::GrammarDef;
     use crate::compiler::grammar_def::tests::*;
     use crate::compiler::tokenizer_dfa::TokenizerDfa;
+    use crate::ds::rangeset::RangeSet;
 
     fn make_vocab_and_preprocessing(
         gdef: &GrammarDef,
@@ -448,11 +339,41 @@ mod tests {
         let gdef = simple_ab_grammar();
         let gg = GlrGrammar::from_grammar_def(&gdef);
         let table = GlrTable::build(&gg);
-        let (_vocab, _tok, vp) = make_vocab_and_preprocessing(&gdef);
+        let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
-        let nwa = build_parser_nwa(&table, &gg, &vp);
+        let nwa = build_parser_nwa(&table, &gg, &tok, &vocab, &vp);
         assert!(nwa.num_states() > 1);
         assert!(nwa.num_transitions() > 0);
+        assert!(nwa.states.iter().all(|state| {
+            state
+                .transitions
+                .keys()
+                .all(|label| !is_negative_label(*label))
+        }));
+    }
+
+    #[test]
+    fn test_resolve_negative_codes_simple_cancellation() {
+        let mut nwa = Nwa::new(1, 2);
+        let start = nwa.add_state();
+        let mid = nwa.add_state();
+        let end = nwa.add_state();
+        nwa.start_states.push(start);
+
+        let w = Weight::from_entries(vec![(0, 0, RangeSet::from_range(2, 2))], 1);
+        nwa.add_transition(start, 0, mid, w.clone());
+        nwa.add_transition(mid, encode_negative_label(0), end, w.clone());
+        nwa.set_final_weight(end, w.clone());
+
+        resolve_negative_codes_in_nwa(&mut nwa);
+
+        assert!(nwa.states.iter().all(|state| {
+            state
+                .transitions
+                .keys()
+                .all(|label| !is_negative_label(*label))
+        }));
+        assert_eq!(nwa.states[mid as usize].final_weight.as_ref(), Some(&w));
     }
 
     #[test]
@@ -460,9 +381,9 @@ mod tests {
         let gdef = simple_ab_grammar();
         let gg = GlrGrammar::from_grammar_def(&gdef);
         let table = GlrTable::build(&gg);
-        let (_vocab, _tok, vp) = make_vocab_and_preprocessing(&gdef);
+        let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
-        let dwa = build_parser_dwa(&table, &gg, &vp);
+        let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp);
         assert!(dwa.num_states() > 0);
     }
 
@@ -471,9 +392,9 @@ mod tests {
         let gdef = choice_grammar(); // S → a | b
         let gg = GlrGrammar::from_grammar_def(&gdef);
         let table = GlrTable::build(&gg);
-        let (_vocab, _tok, vp) = make_vocab_and_preprocessing(&gdef);
+        let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
-        let dwa = build_parser_dwa(&table, &gg, &vp);
+        let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp);
         assert!(dwa.num_states() > 0);
     }
 }

@@ -323,7 +323,7 @@ fn test_forced_token_detection() {
 #[test]
 fn test_int_multichar_mask() {
     // First test the regex itself
-    use glrmask::automata::regex::{Expr, ExprGroup, ExprGroups};
+    use glrmask::automata::regex::{ExprGroup, ExprGroups};
     use glrmask::compiler::tokenizer_dfa::parse_regex;
     
     let expr = parse_regex("[1-9]([0-9])*");
@@ -501,7 +501,6 @@ start: JSON_STRING
         let next = tok.dfa.get_transition(s, b);
         if next == DEAD {
             eprintln!("  state {} + byte 0x{:02X} -> DEAD", s, b);
-            s = next;
             break;
         }
         let finalizers: Vec<usize> = tok.dfa.finalizers(next).iter().copied().collect();
@@ -899,4 +898,115 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     assert!(mask4.get(2), "',' (id=2) should be allowed after '[1,1'");
     assert!(mask4.get(1), "']' (id=1) should be allowed after '[1,1'");
     assert!(mask4.get(7), "',-' (id=7) should be allowed after '[1,1'");
+}
+
+// ====================================================================
+// Plan-conforming API surface tests
+// ====================================================================
+
+/// Verify `mask_len()`, `mask()`, `fill_mask()`, and `is_finished()`.
+#[test]
+fn test_plan_api_mask_and_is_finished() {
+    let vocab = Vocab::new(
+        vec![(0, b"a".to_vec()), (1, b"b".to_vec())],
+        None,
+    );
+    let c = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
+    let mut s = c.start();
+
+    // mask_len() must cover every token index.
+    let len = c.mask_len();
+    assert!(len >= 1, "mask_len must be at least 1");
+    assert!((len - 1) * 32 < 32 * len, "mask_len sanity");
+
+    // mask() returns the same information as compute_mask().
+    let bitmask = s.compute_mask(&c);
+    let words = s.mask(&c);
+    assert_eq!(words.len(), len);
+    assert!((words[0] >> 0) & 1 == 1, "token 0 ('a') should be set");
+    assert!((words[0] >> 1) & 1 == 0, "token 1 ('b') should not be set");
+
+    // fill_mask() must agree with mask().
+    let mut buf = vec![0u32; len];
+    s.fill_mask(&c, &mut buf);
+    assert_eq!(buf, words);
+
+    // is_finished() before completion.
+    assert!(!s.is_finished(&c));
+
+    // Advance to completion.
+    s.commit(&c, 0).unwrap();
+    s.commit(&c, 1).unwrap();
+    assert!(s.is_finished(&c));
+    let _ = bitmask; // suppress unused warning
+}
+
+/// Verify `commit_bytes()` advances state correctly.
+#[test]
+fn test_plan_api_commit_bytes() {
+    let vocab = Vocab::new(
+        vec![(0, b"x".to_vec()), (1, b"y".to_vec())],
+        None,
+    );
+    let c = Constraint::from_ebnf(r#"start ::= "x" "y""#, &vocab).unwrap();
+    let mut s = c.start();
+
+    // commit_bytes is infallible and processes raw bytes directly.
+    s.commit_bytes(&c, b"x");
+    let mask = s.mask(&c);
+    // After "x", only "y" (token 1) is allowed.
+    assert!((mask[0] >> 0) & 1 == 0, "token 0 ('x') must not be set after 'x'");
+    assert!((mask[0] >> 1) & 1 == 1, "token 1 ('y') must be set after 'x'");
+
+    s.commit_bytes(&c, b"y");
+    assert!(s.is_finished(&c));
+}
+
+/// Verify `commit_tokens()` is equivalent to sequential `commit()`.
+#[test]
+fn test_plan_api_commit_tokens() {
+    let vocab = Vocab::new(
+        vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
+        None,
+    );
+    let c = Constraint::from_ebnf(r#"start ::= "a" "b" "c""#, &vocab).unwrap();
+    let mut s = c.start();
+
+    s.commit_tokens(&c, &[0, 1, 2]);
+    assert!(s.is_finished(&c));
+}
+
+/// Verify `force()` returns the forced token sequence for a deterministic grammar.
+#[test]
+fn test_plan_api_force_deterministic() {
+    // Grammar: exactly "a" "b" "c" — all three tokens are forced in one call.
+    let vocab = Vocab::new(
+        vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
+        None,
+    );
+    let c = Constraint::from_ebnf(r#"start ::= "a" "b" "c""#, &vocab).unwrap();
+    let s = c.start();
+
+    // force() greedily collects the entire deterministic sequence.
+    let forced = s.force(&c);
+    assert_eq!(forced, vec![0, 1, 2], "all three tokens are forced in sequence");
+
+    // Committing the forced tokens reaches the finished state.
+    let mut s2 = c.start();
+    s2.commit_tokens(&c, &forced);
+    assert!(s2.is_finished(&c));
+}
+
+/// Verify `force()` returns empty when multiple tokens are possible.
+#[test]
+fn test_plan_api_force_nondeterministic() {
+    let vocab = Vocab::new(
+        vec![(0, b"x".to_vec()), (1, b"y".to_vec())],
+        None,
+    );
+    let c = Constraint::from_ebnf(r#"start ::= "x" | "y""#, &vocab).unwrap();
+    let s = c.start();
+
+    let forced = s.force(&c);
+    assert!(forced.is_empty(), "no token forced when two are possible");
 }

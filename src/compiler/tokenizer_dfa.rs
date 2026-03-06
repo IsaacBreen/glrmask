@@ -25,6 +25,19 @@ pub struct TokenizerDfa {
 }
 
 impl TokenizerDfa {
+    /// Build a tokenizer DFA from fully specified regex groups.
+    pub fn from_expr_groups(groups: &[ExprGroup]) -> Self {
+        let num_terminals = groups.len() as u32;
+        let dfa = ExprGroups {
+            groups: groups.to_vec(),
+        }
+        .build();
+        Self {
+            dfa: dfa.dfa,
+            num_terminals,
+        }
+    }
+
     /// Build a tokenizer DFA from terminal expressions.
     ///
     /// `terminals[i]` = (terminal_id, expression).
@@ -37,12 +50,7 @@ impl TokenizerDfa {
                 is_non_greedy: false,
             })
             .collect();
-        let num_terminals = terminals.len() as u32;
-        let dfa = ExprGroups { groups }.build();
-        Self {
-            dfa: dfa.dfa,
-            num_terminals,
-        }
+        Self::from_expr_groups(&groups)
     }
 
     /// Build a tokenizer DFA from a GrammarDef by parsing terminal patterns.
@@ -81,6 +89,30 @@ impl TokenizerDfa {
         }
         self.dfa
             .finalizers(state)
+            .iter()
+            .map(|&gid| gid as TerminalId)
+            .collect()
+    }
+
+    /// Get the subset of matched terminals whose regex groups are marked non-greedy.
+    pub fn matched_non_greedy_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
+        if state == crate::automata::dfa::DEAD {
+            return BTreeSet::new();
+        }
+        self.dfa
+            .non_greedy_finalizers(state)
+            .iter()
+            .map(|&gid| gid as TerminalId)
+            .collect()
+    }
+
+    /// Get terminals that remain reachable on some non-empty continuation.
+    pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
+        if state == crate::automata::dfa::DEAD {
+            return BTreeSet::new();
+        }
+        self.dfa
+            .possible_future_group_ids(state)
             .iter()
             .map(|&gid| gid as TerminalId)
             .collect()
@@ -546,6 +578,7 @@ fn hex_digit(b: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automata::regex::bytes;
     use crate::compiler::grammar_def::{GrammarDef, Rule, Symbol, TerminalDef};
 
     #[test]
@@ -764,5 +797,28 @@ mod tests {
             reachable[es_t as usize].contains(&0),
             "JSON_BOOL should be reachable from state after 't'"
         );
+    }
+
+    #[test]
+    fn test_preserves_non_greedy_and_future_terminal_metadata() {
+        let tokenizer = TokenizerDfa::from_expr_groups(&[
+            ExprGroup {
+                expr: bytes(b"a"),
+                is_non_greedy: true,
+            },
+            ExprGroup {
+                expr: bytes(b"ab"),
+                is_non_greedy: false,
+            },
+        ]);
+
+        let state_after_a = tokenizer.run(b"a");
+        assert!(tokenizer.matched_terminals(state_after_a).contains(&0));
+        assert!(tokenizer
+            .matched_non_greedy_terminals(state_after_a)
+            .contains(&0));
+        assert!(tokenizer
+            .possible_future_terminals(state_after_a)
+            .contains(&1));
     }
 }

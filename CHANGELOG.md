@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — API conformance pass
+
+### New Public API (aligned with rewrite plan)
+
+#### `Constraint`
+- `mask_len() -> usize` — number of `u32` words needed for a mask buffer
+
+#### `ConstraintState`
+- `mask(constraint) -> Vec<u32>` — allowed-token mask as `u32` words
+- `fill_mask(constraint, buf: &mut [u32])` — zero-alloc mask fill
+- `is_finished(constraint) -> bool` — grammar fully satisfied (alias for `is_accepting`)
+- `commit_bytes(constraint, bytes: &[u8])` — infallible raw-byte commit
+- `commit_tokens(constraint, tokens: &[u32])` — batch token commit
+- `force(constraint) -> Vec<u32>` — greedy forced-token prefix
+
+### Internal Compiler Improvements
+- Added `non_greedy_finalizers` and `possible_future_group_ids` tracking to `Dfa` and `Nfa`
+- Non-greedy terminal metadata propagated through `TokenizerDfa` → `TerminalDwa`
+- `terminal_dwa.rs`: full vocabulary-trie walk replaces `possible_matches` projection
+- `template.rs`: template bundle construction groups equivalent terminal characterizations
+- `parser_dwa.rs`: refactored to use `build_terminal_dwa` + `build_template_bundles`
+- Added `compiler/labels.rs` — shared parser-state label encoding
+- Added `compiler/resolve_negatives.rs` — cancellation semantics for negative NWA labels
+
+---
+
 ## 0.1.0 — Initial Release
 
 ### Features
@@ -8,7 +34,7 @@
 - **DWA-based mask computation** in microseconds
 - **Serialization**: `save()`/`load()` via bincode
 - **Force detection**: `forced_token()` and `is_dead()` utilities
-- 196 tests (179 unit + 17 integration)
+- 206 tests (179 unit + 27 integration)
 
 ### Architecture
 - `ds/`: Core data structures (RangeSet, U8Set, BitSet)

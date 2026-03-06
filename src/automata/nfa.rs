@@ -19,6 +19,8 @@ struct NfaState {
     epsilon_transitions: Vec<u32>,
     /// Finalizer group IDs (which groups match at this state).
     finalizers: BTreeSet<GroupId>,
+    /// Subset of finalizers corresponding to non-greedy groups.
+    non_greedy_finalizers: BTreeSet<GroupId>,
 }
 
 impl NfaState {
@@ -27,6 +29,7 @@ impl NfaState {
             transitions: Vec::new(),
             epsilon_transitions: Vec::new(),
             finalizers: BTreeSet::new(),
+            non_greedy_finalizers: BTreeSet::new(),
         }
     }
 }
@@ -81,6 +84,14 @@ impl Nfa {
     /// Mark a state as finalizing for a group.
     pub fn add_finalizer(&mut self, state: u32, group_id: GroupId) {
         self.states[state as usize].finalizers.insert(group_id);
+    }
+
+    /// Mark a state as finalizing for a non-greedy group.
+    pub fn add_non_greedy_finalizer(&mut self, state: u32, group_id: GroupId) {
+        self.states[state as usize].finalizers.insert(group_id);
+        self.states[state as usize]
+            .non_greedy_finalizers
+            .insert(group_id);
     }
 
     /// Set whether a state is accepting (convenience, uses group 0).
@@ -191,12 +202,17 @@ impl Nfa {
                 for &group in &self.states[nfa_s as usize].finalizers {
                     dfa.add_finalizer(dfa_id as u32, group);
                 }
+                for &group in &self.states[nfa_s as usize].non_greedy_finalizers {
+                    dfa.add_non_greedy_finalizer(dfa_id as u32, group);
+                }
             }
             // Set transitions
             for &(byte, target) in &transitions[dfa_id] {
                 dfa.set_transition(dfa_id as u32, byte, target);
             }
         }
+
+        dfa.recompute_possible_future_group_ids();
 
         dfa
     }
@@ -314,6 +330,18 @@ mod tests {
         let m_b = dfa.find_matches(b"b");
         assert!(!m_b.contains(&0));
         assert!(m_b.contains(&1));
+    }
+
+    #[test]
+    fn test_non_greedy_finalizers_propagate_to_dfa() {
+        let mut nfa = Nfa::new(2);
+        nfa.add_transition(0, b'a', 1);
+        nfa.add_non_greedy_finalizer(1, 3);
+
+        let dfa = nfa.to_dfa();
+        let accept = dfa.run(b"a");
+        assert!(dfa.finalizers(accept).contains(&3));
+        assert!(dfa.non_greedy_finalizers(accept).contains(&3));
     }
 
     #[test]

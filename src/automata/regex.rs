@@ -357,13 +357,16 @@ impl ExprGroups {
             group_idx,
             ExprGroup {
                 expr,
-                is_non_greedy: _,
+                is_non_greedy,
             },
         ) in self.groups.into_iter().enumerate()
         {
             // Create accept state for this group
             let accept = nfa.add_state();
             nfa.add_finalizer(accept, group_idx);
+            if is_non_greedy {
+                nfa.add_non_greedy_finalizer(accept, group_idx);
+            }
 
             // Compile the expression into the accept state
             let group_start = Expr::compile_cps(&expr, &mut nfa, accept, &mut cache);
@@ -551,6 +554,31 @@ mod tests {
         let m3 = regex.dfa.find_matches(b"ab");
         assert!(m3.contains(&2));
         assert!(!m3.contains(&0)); // "abc" needs 3 chars
+    }
+
+    #[test]
+    fn test_non_greedy_metadata_survives_compilation() {
+        let regex = ExprGroups {
+            groups: vec![
+                ExprGroup {
+                    expr: bytes(b"a"),
+                    is_non_greedy: true,
+                },
+                ExprGroup {
+                    expr: bytes(b"ab"),
+                    is_non_greedy: false,
+                },
+            ],
+        }
+        .build();
+
+        let state_after_a = regex.dfa.run(b"a");
+        assert!(regex.dfa.finalizers(state_after_a).contains(&0));
+        assert!(regex.dfa.non_greedy_finalizers(state_after_a).contains(&0));
+        assert!(regex
+            .dfa
+            .possible_future_group_ids(state_after_a)
+            .contains(&1));
     }
 
     #[test]

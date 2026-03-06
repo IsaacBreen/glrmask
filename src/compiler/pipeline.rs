@@ -35,7 +35,7 @@ use crate::runtime::Constraint;
 ///       │      │
 ///       │      └── VocabPreprocessing::compute()
 ///       │
-///       └── build_parser_dwa()  ← uses table + grammar + vocab_pre
+///       └── build_parser_dwa()  ← uses table + grammar + tokenizer + vocab + vocab_pre
 ///              │
 ///              └── determinize + minimize → CompDwa
 ///                     │
@@ -66,7 +66,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     // 5–6. Build parser DWA (NWA → determinize → minimize).
     let t = Instant::now();
-    let parser_dwa = build_parser_dwa(&table, &glr_grammar, &vocab_pre);
+    let parser_dwa = build_parser_dwa(&table, &glr_grammar, &tokenizer, vocab, &vocab_pre);
     eprintln!("[glrmask::compile] DWA build:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), parser_dwa.num_states());
 
     // 7. Package as Constraint.

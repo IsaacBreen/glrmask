@@ -31,6 +31,10 @@ pub struct Dfa {
     /// Per-state finalizer group IDs. `finalizers[state]` is the set of groups
     /// that match at this state. Empty means non-accepting.
     finalizers: Vec<BTreeSet<GroupId>>,
+    /// Per-state subset of finalizers that came from non-greedy regex groups.
+    non_greedy_finalizers: Vec<BTreeSet<GroupId>>,
+    /// Per-state group IDs that remain reachable on some non-empty continuation.
+    possible_future_group_ids: Vec<BTreeSet<GroupId>>,
     /// Number of states.
     num_states: usize,
 }
@@ -41,6 +45,8 @@ impl Dfa {
         Self {
             transitions: vec![DEAD; num_states * 256],
             finalizers: vec![BTreeSet::new(); num_states],
+            non_greedy_finalizers: vec![BTreeSet::new(); num_states],
+            possible_future_group_ids: vec![BTreeSet::new(); num_states],
             num_states,
         }
     }
@@ -79,6 +85,12 @@ impl Dfa {
         self.finalizers[state as usize].insert(group_id);
     }
 
+    /// Add a non-greedy finalizer group ID to a state.
+    pub fn add_non_greedy_finalizer(&mut self, state: u32, group_id: GroupId) {
+        self.finalizers[state as usize].insert(group_id);
+        self.non_greedy_finalizers[state as usize].insert(group_id);
+    }
+
     /// Set the finalizers for a state.
     pub fn set_finalizers(&mut self, state: u32, groups: BTreeSet<GroupId>) {
         self.finalizers[state as usize] = groups;
@@ -87,6 +99,16 @@ impl Dfa {
     /// Get the finalizer group IDs for a state.
     pub fn finalizers(&self, state: u32) -> &BTreeSet<GroupId> {
         &self.finalizers[state as usize]
+    }
+
+    /// Get the non-greedy finalizer group IDs for a state.
+    pub fn non_greedy_finalizers(&self, state: u32) -> &BTreeSet<GroupId> {
+        &self.non_greedy_finalizers[state as usize]
+    }
+
+    /// Get the group IDs reachable from this state on some non-empty suffix.
+    pub fn possible_future_group_ids(&self, state: u32) -> &BTreeSet<GroupId> {
+        &self.possible_future_group_ids[state as usize]
     }
 
     /// Whether a state is accepting (has any finalizer).
@@ -147,6 +169,38 @@ impl Dfa {
     pub fn minimize(&self) -> Dfa {
         hopcroft_minimize(self)
     }
+
+    /// Recompute `possible_future_group_ids` from the current transition graph.
+    pub fn recompute_possible_future_group_ids(&mut self) {
+        let mut possible_future_group_ids = vec![BTreeSet::new(); self.num_states];
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for state in 0..self.num_states {
+                let mut next_groups = BTreeSet::new();
+                for byte in 0..=255u8 {
+                    let target = self.get_transition(state as u32, byte);
+                    if target == DEAD {
+                        continue;
+                    }
+                    next_groups.extend(self.finalizers[target as usize].iter().copied());
+                    next_groups.extend(
+                        possible_future_group_ids[target as usize]
+                            .iter()
+                            .copied(),
+                    );
+                }
+
+                if next_groups != possible_future_group_ids[state] {
+                    possible_future_group_ids[state] = next_groups;
+                    changed = true;
+                }
+            }
+        }
+
+        self.possible_future_group_ids = possible_future_group_ids;
+    }
 }
 
 /// Hopcroft's DFA minimization algorithm.
@@ -181,13 +235,16 @@ fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
 
     // Initial partition: group by finalizer sets
     use std::collections::HashMap;
-    let mut finalizer_to_class: HashMap<&BTreeSet<GroupId>, u32> = HashMap::new();
+    let mut finalizer_to_class: HashMap<(BTreeSet<GroupId>, BTreeSet<GroupId>), u32> = HashMap::new();
     let mut partition = vec![0u32; n];
     let mut num_classes = 0u32;
 
     for &s in &reachable_states {
-        let fin = &dfa.finalizers[s];
-        let class = *finalizer_to_class.entry(fin).or_insert_with(|| {
+        let key = (
+            dfa.finalizers[s].clone(),
+            dfa.non_greedy_finalizers[s].clone(),
+        );
+        let class = *finalizer_to_class.entry(key).or_insert_with(|| {
             let c = num_classes;
             num_classes += 1;
             c
@@ -281,6 +338,7 @@ fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
         }
         if let Some(&rep) = reachable_states.iter().find(|&&s| partition[s] == class) {
             result.finalizers[new_class as usize] = dfa.finalizers[rep].clone();
+            result.non_greedy_finalizers[new_class as usize] = dfa.non_greedy_finalizers[rep].clone();
             for byte in 0..=255u8 {
                 let t = dfa.get_transition(rep as u32, byte);
                 if t != DEAD {
@@ -292,6 +350,8 @@ fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
             }
         }
     }
+
+    result.recompute_possible_future_group_ids();
 
     result
 }
@@ -348,6 +408,21 @@ mod tests {
         assert!(!m1.contains(&1));
         let m2 = dfa.find_matches(b"b");
         assert!(m2.contains(&1));
+    }
+
+    #[test]
+    fn test_non_greedy_and_possible_future_metadata() {
+        let mut dfa = Dfa::new(3);
+        dfa.set_transition(0, b'a', 1);
+        dfa.set_transition(1, b'b', 2);
+        dfa.add_non_greedy_finalizer(1, 0);
+        dfa.add_finalizer(2, 1);
+        dfa.recompute_possible_future_group_ids();
+
+        assert!(dfa.non_greedy_finalizers(1).contains(&0));
+        assert!(dfa.possible_future_group_ids(0).contains(&0));
+        assert!(dfa.possible_future_group_ids(0).contains(&1));
+        assert!(dfa.possible_future_group_ids(1).contains(&1));
     }
 
     #[test]

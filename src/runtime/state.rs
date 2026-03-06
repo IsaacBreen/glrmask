@@ -214,6 +214,14 @@ impl Constraint {
     pub fn tokenizer_initial_state(&self) -> u32 {
         self.tokenizer.initial_state()
     }
+
+    /// Number of `u32` words required in a mask buffer for this vocabulary.
+    ///
+    /// Allocate the buffer with `vec![0u32; constraint.mask_len()]`.
+    /// Token `i` is allowed iff `buf[i / 32] & (1u32 << (i % 32)) != 0`.
+    pub fn mask_len(&self) -> usize {
+        (self.max_token as usize / 32) + 1
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -403,23 +411,118 @@ impl ConstraintState {
             })?
             .clone();
 
-        if token_bytes.is_empty() {
-            return Ok(());
+        self.process_bytes_raw(constraint, &token_bytes);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan-conforming public API
+    // -----------------------------------------------------------------------
+
+    /// Compute the allowed-token mask as a `Vec<u32>`.
+    ///
+    /// Token `i` is allowed iff `result[i / 32] & (1u32 << (i % 32)) != 0`.
+    /// Allocate the buffer with [`Constraint::mask_len`] words.
+    pub fn mask(&self, constraint: &Constraint) -> Vec<u32> {
+        let bitset = self.compute_mask(constraint);
+        let mut buf = vec![0u32; constraint.mask_len()];
+        bitset.fill_u32_mask(&mut buf);
+        buf
+    }
+
+    /// Fill a pre-allocated mask buffer.
+    ///
+    /// `buf` must be at least `constraint.mask_len()` words long.
+    /// Token `i` is allowed iff `buf[i / 32] & (1u32 << (i % 32)) != 0`.
+    pub fn fill_mask(&self, constraint: &Constraint, buf: &mut [u32]) {
+        let bitset = self.compute_mask(constraint);
+        bitset.fill_u32_mask(buf);
+    }
+
+    /// Whether the grammar has been fully satisfied (EOS is valid at current position).
+    pub fn is_finished(&self, constraint: &Constraint) -> bool {
+        self.is_accepting(constraint)
+    }
+
+    /// Commit raw bytes, advancing tokenizer and parser state.
+    ///
+    /// Infallible. If the bytes produce no valid parse continuations the next
+    /// mask will simply be empty.
+    pub fn commit_bytes(&mut self, constraint: &Constraint, bytes: &[u8]) {
+        self.process_bytes_raw(constraint, bytes);
+    }
+
+    /// Commit multiple tokens in sequence (batch convenience wrapper).
+    ///
+    /// Equivalent to calling `commit(constraint, token)` for each token.
+    pub fn commit_tokens(&mut self, constraint: &Constraint, tokens: &[u32]) {
+        for &token in tokens {
+            let _ = self.commit(constraint, token);
+        }
+    }
+
+    /// Return the sequence of tokens forced by the current grammar state.
+    ///
+    /// A token is *forced* when it is the only non-EOS option in the mask.
+    /// The method repeatedly computes the mask, collects any single forced
+    /// token, simulates a commit, and continues until the state is no longer
+    /// deterministic. Returns an empty `Vec` when no tokens are forced.
+    ///
+    /// The caller is responsible for committing the returned tokens via
+    /// [`commit_tokens`].
+    pub fn force(&self, constraint: &Constraint) -> Vec<u32> {
+        let mut result = Vec::new();
+        let mut trial = self.clone();
+        loop {
+            let bitset = trial.compute_mask(constraint);
+            // Build a copy with the EOS bit cleared so we see only real tokens.
+            let forced_token = if let Some(eos_id) = constraint.eos_token_id {
+                let mut without_eos = bitset.clone();
+                without_eos.clear(eos_id as usize);
+                if without_eos.count_ones() == 1 {
+                    without_eos.iter_ones().next().map(|i| i as u32)
+                } else {
+                    None
+                }
+            } else {
+                if bitset.count_ones() == 1 {
+                    bitset.iter_ones().next().map(|i| i as u32)
+                } else {
+                    None
+                }
+            };
+
+            let Some(token) = forced_token else { break };
+            result.push(token);
+            let _ = trial.commit(constraint, token);
+            if trial.state.is_empty() {
+                break;
+            }
+        }
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    /// Core byte-processing engine shared by `commit` and `commit_bytes`.
+    fn process_bytes_raw(&mut self, constraint: &Constraint, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
         }
 
+        let bytes_len = bytes.len();
         let mut new_state: BTreeMap<u32, ParserGSS> = BTreeMap::new();
 
-        // Processing queue: (byte_offset, tokenizer_state, gss)
+        // Processing queue: (byte_offset, tokenizer_state → gss)
         let mut queue: BTreeMap<usize, BTreeMap<u32, ParserGSS>> = BTreeMap::new();
-
-        // Seed the queue with the current state at offset 0.
         queue.insert(0, self.state.clone());
 
         while let Some((offset, states_at_offset)) = queue.pop_first() {
             for (tok_state, gss) in states_at_offset {
-                let remaining = &token_bytes[offset..];
+                let remaining = &bytes[offset..];
                 if remaining.is_empty() {
-                    // All bytes consumed — add to new state.
                     new_state
                         .entry(tok_state)
                         .and_modify(|existing| *existing = existing.merge(&gss))
@@ -427,30 +530,24 @@ impl ConstraintState {
                     continue;
                 }
 
-                // Run tokenizer on remaining bytes.
                 let result = constraint
                     .tokenizer
                     .execute_all_matches(remaining, tok_state);
 
-                // Process each intermediate match.
                 for (match_offset, matched_terminals) in &result.matches {
                     let abs_offset = offset + match_offset;
 
                     for &terminal_id in matched_terminals {
-                        // Step GLR parser on this terminal using the GSS.
                         let new_gss = step_glr_gss(&constraint.table, &gss, terminal_id);
 
                         if !new_gss.is_empty() {
-                            // After matching a terminal, reset tokenizer to initial state.
                             let initial_tok = constraint.tokenizer.initial_state();
-                            if abs_offset == token_bytes.len() {
-                                // All bytes consumed — add directly to new state.
+                            if abs_offset == bytes_len {
                                 new_state
                                     .entry(initial_tok)
                                     .and_modify(|existing| *existing = existing.merge(&new_gss))
                                     .or_insert(new_gss);
                             } else {
-                                // More bytes to process.
                                 queue
                                     .entry(abs_offset)
                                     .or_default()
@@ -462,7 +559,6 @@ impl ConstraintState {
                     }
                 }
 
-                // Track the tokenizer end state (for partial matches).
                 if result.end_state != DEAD {
                     new_state
                         .entry(result.end_state)
@@ -472,11 +568,8 @@ impl ConstraintState {
             }
         }
 
-        // Remove empty entries.
         new_state.retain(|_, gss| !gss.is_empty());
-
         self.state = new_state;
-        Ok(())
     }
 }
 
