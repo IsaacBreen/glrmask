@@ -303,20 +303,6 @@ fn test_load_invalid_bytes() {
 // ====================================================================
 
 #[test]
-fn test_forced_token_detection() {
-    use glrmask::runtime::force::{forced_token, is_dead};
-
-    let vocab = make_vocab(&["a", "b"]);
-    let c = Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
-    let s = c.start();
-    let mask = s.compute_mask();
-
-    // Only "a" should be valid — forced token should be 0.
-    assert_eq!(forced_token(&mask), Some(0));
-    assert!(!is_dead(&mask));
-}
-
-#[test]
 fn test_int_multichar_mask() {
     // First test the regex itself
     use glrmask::automata::regex::{ExprGroup, ExprGroups};

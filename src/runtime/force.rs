@@ -7,7 +7,8 @@
 use crate::ds::bitset::BitSet;
 
 /// Check if the mask allows exactly one token. Returns it if so.
-pub fn forced_token(mask: &BitSet) -> Option<u32> {
+#[allow(dead_code)]
+pub(crate) fn forced_token(mask: &BitSet) -> Option<u32> {
     if mask.count_ones() == 1 {
         // Find the single set bit.
         for i in 0..mask.len() {
@@ -20,13 +21,37 @@ pub fn forced_token(mask: &BitSet) -> Option<u32> {
 }
 
 /// Check if the mask is empty (no tokens allowed).
-pub fn is_dead(mask: &BitSet) -> bool {
+#[allow(dead_code)]
+pub(crate) fn is_dead(mask: &BitSet) -> bool {
     mask.count_ones() == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::state::Constraint;
+    use crate::Vocab;
+
+    fn make_vocab(entries: &[&str]) -> Vocab {
+        let entries: Vec<(u32, Vec<u8>)> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as u32, s.as_bytes().to_vec()))
+            .collect();
+        Vocab::new(entries, None)
+    }
+
+    #[test]
+    fn test_forced_token_detection() {
+        let vocab = make_vocab(&["a", "b"]);
+        let c = Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
+        let s = c.start();
+        let mask = s.compute_mask();
+
+        // Only "a" should be valid — forced token should be 0.
+        assert_eq!(forced_token(&mask), Some(0));
+        assert!(!is_dead(&mask));
+    }
 
     #[test]
     fn test_forced_single() {
