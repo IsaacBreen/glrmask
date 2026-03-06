@@ -1678,3 +1678,88 @@ DIGIT: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
         "json_value span token: b'\":\\\"\\\",\\\"' (ID 34713) must be in mask after b'{{\\\"' (ID 4895)"
     );
 }
+
+// =============================================================================
+// Batch 5: Indirect recursion + expression edge cases
+// =============================================================================
+
+/// Grammar: `s_prime ::= s EOF; s ::= A e | B; e ::= s` (indirect recursion s ↔ e).
+/// Equivalent to `a* b $`. After `a` the state recurses through `e = s`; after `ab`
+/// only `$` (EOF) remains.
+///
+/// Differs from `test_ported_indirect_recursion` (which is `s ::= A s | B end`):
+/// here the recursive step goes through an intermediate non-terminal `e`.
+#[test]
+fn test_ported_indirect_recursion_minimized() {
+    let vocab = make_vocab(&["a", "b", "$"]);
+    let c = Constraint::from_ebnf(
+        r#"s_prime ::= s EOF
+s ::= A e | B
+e ::= s
+A ::= 'a'
+B ::= 'b'
+EOF ::= '$'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' must be in initial mask");
+    assert!(token_allowed(&mask, 1), "'b' must be in initial mask");
+    assert!(!token_allowed(&mask, 2), "'$' must NOT be in initial mask (s not yet satisfied)");
+
+    s.commit(0u32); // "a"
+    let mask = s.mask();
+    // After "a", e = s recurses: expect 'a' or 'b' again.
+    assert!(token_allowed(&mask, 0), "'a' must be in mask after first 'a'");
+    assert!(token_allowed(&mask, 1), "'b' must be in mask after first 'a'");
+    assert!(!token_allowed(&mask, 2), "'$' must NOT be in mask (s not yet fully satisfied)");
+
+    s.commit(1u32); // "b"
+    let mask = s.mask();
+    // After "ab", s = A e = A B (complete). Now expect EOF.
+    assert!(!token_allowed(&mask, 0), "'a' must NOT be in mask after 'ab'");
+    assert!(!token_allowed(&mask, 1), "'b' must NOT be in mask after 'ab'");
+    assert!(token_allowed(&mask, 2), "'$' must be in mask after 'ab' (ready for EOF)");
+}
+
+/// Grammar: `s ::= e; e ::= e '+' | t; t ::= t '*' | I; I ::= 'i'` (left-recursive E/T with I).
+/// Vocab: only `+`=0.
+/// Initial mask: `{}` — `+` cannot start any string (`i` prefix needed, not in vocab).
+/// After `commit_bytes("i")`: old system gives `{0}` (prefix-consistent extension);
+/// new system completability-checks and may give `{}` (no completion reachable with vocab `{+}`).
+///
+/// KNOWN FAILING: New system rejects `+` after `i` because no vocab token can complete
+/// a new `e` following the `+`. Old system used prefix-consistency, not completability.
+#[test]
+fn test_ported_expression_minimized() {
+    let vocab = Vocab::new(vec![(0u32, b"+".to_vec())], None);
+    let c = Constraint::from_ebnf(
+        r#"s ::= e
+e ::= e '+' | t
+t ::= t '*' | I
+I ::= 'i'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let s = c.start();
+    let mask = s.mask();
+    // Initial: '+' can't start any expression (needs 'i' first, which is not in vocab)
+    assert!(
+        iter_allowed(&mask).is_empty(),
+        "initial mask must be empty: '+' cannot start any expression: {mask:?}"
+    );
+
+    let mut s2 = c.start();
+    s2.commit_bytes(b"i");
+    let mask2 = s2.mask();
+    // After "i": grammar satisfied (e = t = I). '+' would extend via e ::= e '+' | t.
+    // Old system: {0}. New system: {} if completability-checks that 'i+' cannot be completed
+    // (next 'e' requires another 'i', not in vocab).
+    assert!(
+        token_allowed(&mask2, 0),
+        "'+' (id=0) must be in mask after 'i' (prefix-consistent extension of e ::= e '+')"
+    );
+}
