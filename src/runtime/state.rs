@@ -100,6 +100,7 @@ impl Constraint {
     }
 
     /// Save to a file.
+    #[doc(hidden)]
     pub fn save_to_file(&self, path: &std::path::Path) -> crate::Result<()> {
         let bytes = self.save()?;
         std::fs::write(path, bytes)
@@ -108,6 +109,7 @@ impl Constraint {
     }
 
     /// Load from a file.
+    #[doc(hidden)]
     pub fn load_from_file(path: &std::path::Path) -> crate::Result<Self> {
         let bytes = std::fs::read(path)
             .map_err(|e| crate::GlrMaskError::Serialization(format!("read: {e}")))?;
@@ -129,6 +131,7 @@ impl Constraint {
     }
 
     /// Debug dump of internal state for troubleshooting.
+    #[doc(hidden)]
     pub fn debug_dump(&self) {
         eprintln!("--- Constraint Debug Dump ---");
         eprintln!("num_tsids: {}", self.num_tsids);
@@ -167,6 +170,7 @@ impl Constraint {
     }
 
     /// Debug: trace tokenizer behavior for specific bytes from a given starting state.
+    #[doc(hidden)]
     pub fn debug_tokenizer(&self, input: &[u8], start_state: u32) {
         let result = self.tokenizer.execute_all_matches(input, start_state);
         eprintln!(
@@ -195,6 +199,7 @@ impl Constraint {
     }
 
     /// Get the tokenizer's initial state (for debugging).
+    #[doc(hidden)]
     pub fn tokenizer_initial_state(&self) -> u32 {
         self.tokenizer.initial_state()
     }
@@ -233,6 +238,10 @@ impl ConstraintState {
     /// Two-phase approach:
     /// 1. DWA walk produces an overapproximation (fast, ~O(stacks × DWA states))
     /// 2. Post-filter: simulate `commit()` for each candidate to remove false positives
+    ///
+    /// **Note**: prefer [`mask`] or [`fill_mask`] which return `u32` words matching the
+    /// plan's public API. This method is retained for white-box tests only.
+    #[doc(hidden)]
     pub fn compute_mask(&self, constraint: &Constraint) -> BitSet {
         // Phase 1: DWA overapproximation.
         let mut stacks_map: BTreeMap<u32, Vec<Vec<u32>>> = self.state.iter().map(|(&tok_state, gss)| {
@@ -354,6 +363,10 @@ impl ConstraintState {
     ///
     /// Only checks stacks at the initial tokenizer state (clean terminal boundary).
     /// Stacks at non-initial tokenizer states are mid-match and cannot accept.
+    ///
+    /// **Note**: prefer [`is_finished`] which matches the plan's public API.
+    /// This method is retained for white-box tests only.
+    #[doc(hidden)]
     pub fn is_accepting(&self, constraint: &Constraint) -> bool {
         let eof = crate::compiler::glr::grammar::EOF;
         let initial_tok = constraint.tokenizer.initial_state();
