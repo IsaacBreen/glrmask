@@ -801,4 +801,108 @@ mod tests {
         // Only positions 2..=5 survive the intersection.
         assert_eq!(result.len(), 4);
     }
+
+    #[test]
+    fn test_ported_det_diverging_epsilon_paths() {
+        // Ported from old test_determinize_simple_divergence (was #[should_panic] in the
+        // old codebase — old code panicked on this; new code handles it correctly).
+        //
+        // Two NWA paths joined by epsilon from a super-start:
+        //   super_start --eps--> s0 --'a'--> s1 --'c'--> s2  (final, pos 0)
+        //   super_start --eps--> s3 --'b'--> s4 --'c'--> s5  (final, pos 1)
+        //
+        // After determinisation:
+        //   eval("ac") contains pos 0 but NOT pos 1
+        //   eval("bc") contains pos 1 but NOT pos 0
+        let nt = 1u32;
+        let max_tok = 200u32; // Must cover 'a'=97, 'b'=98, 'c'=99
+        let mut nwa = Nwa::new(nt, max_tok);
+        let w_all = Weight::all(nwa.max_position(), nt);
+        let w0 = Weight::from_positions(&RangeSet::from_range(0, 0), nt);
+        let w1 = Weight::from_positions(&RangeSet::from_range(1, 1), nt);
+
+        // Path 1: s0 --'a'--> s1 --'c'--> s2 (final, w0)
+        let s0 = nwa.add_state();
+        let s1 = nwa.add_state();
+        let s2 = nwa.add_state();
+        nwa.add_transition(s0, b'a' as i32, s1, w_all.clone());
+        nwa.add_transition(s1, b'c' as i32, s2, w_all.clone());
+        nwa.set_final_weight(s2, w0.clone());
+
+        // Path 2: s3 --'b'--> s4 --'c'--> s5 (final, w1)
+        let s3 = nwa.add_state();
+        let s4 = nwa.add_state();
+        let s5 = nwa.add_state();
+        nwa.add_transition(s3, b'b' as i32, s4, w_all.clone());
+        nwa.add_transition(s4, b'c' as i32, s5, w_all.clone());
+        nwa.set_final_weight(s5, w1.clone());
+
+        // Super-start with epsilon transitions to both paths
+        let super_start = nwa.add_state();
+        nwa.add_epsilon(super_start, s0, w_all.clone());
+        nwa.add_epsilon(super_start, s3, w_all.clone());
+        nwa.start_states.push(super_start);
+
+        let dwa = determinize_acyclic(&nwa).unwrap();
+
+        // eval("ac") should contain pos 0 only
+        let r_ac = dwa.eval_word(&[b'a' as i32, b'c' as i32]);
+        assert!(!r_ac.is_empty(), "'ac' should be accepted");
+        assert!(r_ac.contains(0), "'ac' should yield weight pos 0");
+        assert!(!r_ac.contains(1), "'ac' should NOT yield weight pos 1");
+
+        // eval("bc") should contain pos 1 only
+        let r_bc = dwa.eval_word(&[b'b' as i32, b'c' as i32]);
+        assert!(!r_bc.is_empty(), "'bc' should be accepted");
+        assert!(r_bc.contains(1), "'bc' should yield weight pos 1");
+        assert!(!r_bc.contains(0), "'bc' should NOT yield weight pos 0");
+
+        // eval("a") alone is empty (no final state after one step)
+        assert!(dwa.eval_word(&[b'a' as i32]).is_empty(), "'a' alone should be empty");
+
+        // DWA should have a compact number of states
+        assert!(dwa.num_states() <= 5, "DWA should have ≤5 states, got {}", dwa.num_states());
+    }
+
+    #[test]
+    fn test_ported_det_epsilon_convergence() {
+        // Ported from test_epsilon_explosion_minimal (correctness aspect).
+        //
+        // Two epsilon branches share the same terminal label and converge to one DFA state:
+        //   super_start --eps--> s0  (s0: 'x' -> s_final with w0)
+        //   super_start --eps--> s1  (s1: 'x' -> s_final with w1)
+        //   s_final: final weight w_all
+        //
+        // On reading 'x', both branches arrive at s_final with their respective
+        // per-transition weights; the resulting weight is the union: w0 ∪ w1.
+        let nt = 1u32;
+        let max_tok = 200u32;
+        let mut nwa = Nwa::new(nt, max_tok);
+        let w_all = Weight::all(nwa.max_position(), nt);
+        let w0 = Weight::from_positions(&RangeSet::from_range(0, 0), nt);
+        let w1 = Weight::from_positions(&RangeSet::from_range(1, 1), nt);
+
+        let s0 = nwa.add_state();
+        let s1 = nwa.add_state();
+        let s_final = nwa.add_state();
+        nwa.add_transition(s0, b'x' as i32, s_final, w0.clone());
+        nwa.add_transition(s1, b'x' as i32, s_final, w1.clone());
+        nwa.set_final_weight(s_final, w_all.clone());
+
+        let super_start = nwa.add_state();
+        nwa.add_epsilon(super_start, s0, w_all.clone());
+        nwa.add_epsilon(super_start, s1, w_all.clone());
+        nwa.start_states.push(super_start);
+
+        let dwa = determinize_acyclic(&nwa).unwrap();
+
+        // eval("x") should contain both pos 0 (from s0 branch) and pos 1 (from s1 branch)
+        let r = dwa.eval_word(&[b'x' as i32]);
+        assert!(!r.is_empty(), "'x' should be accepted");
+        assert!(r.contains(0), "'x' should yield pos 0 (from s0 branch)");
+        assert!(r.contains(1), "'x' should yield pos 1 (from s1 branch)");
+
+        // eval("y") should be empty (no transition on 'y')
+        assert!(dwa.eval_word(&[b'y' as i32]).is_empty(), "'y' should be rejected");
+    }
 }
