@@ -236,4 +236,209 @@ mod tests {
         assert!(valid.contains(&0)); // 'a' is valid from start
         assert!(!valid.contains(&1)); // 'b' is not valid from start
     }
+
+    // ---------------------------------------------------------------------------
+    // Ported tests from old grammars2024/src/glr/tests.rs
+    // ---------------------------------------------------------------------------
+
+    /// Shorthand for building a TerminalDef.
+    fn tdef(id: u32, name: &str) -> TerminalDef {
+        TerminalDef { id, name: name.into(), pattern: name.into() }
+    }
+
+    #[test]
+    fn test_ported_glr_left_recursive() {
+        // Ported from old test_simple_parse_table_generation_and_parse.
+        // Grammar: A → A a | b  (left-recursive, language = b a*)
+        // NT 0=A; Terminal 0='a', 1='b'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(0)] }, // A → A a
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },                          // A → b
+            ],
+            start: 0,
+            terminals: vec![tdef(0, "a"), tdef(1, "b")],
+        };
+        let parser = build_parser(&gdef);
+        // Accepted: b a*
+        assert!(parser.parse(&[1]),       "\"b\" accepted");
+        assert!(parser.parse(&[1, 0]),    "\"ba\" accepted");
+        assert!(parser.parse(&[1, 0, 0]), "\"baa\" accepted");
+        // Rejected
+        assert!(!parser.parse(&[0]),    "\"a\" rejected (must start with 'b')");
+        assert!(!parser.parse(&[1, 1]), "\"bb\" rejected (two 'b's)");
+    }
+
+    #[test]
+    fn test_ported_glr_right_recursive() {
+        // Ported from old test_right_recursive_grammar_parse.
+        // Grammar: S → a S | b  (right-recursive, language = a* b)
+        // NT 0=S; Terminal 0='a', 1='b'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(0)] }, // S → a S
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },                          // S → b
+            ],
+            start: 0,
+            terminals: vec![tdef(0, "a"), tdef(1, "b")],
+        };
+        let parser = build_parser(&gdef);
+        // Accepted: a* b
+        assert!(parser.parse(&[1]),          "\"b\" accepted");
+        assert!(parser.parse(&[0, 1]),       "\"ab\" accepted");
+        assert!(parser.parse(&[0, 0, 1]),    "\"aab\" accepted");
+        assert!(parser.parse(&[0, 0, 0, 1]), "\"aaab\" accepted");
+        // Rejected
+        assert!(!parser.parse(&[0]),     "\"a\" rejected (must end in 'b')");
+        assert!(!parser.parse(&[1, 0]),  "\"ba\" rejected");
+        assert!(!parser.parse(&[1, 1]),  "\"bb\" rejected");
+    }
+
+    #[test]
+    fn test_ported_glr_expression_grammar() {
+        // Ported from old test_expression_parse_table_generation_and_parse.
+        // Grammar: E → E + T | T,  T → T * F | F,  F → ( E ) | i
+        // NT 0=E, 1=T, 2=F; Terminal 0='i', 1='+', 2='*', 3='(', 4=')'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(1), Symbol::Nonterminal(1)] }, // E → E + T
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },                                               // E → T
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2), Symbol::Nonterminal(2)] }, // T → T * F
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(2)] },                                               // T → F
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(3), Symbol::Nonterminal(0), Symbol::Terminal(4)] },    // F → ( E )
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },                                                  // F → i
+            ],
+            start: 0,
+            terminals: vec![tdef(0, "i"), tdef(1, "+"), tdef(2, "*"), tdef(3, "("), tdef(4, ")")],
+        };
+        let parser = build_parser(&gdef);
+        // Accepted
+        assert!(parser.parse(&[0]),                   "\"i\" accepted");
+        assert!(parser.parse(&[0, 1, 0]),             "\"i+i\" accepted");
+        assert!(parser.parse(&[0, 2, 0]),             "\"i*i\" accepted");
+        assert!(parser.parse(&[0, 1, 0, 2, 0]),       "\"i+i*i\" accepted");
+        assert!(parser.parse(&[3, 0, 1, 0, 4, 2, 0]), "\"(i+i)*i\" accepted");
+        // Rejected
+        assert!(!parser.parse(&[0, 1]),       "\"i+\" rejected (incomplete)");
+        assert!(!parser.parse(&[0, 1, 1, 0]), "\"i++i\" rejected (invalid)");
+        assert!(!parser.parse(&[]),           "\"\" rejected (empty)");
+        assert!(!parser.parse(&[4]),          "\")\" rejected");
+        assert!(!parser.parse(&[3, 0]),       "\"(i\" rejected (unclosed paren)");
+    }
+
+    #[test]
+    fn test_ported_glr_reduce_reduce_conflict() {
+        // Ported from old test_reduce_reduce_conflict.
+        // Grammar: S → A | B,  A → x,  B → x
+        // GLR accepts "x" despite the A→x / B→x reduce/reduce conflict.
+        // NT 0=S, 1=A, 2=B; Terminal 0='x'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] }, // S → A
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(2)] }, // S → B
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },    // A → x
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },    // B → x
+            ],
+            start: 0,
+            terminals: vec![tdef(0, "x")],
+        };
+        let parser = build_parser(&gdef);
+        assert!(parser.parse(&[0]),  "\"x\" accepted despite reduce/reduce conflict");
+        assert!(!parser.parse(&[]), "\"\" rejected");
+    }
+
+    #[test]
+    fn test_ported_glr_epsilon_ambiguity() {
+        // Ported from old test_epsilon_rules_ambiguity.
+        // Grammar: S → A B,  A → x | ε,  B → x | ε
+        // Language: {ε, x, xx}  (A and B each consume zero or one 'x')
+        // NT 0=S, 1=A, 2=B; Terminal 0='x'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)] }, // S → A B
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },  // A → x
+                Rule { lhs: 1, rhs: vec![] },                     // A → ε
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },  // B → x
+                Rule { lhs: 2, rhs: vec![] },                     // B → ε
+            ],
+            start: 0,
+            terminals: vec![tdef(0, "x")],
+        };
+        let parser = build_parser(&gdef);
+        assert!(parser.parse(&[]),       "\"\" accepted (A→ε, B→ε)");
+        assert!(parser.parse(&[0]),      "\"x\" accepted (A→x,B→ε or A→ε,B→x)");
+        assert!(parser.parse(&[0, 0]),   "\"xx\" accepted (A→x, B→x)");
+        assert!(!parser.parse(&[0, 0, 0]), "\"xxx\" rejected");
+    }
+
+    #[test]
+    fn test_ported_glr_highly_ambiguous() {
+        // Ported from old test_highly_ambiguous_potentially_slow.
+        // Grammar: S → S S | a  (Catalan-number ambiguity)
+        // NT 0=S; Terminal 0='a'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Nonterminal(0)] }, // S → S S
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },                             // S → a
+            ],
+            start: 0,
+            terminals: vec![tdef(0, "a")],
+        };
+        let parser = build_parser(&gdef);
+        assert!(parser.parse(&[0]),       "\"a\" accepted");
+        assert!(parser.parse(&[0, 0]),    "\"aa\" accepted");
+        assert!(parser.parse(&[0, 0, 0]), "\"aaa\" accepted (many parse trees)");
+        assert!(!parser.parse(&[]),       "\"\" rejected (S not nullable)");
+    }
+
+    #[test]
+    fn test_ported_glr_nullable_before_terminal() {
+        // Ported from old test_nullable_nonterminal_before_terminal.
+        // Grammar: A → B c,  B → d | ε
+        // NT 0=A, 1=B; Terminal 0='c', 1='d'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(0)] }, // A → B c
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(1)] }, // B → d
+                Rule { lhs: 1, rhs: vec![] },                    // B → ε
+            ],
+            start: 0,
+            terminals: vec![tdef(0, "c"), tdef(1, "d")],
+        };
+        let parser = build_parser(&gdef);
+        // Accepted
+        assert!(parser.parse(&[1, 0]), "\"dc\" accepted (A → d c)");
+        assert!(parser.parse(&[0]),    "\"c\" accepted (A → ε c via B→ε)");
+        // Rejected
+        assert!(!parser.parse(&[1]),   "\"d\" rejected (missing 'c')");
+        assert!(!parser.parse(&[]),    "\"\" rejected (A always requires 'c')");
+    }
+
+    #[test]
+    fn test_ported_glr_ambiguous_dangling_else() {
+        // Ported from old test_ambiguous_dangling_else.
+        // Grammar: Stmt → if id then Stmt
+        //                | if id then Stmt else Stmt
+        //                | other
+        // The input "if id then if id then other else other" is ambiguous —
+        // the else can attach to the inner or outer if.  GLR accepts both.
+        // NT 0=Stmt; Terminal 0='if', 1='id', 2='then', 3='else', 4='other'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2), Symbol::Nonterminal(0)] }, // if id then Stmt
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2), Symbol::Nonterminal(0), Symbol::Terminal(3), Symbol::Nonterminal(0)] }, // if id then Stmt else Stmt
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(4)] }, // Stmt → other
+            ],
+            start: 0,
+            terminals: vec![tdef(0, "if"), tdef(1, "id"), tdef(2, "then"), tdef(3, "else"), tdef(4, "other")],
+        };
+        let parser = build_parser(&gdef);
+        // Ambiguous dangling-else input: accepted through GLR's parallel exploration
+        assert!(parser.parse(&[0, 1, 2, 0, 1, 2, 4, 3, 4]),
+            "ambiguous 'if id then if id then other else other' should be accepted");
+        // Simpler cases
+        assert!(parser.parse(&[4]),          "\"other\" accepted");
+        assert!(parser.parse(&[0, 1, 2, 4]), "\"if id then other\" accepted");
+        assert!(!parser.parse(&[0, 1, 2]),   "\"if id then\" rejected (incomplete)");
+    }
 }
