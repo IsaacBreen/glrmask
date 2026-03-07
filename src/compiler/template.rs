@@ -166,7 +166,7 @@ impl<'a> TemplateCompositionContext<'a> {
 
         body_cache.insert(state_id, (cont_body, final_node));
 
-        let w_all = Weight::all(self.combined.max_position(), num_tsids);
+        let w_all = Weight::full();
 
         // Process transitions from the terminal NWA state (template entries).
         let transitions: Vec<_> = self.terminal_dwa.nwa.states[state_id as usize]
@@ -304,7 +304,7 @@ fn ensure_nt_stack_state(
 
 fn build_template_structure_nwa(characterization: &TerminalCharacterization) -> Nwa {
     let mut nwa = Nwa::new(1, 0);
-    let w_all = Weight::all(0, 1);
+    let w_all = Weight::full();
 
     let start = nwa.add_state();
     let end = nwa.add_state();
@@ -496,7 +496,7 @@ fn instantiate_template_dfa(
     max_token: u32,
 ) -> Nwa {
     let mut nwa = Nwa::new(num_tsids, max_token);
-    let w_all = Weight::all(nwa.max_position(), num_tsids);
+    let w_all = Weight::full();
 
     for _ in 0..template_dfa.dfa.states.len() {
         nwa.add_state();

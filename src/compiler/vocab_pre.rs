@@ -11,18 +11,18 @@ use crate::Vocab;
 use crate::automata::dfa::DEAD;
 use crate::compiler::grammar_def::TerminalId;
 use crate::compiler::tokenizer_dfa::TokenizerDfa;
-use crate::ds::rangeset::RangeSet;
+use crate::automata::weighted::weight::TokenSet;
 
 /// Result of vocabulary preprocessing.
 #[derive(Debug, Clone)]
 pub struct VocabPreprocessing {
-    /// `possible_matches[tsid]` = map from terminal_id → RangeSet of token positions.
+    /// `possible_matches[tsid]` = map from terminal_id → TokenSet of token positions.
     /// A "token position" is just the token index in the vocab.
-    pub possible_matches: Vec<BTreeMap<TerminalId, RangeSet>>,
-    /// `passthrough_tokens[tsid]` = RangeSet of tokens that reach a non-dead
+    pub possible_matches: Vec<BTreeMap<TerminalId, TokenSet>>,
+    /// `passthrough_tokens[tsid]` = set of tokens that reach a non-dead
     /// tokenizer state from this TSID but don't match any terminal.
     /// These tokens just advance the tokenizer without triggering parser actions.
-    pub passthrough_tokens: Vec<RangeSet>,
+    pub passthrough_tokens: Vec<TokenSet>,
     /// Number of unique TSIDs.
     pub num_tsids: u32,
     /// `state_to_tsid[dfa_state]` = compacted TSID (u32::MAX if unreachable).
@@ -144,14 +144,14 @@ impl VocabPreprocessing {
         #[cfg(feature = "rayon")]
         let (possible_matches, passthrough_tokens) = {
             use rayon::prelude::*;
-            let results: Vec<(BTreeMap<TerminalId, RangeSet>, RangeSet)> = tsid_to_state
+            let results: Vec<(BTreeMap<TerminalId, TokenSet>, TokenSet)> = tsid_to_state
                 .par_iter()
                 .enumerate()
                 .map(|(tsid_idx, &dfa_state)| {
                     if skip_tsid[tsid_idx] {
-                        return (BTreeMap::new(), RangeSet::new());
+                        return (BTreeMap::new(), TokenSet::new());
                     }
-                    // Collect (terminal, token_id) pairs for batch RangeSet construction.
+                    // Collect (terminal, token_id) pairs for batch TokenSet construction.
                     // Uses zero-allocation callback to avoid BTreeSet per match.
                     let mut pairs: Vec<(TerminalId, u32)> = Vec::new();
                     let mut pt_ids: Vec<u32> = Vec::new();
@@ -175,10 +175,10 @@ impl VocabPreprocessing {
                             }
                         }
                     }
-                    // Sort by (terminal, token_id), dedup, then batch-build RangeSets.
+                    // Sort by (terminal, token_id), dedup, then batch-build TokenSets.
                     pairs.sort_unstable();
                     pairs.dedup();
-                    let mut pm: BTreeMap<TerminalId, RangeSet> = BTreeMap::new();
+                    let mut pm: BTreeMap<TerminalId, TokenSet> = BTreeMap::new();
                     let mut i = 0;
                     while i < pairs.len() {
                         let terminal = pairs[i].0;
@@ -186,18 +186,17 @@ impl VocabPreprocessing {
                         while i < pairs.len() && pairs[i].0 == terminal {
                             i += 1;
                         }
-                        let rs = RangeSet::from_ranges(
-                            pairs[start..i].iter().map(|&(_, tid)| (tid, tid))
-                        );
+                        let rs: TokenSet =
+                            pairs[start..i].iter().map(|&(_, tid)| tid..=tid).collect();
                         pm.insert(terminal, rs);
                     }
-                    // Batch-build passthrough RangeSet.
-                    let pt = if !pt_ids.is_empty() {
+                    // Batch-build passthrough TokenSet.
+                    let pt: TokenSet = if !pt_ids.is_empty() {
                         pt_ids.sort_unstable();
                         pt_ids.dedup();
-                        RangeSet::from_ranges(pt_ids.iter().map(|&tid| (tid, tid)))
+                        pt_ids.iter().map(|&tid| tid..=tid).collect()
                     } else {
-                        RangeSet::new()
+                        TokenSet::new()
                     };
                     (pm, pt)
                 })
@@ -213,17 +212,16 @@ impl VocabPreprocessing {
 
         #[cfg(not(feature = "rayon"))]
         let (possible_matches, passthrough_tokens) = {
-            // Collect (terminal, token_id) pairs per TSID, then batch-build RangeSets
-            // to avoid the per-insert Arc clone in RangeSet::insert().
-            let mut possible_matches: Vec<BTreeMap<TerminalId, RangeSet>> =
+            // Collect (terminal, token_id) pairs per TSID, then batch-build TokenSets.
+            let mut possible_matches: Vec<BTreeMap<TerminalId, TokenSet>> =
                 vec![BTreeMap::new(); num_tsids as usize];
-            let mut passthrough_tokens: Vec<RangeSet> =
-                vec![RangeSet::new(); num_tsids as usize];
+            let mut passthrough_tokens: Vec<TokenSet> =
+                vec![TokenSet::new(); num_tsids as usize];
             for (tsid, &dfa_state) in tsid_to_state.iter().enumerate() {
                 if skip_tsid[tsid] {
                     continue;
                 }
-                // Collect (terminal, token_id) pairs for batch RangeSet construction.
+                // Collect (terminal, token_id) pairs for batch TokenSet construction.
                 // Uses zero-allocation callback to avoid BTreeSet per match.
                 let mut pairs: Vec<(TerminalId, u32)> = Vec::new();
                 let mut pt_ids: Vec<u32> = Vec::new();
@@ -247,7 +245,7 @@ impl VocabPreprocessing {
                         }
                     }
                 }
-                // Sort by (terminal, token_id), dedup, then batch-build RangeSets.
+                // Sort by (terminal, token_id), dedup, then batch-build TokenSets.
                 pairs.sort_unstable();
                 pairs.dedup();
                 let mut i = 0;
@@ -257,18 +255,15 @@ impl VocabPreprocessing {
                     while i < pairs.len() && pairs[i].0 == terminal {
                         i += 1;
                     }
-                    let rs = RangeSet::from_ranges(
-                        pairs[start..i].iter().map(|&(_, tid)| (tid, tid))
-                    );
+                    let rs: TokenSet =
+                        pairs[start..i].iter().map(|&(_, tid)| tid..=tid).collect();
                     possible_matches[tsid].insert(terminal, rs);
                 }
-                // Batch-build passthrough RangeSet.
+                // Batch-build passthrough TokenSet.
                 if !pt_ids.is_empty() {
                     pt_ids.sort_unstable();
                     pt_ids.dedup();
-                    passthrough_tokens[tsid] = RangeSet::from_ranges(
-                        pt_ids.iter().map(|&tid| (tid, tid))
-                    );
+                    passthrough_tokens[tsid] = pt_ids.iter().map(|&tid| tid..=tid).collect();
                 }
             }
             (possible_matches, passthrough_tokens)

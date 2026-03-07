@@ -11,7 +11,7 @@ use crate::compiler::glr::table::{Action, GlrTable};
 use crate::compiler::grammar_def::TerminalId;
 use crate::compiler::tokenizer_dfa::TokenizerDfa;
 use crate::ds::bitset::BitSet;
-use crate::ds::rangeset::RangeSet;
+use crate::automata::weighted::weight::TokenSet;
 
 use super::gss_acc::{TerminalsDisallowed, terminals_disallowed_fresh};
 use super::leveled_gss::LeveledGSS;
@@ -49,14 +49,16 @@ pub struct Constraint {
     /// TSID → tokenizer DFA state mapping.
     pub(crate) tsid_to_state: Vec<u32>,
 
-    /// Per-TSID: { terminal_id → token RangeSet }.
+    /// Per-TSID: { terminal_id → token TokenSet }.
     /// `possible_matches[tsid][terminal] = set of allowed token IDs`.
-    pub(crate) possible_matches: Vec<BTreeMap<TerminalId, RangeSet>>,
+    #[serde(with = "crate::ds::range_set_serde::vec_btmap_rsb")]
+    pub(crate) possible_matches: Vec<BTreeMap<TerminalId, TokenSet>>,
 
     /// Per-TSID: tokens that reach a non-dead tokenizer state without
     /// completing any terminal match. These tokens advance the tokenizer
     /// without triggering parser actions.
-    pub(crate) passthrough_tokens: Vec<RangeSet>,
+    #[serde(with = "crate::ds::range_set_serde::vec_rsb")]
+    pub(crate) passthrough_tokens: Vec<TokenSet>,
 
     /// Maximum token ID in the vocabulary.
     pub(crate) max_token: u32,
@@ -169,7 +171,7 @@ impl Constraint {
         eprintln!("DWA states: {}", self.parser_dwa.states.len());
         for (tsid, pm) in self.possible_matches.iter().enumerate() {
             for (term, rs) in pm {
-                let vals: Vec<u32> = rs.iter_values().collect();
+                let vals: Vec<u32> = rs.iter().collect();
                 eprintln!("possible_matches[tsid={}][term={}] = {:?}", tsid, term, vals);
             }
         }
@@ -339,7 +341,7 @@ impl<'a> ConstraintState<'a> {
                 for tsid_map in &self.constraint.possible_matches {
                     pm_total_terminals += tsid_map.len();
                     for (_term, rs) in tsid_map {
-                        pm_total_ranges += rs.num_ranges();
+                        pm_total_ranges += rs.ranges_len();
                     }
                 }
                 eprintln!("[STATS] possible_matches: {} TSIDs, total_terminals={}, total_ranges={}",
@@ -349,8 +351,8 @@ impl<'a> ConstraintState<'a> {
                 let mut pt_total_ranges = 0usize;
                 let mut pt_total_cardinality = 0u64;
                 for rs in &self.constraint.passthrough_tokens {
-                    pt_total_ranges += rs.num_ranges();
-                    pt_total_cardinality += rs.cardinality();
+                    pt_total_ranges += rs.ranges_len();
+                    pt_total_cardinality += rs.len() as u64;
                 }
                 eprintln!("[STATS] passthrough_tokens: {} TSIDs, total_ranges={}, total_cardinality={}",
                     self.constraint.passthrough_tokens.len(), pt_total_ranges, pt_total_cardinality);
@@ -401,7 +403,7 @@ impl<'a> ConstraintState<'a> {
                 if (tsid as usize) < self.constraint.possible_matches.len() {
                     for &terminal in expected {
                         if let Some(token_set) = self.constraint.possible_matches[tsid as usize].get(&terminal) {
-                            for token_id in token_set.iter_values() {
+                            for token_id in token_set.iter() {
                                 if token_id <= self.constraint.max_token {
                                     m.set(token_id as usize);
                                 }
@@ -414,7 +416,7 @@ impl<'a> ConstraintState<'a> {
                     let tok_reachable = &reachable[tok_state as usize];
                     let any_expected_reachable = expected.iter().any(|t| tok_reachable.contains(t));
                     if any_expected_reachable {
-                        for token_id in self.constraint.passthrough_tokens[tsid as usize].iter_values() {
+                        for token_id in self.constraint.passthrough_tokens[tsid as usize].iter() {
                             if token_id <= self.constraint.max_token {
                                 m.set(token_id as usize);
                             }
@@ -438,7 +440,7 @@ impl<'a> ConstraintState<'a> {
                         for tsid in 0..dwa.num_tsids {
                             let tokens = weight.tokens_for_tsid(tsid);
                             if !tokens.is_empty() {
-                                let vals: Vec<u32> = tokens.iter_values().collect();
+                                let vals: Vec<u32> = tokens.iter().collect();
                                 eprintln!("      TSID {} → tokens: {:?}", tsid, vals);
                             }
                         }
@@ -448,7 +450,7 @@ impl<'a> ConstraintState<'a> {
                         for tsid in 0..dwa.num_tsids {
                             let tokens = fw.tokens_for_tsid(tsid);
                             if !tokens.is_empty() {
-                                let vals: Vec<u32> = tokens.iter_values().collect();
+                                let vals: Vec<u32> = tokens.iter().collect();
                                 eprintln!("      TSID {} → tokens: {:?}", tsid, vals);
                             }
                         }

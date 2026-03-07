@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 
 use super::dwa::{CompDwa, CompDwaState};
 use super::nwa::{Label, Nwa};
-use super::weight::Weight;
+use super::weight::{TokenSet, Weight};
 use crate::GlrMaskError;
 
 type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);
@@ -36,7 +36,7 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
 
     let nt = nwa.num_tsids;
     let max_tok = nwa.max_token;
-    let max_pos = nwa.max_position();
+    let _max_pos = nwa.max_position();
 
     // ---------------------------------------------------------------
     // Epsilon closure via fixed-point iteration (handles cycles)
@@ -66,7 +66,7 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
                 if needs_enqueue {
                     let e = closure
                         .entry(*v)
-                        .or_insert_with(|| Weight::empty(nwa.num_tsids));
+                        .or_insert_with(|| Weight::empty());
                     *e = e.union(&v_new_weight);
                     worklist.push_back(*v);
                 }
@@ -128,8 +128,8 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
         if (s as usize) < n {
             start_map
                 .entry(s)
-                .and_modify(|w| *w = w.union(&Weight::all(max_pos, nt)))
-                .or_insert_with(|| Weight::all(max_pos, nt));
+                .and_modify(|w| *w = w.union(&Weight::full()))
+                .or_insert_with(|| Weight::full());
         }
     }
 
@@ -169,12 +169,12 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
 
         if topo.len() == n_local {
             // ε-subgraph is acyclic — precompute closures in reverse topo order.
-            let max_pos_local = nwa.max_position();
+            let _max_pos_local = nwa.max_position();
             // Use FxHashMap per state during construction for O(1) lookups.
             let mut lookup_maps: Vec<rustc_hash::FxHashMap<u32, Weight>> =
                 (0..n_local).map(|i| {
                     let mut m = rustc_hash::FxHashMap::default();
-                    m.insert(i as u32, Weight::all(max_pos_local, nt));
+                    m.insert(i as u32, Weight::full());
                     m
                 }).collect();
             // Process in reverse topo order.
@@ -260,7 +260,7 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
     worklist.push_back(start_id);
 
     // Precompute the full RangeSet once for all normalization operations.
-    let full_rs = crate::ds::RangeSet::from_range(0, max_tok);
+    let full_rs = TokenSet::from_iter([0..=max_tok]);
 
     while let Some(dwa_sid) = worklist.pop_front() {
         let t0_clone = std::time::Instant::now();
@@ -401,7 +401,7 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
                 // epsilon closures (only self → w_all), skip the intersection loop.
                 let all_trivial = next_pre_closure.keys().all(|u| {
                     let entries = &lookup[*u as usize];
-                    entries.len() == 1 && entries[0].0 == *u && entries[0].1.is_full
+                    entries.len() == 1 && entries[0].0 == *u && entries[0].1.is_full()
                 });
                 if all_trivial {
                     // Closure is identical to pre_closure.
@@ -410,7 +410,7 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
                     let mut result: BTreeMap<u32, Weight> = BTreeMap::new();
                     for (&u, w_u) in &next_pre_closure {
                         let entries = &lookup[u as usize];
-                        if entries.len() == 1 && entries[0].0 == u && entries[0].1.is_full {
+                        if entries.len() == 1 && entries[0].0 == u && entries[0].1.is_full() {
                             // Trivial: self with w_all → just copy w_u
                             result.entry(u)
                                 .and_modify(|e| *e = e.union(w_u))
@@ -441,9 +441,9 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
             // In Boolean semiring: w / v = w | !v
             // Precompute the complement of w_edge once, then use it for all states.
             let t0_norm = std::time::Instant::now();
-            let edge_is_full = w_edge.is_full;
+            let edge_is_full = w_edge.is_full();
             let w_edge_comp = if !edge_is_full {
-                Some(w_edge.divide_complement(max_tok))
+                Some(w_edge.divide_complement(max_tok, nt))
             } else {
                 None
             };
@@ -455,10 +455,10 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
 
             for (id, w) in &next_closure {
                 total_divides += 1;
-                if edge_is_full || w.is_full {
+                if edge_is_full || w.is_full() {
                     divide_full_skips += 1;
                 }
-                let norm = if w.is_full {
+                let norm = if w.is_full() {
                     w.clone()
                 } else if edge_is_full {
                     w.clone()
@@ -724,13 +724,13 @@ fn intern_subset(
 /// Multiple paths to the same state v are combined with ∪.
 fn weighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeMap<u32, Weight>> {
     let n = nwa.states.len();
-    let nt = nwa.num_tsids;
-    let max_pos = nwa.max_position();
+    let _nt = nwa.num_tsids;
+    let _max_pos = nwa.max_position();
 
     let mut closures: Vec<BTreeMap<u32, Weight>> = (0..n)
         .map(|i| {
             let mut m = BTreeMap::new();
-            m.insert(i as u32, Weight::all(max_pos, nt));
+            m.insert(i as u32, Weight::full());
             m
         })
         .collect();
@@ -860,7 +860,7 @@ fn merge_weighted_closures(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ds::RangeSet;
+    use crate::automata::weighted::weight::TokenSet;
 
     #[test]
     fn test_determinize_trivial_accepting() {
@@ -868,7 +868,7 @@ mod tests {
         let mut nwa = Nwa::new(1, 5);
         let s = nwa.add_state();
         nwa.start_states.push(s);
-        nwa.set_final_weight(s, Weight::all(5, 1));
+        nwa.set_final_weight(s, Weight::full());
 
         let dwa = determinize_acyclic(&nwa).unwrap();
         assert_eq!(dwa.num_states(), 1);
@@ -885,7 +885,7 @@ mod tests {
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w_all = Weight::all(nwa.max_position(), nt);
+        let w_all = Weight::full();
         nwa.add_transition(s0, 0, s1, w_all.clone());
         nwa.set_final_weight(s1, w_all);
 
@@ -913,12 +913,12 @@ mod tests {
         let s2 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w1 = Weight::from_positions(&RangeSet::from_range(0, 2), nt);
-        let w2 = Weight::from_positions(&RangeSet::from_range(3, 5), nt);
+        let w1 = Weight::from_positions(&TokenSet::from_iter([0..=2]), nt);
+        let w2 = Weight::from_positions(&TokenSet::from_iter([3..=5]), nt);
         nwa.add_transition(s0, 0, s1, w1);
         nwa.add_transition(s0, 0, s2, w2);
-        nwa.set_final_weight(s1, Weight::all(nwa.max_position(), nt));
-        nwa.set_final_weight(s2, Weight::all(nwa.max_position(), nt));
+        nwa.set_final_weight(s1, Weight::full());
+        nwa.set_final_weight(s2, Weight::full());
 
         let dwa = determinize_acyclic(&nwa).unwrap();
         let result = dwa.eval_word(&[0]);
@@ -938,7 +938,7 @@ mod tests {
         let s2 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w_all = Weight::all(nwa.max_position(), nt);
+        let w_all = Weight::full();
         nwa.add_epsilon(s0, s1, w_all.clone());
         nwa.add_transition(s1, 0, s2, w_all.clone());
         nwa.set_final_weight(s2, w_all);
@@ -953,7 +953,7 @@ mod tests {
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
-        let w = Weight::all(5, 1);
+        let w = Weight::full();
         nwa.add_epsilon(s0, s1, w.clone());
         nwa.add_epsilon(s1, s0, w);
 
@@ -974,7 +974,7 @@ mod tests {
         // NWA with states but no start states → start subset = ∅ → 1 dead DWA state.
         let mut nwa = Nwa::new(1, 5);
         let s0 = nwa.add_state();
-        nwa.set_final_weight(s0, Weight::all(5, 1));
+        nwa.set_final_weight(s0, Weight::full());
         // No start_states pushed.
         let dwa = determinize_acyclic(&nwa).unwrap();
         assert_eq!(dwa.num_states(), 1);
@@ -993,7 +993,7 @@ mod tests {
         let s3 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w_all = Weight::all(nwa.max_position(), nt);
+        let w_all = Weight::full();
         nwa.add_transition(s0, 0, s1, w_all.clone());
         nwa.add_epsilon(s1, s2, w_all.clone());
         nwa.add_transition(s2, 1, s3, w_all.clone());
@@ -1020,7 +1020,7 @@ mod tests {
         nwa.start_states.push(s0);
 
         let w_small = Weight::from_positions(&RangeSet::from_range(2, 5), nt);
-        let w_all = Weight::all(nwa.max_position(), nt);
+        let w_all = Weight::full();
         nwa.add_transition(s0, 0, s1, w_small);
         nwa.set_final_weight(s1, w_all);
 
@@ -1046,7 +1046,7 @@ mod tests {
         let nt = 1u32;
         let max_tok = 200u32; // Must cover 'a'=97, 'b'=98, 'c'=99
         let mut nwa = Nwa::new(nt, max_tok);
-        let w_all = Weight::all(nwa.max_position(), nt);
+        let w_all = Weight::full();
         let w0 = Weight::from_positions(&RangeSet::from_range(0, 0), nt);
         let w1 = Weight::from_positions(&RangeSet::from_range(1, 1), nt);
 
@@ -1077,14 +1077,14 @@ mod tests {
         // eval("ac") should contain pos 0 only
         let r_ac = dwa.eval_word(&[b'a' as i32, b'c' as i32]);
         assert!(!r_ac.is_empty(), "'ac' should be accepted");
-        assert!(r_ac.contains(0), "'ac' should yield weight pos 0");
-        assert!(!r_ac.contains(1), "'ac' should NOT yield weight pos 1");
+        assert!(r_ac.contains(0, nt), "'ac' should yield weight pos 0");
+        assert!(!r_ac.contains(1, nt), "'ac' should NOT yield weight pos 1");
 
         // eval("bc") should contain pos 1 only
         let r_bc = dwa.eval_word(&[b'b' as i32, b'c' as i32]);
         assert!(!r_bc.is_empty(), "'bc' should be accepted");
-        assert!(r_bc.contains(1), "'bc' should yield weight pos 1");
-        assert!(!r_bc.contains(0), "'bc' should NOT yield weight pos 0");
+        assert!(r_bc.contains(1, nt), "'bc' should yield weight pos 1");
+        assert!(!r_bc.contains(0, nt), "'bc' should NOT yield weight pos 0");
 
         // eval("a") alone is empty (no final state after one step)
         assert!(dwa.eval_word(&[b'a' as i32]).is_empty(), "'a' alone should be empty");
@@ -1107,7 +1107,7 @@ mod tests {
         let nt = 1u32;
         let max_tok = 200u32;
         let mut nwa = Nwa::new(nt, max_tok);
-        let w_all = Weight::all(nwa.max_position(), nt);
+        let w_all = Weight::full();
         let w0 = Weight::from_positions(&RangeSet::from_range(0, 0), nt);
         let w1 = Weight::from_positions(&RangeSet::from_range(1, 1), nt);
 
@@ -1128,8 +1128,8 @@ mod tests {
         // eval("x") should contain both pos 0 (from s0 branch) and pos 1 (from s1 branch)
         let r = dwa.eval_word(&[b'x' as i32]);
         assert!(!r.is_empty(), "'x' should be accepted");
-        assert!(r.contains(0), "'x' should yield pos 0 (from s0 branch)");
-        assert!(r.contains(1), "'x' should yield pos 1 (from s1 branch)");
+        assert!(r.contains(0, nt), "'x' should yield pos 0 (from s0 branch)");
+        assert!(r.contains(1, nt), "'x' should yield pos 1 (from s1 branch)");
 
         // eval("y") should be empty (no transition on 'y')
         assert!(dwa.eval_word(&[b'y' as i32]).is_empty(), "'y' should be rejected");

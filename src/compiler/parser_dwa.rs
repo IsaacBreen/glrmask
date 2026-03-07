@@ -554,7 +554,7 @@ mod tests {
     use crate::compiler::grammar_def::GrammarDef;
     use crate::compiler::grammar_def::tests::*;
     use crate::compiler::tokenizer_dfa::TokenizerDfa;
-    use crate::ds::rangeset::RangeSet;
+    use crate::automata::weighted::weight::TokenSet;
 
     fn make_vocab_and_preprocessing(
         gdef: &GrammarDef,
@@ -611,7 +611,7 @@ mod tests {
         let end = nwa.add_state();
         nwa.start_states.push(start);
 
-        let w = Weight::from_entries(vec![(0, 0, RangeSet::from_range(2, 2))], 1);
+        let w = Weight::from_entries(vec![(0, 0, TokenSet::from_iter([2..=2]))]);
         nwa.add_transition(start, 0, mid, w.clone());
         nwa.add_transition(mid, encode_negative_label(0), end, w.clone());
         nwa.set_final_weight(end, w.clone());

@@ -17,7 +17,7 @@ use crate::compiler::grammar_def::TerminalId;
 use crate::compiler::grammar_def::Symbol;
 use crate::compiler::tokenizer_dfa::TokenizerDfa;
 use crate::compiler::vocab_pre::VocabPreprocessing;
-use crate::ds::RangeSet;
+use crate::automata::weighted::weight::TokenSet;
 
 /// Reduced terminal-side compilation artifact.
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ fn build_terminal_dwa_nwa(
 
     // Leaf state.
     let leaf_state = nwa.add_state();
-    nwa.set_final_weight(leaf_state, Weight::all(nwa.max_position(), num_tsids));
+    nwa.set_final_weight(leaf_state, Weight::full());
 
     // Root states: one per TSID.
     let mut tsid_roots: Vec<u32> = Vec::with_capacity(num_tsids as usize);
@@ -281,7 +281,7 @@ fn build_terminal_dwa_nwa(
         pairs.sort_unstable();
         pairs.dedup();
 
-        let mut entries: Vec<(u32, u32, RangeSet)> = Vec::new();
+        let mut entries: Vec<(u32, u32, TokenSet)> = Vec::new();
         let mut i = 0;
         while i < pairs.len() {
             let tsid = pairs[i].0;
@@ -289,13 +289,14 @@ fn build_terminal_dwa_nwa(
             while i < pairs.len() && pairs[i].0 == tsid {
                 i += 1;
             }
-            // Build RangeSet from sorted token_ids without per-insert cloning.
-            let rs = RangeSet::from_ranges(
-                pairs[start..i].iter().map(|&(_, tid)| (tid, tid))
-            );
+            // Build TokenSet from sorted token_ids.
+            let rs: TokenSet = pairs[start..i]
+                .iter()
+                .map(|&(_, tid)| tid..=tid)
+                .collect();
             entries.push((tsid, tsid, rs));
         }
-        let weight = Weight::from_entries(entries, num_tsids);
+        let weight = Weight::from_entries(entries);
 
         by_src_label.entry((src, label)).or_default().push((dst, weight));
     }
@@ -536,7 +537,7 @@ fn collapse_always_allowed(
                     let updated = state
                         .final_weight
                         .clone()
-                        .unwrap_or_else(|| Weight::empty(nwa.num_tsids))
+                        .unwrap_or_else(Weight::empty)
                         .union(&collapsed);
                     state.final_weight = if updated.is_empty() { None } else { Some(updated) };
                     changed = true;
@@ -809,6 +810,7 @@ mod tests {
     use crate::compiler::glr::grammar::GlrGrammar;
     use crate::compiler::tokenizer_dfa::TokenizerDfa;
     use crate::compiler::vocab_pre::VocabPreprocessing;
+    use crate::automata::weighted::weight::TokenSet;
 
     #[test]
     fn test_build_terminal_dwa_collapses_always_allowed_follow_path() {
@@ -825,18 +827,18 @@ mod tests {
         let a_targets = &terminal_dwa.nwa.states[root as usize].transitions[&0];
         assert!(!a_targets.is_empty());
 
-        let mut combined_a = Weight::empty(vocab_pre.num_tsids);
+        let mut combined_a = Weight::empty();
         for (_, weight) in a_targets {
             combined_a = combined_a.union(weight);
         }
-        assert_eq!(combined_a.tokens_for_tsid(initial_tsid as u32), RangeSet::from_range(0, 1));
+        assert_eq!(combined_a.tokens_for_tsid(initial_tsid as u32), TokenSet::from_iter([0..=1u32]));
 
         for (dest, weight) in a_targets {
             let state = &terminal_dwa.nwa.states[*dest as usize];
             assert!(state.final_weight.is_some());
             assert!(!state.transitions.contains_key(&1));
             if !state.transitions.is_empty() {
-                assert_eq!(weight.tokens_for_tsid(initial_tsid as u32), RangeSet::from_range(1, 1));
+                assert_eq!(weight.tokens_for_tsid(initial_tsid as u32), TokenSet::from_iter([1..=1u32]));
             }
         }
     }

@@ -35,9 +35,9 @@ pub struct Nwa {
     pub states: Vec<NwaState>,
     /// Start states (subset construction begins from the ε-closure of these).
     pub start_states: Vec<u32>,
-    /// Number of TSIDs (for constructing `Weight::all()`).
+    /// Number of TSIDs (dimension bound for weight operations).
     pub num_tsids: u32,
-    /// Maximum token ID (for `Weight::all()` / complement universe).
+    /// Maximum token ID (dimension bound for weight operations).
     pub max_token: u32,
 }
 
@@ -231,7 +231,7 @@ impl std::fmt::Display for NwaDisplayWithAllMaps<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ds::RangeSet;
+    use crate::automata::weighted::weight::TokenSet;
 
     #[test]
     fn test_nwa_basic() {
@@ -240,7 +240,7 @@ mod tests {
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
 
-        let w = Weight::from_uniform_tsid_set(0, 10, &RangeSet::from_range(0, 1), 2);
+        let w = Weight::from_uniform_tsid_set(0, 10, &TokenSet::from_iter([0..=1]));
         nwa.add_transition(s0, 0, s1, w.clone());
         nwa.add_epsilon(s1, s2, w.clone());
         nwa.set_final_weight(s2, w);

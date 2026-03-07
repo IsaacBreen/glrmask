@@ -40,7 +40,7 @@ pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {
                     .entry(*b)
                     .or_default()
                     .entry((a, c))
-                    .or_insert_with(|| Weight::empty(weight.num_tsids()));
+                    .or_insert_with(Weight::empty);
                 if !weight.is_subset(query_weight) {
                     *query_weight = query_weight.union(weight);
                     enqueue(&mut worklist, &mut in_queue, *b, a, c);
@@ -68,7 +68,7 @@ pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {
                     .entry(target)
                     .or_default()
                     .entry((a, c))
-                    .or_insert_with(|| Weight::empty(prop_w.num_tsids()));
+                    .or_insert_with(Weight::empty);
                 if !prop_w.is_subset(query_weight) {
                     *query_weight = query_weight.union(&prop_w);
                     enqueue(&mut worklist, &mut in_queue, target, a, c);
@@ -99,7 +99,7 @@ pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {
             let combined_eps_w = {
                 let eps_weight = eps_from_a
                     .entry(target)
-                    .or_insert_with(|| Weight::empty(new_eps_w.num_tsids()));
+                    .or_insert_with(Weight::empty);
                 if new_eps_w.is_subset(eps_weight) {
                     eps_weight.clone()
                 } else {
@@ -121,7 +121,7 @@ pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {
                     .entry(target)
                     .or_default()
                     .entry((a_prime, c_prime))
-                    .or_insert_with(|| Weight::empty(prop_w.num_tsids()));
+                    .or_insert_with(Weight::empty);
                 if !prop_w.is_subset(query_weight) {
                     *query_weight = query_weight.union(&prop_w);
                     enqueue(&mut worklist, &mut in_queue, target, a_prime, c_prime);
@@ -138,7 +138,7 @@ pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {
                 .entry(*target)
                 .or_default()
                 .entry((a, c))
-                .or_insert_with(|| Weight::empty(prop_w.num_tsids()));
+                .or_insert_with(Weight::empty);
             if !prop_w.is_subset(query_weight) {
                 *query_weight = query_weight.union(&prop_w);
                 enqueue(&mut worklist, &mut in_queue, *target, a, c);
@@ -311,10 +311,10 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut Nwa) {
 mod tests {
     use super::*;
     use crate::automata::weighted::weight::Weight;
-    use crate::ds::RangeSet;
+    use crate::automata::weighted::weight::TokenSet;
 
     fn singleton_weight(token: u32) -> Weight {
-        Weight::from_entries(vec![(0, 0, RangeSet::from_range(token, token))], 1)
+        Weight::from_entries(vec![(0, 0, TokenSet::from_iter([token..=token]))])
     }
 
     #[test]

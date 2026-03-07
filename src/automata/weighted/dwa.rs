@@ -93,17 +93,13 @@ impl CompDwa {
     pub fn eval_word(&self, word: &[Label]) -> Weight {
         use crate::compiler::parser_dwa::DEFAULT_LABEL;
 
-        let empty = Weight::empty(self.num_tsids);
+        let empty = Weight::empty();
         if self.states.is_empty() {
             return empty;
         }
 
-        let max_pos = self
-            .max_token
-            .saturating_mul(self.num_tsids.max(1))
-            .saturating_add(self.num_tsids.max(1) - 1);
         let mut state = self.start_state;
-        let mut acc = Weight::all(max_pos, self.num_tsids);
+        let mut acc = Weight::full();
 
         for &label in word {
             // Try specific transition first, then DEFAULT fallback.
@@ -335,7 +331,7 @@ impl Dwa {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ds::RangeSet;
+    use crate::automata::weighted::weight::TokenSet;
 
     #[test]
     fn test_comp_dwa_eval_word() {
@@ -345,8 +341,8 @@ mod tests {
         let mut dwa = CompDwa::new(nt, max_tok);
         let s1 = dwa.add_state();
 
-        let w_trans = Weight::from_positions(&RangeSet::from_range(0, 5), nt);
-        let w_final = Weight::from_positions(&RangeSet::from_range(2, 4), nt);
+        let w_trans = Weight::from_positions(&TokenSet::from_iter([0..=5]), nt);
+        let w_final = Weight::from_positions(&TokenSet::from_iter([2..=4]), nt);
         dwa.add_transition(0, 0, s1, w_trans);
         dwa.set_final_weight(s1, w_final);
 
@@ -354,9 +350,9 @@ mod tests {
         // acc starts as all(5, 1) = {0..=5}, intersect with trans {0..=5} = {0..=5}
         // then intersect with final {2..=4} = {2..=4}
         assert_eq!(result.len(), 3);
-        assert!(result.contains(2));
-        assert!(result.contains(3));
-        assert!(result.contains(4));
+        assert!(result.contains(2, nt));
+        assert!(result.contains(3, nt));
+        assert!(result.contains(4, nt));
     }
 
     #[test]
