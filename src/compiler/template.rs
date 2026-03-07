@@ -128,28 +128,55 @@ impl<'a> TemplateCompositionContext<'a> {
         }
     }
 
+    /// Compose a terminal NWA state into the combined parser NWA.
+    ///
+    /// Returns the **continuation body** — a non-final state with template
+    /// fragment entries for processing the next stack element.  A separate
+    /// **final node** (if the terminal NWA state is accepting) receives the
+    /// token-specific weight from fragment exits.  This separation ensures
+    /// that the token constraint from one template step does not bleed into
+    /// subsequent steps through the determinizer's epsilon-closure
+    /// intersection.
     fn compose_terminal_state(
         &mut self,
         state_id: u32,
-        body_cache: &mut BTreeMap<u32, u32>,
+        body_cache: &mut BTreeMap<u32, (u32, Option<u32>)>,
         num_tsids: u32,
         max_token: u32,
     ) -> u32 {
-        if let Some(&cached) = body_cache.get(&state_id) {
-            return cached;
+        if let Some(&(cont, _)) = body_cache.get(&state_id) {
+            return cont;
         }
 
-        let body_start = self.combined.add_state();
-        body_cache.insert(state_id, body_start);
+        let cont_body = self.combined.add_state();
 
-        let terminal_state = &self.terminal_dwa.nwa.states[state_id as usize];
-        if let Some(final_weight) = &terminal_state.final_weight {
-            self.combined.set_final_weight(body_start, final_weight.clone());
-        }
+        // If the terminal NWA state is accepting, create a separate final
+        // node.  Fragment exits will route finality here (with token weight)
+        // and continuation to cont_body (with ALL weight).
+        let final_node = {
+            let terminal_state = &self.terminal_dwa.nwa.states[state_id as usize];
+            if let Some(final_weight) = &terminal_state.final_weight {
+                let node = self.combined.add_state();
+                self.combined.set_final_weight(node, final_weight.clone());
+                Some(node)
+            } else {
+                None
+            }
+        };
+
+        body_cache.insert(state_id, (cont_body, final_node));
 
         let w_all = Weight::all(self.combined.max_position(), num_tsids);
-        for (&label, targets) in &terminal_state.transitions {
-            let Ok(terminal) = TerminalId::try_from(label) else {
+
+        // Process transitions from the terminal NWA state (template entries).
+        let transitions: Vec<_> = self.terminal_dwa.nwa.states[state_id as usize]
+            .transitions
+            .iter()
+            .map(|(&l, t)| (l, t.clone()))
+            .collect();
+
+        for (label, targets) in &transitions {
+            let Ok(terminal) = TerminalId::try_from(*label) else {
                 continue;
             };
             let Some(&bundle_idx) = self.template_by_terminal.get(&terminal) else {
@@ -158,17 +185,58 @@ impl<'a> TemplateCompositionContext<'a> {
 
             for (dest, transition_weight) in targets {
                 let fragment = self.fresh_fragment(bundle_idx, transition_weight, num_tsids, max_token);
-                let dest_start = self.compose_terminal_state(*dest, body_cache, num_tsids, max_token);
+                let dest_cont = self.compose_terminal_state(*dest, body_cache, num_tsids, max_token);
+                let dest_final = body_cache.get(dest).and_then(|&(_, f)| f);
                 for start in &fragment.start_states {
-                    self.combined.add_epsilon(body_start, *start, w_all.clone());
+                    self.combined.add_epsilon(cont_body, *start, w_all.clone());
                 }
                 for (final_state, final_weight) in &fragment.final_states {
-                    self.combined.add_epsilon(*final_state, dest_start, final_weight.clone());
+                    // Continuation: ALL weight → dest cont_body (no constraint)
+                    self.combined.add_epsilon(*final_state, dest_cont, w_all.clone());
+                    // Finality: token weight → dest final_node
+                    if let Some(fn_id) = dest_final {
+                        self.combined.add_epsilon(*final_state, fn_id, final_weight.clone());
+                    }
                 }
             }
         }
 
-        body_start
+        // If the terminal NWA state is a leaf (final but no transitions),
+        // add template fragment entries from ALL root states so the parser
+        // NWA can continue processing subsequent stack entries.
+        if transitions.is_empty() {
+            for &root_id in &self.terminal_dwa.tsid_roots.clone() {
+                let root_transitions: Vec<_> = self.terminal_dwa.nwa.states[root_id as usize]
+                    .transitions
+                    .iter()
+                    .map(|(&l, t)| (l, t.clone()))
+                    .collect();
+                for (label, targets) in &root_transitions {
+                    let Ok(terminal) = TerminalId::try_from(*label) else {
+                        continue;
+                    };
+                    let Some(&bundle_idx) = self.template_by_terminal.get(&terminal) else {
+                        continue;
+                    };
+                    for (dest, transition_weight) in targets {
+                        let fragment = self.fresh_fragment(bundle_idx, transition_weight, num_tsids, max_token);
+                        let dest_cont = self.compose_terminal_state(*dest, body_cache, num_tsids, max_token);
+                        let dest_final = body_cache.get(dest).and_then(|&(_, f)| f);
+                        for start in &fragment.start_states {
+                            self.combined.add_epsilon(cont_body, *start, w_all.clone());
+                        }
+                        for (final_state, final_weight) in &fragment.final_states {
+                            self.combined.add_epsilon(*final_state, dest_cont, w_all.clone());
+                            if let Some(fn_id) = dest_final {
+                                self.combined.add_epsilon(*final_state, fn_id, final_weight.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        cont_body
     }
 }
 
@@ -494,7 +562,7 @@ pub(crate) fn build_template_nwa_from_bundles(
     max_token: u32,
 ) -> Nwa {
     let mut context = TemplateCompositionContext::new(bundles, terminal_dwa, num_tsids, max_token);
-    let mut body_cache = BTreeMap::new();
+    let mut body_cache: BTreeMap<u32, (u32, Option<u32>)> = BTreeMap::new();
     context.combined.start_states = terminal_dwa
         .nwa
         .start_states
