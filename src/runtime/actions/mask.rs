@@ -189,13 +189,18 @@ impl<'a> ConstraintState<'a> {
         weight: &crate::ds::weight::Weight,
     ) -> RangeSetBlaze<u32> {
         let mut all = RangeSetBlaze::new();
-        for tokenizer_state in 0..self.constraint.tokenizer.num_states() {
-            let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
-            let token_ids = if weight.is_full() {
-                self.all_tokens_for_state(tokenizer_state)
-            } else {
-                weight.tokens_for_tsid(internal_tsid)
-            };
+        for (internal_tsid, original_states) in self.constraint.internal_tsid_to_states.iter().enumerate() {
+            if weight.is_full() {
+                for &tokenizer_state in original_states {
+                    let token_ids = self.all_tokens_for_state(tokenizer_state);
+                    if !token_ids.is_empty() {
+                        all = all | token_ids;
+                    }
+                }
+                continue;
+            }
+
+            let token_ids = weight.tokens_for_tsid(internal_tsid as u32);
             if !token_ids.is_empty() {
                 all = all | token_ids;
             }

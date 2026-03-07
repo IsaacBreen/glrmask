@@ -64,6 +64,8 @@ pub struct Constraint {
 
         pub(crate) state_to_internal_tsid: Vec<u32>,
 
+    pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+
     
     pub(crate) eos_token_id: Option<u32>,
 
