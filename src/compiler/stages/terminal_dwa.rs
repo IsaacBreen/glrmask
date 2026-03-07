@@ -377,6 +377,17 @@ fn collapse_always_allowed(
     changed
 }
 
+// SEP1_MAP: This is the glrmask analogue of sep1's
+// `prune_nwa_disallowed_follows` in `constraint_precompute.rs`.
+// Sep1 uses a two-pass approach:
+//   Pass 1 (union): collect an upper-bound disallowed set per state.
+//   Pass 2 (intersection): narrow it to terminals disallowed on ALL
+//           incoming paths — only intersection-safe results are used
+//           for pruning.
+// The previous glrmask implementation used a single union pass, which
+// was over-aggressive: at states reachable from multiple predecessor
+// labels, it could prune transitions that were valid on at least one
+// path, producing false negatives in the mask.
 fn prune_disallowed_follows(
     terminal_dwa: &mut TerminalDWA,
     grammar: &AnalyzedGrammar,
@@ -400,56 +411,109 @@ fn prune_disallowed_follows(
         })
         .collect();
 
-    let mut state_disallowed: Vec<HashSet<TerminalID>> = vec![HashSet::new(); nwa.states.len()];
-    let mut queue = VecDeque::new();
-    let mut in_queue = vec![false; nwa.states.len()];
-
-    for &start in &nwa.start_states {
-        queue.push_back(start as usize);
-        in_queue[start as usize] = true;
-    }
-
-    while let Some(state_id) = queue.pop_front() {
-        in_queue[state_id] = false;
-        let inherited = state_disallowed[state_id].clone();
-
-        for (dst, _) in &nwa.states[state_id].epsilons {
-            let dst = *dst as usize;
-            let before = state_disallowed[dst].len();
-            state_disallowed[dst].extend(inherited.iter().copied());
-            if state_disallowed[dst].len() != before && !in_queue[dst] {
-                in_queue[dst] = true;
-                queue.push_back(dst);
+    // --- Topological sort via Kahn's algorithm ---
+    let num_states = nwa.states.len();
+    let mut in_degree = vec![0u32; num_states];
+    for state in nwa.states.iter() {
+        for (dst, _) in &state.epsilons {
+            in_degree[*dst as usize] += 1;
+        }
+        for targets in state.transitions.values() {
+            for (dst, _) in targets {
+                in_degree[*dst as usize] += 1;
             }
         }
-
-        for (&label, targets) in &nwa.states[state_id].transitions {
-            let propagated = if label >= 0 && (label as usize) < disallowed_after.len() {
-                let mut next = inherited.clone();
-                next.extend(disallowed_after[label as usize].iter().copied());
-                next
-            } else {
-                inherited.clone()
-            };
-
-            for (dst, _) in targets {
-                let dst = *dst as usize;
-                let before = state_disallowed[dst].len();
-                state_disallowed[dst].extend(propagated.iter().copied());
-                if state_disallowed[dst].len() != before && !in_queue[dst] {
-                    in_queue[dst] = true;
-                    queue.push_back(dst);
+    }
+    let mut topo_queue: VecDeque<usize> = VecDeque::new();
+    for id in 0..num_states {
+        if in_degree[id] == 0 {
+            topo_queue.push_back(id);
+        }
+    }
+    let mut topo_order: Vec<usize> = Vec::with_capacity(num_states);
+    {
+        let mut deg = in_degree.clone();
+        while let Some(sid) = topo_queue.pop_front() {
+            topo_order.push(sid);
+            let state = &nwa.states[sid];
+            for (dst, _) in &state.epsilons {
+                deg[*dst as usize] -= 1;
+                if deg[*dst as usize] == 0 {
+                    topo_queue.push_back(*dst as usize);
+                }
+            }
+            for targets in state.transitions.values() {
+                for (dst, _) in targets {
+                    deg[*dst as usize] -= 1;
+                    if deg[*dst as usize] == 0 {
+                        topo_queue.push_back(*dst as usize);
+                    }
                 }
             }
         }
     }
 
+    // --- Pass 2: intersection semantics (safe for pruning) ---
+    // For each state, compute the intersection of disallowed sets from all
+    // incoming edges.  Through epsilon edges the parent's disallowed set is
+    // forwarded; through labeled edges only the label's own disallowed set
+    // is used (the label "resets" the follow context, matching sep1).
+    let mut disallowed_intersected: Vec<Option<HashSet<TerminalID>>> = vec![None; num_states];
+    for &start in &nwa.start_states {
+        disallowed_intersected[start as usize] = Some(HashSet::new());
+    }
+
+    for &sid in &topo_order {
+        let src_disallowed = match &disallowed_intersected[sid] {
+            Some(d) => d.clone(),
+            None => HashSet::new(),
+        };
+
+        // Epsilon edges: forward the parent's disallowed set.
+        let epsilon_targets: Vec<u32> = nwa.states[sid].epsilons.iter().map(|(dst, _)| *dst).collect();
+        for dst in epsilon_targets {
+            let dst = dst as usize;
+            let entry = &mut disallowed_intersected[dst];
+            match entry {
+                None => *entry = Some(src_disallowed.clone()),
+                Some(existing) => {
+                    existing.retain(|t| src_disallowed.contains(t));
+                }
+            }
+        }
+
+        // Labeled transitions: propagate only the label's disallowed set.
+        let labeled_targets: Vec<(i32, Vec<u32>)> = nwa.states[sid]
+            .transitions
+            .iter()
+            .map(|(&label, targets)| (label, targets.iter().map(|(dst, _)| *dst).collect()))
+            .collect();
+        for (label, targets) in labeled_targets {
+            let label_dis = if label >= 0 && (label as usize) < disallowed_after.len() {
+                &disallowed_after[label as usize]
+            } else {
+                continue;
+            };
+            for dst in targets {
+                let dst = dst as usize;
+                let entry = &mut disallowed_intersected[dst];
+                match entry {
+                    None => *entry = Some(label_dis.clone()),
+                    Some(existing) => {
+                        existing.retain(|t| label_dis.contains(t));
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Prune ---
     let mut changed = false;
     for (state_id, state) in nwa.states.iter_mut().enumerate() {
-        let disallowed = &state_disallowed[state_id];
-        if disallowed.is_empty() {
-            continue;
-        }
+        let disallowed = match &disallowed_intersected[state_id] {
+            Some(d) if !d.is_empty() => d,
+            _ => continue,
+        };
 
         let before = state.transitions.len();
         state.transitions.retain(|label, _| {
