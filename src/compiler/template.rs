@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::automata::u32::unweighted::dfa::Dfa as UnweightedDfa;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::CompDwa;
 use crate::automata::weighted::minimize::minimize_acyclic;
@@ -153,7 +154,7 @@ impl<'a> TemplateCompositionContext<'a> {
 /// A compiled structural template DFA, independent of lexical weights.
 #[derive(Debug, Clone)]
 pub struct TemplateDfa {
-    pub dfa: CompDwa,
+    pub dfa: UnweightedDfa,
 }
 
 /// A parser-side template bundle shared by one or more terminals.

@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
-ALLOW_ATTR = '#![allow(unused_imports, unused_variables, unused_mut, dead_code)]\n'
-STUB_MSG = 'cargo-check-only stub'
+OLD_ALLOW_ATTRS = (
+    '#![allow(unused_imports, unused_variables, dead_code)]\n',
+    '#![allow(unused_imports, unused_variables, unused_mut, dead_code)]\n',
+)
+UNUSED_IMPORTS_ATTR = '#![allow(unused_imports)]\n'
+FN_ALLOW_ATTR = '#[allow(unused_variables, unused_mut, dead_code)]\n'
 
 
 def split_pre_test(text: str) -> tuple[str, str]:
@@ -17,20 +22,64 @@ def split_pre_test(text: str) -> tuple[str, str]:
 
 
 def ensure_allow_attr(pre: str) -> str:
-    if ALLOW_ATTR in pre:
-        return pre
-    # Keep leading shebang/doc comments/inner attrs in place, then inject.
-    insert_at = 0
+    for attr in OLD_ALLOW_ATTRS:
+        pre = pre.replace(attr, '')
+    pre = pre.replace(UNUSED_IMPORTS_ATTR, '')
+    if '\nuse ' in pre or pre.lstrip().startswith('use '):
+        # Keep this narrow file-level allowance because the aggressive gutting
+        # pass intentionally preserves signatures/module shape but not bodies.
+        insert_at = 0
+        lines = pre.splitlines(keepends=True)
+        i = 0
+        while i < len(lines):
+            s = lines[i].lstrip()
+            if s.startswith('//!') or s.startswith('/*!') or s.startswith('#![') or s == '\n':
+                insert_at += len(lines[i])
+                i += 1
+                continue
+            break
+        pre = pre[:insert_at] + UNUSED_IMPORTS_ATTR + pre[insert_at:]
+    return pre
+
+
+def imported_names(use_line: str) -> list[str] | None:
+    stripped = use_line.strip()
+    if not stripped.startswith('use ') or stripped.startswith('pub use '):
+        return None
+    if '*' in stripped or '{' in stripped and '}' not in stripped:
+        return None
+    body = stripped[len('use '):].rstrip(';').strip()
+    names: list[str] = []
+    if '{' in body and '}' in body:
+        prefix, rest = body.split('{', 1)
+        inner = rest.rsplit('}', 1)[0]
+        for part in inner.split(','):
+            token = part.strip()
+            if not token or token == 'self':
+                continue
+            if ' as ' in token:
+                names.append(token.split(' as ', 1)[1].strip())
+            else:
+                names.append(token.split('::')[-1].strip())
+        return [n for n in names if n]
+    token = body.split('::')[-1].strip()
+    if ' as ' in token:
+        token = token.split(' as ', 1)[1].strip()
+    return [token] if token else None
+
+
+def prune_unused_single_line_imports(pre: str) -> str:
     lines = pre.splitlines(keepends=True)
-    i = 0
-    while i < len(lines):
-        s = lines[i].lstrip()
-        if s.startswith('//!') or s.startswith('/*!') or s.startswith('#![') or s == '\n':
-            insert_at += len(lines[i])
-            i += 1
+    non_import_text = ''.join(line for line in lines if not line.lstrip().startswith('use '))
+    kept: list[str] = []
+    for line in lines:
+        names = imported_names(line)
+        if not names:
+            kept.append(line)
             continue
-        break
-    return pre[:insert_at] + ALLOW_ATTR + pre[insert_at:]
+        if any(re.search(rf'\b{re.escape(name)}\b', non_import_text) for name in names):
+            kept.append(line)
+    return ''.join(kept)
 
 
 def is_ident_char(ch: str) -> bool:
@@ -204,12 +253,14 @@ def rewrite_pre_test(pre: str) -> str:
                 close = match_block(pre, pos)
                 indent = line_indent(pre, i)
                 sig_text = pre[line_start_pos(pre, i):pos]
-                body = f'unimplemented!("{STUB_MSG}")'
+                body = 'unimplemented!()'
                 if 'const fn' in sig_text:
                     body = 'loop {}'
                 elif '-> impl Iterator' in sig_text:
                     body = 'std::iter::empty()'
-                out.append(pre[last:pos + 1])
+                out.append(pre[last:i])
+                out.append(indent + FN_ALLOW_ATTR)
+                out.append(pre[i:pos + 1])
                 out.append(f"\n{indent}    {body}\n{indent}}}")
                 last = close + 1
                 i = close + 1
