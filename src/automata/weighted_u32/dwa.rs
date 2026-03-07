@@ -1,12 +1,6 @@
 //! Deterministic Weighted Automaton (DWA).
 //!
-//! Two representations live here:
-//!
-//! - **[`CompDwa`]** – compilation-time DWA whose transitions carry full
-//!   [`Weight`] sets.  Used during determinization and minimization.
-//! - **[`Dwa`]** – runtime DWA backed by a flat [`WeightTable`].  Produced at
-//!   the end of compilation and used for fast mask computation during
-//!   inference.
+//! Shape-first compilation-time deterministic weighted automaton.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -17,15 +11,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::nwa::Label;
-use super::weight::{Weight, WeightTable};
-
-// ---------------------------------------------------------------------------
-// CompDwa — compilation-time DWA
-// ---------------------------------------------------------------------------
+use super::weight::Weight;
 
 /// A single state in the compilation-time DWA.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CompDwaState {
+pub struct DwaState {
     /// Label → (target_state, transition_weight).
     pub transitions: BTreeMap<Label, (u32, Weight)>,
     /// Accepting weight, or `None` if the state is non-accepting.
@@ -37,7 +27,7 @@ pub struct CompDwaState {
 /// Each `(state, label)` maps to at most one `(target, weight)`.  The weights
 /// are full [`Weight`] sets that track which (token, TSID) positions survive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompDwa {
+pub struct Dwa {
     /// All states.
     pub states: Vec<CompDwaState>,
     /// Start state ID.
@@ -48,8 +38,8 @@ pub struct CompDwa {
     pub max_token: u32,
 }
 
-impl CompDwa {
-    /// Create a new CompDwa with a single (empty) start state.
+impl Dwa {
+    /// Create a new Dwa with a single (empty) start state.
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         unimplemented!()
     }
@@ -99,7 +89,7 @@ impl CompDwa {
     pub fn display_with_symbols<'a>(
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
-    ) -> CompDwaDisplayWithSymbols<'a> {
+    ) -> DwaDisplayWithSymbols<'a> {
         unimplemented!()
     }
 
@@ -110,7 +100,7 @@ impl CompDwa {
         symbols: &'a BTreeMap<Label, String>,
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
-    ) -> CompDwaDisplayWithAllMaps<'a> {
+    ) -> DwaDisplayWithAllMaps<'a> {
         unimplemented!()
     }
 }
@@ -120,8 +110,8 @@ impl CompDwa {
 // ---------------------------------------------------------------------------
 
 /// Shared formatting logic for CompDwa states.
-fn fmt_comp_dwa_states(
-    dwa: &CompDwa,
+fn fmt_dwa_states(
+    dwa: &Dwa,
     f: &mut std::fmt::Formatter<'_>,
     label_fn: &dyn Fn(Label) -> String,
     weight_fn: &dyn Fn(&Weight) -> String,
@@ -151,25 +141,25 @@ fn fmt_comp_dwa_states(
 // Display
 // ---------------------------------------------------------------------------
 
-impl std::fmt::Display for CompDwa {
+impl std::fmt::Display for Dwa {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     unimplemented!()
 }
 }
 
-/// Wrapper to display a [`CompDwa`] with human-readable symbol names.
-pub struct CompDwaDisplayWithSymbols<'a> {
-    dwa: &'a CompDwa,
+/// Wrapper to display a [`Dwa`] with human-readable symbol names.
+pub struct DwaDisplayWithSymbols<'a> {
+    dwa: &'a Dwa,
     symbols: &'a BTreeMap<Label, String>,
 }
 
-impl std::fmt::Display for CompDwaDisplayWithSymbols<'_> {
+impl std::fmt::Display for DwaDisplayWithSymbols<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let dwa = self.dwa;
         writeln!(f, "DWA: {} states, start=State {}, tsids={}, max_token={}",
             dwa.states.len(), dwa.start_state, dwa.num_tsids, dwa.max_token)?;
         let syms = self.symbols;
-        fmt_comp_dwa_states(dwa, f,
+        fmt_dwa_states(dwa, f,
             &|label| match syms.get(&label) {
                 Some(name) => name.clone(),
                 None => format!("{label}"),
@@ -179,79 +169,34 @@ impl std::fmt::Display for CompDwaDisplayWithSymbols<'_> {
     }
 }
 
-/// Wrapper to display a [`CompDwa`] with maps for symbols, TSIDs, and tokens.
-pub struct CompDwaDisplayWithAllMaps<'a> {
-    dwa: &'a CompDwa,
+/// Wrapper to display a [`Dwa`] with maps for symbols, TSIDs, and tokens.
+pub struct DwaDisplayWithAllMaps<'a> {
+    dwa: &'a Dwa,
     symbols: &'a BTreeMap<Label, String>,
     tsid_names: &'a std::collections::BTreeMap<u32, String>,
     token_names: &'a std::collections::BTreeMap<u32, String>,
 }
 
-impl std::fmt::Display for CompDwaDisplayWithAllMaps<'_> {
+impl std::fmt::Display for DwaDisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unimplemented!()
     }
 }
 
-impl PartialEq for CompDwa {
+impl PartialEq for Dwa {
     fn eq(&self, other: &Self) -> bool {
         unimplemented!()
     }
 }
 
-impl PartialEq for CompDwaState {
+impl PartialEq for DwaState {
     fn eq(&self, other: &Self) -> bool {
         unimplemented!()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Dwa — runtime DWA (flat table)
-// ---------------------------------------------------------------------------
-
-/// A Deterministic Weighted Automaton operating over token-set IDs.
-///
-/// At each step, given the current state and a token-set ID (TSID),
-/// the DWA produces a next state and an integer weight.  The weight
-/// is used to determine whether the token is allowed (weight ≥ 0 means
-/// allowed).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dwa {
-    /// The weight/transition table.
-    pub weights: WeightTable,
-    /// The start state.
-    pub start_state: u32,
-    /// Which states are accepting (valid end-of-sequence states).
-    pub accepting: Vec<bool>,
-}
-
-impl Dwa {
-    /// Create a new DWA.
-    pub fn new(weights: WeightTable, start_state: u32, accepting: Vec<bool>) -> Self {
-        unimplemented!()
-    }
-
-    /// Number of states.
-    pub fn num_states(&self) -> u32 {
-        unimplemented!()
-    }
-
-    /// Number of token-set IDs.
-    pub fn num_tsids(&self) -> u32 {
-        unimplemented!()
-    }
-
-    /// Get the transition for `(state, tsid)`.
-    #[inline]
-    pub fn step(&self, state: u32, tsid: u32) -> (u32, i32) {
-        unimplemented!()
-    }
-
-    /// Whether a state is accepting.
-    pub fn is_accepting(&self, state: u32) -> bool {
-        unimplemented!()
-    }
-}
+pub type CompDwa = Dwa;
+pub type CompDwaState = DwaState;
 
 #[cfg(test)]
 mod tests {

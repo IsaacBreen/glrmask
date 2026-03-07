@@ -23,7 +23,7 @@ use crate::automata::weighted::nwa::Label;
 use crate::ds::bitset::BitSet;
 use crate::automata::weighted::weight::TokenSet;
 
-/// Compute the allowed-token mask for the current constraint state.
+/// Low-level mask helper over an explicit tokenizer-state → stack-map shape.
 ///
 /// `state`: tokenizer DFA state → list of parser stacks (each stack is bottom-to-top)
 /// `dwa`: the compiled parser DWA
@@ -32,7 +32,7 @@ use crate::automata::weighted::weight::TokenSet;
 /// `num_tsids`: number of token-set IDs
 ///
 /// Returns a BitSet where bit `i` is set iff token `i` is allowed.
-pub fn compute_mask(
+pub fn compute_mask_from_state_map(
     state: &BTreeMap<u32, Vec<Vec<u32>>>,
     dwa: &CompDwa,
     state_to_tsid: &[u32],

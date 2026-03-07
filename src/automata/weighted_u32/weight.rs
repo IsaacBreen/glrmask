@@ -5,11 +5,9 @@
 #![allow(unused_imports)]
 
 pub use crate::ds::rangeset2d::{
-    RangeMap,
     RangeSet2D,
     TokenSet,
     Tsid,
-    WeightTable,
     bare,
     vec_btmap_rsb,
     vec_rsb,

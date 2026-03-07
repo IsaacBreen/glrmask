@@ -3,6 +3,9 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
+pub mod ast;
+pub mod compile;
 pub mod dfa;
 pub mod nfa;
-pub mod regex;
+
+pub use ast as regex;

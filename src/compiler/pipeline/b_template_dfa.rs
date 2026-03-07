@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::automata::u32::unweighted::dfa::Dfa as UnweightedDfa;
+use crate::automata::unweighted_u32::dfa::Dfa as UnweightedDfa;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::CompDwa;
 use crate::automata::weighted::minimize::minimize_acyclic;

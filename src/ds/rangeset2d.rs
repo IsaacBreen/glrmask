@@ -5,11 +5,8 @@
 //! token sets.  This is the sole weight representation used during DWA
 //! determinization and minimization.
 //!
-//! The **WeightTable** is the flat, cache-friendly layout used at inference
-//! time.  It stores `(target_state, weight)` pairs indexed by `(tsid, state)`.
-//!
-//! The **RangeMap** is a generic sorted-interval-to-value map used for
-//! vocabulary preprocessing (token → TSID mapping).
+//! The backing representation is the shape-only 2D token/TSID range-set used
+//! throughout the weighted-u32 automata skeleton.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -28,101 +25,6 @@ pub type Tsid = u32;
 /// consumers import `TokenSet` instead of depending on the upstream crate
 /// directly.
 pub type TokenSet = RangeSetBlaze<u32>;
-
-// ---------------------------------------------------------------------------
-// RangeMap<V> — generic sorted interval map
-// ---------------------------------------------------------------------------
-
-/// A mapping from non-overlapping, half-open `[start, end)` ranges to values.
-///
-/// Used for vocabulary-level mappings such as token-ID → TSID.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RangeMap<V> {
-    /// Sorted entries: `(start, end, value)` where range is `[start, end)`.
-    entries: Vec<(u32, u32, V)>,
-}
-
-impl<V: Clone + Eq> RangeMap<V> {
-    /// Create an empty range map.
-    pub fn new() -> Self {
-        unimplemented!()
-    }
-
-    /// Create from pre-sorted entries.
-    pub fn from_sorted(entries: Vec<(u32, u32, V)>) -> Self {
-        unimplemented!()
-    }
-
-    /// Number of range entries.
-    pub fn len(&self) -> usize {
-        unimplemented!()
-    }
-
-    /// Whether empty.
-    pub fn is_empty(&self) -> bool {
-        unimplemented!()
-    }
-
-    /// Look up the value for a given key using binary search.
-    pub fn get(&self, key: u32) -> Option<&V> {
-        unimplemented!()
-    }
-
-    /// Iterate over all entries as `(start, end, &value)`.
-    pub fn iter(&self) -> impl Iterator<Item = (u32, u32, &V)> {
-        std::iter::empty()
-    }
-
-    /// Access entries as a slice.
-    pub fn entries(&self) -> &[(u32, u32, V)] {
-        unimplemented!()
-    }
-}
-
-impl<V: Clone + Eq> Default for RangeMap<V> {
-    fn default() -> Self {
-        unimplemented!()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// WeightTable — flat TSID×state table for runtime
-// ---------------------------------------------------------------------------
-
-/// Weight layout using TSID-outer organization.
-///
-/// For each `(tsid, state)` pair, stores the resulting DWA transition
-/// `(target_state, weight)`.  The outer dimension is TSID so that computing
-/// a mask for a single token set requires a contiguous memory scan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WeightTable {
-    /// Number of DWA states.
-    pub num_states: u32,
-    /// Number of token-set IDs.
-    pub num_tsids: u32,
-    /// Flat table: `data[tsid * num_states + state] = (target_state, weight)`.
-    /// `target_state == u32::MAX` means dead/no transition.
-    pub data: Vec<(u32, i32)>,
-}
-
-impl WeightTable {
-    /// Create a new weight table with all dead transitions.
-    pub fn new(num_states: u32, num_tsids: u32) -> Self {
-        unimplemented!()
-    }
-
-    /// Get the transition for `(tsid, state)`.
-    #[inline]
-    pub fn get(&self, tsid: u32, state: u32) -> (u32, i32) {
-        unimplemented!()
-    }
-
-    /// Set the transition for `(tsid, state)`.
-    #[inline]
-    pub fn set(&mut self, tsid: u32, state: u32, target: u32, weight: i32) {
-        unimplemented!()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Weight — TSID-outer weight set for compilation
@@ -293,12 +195,7 @@ impl Weight {
     ///
     /// For `Full`, yields nothing (materialize first).
     pub fn iter_entries(&self) -> Box<dyn Iterator<Item = (u32, u32, &RangeSetBlaze<u32>)> + '_> {
-        match self {
-            Weight::Concrete(m) => {
-                Box::new(m.range_values().map(|(r, v)| (*r.start(), *r.end(), v)))
-            }
-            _ => Box::new(std::iter::empty()),
-        }
+        unimplemented!()
     }
 
     /// Expand to a sorted list of non-overlapping inclusive flat-position
@@ -306,131 +203,19 @@ impl Weight {
     ///
     /// Panics if called on `Full` (materialize first).
     pub fn expand_to_positions(&self, num_tsids: u32) -> Vec<(u32, u32)> {
-        let map = match self {
-            Weight::Empty => return Vec::new(),
-            Weight::Full => panic!("expand_to_positions called on Full weight; materialize first"),
-            Weight::Concrete(m) => m,
-        };
-        let nt = num_tsids.max(1);
-        let mut ranges = Vec::new();
-
-        for (tsid_range, token_set) in map.range_values() {
-            let tsid_lo = *tsid_range.start();
-            let tsid_hi = *tsid_range.end();
-            let tsid_span = tsid_hi - tsid_lo + 1;
-            for tok_range in token_set.ranges() {
-                let t_lo = *tok_range.start();
-                let t_hi = *tok_range.end();
-                if nt <= 1 || tsid_span == nt {
-                    // Full TSID coverage ⇒ contiguous positions.
-                    let pos_lo = t_lo.saturating_mul(nt).saturating_add(tsid_lo);
-                    let pos_hi = t_hi.saturating_mul(nt).saturating_add(tsid_hi);
-                    ranges.push((pos_lo, pos_hi));
-                } else {
-                    // Partial TSID range ⇒ per-token blocks.
-                    for token in t_lo..=t_hi {
-                        let base = token.saturating_mul(nt);
-                        ranges.push((base.saturating_add(tsid_lo), base.saturating_add(tsid_hi)));
-                    }
-                }
-            }
-        }
-
-        // Sort and coalesce.
-        ranges.sort_unstable();
-        coalesce_ranges(&mut ranges);
-        ranges
+        unimplemented!()
     }
 
     // ---- Set operations ----
 
     /// Compute the union of two weights.
     pub fn union(&self, other: &Self) -> Self {
-        match (self, other) {
-            (Weight::Full, _) | (_, Weight::Full) => Weight::Full,
-            (Weight::Empty, _) => other.clone(),
-            (_, Weight::Empty) => self.clone(),
-            (Weight::Concrete(a), Weight::Concrete(b)) => {
-                Self::from_map(Self::merge_maps(a, b, |a, b| match (a, b) {
-                    (Some(a), Some(b)) => a | b,
-                    (Some(x), None) | (None, Some(x)) => x.clone(),
-                    (None, None) => RangeSetBlaze::new(),
-                }))
-            }
-        }
+        unimplemented!()
     }
 
     /// Compute the intersection of two weights.
     pub fn intersection(&self, other: &Self) -> Self {
-        match (self, other) {
-            (Weight::Empty, _) | (_, Weight::Empty) => Weight::Empty,
-            (Weight::Full, _) => other.clone(),
-            (_, Weight::Full) => self.clone(),
-            (Weight::Concrete(a), Weight::Concrete(b)) => {
-                // Specialized two-pointer sweep for intersection (only
-                // overlapping TSID ranges can contribute).
-                let mut result = RangeMapBlaze::new();
-                let mut a_iter = a.range_values().peekable();
-                let mut b_iter = b.range_values().peekable();
-
-                // Track pending coalesce state.
-                let mut cur_start: Option<u32> = None;
-                let mut cur_end: u32 = 0;
-                let mut cur_val = RangeSetBlaze::<u32>::new();
-
-                while let (Some(&(ref a_range, ref a_rs)), Some(&(ref b_range, ref b_rs))) =
-                    (a_iter.peek(), b_iter.peek())
-                {
-                    let a_lo = *a_range.start();
-                    let a_hi = *a_range.end();
-                    let b_lo = *b_range.start();
-                    let b_hi = *b_range.end();
-
-                    if a_hi < b_lo {
-                        a_iter.next();
-                        continue;
-                    }
-                    if b_hi < a_lo {
-                        b_iter.next();
-                        continue;
-                    }
-
-                    // Overlapping TSID interval.
-                    let lo = a_lo.max(b_lo);
-                    let hi = a_hi.min(b_hi);
-                    let rs: RangeSetBlaze<u32> = (*a_rs) & (*b_rs);
-                    if !rs.is_empty() {
-                        if let Some(start) = cur_start {
-                            if cur_val == rs && cur_end + 1 == lo {
-                                cur_end = hi;
-                            } else {
-                                result.ranges_insert(start..=cur_end, cur_val.clone());
-                                cur_start = Some(lo);
-                                cur_end = hi;
-                                cur_val = rs;
-                            }
-                        } else {
-                            cur_start = Some(lo);
-                            cur_end = hi;
-                            cur_val = rs;
-                        }
-                    } else if let Some(start) = cur_start.take() {
-                        result.ranges_insert(start..=cur_end, cur_val.clone());
-                    }
-
-                    if a_hi <= b_hi {
-                        a_iter.next();
-                    } else {
-                        b_iter.next();
-                    }
-                }
-                if let Some(start) = cur_start {
-                    result.ranges_insert(start..=cur_end, cur_val);
-                }
-
-                Self::from_map(result)
-            }
-        }
+        unimplemented!()
     }
 
     /// Compute the set difference `self − other`.
@@ -438,31 +223,12 @@ impl Weight {
     /// Panics if `self` is `Full` and `other` is `Concrete` (use
     /// [`complement`](Self::complement) with explicit bounds instead).
     pub fn difference(&self, other: &Self) -> Self {
-        match (self, other) {
-            (Weight::Empty, _) | (_, Weight::Full) => Weight::Empty,
-            (_, Weight::Empty) => self.clone(),
-            (Weight::Full, Weight::Concrete(_)) => {
-                panic!("difference(Full, Concrete) requires explicit bounds — use complement() instead")
-            }
-            (Weight::Concrete(a), Weight::Concrete(b)) => {
-                Self::from_map(Self::merge_maps(a, b, |a, b| match (a, b) {
-                    (Some(a), Some(b)) => a - b,
-                    (Some(a), None) => a.clone(),
-                    _ => RangeSetBlaze::new(),
-                }))
-            }
-        }
+        unimplemented!()
     }
 
     /// Compute the complement within `[0, max_position]`.
     pub fn complement(&self, max_position: u32, num_tsids: u32) -> Self {
-        match self {
-            Weight::Full => Weight::Empty,
-            Weight::Empty => Weight::materialize_full(max_position, num_tsids),
-            Weight::Concrete(_) => {
-                Weight::materialize_full(max_position, num_tsids).difference(self)
-            }
-        }
+        unimplemented!()
     }
 
     /// Compute `self | !other` (divide).
@@ -472,17 +238,7 @@ impl Weight {
     /// `[0, max_token]`.  Requires explicit `max_token` and `num_tsids`
     /// to define the complement universe.
     pub fn divide(&self, other: &Self, max_token: u32, num_tsids: u32) -> Self {
-        // Fast path: divide(full, any) = full
-        if self.is_full() {
-            return Weight::Full;
-        }
-        // Fast path: divide(w, full) = w  (a | (full - full) = a | ∅ = a)
-        if other.is_full() {
-            return self.clone();
-        }
-        let full = RangeSetBlaze::from_iter([0..=max_token]);
-        let comp = other.divide_complement(max_token, num_tsids);
-        self.divide_with_complement(&comp, &full)
+        unimplemented!()
     }
 
     /// Compute the "divide complement" of `self` within `[0, max_token]`.
@@ -494,48 +250,7 @@ impl Weight {
     /// This can be precomputed once for a divisor and reused across
     /// multiple `divide_with_complement` calls.
     pub fn divide_complement(&self, max_token: u32, num_tsids: u32) -> Self {
-        if self.is_full() {
-            return Weight::Empty;
-        }
-        let full = RangeSetBlaze::from_iter([0..=max_token]);
-        let nt = num_tsids.max(1);
-
-        let map = match self {
-            Weight::Empty => {
-                // Complement of empty across all TSIDs = full for every TSID.
-                return Weight::Concrete(RangeMapBlaze::from_iter([(
-                    0..=(nt - 1),
-                    full,
-                )]));
-            }
-            Weight::Full => unreachable!(),
-            Weight::Concrete(m) => m,
-        };
-
-        let mut result = RangeMapBlaze::new();
-        let mut pos = 0u32;
-
-        for (tsid_range, rs) in map.range_values() {
-            let lo = *tsid_range.start();
-            let hi = *tsid_range.end();
-
-            // Gap before this entry: fill with `full`
-            if pos < lo {
-                result.ranges_insert(pos..=(lo - 1), full.clone());
-            }
-            // This entry: complement
-            let comp = &full - rs;
-            if !comp.is_empty() {
-                result.ranges_insert(lo..=hi, comp);
-            }
-            pos = hi + 1;
-        }
-        // Trailing gap: fill with `full`
-        if pos < nt {
-            result.ranges_insert(pos..=(nt - 1), full);
-        }
-
-        Self::from_map(result)
+        unimplemented!()
     }
 
     /// Divide using a precomputed complement: `self | complement`.
@@ -568,7 +283,7 @@ impl Weight {
     /// points from both maps, partitions the key space into uniform
     /// sub-intervals, calls the `combine` closure for each, and
     /// builds the result RangeMapBlaze with coalescing.
-    fn merge_maps<F>(
+        fn merge_maps<F>(
         a: &RangeMapBlaze<u32, RangeSetBlaze<u32>>,
         b: &RangeMapBlaze<u32, RangeSetBlaze<u32>>,
         combine: F,
@@ -576,24 +291,24 @@ impl Weight {
     where
         F: Fn(Option<&RangeSetBlaze<u32>>, Option<&RangeSetBlaze<u32>>) -> RangeSetBlaze<u32>,
     {
-        unimplemented!()
-    }
+            unimplemented!()
+        }
 }
 
 // ---- Trait impls ----
 
 impl PartialEq for Weight {
-    fn eq(&self, other: &Self) -> bool {
-        unimplemented!()
-    }
+        fn eq(&self, other: &Self) -> bool {
+            unimplemented!()
+        }
 }
 
 impl Eq for Weight {}
 
 impl std::hash::Hash for Weight {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        unimplemented!()
-    }
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            unimplemented!()
+        }
 }
 
 impl std::fmt::Display for Weight {
@@ -604,41 +319,7 @@ impl std::fmt::Display for Weight {
     /// - `∅` (empty weight)
     /// - `ALL` (full weight)
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Weight::Empty => write!(f, "∅"),
-            Weight::Full => write!(f, "ALL"),
-            Weight::Concrete(m) => {
-                write!(f, "{{")?;
-                for (i, (range, rs)) in m.range_values().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    let lo = range.start();
-                    let hi = range.end();
-                    if lo == hi {
-                        write!(f, "{lo}: ")?;
-                    } else {
-                        write!(f, "{lo}..={hi}: ")?;
-                    }
-                    // Display the token set
-                    write!(f, "{{")?;
-                    for (j, tok_range) in rs.ranges().enumerate() {
-                        if j > 0 {
-                            write!(f, ", ")?;
-                        }
-                        let tlo = tok_range.start();
-                        let thi = tok_range.end();
-                        if tlo == thi {
-                            write!(f, "{tlo}")?;
-                        } else {
-                            write!(f, "{tlo}..={thi}")?;
-                        }
-                    }
-                    write!(f, "}}")?;
-                }
-                write!(f, "}}")
-            }
-        }
+        unimplemented!()
     }
 }
 
@@ -667,73 +348,13 @@ impl<'a> Weight {
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
     ) -> WeightDisplayWithMaps<'a> {
-        WeightDisplayWithMaps {
-            weight: self,
-            tsid_names,
-            token_names,
-        }
+        unimplemented!()
     }
 }
 
 impl std::fmt::Display for WeightDisplayWithMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let w = self.weight;
-        if w.is_empty() {
-            return write!(f, "∅");
-        }
-        if w.is_full() {
-            return write!(f, "ALL");
-        }
-
-        let map = match w {
-            Weight::Concrete(m) => m,
-            _ => return write!(f, "{w}"),
-        };
-
-        // Size guard: if too many entries, fall back to compact form.
-        let total_token_ranges: usize = map.range_values().map(|(_, rs)| rs.ranges_len()).sum();
-        if map.range_values_len() + total_token_ranges > WEIGHT_SYMBOL_EXPAND_LIMIT {
-            return write!(f, "{w}");
-        }
-
-        write!(f, "{{")?;
-        for (i, (range, rs)) in map.range_values().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            let lo = *range.start();
-            let hi = *range.end();
-            // TSID part
-            if lo == hi {
-                match self.tsid_names.get(&lo) {
-                    Some(name) => write!(f, "{name}")?,
-                    None => write!(f, "tsid{lo}")?,
-                }
-            } else {
-                write!(f, "tsid{lo}..={hi}")?;
-            }
-            write!(f, ": [")?;
-            // Token part — expand individual values when small
-            let mut first = true;
-            for tok_range in rs.ranges() {
-                if !first {
-                    write!(f, ", ")?;
-                }
-                first = false;
-                let tlo = *tok_range.start();
-                let thi = *tok_range.end();
-                if tlo == thi {
-                    match self.token_names.get(&tlo) {
-                        Some(name) => write!(f, "{name}")?,
-                        None => write!(f, "tok{tlo}")?,
-                    }
-                } else {
-                    write!(f, "tok{tlo}..={thi}")?;
-                }
-            }
-            write!(f, "]")?;
-        }
-        write!(f, "}}")
+        unimplemented!()
     }
 }
 
@@ -752,53 +373,13 @@ enum WeightSerde {
 
 impl Serialize for Weight {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let proxy = match self {
-            Weight::Empty => WeightSerde::Empty,
-            Weight::Full => WeightSerde::Full,
-            Weight::Concrete(m) => {
-                let entries: Vec<(u32, u32, Vec<u32>)> = m
-                    .range_values()
-                    .map(|(range, rs)| {
-                        let flat: Vec<u32> = rs
-                            .ranges()
-                            .flat_map(|r| [*r.start(), *r.end()])
-                            .collect();
-                        (*range.start(), *range.end(), flat)
-                    })
-                    .collect();
-                WeightSerde::Concrete(entries)
-            }
-        };
-        proxy.serialize(serializer)
+        unimplemented!()
     }
 }
 
 impl<'de> Deserialize<'de> for Weight {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let proxy = WeightSerde::deserialize(deserializer)?;
-        match proxy {
-            WeightSerde::Empty => Ok(Weight::Empty),
-            WeightSerde::Full => Ok(Weight::Full),
-            WeightSerde::Concrete(entries) => {
-                let mut map = RangeMapBlaze::new();
-                for (lo, hi, flat) in entries {
-                    let rs: RangeSetBlaze<u32> = flat
-                        .chunks(2)
-                        .filter_map(|c| {
-                            if c.len() == 2 {
-                                Some(c[0]..=c[1])
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if !rs.is_empty() {
-                        map.ranges_insert(lo..=hi, rs);
-                    }
-                }
-                Ok(Weight::from_map(map))
-            }
-        }
+        unimplemented!()
     }
 }
 
@@ -807,19 +388,7 @@ impl<'de> Deserialize<'de> for Weight {
 /// Sort and coalesce a `Vec<(u32, u32)>` of inclusive ranges **in-place**,
 /// assuming the input is already sorted.
 fn coalesce_ranges(ranges: &mut Vec<(u32, u32)>) {
-    if ranges.len() <= 1 {
-        return;
-    }
-    let mut write = 0;
-    for read in 1..ranges.len() {
-        if ranges[read].0 <= ranges[write].1.saturating_add(1) {
-            ranges[write].1 = ranges[write].1.max(ranges[read].1);
-        } else {
-            write += 1;
-            ranges[write] = ranges[read];
-        }
-    }
-    ranges.truncate(write + 1);
+    unimplemented!()
 }
 
 // ====================================================================

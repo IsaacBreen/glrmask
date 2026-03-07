@@ -240,16 +240,11 @@ pub struct ConstraintState<'a> {
 }
 
 impl<'a> ConstraintState<'a> {
-    /// Compute the allowed-token mask.
+    /// Compute the allowed-token mask for this high-level constraint state.
     ///
-    /// Returns a BitSet where bit `i` is set iff token `i` is allowed.
-    ///
-    /// Two-phase approach:
-    /// 1. DWA walk produces an overapproximation (fast, ~O(stacks × DWA states))
-    /// 2. Post-filter: simulate `commit()` for each candidate to remove false positives
-    ///
-    /// **Note**: prefer [`mask`] or [`fill_mask`] which return `u32` words matching the
-    /// plan's public API. This method is retained for white-box tests only.
+    /// This is the `ConstraintState`-level wrapper. The low-level explicit
+    /// map-based helper lives in [src/runtime/mask.rs](src/runtime/mask.rs).
+    /// Prefer [`mask`] or [`fill_mask`] for the public `u32`-word mask shape.
     pub(crate) fn compute_mask(&self) -> BitSet {
         unimplemented!()
     }
