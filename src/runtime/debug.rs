@@ -19,7 +19,7 @@ impl Constraint {
         eprintln!("--- Constraint Debug Dump ---");
         eprintln!("Tokenizer DFA states: {}", self.tokenizer.dfa.num_states());
         for s in 0..self.tokenizer.dfa.num_states() {
-            let fin = self.tokenizer.matched_terminals(s as u32);
+            let fin = self.tokenizer.all_matched_terminals(s as u32);
             if !fin.is_empty() {
                 eprintln!("  tok DFA state {}: finalizers={:?}", s, fin);
             }
@@ -66,7 +66,10 @@ impl Constraint {
             let next = self.tokenizer.dfa.get_transition(state, byte);
             let is_dead = next == crate::automata::dfa::DEAD;
             let finals = if !is_dead {
-                self.tokenizer.dfa.finalizers(next).iter().collect::<Vec<_>>()
+                self.tokenizer
+                    .all_matched_terminals(next)
+                    .into_iter()
+                    .collect::<Vec<_>>()
             } else {
                 vec![]
             };
