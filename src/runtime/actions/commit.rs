@@ -58,13 +58,7 @@ impl<'a> ConstraintState<'a> {
                 return BTreeSet::new();
             };
 
-            let mut terminals = self.constraint.tokenizer.matched_terminals(prefix_end_state);
-            terminals.extend(
-                self.constraint
-                    .tokenizer
-                    .matched_non_greedy_terminals(prefix_end_state),
-            );
-            terminals
+            self.constraint.tokenizer.all_matched_terminals(prefix_end_state)
         };
 
         let mut state_map = BTreeMap::new();

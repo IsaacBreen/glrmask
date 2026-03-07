@@ -64,7 +64,7 @@ fn possible_matches_for_node(
     let mut result = BTreeMap::new();
 
     if let Some(token_id) = node.token_id {
-        for terminal in tokenizer.matched_terminals(tokenizer_state) {
+        for terminal in tokenizer.all_matched_terminals(tokenizer_state) {
             result
                 .entry(terminal)
                 .and_modify(|existing: &mut RangeSetBlaze<u32>| {
