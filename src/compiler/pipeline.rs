@@ -11,6 +11,8 @@
 //! 5. Build parser NWA from terminal characterizations
 //! 6. Determinize + minimize → parser DWA
 //! 7. Package as `Constraint`
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use crate::Vocab;
 use crate::automata::weighted::dwa::CompDwa;
@@ -44,78 +46,7 @@ use crate::runtime::Constraint;
 ///                     └── Constraint { parser_dwa, table, tokenizer, vocab_pre, ... }
 /// ```
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    use std::time::Instant;
-
-    // 1. Normalize grammar for mask computation (epsilon elimination + right recursion elimination).
-    let t = Instant::now();
-    let normalized_grammar = normalize_for_mask(grammar);
-
-    // 2. Build augmented GLR grammar.
-    let glr_grammar = GlrGrammar::from_grammar_def(&normalized_grammar);
-    eprintln!("[glrmask::compile] GLR grammar: {:.3}s ({} rules)", t.elapsed().as_secs_f64(), glr_grammar.rules.len());
-
-    // 3. Build SLR(1) parse table.
-    let t = Instant::now();
-    let table = GlrTable::build(&glr_grammar);
-    eprintln!("[glrmask::compile] SLR table:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), table.num_states);
-
-    // 4. Build tokenizer DFA.
-    let t = Instant::now();
-    let tokenizer = TokenizerDfa::from_grammar_def(grammar);  // use original grammar for tokenizer
-    eprintln!("[glrmask::compile] Tokenizer:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), tokenizer.dfa.num_states());
-
-    // 5. Compute characterized terminals (used to filter vocab preprocessing).
-    //    characterize_terminal only needs table + grammar, not vocab/vocab_pre.
-    let t = Instant::now();
-    let characterizations = crate::compiler::parser_dwa::characterize_terminal(&table, &glr_grammar);
-    let characterized_terminals: std::collections::BTreeSet<crate::compiler::grammar_def::TerminalId> =
-        characterizations.keys().copied().collect();
-    eprintln!("[glrmask::compile] Characterize: {:.3}s ({} terminals)", t.elapsed().as_secs_f64(), characterized_terminals.len());
-
-    // 6. Compute vocabulary preprocessing (TSID mapping, possible_matches).
-    //    Pass characterized_terminals to skip TSIDs that can't reach any used terminal.
-    let t = Instant::now();
-    let vocab_pre = VocabPreprocessing::compute(&tokenizer, vocab, Some(&characterized_terminals));
-    eprintln!("[glrmask::compile] Vocab pre:   {:.3}s ({} TSIDs)", t.elapsed().as_secs_f64(), vocab_pre.num_tsids);
-
-    // 7–8. Build parser DWA (NWA → determinize → minimize).
-    //      Skip if GLRMASK_SKIP_DWA=1 — use possible_matches-based masking instead.
-    let t = Instant::now();
-    let skip_dwa = std::env::var("GLRMASK_SKIP_DWA")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let parser_dwa = if skip_dwa {
-        // Create a dummy 1-state DWA with no transitions.
-        // Mask computation will use possible_matches + GLR table instead.
-        eprintln!("[glrmask::compile] DWA build:   SKIPPED (GLRMASK_SKIP_DWA=1)");
-        CompDwa::new(vocab_pre.num_tsids, vocab_pre.max_token)
-    } else {
-        let dwa = build_parser_dwa(&table, &glr_grammar, &tokenizer, vocab, &vocab_pre);
-        eprintln!("[glrmask::compile] DWA build:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), dwa.num_states());
-        dwa
-    };
-
-    // 7. Package as Constraint.
-    let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> = vocab
-        .entries
-        .iter()
-        .map(|(id, bytes)| (*id, bytes.clone()))
-        .collect();
-
-    Constraint {
-        parser_dwa,
-        table,
-        num_tsids: vocab_pre.num_tsids,
-        state_to_tsid: vocab_pre.state_to_tsid.clone(),
-        tsid_to_state: vocab_pre.tsid_to_state.clone(),
-        possible_matches: vocab_pre.possible_matches,
-        passthrough_tokens: vocab_pre.passthrough_tokens,
-        max_token: vocab_pre.max_token,
-        eos_token_id: vocab.eos_token_id,
-        token_bytes,
-        reachable_terminals: tokenizer.compute_reachable_terminals(),
-        tokenizer,
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 /// Compile, returning a [`CompileDebug`] bundle alongside the [`Constraint`].
@@ -124,71 +55,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 /// inspect the terminal NWA before/after optimisations, the composed parser
 /// NWA before/after resolve_negatives, the DWA pre/post minimisation, etc.
 pub fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
-    use std::time::Instant;
-    use crate::compiler::parser_dwa::build_parser_dwa_with_debug;
-
-    // 1–4. Same front-end as compile().
-    let t = Instant::now();
-    let normalized_grammar = normalize_for_mask(grammar);
-    let glr_grammar = GlrGrammar::from_grammar_def(&normalized_grammar);
-    eprintln!("[glrmask::compile_dbg] GLR grammar: {:.3}s ({} rules)", t.elapsed().as_secs_f64(), glr_grammar.rules.len());
-
-    let t = Instant::now();
-    let table = GlrTable::build(&glr_grammar);
-    eprintln!("[glrmask::compile_dbg] SLR table:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), table.num_states);
-
-    let t = Instant::now();
-    let tokenizer = TokenizerDfa::from_grammar_def(grammar);
-    eprintln!("[glrmask::compile_dbg] Tokenizer:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), tokenizer.dfa.num_states());
-
-    let t = Instant::now();
-    let characterizations = crate::compiler::parser_dwa::characterize_terminal(&table, &glr_grammar);
-    let characterized_terminals: std::collections::BTreeSet<crate::compiler::grammar_def::TerminalId> =
-        characterizations.keys().copied().collect();
-    eprintln!("[glrmask::compile_dbg] Characterize: {:.3}s ({} terminals)", t.elapsed().as_secs_f64(), characterized_terminals.len());
-
-    let t = Instant::now();
-    let vocab_pre = VocabPreprocessing::compute(&tokenizer, vocab, Some(&characterized_terminals));
-    eprintln!("[glrmask::compile_dbg] Vocab pre:   {:.3}s ({} TSIDs)", t.elapsed().as_secs_f64(), vocab_pre.num_tsids);
-
-    // 5–6. Build parser DWA with debug capture.
-    let t = Instant::now();
-    let (parser_dwa, automata_debug) = build_parser_dwa_with_debug(&table, &glr_grammar, &tokenizer, vocab, &vocab_pre);
-    eprintln!("[glrmask::compile_dbg] DWA build:   {:.3}s ({} states)", t.elapsed().as_secs_f64(), parser_dwa.num_states());
-
-    // Assemble full debug bundle with interpretation metadata.
-    let debug = CompileDebug::from_parts(
-        grammar.clone(),
-        normalized_grammar,
-        glr_grammar,
-        table.clone(),
-        automata_debug,
-        vocab.entries.clone(),
-        vocab.eos_token_id,
-    );
-
-    let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> = vocab
-        .entries
-        .iter()
-        .map(|(id, bytes)| (*id, bytes.clone()))
-        .collect();
-
-    let constraint = Constraint {
-        parser_dwa,
-        table,
-        num_tsids: vocab_pre.num_tsids,
-        state_to_tsid: vocab_pre.state_to_tsid.clone(),
-        tsid_to_state: vocab_pre.tsid_to_state.clone(),
-        possible_matches: vocab_pre.possible_matches,
-        passthrough_tokens: vocab_pre.passthrough_tokens,
-        max_token: vocab_pre.max_token,
-        eos_token_id: vocab.eos_token_id,
-        token_bytes,
-        reachable_terminals: tokenizer.compute_reachable_terminals(),
-        tokenizer,
-    };
-
-    (constraint, debug)
+    unimplemented!("cargo-check-only stub")
 }
 
 // ====================================================================

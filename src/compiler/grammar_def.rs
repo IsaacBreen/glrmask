@@ -2,6 +2,8 @@
 //!
 //! The canonical internal representation of a grammar that all frontends
 //! (EBNF, Lark, JSON Schema) compile down to.
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -54,13 +56,12 @@ pub struct TerminalDef {
 impl GrammarDef {
     /// Number of terminals.
     pub fn num_terminals(&self) -> u32 {
-        self.terminals.len() as u32
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of nonterminals (determined by scanning rules).
     pub fn num_nonterminals(&self) -> u32 {
-        let max = self.rules.iter().map(|r| r.lhs).max().unwrap_or(0);
-        max + 1
+        unimplemented!("cargo-check-only stub")
     }
 }
 

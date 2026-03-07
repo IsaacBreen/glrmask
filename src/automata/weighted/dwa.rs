@@ -8,6 +8,8 @@
 //!   the end of compilation and used for fast mask computation during
 //!   inference.
 #![allow(dead_code)]
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -48,41 +50,32 @@ pub struct CompDwa {
 impl CompDwa {
     /// Create a new CompDwa with a single (empty) start state.
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
-        Self {
-            states: vec![CompDwaState::default()],
-            start_state: 0,
-            num_tsids,
-            max_token,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add a new state and return its ID.
     pub fn add_state(&mut self) -> u32 {
-        let id = self.states.len() as u32;
-        self.states.push(CompDwaState::default());
-        id
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of states.
     pub fn num_states(&self) -> u32 {
-        self.states.len() as u32
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Total number of transitions across all states.
     pub fn num_transitions(&self) -> usize {
-        self.states.iter().map(|s| s.transitions.len()).sum()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Set the final weight for a state.
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
-        self.states[state as usize].final_weight = Some(weight);
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add a labelled transition.
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
-        self.states[from as usize]
-            .transitions
-            .insert(label, (to, weight));
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Evaluate a word, returning the surviving weight.
@@ -91,53 +84,12 @@ impl CompDwa {
     /// Returns the intersection of all transition weights and the final weight
     /// of the last state (empty weight if any step fails).
     pub fn eval_word(&self, word: &[Label]) -> Weight {
-        use crate::compiler::parser_dwa::DEFAULT_LABEL;
-
-        let empty = Weight::empty();
-        if self.states.is_empty() {
-            return empty;
-        }
-
-        let mut state = self.start_state;
-        let mut acc = Weight::full();
-
-        for &label in word {
-            // Try specific transition first, then DEFAULT fallback.
-            let resolved = self.states[state as usize]
-                .transitions
-                .get(&label)
-                .or_else(|| self.states[state as usize].transitions.get(&DEFAULT_LABEL));
-            match resolved {
-                Some(&(target, ref w)) => {
-                    acc = acc.intersection(w);
-                    if acc.is_empty() {
-                        return empty;
-                    }
-                    state = target;
-                }
-                None => return empty,
-            }
-        }
-
-        match &self.states[state as usize].final_weight {
-            Some(fw) => {
-                let result = acc.intersection(fw);
-                if result.is_empty() { empty } else { result }
-            }
-            None => empty,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Collect all distinct labels used in transitions.
     pub fn labels(&self) -> Vec<Label> {
-        let mut labels: Vec<Label> = self
-            .states
-            .iter()
-            .flat_map(|s| s.transitions.keys().copied())
-            .collect();
-        labels.sort_unstable();
-        labels.dedup();
-        labels
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Return a wrapper that prints this DWA using a symbol→name map.
@@ -147,7 +99,7 @@ impl CompDwa {
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
     ) -> CompDwaDisplayWithSymbols<'a> {
-        CompDwaDisplayWithSymbols { dwa: self, symbols }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Return a wrapper that prints this DWA using maps for symbols, TSIDs,
@@ -158,7 +110,7 @@ impl CompDwa {
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
     ) -> CompDwaDisplayWithAllMaps<'a> {
-        CompDwaDisplayWithAllMaps { dwa: self, symbols, tsid_names, token_names }
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -200,13 +152,8 @@ fn fmt_comp_dwa_states(
 
 impl std::fmt::Display for CompDwa {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "DWA: {} states, start=State {}, tsids={}, max_token={}",
-            self.states.len(), self.start_state, self.num_tsids, self.max_token)?;
-        fmt_comp_dwa_states(self, f,
-            &|label| format!("{label}"),
-            &|w| format!("{w}"),
-        )
-    }
+    unimplemented!("cargo-check-only stub")
+}
 }
 
 /// Wrapper to display a [`CompDwa`] with human-readable symbol names.
@@ -241,38 +188,19 @@ pub struct CompDwaDisplayWithAllMaps<'a> {
 
 impl std::fmt::Display for CompDwaDisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let dwa = self.dwa;
-        writeln!(f, "DWA: {} states, start=State {}, tsids={}, max_token={}",
-            dwa.states.len(), dwa.start_state, dwa.num_tsids, dwa.max_token)?;
-        let syms = self.symbols;
-        let tsid_m = self.tsid_names;
-        let tok_m = self.token_names;
-        fmt_comp_dwa_states(dwa, f,
-            &|label| match syms.get(&label) {
-                Some(name) => name.clone(),
-                None => format!("{label}"),
-            },
-            &|w| format!("{}", w.display_with_maps(tsid_m, tok_m)),
-        )
+        unimplemented!("cargo-check-only stub")
     }
 }
 
 impl PartialEq for CompDwa {
     fn eq(&self, other: &Self) -> bool {
-        self.start_state == other.start_state
-            && self.num_tsids == other.num_tsids
-            && self.states.len() == other.states.len()
-            && self
-                .states
-                .iter()
-                .zip(other.states.iter())
-                .all(|(a, b)| a.final_weight == b.final_weight && a.transitions == b.transitions)
+        unimplemented!("cargo-check-only stub")
     }
 }
 
 impl PartialEq for CompDwaState {
     fn eq(&self, other: &Self) -> bool {
-        self.final_weight == other.final_weight && self.transitions == other.transitions
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -299,32 +227,28 @@ pub struct Dwa {
 impl Dwa {
     /// Create a new DWA.
     pub fn new(weights: WeightTable, start_state: u32, accepting: Vec<bool>) -> Self {
-        Self {
-            weights,
-            start_state,
-            accepting,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of states.
     pub fn num_states(&self) -> u32 {
-        self.weights.num_states
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of token-set IDs.
     pub fn num_tsids(&self) -> u32 {
-        self.weights.num_tsids
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get the transition for `(state, tsid)`.
     #[inline]
     pub fn step(&self, state: u32, tsid: u32) -> (u32, i32) {
-        self.weights.get(tsid, state)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Whether a state is accepting.
     pub fn is_accepting(&self, state: u32) -> bool {
-        self.accepting.get(state as usize).copied().unwrap_or(false)
+        unimplemented!("cargo-check-only stub")
     }
 }
 

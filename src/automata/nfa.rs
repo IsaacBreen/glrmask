@@ -3,6 +3,8 @@
 //! Supports epsilon transitions and U8Set-based byte transitions.
 //! Can be converted to a DFA via subset construction.
 #![allow(dead_code)]
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -26,12 +28,7 @@ struct NfaState {
 
 impl NfaState {
     fn new() -> Self {
-        Self {
-            transitions: Vec::new(),
-            epsilon_transitions: Vec::new(),
-            finalizers: BTreeSet::new(),
-            non_greedy_finalizers: BTreeSet::new(),
-        }
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -46,81 +43,57 @@ pub struct Nfa {
 impl Nfa {
     /// Create an NFA with the given number of states.
     pub fn new(num_states: usize) -> Self {
-        Self {
-            states: (0..num_states).map(|_| NfaState::new()).collect(),
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of states.
     pub fn num_states(&self) -> usize {
-        self.states.len()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add a new state and return its ID.
     pub fn add_state(&mut self) -> u32 {
-        let id = self.states.len() as u32;
-        self.states.push(NfaState::new());
-        id
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add a single-byte transition.
     pub fn add_transition(&mut self, from: u32, byte: u8, to: u32) {
-        self.states[from as usize]
-            .transitions
-            .push((U8Set::from_byte(byte), to));
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add a U8Set transition (transition on any byte in the set).
     pub fn add_u8set_transition(&mut self, from: u32, set: U8Set, to: u32) {
-        if !set.is_empty() {
-            self.states[from as usize].transitions.push((set, to));
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add an epsilon transition.
     pub fn add_epsilon(&mut self, from: u32, to: u32) {
-        self.states[from as usize].epsilon_transitions.push(to);
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Mark a state as finalizing for a group.
     pub fn add_finalizer(&mut self, state: u32, group_id: GroupId) {
-        self.states[state as usize].finalizers.insert(group_id);
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Mark a state as finalizing for a non-greedy group.
     pub fn add_non_greedy_finalizer(&mut self, state: u32, group_id: GroupId) {
-        self.states[state as usize].finalizers.insert(group_id);
-        self.states[state as usize]
-            .non_greedy_finalizers
-            .insert(group_id);
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Set whether a state is accepting (convenience, uses group 0).
     pub fn set_accepting(&mut self, state: u32, accepting: bool) {
-        if accepting {
-            self.states[state as usize].finalizers.insert(0);
-        } else {
-            self.states[state as usize].finalizers.clear();
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Whether a state is accepting.
     pub fn is_accepting(&self, state: u32) -> bool {
-        !self.states[state as usize].finalizers.is_empty()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Compute the epsilon closure of a set of states.
     pub fn epsilon_closure(&self, states: &BTreeSet<u32>) -> BTreeSet<u32> {
-        let mut closure = states.clone();
-        let mut stack: Vec<u32> = states.iter().cloned().collect();
-        while let Some(s) = stack.pop() {
-            for &t in &self.states[s as usize].epsilon_transitions {
-                if closure.insert(t) {
-                    stack.push(t);
-                }
-            }
-        }
-        closure
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Convert this NFA to a DFA via subset construction.
@@ -128,94 +101,12 @@ impl Nfa {
     /// Uses input equivalence classes to reduce the alphabet size,
     /// then builds the DFA using the standard powerset/subset construction.
     pub fn to_dfa(&self) -> Dfa {
-        self.subset_construction()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Standard subset construction NFA → DFA.
     fn subset_construction(&self) -> Dfa {
-        // Compute input equivalence classes
-        // Two bytes are equivalent if they trigger the exact same set of transitions
-        // in every NFA state. This reduces the 256 iterations per state to typically
-        // ~20-40.
-        let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
-
-        let start_set = {
-            let mut s = BTreeSet::new();
-            s.insert(0u32);
-            self.epsilon_closure(&s)
-        };
-
-        let mut state_map: HashMap<BTreeSet<u32>, u32> = HashMap::new();
-        let mut dfa_states: Vec<BTreeSet<u32>> = Vec::new();
-        let mut transitions: Vec<Vec<(u8, u32)>> = Vec::new();
-        let mut queue: VecDeque<u32> = VecDeque::new();
-
-        state_map.insert(start_set.clone(), 0);
-        dfa_states.push(start_set);
-        transitions.push(Vec::new());
-        queue.push_back(0);
-
-        while let Some(dfa_state) = queue.pop_front() {
-            // For each equivalence class, compute reachable NFA states
-            for class in 0..num_classes {
-                let representative_byte = class_members[class as usize];
-
-                let mut next_set = BTreeSet::new();
-                for &nfa_state in &dfa_states[dfa_state as usize] {
-                    for &(ref byte_set, target) in &self.states[nfa_state as usize].transitions {
-                        if byte_set.contains(representative_byte) {
-                            next_set.insert(target);
-                        }
-                    }
-                }
-                if next_set.is_empty() {
-                    continue;
-                }
-                let next_set = self.epsilon_closure(&next_set);
-
-                let next_id = if let Some(&id) = state_map.get(&next_set) {
-                    id
-                } else {
-                    let id = dfa_states.len() as u32;
-                    state_map.insert(next_set.clone(), id);
-                    dfa_states.push(next_set);
-                    transitions.push(Vec::new());
-                    queue.push_back(id);
-                    id
-                };
-
-                // Map all bytes in this class to this target
-                for b in 0..=255u8 {
-                    if class_map[b as usize] == class {
-                        transitions[dfa_state as usize].push((b, next_id));
-                    }
-                }
-            }
-        }
-
-        // Build final DFA
-        let num_dfa_states = dfa_states.len();
-        let mut dfa = Dfa::new(num_dfa_states);
-
-        for (dfa_id, nfa_states) in dfa_states.iter().enumerate() {
-            // Merge finalizers from all NFA states in this subset
-            for &nfa_s in nfa_states {
-                for &group in &self.states[nfa_s as usize].finalizers {
-                    dfa.add_finalizer(dfa_id as u32, group);
-                }
-                for &group in &self.states[nfa_s as usize].non_greedy_finalizers {
-                    dfa.add_non_greedy_finalizer(dfa_id as u32, group);
-                }
-            }
-            // Set transitions
-            for &(byte, target) in &transitions[dfa_id] {
-                dfa.set_transition(dfa_id as u32, byte, target);
-            }
-        }
-
-        dfa.recompute_possible_future_group_ids();
-
-        dfa
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Compute input equivalence classes.
@@ -225,37 +116,7 @@ impl Nfa {
     /// - `num_classes` = number of distinct classes
     /// - `class_members[class]` = one representative byte for each class
     fn compute_equivalence_classes(&self) -> (Vec<u8>, u8, Vec<u8>) {
-        // Build a signature for each byte: which (state, transition_index) pairs include it
-        let mut byte_signatures: Vec<Vec<(u32, usize)>> = vec![Vec::new(); 256];
-
-        for (state_idx, state) in self.states.iter().enumerate() {
-            for (trans_idx, &(ref byte_set, _target)) in state.transitions.iter().enumerate() {
-                for b in byte_set.iter() {
-                    byte_signatures[b as usize].push((state_idx as u32, trans_idx));
-                }
-            }
-        }
-
-        // Group bytes by identical signatures
-        let mut sig_to_class: HashMap<&Vec<(u32, usize)>, u8> = HashMap::new();
-        let mut class_map = vec![0u8; 256];
-        let mut class_members = Vec::new();
-        let mut num_classes = 0u8;
-
-        for b in 0..=255u8 {
-            let sig = &byte_signatures[b as usize];
-            if let Some(&class) = sig_to_class.get(sig) {
-                class_map[b as usize] = class;
-            } else {
-                let class = num_classes;
-                num_classes = num_classes.saturating_add(1);
-                sig_to_class.insert(sig, class);
-                class_map[b as usize] = class;
-                class_members.push(b);
-            }
-        }
-
-        (class_map, num_classes, class_members)
+        unimplemented!("cargo-check-only stub")
     }
 }
 

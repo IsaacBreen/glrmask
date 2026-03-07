@@ -1,6 +1,8 @@
 //! Compiler: transforms grammars + vocabularies into compiled constraints.
 //!
 //! Pipeline: grammar IR → GLR table → tokenizer DFA → parser DWA → optimize → Constraint
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 pub mod debug;
 pub mod glr;

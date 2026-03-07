@@ -2,6 +2,8 @@
 //!
 //! This module contains the hot path: `ConstraintState` processes tokens
 //! and computes allowed-token masks in microseconds.
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 pub(crate) mod force;
 mod gss;

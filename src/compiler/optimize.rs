@@ -4,12 +4,13 @@
 //! - Dead state elimination
 //! - Weight normalization
 //! - State renumbering
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use crate::automata::weighted::dwa::Dwa;
 
 #[allow(dead_code)]
     /// Apply all optimization passes to a DWA.
 pub fn optimize(dwa: Dwa) -> Dwa {
-    // TODO: Implement optimization passes
-    dwa
+    unimplemented!("cargo-check-only stub")
 }

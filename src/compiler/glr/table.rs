@@ -2,6 +2,8 @@
 //!
 //! Builds LR(0) item sets, then derives SLR(1) actions using FOLLOW sets.
 //! Shift/reduce and reduce/reduce conflicts are retained (GLR).
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -46,25 +48,17 @@ pub struct GlrTable {
 impl GlrTable {
     /// Build SLR(1) parse tables from a [`GlrGrammar`].
     pub fn build(grammar: &GlrGrammar) -> Self {
-        let (item_sets, transitions) = build_lr0_item_sets(grammar);
-        build_slr1_table(grammar, &item_sets, &transitions)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get all actions for (state, terminal). Returns empty slice if none.
     pub fn actions(&self, state: u32, terminal: TerminalId) -> &[Action] {
-        self.action
-            .get(state as usize)
-            .and_then(|m| m.get(&terminal))
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get goto target for (state, nonterminal). Returns `None` for error.
     pub fn goto_target(&self, state: u32, nt: NonterminalId) -> Option<u32> {
-        self.goto
-            .get(state as usize)
-            .and_then(|m| m.get(&nt))
-            .copied()
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -81,7 +75,7 @@ struct Item {
 
 impl Item {
     fn new(rule: u32, dot: u32) -> Self {
-        Self { rule, dot }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// The symbol just after the dot, or `None` if dot is at the end.
@@ -191,68 +185,8 @@ fn build_slr1_table(
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GlrTable {
-    let rules = &grammar.rules;
-    let num_states = item_sets.len() as u32;
-    let mut action: Vec<BTreeMap<TerminalId, Vec<Action>>> =
-        vec![BTreeMap::new(); num_states as usize];
-    let mut goto: Vec<BTreeMap<NonterminalId, u32>> = vec![BTreeMap::new(); num_states as usize];
-
-    for (sid, items) in item_sets.iter().enumerate() {
-        // Shifts: from transitions on terminals.
-        for (sym, &target) in &transitions[sid] {
-            match sym {
-                Symbol::Terminal(t) => {
-                    action[sid]
-                        .entry(*t)
-                        .or_default()
-                        .push(Action::Shift(target));
-                }
-                Symbol::Nonterminal(nt) => {
-                    goto[sid].insert(*nt, target);
-                }
-            }
-        }
-
-        // Reduces: items with dot at the end.
-        for item in items {
-            if item.next_symbol(rules).is_some() {
-                continue; // Not a reduce item.
-            }
-            let rule_idx = item.rule;
-
-            if rule_idx == 0 {
-                // Augmented start rule: reduce = accept on $.
-                action[sid].entry(EOF).or_default().push(Action::Accept);
-            } else {
-                // SLR(1): reduce on FOLLOW(lhs).
-                let lhs = rules[rule_idx as usize].lhs;
-                if (lhs as usize) < grammar.follow.len() {
-                    for &t in &grammar.follow[lhs as usize] {
-                        action[sid]
-                            .entry(t)
-                            .or_default()
-                            .push(Action::Reduce(rule_idx));
-                    }
-                }
-            }
-        }
-
-        // Deduplicate actions per cell.
-        for actions in action[sid].values_mut() {
-            actions.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
-            actions.dedup();
-        }
+        unimplemented!("cargo-check-only stub")
     }
-
-    GlrTable {
-        action,
-        goto,
-        num_states,
-        num_terminals: grammar.num_terminals,
-        num_rules: rules.len() as u32,
-        rules: rules.to_vec(),
-    }
-}
 
 // ====================================================================
 // Tests

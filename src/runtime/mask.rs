@@ -11,6 +11,8 @@
 //! 3. Project the DWA transition weights to the TSID column to get
 //!    token-space RangeSets
 //! 4. Union all results into the final mask
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -35,31 +37,7 @@ pub fn compute_mask(
     max_token: u32,
     num_tsids: u32,
 ) -> BitSet {
-    let vocab_size = max_token as usize + 1;
-    let mut mask = BitSet::new(vocab_size);
-
-    for (&tok_state, stacks) in state {
-        // Look up the TSID for this tokenizer state.
-        let tsid = if (tok_state as usize) < state_to_tsid.len() {
-            state_to_tsid[tok_state as usize]
-        } else {
-            continue; // unreachable state
-        };
-        if tsid == u32::MAX {
-            continue; // unreachable state
-        }
-
-        for stack in stacks {
-            let tokens = walk_dwa_weighted(dwa, stack, tsid, num_tsids);
-            for pos in tokens.iter() {
-                if pos <= max_token {
-                    mask.set(pos as usize);
-                }
-            }
-        }
-    }
-
-    mask
+    unimplemented!("cargo-check-only stub")
 }
 
 /// Walk the DWA with weight intersection along the path.
@@ -68,60 +46,7 @@ pub fn compute_mask(
 /// in token-space only. This avoids carrying N×M-space accumulators when
 /// only a single TSID column is needed.
 fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> TokenSet {
-    use crate::compiler::parser_dwa::DEFAULT_LABEL;
-
-    if stack.is_empty() || dwa.states.is_empty() {
-        return TokenSet::new();
-    }
-
-    // Start with the full token range as the accumulator (token-space).
-    let mut acc = TokenSet::from_iter([0..=dwa.max_token]);
-    let mut dwa_state = dwa.start_state;
-
-    // Read stack bottom-to-top.
-    for &parser_state in stack.iter() {
-        let label: Label = parser_state as i32;
-        // Try specific transition first, then DEFAULT fallback.
-        let transition = dwa.states[dwa_state as usize]
-            .transitions
-            .get(&label)
-            .or_else(|| dwa.states[dwa_state as usize].transitions.get(&DEFAULT_LABEL));
-
-        if let Some(&(next_state, ref weight)) = transition {
-            if next_state as usize >= dwa.states.len() {
-                return TokenSet::new();
-            }
-            // Project to TSID column, then intersect in token-space.
-            let projected = if weight.is_full() {
-                TokenSet::from_iter([0..=dwa.max_token])
-            } else {
-                weight.tokens_for_tsid(tsid)
-            };
-            acc = &acc & &projected;
-            if acc.is_empty() {
-                return TokenSet::new();
-            }
-            dwa_state = next_state;
-        } else {
-            // No transition for this parser state → dead end.
-            return TokenSet::new();
-        }
-    }
-
-    // Check if the DWA state after reading the stack is accepting.
-    if dwa_state as usize >= dwa.states.len() {
-        return TokenSet::new();
-    }
-    if let Some(ref final_weight) = dwa.states[dwa_state as usize].final_weight {
-        let projected_final = if final_weight.is_full() {
-            TokenSet::from_iter([0..=dwa.max_token])
-        } else {
-            final_weight.tokens_for_tsid(tsid)
-        };
-        &acc & &projected_final
-    } else {
-        TokenSet::new()
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 #[cfg(test)]

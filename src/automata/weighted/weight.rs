@@ -11,6 +11,8 @@
 //! The **RangeMap** is a generic sorted-interval-to-value map used for
 //! vocabulary preprocessing (token → TSID mapping).
 #![allow(dead_code)]
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
@@ -42,57 +44,43 @@ pub struct RangeMap<V> {
 impl<V: Clone + Eq> RangeMap<V> {
     /// Create an empty range map.
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Create from pre-sorted entries.
     pub fn from_sorted(entries: Vec<(u32, u32, V)>) -> Self {
-        Self { entries }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of range entries.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Whether empty.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Look up the value for a given key using binary search.
     pub fn get(&self, key: u32) -> Option<&V> {
-        let idx = self
-            .entries
-            .binary_search_by(|&(start, end, _)| {
-                if key < start {
-                    std::cmp::Ordering::Greater
-                } else if key >= end {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()?;
-        Some(&self.entries[idx].2)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Iterate over all entries as `(start, end, &value)`.
     pub fn iter(&self) -> impl Iterator<Item = (u32, u32, &V)> {
-        self.entries.iter().map(|&(s, e, ref v)| (s, e, v))
+        std::iter::empty()
     }
 
     /// Access entries as a slice.
     pub fn entries(&self) -> &[(u32, u32, V)] {
-        &self.entries
+        unimplemented!("cargo-check-only stub")
     }
 }
 
 impl<V: Clone + Eq> Default for RangeMap<V> {
     fn default() -> Self {
-        Self::new()
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -119,24 +107,19 @@ pub struct WeightTable {
 impl WeightTable {
     /// Create a new weight table with all dead transitions.
     pub fn new(num_states: u32, num_tsids: u32) -> Self {
-        let size = num_states as usize * num_tsids as usize;
-        Self {
-            num_states,
-            num_tsids,
-            data: vec![(u32::MAX, 0); size],
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get the transition for `(tsid, state)`.
     #[inline]
     pub fn get(&self, tsid: u32, state: u32) -> (u32, i32) {
-        self.data[tsid as usize * self.num_states as usize + state as usize]
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Set the transition for `(tsid, state)`.
     #[inline]
     pub fn set(&mut self, tsid: u32, state: u32, target: u32, weight: i32) {
-        self.data[tsid as usize * self.num_states as usize + state as usize] = (target, weight);
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -180,7 +163,7 @@ impl Weight {
 
     /// Create an empty weight (no positions).
     pub fn empty() -> Self {
-        Weight::Empty
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Create a full / universal weight (all positions).
@@ -189,7 +172,7 @@ impl Weight {
     /// [`materialize_full`](Self::materialize_full) when concrete entries
     /// are needed (e.g. for `complement` or `divide_complement`).
     pub fn full() -> Self {
-        Weight::Full
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Construct from raw sorted entries (TSID-outer layout).
@@ -197,39 +180,19 @@ impl Weight {
     /// Entries must be non-overlapping and sorted by TSID range.
     /// Empty token sets are silently filtered out.
     pub fn from_entries(entries: Vec<(u32, u32, RangeSetBlaze<u32>)>) -> Self {
-        let mut map = RangeMapBlaze::new();
-        for (lo, hi, rs) in entries {
-            if !rs.is_empty() {
-                map.ranges_insert(lo..=hi, rs);
-            }
-        }
-        if map.is_empty() {
-            Weight::Empty
-        } else {
-            Weight::Concrete(map)
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Construct a `Concrete` weight directly from a `RangeMapBlaze`.
     pub fn from_map(map: RangeMapBlaze<u32, RangeSetBlaze<u32>>) -> Self {
-        if map.is_empty() {
-            Weight::Empty
-        } else {
-            Weight::Concrete(map)
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Create a weight containing a single flat position.
     ///
     /// Position `p` decodes as `token = p / num_tsids`, `tsid = p % num_tsids`.
     pub fn from_position(pos: u32, num_tsids: u32) -> Self {
-        let num_tsids = num_tsids.max(1);
-        let token = pos / num_tsids;
-        let tsid = pos % num_tsids;
-        Weight::Concrete(RangeMapBlaze::from_iter([(
-            tsid..=tsid,
-            RangeSetBlaze::from_iter([token..=token]),
-        )]))
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Create a weight where every TSID in `tsid_set` maps to the same
@@ -239,15 +202,7 @@ impl Weight {
         token_end: u32,
         tsid_set: &RangeSetBlaze<u32>,
     ) -> Self {
-        if tsid_set.is_empty() || token_start > token_end {
-            return Weight::Empty;
-        }
-        let token_rs = RangeSetBlaze::from_iter([token_start..=token_end]);
-        let map: RangeMapBlaze<u32, RangeSetBlaze<u32>> = tsid_set
-            .ranges()
-            .map(|r| (r, token_rs.clone()))
-            .collect();
-        Weight::Concrete(map)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Create a weight covering all positions from 0 to `max_position`
@@ -255,34 +210,7 @@ impl Weight {
     ///
     /// Use [`full()`](Self::full) for the lazy variant that carries no data.
     pub fn materialize_full(max_position: u32, num_tsids: u32) -> Self {
-        let num_tsids = num_tsids.max(1);
-        if num_tsids == 1 {
-            return Weight::Concrete(RangeMapBlaze::from_iter([(
-                0..=0u32,
-                RangeSetBlaze::from_iter([0..=max_position]),
-            )]));
-        }
-
-        let max_token = max_position / num_tsids;
-        let max_tsid = max_position % num_tsids;
-        let full_tokens = RangeSetBlaze::from_iter([0..=max_token]);
-
-        if max_tsid == num_tsids - 1 {
-            return Weight::Concrete(RangeMapBlaze::from_iter([(
-                0..=max_tsid,
-                full_tokens,
-            )]));
-        }
-
-        let mut map = RangeMapBlaze::new();
-        // TSIDs 0..=max_tsid get all tokens 0..=max_token.
-        map.ranges_insert(0..=max_tsid, full_tokens);
-        // TSIDs max_tsid+1..=num_tsids-1 get tokens 0..=max_token-1.
-        if max_token > 0 && max_tsid < num_tsids - 1 {
-            let prefix_tokens = RangeSetBlaze::from_iter([0..=(max_token - 1)]);
-            map.ranges_insert((max_tsid + 1)..=(num_tsids - 1), prefix_tokens);
-        }
-        Weight::Concrete(map)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Backward-compatible alias: create a full weight with concrete entries.
@@ -290,142 +218,48 @@ impl Weight {
     /// **Prefer [`full()`](Self::full) or [`materialize_full()`](Self::materialize_full).**
     #[deprecated(note = "use Weight::full() for lazy or Weight::materialize_full() for concrete")]
     pub fn all(max_position: u32, num_tsids: u32) -> Self {
-        Self::materialize_full(max_position, num_tsids)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Construct from flat position ranges (position = token × num_tsids + tsid).
     ///
     /// The input is a `RangeSetBlaze<u32>` of flat positions.
     pub fn from_positions(positions: &RangeSetBlaze<u32>, num_tsids: u32) -> Self {
-        let num_tsids = num_tsids.max(1);
-        if positions.is_empty() {
-            return Weight::Empty;
-        }
-
-        // Collect per-TSID token ranges.
-        let mut tsid_tokens: Vec<Vec<(u32, u32)>> = vec![Vec::new(); num_tsids as usize];
-
-        for range in positions.ranges() {
-            let lo = *range.start();
-            let hi = *range.end();
-            let lo_token = lo / num_tsids;
-            let lo_tsid = lo % num_tsids;
-            let hi_token = hi / num_tsids;
-            let hi_tsid = hi % num_tsids;
-
-            if lo_token == hi_token {
-                for tsid in lo_tsid..=hi_tsid {
-                    tsid_tokens[tsid as usize].push((lo_token, lo_token));
-                }
-            } else {
-                // First token: TSIDs lo_tsid..=num_tsids-1.
-                for tsid in lo_tsid..num_tsids {
-                    tsid_tokens[tsid as usize].push((lo_token, lo_token));
-                }
-                // Middle tokens (full TSID range).
-                if lo_token < hi_token.saturating_sub(1) {
-                    for bucket in tsid_tokens.iter_mut() {
-                        bucket.push((lo_token + 1, hi_token - 1));
-                    }
-                }
-                // Last token: TSIDs 0..=hi_tsid.
-                for tsid in 0..=hi_tsid {
-                    tsid_tokens[tsid as usize].push((hi_token, hi_token));
-                }
-            }
-        }
-
-        // Build a RangeMapBlaze by coalescing consecutive TSIDs with the same
-        // token set.
-        let mut map = RangeMapBlaze::new();
-        let mut cur_start: Option<u32> = None;
-        let mut cur_end: u32 = 0;
-        let mut cur_rs = RangeSetBlaze::<u32>::new();
-
-        for (tsid, token_ranges) in tsid_tokens.into_iter().enumerate() {
-            if token_ranges.is_empty() {
-                if let Some(start) = cur_start.take() {
-                    map.ranges_insert(start..=cur_end, std::mem::take(&mut cur_rs));
-                }
-                continue;
-            }
-            let rs: RangeSetBlaze<u32> = token_ranges
-                .into_iter()
-                .map(|(lo, hi)| lo..=hi)
-                .collect();
-            if let Some(start) = cur_start {
-                if rs == cur_rs && cur_end + 1 == tsid as u32 {
-                    cur_end = tsid as u32;
-                    continue;
-                }
-                map.ranges_insert(start..=cur_end, std::mem::take(&mut cur_rs));
-            }
-            cur_start = Some(tsid as u32);
-            cur_end = tsid as u32;
-            cur_rs = rs;
-        }
-        if let Some(start) = cur_start {
-            map.ranges_insert(start..=cur_end, cur_rs);
-        }
-
-        if map.is_empty() {
-            Weight::Empty
-        } else {
-            Weight::Concrete(map)
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     // ---- Queries ----
 
     /// Whether this is the universal (full) weight.
     pub fn is_full(&self) -> bool {
-        matches!(self, Weight::Full)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Whether the weight is empty (no positions).
     pub fn is_empty(&self) -> bool {
-        matches!(self, Weight::Empty)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Access the concrete map, or `None` for `Empty`/`Full`.
     pub fn as_map(&self) -> Option<&RangeMapBlaze<u32, RangeSetBlaze<u32>>> {
-        match self {
-            Weight::Concrete(m) => Some(m),
-            _ => None,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Collect entries as `Vec<(tsid_lo, tsid_hi, token_set)>`.
     ///
     /// For `Empty`/`Full`, returns an empty Vec.
     pub fn collect_entries(&self) -> Vec<(u32, u32, RangeSetBlaze<u32>)> {
-        match self {
-            Weight::Concrete(m) => m
-                .range_values()
-                .map(|(r, v)| (*r.start(), *r.end(), v.clone()))
-                .collect(),
-            _ => Vec::new(),
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of outer range entries.
     pub fn num_entries(&self) -> usize {
-        match self {
-            Weight::Concrete(m) => m.range_values_len(),
-            _ => 0,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Total number of sub-ranges (outer + sum of inner).
     pub fn num_ranges(&self) -> usize {
-        match self {
-            Weight::Concrete(m) => {
-                let outer = m.range_values_len();
-                let inner: usize = m.range_values().map(|(_, rs)| rs.ranges_len()).sum();
-                outer + inner
-            }
-            _ => 0,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Count the total number of positions in this weight.
@@ -434,17 +268,7 @@ impl Weight {
     /// the automaton context.  Use `materialize_full` first if you need
     /// the concrete count.
     pub fn len(&self) -> u64 {
-        match self {
-            Weight::Empty | Weight::Full => 0,
-            Weight::Concrete(m) => {
-                let mut total: u64 = 0;
-                for (range, token_set) in m.range_values() {
-                    let tsid_span = (*range.end() - *range.start() + 1) as u64;
-                    total += tsid_span * token_set.len() as u64;
-                }
-                total
-            }
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Look up the token set for a specific TSID.
@@ -452,11 +276,7 @@ impl Weight {
     /// For `Full`, returns an empty set (materialize first for concrete
     /// results).
     pub fn tokens_for_tsid(&self, tsid: u32) -> RangeSetBlaze<u32> {
-        match self {
-            Weight::Empty => RangeSetBlaze::new(),
-            Weight::Full => RangeSetBlaze::new(), // caller should materialize if needed
-            Weight::Concrete(m) => m.get(tsid).cloned().unwrap_or_default(),
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Check if a flat position is contained.
@@ -465,16 +285,7 @@ impl Weight {
     ///
     /// For `Full`, always returns `true`.
     pub fn contains(&self, pos: u32, num_tsids: u32) -> bool {
-        match self {
-            Weight::Empty => false,
-            Weight::Full => true,
-            Weight::Concrete(m) => {
-                let num_tsids = num_tsids.max(1);
-                let token = pos / num_tsids;
-                let tsid = pos % num_tsids;
-                m.get(tsid).is_some_and(|rs| rs.contains(token))
-            }
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Iterate over entries as `(tsid_lo, tsid_hi, &token_set)`.
@@ -735,84 +546,17 @@ impl Weight {
     /// most complement entries are `full` (where `x | full = full`), so we
     /// only compute actual unions for the few non-`full` entries.
     pub fn divide_with_complement(&self, complement: &Self, full: &RangeSetBlaze<u32>) -> Self {
-        // Fast path: self | complement where self is full → full
-        if self.is_full() {
-            return Weight::Full;
-        }
-
-        let self_map = match self {
-            Weight::Empty => &RangeMapBlaze::new(),
-            Weight::Concrete(m) => m,
-            Weight::Full => unreachable!(),
-        };
-        let comp_map = match complement {
-            Weight::Empty => return self.clone(),
-            Weight::Full => return Weight::Full,
-            Weight::Concrete(m) => m,
-        };
-
-        // Use merge_maps: for each TSID range, combine self | complement.
-        // When complement is `full`, result is `full`.
-        // When only self exists, result is self.
-        // When only complement exists, result is complement.
-        let merged = Self::merge_maps(self_map, comp_map, |a, b| match (a, b) {
-            (Some(a), Some(b)) => {
-                if b == full {
-                    full.clone()
-                } else {
-                    a | b
-                }
-            }
-            (Some(x), None) | (None, Some(x)) => x.clone(),
-            (None, None) => RangeSetBlaze::new(),
-        });
-
-        Self::from_map(merged)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Check whether two weights are disjoint.
     pub fn is_disjoint(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Weight::Empty, _) | (_, Weight::Empty) => true,
-            (Weight::Full, _) | (_, Weight::Full) => false,
-            (Weight::Concrete(a), Weight::Concrete(b)) => {
-                let mut a_iter = a.range_values().peekable();
-                let mut b_iter = b.range_values().peekable();
-                while let (Some(&(ref ar, ref av)), Some(&(ref br, ref bv))) =
-                    (a_iter.peek(), b_iter.peek())
-                {
-                    let a_lo = *ar.start();
-                    let a_hi = *ar.end();
-                    let b_lo = *br.start();
-                    let b_hi = *br.end();
-                    if a_hi < b_lo {
-                        a_iter.next();
-                    } else if b_hi < a_lo {
-                        b_iter.next();
-                    } else {
-                        if !av.is_disjoint(bv) {
-                            return false;
-                        }
-                        if a_hi <= b_hi {
-                            a_iter.next();
-                        } else {
-                            b_iter.next();
-                        }
-                    }
-                }
-                true
-            }
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Check whether `self ⊆ other`.
     pub fn is_subset(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Weight::Empty, _) => true,
-            (_, Weight::Full) => true,
-            (Weight::Full, _) => false, // conservative: would need bounds to check
-            _ => self.difference(other).is_empty(),
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     // ---- Internal ----
@@ -831,80 +575,7 @@ impl Weight {
     where
         F: Fn(Option<&RangeSetBlaze<u32>>, Option<&RangeSetBlaze<u32>>) -> RangeSetBlaze<u32>,
     {
-        // Collect all boundary points (start and end+1 of each entry).
-        let cap = 2 * (a.range_values_len() + b.range_values_len());
-        let mut boundaries: Vec<u32> = Vec::with_capacity(cap);
-        for (range, _) in a.range_values() {
-            boundaries.push(*range.start());
-            if let Some(next) = range.end().checked_add(1) {
-                boundaries.push(next);
-            }
-        }
-        for (range, _) in b.range_values() {
-            boundaries.push(*range.start());
-            if let Some(next) = range.end().checked_add(1) {
-                boundaries.push(next);
-            }
-        }
-        boundaries.sort_unstable();
-        boundaries.dedup();
-
-        if boundaries.is_empty() {
-            return RangeMapBlaze::new();
-        }
-
-        let max_boundary = *boundaries.last().unwrap();
-
-        let mut result = RangeMapBlaze::new();
-        let mut cur_start: Option<u32> = None;
-        let mut cur_end: u32 = 0;
-        let mut cur_value = RangeSetBlaze::<u32>::new();
-
-        for (idx, &start) in boundaries.iter().enumerate() {
-            let end = if idx + 1 < boundaries.len() {
-                boundaries[idx + 1] - 1
-            } else {
-                max_boundary.saturating_sub(1).max(start)
-            };
-            if start > end {
-                continue;
-            }
-
-            let a_val = a.get(start);
-            let b_val = b.get(start);
-            let combined = combine(a_val, b_val);
-
-            if combined.is_empty() {
-                if let Some(range_start) = cur_start.take() {
-                    result.ranges_insert(
-                        range_start..=cur_end,
-                        std::mem::take(&mut cur_value),
-                    );
-                }
-                continue;
-            }
-
-            if let Some(range_start) = cur_start {
-                if cur_value == combined && cur_end.checked_add(1) == Some(start) {
-                    cur_end = end;
-                    continue;
-                }
-                result.ranges_insert(
-                    range_start..=cur_end,
-                    std::mem::take(&mut cur_value),
-                );
-            }
-
-            cur_start = Some(start);
-            cur_end = end;
-            cur_value = combined;
-        }
-
-        if let Some(range_start) = cur_start {
-            result.ranges_insert(range_start..=cur_end, cur_value);
-        }
-
-        result
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -912,12 +583,7 @@ impl Weight {
 
 impl PartialEq for Weight {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Weight::Empty, Weight::Empty) => true,
-            (Weight::Full, Weight::Full) => true,
-            (Weight::Concrete(a), Weight::Concrete(b)) => a == b,
-            _ => false,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -925,22 +591,7 @@ impl Eq for Weight {}
 
 impl std::hash::Hash for Weight {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            Weight::Empty | Weight::Full => {}
-            Weight::Concrete(m) => {
-                m.range_values_len().hash(state);
-                for (range, rs) in m.range_values() {
-                    range.start().hash(state);
-                    range.end().hash(state);
-                    // Hash the token set ranges for determinism.
-                    for r in rs.ranges() {
-                        r.start().hash(state);
-                        r.end().hash(state);
-                    }
-                }
-            }
-        }
+        unimplemented!("cargo-check-only stub")
     }
 }
 

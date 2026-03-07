@@ -6,6 +6,8 @@
 //!
 //! Each "stack" is a sequence of parser state IDs, bottom to top.
 //! The top of the stack is `stack.last()`.
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 #![allow(dead_code)]
 
@@ -22,63 +24,53 @@ pub struct GlrStacks {
 impl GlrStacks {
     /// Create a new GlrStacks with a single stack containing one state.
     pub fn new(initial_state: u32) -> Self {
-        Self {
-            stacks: vec![vec![initial_state]],
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Create from a list of stacks.
     pub fn from_stacks(stacks: Vec<Vec<u32>>) -> Self {
-        Self { stacks }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Create empty (no stacks).
     pub fn empty() -> Self {
-        Self { stacks: Vec::new() }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Whether there are no stacks (all paths died).
     pub fn is_empty(&self) -> bool {
-        self.stacks.is_empty()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of active stacks.
     pub fn len(&self) -> usize {
-        self.stacks.len()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Iterate over stacks.
     pub fn iter(&self) -> impl Iterator<Item = &Vec<u32>> {
-        self.stacks.iter()
+        std::iter::empty()
     }
 
     /// Get the top parser state of each stack.
     pub fn tops(&self) -> BTreeSet<u32> {
-        self.stacks
-            .iter()
-            .filter_map(|s| s.last().copied())
-            .collect()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add a stack.
     pub fn push(&mut self, stack: Vec<u32>) {
-        self.stacks.push(stack);
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Merge with another GlrStacks (union of stacks).
     /// Deduplicates identical stacks.
     pub fn merge(&mut self, other: &GlrStacks) {
-        let existing: BTreeSet<Vec<u32>> = self.stacks.drain(..).collect();
-        let mut all: BTreeSet<Vec<u32>> = existing;
-        for s in &other.stacks {
-            all.insert(s.clone());
-        }
-        self.stacks = all.into_iter().collect();
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Take ownership of the stacks.
     pub fn into_stacks(self) -> Vec<Vec<u32>> {
-        self.stacks
+        unimplemented!("cargo-check-only stub")
     }
 }
 

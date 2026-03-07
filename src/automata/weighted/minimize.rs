@@ -10,6 +10,8 @@
 //!   transition weight.
 //!
 //! Because the DWA is acyclic, a single bottom-up pass suffices.
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -25,60 +27,7 @@ use super::weight::Weight;
 
 /// Minimize a [`CompDwa`] by merging states with identical behaviour.
 pub fn minimize_acyclic(dwa: &CompDwa) -> CompDwa {
-    let n = dwa.states.len();
-    if n <= 1 {
-        return dwa.clone();
-    }
-
-    // 1. Compute heights (leaf = 0).
-    let heights = compute_heights(dwa);
-
-    // 2. Sort states by height (ascending).
-    let mut by_height: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-    for (i, &h) in heights.iter().enumerate() {
-        by_height.entry(h).or_default().push(i as u32);
-    }
-
-    // 3. Bottom-up signature computation.
-    //    `class[old_state]` = new canonical state id.
-    let mut class: Vec<u32> = vec![u32::MAX; n];
-    let mut canon_states: Vec<CompDwaState> = Vec::new();
-    // Signature → canonical id.
-    let mut sig_map: FxHashMap<Sig, u32> = FxHashMap::default();
-
-    for states_at_h in by_height.values() {
-        for &sid in states_at_h {
-            let st = &dwa.states[sid as usize];
-            let sig = state_signature(st, &class);
-
-            if let Some(&canon) = sig_map.get(&sig) {
-                // Merge: map this state to the existing canonical state.
-                class[sid as usize] = canon;
-            } else {
-                // New canonical state.
-                let cid = canon_states.len() as u32;
-                sig_map.insert(sig, cid);
-                class[sid as usize] = cid;
-
-                // Build the canonical CompDwaState with remapped targets.
-                let mut transitions = BTreeMap::new();
-                for (&label, (target, w)) in &st.transitions {
-                    transitions.insert(label, (class[*target as usize], w.clone()));
-                }
-                canon_states.push(CompDwaState {
-                    final_weight: st.final_weight.clone(),
-                    transitions,
-                });
-            }
-        }
-    }
-
-    CompDwa {
-        states: canon_states,
-        start_state: class[dwa.start_state as usize],
-        num_tsids: dwa.num_tsids,
-        max_token: dwa.max_token,
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 // ---------------------------------------------------------------------------
@@ -86,46 +35,7 @@ pub fn minimize_acyclic(dwa: &CompDwa) -> CompDwa {
 // ---------------------------------------------------------------------------
 
 fn compute_heights(dwa: &CompDwa) -> Vec<u32> {
-    let n = dwa.states.len();
-    let mut heights = vec![0u32; n];
-
-    // Topological sort via Kahn's algorithm.
-    let mut indegree = vec![0u32; n];
-    for st in &dwa.states {
-        for (target, _) in st.transitions.values() {
-            indegree[*target as usize] += 1;
-        }
-    }
-    let mut queue = std::collections::VecDeque::new();
-    for (i, &d) in indegree.iter().enumerate() {
-        if d == 0 {
-            queue.push_back(i as u32);
-        }
-    }
-    let mut topo = Vec::with_capacity(n);
-    while let Some(u) = queue.pop_front() {
-        topo.push(u);
-        for (target, _) in dwa.states[u as usize].transitions.values() {
-            let d = &mut indegree[*target as usize];
-            *d -= 1;
-            if *d == 0 {
-                queue.push_back(*target);
-            }
-        }
-    }
-
-    // Reverse topo: compute heights bottom-up.
-    for &u in topo.iter().rev() {
-        let h = dwa.states[u as usize]
-            .transitions
-            .values()
-            .map(|(t, _)| heights[*t as usize] + 1)
-            .max()
-            .unwrap_or(0);
-        heights[u as usize] = h;
-    }
-
-    heights
+    unimplemented!("cargo-check-only stub")
 }
 
 // ---------------------------------------------------------------------------
@@ -143,15 +53,7 @@ struct Sig {
 }
 
 fn state_signature(st: &CompDwaState, class: &[u32]) -> Sig {
-    let transitions: Vec<(Label, u32, Weight)> = st
-        .transitions
-        .iter()
-        .map(|(&label, (target, w))| (label, class[*target as usize], w.clone()))
-        .collect();
-    Sig {
-        final_weight: st.final_weight.clone(),
-        transitions,
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 // ====================================================================

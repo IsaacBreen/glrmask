@@ -8,6 +8,8 @@
 //! [`Weight`](super::weight::Weight) sets representing which
 //! (token, TSID) positions survive a transition.
 #![allow(dead_code)]
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -44,58 +46,42 @@ pub struct Nwa {
 impl Nwa {
     /// Create an empty NWA.
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
-        Self {
-            states: Vec::new(),
-            start_states: Vec::new(),
-            num_tsids,
-            max_token,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add a new state and return its ID.
     pub fn add_state(&mut self) -> u32 {
-        let id = self.states.len() as u32;
-        self.states.push(NwaState::default());
-        id
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of states.
     pub fn num_states(&self) -> u32 {
-        self.states.len() as u32
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Set the final weight for a state (makes it accepting).
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
-        self.states[state as usize].final_weight = Some(weight);
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add a labelled transition.
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
-        self.states[from as usize]
-            .transitions
-            .entry(label)
-            .or_default()
-            .push((to, weight));
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Add an ε-transition.
     pub fn add_epsilon(&mut self, from: u32, to: u32, weight: Weight) {
-        self.states[from as usize].epsilons.push((to, weight));
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Total number of transitions (labelled + ε).
     pub fn num_transitions(&self) -> usize {
-        self.states
-            .iter()
-            .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
-            .sum()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Maximum position in the weight space.
     pub fn max_position(&self) -> u32 {
-        self.max_token
-            .saturating_mul(self.num_tsids.max(1))
-            .saturating_add(self.num_tsids.max(1) - 1)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Return a wrapper that prints this NWA using a symbol→name map.
@@ -105,7 +91,7 @@ impl Nwa {
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
     ) -> NwaDisplayWithSymbols<'a> {
-        NwaDisplayWithSymbols { nwa: self, symbols }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Return a wrapper that prints this NWA using maps for symbols, TSIDs,
@@ -116,7 +102,7 @@ impl Nwa {
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
     ) -> NwaDisplayWithAllMaps<'a> {
-        NwaDisplayWithAllMaps { nwa: self, symbols, tsid_names, token_names }
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -171,13 +157,8 @@ fn fmt_nwa_states(
 
 impl std::fmt::Display for Nwa {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "NWA: {} states, start={:?}, tsids={}, max_token={}",
-            self.states.len(), self.start_states, self.num_tsids, self.max_token)?;
-        fmt_nwa_states(self, f,
-            &|label| format!("{label}"),
-            &|w| format!("{w}"),
-        )
-    }
+    unimplemented!("cargo-check-only stub")
+}
 }
 
 /// Wrapper to display an [`Nwa`] with human-readable symbol names.
@@ -212,19 +193,7 @@ pub struct NwaDisplayWithAllMaps<'a> {
 
 impl std::fmt::Display for NwaDisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let nwa = self.nwa;
-        writeln!(f, "NWA: {} states, start={:?}, tsids={}, max_token={}",
-            nwa.states.len(), nwa.start_states, nwa.num_tsids, nwa.max_token)?;
-        let syms = self.symbols;
-        let tsid_m = self.tsid_names;
-        let tok_m = self.token_names;
-        fmt_nwa_states(nwa, f,
-            &|label| match syms.get(&label) {
-                Some(name) => name.clone(),
-                None => format!("{label}"),
-            },
-            &|w| format!("{}", w.display_with_maps(tsid_m, tok_m)),
-        )
+        unimplemented!("cargo-check-only stub")
     }
 }
 

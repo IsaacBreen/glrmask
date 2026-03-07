@@ -3,6 +3,8 @@
 //! A Generalized LR parser that operates on the GLR parse table.
 //! Uses a list-of-stacks representation for simplicity during compilation.
 //! The runtime uses an efficient GSS (see `runtime/gss.rs`).
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -22,30 +24,17 @@ pub struct GlrParser {
 impl GlrParser {
     /// Create a new parser from a table.
     pub fn new(table: GlrTable) -> Self {
-        Self { table }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Parse a sequence of terminal IDs. Returns `true` if the input is accepted.
     pub fn parse(&self, input: &[TerminalId]) -> bool {
-        let mut stacks: Vec<Vec<u32>> = vec![vec![0]];
-
-        for &token in input {
-            let (new_stacks, _accepted) = self.step(&stacks, token);
-            stacks = new_stacks;
-            if stacks.is_empty() {
-                return false;
-            }
-        }
-
-        // Check for accept on EOF.
-        let (_new_stacks, accepted) = self.step(&stacks, EOF);
-        accepted
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Can the parser continue with this terminal from at least one stack?
     pub fn can_shift(&self, stacks: &[Vec<u32>], token: TerminalId) -> bool {
-        let (new_stacks, accepted) = self.step(stacks, token);
-        accepted || !new_stacks.is_empty()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Process one token across all active stacks.
@@ -53,60 +42,12 @@ impl GlrParser {
     /// Returns (new_stacks_after_shift, did_any_accept).
     /// Reduces are processed exhaustively before shifts.
     pub fn step(&self, stacks: &[Vec<u32>], token: TerminalId) -> (Vec<Vec<u32>>, bool) {
-        let mut shifted: Vec<Vec<u32>> = Vec::new();
-        let mut accepted = false;
-
-        // Worklist of stacks to process reduces on.
-        let mut worklist: VecDeque<Vec<u32>> = stacks.iter().cloned().collect();
-        let mut seen: BTreeSet<Vec<u32>> = stacks.iter().cloned().collect();
-
-        while let Some(stack) = worklist.pop_front() {
-            let state = *stack.last().unwrap();
-            for action in self.table.actions(state, token) {
-                match action {
-                    Action::Shift(next) => {
-                        let mut new_stack = stack.clone();
-                        new_stack.push(*next);
-                        shifted.push(new_stack);
-                    }
-                    Action::Reduce(rule_idx) => {
-                        let rule = &self.table.rules[*rule_idx as usize];
-                        let pop_count = rule.rhs.len();
-                        if stack.len() <= pop_count {
-                            continue; // Stack underflow — dead path.
-                        }
-                        let mut new_stack = stack[..stack.len() - pop_count].to_vec();
-                        let exposed = *new_stack.last().unwrap();
-                        if let Some(goto_state) = self.table.goto_target(exposed, rule.lhs) {
-                            new_stack.push(goto_state);
-                            if seen.insert(new_stack.clone()) {
-                                worklist.push_back(new_stack);
-                            }
-                        }
-                    }
-                    Action::Accept => {
-                        accepted = true;
-                    }
-                }
-            }
-        }
-
-        (shifted, accepted)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Enumerate all terminals that are valid continuations from the given stacks.
     pub fn valid_terminals(&self, stacks: &[Vec<u32>]) -> Vec<TerminalId> {
-        let mut result = BTreeSet::new();
-        for t in 0..self.table.num_terminals {
-            if self.can_shift(stacks, t) {
-                result.insert(t);
-            }
-        }
-        // Also check EOF.
-        if self.can_shift(stacks, EOF) {
-            result.insert(EOF);
-        }
-        result.into_iter().collect()
+        unimplemented!("cargo-check-only stub")
     }
 }
 

@@ -3,6 +3,8 @@
 //! Captures intermediate automata from each stage of the compilation pipeline
 //! without relying on env-var printing. Returned alongside the Constraint by
 //! [`compile_with_debug`].
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -182,42 +184,17 @@ impl CompileDebug {
         vocab_entries: Vec<(u32, Vec<u8>)>,
         eos_token_id: Option<u32>,
     ) -> Self {
-        Self {
-            grammar_def,
-            normalized_grammar_def,
-            glr_grammar,
-            glr_table,
-            characterizations: automata.characterizations,
-            terminal_dwa: automata.terminal_dwa,
-            terminal_debug: automata.terminal_debug,
-            template_bundles: automata.template_bundles,
-            parser_nwa_before_resolve: automata.parser_nwa_before_resolve,
-            parser_nwa_after_resolve: automata.parser_nwa_after_resolve,
-            parser_dwa_pre_minimize: automata.parser_dwa_pre_minimize,
-            parser_dwa: automata.parser_dwa,
-            vocab_pre: automata.vocab_pre,
-            vocab_entries,
-            eos_token_id,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     // --- Display helpers (private) ---
 
     fn terminal_name(&self, id: TerminalId) -> &str {
-        self.grammar_def
-            .terminals
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| t.name.as_str())
-            .unwrap_or("?")
+        unimplemented!("cargo-check-only stub")
     }
 
     fn symbol_str(&self, sym: &crate::compiler::grammar_def::Symbol) -> String {
-        use crate::compiler::grammar_def::Symbol;
-        match sym {
-            Symbol::Terminal(t) => format!("'{}'", self.terminal_name(*t)),
-            Symbol::Nonterminal(n) => format!("NT{n}"),
-        }
+        unimplemented!("cargo-check-only stub")
     }
 }
 

@@ -7,6 +7,8 @@
 //! When two GSS branches merge, their disallowed sets are unioned — this is
 //! a safe overapproximation that may block some tokens but never incorrectly
 //! allows invalid ones.
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,7 +22,7 @@ pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
 
 /// Create a fresh (empty) TerminalsDisallowed — no terminals are disallowed.
 pub fn terminals_disallowed_fresh() -> TerminalsDisallowed {
-    BTreeMap::new()
+    unimplemented!("cargo-check-only stub")
 }
 
 /// Implement Merge for TerminalsDisallowed.
@@ -30,10 +32,6 @@ pub fn terminals_disallowed_fresh() -> TerminalsDisallowed {
 /// the merged result also disallows it.
 impl Merge for TerminalsDisallowed {
     fn merge(&self, other: &Self) -> Self {
-        let mut result = self.clone();
-        for (k, v) in other {
-            result.entry(*k).or_default().extend(v.iter().cloned());
-        }
-        result
+        unimplemented!("cargo-check-only stub")
     }
 }

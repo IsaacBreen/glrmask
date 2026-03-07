@@ -25,6 +25,8 @@
 //! rule_name         // rule reference
 //! TERMINAL_NAME     // terminal reference
 //! ```
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;

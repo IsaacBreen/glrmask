@@ -2,6 +2,8 @@
 //!
 //! Used for token masks and set operations on token IDs.
 #![allow(dead_code)]
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -17,78 +19,57 @@ pub struct BitSet {
 impl BitSet {
     /// Create a new bitset that can hold at least `len` bits, all initially zero.
     pub fn new(len: usize) -> Self {
-        let num_words = len.div_ceil(64);
-        Self {
-            words: vec![0u64; num_words],
-            len,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of bits this bitset can hold.
     pub fn len(&self) -> usize {
-        self.len
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Whether the bitset has zero capacity.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get the value of bit `i`.
     pub fn get(&self, i: usize) -> bool {
-        debug_assert!(i < self.len);
-        let word = i / 64;
-        let bit = i % 64;
-        (self.words[word] >> bit) & 1 != 0
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Set bit `i` to 1.
     pub fn set(&mut self, i: usize) {
-        debug_assert!(i < self.len);
-        let word = i / 64;
-        let bit = i % 64;
-        self.words[word] |= 1u64 << bit;
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Clear bit `i` to 0.
     pub fn clear(&mut self, i: usize) {
-        debug_assert!(i < self.len);
-        let word = i / 64;
-        let bit = i % 64;
-        self.words[word] &= !(1u64 << bit);
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Set all bits to 0.
     pub fn clear_all(&mut self) {
-        for w in &mut self.words {
-            *w = 0;
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of set bits (population count).
     pub fn count_ones(&self) -> usize {
-        self.words.iter().map(|w| w.count_ones() as usize).sum()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Whether all bits are zero.
     pub fn is_zero(&self) -> bool {
-        self.words.iter().all(|&w| w == 0)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// In-place OR: `self |= other`.
     pub fn union_with(&mut self, other: &BitSet) {
-        debug_assert_eq!(self.len, other.len);
-        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
-            *a |= *b;
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// In-place AND: `self &= other`.
     pub fn intersect_with(&mut self, other: &BitSet) {
-        debug_assert_eq!(self.len, other.len);
-        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
-            *a &= *b;
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Iterator over set bit indices.

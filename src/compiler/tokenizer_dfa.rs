@@ -3,6 +3,8 @@
 //! Builds a multi-pattern DFA that recognizes terminal patterns.
 //! Given a stream of bytes, the DFA tracks which terminals are
 //! currently matching (via finalizer groups).
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::BTreeSet;
 
@@ -27,15 +29,7 @@ pub struct TokenizerDfa {
 impl TokenizerDfa {
     /// Build a tokenizer DFA from fully specified regex groups.
     pub fn from_expr_groups(groups: &[ExprGroup]) -> Self {
-        let num_terminals = groups.len() as u32;
-        let dfa = ExprGroups {
-            groups: groups.to_vec(),
-        }
-        .build();
-        Self {
-            dfa: dfa.dfa,
-            num_terminals,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Build a tokenizer DFA from terminal expressions.
@@ -43,92 +37,55 @@ impl TokenizerDfa {
     /// `terminals[i]` = (terminal_id, expression).
     /// Terminal i maps to DFA group i.
     pub fn from_exprs(terminals: &[(TerminalId, Expr)]) -> Self {
-        let groups: Vec<ExprGroup> = terminals
-            .iter()
-            .map(|(_tid, expr)| ExprGroup {
-                expr: expr.clone(),
-                is_non_greedy: false,
-            })
-            .collect();
-        Self::from_expr_groups(&groups)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Build a tokenizer DFA from a GrammarDef by parsing terminal patterns.
     pub fn from_grammar_def(grammar: &GrammarDef) -> Self {
-        let terminals: Vec<(TerminalId, Expr)> = grammar
-            .terminals
-            .iter()
-            .map(|td| (td.id, parse_regex(&td.pattern)))
-            .collect();
-        Self::from_exprs(&terminals)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get the start state.
     pub fn start_state(&self) -> u32 {
-        0
+        unimplemented!("cargo-check-only stub")
     }
 
     #[allow(dead_code)]
     /// Step from `state` on `byte`. Returns the next state, or `None` if dead.
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        let next = self.dfa.get_transition(state, byte);
-        // State 0 is typically the dead/start state in the minimized DFA.
-        // We treat "no valid transition" as staying at current state or dead.
-        // In our DFA, dead state is implicit — check if the target has any outgoing transitions.
-        Some(next)
+        unimplemented!("cargo-check-only stub")
     }
 
     #[allow(dead_code)]
     /// Feed a byte string, return the final state.
     pub fn run(&self, input: &[u8]) -> u32 {
-        self.dfa.run(input)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get the set of terminals matched at the given state.
     pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
-        if state == crate::automata::dfa::DEAD {
-            return BTreeSet::new();
-        }
-        self.dfa
-            .finalizers(state)
-            .iter()
-            .map(|&gid| gid as TerminalId)
-            .collect()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get the subset of matched terminals whose regex groups are marked non-greedy.
     pub fn matched_non_greedy_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
-        if state == crate::automata::dfa::DEAD {
-            return BTreeSet::new();
-        }
-        self.dfa
-            .non_greedy_finalizers(state)
-            .iter()
-            .map(|&gid| gid as TerminalId)
-            .collect()
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get terminals that remain reachable on some non-empty continuation.
     pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
-        if state == crate::automata::dfa::DEAD {
-            return BTreeSet::new();
-        }
-        self.dfa
-            .possible_future_group_ids(state)
-            .iter()
-            .map(|&gid| gid as TerminalId)
-            .collect()
+        unimplemented!("cargo-check-only stub")
     }
 
     #[allow(dead_code)]
     /// Check if a specific terminal matches at the given state.
     pub fn terminal_matches(&self, state: u32, terminal: TerminalId) -> bool {
-        self.dfa.finalizers(state).contains(&(terminal as usize))
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Number of DFA states.
     pub fn num_states(&self) -> u32 {
-        self.dfa.num_states() as u32
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Compute which terminals are reachable from each DFA state.
@@ -139,46 +96,7 @@ impl TokenizerDfa {
     /// This is a backward reachability analysis: start from accepting states,
     /// then propagate backward through transitions.
     pub fn compute_reachable_terminals(&self) -> Vec<BTreeSet<TerminalId>> {
-        let n = self.num_states() as usize;
-        let mut reachable: Vec<BTreeSet<TerminalId>> = vec![BTreeSet::new(); n];
-
-        // Seed: each accepting state reaches its matched terminals.
-        for s in 0..n {
-            let s32 = s as u32;
-            if s32 == crate::automata::dfa::DEAD {
-                continue;
-            }
-            for &gid in self.dfa.finalizers(s32) {
-                reachable[s].insert(gid as TerminalId);
-            }
-        }
-
-        // Fixed-point backward propagation.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for s in 0..n {
-                let s32 = s as u32;
-                if s32 == crate::automata::dfa::DEAD {
-                    continue;
-                }
-                for byte in 0..=255u8 {
-                    let next = self.dfa.get_transition(s32, byte);
-                    if next == crate::automata::dfa::DEAD || next as usize >= n {
-                        continue;
-                    }
-                    // If next can reach terminal T, then s can reach T too.
-                    let next_reachable = reachable[next as usize].clone();
-                    for t in next_reachable {
-                        if reachable[s].insert(t) {
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        reachable
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Execute the tokenizer on a byte string from a given state.
@@ -187,15 +105,7 @@ impl TokenizerDfa {
     /// This does maximal-munch tokenization: feeds all bytes and returns
     /// terminals matched at the final state.
     pub fn execute(&self, input: &[u8], start: u32) -> (u32, BTreeSet<TerminalId>) {
-        let mut state = start;
-        for &b in input {
-            state = self.dfa.get_transition(state, b);
-            if state == crate::automata::dfa::DEAD {
-                return (state, BTreeSet::new());
-            }
-        }
-        let matched = self.matched_terminals(state);
-        (state, matched)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Execute the tokenizer on a byte string, tracking matches at every prefix.
@@ -208,32 +118,12 @@ impl TokenizerDfa {
     /// This is used during commit to find all intermediate terminal matches
     /// within a single LLM token's byte sequence.
     pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
-        let mut state = start;
-        let mut matches = Vec::new();
-
-        for (i, &b) in input.iter().enumerate() {
-            state = self.dfa.get_transition(state, b);
-            if state == crate::automata::dfa::DEAD {
-                return TokenizerResult {
-                    end_state: state,
-                    matches,
-                };
-            }
-            let matched = self.matched_terminals(state);
-            if !matched.is_empty() {
-                matches.push((i + 1, matched));
-            }
-        }
-
-        TokenizerResult {
-            end_state: state,
-            matches,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// The initial DFA state (always 0).
     pub fn initial_state(&self) -> u32 {
-        0
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Execute the tokenizer on a byte string, calling a callback for each match.
@@ -251,18 +141,7 @@ impl TokenizerDfa {
     where
         F: FnMut(usize, &BTreeSet<usize>),
     {
-        let mut state = start;
-        for (i, &b) in input.iter().enumerate() {
-            state = self.dfa.get_transition(state, b);
-            if state == crate::automata::dfa::DEAD {
-                return state;
-            }
-            let finalizers = self.dfa.finalizers(state);
-            if !finalizers.is_empty() {
-                cb(i + 1, finalizers);
-            }
-        }
-        state
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Execute with callback, but only fire the callback for states with at
@@ -282,20 +161,7 @@ impl TokenizerDfa {
     where
         F: FnMut(usize, &BTreeSet<usize>),
     {
-        let mut state = start;
-        for (i, &b) in input.iter().enumerate() {
-            state = self.dfa.get_transition(state, b);
-            if state == crate::automata::dfa::DEAD {
-                return state;
-            }
-            if (state as usize) < state_has_used.len() && state_has_used[state as usize] {
-                let finalizers = self.dfa.finalizers(state);
-                if !finalizers.is_empty() {
-                    cb(i + 1, finalizers);
-                }
-            }
-        }
-        state
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -327,390 +193,51 @@ pub struct TokenizerResult {
 /// - `*`, `+`, `?` quantifiers
 /// - `{n}`, `{n,}`, `{n,m}` bounded repetition
 pub fn parse_regex(pattern: &str) -> Expr {
-    let bytes = pattern.as_bytes();
-    let (expr, pos) = parse_alternation(bytes, 0);
-    assert_eq!(
-        pos,
-        bytes.len(),
-        "Unexpected character at position {} in pattern {:?}",
-        pos,
-        pattern
-    );
-    expr
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_alternation(input: &[u8], pos: usize) -> (Expr, usize) {
-    let (first, mut pos) = parse_sequence(input, pos);
-    let mut alts = vec![first];
-
-    while pos < input.len() && input[pos] == b'|' {
-        pos += 1;
-        let (alt, next) = parse_sequence(input, pos);
-        alts.push(alt);
-        pos = next;
-    }
-
-    if alts.len() == 1 {
-        (alts.into_iter().next().unwrap(), pos)
-    } else {
-        (Expr::Choice(alts), pos)
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_sequence(input: &[u8], mut pos: usize) -> (Expr, usize) {
-    let mut parts: Vec<Expr> = Vec::new();
-
-    while pos < input.len() && input[pos] != b'|' && input[pos] != b')' {
-        let (atom, next) = parse_quantified(input, pos);
-        parts.push(atom);
-        pos = next;
-    }
-
-    match parts.len() {
-        0 => (Expr::U8Seq(vec![]), pos), // empty ε
-        1 => (parts.into_iter().next().unwrap(), pos),
-        _ => (Expr::Seq(parts), pos),
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_quantified(input: &[u8], pos: usize) -> (Expr, usize) {
-    let (atom, mut pos) = parse_atom(input, pos);
-
-    if pos < input.len() {
-        match input[pos] {
-            b'*' => {
-                pos += 1;
-                (
-                    Expr::Quantifier(
-                        Box::new(atom),
-                        crate::automata::regex::QuantifierType::ZeroOrMore,
-                    ),
-                    pos,
-                )
-            }
-            b'+' => {
-                pos += 1;
-                (
-                    Expr::Quantifier(
-                        Box::new(atom),
-                        crate::automata::regex::QuantifierType::OneOrMore,
-                    ),
-                    pos,
-                )
-            }
-            b'?' => {
-                pos += 1;
-                (
-                    Expr::Quantifier(
-                        Box::new(atom),
-                        crate::automata::regex::QuantifierType::ZeroOrOne,
-                    ),
-                    pos,
-                )
-            }
-            b'{' => {
-                let (min, max, next) = parse_repetition_bounds(input, pos + 1);
-                (
-                    Expr::RepeatBounded {
-                        inner: Box::new(atom),
-                        min,
-                        max,
-                    },
-                    next,
-                )
-            }
-            _ => (atom, pos),
-        }
-    } else {
-        (atom, pos)
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_repetition_bounds(input: &[u8], mut pos: usize) -> (usize, Option<usize>, usize) {
-    // Parse: {n}, {n,}, {n,m}
-    let (min, next) = parse_usize(input, pos);
-    pos = next;
-
-    if pos < input.len() && input[pos] == b'}' {
-        // {n} — exactly n
-        return (min, Some(min), pos + 1);
-    }
-    if pos < input.len() && input[pos] == b',' {
-        pos += 1;
-        if pos < input.len() && input[pos] == b'}' {
-            // {n,} — at least n
-            return (min, None, pos + 1);
-        }
-        let (max, next) = parse_usize(input, pos);
-        pos = next;
-        assert!(pos < input.len() && input[pos] == b'}', "Expected }}");
-        return (min, Some(max), pos + 1);
-    }
-    panic!("Invalid repetition bounds");
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_usize(input: &[u8], mut pos: usize) -> (usize, usize) {
-    let start = pos;
-    while pos < input.len() && input[pos].is_ascii_digit() {
-        pos += 1;
-    }
-    let s = std::str::from_utf8(&input[start..pos]).unwrap();
-    (s.parse::<usize>().unwrap(), pos)
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_atom(input: &[u8], mut pos: usize) -> (Expr, usize) {
-    assert!(pos < input.len(), "Unexpected end of regex");
-
-    match input[pos] {
-        b'(' => {
-            pos += 1;
-            let (expr, next) = parse_alternation(input, pos);
-            assert!(next < input.len() && input[next] == b')', "Expected ')'");
-            (expr, next + 1)
-        }
-        b'[' => parse_char_class(input, pos),
-        b'\\' => parse_escape(input, pos),
-        b'.' => {
-            // Any byte except newline.
-            let mut set = U8Set::full();
-            set.remove(b'\n');
-            (Expr::U8Class(set), pos + 1)
-        }
-        b'^' | b'$' => {
-            // Anchors — treat as ε (we don't support multi-line).
-            (Expr::U8Seq(vec![]), pos + 1)
-        }
-        ch => {
-            // Literal byte.
-            (Expr::U8Seq(vec![ch]), pos + 1)
-        }
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_char_class(input: &[u8], mut pos: usize) -> (Expr, usize) {
-    assert_eq!(input[pos], b'[');
-    pos += 1;
-
-    let negate = pos < input.len() && input[pos] == b'^';
-    if negate {
-        pos += 1;
-    }
-
-    let mut set = U8Set::empty();
-
-    // Allow ] as first character in class.
-    if pos < input.len() && input[pos] == b']' {
-        set.insert(b']');
-        pos += 1;
-    }
-
-    while pos < input.len() && input[pos] != b']' {
-        if input[pos] == b'\\' {
-            let ch = parse_escape_byte(input, pos);
-            pos += escape_len(input, pos);
-            // Check for range: \x-y
-            if pos + 1 < input.len() && input[pos] == b'-' && input[pos + 1] != b']' {
-                pos += 1;
-                let hi = if input[pos] == b'\\' {
-                    let h = parse_escape_byte(input, pos);
-                    pos += escape_len(input, pos);
-                    h
-                } else {
-                    let h = input[pos];
-                    pos += 1;
-                    h
-                };
-                for b in ch..=hi {
-                    set.insert(b);
-                }
-            } else {
-                set.insert(ch);
-            }
-        } else if pos + 2 < input.len() && input[pos + 1] == b'-' && input[pos + 2] != b']' {
-            let lo = input[pos];
-            pos += 2; // skip lo and '-'
-            let hi = if input[pos] == b'\\' {
-                let h = parse_escape_byte(input, pos);
-                pos += escape_len(input, pos);
-                h
-            } else {
-                let h = input[pos];
-                pos += 1;
-                h
-            };
-            for b in lo..=hi {
-                set.insert(b);
-            }
-        } else {
-            set.insert(input[pos]);
-            pos += 1;
-        }
-    }
-
-    assert!(pos < input.len() && input[pos] == b']', "Expected ']'");
-    pos += 1;
-
-    if negate {
-        // If the excluded set is entirely ASCII (≤ 0x7F), build a UTF-8-aware
-        // expression instead of a raw byte complement.
-        //
-        // A raw byte complement incorrectly admits continuation bytes (0x80–0xBF)
-        // as standalone tokens, which is never valid UTF-8.  The Lark convention
-        // (e.g. /[^\x00-\x1F"\\]/) means "any Unicode character not in the set",
-        // which in UTF-8 expansion means:
-        //   - ASCII characters not in the excluded set  (single-byte 0x20–0x7F minus exclusions)
-        //   - All valid 2-, 3-, 4-byte UTF-8 lead sequences              (multi-byte)
-        //
-        // This matches the reference implementation in grammars2024.
-        let excluded_is_ascii = set.iter().all(|b| b <= 0x7F);
-        if excluded_is_ascii {
-            let ascii_allowed = U8Set::from_predicate(|b| b <= 0x7F && !set.contains(b));
-            let cont = U8Set::from_range(0x80, 0xBF);
-
-            let mut choices: Vec<Expr> = Vec::new();
-
-            // ASCII (single-byte) chars not excluded.
-            if !ascii_allowed.is_empty() {
-                choices.push(Expr::U8Class(ascii_allowed));
-            }
-
-            // Valid UTF-8 2-byte: C2–DF 80–BF
-            choices.push(Expr::Seq(vec![
-                Expr::U8Class(U8Set::from_range(0xC2, 0xDF)),
-                Expr::U8Class(cont),
-            ]));
-            // Valid UTF-8 3-byte: E0 A0–BF 80–BF
-            choices.push(Expr::Seq(vec![
-                Expr::U8Class(U8Set::from_range(0xE0, 0xE0)),
-                Expr::U8Class(U8Set::from_range(0xA0, 0xBF)),
-                Expr::U8Class(cont),
-            ]));
-            // E1–EC 80–BF 80–BF
-            choices.push(Expr::Seq(vec![
-                Expr::U8Class(U8Set::from_range(0xE1, 0xEC)),
-                Expr::U8Class(cont),
-                Expr::U8Class(cont),
-            ]));
-            // ED 80–9F 80–BF  (excludes surrogates D800–DFFF)
-            choices.push(Expr::Seq(vec![
-                Expr::U8Class(U8Set::from_range(0xED, 0xED)),
-                Expr::U8Class(U8Set::from_range(0x80, 0x9F)),
-                Expr::U8Class(cont),
-            ]));
-            // EE–EF 80–BF 80–BF
-            choices.push(Expr::Seq(vec![
-                Expr::U8Class(U8Set::from_range(0xEE, 0xEF)),
-                Expr::U8Class(cont),
-                Expr::U8Class(cont),
-            ]));
-            // Valid UTF-8 4-byte: F0 90–BF 80–BF 80–BF
-            choices.push(Expr::Seq(vec![
-                Expr::U8Class(U8Set::from_range(0xF0, 0xF0)),
-                Expr::U8Class(U8Set::from_range(0x90, 0xBF)),
-                Expr::U8Class(cont),
-                Expr::U8Class(cont),
-            ]));
-            // F1–F3 80–BF 80–BF 80–BF
-            choices.push(Expr::Seq(vec![
-                Expr::U8Class(U8Set::from_range(0xF1, 0xF3)),
-                Expr::U8Class(cont),
-                Expr::U8Class(cont),
-                Expr::U8Class(cont),
-            ]));
-            // F4 80–8F 80–BF 80–BF  (U+10FFFF max)
-            choices.push(Expr::Seq(vec![
-                Expr::U8Class(U8Set::from_range(0xF4, 0xF4)),
-                Expr::U8Class(U8Set::from_range(0x80, 0x8F)),
-                Expr::U8Class(cont),
-                Expr::U8Class(cont),
-            ]));
-
-            return (Expr::Choice(choices), pos);
-        }
-
-        set = !set;
-    }
-
-    (Expr::U8Class(set), pos)
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_escape(input: &[u8], pos: usize) -> (Expr, usize) {
-    assert_eq!(input[pos], b'\\');
-    let next = pos + 1;
-    assert!(next < input.len(), "Trailing backslash");
-
-    match input[next] {
-        b'd' => {
-            let set = U8Set::from_predicate(|b| b.is_ascii_digit());
-            (Expr::U8Class(set), next + 1)
-        }
-        b'D' => {
-            let set = U8Set::from_predicate(|b| !b.is_ascii_digit());
-            (Expr::U8Class(set), next + 1)
-        }
-        b'w' => {
-            let set = U8Set::from_predicate(|b| b.is_ascii_alphanumeric() || b == b'_');
-            (Expr::U8Class(set), next + 1)
-        }
-        b'W' => {
-            let set = U8Set::from_predicate(|b| !(b.is_ascii_alphanumeric() || b == b'_'));
-            (Expr::U8Class(set), next + 1)
-        }
-        b's' => {
-            let set = U8Set::from_predicate(|b| b.is_ascii_whitespace());
-            (Expr::U8Class(set), next + 1)
-        }
-        b'S' => {
-            let set = U8Set::from_predicate(|b| !b.is_ascii_whitespace());
-            (Expr::U8Class(set), next + 1)
-        }
-        b'x' => {
-            // \xHH
-            assert!(next + 3 <= input.len(), "\\x requires two hex digits");
-            let hi = hex_digit(input[next + 1]);
-            let lo = hex_digit(input[next + 2]);
-            let byte = (hi << 4) | lo;
-            (Expr::U8Seq(vec![byte]), next + 3)
-        }
-        b'n' => (Expr::U8Seq(vec![b'\n']), next + 1),
-        b'r' => (Expr::U8Seq(vec![b'\r']), next + 1),
-        b't' => (Expr::U8Seq(vec![b'\t']), next + 1),
-        // All other escaped characters are literal.
-        ch => (Expr::U8Seq(vec![ch]), next + 1),
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 fn parse_escape_byte(input: &[u8], pos: usize) -> u8 {
-    assert_eq!(input[pos], b'\\');
-    let next = pos + 1;
-    match input[next] {
-        b'x' => {
-            let hi = hex_digit(input[next + 1]);
-            let lo = hex_digit(input[next + 2]);
-            (hi << 4) | lo
-        }
-        b'n' => b'\n',
-        b'r' => b'\r',
-        b't' => b'\t',
-        ch => ch,
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 fn escape_len(input: &[u8], pos: usize) -> usize {
-    assert_eq!(input[pos], b'\\');
-    match input[pos + 1] {
-        b'x' => 4,
-        _ => 2,
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 fn hex_digit(b: u8) -> u8 {
-    match b {
-        b'0'..=b'9' => b - b'0',
-        b'a'..=b'f' => b - b'a' + 10,
-        b'A'..=b'F' => b - b'A' + 10,
-        _ => panic!("Invalid hex digit: {}", b as char),
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 // ====================================================================

@@ -2,6 +2,8 @@
 //!
 //! Provides a high-level grammar IR (`GrammarExpr`) that frontends produce,
 //! plus logic to flatten it into the low-level `GrammarDef` consumed by the compiler.
+#![allow(unused_imports, unused_variables, dead_code)]
+#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -69,174 +71,27 @@ struct Lowerer {
 
 impl Lowerer {
     fn new() -> Self {
-        Lowerer {
-            rules: Vec::new(),
-            terminal_map: BTreeMap::new(),
-            terminals: Vec::new(),
-            nt_map: BTreeMap::new(),
-            anon_counter: 0,
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get or create a nonterminal ID for a name.
     fn nt_id(&mut self, name: &str) -> NonterminalId {
-        if let Some(&id) = self.nt_map.get(name) {
-            id
-        } else {
-            let id = self.nt_map.len() as NonterminalId;
-            self.nt_map.insert(name.to_string(), id);
-            id
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Create an anonymous nonterminal.
     fn fresh_nt(&mut self, hint: &str) -> (String, NonterminalId) {
-        let name = format!("_anon_{hint}_{}", self.anon_counter);
-        self.anon_counter += 1;
-        let id = self.nt_id(&name);
-        (name, id)
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Get or create a terminal for a literal/pattern.
     fn terminal_id(&mut self, name: &str, pattern: &str) -> TerminalId {
-        if let Some(&id) = self.terminal_map.get(name) {
-            id
-        } else {
-            let id = self.terminals.len() as TerminalId;
-            self.terminals.push(TerminalDef {
-                id,
-                name: name.to_string(),
-                pattern: pattern.to_string(),
-            });
-            self.terminal_map.insert(name.to_string(), id);
-            id
-        }
+        unimplemented!("cargo-check-only stub")
     }
 
     /// Lower a `GrammarExpr` into a single `Symbol` (creating helper rules as needed).
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
-        match expr {
-            GrammarExpr::Ref(name) => {
-                // Check if this references a compiled terminal.
-                if let Some(&id) = self.terminal_map.get(name) {
-                    Symbol::Terminal(id)
-                } else {
-                    let id = self.nt_id(name);
-                    Symbol::Nonterminal(id)
-                }
-            }
-            GrammarExpr::Literal(bytes) => {
-                if bytes.len() == 1 {
-                    // Single byte → single terminal.
-                    let ch = bytes[0];
-                    let name = format!("_lit_{}", escape_byte(ch));
-                    let pattern = regex_escape_byte(ch);
-                    let id = self.terminal_id(&name, &pattern);
-                    Symbol::Terminal(id)
-                } else {
-                    // Multi-byte literal → sequence of terminals wrapped in a nonterminal.
-                    let (_, nt) = self.fresh_nt("lit");
-                    let rhs: Vec<Symbol> = bytes
-                        .iter()
-                        .map(|&b| {
-                            let name = format!("_lit_{}", escape_byte(b));
-                            let pattern = regex_escape_byte(b);
-                            let id = self.terminal_id(&name, &pattern);
-                            Symbol::Terminal(id)
-                        })
-                        .collect();
-                    self.rules.push(Rule { lhs: nt, rhs });
-                    Symbol::Nonterminal(nt)
-                }
-            }
-            GrammarExpr::CharClass { def, negate } => {
-                let pattern = if *negate {
-                    format!("[^{}]", def)
-                } else {
-                    format!("[{}]", def)
-                };
-                let name = format!("_cc_{}", &pattern);
-                let id = self.terminal_id(&name, &pattern);
-                Symbol::Terminal(id)
-            }
-            GrammarExpr::RawRegex(pattern) => {
-                let name = format!("_rx_{}", pattern);
-                let id = self.terminal_id(&name, pattern);
-                Symbol::Terminal(id)
-            }
-            GrammarExpr::AnyByte => {
-                let name = "_any".to_string();
-                let pattern = ".".to_string();
-                let id = self.terminal_id(&name, &pattern);
-                Symbol::Terminal(id)
-            }
-            GrammarExpr::Sequence(parts) => {
-                if parts.len() == 1 {
-                    return self.lower_expr(&parts[0]);
-                }
-                let (_, nt) = self.fresh_nt("seq");
-                let rhs: Vec<Symbol> = parts.iter().map(|p| self.lower_expr(p)).collect();
-                self.rules.push(Rule { lhs: nt, rhs });
-                Symbol::Nonterminal(nt)
-            }
-            GrammarExpr::Choice(alts) => {
-                if alts.len() == 1 {
-                    return self.lower_expr(&alts[0]);
-                }
-                let (_, nt) = self.fresh_nt("choice");
-                for alt in alts {
-                    let sym = self.lower_expr(alt);
-                    self.rules.push(Rule {
-                        lhs: nt,
-                        rhs: vec![sym],
-                    });
-                }
-                Symbol::Nonterminal(nt)
-            }
-            GrammarExpr::Optional(inner) => {
-                // A? → _anon → A | ε
-                let (_, nt) = self.fresh_nt("opt");
-                let sym = self.lower_expr(inner);
-                self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![sym],
-                });
-                // ε-production.
-                self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![],
-                });
-                Symbol::Nonterminal(nt)
-            }
-            GrammarExpr::Repeat(inner) => {
-                // A* → _anon → _anon A | ε
-                let (_, nt) = self.fresh_nt("rep");
-                let sym = self.lower_expr(inner);
-                self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![Symbol::Nonterminal(nt), sym],
-                });
-                self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![],
-                });
-                Symbol::Nonterminal(nt)
-            }
-            GrammarExpr::RepeatOne(inner) => {
-                // A+ → _anon → _anon A | A
-                let (_, nt) = self.fresh_nt("rep1");
-                let sym = self.lower_expr(inner);
-                self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![Symbol::Nonterminal(nt), sym.clone()],
-                });
-                self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![sym],
-                });
-                Symbol::Nonterminal(nt)
-            }
-        }
+        unimplemented!("cargo-check-only stub")
     }
 }
 
@@ -246,11 +101,7 @@ impl Lowerer {
 
 /// Check if a rule name is a terminal name (ALL-CAPS, underscores, digits).
 fn is_terminal_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-        && name.chars().any(|c| c.is_ascii_uppercase())
+    unimplemented!("cargo-check-only stub")
 }
 
 /// Compile a `GrammarExpr` into a regex pattern string.
@@ -261,67 +112,7 @@ fn compile_to_regex(
     expr: &GrammarExpr,
     terminal_patterns: &BTreeMap<String, String>,
 ) -> Result<String, GlrMaskError> {
-    match expr {
-        GrammarExpr::Literal(bytes) => {
-            Ok(bytes.iter().map(|&b| regex_escape_byte(b)).collect())
-        }
-        GrammarExpr::CharClass { def, negate } => {
-            if *negate {
-                Ok(format!("[^{}]", def))
-            } else {
-                Ok(format!("[{}]", def))
-            }
-        }
-        GrammarExpr::Choice(alts) => {
-            let parts: Vec<String> = alts
-                .iter()
-                .map(|a| compile_to_regex(a, terminal_patterns))
-                .collect::<Result<_, _>>()?;
-            if parts.len() == 1 {
-                Ok(parts.into_iter().next().unwrap())
-            } else {
-                Ok(format!("({})", parts.join("|")))
-            }
-        }
-        GrammarExpr::Sequence(parts) => {
-            let parts: Vec<String> = parts
-                .iter()
-                .map(|p| compile_to_regex(p, terminal_patterns))
-                .collect::<Result<_, _>>()?;
-            Ok(parts.join(""))
-        }
-        GrammarExpr::Optional(inner) => {
-            let inner = compile_to_regex(inner, terminal_patterns)?;
-            Ok(format!("({})?", inner))
-        }
-        GrammarExpr::Repeat(inner) => {
-            let inner = compile_to_regex(inner, terminal_patterns)?;
-            Ok(format!("({})*", inner))
-        }
-        GrammarExpr::RepeatOne(inner) => {
-            let inner = compile_to_regex(inner, terminal_patterns)?;
-            Ok(format!("({})+", inner))
-        }
-        GrammarExpr::RawRegex(s) => Ok(s.clone()),
-        GrammarExpr::AnyByte => Ok(".".to_string()),
-        GrammarExpr::Ref(name) => {
-            if is_terminal_name(name) {
-                if let Some(pattern) = terminal_patterns.get(name) {
-                    Ok(format!("({})", pattern))
-                } else {
-                    Err(GlrMaskError::GrammarParse(format!(
-                        "terminal '{}' not yet compiled",
-                        name
-                    )))
-                }
-            } else {
-                Err(GlrMaskError::GrammarParse(format!(
-                    "terminal rule body references non-terminal '{}'",
-                    name
-                )))
-            }
-        }
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 /// Lower a `NamedGrammar` to a `GrammarDef`.
@@ -329,101 +120,7 @@ fn compile_to_regex(
 /// Terminal rules (ALL-CAPS names) are compiled to single terminals with regex
 /// patterns. Nonterminal rules (lowercase names) reference terminals directly.
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
-    let mut lowerer = Lowerer::new();
-
-    // Phase 1: Identify terminal rules (ALL-CAPS names) and compile their
-    // bodies into regex patterns. Handle dependencies by iterating until all
-    // terminals are compiled.
-    let mut terminal_patterns: BTreeMap<String, String> = BTreeMap::new();
-    let mut remaining: Vec<(&str, &GrammarExpr)> = grammar
-        .rules
-        .iter()
-        .filter(|(name, _)| is_terminal_name(name))
-        .map(|(name, expr)| (name.as_str(), expr))
-        .collect();
-
-    let max_iterations = remaining.len() + 1;
-    for _ in 0..max_iterations {
-        if remaining.is_empty() {
-            break;
-        }
-        let prev_count = remaining.len();
-        let mut next_remaining = Vec::new();
-        for (name, expr) in remaining {
-            match compile_to_regex(expr, &terminal_patterns) {
-                Ok(pattern) => {
-                    terminal_patterns.insert(name.to_string(), pattern);
-                }
-                Err(_) => {
-                    next_remaining.push((name, expr));
-                }
-            }
-        }
-        if next_remaining.len() == prev_count {
-            // No progress — unresolved dependency.
-            let names: Vec<_> = next_remaining.iter().map(|(n, _)| *n).collect();
-            return Err(GlrMaskError::GrammarParse(format!(
-                "unresolved terminal dependencies: {:?}",
-                names
-            )));
-        }
-        remaining = next_remaining;
-    }
-
-    // Register compiled terminals.
-    for (name, pattern) in &terminal_patterns {
-        lowerer.terminal_id(name, pattern);
-    }
-
-    // Phase 2: Pre-register nonterminals (only non-terminal rules).
-    for (name, _) in &grammar.rules {
-        if !is_terminal_name(name) {
-            lowerer.nt_id(name);
-        }
-    }
-
-    // Phase 3: Lower nonterminal rules.
-    for (name, expr) in &grammar.rules {
-        if is_terminal_name(name) {
-            continue; // Already handled as a terminal.
-        }
-        let nt = lowerer.nt_id(name);
-        match expr {
-            // Top-level choice → multiple rules for the same NT.
-            GrammarExpr::Choice(alts) => {
-                for alt in alts {
-                    let rhs = match alt {
-                        GrammarExpr::Sequence(parts) => {
-                            parts.iter().map(|p| lowerer.lower_expr(p)).collect()
-                        }
-                        other => vec![lowerer.lower_expr(other)],
-                    };
-                    lowerer.rules.push(Rule { lhs: nt, rhs });
-                }
-            }
-            GrammarExpr::Sequence(parts) => {
-                let rhs: Vec<Symbol> = parts.iter().map(|p| lowerer.lower_expr(p)).collect();
-                lowerer.rules.push(Rule { lhs: nt, rhs });
-            }
-            other => {
-                let sym = lowerer.lower_expr(other);
-                lowerer.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![sym],
-                });
-            }
-        }
-    }
-
-    let start = *lowerer.nt_map.get(&grammar.start).ok_or_else(|| {
-        GlrMaskError::GrammarParse(format!("start rule '{}' not found", grammar.start))
-    })?;
-
-    Ok(GrammarDef {
-        rules: lowerer.rules,
-        start,
-        terminals: lowerer.terminals,
-    })
+    unimplemented!("cargo-check-only stub")
 }
 
 // ---------------------------------------------------------------------------
@@ -431,22 +128,11 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
 // ---------------------------------------------------------------------------
 
 fn escape_byte(b: u8) -> String {
-    if b.is_ascii_alphanumeric() || b == b'_' {
-        String::from(b as char)
-    } else {
-        format!("x{:02x}", b)
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 fn regex_escape_byte(b: u8) -> String {
-    let ch = b as char;
-    match ch {
-        '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' | '^' | '$' | '|' => {
-            format!("\\{}", ch)
-        }
-        _ if b.is_ascii_graphic() || b == b' ' => String::from(ch),
-        _ => format!("\\x{:02x}", b),
-    }
+    unimplemented!("cargo-check-only stub")
 }
 
 // ---------------------------------------------------------------------------
