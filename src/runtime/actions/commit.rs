@@ -55,12 +55,12 @@ impl<'a> ConstraintState<'a> {
             let exec = self.constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
             if let Some(end_state) = exec.end_state {
                 state_map.insert(tokenizer_state, end_state);
-                for matched in exec.matches {
-                    terminals_map
-                        .entry(tokenizer_state)
-                        .or_default()
-                        .insert(matched.id);
-                }
+            }
+            for matched in exec.matches {
+                terminals_map
+                    .entry(tokenizer_state)
+                    .or_default()
+                    .insert(matched.id);
             }
         }
 
