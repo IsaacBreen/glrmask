@@ -16,8 +16,10 @@
 //! 2. **Bundle equivalent templates** so parser-side structure is shared.
 //! 3. **Build NWA** from template bundles (labels = parser state IDs, weights = token sets).
 //! 3. **Determinize + minimize** → CompDwa → Dwa.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

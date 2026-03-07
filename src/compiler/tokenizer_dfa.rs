@@ -3,8 +3,10 @@
 //! Builds a multi-pattern DFA that recognizes terminal patterns.
 //! Given a stream of bytes, the DFA tracks which terminals are
 //! currently matching (via finalizer groups).
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeSet;
 
@@ -29,7 +31,7 @@ pub struct TokenizerDfa {
 impl TokenizerDfa {
     /// Build a tokenizer DFA from fully specified regex groups.
     pub fn from_expr_groups(groups: &[ExprGroup]) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Build a tokenizer DFA from terminal expressions.
@@ -37,55 +39,55 @@ impl TokenizerDfa {
     /// `terminals[i]` = (terminal_id, expression).
     /// Terminal i maps to DFA group i.
     pub fn from_exprs(terminals: &[(TerminalId, Expr)]) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Build a tokenizer DFA from a GrammarDef by parsing terminal patterns.
     pub fn from_grammar_def(grammar: &GrammarDef) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the start state.
     pub fn start_state(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     #[allow(dead_code)]
     /// Step from `state` on `byte`. Returns the next state, or `None` if dead.
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     #[allow(dead_code)]
     /// Feed a byte string, return the final state.
     pub fn run(&self, input: &[u8]) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the set of terminals matched at the given state.
     pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the subset of matched terminals whose regex groups are marked non-greedy.
     pub fn matched_non_greedy_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get terminals that remain reachable on some non-empty continuation.
     pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     #[allow(dead_code)]
     /// Check if a specific terminal matches at the given state.
     pub fn terminal_matches(&self, state: u32, terminal: TerminalId) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of DFA states.
     pub fn num_states(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Compute which terminals are reachable from each DFA state.
@@ -96,7 +98,7 @@ impl TokenizerDfa {
     /// This is a backward reachability analysis: start from accepting states,
     /// then propagate backward through transitions.
     pub fn compute_reachable_terminals(&self) -> Vec<BTreeSet<TerminalId>> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Execute the tokenizer on a byte string from a given state.
@@ -105,7 +107,7 @@ impl TokenizerDfa {
     /// This does maximal-munch tokenization: feeds all bytes and returns
     /// terminals matched at the final state.
     pub fn execute(&self, input: &[u8], start: u32) -> (u32, BTreeSet<TerminalId>) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Execute the tokenizer on a byte string, tracking matches at every prefix.
@@ -118,12 +120,12 @@ impl TokenizerDfa {
     /// This is used during commit to find all intermediate terminal matches
     /// within a single LLM token's byte sequence.
     pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// The initial DFA state (always 0).
     pub fn initial_state(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Execute the tokenizer on a byte string, calling a callback for each match.
@@ -141,7 +143,7 @@ impl TokenizerDfa {
     where
         F: FnMut(usize, &BTreeSet<usize>),
     {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Execute with callback, but only fire the callback for states with at
@@ -161,7 +163,7 @@ impl TokenizerDfa {
     where
         F: FnMut(usize, &BTreeSet<usize>),
     {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -193,51 +195,51 @@ pub struct TokenizerResult {
 /// - `*`, `+`, `?` quantifiers
 /// - `{n}`, `{n,}`, `{n,m}` bounded repetition
 pub fn parse_regex(pattern: &str) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_alternation(input: &[u8], pos: usize) -> (Expr, usize) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_sequence(input: &[u8], mut pos: usize) -> (Expr, usize) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_quantified(input: &[u8], pos: usize) -> (Expr, usize) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_repetition_bounds(input: &[u8], mut pos: usize) -> (usize, Option<usize>, usize) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_usize(input: &[u8], mut pos: usize) -> (usize, usize) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_atom(input: &[u8], mut pos: usize) -> (Expr, usize) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_char_class(input: &[u8], mut pos: usize) -> (Expr, usize) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_escape(input: &[u8], pos: usize) -> (Expr, usize) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn parse_escape_byte(input: &[u8], pos: usize) -> u8 {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn escape_len(input: &[u8], pos: usize) -> usize {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn hex_digit(b: u8) -> u8 {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ====================================================================

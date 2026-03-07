@@ -3,8 +3,10 @@
 //! A Generalized LR parser that operates on the GLR parse table.
 //! Uses a list-of-stacks representation for simplicity during compilation.
 //! The runtime uses an efficient GSS (see `runtime/gss.rs`).
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -24,17 +26,17 @@ pub struct GlrParser {
 impl GlrParser {
     /// Create a new parser from a table.
     pub fn new(table: GlrTable) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Parse a sequence of terminal IDs. Returns `true` if the input is accepted.
     pub fn parse(&self, input: &[TerminalId]) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Can the parser continue with this terminal from at least one stack?
     pub fn can_shift(&self, stacks: &[Vec<u32>], token: TerminalId) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Process one token across all active stacks.
@@ -42,12 +44,12 @@ impl GlrParser {
     /// Returns (new_stacks_after_shift, did_any_accept).
     /// Reduces are processed exhaustively before shifts.
     pub fn step(&self, stacks: &[Vec<u32>], token: TerminalId) -> (Vec<Vec<u32>>, bool) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Enumerate all terminals that are valid continuations from the given stacks.
     pub fn valid_terminals(&self, stacks: &[Vec<u32>]) -> Vec<TerminalId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

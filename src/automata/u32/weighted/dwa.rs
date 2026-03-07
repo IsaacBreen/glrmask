@@ -8,8 +8,9 @@
 //!   the end of compilation and used for fast mask computation during
 //!   inference.
 #![allow(dead_code)]
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeMap;
 
@@ -50,32 +51,32 @@ pub struct CompDwa {
 impl CompDwa {
     /// Create a new CompDwa with a single (empty) start state.
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a new state and return its ID.
     pub fn add_state(&mut self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of states.
     pub fn num_states(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Total number of transitions across all states.
     pub fn num_transitions(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set the final weight for a state.
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a labelled transition.
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Evaluate a word, returning the surviving weight.
@@ -84,12 +85,12 @@ impl CompDwa {
     /// Returns the intersection of all transition weights and the final weight
     /// of the last state (empty weight if any step fails).
     pub fn eval_word(&self, word: &[Label]) -> Weight {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Collect all distinct labels used in transitions.
     pub fn labels(&self) -> Vec<Label> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Return a wrapper that prints this DWA using a symbol→name map.
@@ -99,7 +100,7 @@ impl CompDwa {
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
     ) -> CompDwaDisplayWithSymbols<'a> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Return a wrapper that prints this DWA using maps for symbols, TSIDs,
@@ -110,7 +111,7 @@ impl CompDwa {
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
     ) -> CompDwaDisplayWithAllMaps<'a> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -152,7 +153,7 @@ fn fmt_comp_dwa_states(
 
 impl std::fmt::Display for CompDwa {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 }
 
@@ -188,19 +189,19 @@ pub struct CompDwaDisplayWithAllMaps<'a> {
 
 impl std::fmt::Display for CompDwaDisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl PartialEq for CompDwa {
     fn eq(&self, other: &Self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl PartialEq for CompDwaState {
     fn eq(&self, other: &Self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -227,28 +228,28 @@ pub struct Dwa {
 impl Dwa {
     /// Create a new DWA.
     pub fn new(weights: WeightTable, start_state: u32, accepting: Vec<bool>) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of states.
     pub fn num_states(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of token-set IDs.
     pub fn num_tsids(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the transition for `(state, tsid)`.
     #[inline]
     pub fn step(&self, state: u32, tsid: u32) -> (u32, i32) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether a state is accepting.
     pub fn is_accepting(&self, state: u32) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

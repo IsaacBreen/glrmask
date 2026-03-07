@@ -11,8 +11,10 @@
 //! 5. Build parser NWA from terminal characterizations
 //! 6. Determinize + minimize → parser DWA
 //! 7. Package as `Constraint`
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 pub mod a_terminal_dwa;
 pub mod b_template_dfa;
@@ -51,7 +53,7 @@ use crate::runtime::Constraint;
 ///                     └── Constraint { parser_dwa, table, tokenizer, vocab_pre, ... }
 /// ```
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Compile, returning a [`CompileDebug`] bundle alongside the [`Constraint`].
@@ -60,7 +62,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 /// inspect the terminal NWA before/after optimisations, the composed parser
 /// NWA before/after resolve_negatives, the DWA pre/post minimisation, etc.
 pub fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ====================================================================

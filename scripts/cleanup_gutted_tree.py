@@ -7,8 +7,12 @@ OLD_ATTRS = (
     '#![allow(unused_imports, unused_variables, dead_code)]\n',
     '#![allow(unused_imports, unused_variables, unused_mut, dead_code)]\n',
 )
-NARROW_ATTR = '#![allow(unused_imports)]\n'
-DEAD_CODE_ATTR = '#![allow(dead_code)]\n'
+NARROW_ATTRS = (
+    '#![allow(unused_imports)]\n',
+    '#![allow(unused_variables)]\n',
+    '#![allow(unused_mut)]\n',
+    '#![allow(dead_code)]\n',
+)
 OLD_UNIMP = 'unimplemented!("cargo-check-only stub")'
 NEW_UNIMP = 'unimplemented!()'
 
@@ -21,8 +25,8 @@ def split_pre_test(text: str) -> tuple[str, str]:
     return text[:idx], text[idx:]
 
 
-def insert_narrow_attr(pre: str) -> str:
-    if NARROW_ATTR in pre:
+def insert_attr(pre: str, attr: str) -> str:
+    if attr in pre:
         return pre
     lines = pre.splitlines(keepends=True)
     insert_at = 0
@@ -34,23 +38,7 @@ def insert_narrow_attr(pre: str) -> str:
             i += 1
             continue
         break
-    return pre[:insert_at] + NARROW_ATTR + pre[insert_at:]
-
-
-def insert_dead_code_attr(pre: str) -> str:
-    if DEAD_CODE_ATTR in pre:
-        return pre
-    lines = pre.splitlines(keepends=True)
-    insert_at = 0
-    i = 0
-    while i < len(lines):
-        s = lines[i].lstrip()
-        if s.startswith('//!') or s.startswith('/*!') or s.startswith('#![') or s == '\n':
-            insert_at += len(lines[i])
-            i += 1
-            continue
-        break
-    return pre[:insert_at] + DEAD_CODE_ATTR + pre[insert_at:]
+    return pre[:insert_at] + attr + pre[insert_at:]
 
 
 def cleanup_file(path: Path) -> bool:
@@ -59,12 +47,18 @@ def cleanup_file(path: Path) -> bool:
     cleaned = pre
     for attr in OLD_ATTRS:
         cleaned = cleaned.replace(attr, '')
-    cleaned = cleaned.replace(NARROW_ATTR, '')
-    cleaned = cleaned.replace(DEAD_CODE_ATTR, '')
+    for attr in NARROW_ATTRS:
+        cleaned = cleaned.replace(attr, '')
     cleaned = cleaned.replace(OLD_UNIMP, NEW_UNIMP)
+    attrs_to_add = [
+        NARROW_ATTRS[1],
+        NARROW_ATTRS[2],
+        NARROW_ATTRS[3],
+    ]
     if '\nuse ' in cleaned or cleaned.lstrip().startswith('use '):
-        cleaned = insert_narrow_attr(cleaned)
-    cleaned = insert_dead_code_attr(cleaned)
+        attrs_to_add.insert(0, NARROW_ATTRS[0])
+    for attr in reversed(attrs_to_add):
+        cleaned = insert_attr(cleaned, attr)
     rewritten = cleaned + tail
     if rewritten != original:
         path.write_text(rewritten)

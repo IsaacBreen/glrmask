@@ -15,8 +15,10 @@
 //! - merge, peek, reduce_acc
 //!
 //! All logic here is pure Rust and contains no Python bindings.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use im::{HashMap as IHashMap, OrdMap};
 use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
@@ -58,11 +60,11 @@ enum Upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     fn max_depth(&self) -> isize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn children_keys(&self) -> Vec<T> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

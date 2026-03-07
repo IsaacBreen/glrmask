@@ -3,8 +3,9 @@
 //! `U8Set` represents a set of byte values (0..=255) using two `u128` words.
 //! This is the fundamental building block for byte-level automata transitions.
 #![allow(dead_code)]
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::fmt;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
@@ -34,116 +35,116 @@ impl U8Set {
 
     /// Singleton set containing just one byte.
     pub fn from_byte(b: u8) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set from a byte slice.
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set from an inclusive byte range `[lo, hi]`.
     pub fn from_range(lo: u8, hi: u8) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set from a predicate function.
     pub fn from_predicate(f: impl Fn(u8) -> bool) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether the set is empty.
     pub fn is_empty(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of bytes in the set.
     pub fn len(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether the set contains all 256 bytes.
     pub fn is_full(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Check if a byte is in the set.
     pub fn contains(&self, b: u8) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Insert a byte into the set. Returns true if the byte was not already present.
     pub fn insert(&mut self, b: u8) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Remove a byte from the set. Returns true if the byte was present.
     pub fn remove(&mut self, b: u8) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Union of two sets.
     pub fn union(&self, other: &Self) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Intersection of two sets.
     pub fn intersection(&self, other: &Self) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set difference: `self \ other`.
     pub fn difference(&self, other: &Self) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Complement: all bytes NOT in this set.
     pub fn complement(&self) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Iterator over all bytes in the set, in ascending order.
     pub fn iter(&self) -> U8SetIter {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl Default for U8Set {
     fn default() -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl BitOr for U8Set {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl BitOrAssign for U8Set {
     fn bitor_assign(&mut self, rhs: Self) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl BitAnd for U8Set {
     type Output = Self;
     fn bitand(self, rhs: Self) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl BitAndAssign for U8Set {
     fn bitand_assign(&mut self, rhs: Self) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl Not for U8Set {
     type Output = Self;
     fn not(self) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -160,7 +161,7 @@ impl fmt::Debug for U8Set {
 
 impl fmt::Display for U8Set {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -175,7 +176,7 @@ impl Iterator for U8SetIter {
     type Item = u8;
 
     fn next(&mut self) -> Option<u8> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

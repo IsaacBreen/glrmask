@@ -2,8 +2,10 @@
 //!
 //! Cargo-check-only skeleton: signatures and module structure are preserved,
 //! but implementation bodies are intentionally gutted.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeSet;
 
@@ -31,29 +33,29 @@ fn build_terminal_dwa_nwa(
     vocab_pre: &VocabPreprocessing,
     used_terminals: &BTreeSet<TerminalId>,
 ) -> TerminalDwa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn compute_ever_allowed_follows(grammar: &GlrGrammar) -> Vec<Vec<TerminalId>> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn compute_always_allowed_follows(grammar: &GlrGrammar) -> Vec<Vec<TerminalId>> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn collapse_always_allowed(
     terminal_dwa: &mut TerminalDwa,
     grammar: &GlrGrammar,
 ) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn prune_disallowed_follows(
     terminal_dwa: &mut TerminalDwa,
     grammar: &GlrGrammar,
 ) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn build_terminal_dwa_impl(
@@ -64,7 +66,7 @@ fn build_terminal_dwa_impl(
     used_terminals: &BTreeSet<TerminalId>,
     capture_debug: bool,
 ) -> (TerminalDwa, Option<TerminalDebug>) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 pub(crate) fn build_terminal_dwa(
@@ -74,7 +76,7 @@ pub(crate) fn build_terminal_dwa(
     grammar: &GlrGrammar,
     used_terminals: &BTreeSet<TerminalId>,
 ) -> TerminalDwa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 pub(crate) fn build_terminal_dwa_with_debug(
@@ -84,7 +86,7 @@ pub(crate) fn build_terminal_dwa_with_debug(
     grammar: &GlrGrammar,
     used_terminals: &BTreeSet<TerminalId>,
 ) -> (TerminalDwa, TerminalDebug) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 #[cfg(test)]

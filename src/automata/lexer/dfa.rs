@@ -7,8 +7,9 @@
 //! - A 256-entry transition table (one per byte)
 //! - A set of "finalizer" group IDs (which regex groups are matched at this state)
 #![allow(dead_code)]
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeSet;
 
@@ -45,105 +46,105 @@ pub struct Dfa {
 impl Dfa {
     /// Create a DFA with the given number of states (all transitions dead, no finalizers).
     pub fn new(num_states: usize) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of states.
     pub fn num_states(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set a transition.
     #[inline]
     pub fn set_transition(&mut self, from: u32, byte: u8, to: u32) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get a transition. Returns `DEAD` if no transition.
     #[inline]
     pub fn get_transition(&self, from: u32, byte: u8) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the set of bytes that have transitions from a state.
     pub fn get_u8set(&self, state: u32) -> U8Set {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a finalizer group ID to a state.
     pub fn add_finalizer(&mut self, state: u32, group_id: GroupId) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a non-greedy finalizer group ID to a state.
     pub fn add_non_greedy_finalizer(&mut self, state: u32, group_id: GroupId) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set the finalizers for a state.
     pub fn set_finalizers(&mut self, state: u32, groups: BTreeSet<GroupId>) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the finalizer group IDs for a state.
     pub fn finalizers(&self, state: u32) -> &BTreeSet<GroupId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the non-greedy finalizer group IDs for a state.
     pub fn non_greedy_finalizers(&self, state: u32) -> &BTreeSet<GroupId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the group IDs reachable from this state on some non-empty suffix.
     pub fn possible_future_group_ids(&self, state: u32) -> &BTreeSet<GroupId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether a state is accepting (has any finalizer).
     pub fn is_accepting(&self, state: u32) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set whether a state is accepting (convenience, uses group 0).
     pub fn set_accepting(&mut self, state: u32, accepting: bool) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Run the DFA on a byte sequence from state 0. Returns the final state
     /// (or `DEAD` if any transition was dead).
     pub fn run(&self, input: &[u8]) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether the DFA accepts the given input.
     pub fn accepts(&self, input: &[u8]) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Which group IDs match the given input (empty if no match).
     pub fn find_matches(&self, input: &[u8]) -> BTreeSet<GroupId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the next state for a byte, returning `None` for dead.
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Access the full transition table.
     pub fn transitions(&self) -> &[u32] {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Minimize this DFA using Hopcroft's algorithm. Returns a new minimized DFA.
     pub fn minimize(&self) -> Dfa {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Recompute `possible_future_group_ids` from the current transition graph.
     pub fn recompute_possible_future_group_ids(&mut self) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -153,7 +154,7 @@ impl Dfa {
 /// and finalizer sets. States with different finalizers or different transition
 /// signatures (w.r.t. equivalence classes) are separated.
 fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 #[cfg(test)]

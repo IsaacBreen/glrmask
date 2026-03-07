@@ -3,8 +3,9 @@
 //! Supports epsilon transitions and U8Set-based byte transitions.
 //! Can be converted to a DFA via subset construction.
 #![allow(dead_code)]
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -28,7 +29,7 @@ struct NfaState {
 
 impl NfaState {
     fn new() -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -43,57 +44,57 @@ pub struct Nfa {
 impl Nfa {
     /// Create an NFA with the given number of states.
     pub fn new(num_states: usize) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of states.
     pub fn num_states(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a new state and return its ID.
     pub fn add_state(&mut self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a single-byte transition.
     pub fn add_transition(&mut self, from: u32, byte: u8, to: u32) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a U8Set transition (transition on any byte in the set).
     pub fn add_u8set_transition(&mut self, from: u32, set: U8Set, to: u32) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add an epsilon transition.
     pub fn add_epsilon(&mut self, from: u32, to: u32) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Mark a state as finalizing for a group.
     pub fn add_finalizer(&mut self, state: u32, group_id: GroupId) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Mark a state as finalizing for a non-greedy group.
     pub fn add_non_greedy_finalizer(&mut self, state: u32, group_id: GroupId) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set whether a state is accepting (convenience, uses group 0).
     pub fn set_accepting(&mut self, state: u32, accepting: bool) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether a state is accepting.
     pub fn is_accepting(&self, state: u32) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Compute the epsilon closure of a set of states.
     pub fn epsilon_closure(&self, states: &BTreeSet<u32>) -> BTreeSet<u32> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Convert this NFA to a DFA via subset construction.
@@ -101,12 +102,12 @@ impl Nfa {
     /// Uses input equivalence classes to reduce the alphabet size,
     /// then builds the DFA using the standard powerset/subset construction.
     pub fn to_dfa(&self) -> Dfa {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Standard subset construction NFA → DFA.
     fn subset_construction(&self) -> Dfa {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Compute input equivalence classes.
@@ -116,7 +117,7 @@ impl Nfa {
     /// - `num_classes` = number of distinct classes
     /// - `class_members[class]` = one representative byte for each class
     fn compute_equivalence_classes(&self) -> (Vec<u8>, u8, Vec<u8>) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

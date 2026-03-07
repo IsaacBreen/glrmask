@@ -2,34 +2,36 @@
 //!
 //! Cargo-check-only skeleton: signatures and module structure are preserved,
 //! but implementation bodies are intentionally gutted.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use crate::automata::weighted::nwa::Nwa;
 use crate::automata::weighted::weight::Weight;
 
 pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 pub(crate) fn apply_cancellations(nwa: &mut Nwa) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 pub(crate) fn apply_finality_fixpoint(nwa: &mut Nwa) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 pub(crate) fn remove_negative_transitions(nwa: &mut Nwa) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 pub(crate) fn remove_redundant_default_transitions(nwa: &mut Nwa) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut Nwa) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 #[cfg(test)]

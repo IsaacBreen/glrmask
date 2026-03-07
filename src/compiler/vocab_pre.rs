@@ -4,8 +4,10 @@
 //! tokenizer state to discover which (state, terminal) pairs each token
 //! produces. Compresses the reachable tokenizer states into compact
 //! "TSID" (Tokenizer State ID) indices.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -52,7 +54,7 @@ impl VocabPreprocessing {
         vocab: &Vocab,
         used_terminals: Option<&BTreeSet<TerminalId>>,
     ) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

@@ -11,8 +11,10 @@
 //! - `enum`, `const`
 //! - `$ref`, `$defs`, `definitions`
 //! - `pattern` (string regex), `minLength`, `maxLength`
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::HashMap;
 
@@ -22,12 +24,12 @@ use crate::frontend::grammar_expr::{GrammarExpr, NamedGrammar, lower};
 
 /// Convert a JSON Schema (as a JSON string) into a `GrammarDef`.
 pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Convert a parsed JSON Schema value into a `NamedGrammar`.
 pub fn schema_to_named_grammar(schema: &serde_json::Value) -> Result<NamedGrammar, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -43,11 +45,11 @@ struct SchemaCtx {
 
 impl SchemaCtx {
     fn new(root: &serde_json::Value) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn fresh_name(&mut self, hint: &str) -> String {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // -----------------------------------------------------------------------
@@ -55,7 +57,7 @@ impl SchemaCtx {
     // -----------------------------------------------------------------------
 
     fn convert_schema(&mut self, schema: &serde_json::Value) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // -----------------------------------------------------------------------
@@ -63,7 +65,7 @@ impl SchemaCtx {
     // -----------------------------------------------------------------------
 
     fn resolve_ref(&mut self, ref_str: &str) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // -----------------------------------------------------------------------
@@ -75,7 +77,7 @@ impl SchemaCtx {
         all: &[serde_json::Value],
         parent: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // -----------------------------------------------------------------------
@@ -86,7 +88,7 @@ impl SchemaCtx {
         &mut self,
         obj: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Build an object rule with the CFA-style sequential optional permutation.
@@ -106,7 +108,7 @@ impl SchemaCtx {
         required: &[String],
         additional: Option<&serde_json::Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // -----------------------------------------------------------------------
@@ -117,7 +119,7 @@ impl SchemaCtx {
         &mut self,
         obj: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // -----------------------------------------------------------------------
@@ -126,52 +128,52 @@ impl SchemaCtx {
 
     /// Generic JSON value (fully recursive: includes arrays and objects).
     fn json_value(&mut self) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Generic JSON array: `[ ws (_json_value (, ws _json_value)*)? ws ]`.
     fn json_array_generic(&mut self) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Generic JSON object: `{ ws (str : val (, str : val)*)? ws }`.
     fn json_object_generic(&mut self) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// JSON string: `"` (escape | [^"\\])* `"`.
     fn json_string(&mut self) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// JSON string constrained by minLength / maxLength.
     fn json_string_bounded(&mut self, min: usize, max: Option<usize>) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// JSON string matching a regex pattern (wrapped in `"..."` delimiters).
     fn json_string_pattern(&self, pattern: &str) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// JSON number.
     fn json_number(&mut self) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// JSON integer.
     fn json_integer(&mut self) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Produce a GrammarExpr for a specific JSON literal value.
     fn json_literal(&self, value: &serde_json::Value) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Produce a GrammarExpr for a JSON string literal: `"key"`.
     fn json_string_literal(&self, s: &str) -> GrammarExpr {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -181,12 +183,12 @@ impl SchemaCtx {
 
 /// Collapse a vec of alternatives into a `Choice` (or return single element).
 fn choice_or_single(alts: Vec<GrammarExpr>) -> GrammarExpr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Sanitise a property name into a valid rule-name fragment.
 fn sanitize_rule_name(s: &str) -> String {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Build the CFA-style sequential permutation optional-property choice.
@@ -200,7 +202,7 @@ fn sanitize_rule_name(s: &str) -> String {
 /// ])
 /// ```
 fn build_optional_choice(optional_keys: &[String], kv_rules: &[(String, String)]) -> GrammarExpr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Build a repetition expression for `min..=max` items of `item_rule`, separated by `, ws`.
@@ -209,7 +211,7 @@ fn build_optional_choice(optional_keys: &[String], kv_rules: &[(String, String)]
 /// - `min=1, max=None` → `item (, ws item)*`
 /// - `min=2, max=Some(4)` → `item , ws item (, ws item)? (, ws item)?`
 fn build_repetition(item_rule: &str, min: usize, max: Option<usize>) -> GrammarExpr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------

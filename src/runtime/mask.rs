@@ -11,8 +11,10 @@
 //! 3. Project the DWA transition weights to the TSID column to get
 //!    token-space RangeSets
 //! 4. Union all results into the final mask
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeMap;
 
@@ -37,7 +39,7 @@ pub fn compute_mask(
     max_token: u32,
     num_tsids: u32,
 ) -> BitSet {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Walk the DWA with weight intersection along the path.
@@ -46,7 +48,7 @@ pub fn compute_mask(
 /// in token-space only. This avoids carrying N×M-space accumulators when
 /// only a single TSID column is needed.
 fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> TokenSet {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 #[cfg(test)]

@@ -3,21 +3,23 @@
 //! When only one token is allowed by the mask, it can be "forced" without
 //! sampling. This module provides utilities for detecting and returning
 //! forced tokens.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use crate::ds::bitset::BitSet;
 
 /// Check if the mask allows exactly one token. Returns it if so.
 #[allow(dead_code)]
 pub(crate) fn forced_token(mask: &BitSet) -> Option<u32> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Check if the mask is empty (no tokens allowed).
 #[allow(dead_code)]
 pub(crate) fn is_dead(mask: &BitSet) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 #[cfg(test)]

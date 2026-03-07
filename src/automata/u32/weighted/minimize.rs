@@ -10,8 +10,10 @@
 //!   transition weight.
 //!
 //! Because the DWA is acyclic, a single bottom-up pass suffices.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeMap;
 
@@ -27,7 +29,7 @@ use super::weight::Weight;
 
 /// Minimize a [`CompDwa`] by merging states with identical behaviour.
 pub fn minimize_acyclic(dwa: &CompDwa) -> CompDwa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -35,7 +37,7 @@ pub fn minimize_acyclic(dwa: &CompDwa) -> CompDwa {
 // ---------------------------------------------------------------------------
 
 fn compute_heights(dwa: &CompDwa) -> Vec<u32> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +55,7 @@ struct Sig {
 }
 
 fn state_signature(st: &CompDwaState, class: &[u32]) -> Sig {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ====================================================================

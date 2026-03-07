@@ -6,8 +6,10 @@
 //! still lacks the full tokenizer/template composition step, but it can and
 //! should at least build the parser-side bundles explicitly instead of hiding
 //! that structure inside `parser_dwa.rs`.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -147,7 +149,7 @@ impl<'a> TemplateCompositionContext<'a> {
         num_tsids: u32,
         max_token: u32,
     ) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -177,7 +179,7 @@ pub(crate) fn build_template_bundles(
     characterizations: &BTreeMap<TerminalId, TerminalCharacterization>,
     used_terminals: &BTreeSet<TerminalId>,
 ) -> Vec<TemplateBundle> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn ensure_nt_stack_state(
@@ -187,19 +189,19 @@ fn ensure_nt_stack_state(
     depth: usize,
     w_all: &Weight,
 ) -> u32 {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn build_template_structure_nwa(characterization: &TerminalCharacterization) -> Nwa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn is_acyclic(dwa: &CompDwa) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn build_template_dfa(characterization: &TerminalCharacterization) -> TemplateDfa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn instantiate_template_dfa(
@@ -208,11 +210,11 @@ fn instantiate_template_dfa(
     num_tsids: u32,
     max_token: u32,
 ) -> Nwa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn append_nwa(target: &mut Nwa, fragment: &Nwa) -> u32 {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Build the parser-side template NWA by unioning the per-bundle template NWAs.
@@ -222,7 +224,7 @@ pub(crate) fn build_template_nwa_from_bundles(
     num_tsids: u32,
     max_token: u32,
 ) -> Nwa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 #[cfg(test)]

@@ -2,8 +2,10 @@
 //!
 //! Provides a high-level grammar IR (`GrammarExpr`) that frontends produce,
 //! plus logic to flatten it into the low-level `GrammarDef` consumed by the compiler.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeMap;
 
@@ -71,27 +73,27 @@ struct Lowerer {
 
 impl Lowerer {
     fn new() -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get or create a nonterminal ID for a name.
     fn nt_id(&mut self, name: &str) -> NonterminalId {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Create an anonymous nonterminal.
     fn fresh_nt(&mut self, hint: &str) -> (String, NonterminalId) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get or create a terminal for a literal/pattern.
     fn terminal_id(&mut self, name: &str, pattern: &str) -> TerminalId {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Lower a `GrammarExpr` into a single `Symbol` (creating helper rules as needed).
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -101,7 +103,7 @@ impl Lowerer {
 
 /// Check if a rule name is a terminal name (ALL-CAPS, underscores, digits).
 fn is_terminal_name(name: &str) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Compile a `GrammarExpr` into a regex pattern string.
@@ -112,7 +114,7 @@ fn compile_to_regex(
     expr: &GrammarExpr,
     terminal_patterns: &BTreeMap<String, String>,
 ) -> Result<String, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Lower a `NamedGrammar` to a `GrammarDef`.
@@ -120,7 +122,7 @@ fn compile_to_regex(
 /// Terminal rules (ALL-CAPS names) are compiled to single terminals with regex
 /// patterns. Nonterminal rules (lowercase names) reference terminals directly.
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -128,11 +130,11 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
 // ---------------------------------------------------------------------------
 
 fn escape_byte(b: u8) -> String {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn regex_escape_byte(b: u8) -> String {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------

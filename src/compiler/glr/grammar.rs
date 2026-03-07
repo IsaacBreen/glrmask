@@ -17,8 +17,10 @@
 //! 2. **Right recursion elimination** via [`eliminate_right_recursion`] — removes all
 //!    direct and indirect right recursion (and hidden left recursion) that would
 //!    otherwise create unbounded reduction chains and NWA back-edges.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeSet, BTreeMap};
 
@@ -60,17 +62,17 @@ impl GlrGrammar {
     /// `GrammarDef` BEFORE passing it to this function.  The compilation
     /// pipeline in `pipeline.rs` does this automatically.
     pub fn from_grammar_def(g: &GrammarDef) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// FIRST set for a sequence of symbols.
     pub fn first_of_seq(&self, seq: &[Symbol]) -> BTreeSet<TerminalId> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether a symbol sequence can derive ε.
     pub fn seq_is_nullable(&self, seq: &[Symbol]) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -100,7 +102,7 @@ impl GlrGrammar {
 ///
 /// Call this once in the compilation pipeline BEFORE [`GlrGrammar::from_grammar_def`].
 pub fn normalize_for_mask(g: &GrammarDef) -> GrammarDef {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +146,7 @@ pub(crate) fn eliminate_direct_left_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalId,
 ) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -170,12 +172,12 @@ pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalId,
 ) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Return the highest NT id present in `rules` (0 if empty).
 fn max_nt_id(rules: &[Rule]) -> u32 {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Build the right-reachability graph: A → B if A has a production where B
@@ -187,7 +189,7 @@ fn build_right_reachability_graph(
     rules: &[Rule],
     nullable: &BTreeSet<NonterminalId>,
 ) -> BTreeMap<NonterminalId, BTreeSet<NonterminalId>> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Find an indirect right-recursion cycle (length > 1, no self-loops).
@@ -196,7 +198,7 @@ fn build_right_reachability_graph(
 fn find_indirect_rr_cycle(
     graph: &BTreeMap<NonterminalId, BTreeSet<NonterminalId>>,
 ) -> Option<Vec<NonterminalId>> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Inline `to_nt`'s productions into every rule of `from_nt` that ends with `to_nt`
@@ -210,13 +212,13 @@ fn inline_right_end(
     to_nt: NonterminalId,
     nullable: &BTreeSet<NonterminalId>,
 ) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Returns `true` if `rule` has direct right recursion (its last RHS symbol
 /// is the NT equal to `rule.lhs`).
 fn is_direct_right_recursive(rule: &Rule) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Eliminate direct right recursion for a single NT `nt` using the
@@ -240,7 +242,7 @@ fn resolve_direct_rr_single_nt(
     nt: NonterminalId,
     new_nt: NonterminalId,
 ) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +267,7 @@ fn resolve_direct_rr_single_nt(
 ///
 /// Panics if the result still contains epsilon productions (indicates a bug).
 pub(crate) fn inline_epsilon_rules(rules: &[Rule]) -> Vec<Rule> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +275,7 @@ pub(crate) fn inline_epsilon_rules(rules: &[Rule]) -> Vec<Rule> {
 // ---------------------------------------------------------------------------
 
 fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalId> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +287,7 @@ fn compute_first(
     num_nt: u32,
     nullable: &BTreeSet<NonterminalId>,
 ) -> Vec<BTreeSet<TerminalId>> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +301,7 @@ fn compute_follow(
     first: &[BTreeSet<TerminalId>],
     nullable: &BTreeSet<NonterminalId>,
 ) -> Vec<BTreeSet<TerminalId>> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 #[cfg(test)]

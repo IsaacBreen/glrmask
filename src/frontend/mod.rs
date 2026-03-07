@@ -2,8 +2,9 @@
 //!
 //! All frontends parse their input into a shared `GrammarExpr` AST,
 //! then lower it to the internal `GrammarDef` used by the compiler.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
 
 pub mod ebnf;
 pub mod grammar_expr;

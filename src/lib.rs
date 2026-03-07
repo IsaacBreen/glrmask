@@ -39,8 +39,10 @@
 //! - `runtime`: Mask computation and state management
 //! - `automata`: Finite automata (DFA, NFA, DWA, NWA)
 //! - `ds`: Data structures (bitset, rangeset)
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 #![deny(warnings)]
 
@@ -92,21 +94,21 @@ impl Vocab {
     /// If `eos_token_id` is `None`, auto-detects by looking for a token whose
     /// bytes are `<|endoftext|>`.
     pub fn new(entries: Vec<(u32, Vec<u8>)>, eos_token_id: Option<u32>) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of tokens in the vocabulary.
     pub fn len(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether the vocabulary is empty.
     pub fn is_empty(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Maximum token ID + 1 (determines bitvector size for masks).
     pub fn max_token_id(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }

@@ -2,8 +2,10 @@
 //!
 //! `Constraint` holds all compiled artifacts needed at inference time.
 //! `ConstraintState` tracks per-sequence state and computes token masks.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,13 +55,13 @@ pub struct Constraint {
 
     /// Per-TSID: { terminal_id → token TokenSet }.
     /// `possible_matches[tsid][terminal] = set of allowed token IDs`.
-    #[serde(with = "crate::ds::range_set_serde::vec_btmap_rsb")]
+    #[serde(with = "crate::ds::rangeset2d::vec_btmap_rsb")]
     pub(crate) possible_matches: Vec<BTreeMap<TerminalId, TokenSet>>,
 
     /// Per-TSID: tokens that reach a non-dead tokenizer state without
     /// completing any terminal match. These tokens advance the tokenizer
     /// without triggering parser actions.
-    #[serde(with = "crate::ds::range_set_serde::vec_rsb")]
+    #[serde(with = "crate::ds::rangeset2d::vec_rsb")]
     pub(crate) passthrough_tokens: Vec<TokenSet>,
 
     /// Maximum token ID in the vocabulary.
@@ -81,7 +83,7 @@ pub struct Constraint {
 impl Constraint {
     /// Compile a constraint from an EBNF grammar string.
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Compile a constraint from an EBNF grammar string, returning a
@@ -91,29 +93,29 @@ impl Constraint {
         ebnf: &str,
         vocab: &crate::Vocab,
     ) -> crate::Result<(Self, crate::compiler::debug::CompileDebug)> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Compile a constraint from a Lark grammar string.
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Compile a constraint from a JSON Schema string.
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Serialize this constraint to a byte vector (bincode format).
     ///
     /// Infallible — panics only if memory is exhausted (which will crash anyway).
     pub fn save(&self) -> Vec<u8> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Deserialize a constraint from bytes (bincode format).
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Create a new `ConstraintState` at the start position.
@@ -201,7 +203,7 @@ impl Constraint {
     #[allow(dead_code)]
     /// Get the tokenizer's initial state (for debugging).
     pub(crate) fn tokenizer_initial_state(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of `u32` words required in a mask buffer for this vocabulary.
@@ -209,12 +211,12 @@ impl Constraint {
     /// Allocate the buffer with `vec![0u32; self.constraint.mask_len()]`.
     /// Token `i` is allowed iff `buf[i / 32] & (1u32 << (i % 32)) != 0`.
     pub fn mask_len(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Access the compiled parser DWA (for debugging/analysis).
     pub fn parser_dwa(&self) -> &CompDwa {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -249,13 +251,13 @@ impl<'a> ConstraintState<'a> {
     /// **Note**: prefer [`mask`] or [`fill_mask`] which return `u32` words matching the
     /// plan's public API. This method is retained for white-box tests only.
     pub(crate) fn compute_mask(&self) -> BitSet {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Compute expected terminals per tokenizer state from parser stacks.
     /// Includes reduce-cascade expansion.
     fn compute_expected_per_tok(&self) -> BTreeMap<u32, BTreeSet<TerminalId>> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether the current state is accepting (grammar allows end-of-input here).
@@ -269,7 +271,7 @@ impl<'a> ConstraintState<'a> {
     /// **Note**: prefer [`is_finished`] which matches the plan's public API.
     /// This method is retained for white-box tests only.
     pub(crate) fn is_accepting(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Commit a token: advance the constraint state.
@@ -282,7 +284,7 @@ impl<'a> ConstraintState<'a> {
         &mut self,
         token_id: u32,
     ) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // -----------------------------------------------------------------------
@@ -294,7 +296,7 @@ impl<'a> ConstraintState<'a> {
     /// Token `i` is allowed iff `result[i / 32] & (1u32 << (i % 32)) != 0`.
     /// Allocate the buffer with [`Constraint::mask_len`] words.
     pub fn mask(&self) -> Vec<u32> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Fill a pre-allocated mask buffer.
@@ -302,12 +304,12 @@ impl<'a> ConstraintState<'a> {
     /// `buf` must be at least `self.constraint.mask_len()` words long.
     /// Token `i` is allowed iff `buf[i / 32] & (1u32 << (i % 32)) != 0`.
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether the grammar has been fully satisfied (EOS is valid at current position).
     pub fn is_finished(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Commit raw bytes, advancing tokenizer and parser state.
@@ -315,14 +317,14 @@ impl<'a> ConstraintState<'a> {
     /// Infallible. If the bytes produce no valid parse continuations the next
     /// mask will simply be empty.
     pub fn commit_bytes(&mut self, bytes: &[u8]) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Commit multiple tokens in sequence (batch convenience wrapper).
     ///
     /// Equivalent to calling [`commit`] for each token ID in order.
     pub fn commit_tokens(&mut self, tokens: &[u32]) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Return the sequence of tokens forced by the current grammar state.
@@ -335,7 +337,7 @@ impl<'a> ConstraintState<'a> {
     /// The caller is responsible for committing the returned tokens via
     /// [`commit_tokens`].
     pub fn force(&self) -> Vec<u32> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // -----------------------------------------------------------------------
@@ -344,7 +346,7 @@ impl<'a> ConstraintState<'a> {
 
     /// Core byte-processing engine shared by `commit` and `commit_bytes`.
     fn process_bytes_raw(&mut self, bytes: &[u8]) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -362,7 +364,7 @@ impl<'a> ConstraintState<'a> {
 ///
 /// This is equivalent to grammars2024's `process_token_gss`.
 fn step_glr_gss(table: &GlrTable, gss: &ParserGSS, terminal: TerminalId) -> ParserGSS {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Compute ε-reduce closure for a single stack.
@@ -373,16 +375,16 @@ fn step_glr_gss(table: &GlrTable, gss: &ParserGSS, terminal: TerminalId) -> Pars
 ///
 /// The original stack is NOT included in `out` — only newly produced variants.
 fn epsilon_reduce_stacks(table: &GlrTable, stack: &[u32], out: &mut Vec<Vec<u32>>) {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Check if a stack can reach Accept via EOF (possibly after reduce cascades).
 fn can_accept(table: &GlrTable, stack: &[u32], eof: TerminalId) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 fn can_accept_inner(table: &GlrTable, stack: &[u32], eof: TerminalId, depth: usize) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Check if a state has viable continuations.
@@ -401,5 +403,5 @@ fn has_viable_state(
     initial_tok_state: u32,
     tok_dfa: &crate::automata::dfa::Dfa,
 ) -> bool {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }

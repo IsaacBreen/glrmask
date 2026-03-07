@@ -8,8 +8,9 @@
 //! [`Weight`](super::weight::Weight) sets representing which
 //! (token, TSID) positions survive a transition.
 #![allow(dead_code)]
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeMap;
 
@@ -46,42 +47,42 @@ pub struct Nwa {
 impl Nwa {
     /// Create an empty NWA.
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a new state and return its ID.
     pub fn add_state(&mut self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of states.
     pub fn num_states(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set the final weight for a state (makes it accepting).
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a labelled transition.
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add an ε-transition.
     pub fn add_epsilon(&mut self, from: u32, to: u32, weight: Weight) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Total number of transitions (labelled + ε).
     pub fn num_transitions(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Maximum position in the weight space.
     pub fn max_position(&self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Return a wrapper that prints this NWA using a symbol→name map.
@@ -91,7 +92,7 @@ impl Nwa {
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
     ) -> NwaDisplayWithSymbols<'a> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Return a wrapper that prints this NWA using maps for symbols, TSIDs,
@@ -102,7 +103,7 @@ impl Nwa {
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
     ) -> NwaDisplayWithAllMaps<'a> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -157,7 +158,7 @@ fn fmt_nwa_states(
 
 impl std::fmt::Display for Nwa {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 }
 
@@ -193,7 +194,7 @@ pub struct NwaDisplayWithAllMaps<'a> {
 
 impl std::fmt::Display for NwaDisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

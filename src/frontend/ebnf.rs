@@ -22,8 +22,10 @@
 //! [^a-z]          # negated character class
 //! rule_name       # rule reference
 //! ```
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
@@ -104,7 +106,7 @@ impl<'a> Lexer<'a> {
                     Some(b'"') => s.push('"'),
                     Some(b'\'') => s.push('\''),
                     Some(b'x') => {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
                     Some(c) => {
                         s.push('\\');
@@ -127,20 +129,20 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_char_class(&mut self) -> Result<(String, bool), GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn lex_ident(&mut self, first: u8) -> String {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn tokenize(&mut self) -> Result<Vec<Token>, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -154,52 +156,52 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn peek(&self) -> Option<&Token> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn advance(&mut self) -> Option<Token> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn expect(&mut self, expected: &Token) -> Result<(), GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn skip_newlines(&mut self) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Parse the full grammar.
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// `alternatives = sequence ("|" sequence)*`
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// `sequence = unit+`
     fn parse_sequence(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn is_unit_start(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// `unit = atom quantifier?`
     fn parse_unit(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// `atom = IDENT | LITERAL | CHARCLASS | "(" alternatives ")" | "."`
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -209,13 +211,13 @@ impl Parser {
 
 /// Parse an EBNF grammar string into a `GrammarDef`.
 pub fn parse_ebnf(input: &str) -> Result<GrammarDef, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 #[allow(dead_code)]
     /// Parse an EBNF grammar string into a `NamedGrammar` (intermediate form).
 pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------

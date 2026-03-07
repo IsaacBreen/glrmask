@@ -12,8 +12,9 @@
 //! Compilation uses CPS (Continuation-Passing Style) to build NFA fragments,
 //! then subset construction + Hopcroft minimization to produce a minimal DFA.
 #![allow(dead_code)]
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,27 +36,27 @@ pub struct Regex {
 impl Regex {
     /// Number of states in the DFA.
     pub fn num_states(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether the regex matches the input completely.
     pub fn is_match(&self, input: &[u8]) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the next DFA state for a byte, starting from the given state.
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether a DFA state is accepting.
     pub fn is_accepting(&self, state: u32) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the set of valid next bytes from a DFA state.
     pub fn get_u8set(&self, state: u32) -> U8Set {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -117,74 +118,74 @@ pub enum Expr {
 
 /// Match a single byte.
 pub fn byte(b: u8) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Match a byte sequence.
 pub fn bytes(bs: &[u8]) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Match any byte in a set.
 pub fn class(set: U8Set) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Match any byte in an inclusive range.
 pub fn range(lo: u8, hi: u8) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Zero or more (Kleene star).
 pub fn star(e: impl Into<Expr>) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// One or more.
 pub fn plus(e: impl Into<Expr>) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Zero or one.
 pub fn opt(e: impl Into<Expr>) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Bounded repetition `expr{min,max}`.
 pub fn repeat(e: impl Into<Expr>, min: usize, max: Option<usize>) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Alternation.
 pub fn choice(alts: Vec<Expr>) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Concatenation.
 pub fn seq(parts: Vec<Expr>) -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Epsilon (empty string).
 pub fn eps() -> Expr {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 impl From<u8> for Expr {
     fn from(b: u8) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl From<&[u8]> for Expr {
     fn from(bs: &[u8]) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl From<&str> for Expr {
     fn from(s: &str) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -193,7 +194,7 @@ impl From<&str> for Expr {
 impl Expr {
     /// Build a single-group regex from this expression.
     pub fn build(self) -> Regex {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// CPS (Continuation-Passing Style) NFA compilation.
@@ -206,19 +207,19 @@ impl Expr {
         cont: u32,
         cache: &mut HashMap<(usize, u32), u32>,
     ) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl ExprGroups {
     /// Compile all groups into a single multi-group regex.
     pub fn build(self) -> Regex {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Compile to NFA (without DFA conversion — useful for testing).
     pub fn build_nfa(self) -> Nfa {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

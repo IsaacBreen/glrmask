@@ -2,8 +2,9 @@
 //!
 //! Used for token masks and set operations on token IDs.
 #![allow(dead_code)]
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use serde::{Deserialize, Serialize};
 
@@ -19,57 +20,57 @@ pub struct BitSet {
 impl BitSet {
     /// Create a new bitset that can hold at least `len` bits, all initially zero.
     pub fn new(len: usize) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of bits this bitset can hold.
     pub fn len(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether the bitset has zero capacity.
     pub fn is_empty(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get the value of bit `i`.
     pub fn get(&self, i: usize) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set bit `i` to 1.
     pub fn set(&mut self, i: usize) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Clear bit `i` to 0.
     pub fn clear(&mut self, i: usize) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Set all bits to 0.
     pub fn clear_all(&mut self) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of set bits (population count).
     pub fn count_ones(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether all bits are zero.
     pub fn is_zero(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// In-place OR: `self |= other`.
     pub fn union_with(&mut self, other: &BitSet) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// In-place AND: `self &= other`.
     pub fn intersect_with(&mut self, other: &BitSet) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Iterator over set bit indices.

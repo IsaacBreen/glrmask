@@ -1,4 +1,8 @@
 //! Unweighted DFA skeleton used by parser templates.
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeMap;
 
@@ -19,33 +23,33 @@ pub struct Dfa {
 impl Dfa {
     #[allow(unused_variables, unused_mut, dead_code)]
     pub fn new() -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     #[allow(unused_variables, unused_mut, dead_code)]
     pub fn num_states(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     #[allow(unused_variables, unused_mut, dead_code)]
     pub fn add_state(&mut self) -> u32 {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     #[allow(unused_variables, unused_mut, dead_code)]
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     #[allow(unused_variables, unused_mut, dead_code)]
     pub fn set_accepting(&mut self, state: u32, is_accepting: bool) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
 impl std::fmt::Display for Dfa {
     #[allow(unused_variables, unused_mut, dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }

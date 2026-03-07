@@ -3,8 +3,10 @@
 //! Captures intermediate automata from each stage of the compilation pipeline
 //! without relying on env-var printing. Returned alongside the Constraint by
 //! [`compile_with_debug`].
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::BTreeMap;
 
@@ -184,17 +186,17 @@ impl CompileDebug {
         vocab_entries: Vec<(u32, Vec<u8>)>,
         eos_token_id: Option<u32>,
     ) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     // --- Display helpers (private) ---
 
     fn terminal_name(&self, id: TerminalId) -> &str {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     fn symbol_str(&self, sym: &crate::compiler::grammar_def::Symbol) -> String {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 

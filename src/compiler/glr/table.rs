@@ -2,8 +2,10 @@
 //!
 //! Builds LR(0) item sets, then derives SLR(1) actions using FOLLOW sets.
 //! Shift/reduce and reduce/reduce conflicts are retained (GLR).
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -48,17 +50,17 @@ pub struct GlrTable {
 impl GlrTable {
     /// Build SLR(1) parse tables from a [`GlrGrammar`].
     pub fn build(grammar: &GlrGrammar) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get all actions for (state, terminal). Returns empty slice if none.
     pub fn actions(&self, state: u32, terminal: TerminalId) -> &[Action] {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Get goto target for (state, nonterminal). Returns `None` for error.
     pub fn goto_target(&self, state: u32, nt: NonterminalId) -> Option<u32> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
@@ -75,7 +77,7 @@ struct Item {
 
 impl Item {
     fn new(rule: u32, dot: u32) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// The symbol just after the dot, or `None` if dot is at the end.
@@ -185,7 +187,7 @@ fn build_slr1_table(
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GlrTable {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
 // ====================================================================

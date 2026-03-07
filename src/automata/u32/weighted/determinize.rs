@@ -7,8 +7,9 @@
 //! - [`determinize_acyclic`] – optimised two-phase algorithm for acyclic
 //!   NWAs.  Returns an error if the NWA contains cycles.
 #![allow(dead_code)]
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -31,14 +32,14 @@ type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);
 /// Works for arbitrary NWAs (acyclic or cyclic).  Uses a worklist-based
 /// weighted subset construction with fixed-point ε-closures.
 pub fn determinize(nwa: &Nwa) -> CompDwa {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Determinize an acyclic NWA into a compilation-time DWA.
 ///
 /// Returns an error if the NWA contains cycles.
 pub fn determinize_acyclic(nwa: &Nwa) -> Result<CompDwa, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ pub fn determinize_acyclic(nwa: &Nwa) -> Result<CompDwa, GlrMaskError> {
 // ---------------------------------------------------------------------------
 
 fn topo_sort(nwa: &Nwa) -> Result<Vec<u32>, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +56,7 @@ fn topo_sort(nwa: &Nwa) -> Result<Vec<u32>, GlrMaskError> {
 
 /// For each NWA state, compute the set of states reachable via ε-transitions.
 fn unweighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeSet<u32>> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +69,7 @@ fn unweighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeSet<u32>> {
 /// - `subsets[dwa_id]` = set of NWA states forming that DWA state.
 /// - `transitions[dwa_id]` = vec of (label, target_dwa_id).
 fn unweighted_subset_construction(nwa: &Nwa, eps_uw: &[BTreeSet<u32>]) -> SubsetTransitions {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Intern a subset: if already seen return its id, otherwise register it.
@@ -79,7 +80,7 @@ fn intern_subset(
     seen: &mut FxHashMap<Vec<u32>, u32>,
     queue: &mut VecDeque<u32>,
 ) -> u32 {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +92,7 @@ fn intern_subset(
 ///
 /// Multiple paths to the same state v are combined with ∪.
 fn weighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeMap<u32, Weight>> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +105,7 @@ fn build_comp_dwa(
     uw_transitions: &[Vec<(Label, u32)>],
     eps_w: &[BTreeMap<u32, Weight>],
 ) -> Result<CompDwa, GlrMaskError> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 /// Merge weighted ε-closures for all NWA states in a subset.
@@ -112,7 +113,7 @@ fn merge_weighted_closures(
     subset: &BTreeSet<u32>,
     eps_w: &[BTreeMap<u32, Weight>],
 ) -> BTreeMap<u32, Weight> {
-    unimplemented!("cargo-check-only stub")
+    unimplemented!()
 }
 
 // ====================================================================

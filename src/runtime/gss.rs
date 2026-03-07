@@ -6,10 +6,11 @@
 //!
 //! Each "stack" is a sequence of parser state IDs, bottom to top.
 //! The top of the stack is `stack.last()`.
-#![allow(unused_imports, unused_variables, dead_code)]
-#![allow(unused_imports, unused_variables, unused_mut, dead_code)]
-
 #![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 
 use std::collections::BTreeSet;
 
@@ -24,27 +25,27 @@ pub struct GlrStacks {
 impl GlrStacks {
     /// Create a new GlrStacks with a single stack containing one state.
     pub fn new(initial_state: u32) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Create from a list of stacks.
     pub fn from_stacks(stacks: Vec<Vec<u32>>) -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Create empty (no stacks).
     pub fn empty() -> Self {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Whether there are no stacks (all paths died).
     pub fn is_empty(&self) -> bool {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Number of active stacks.
     pub fn len(&self) -> usize {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Iterate over stacks.
@@ -54,23 +55,23 @@ impl GlrStacks {
 
     /// Get the top parser state of each stack.
     pub fn tops(&self) -> BTreeSet<u32> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Add a stack.
     pub fn push(&mut self, stack: Vec<u32>) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Merge with another GlrStacks (union of stacks).
     /// Deduplicates identical stacks.
     pub fn merge(&mut self, other: &GlrStacks) {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 
     /// Take ownership of the stacks.
     pub fn into_stacks(self) -> Vec<Vec<u32>> {
-        unimplemented!("cargo-check-only stub")
+        unimplemented!()
     }
 }
 
