@@ -76,19 +76,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     let possible_matches_by_state = build_possible_matches_by_state(&normalized, &tokenizer, vocab);
 
-    let mut terminal_tokens_by_state = std::collections::BTreeMap::new();
-    for (tokenizer_state, terminal_to_tokens) in &possible_matches_by_state {
-        let mut tsid_map = std::collections::BTreeMap::new();
-        let internal_tsid = id_map
-            .tokenizer_states
-            .original_to_internal
-            .get(*tokenizer_state as usize)
-            .copied()
-            .unwrap_or(*tokenizer_state);
-        tsid_map.insert(internal_tsid, terminal_to_tokens.clone());
-        terminal_tokens_by_state.insert(*tokenizer_state, tsid_map);
-    }
-
     let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> =
         vocab.entries.iter().cloned().collect();
     let terminal_dwa = build_terminal_dwa(
@@ -110,7 +97,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         table,
         tokenizer,
         possible_matches: possible_matches_by_state.clone(),
-        terminal_tokens_by_state,
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
         eos_token_id: vocab.eos_token_id,
@@ -131,18 +117,6 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     let id_map = InternalIdMap::build(&tokenizer, vocab);
 
     let possible_matches_by_state = build_possible_matches_by_state(&normalized, &tokenizer, vocab);
-    let mut terminal_tokens_by_state = std::collections::BTreeMap::new();
-    for (tokenizer_state, terminal_to_tokens) in &possible_matches_by_state {
-        let mut tsid_map = std::collections::BTreeMap::new();
-        let internal_tsid = id_map
-            .tokenizer_states
-            .original_to_internal
-            .get(*tokenizer_state as usize)
-            .copied()
-            .unwrap_or(*tokenizer_state);
-        tsid_map.insert(internal_tsid, terminal_to_tokens.clone());
-        terminal_tokens_by_state.insert(*tokenizer_state, tsid_map);
-    }
 
     let characterizations = characterize_terminals(&table, &glr_grammar);
     let templates = Templates::from_characterizations(&characterizations);
@@ -168,7 +142,6 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         table: table.clone(),
         tokenizer: tokenizer.clone(),
         possible_matches: possible_matches_by_state.clone(),
-        terminal_tokens_by_state,
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
         eos_token_id: vocab.eos_token_id,

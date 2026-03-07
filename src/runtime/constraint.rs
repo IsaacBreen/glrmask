@@ -20,18 +20,12 @@ use crate::ds::leveled_gss::LeveledGSS;
 
 use super::state::ConstraintState;
 
-// SEP1_MAP: `TerminalTokensByState` is closest to sep1
+// SEP1_MAP: `PossibleMatchesByState` corresponds directly to sep1
 // `GrammarConstraint.possible_matches` in `grammars2024/src/constraint.rs`.
-// glrmask still stores a compatibility-era tokenizer-state/TSID/terminal lookup
-// directly instead of sep1's flatter `possible_matches` view, but runtime code
-// should increasingly project through `possible_matches_for_state()` rather than
-// treat this nested shape as the target abstraction.
+// glrmask projects runtime lookups through `possible_matches_for_state()`.
 pub(crate) type TokenizerStateID = u32;
-pub(crate) type TSID = u32;
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
-pub(crate) type TerminalTokensByState =
-    BTreeMap<TokenizerStateID, BTreeMap<TSID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>>;
 
 
 
@@ -59,10 +53,7 @@ pub struct Constraint {
     
     
     
-    #[serde(with = "crate::runtime::serde::serde_nested_btmap_rsb")]
-    pub(crate) terminal_tokens_by_state: TerminalTokensByState,
-
-        pub(crate) state_to_internal_tsid: Vec<u32>,
+    pub(crate) state_to_internal_tsid: Vec<u32>,
 
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
 

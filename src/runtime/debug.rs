@@ -37,7 +37,7 @@ impl Constraint {
             }
         }
         eprintln!("DWA states: {}", self.parser_dwa.states.len());
-        for tokenizer_state in self.terminal_tokens_by_state.keys() {
+        for tokenizer_state in self.possible_matches.keys() {
             for (term, rs) in self.possible_matches_for_state(*tokenizer_state) {
                 let vals: Vec<u32> = rs.iter().collect();
                 eprintln!(
