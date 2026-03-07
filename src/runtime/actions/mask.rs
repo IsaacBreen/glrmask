@@ -231,19 +231,14 @@ impl<'a> ConstraintState<'a> {
         all
     }
 
-    fn all_tokens_for_state(&self, tokenizer_state: u32) -> RangeSetBlaze<u32> {
-        let mut all = RangeSetBlaze::new();
-        for token_ids in self.constraint.possible_matches_for_state(tokenizer_state).values() {
-            all = all | token_ids.clone();
-        }
-        all
-    }
-
     fn filter_weight_tokens(
         &self,
         tokens: RangeSetBlaze<u32>,
         terminals_disallowed: &crate::compiler::glr::parser::TerminalsDisallowed,
     ) -> RangeSetBlaze<u32> {
+        // Keep disallowed-terminal subtraction keyed by original tokenizer states.
+        // This matches sep1's `possible_matches` usage even when weight projection
+        // has already been lifted onto internal tsid classes.
         let mut allowed = tokens;
         if terminals_disallowed.is_empty()
             || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
