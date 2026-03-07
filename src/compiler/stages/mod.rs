@@ -7,7 +7,7 @@
 //! 1. Build augmented GLR grammar (FIRST/FOLLOW/nullable)
 //! 2. Build SLR(1) parse table
 //! 3. Build tokenizer DFA from terminal patterns
-//! 4. Compute vocabulary preprocessing (TSID mapping, possible_matches)
+//! 4. Compute internal ID mappings for tokenizer states and vocab tokens
 //! 5. Build parser NWA from terminal characterizations
 //! 6. Determinize + minimize → parser DWA
 //! 7. Package as `Constraint`
@@ -16,7 +16,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-pub mod vocab_pre;
+pub mod id_map;
 pub mod terminal_dwa;
 pub mod template_dfa;
 pub mod parser_dwa;
@@ -30,8 +30,8 @@ use crate::compiler::glr::analysis::GlrGrammar;
 use crate::compiler::glr::table::GlrTable;
 use crate::compiler::grammar::ast::GrammarDef;
 use crate::compiler::grammar::normalize::normalize_for_mask;
+use crate::compiler::stages::id_map::InternalIdMap;
 use crate::compiler::parser_dwa::build_parser_dwa;
-use crate::compiler::stages::vocab_pre::VocabPreprocessing;
 use crate::runtime::Constraint;
 
 /// Compile a grammar definition and vocabulary into a `Constraint`.
@@ -46,13 +46,13 @@ use crate::runtime::Constraint;
 ///       │
 ///       ├── TokenizerDfa::from_grammar_def()
 ///       │      │
-///       │      └── VocabPreprocessing::compute()
+///       │      └── InternalIdMap::build()
 ///       │
-///       └── build_parser_dwa()  ← uses table + grammar + tokenizer + vocab + vocab_pre
+///       └── build_parser_dwa()  ← uses table + grammar + tokenizer + vocab + id_map
 ///              │
 ///              └── determinize + minimize → CompDwa
 ///                     │
-///                     └── Constraint { parser_dwa, table, tokenizer, vocab_pre, ... }
+///                     └── Constraint { parser_dwa, table, tokenizer, id_map-derived metadata, ... }
 /// ```
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     unimplemented!()

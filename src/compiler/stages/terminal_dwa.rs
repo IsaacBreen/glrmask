@@ -15,7 +15,7 @@ use crate::automata::weighted::nwa::NWA;
 use crate::compiler::debug::TerminalDebug;
 use crate::compiler::glr::analysis::GLRGrammar;
 use crate::compiler::grammar::ast::TerminalId;
-use crate::compiler::stages::vocab_pre::VocabPreprocessing;
+use crate::compiler::stages::id_map::InternalIdMap;
 
 #[derive(Debug, Clone)]
 pub struct TerminalDWA {
@@ -30,7 +30,7 @@ pub struct TerminalDWA {
 fn build_terminal_dwa_nwa(
     tokenizer: &TokenizerDFA,
     vocab: &Vocab,
-    vocab_pre: &VocabPreprocessing,
+    id_map: &InternalIdMap,
     used_terminals: &BTreeSet<TerminalId>,
 ) -> TerminalDWA {
     unimplemented!()
@@ -61,7 +61,7 @@ fn prune_disallowed_follows(
 fn build_terminal_dwa_impl(
     tokenizer: &TokenizerDFA,
     vocab: &Vocab,
-    vocab_pre: &VocabPreprocessing,
+    id_map: &InternalIdMap,
     grammar: &GLRGrammar,
     used_terminals: &BTreeSet<TerminalId>,
     capture_debug: bool,
@@ -72,7 +72,7 @@ fn build_terminal_dwa_impl(
 pub(crate) fn build_terminal_dwa(
     tokenizer: &TokenizerDFA,
     vocab: &Vocab,
-    vocab_pre: &VocabPreprocessing,
+    id_map: &InternalIdMap,
     grammar: &GLRGrammar,
     used_terminals: &BTreeSet<TerminalId>,
 ) -> TerminalDWA {
@@ -82,7 +82,7 @@ pub(crate) fn build_terminal_dwa(
 pub(crate) fn build_terminal_dwa_with_debug(
     tokenizer: &TokenizerDFA,
     vocab: &Vocab,
-    vocab_pre: &VocabPreprocessing,
+    id_map: &InternalIdMap,
     grammar: &GLRGrammar,
     used_terminals: &BTreeSet<TerminalId>,
 ) -> (TerminalDWA, TerminalDebug) {
@@ -100,7 +100,7 @@ mod tests {
     use crate::automata::lexer::tokenizer::TokenizerDfa;
     use crate::compiler::glr::analysis::GlrGrammar;
     use crate::compiler::grammar::ast::tests::simple_ab_grammar;
-    use crate::compiler::stages::vocab_pre::VocabPreprocessing;
+    use crate::compiler::stages::id_map::InternalIdMap;
 
     #[test]
     fn test_build_terminal_dwa_collapses_always_allowed_follow_path() {
@@ -108,11 +108,11 @@ mod tests {
         let glr_grammar = GlrGrammar::from_grammar_def(&grammar);
         let tokenizer = TokenizerDfa::from_grammar_def(&grammar);
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())], None);
-        let vocab_pre = VocabPreprocessing::compute(&tokenizer, &vocab, None);
+        let id_map = InternalIdMap::build(&tokenizer, &vocab);
 
         let all_terminals: BTreeSet<TerminalId> = (0..glr_grammar.num_terminals).collect();
-        let terminal_dwa = build_terminal_dwa(&tokenizer, &vocab, &vocab_pre, &glr_grammar, &all_terminals);
-        let initial_tsid = vocab_pre.state_to_tsid[tokenizer.initial_state() as usize] as usize;
+        let terminal_dwa = build_terminal_dwa(&tokenizer, &vocab, &id_map, &glr_grammar, &all_terminals);
+        let initial_tsid = id_map.tokenizer_states.original_to_internal[tokenizer.initial_state() as usize] as usize;
         let root = terminal_dwa.tsid_roots[initial_tsid];
         let a_targets = &terminal_dwa.nwa.states[root as usize].transitions[&0];
         assert!(!a_targets.is_empty());
@@ -148,10 +148,10 @@ mod tests {
             },
         ]);
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())], None);
-        let vocab_pre = VocabPreprocessing::compute(&tokenizer, &vocab, None);
+        let id_map = InternalIdMap::build(&tokenizer, &vocab);
 
         let all_terminals: BTreeSet<TerminalId> = (0..glr_grammar.num_terminals).collect();
-        let terminal_dwa = build_terminal_dwa(&tokenizer, &vocab, &vocab_pre, &glr_grammar, &all_terminals);
+        let terminal_dwa = build_terminal_dwa(&tokenizer, &vocab, &id_map, &glr_grammar, &all_terminals);
         let state_after_a = tokenizer.run(b"a") as usize;
 
         assert!(terminal_dwa.non_greedy_terminals_by_tokenizer_state[state_after_a].contains(&0));

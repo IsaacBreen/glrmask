@@ -32,9 +32,9 @@ use crate::compiler::glr::analysis::GlrGrammar;
 use crate::compiler::glr::table::{Action, GlrTable};
 use crate::compiler::grammar::ast::{NonterminalId, TerminalId};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
+use crate::compiler::stages::id_map::InternalIdMap;
 use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::compiler::template::{build_template_bundles, build_template_nwa_from_bundles};
-use crate::compiler::stages::vocab_pre::VocabPreprocessing;
 use crate::Vocab;
 
 pub use crate::compiler::labels::DEFAULT_LABEL;
@@ -177,7 +177,7 @@ pub(crate) fn characterize_terminal(
 // NWA construction from characterizations
 // ---------------------------------------------------------------------------
 
-/// Build the parser NWA from terminal characterizations and vocab preprocessing.
+/// Build the parser NWA from terminal characterizations and internal ID mappings.
 ///
 /// The NWA labels are parser state IDs (non-negative i32).
 /// The weights encode which LLM tokens are valid, in TSID × token space.
@@ -204,7 +204,7 @@ pub fn build_parser_nwa(
     grammar: &GlrGrammar,
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
-    vocab_pre: &VocabPreprocessing,
+    id_map: &InternalIdMap,
 ) -> Nwa {
     use std::time::Instant;
 
@@ -217,7 +217,7 @@ pub fn build_parser_nwa(
         characterizations.keys().copied().collect();
 
     let t0 = Instant::now();
-    let terminal_dwa = build_terminal_dwa(tokenizer, vocab, vocab_pre, grammar, &characterized_terminals);
+    let terminal_dwa = build_terminal_dwa(tokenizer, vocab, id_map, grammar, &characterized_terminals);
     eprintln!("[glrmask::dwa]   terminal_dwa:  {:.3}s ({} nwa states)", t0.elapsed().as_secs_f64(), terminal_dwa.nwa.states.len());
     debug_assert_eq!(terminal_dwa.nwa.start_states.len(), terminal_dwa.tsid_roots.len());
 
@@ -230,8 +230,8 @@ pub fn build_parser_nwa(
     let mut nwa = build_template_nwa_from_bundles(
         &template_bundles,
         &terminal_dwa,
-        vocab_pre.num_tsids,
-        vocab_pre.max_token,
+        id_map.num_tsids(),
+        id_map.max_token_id(),
     );
     eprintln!("[glrmask::dwa]   compose NWA:   {:.3}s ({} states, {} transitions)", t0.elapsed().as_secs_f64(), nwa.states.len(), nwa.num_transitions());
 
@@ -417,9 +417,9 @@ pub fn build_parser_dwa(
     grammar: &GlrGrammar,
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
-    vocab_pre: &VocabPreprocessing,
+    id_map: &InternalIdMap,
 ) -> CompDwa {
-    let (dwa, _) = build_parser_dwa_impl(table, grammar, tokenizer, vocab, vocab_pre, false);
+    let (dwa, _) = build_parser_dwa_impl(table, grammar, tokenizer, vocab, id_map, false);
     dwa
 }
 
@@ -430,9 +430,9 @@ pub fn build_parser_dwa_with_debug(
     grammar: &GlrGrammar,
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
-    vocab_pre: &VocabPreprocessing,
+    id_map: &InternalIdMap,
 ) -> (CompDwa, crate::compiler::debug::AutomataDebug) {
-    let (dwa, dbg) = build_parser_dwa_impl(table, grammar, tokenizer, vocab, vocab_pre, true);
+    let (dwa, dbg) = build_parser_dwa_impl(table, grammar, tokenizer, vocab, id_map, true);
     (dwa, dbg.expect("debug=true must produce Some"))
 }
 
@@ -441,7 +441,7 @@ fn build_parser_dwa_impl(
     grammar: &GlrGrammar,
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
-    vocab_pre: &VocabPreprocessing,
+    id_map: &InternalIdMap,
     capture_debug: bool,
 ) -> (CompDwa, Option<crate::compiler::debug::AutomataDebug>) {
     use std::time::Instant;
@@ -456,10 +456,10 @@ fn build_parser_dwa_impl(
     let t = Instant::now();
     let (terminal_dwa, terminal_debug) = if capture_debug {
         use crate::compiler::terminal_dwa::build_terminal_dwa_with_debug;
-        let (dwa, dbg) = build_terminal_dwa_with_debug(tokenizer, vocab, vocab_pre, grammar, &characterized_terminals);
+        let (dwa, dbg) = build_terminal_dwa_with_debug(tokenizer, vocab, id_map, grammar, &characterized_terminals);
         (dwa, Some(dbg))
     } else {
-        (build_terminal_dwa(tokenizer, vocab, vocab_pre, grammar, &characterized_terminals), None)
+        (build_terminal_dwa(tokenizer, vocab, id_map, grammar, &characterized_terminals), None)
     };
     eprintln!("[glrmask::dwa]   terminal_dwa:  {:.3}s ({} nwa states)", t.elapsed().as_secs_f64(), terminal_dwa.nwa.states.len());
     debug_assert_eq!(terminal_dwa.nwa.start_states.len(), terminal_dwa.tsid_roots.len());
@@ -475,8 +475,8 @@ fn build_parser_dwa_impl(
     let mut nwa = build_template_nwa_from_bundles(
         &template_bundles,
         &terminal_dwa,
-        vocab_pre.num_tsids,
-        vocab_pre.max_token,
+        id_map.num_tsids(),
+        id_map.max_token_id(),
     );
     eprintln!("[glrmask::dwa]   compose NWA:   {:.3}s ({} states, {} transitions)", t.elapsed().as_secs_f64(), nwa.states.len(), nwa.num_transitions());
 
@@ -537,7 +537,7 @@ fn build_parser_dwa_impl(
             parser_nwa_after_resolve: nwa_after_resolve.unwrap(),
             parser_dwa_pre_minimize: dwa_pre_minimize.unwrap(),
             parser_dwa: final_dwa.clone(),
-            vocab_pre: vocab_pre.clone(),
+            id_map: id_map.clone(),
         })
     } else {
         None
@@ -562,7 +562,7 @@ mod tests {
 
     fn make_vocab_and_preprocessing(
         gdef: &GrammarDef,
-    ) -> (Vocab, TokenizerDfa, VocabPreprocessing) {
+    ) -> (Vocab, TokenizerDfa, InternalIdMap) {
         let tok = TokenizerDfa::from_grammar_def(gdef);
         // Build vocab: one token per terminal pattern.
         let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -570,8 +570,8 @@ mod tests {
             entries.push((i as u32, td.name.as_bytes().to_vec()));
         }
         let vocab = Vocab::new(entries, None);
-        let vp = VocabPreprocessing::compute(&tok, &vocab, None);
-        (vocab, tok, vp)
+        let id_map = InternalIdMap::build(&tok, &vocab);
+        (vocab, tok, id_map)
     }
 
     #[test]

@@ -13,7 +13,7 @@ pub mod stages;
 
 pub use crate::automata::lexer::tokenizer as tokenizer_dfa;
 pub use grammar::ast as grammar_def;
-pub use stages::vocab_pre;
+pub use stages::id_map;
 
 pub use stages::parser_dwa;
 pub use stages::resolve_negatives;
