@@ -51,6 +51,17 @@ impl Weight {
         unimplemented!()
     }
 
+    /// Insert token ranges for one inclusive TSID range.
+    pub fn insert(
+        &mut self,
+        tsid_range: std::ops::RangeInclusive<u32>,
+        token_ranges: &[std::ops::RangeInclusive<u32>],
+    ) {
+        let _ = tsid_range;
+        let _ = token_ranges;
+        unimplemented!()
+    }
+
     /// Clear this 2D range-set back to the empty set.
     pub fn clear(&mut self) {
         *self = Self::empty();
@@ -126,138 +137,6 @@ impl Weight {
 }
 
 // ---- Trait impls ----
-
-impl std::ops::BitOr<&Weight> for Weight {
-    type Output = Weight;
-
-    fn bitor(self, rhs: &Weight) -> Self::Output {
-        self.union(rhs)
-    }
-}
-
-impl std::ops::BitOr<Weight> for Weight {
-    type Output = Weight;
-
-    fn bitor(self, rhs: Weight) -> Self::Output {
-        self.union(&rhs)
-    }
-}
-
-impl std::ops::BitOr<&Weight> for &Weight {
-    type Output = Weight;
-
-    fn bitor(self, rhs: &Weight) -> Self::Output {
-        self.union(rhs)
-    }
-}
-
-impl std::ops::BitOr<Weight> for &Weight {
-    type Output = Weight;
-
-    fn bitor(self, rhs: Weight) -> Self::Output {
-        self.union(&rhs)
-    }
-}
-
-impl std::ops::BitAnd<&Weight> for Weight {
-    type Output = Weight;
-
-    fn bitand(self, rhs: &Weight) -> Self::Output {
-        self.intersection(rhs)
-    }
-}
-
-impl std::ops::BitAnd<Weight> for Weight {
-    type Output = Weight;
-
-    fn bitand(self, rhs: Weight) -> Self::Output {
-        self.intersection(&rhs)
-    }
-}
-
-impl std::ops::BitAnd<&Weight> for &Weight {
-    type Output = Weight;
-
-    fn bitand(self, rhs: &Weight) -> Self::Output {
-        self.intersection(rhs)
-    }
-}
-
-impl std::ops::BitAnd<Weight> for &Weight {
-    type Output = Weight;
-
-    fn bitand(self, rhs: Weight) -> Self::Output {
-        self.intersection(&rhs)
-    }
-}
-
-impl std::ops::Sub<&Weight> for Weight {
-    type Output = Weight;
-
-    fn sub(self, rhs: &Weight) -> Self::Output {
-        self.difference(rhs)
-    }
-}
-
-impl std::ops::Sub<Weight> for Weight {
-    type Output = Weight;
-
-    fn sub(self, rhs: Weight) -> Self::Output {
-        self.difference(&rhs)
-    }
-}
-
-impl std::ops::Sub<&Weight> for &Weight {
-    type Output = Weight;
-
-    fn sub(self, rhs: &Weight) -> Self::Output {
-        self.difference(rhs)
-    }
-}
-
-impl std::ops::Sub<Weight> for &Weight {
-    type Output = Weight;
-
-    fn sub(self, rhs: Weight) -> Self::Output {
-        self.difference(&rhs)
-    }
-}
-
-impl std::ops::BitOrAssign<&Weight> for Weight {
-    fn bitor_assign(&mut self, rhs: &Weight) {
-        *self = self.union(rhs);
-    }
-}
-
-impl std::ops::BitOrAssign<Weight> for Weight {
-    fn bitor_assign(&mut self, rhs: Weight) {
-        *self |= &rhs;
-    }
-}
-
-impl std::ops::BitAndAssign<&Weight> for Weight {
-    fn bitand_assign(&mut self, rhs: &Weight) {
-        *self = self.intersection(rhs);
-    }
-}
-
-impl std::ops::BitAndAssign<Weight> for Weight {
-    fn bitand_assign(&mut self, rhs: Weight) {
-        *self &= &rhs;
-    }
-}
-
-impl std::ops::SubAssign<&Weight> for Weight {
-    fn sub_assign(&mut self, rhs: &Weight) {
-        *self = self.difference(rhs);
-    }
-}
-
-impl std::ops::SubAssign<Weight> for Weight {
-    fn sub_assign(&mut self, rhs: Weight) {
-        *self -= &rhs;
-    }
-}
 
 impl PartialEq for Weight {
     fn eq(&self, other: &Self) -> bool {
@@ -374,6 +253,13 @@ mod tests {
     }
 
     #[test]
+    fn test_weight_insert_shape() {
+        let mut w = Weight::empty();
+        w.insert(0..=2, &[10..=12, 20..=21]);
+        assert!(w.estimated_size_bytes() >= std::mem::size_of::<Weight>());
+    }
+
+    #[test]
     fn test_rangeset2d_estimated_size_bytes_has_base_size() {
         let w = Weight::empty();
         assert!(w.estimated_size_bytes() >= std::mem::size_of::<Weight>());
@@ -411,35 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rangeset2d_assign_ops() {
-        let empty = Weight::empty();
-        let all = Weight::all();
-
-        let mut union_acc = Weight::empty();
-        union_acc |= &all;
-        assert!(union_acc.is_full());
-
-        let mut intersection_acc = Weight::all();
-        intersection_acc &= &empty;
-        assert!(intersection_acc.is_empty());
-
-        let mut difference_acc = Weight::all();
-        difference_acc -= &empty;
-        assert!(difference_acc.is_full());
-    }
-
-    #[test]
-    fn test_rangeset2d_operator_rhs_forms() {
-        let empty = Weight::empty();
-        let all = Weight::all();
-
-        assert!((empty.clone() | &all).is_full());
-        assert!((&empty | all.clone()).is_full());
-        assert!((all.clone() & &empty).is_empty());
-        assert!((&all - empty.clone()).is_full());
-    }
-
-    #[test]
     fn test_rangeset2d_display() {
         let empty = Weight::empty();
         let all = Weight::all();
@@ -473,8 +330,8 @@ mod tests {
     }
 }
 
-    /// Compatibility alias for older `RangeSet2D`-oriented naming.
-    pub type RangeSet2D = Weight;
+/// Compatibility alias for older `RangeSet2D`-oriented naming.
+pub type RangeSet2D = Weight;
 
-    /// Compatibility alias for older `RangeSet2DDisplayWithMaps` naming.
-    pub type RangeSet2DDisplayWithMaps<'a> = WeightDisplayWithMaps<'a>;
+/// Compatibility alias for older `RangeSet2DDisplayWithMaps` naming.
+pub type RangeSet2DDisplayWithMaps<'a> = WeightDisplayWithMaps<'a>;
