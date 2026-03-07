@@ -16,10 +16,10 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-pub mod a_terminal_dwa;
-pub mod b_template_dfa;
-pub mod c_parser_dwa;
-pub mod d_resolve_negatives;
+pub mod parser_dwa;
+pub mod resolve_negatives;
+pub mod template_dfa;
+pub mod terminal_dwa;
 
 use crate::Vocab;
 use crate::automata::weighted::dwa::CompDwa;

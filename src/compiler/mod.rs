@@ -13,7 +13,7 @@ pub mod pipeline;
 pub mod tokenizer_dfa;
 pub mod vocab_pre;
 
-pub use pipeline::a_terminal_dwa as terminal_dwa;
-pub use pipeline::b_template_dfa as template;
-pub use pipeline::c_parser_dwa as parser_dwa;
-pub use pipeline::d_resolve_negatives as resolve_negatives;
+pub use pipeline::parser_dwa;
+pub use pipeline::resolve_negatives;
+pub use pipeline::template_dfa as template;
+pub use pipeline::terminal_dwa;
