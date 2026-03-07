@@ -7,6 +7,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: This stage matches sep1's `constraint_precompute.rs` terminal-DWA construction, extracted here as its own compiler phase.
+
 use std::collections::BTreeSet;
 
 use crate::Vocab;
@@ -54,6 +56,7 @@ pub(crate) fn build_terminal_dwa(
     vocab: &Vocab,
     id_map: &InternalIdMap,
 ) -> TerminalDWA {
+    // SEP1_MAP: sep1 folds this logic into the large terminal-precompute pipeline in `constraint_precompute.rs`; glrmask keeps the boundary here explicit.
     unimplemented!()
 }
 

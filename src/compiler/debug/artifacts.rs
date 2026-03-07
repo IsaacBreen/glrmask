@@ -8,6 +8,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: `CompileDebug` and `AutomataDebug` are glrmask-only aggregation structs; sep1 exposes the nearest intermediate pieces separately via `GLRParser`, parser-DWA builders, and ad hoc debug output rather than one compiler bundle.
+
 use std::collections::BTreeMap;
 
 use crate::automata::weighted::dwa::DWA;

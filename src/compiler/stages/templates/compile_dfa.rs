@@ -1,5 +1,6 @@
 //! NOTE: template DFA compilation is intentionally deferred.
 //! Keep only the terminal → template-DFA mapping surface in this cleanup pass.
+// SEP1_MAP: This placeholder file corresponds directly to sep1's `precompute4/template_dfa.rs` template-automaton builder.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

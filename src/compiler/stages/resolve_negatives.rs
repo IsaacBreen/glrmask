@@ -1,5 +1,6 @@
 //! NOTE: `resolve_negatives` is intentionally deferred.
 //! Keep only this stage boundary during the parser-DWA cleanup.
+// SEP1_MAP: This placeholder stage corresponds directly to sep1's `precompute4/resolve_negatives.rs` cancellation and finality pass.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

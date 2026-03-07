@@ -8,6 +8,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: This module is the trimmed glrmask counterpart to sep1's `equivalence_analysis/` tree, keeping only the ID-remapping surface the compiler still needs.
+
 pub mod combined;
 pub mod state_analysis;
 pub mod vocab_analysis;

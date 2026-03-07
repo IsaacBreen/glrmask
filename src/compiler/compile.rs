@@ -7,6 +7,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: This orchestration layer compresses sep1's interface/pipeline/precompute split; compare interface/interface.rs `CompiledGrammar::from_definition`, pipeline.rs `build_compiled()`/`build()`, and constraint-side precompute entrypoints.
+
 use crate::Vocab;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::lexer::tokenizer::Tokenizer;

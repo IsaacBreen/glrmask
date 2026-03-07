@@ -1,5 +1,6 @@
 //! NOTE: template bundle assembly is intentionally deferred.
 //! Keep only this parser-NWA assembly stage boundary for now.
+// SEP1_MAP: sep1 performs the nearest work inside `precompute4/parser_dwa.rs` when it assembles parser-NWA pieces after template construction; glrmask keeps that boundary as its own placeholder file.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

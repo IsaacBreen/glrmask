@@ -1,5 +1,6 @@
 //! NOTE: terminal characterization is intentionally deferred.
 //! Keep only the minimal data shape and entrypoint for this cleanup pass.
+// SEP1_MAP: This placeholder file corresponds directly to sep1's `precompute4/characterize.rs` terminal-characterization pass.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

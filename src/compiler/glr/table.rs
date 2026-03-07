@@ -7,6 +7,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: `GLRTable` is the closest glrmask equivalent to sep1's `glr/table.rs` output, but glrmask collapses sep1's larger staged table builder into a smaller compiler-local table type.
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rustc_hash::FxHashMap;

@@ -3,6 +3,8 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
+// SEP1_MAP: This submodule is the direct glrmask counterpart to sep1's `glr/` tree, but reduced to the pieces the current compiler pipeline still uses.
+
 pub mod analysis;
 pub mod labels;
 pub mod parser;

@@ -21,6 +21,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: This file is the direct glrmask counterpart to sep1's `precompute4/parser_dwa.rs`, with the same high-level job but a much thinner current implementation.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -119,6 +121,7 @@ pub fn build_parser_dwa(
     vocab: &Vocab,
     id_map: &InternalIdMap,
 ) -> DWA {
+    // SEP1_MAP: Like sep1's parser-DWA builder, this stage composes terminal automata, template automata, and parser-table behavior into the final parser DWA.
     use std::time::Instant;
 
     let t = Instant::now();

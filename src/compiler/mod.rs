@@ -5,6 +5,8 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
+// SEP1_MAP: This is the glrmask compiler umbrella; sep1 spreads the comparable surface across interface/, glr/, pipeline.rs, and precompute4/.
+
 pub mod compile;
 pub mod debug;
 pub mod glr;
