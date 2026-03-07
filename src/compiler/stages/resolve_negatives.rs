@@ -8,6 +8,7 @@
 #![allow(unused_imports)]
 
 use crate::automata::weighted::nwa::Nwa;
+use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::ds::weight::Weight;
 
 pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {

@@ -15,7 +15,7 @@ use crate::automata::weighted::nwa::NWA;
 use crate::compiler::debug::TerminalDebug;
 use crate::compiler::glr::analysis::GLRGrammar;
 use crate::compiler::grammar::ast::TerminalId;
-use crate::compiler::stages::id_map::InternalIdMap;
+use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 
 #[derive(Debug, Clone)]
 pub struct TerminalDWA {
@@ -100,7 +100,7 @@ mod tests {
     use crate::automata::lexer::tokenizer::TokenizerDfa;
     use crate::compiler::glr::analysis::GlrGrammar;
     use crate::compiler::grammar::ast::tests::simple_ab_grammar;
-    use crate::compiler::stages::id_map::InternalIdMap;
+    use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 
     #[test]
     fn test_build_terminal_dwa_collapses_always_allowed_follow_path() {

@@ -16,7 +16,7 @@ use crate::compiler::glr::table::GlrTable;
 use crate::compiler::grammar::ast::GrammarDef;
 use crate::compiler::grammar::normalize::normalize_for_mask;
 use crate::compiler::parser_dwa::build_parser_dwa;
-use crate::compiler::stages::id_map::InternalIdMap;
+use crate::compiler::stages::equivalence_analysis::{InternalIdMap, analyze_equivalences};
 use crate::runtime::Constraint;
 
 /// Compile a grammar definition and vocabulary into a `Constraint`.
@@ -31,7 +31,7 @@ use crate::runtime::Constraint;
 ///       │
 ///       ├── TokenizerDfa::from_grammar_def()
 ///       │      │
-///       │      └── InternalIdMap::build()
+///       │      └── analyze_equivalences() → InternalIdMap
 ///       │
 ///       └── build_parser_dwa()  ← uses table + grammar + tokenizer + vocab + id_map
 ///              │

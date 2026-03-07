@@ -4,6 +4,7 @@
 #![allow(unused_variables)]
 
 pub mod analysis;
+pub mod labels;
 pub mod parser;
 pub mod table;
 

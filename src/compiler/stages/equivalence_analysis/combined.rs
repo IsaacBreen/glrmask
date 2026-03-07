@@ -1,0 +1,55 @@
+//! Combined compiler-side equivalence analysis.
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
+use crate::Vocab;
+use crate::automata::lexer::tokenizer::TokenizerDfa;
+use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::equivalence_analysis::state_analysis::analyze_state_equivalences;
+use crate::compiler::stages::equivalence_analysis::vocab_analysis::analyze_vocab_equivalences;
+
+/// Run both equivalence analyses and return the joint internal-ID mapping.
+pub(crate) fn analyze_equivalences(tokenizer: &TokenizerDfa, vocab: &Vocab) -> InternalIdMap {
+    InternalIdMap {
+        tokenizer_states: analyze_state_equivalences(tokenizer),
+        vocab_tokens: analyze_vocab_equivalences(vocab),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::lexer::tokenizer::TokenizerDfa;
+    use crate::compiler::grammar::ast::{GrammarDef, Rule, Symbol, TerminalDef};
+
+    #[test]
+    fn test_internal_id_map_shape() {
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![TerminalDef {
+                id: 0,
+                name: "a".into(),
+                pattern: "a".into(),
+            }],
+        };
+        let tok = TokenizerDfa::from_grammar_def(&gdef);
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"b".to_vec()),
+            ],
+            None,
+        );
+        let id_map = analyze_equivalences(&tok, &vocab);
+
+        assert!(id_map.num_tsids() >= 1);
+        assert_eq!(id_map.max_token_id(), 2);
+    }
+}

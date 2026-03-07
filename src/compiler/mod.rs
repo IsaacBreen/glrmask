@@ -14,10 +14,10 @@ pub mod stages;
 pub use crate::automata::lexer::tokenizer as tokenizer_dfa;
 pub use compile::{compile, compile_with_debug};
 pub use grammar::ast as grammar_def;
-pub use stages::id_map;
-pub use stages::parser_labels;
+pub use glr::labels as parser_labels;
+pub use stages::equivalence_analysis;
 
 pub use stages::parser_dwa;
 pub use stages::resolve_negatives;
-pub use stages::template_dfa as template;
+pub use stages::templates::compile as template;
 pub use stages::terminal_dwa;
