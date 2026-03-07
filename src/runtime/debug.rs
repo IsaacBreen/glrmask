@@ -1,0 +1,77 @@
+//! Runtime debug helpers for compiled constraints.
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
+use crate::runtime::Constraint;
+
+impl Constraint {
+    /// Debug dump of internal state for troubleshooting.
+    pub(crate) fn debug_dump(&self) {
+        eprintln!("--- Constraint Debug Dump ---");
+        eprintln!("num_tsids: {}", self.num_tsids);
+        eprintln!("max_token: {}", self.max_token);
+        eprintln!("state_to_tsid: {:?}", self.state_to_tsid);
+        eprintln!("tsid_to_state: {:?}", self.tsid_to_state);
+        eprintln!("Tokenizer DFA states: {}", self.tokenizer.dfa.num_states());
+        for s in 0..self.tokenizer.dfa.num_states() {
+            let fin = self.tokenizer.matched_terminals(s as u32);
+            if !fin.is_empty() {
+                eprintln!("  tok DFA state {}: finalizers={:?}", s, fin);
+            }
+            let mut trans = Vec::new();
+            for b in 0u16..=255u16 {
+                let next = self.tokenizer.dfa.get_transition(s as u32, b as u8);
+                if next != crate::automata::dfa::DEAD {
+                    trans.push((b as u8, next));
+                }
+            }
+            if !trans.is_empty() && trans.len() <= 20 {
+                eprintln!("  tok DFA state {}: transitions={:?}", s, trans);
+            } else if !trans.is_empty() {
+                eprintln!("  tok DFA state {}: {} transitions", s, trans.len());
+            }
+        }
+        eprintln!("DWA states: {}", self.parser_dwa.states.len());
+        for (tsid, pm) in self.possible_matches.iter().enumerate() {
+            for (term, rs) in pm {
+                let vals: Vec<u32> = rs.iter().collect();
+                eprintln!("possible_matches[tsid={}][term={}] = {:?}", tsid, term, vals);
+            }
+        }
+        eprintln!("--- End Debug Dump ---");
+    }
+
+    /// Debug: trace tokenizer behavior for specific bytes from a given starting state.
+    pub(crate) fn debug_tokenizer(&self, input: &[u8], start_state: u32) {
+        let result = self.tokenizer.execute_all_matches(input, start_state);
+        eprintln!(
+            "[debug_tokenizer] input={:?} start={} -> end={} matches={:?}",
+            input, start_state, result.end_state, result.matches
+        );
+        let mut state = start_state;
+        for (i, &byte) in input.iter().enumerate() {
+            let next = self.tokenizer.dfa.get_transition(state, byte);
+            let is_dead = next == crate::automata::dfa::DEAD;
+            let finals = if !is_dead {
+                self.tokenizer.dfa.finalizers(next).iter().copied().collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+            eprintln!(
+                "  byte[{}]=0x{:02X} state {}->{}{}{}",
+                i, byte, state, next,
+                if is_dead { " DEAD" } else { "" },
+                if !finals.is_empty() { format!(" finalizers={:?}", finals) } else { String::new() }
+            );
+            state = next;
+            if is_dead { break; }
+        }
+    }
+
+    /// Get the tokenizer's initial state (for debugging).
+    pub(crate) fn tokenizer_initial_state(&self) -> u32 {
+        unimplemented!()
+    }
+}
