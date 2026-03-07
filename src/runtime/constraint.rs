@@ -132,4 +132,27 @@ impl Constraint {
             .copied()
             .unwrap_or(tokenizer_state)
     }
+
+    pub(crate) fn possible_matches_for_internal_tsid(
+        &self,
+        internal_tsid: u32,
+    ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
+        let mut merged = BTreeMap::new();
+        let Some(original_states) = self.internal_tsid_to_states.get(internal_tsid as usize) else {
+            return merged;
+        };
+
+        for &tokenizer_state in original_states {
+            for (terminal, token_ids) in self.possible_matches_for_state(tokenizer_state) {
+                merged
+                    .entry(terminal)
+                    .and_modify(|existing: &mut RangeSetBlaze<u32>| {
+                        *existing = existing.clone() | token_ids.clone();
+                    })
+                    .or_insert(token_ids);
+            }
+        }
+
+        merged
+    }
 }

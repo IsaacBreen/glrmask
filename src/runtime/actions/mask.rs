@@ -191,11 +191,9 @@ impl<'a> ConstraintState<'a> {
         let mut all = RangeSetBlaze::new();
         for (internal_tsid, original_states) in self.constraint.internal_tsid_to_states.iter().enumerate() {
             if weight.is_full() {
-                for &tokenizer_state in original_states {
-                    let token_ids = self.all_tokens_for_state(tokenizer_state);
-                    if !token_ids.is_empty() {
-                        all = all | token_ids;
-                    }
+                let token_ids = self.all_tokens_for_internal_tsid(internal_tsid as u32);
+                if !token_ids.is_empty() {
+                    all = all | token_ids;
                 }
                 continue;
             }
@@ -215,10 +213,22 @@ impl<'a> ConstraintState<'a> {
     ) -> RangeSetBlaze<u32> {
         let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
         if weight.is_full() {
-            self.all_tokens_for_state(tokenizer_state)
+            self.all_tokens_for_internal_tsid(internal_tsid)
         } else {
             weight.tokens_for_tsid(internal_tsid)
         }
+    }
+
+    fn all_tokens_for_internal_tsid(&self, internal_tsid: u32) -> RangeSetBlaze<u32> {
+        let mut all = RangeSetBlaze::new();
+        for token_ids in self
+            .constraint
+            .possible_matches_for_internal_tsid(internal_tsid)
+            .values()
+        {
+            all = all | token_ids.clone();
+        }
+        all
     }
 
     fn all_tokens_for_state(&self, tokenizer_state: u32) -> RangeSetBlaze<u32> {
