@@ -1,6 +1,6 @@
 //! Grammar intermediate representation.
 //!
-//! The canonical internal representation of a grammar that all frontends
+//! The canonical internal representation of a grammar that all importers
 //! (EBNF, Lark, JSON Schema) compile down to.
 #![allow(dead_code)]
 #![allow(unused_mut)]

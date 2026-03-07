@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_reachable_terminals_boolean() {
-        use crate::frontend::lark::parse_lark;
+        use crate::import::lark::parse_lark;
 
         let lark = "JSON_BOOL: \"true\" | \"false\"\nstart: JSON_BOOL\n";
         let grammar = parse_lark(lark).unwrap();
@@ -556,7 +556,7 @@ mod tests {
     ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" /[0-9A-Fa-f]/ /[0-9A-Fa-f]/ /[0-9A-Fa-f]/ /[0-9A-Fa-f]/
     start: ESCAPE_SEQ
     "#;
-        let gdef = crate::frontend::lark::parse_lark(lark).unwrap();
+        let gdef = crate::import::lark::parse_lark(lark).unwrap();
         for (i, t) in gdef.terminals.iter().enumerate() {
             eprintln!("Terminal {}: name={}, pattern={}", i, t.name, t.pattern);
         }
@@ -601,7 +601,7 @@ mod tests {
     JSON_STRING: "\"" STRING_CONTENT "\""
     start: JSON_STRING
     "#;
-        let gdef = crate::frontend::lark::parse_lark(lark).unwrap();
+        let gdef = crate::import::lark::parse_lark(lark).unwrap();
         for (i, t) in gdef.terminals.iter().enumerate() {
             eprintln!("Terminal {}: name={}, pattern={}", i, t.name, t.pattern);
         }
@@ -693,7 +693,7 @@ mod tests {
     JSON_STRING: "\"" STRING_CONTENT "\""
     start: JSON_STRING
     "#;
-        let gdef = crate::frontend::lark::parse_lark(lark).unwrap();
+        let gdef = crate::import::lark::parse_lark(lark).unwrap();
         
         // Build DFA from ONLY JSON_STRING terminal (skip fragments)
         use crate::automata::regex::{ExprGroup, ExprGroups};
@@ -798,7 +798,7 @@ mod tests {
     JSON_STRING: "\"" STRING_CONTENT "\""
     start: JSON_STRING
     "#;
-        let gdef = crate::frontend::lark::parse_lark(lark).unwrap();
+        let gdef = crate::import::lark::parse_lark(lark).unwrap();
         let json_string_term = gdef.terminals.iter().find(|t| t.name == "JSON_STRING").unwrap();
         let pattern3 = &json_string_term.pattern;
         eprintln!("\nJSON_STRING pattern: {}", pattern3);

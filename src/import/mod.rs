@@ -8,6 +8,13 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+pub mod ast;
+pub mod ebnf;
+pub mod json_schema;
+pub mod lark;
+
+pub use ast as grammar_expr;
+
 use crate::compiler::debug::CompileDebug;
 use crate::runtime::Constraint;
 

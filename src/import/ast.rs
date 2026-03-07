@@ -1,6 +1,6 @@
 //! Grammar expression AST and lowering to `GrammarDef`.
 //!
-//! Provides a high-level grammar IR (`GrammarExpr`) that frontends produce,
+//! Provides a high-level grammar IR (`GrammarExpr`) that importers produce,
 //! plus logic to flatten it into the low-level `GrammarDef` consumed by the compiler.
 #![allow(dead_code)]
 #![allow(unused_mut)]

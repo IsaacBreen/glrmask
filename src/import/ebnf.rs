@@ -29,7 +29,7 @@
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
-use crate::frontend::ast::{GrammarExpr, NamedGrammar, lower};
+use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
 
 // ---------------------------------------------------------------------------
 // Tokenizer

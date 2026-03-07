@@ -9,7 +9,6 @@ pub mod compile;
 pub mod debug;
 pub mod glr;
 pub mod grammar;
-pub mod import;
 pub mod stages;
 
 pub use crate::automata::lexer::tokenizer as tokenizer_dfa;

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
-use crate::frontend::ast::{GrammarExpr, NamedGrammar, lower};
+use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
 
 /// Convert a JSON Schema (as a JSON string) into a `GrammarDef`.
 pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskError> {

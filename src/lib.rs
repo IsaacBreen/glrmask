@@ -35,7 +35,7 @@
 //! # Module Organization (internal)
 //!
 //! - `compiler`: Compilation pipeline (grammar → DWA → constraint)
-//! - `frontend`: Grammar parsing (EBNF, Lark, JSON Schema)
+//! - `import`: External-spec ingestion (EBNF, Lark, JSON Schema)
 //! - `runtime`: Mask computation and state management
 //! - `automata`: Finite automata (DFA, NFA, DWA, NWA)
 //! - `ds`: Data structures (bitset, rangeset)
@@ -49,7 +49,7 @@
 pub(crate) mod automata;
 pub(crate) mod compiler;
 pub(crate) mod ds;
-pub(crate) mod frontend;
+pub(crate) mod import;
 pub(crate) mod runtime;
 
 // Re-export public API types
