@@ -5,6 +5,7 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
+pub mod compile;
 pub mod debug;
 pub mod glr;
 pub mod grammar;
@@ -13,6 +14,7 @@ pub mod labels;
 pub mod stages;
 
 pub use crate::automata::lexer::tokenizer as tokenizer_dfa;
+pub use compile::{compile, compile_with_debug};
 pub use grammar::ast as grammar_def;
 pub use stages::id_map;
 
