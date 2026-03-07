@@ -1,11 +1,10 @@
-//! RangeMapBlaze-based 2D token/TSID range-set backend.
+//! `Weight`: a TSID-outer token/TSID set.
 //!
 //! The **Weight** type stores a set of `(token, TSID)` positions using
 //! TSID-outer layout: a `RangeMapBlaze<u32, RangeSetBlaze<u32>>` mapping TSID
 //! ranges to token sets.
 //!
-//! This is the shape-only 2D token/TSID range-set used throughout the
-//! weighted-u32 automata skeleton.
+//! It is the core set-valued payload carried by the weighted-u32 automata.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -15,10 +14,10 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Weight — TSID-outer 2D token/TSID range-set
+// Weight — TSID-outer token/TSID set
 // ---------------------------------------------------------------------------
 
-/// A 2D token/TSID range-set using TSID-outer layout.
+/// A token/TSID set using TSID-outer layout.
 ///
 /// Stores a `RangeMapBlaze<u32, RangeSetBlaze<u32>>` mapping TSID ranges to
 /// token sets.
@@ -28,12 +27,12 @@ pub struct Weight(pub RangeMapBlaze<u32, RangeSetBlaze<u32>>);
 impl Weight {
     // ---- Construction ----
 
-    /// Create an empty 2D range-set (no positions).
+    /// Create an empty weight (no surviving positions).
     pub fn empty() -> Self {
         unimplemented!()
     }
 
-    /// Create the universal 2D range-set (all positions).
+    /// Create the universal weight (all positions).
     pub fn all() -> Self {
         unimplemented!()
     }
@@ -62,38 +61,38 @@ impl Weight {
         unimplemented!()
     }
 
-    /// Clear this 2D range-set back to the empty set.
+    /// Clear this weight back to the empty set.
     pub fn clear(&mut self) {
         *self = Self::empty();
     }
 
-    /// Union all token coverage across every TSID into a single token set.
+    /// Project this weight onto the token dimension by unioning across TSIDs.
     ///
-    /// This collapses away the TSID dimension and returns the vocab/token
-    /// dimension alone.
-    pub fn union_tokens_across_tsids(&self) -> RangeSetBlaze<u32> {
+    /// This collapses away the TSID dimension and returns just the surviving
+    /// token IDs.
+    pub fn token_union(&self) -> RangeSetBlaze<u32> {
         let _ = self;
         unimplemented!()
     }
 
     // ---- Queries ----
 
-    /// Whether this is the universal (full) 2D range-set.
+    /// Whether this is the universal weight.
     pub fn is_full(&self) -> bool {
         unimplemented!()
     }
 
-    /// Whether the 2D range-set is empty (no positions).
+    /// Whether this weight is empty (no positions).
     pub fn is_empty(&self) -> bool {
         unimplemented!()
     }
 
-    /// Total number of sub-ranges (outer + sum of inner).
+    /// Total number of stored sub-ranges (outer + sum of inner).
     pub fn num_ranges(&self) -> usize {
         unimplemented!()
     }
 
-    /// Estimate the heap + inline footprint of this 2D range-set in bytes.
+    /// Estimate the heap + inline footprint of this weight in bytes.
     ///
     /// This is intentionally an estimate, not an exact accounting. It uses the
     /// number of stored ranges as a structural proxy for backing allocation and
@@ -106,12 +105,12 @@ impl Weight {
 
     // ---- Set operations ----
 
-    /// Compute the union of two 2D range-sets.
+    /// Compute the union of two weights.
     pub fn union(&self, other: &Self) -> Self {
         unimplemented!()
     }
 
-    /// Compute the intersection of two 2D range-sets.
+    /// Compute the intersection of two weights.
     pub fn intersection(&self, other: &Self) -> Self {
         unimplemented!()
     }
@@ -134,7 +133,7 @@ impl Weight {
         unimplemented!()
     }
 
-    /// Check whether two 2D range-sets are disjoint.
+    /// Check whether two weights are disjoint.
     pub fn is_disjoint(&self, other: &Self) -> bool {
         unimplemented!()
     }
@@ -166,24 +165,24 @@ impl std::fmt::Display for Weight {
     ///
     /// Examples:
     /// - `{0: {0, 3, 5}, 1..=3: {1..=5, 7, 9..=11}}`
-    /// - `∅` (empty 2D range-set)
-    /// - `ALL` (full 2D range-set)
+    /// - `∅` (empty weight)
+    /// - `ALL` (full weight)
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unimplemented!()
     }
 }
 
 /// Maximum number of entries before falling back to compact display in
-/// the symbol-aware `Weight` formatter.
-const RANGESET2D_SYMBOL_EXPAND_LIMIT: usize = 64;
+/// the name-aware `Weight` formatter.
+const WEIGHT_NAME_EXPAND_LIMIT: usize = 64;
 
 /// Wrapper to display a [`Weight`] with human-readable names for both
 /// the TSID dimension and the token dimension.
 ///
-/// If either dimension exceeds [`RANGESET2D_SYMBOL_EXPAND_LIMIT`], falls back
+/// If either dimension exceeds [`WEIGHT_NAME_EXPAND_LIMIT`], falls back
 /// to the compact/default representation.
-pub struct WeightDisplayWithMaps<'a> {
-    rangeset2d: &'a Weight,
+pub struct WeightDisplayWithNames<'a> {
+    weight: &'a Weight,
     /// TSID → name (e.g. "root", "state3").
     tsid_names: &'a std::collections::BTreeMap<u32, String>,
     /// token_id → name (e.g. `"a"`, `"$"`).
@@ -191,18 +190,18 @@ pub struct WeightDisplayWithMaps<'a> {
 }
 
 impl Weight {
-    /// Return a wrapper that prints this 2D range-set using human-readable names
-    /// for TSIDs and tokens.
-    pub fn display_with_maps(
+    /// Return a wrapper that prints this weight using human-readable names for
+    /// TSIDs and tokens.
+    pub fn display_with_names(
         &self,
         tsid_names: &std::collections::BTreeMap<u32, String>,
         token_names: &std::collections::BTreeMap<u32, String>,
-    ) -> WeightDisplayWithMaps<'_> {
+    ) -> WeightDisplayWithNames<'_> {
         unimplemented!()
     }
 }
 
-impl std::fmt::Display for WeightDisplayWithMaps<'_> {
+impl std::fmt::Display for WeightDisplayWithNames<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unimplemented!()
     }
@@ -215,7 +214,7 @@ impl std::fmt::Display for WeightDisplayWithMaps<'_> {
 /// The intended serialized form is a plain entry list:
 /// `Vec<(tsid_lo, tsid_hi, token_ranges)>`
 /// with `all()` represented by the sentinel pair `(u32::MAX, u32::MAX)`.
-const RANGESET2D_ALL_SENTINEL: u32 = u32::MAX;
+const WEIGHT_ALL_SENTINEL: u32 = u32::MAX;
 
 impl Serialize for Weight {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -240,13 +239,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rangeset2d_empty() {
+    fn test_weight_empty() {
         let w = Weight::empty();
         assert!(w.is_empty());
     }
 
     #[test]
-    fn test_rangeset2d_all_is_full() {
+    fn test_weight_all_is_full() {
         let w = Weight::all();
         assert!(w.is_full());
         assert!(!w.is_empty());
@@ -269,22 +268,22 @@ mod tests {
     }
 
     #[test]
-    fn test_weight_union_tokens_across_tsids_shape() {
+    fn test_weight_token_union_shape() {
         let w = Weight::from_compact_ranges([
             (0..=2, [10..=12, 20..=21]),
             (5..=5, [7..=9]),
         ]);
-        let _tokens = w.union_tokens_across_tsids();
+        let _tokens = w.token_union();
     }
 
     #[test]
-    fn test_rangeset2d_estimated_size_bytes_has_base_size() {
+    fn test_weight_estimated_size_bytes_has_base_size() {
         let w = Weight::empty();
         assert!(w.estimated_size_bytes() >= std::mem::size_of::<Weight>());
     }
 
     #[test]
-    fn test_rangeset2d_union() {
+    fn test_weight_union() {
         let a = Weight::empty();
         let b = Weight::all();
         let u = a.union(&b);
@@ -292,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rangeset2d_intersection() {
+    fn test_weight_intersection() {
         let a = Weight::empty();
         let b = Weight::all();
         let i = a.intersection(&b);
@@ -300,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rangeset2d_difference() {
+    fn test_weight_difference() {
         let a = Weight::all();
         let b = Weight::empty();
         let d = a.difference(&b);
@@ -308,14 +307,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rangeset2d_clear() {
+    fn test_weight_clear() {
         let mut w = Weight::all();
         w.clear();
         assert!(w.is_empty());
     }
 
     #[test]
-    fn test_rangeset2d_display() {
+    fn test_weight_display() {
         let empty = Weight::empty();
         let all = Weight::all();
         assert_eq!(format!("{empty}"), "∅");
@@ -323,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rangeset2d_equality() {
+    fn test_weight_equality() {
         let a = Weight::empty();
         let b = Weight::empty();
         assert_eq!(a, b);
@@ -332,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rangeset2d_serde_empty() {
+    fn test_weight_serde_empty() {
         let w = Weight::empty();
         let json = serde_json::to_string(&w).unwrap();
         let w2: Weight = serde_json::from_str(&json).unwrap();
@@ -340,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rangeset2d_serde_all() {
+    fn test_weight_serde_all() {
         let w = Weight::all();
         let json = serde_json::to_string(&w).unwrap();
         let w2: Weight = serde_json::from_str(&json).unwrap();
