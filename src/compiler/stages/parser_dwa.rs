@@ -33,16 +33,15 @@ use crate::compiler::glr::table::{Action, GlrTable};
 use crate::compiler::grammar::ast::{NonterminalId, TerminalId};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::id_map::InternalIdMap;
+use crate::compiler::stages::parser_labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::compiler::template::{build_template_bundles, build_template_nwa_from_bundles};
 use crate::Vocab;
 
-pub use crate::compiler::labels::DEFAULT_LABEL;
-
 #[cfg(test)]
 use crate::ds::rangeset2d::Weight;
 #[cfg(test)]
-use crate::compiler::labels::{encode_negative_label, is_negative_label};
+use crate::compiler::stages::parser_labels::encode_negative_label;
 
 fn terminals_present_in_terminal_dwa(terminal_dwa: &crate::compiler::terminal_dwa::TerminalDwa) -> BTreeSet<TerminalId> {
     let mut terminals = BTreeSet::new();
@@ -245,10 +244,10 @@ pub fn build_parser_nwa(
             eprintln!("  state {}:", i);
             for (&label, targets) in &state.transitions {
                 for (dest, _w) in targets {
-                    let label_str = if label == crate::compiler::labels::DEFAULT_LABEL {
+                    let label_str = if label == DEFAULT_LABEL {
                         "DEFAULT".to_string()
-                    } else if crate::compiler::labels::is_negative_label(label) {
-                        format!("neg({})", crate::compiler::labels::negative_to_positive_label(label))
+                    } else if is_negative_label(label) {
+                        format!("neg({})", negative_to_positive_label(label))
                     } else {
                         format!("{}", label)
                     };
@@ -278,7 +277,7 @@ pub fn build_parser_nwa(
             eprintln!("  state {}:", i);
             for (&label, targets) in &state.transitions {
                 for (dest, _w) in targets {
-                    let label_str = if label == crate::compiler::labels::DEFAULT_LABEL {
+                    let label_str = if label == DEFAULT_LABEL {
                         "DEFAULT".to_string()
                     } else {
                         format!("{}", label)

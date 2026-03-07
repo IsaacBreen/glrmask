@@ -10,13 +10,13 @@ pub mod debug;
 pub mod glr;
 pub mod grammar;
 pub mod import;
-pub mod labels;
 pub mod stages;
 
 pub use crate::automata::lexer::tokenizer as tokenizer_dfa;
 pub use compile::{compile, compile_with_debug};
 pub use grammar::ast as grammar_def;
 pub use stages::id_map;
+pub use stages::parser_labels;
 
 pub use stages::parser_dwa;
 pub use stages::resolve_negatives;

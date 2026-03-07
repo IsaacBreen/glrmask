@@ -20,7 +20,7 @@ use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{Nwa, NwaState};
 use crate::ds::rangeset2d::Weight;
 use crate::compiler::grammar_def::TerminalId;
-use crate::compiler::labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label};
+use crate::compiler::stages::parser_labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label};
 use crate::compiler::parser_dwa::TerminalCharacterization;
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::terminal_dwa::TerminalDwa;

@@ -8,6 +8,7 @@
 #![allow(unused_imports)]
 
 pub mod id_map;
+pub mod parser_labels;
 pub mod terminal_dwa;
 pub mod template_dfa;
 pub mod parser_dwa;
