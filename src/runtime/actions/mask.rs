@@ -7,7 +7,36 @@
 #![allow(unused_imports)]
 
 use crate::runtime::state::ConstraintState;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use range_set_blaze::RangeSetBlaze;
+
+#[derive(Clone, Debug)]
+struct AllowedTokens(RangeSetBlaze<u32>);
+
+impl PartialEq for AllowedTokens {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for AllowedTokens {}
+
+impl std::hash::Hash for AllowedTokens {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for range in self.0.ranges() {
+            range.start().hash(state);
+            range.end().hash(state);
+        }
+    }
+}
+
+impl Merge for AllowedTokens {
+    fn merge(&self, other: &Self) -> Self {
+        Self(&self.0 | &other.0)
+    }
+}
+
+type WeightedParserGSS = LeveledGSS<u32, AllowedTokens>;
 
 // SEP1_MAP: this file is the glrmask split of sep1 mask generation from
 // `grammars2024/src/constraint_fns.rs::{compute_internal_mask,get_mask,fill_mask_i32}`.
@@ -28,7 +57,7 @@ impl<'a> ConstraintState<'a> {
 
         let mut queue = std::collections::BTreeMap::<
             isize,
-            std::collections::BTreeMap<(u32, u32), crate::compiler::glr::parser::ParserGSS>,
+            std::collections::BTreeMap<(u32, u32), WeightedParserGSS>,
         >::new();
 
         for (&tokenizer_state, gss) in &self.state {
@@ -44,7 +73,7 @@ impl<'a> ConstraintState<'a> {
                 continue;
             };
 
-            let seeded = self.prune_by_weight(tokenizer_state, gss, seed_weight);
+            let seeded = self.seed_by_weight(tokenizer_state, gss, seed_weight);
             if seeded.is_empty() {
                 continue;
             }
@@ -64,17 +93,9 @@ impl<'a> ConstraintState<'a> {
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let allowed = if final_weight.is_full() {
-                            self.filter_weight_tokens(
-                                tokenizer_state,
-                                self.all_tokens_for_state(tokenizer_state),
-                                &reduced_acc,
-                            )
+                            reduced_acc.0.clone()
                         } else {
-                            self.filter_weight_tokens(
-                                tokenizer_state,
-                                final_weight.tokens_for_tsid(tokenizer_state),
-                                &reduced_acc,
-                            )
+                            &reduced_acc.0 & &final_weight.tokens_for_tsid(tokenizer_state)
                         };
                         for token_id in allowed.iter() {
                             let word = token_id as usize / 32;
@@ -87,7 +108,7 @@ impl<'a> ConstraintState<'a> {
                 }
 
                 for parser_state in gss.peek() {
-                    let mut advance = |label: i32, current: &crate::compiler::glr::parser::ParserGSS| {
+                    let mut advance = |label: i32, current: &WeightedParserGSS| {
                         let Some((target, weight)) = dwa_state.transitions.get(&label) else {
                             return;
                         };
@@ -96,7 +117,7 @@ impl<'a> ConstraintState<'a> {
                         if popped.is_empty() {
                             return;
                         }
-                        let pruned = self.prune_by_weight(tokenizer_state, &popped, weight);
+                        let pruned = self.intersect_weight_tokens(tokenizer_state, &popped, weight);
                         if pruned.is_empty() {
                             return;
                         }
@@ -125,32 +146,60 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    fn prune_by_weight(
+    fn seed_by_weight(
         &self,
         tokenizer_state: u32,
         gss: &crate::compiler::glr::parser::ParserGSS,
         weight: &crate::ds::weight::Weight,
-    ) -> crate::compiler::glr::parser::ParserGSS {
-        let tokens = weight.tokens_for_tsid(tokenizer_state);
-        if tokens.is_empty() && !weight.is_full() {
-            return crate::compiler::glr::parser::ParserGSS::empty();
+    ) -> WeightedParserGSS {
+        let tokens = self.tokens_for_weight(tokenizer_state, weight);
+        if tokens.is_empty() {
+            return WeightedParserGSS::empty();
         }
         gss.apply_and_prune(|terminals_disallowed| {
-            let allowed = if weight.is_full() {
-                self.filter_weight_tokens(
-                    tokenizer_state,
-                    self.all_tokens_for_state(tokenizer_state),
-                    terminals_disallowed,
-                )
-            } else {
-                self.filter_weight_tokens(tokenizer_state, tokens.clone(), terminals_disallowed)
-            };
+            let allowed = self.filter_weight_tokens(
+                tokenizer_state,
+                tokens.clone(),
+                terminals_disallowed,
+            );
             if allowed.is_empty() {
                 None
             } else {
-                Some(terminals_disallowed.clone())
+                Some(AllowedTokens(allowed))
             }
         })
+    }
+
+    fn intersect_weight_tokens(
+        &self,
+        tokenizer_state: u32,
+        gss: &WeightedParserGSS,
+        weight: &crate::ds::weight::Weight,
+    ) -> WeightedParserGSS {
+        let tokens = self.tokens_for_weight(tokenizer_state, weight);
+        if tokens.is_empty() {
+            return WeightedParserGSS::empty();
+        }
+        gss.apply_and_prune(|allowed| {
+            let next = &allowed.0 & &tokens;
+            if next.is_empty() {
+                None
+            } else {
+                Some(AllowedTokens(next))
+            }
+        })
+    }
+
+    fn tokens_for_weight(
+        &self,
+        tokenizer_state: u32,
+        weight: &crate::ds::weight::Weight,
+    ) -> RangeSetBlaze<u32> {
+        if weight.is_full() {
+            self.all_tokens_for_state(tokenizer_state)
+        } else {
+            weight.tokens_for_tsid(tokenizer_state)
+        }
     }
 
     fn all_tokens_for_state(&self, tokenizer_state: u32) -> RangeSetBlaze<u32> {
