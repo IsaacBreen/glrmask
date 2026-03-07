@@ -111,6 +111,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         tokenizer,
         possible_matches: possible_matches_by_state.clone(),
         terminal_tokens_by_state,
+        state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         eos_token_id: vocab.eos_token_id,
         token_bytes,
     }
@@ -167,6 +168,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         tokenizer: tokenizer.clone(),
         possible_matches: possible_matches_by_state.clone(),
         terminal_tokens_by_state,
+        state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         eos_token_id: vocab.eos_token_id,
         token_bytes: token_bytes.clone(),
     };

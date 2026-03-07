@@ -62,6 +62,8 @@ pub struct Constraint {
     #[serde(with = "crate::runtime::serde::serde_nested_btmap_rsb")]
     pub(crate) terminal_tokens_by_state: TerminalTokensByState,
 
+        pub(crate) state_to_internal_tsid: Vec<u32>,
+
     
     pub(crate) eos_token_id: Option<u32>,
 
@@ -120,5 +122,12 @@ impl Constraint {
             .get(&tokenizer_state)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: u32) -> u32 {
+        self.state_to_internal_tsid
+            .get(tokenizer_state as usize)
+            .copied()
+            .unwrap_or(tokenizer_state)
     }
 }

@@ -149,6 +149,7 @@ impl<'a> ConstraintState<'a> {
         gss: &crate::compiler::glr::parser::ParserGSS,
         weight: &crate::ds::weight::Weight,
     ) -> WeightedParserGSS {
+        let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
         let tokens = self.tokens_for_weight(tokenizer_state, weight);
         if tokens.is_empty() {
             return WeightedParserGSS::empty();
@@ -162,7 +163,7 @@ impl<'a> ConstraintState<'a> {
                 None
             } else {
                 Some(AllowedWeight(
-                    crate::ds::weight::Weight::from_token_set_for_tsid(tokenizer_state, allowed),
+                    crate::ds::weight::Weight::from_token_set_for_tsid(internal_tsid, allowed),
                 ))
             }
         })
@@ -189,10 +190,11 @@ impl<'a> ConstraintState<'a> {
     ) -> RangeSetBlaze<u32> {
         let mut all = RangeSetBlaze::new();
         for tokenizer_state in 0..self.constraint.tokenizer.num_states() {
+            let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
             let token_ids = if weight.is_full() {
                 self.all_tokens_for_state(tokenizer_state)
             } else {
-                weight.tokens_for_tsid(tokenizer_state)
+                weight.tokens_for_tsid(internal_tsid)
             };
             if !token_ids.is_empty() {
                 all = all | token_ids;
@@ -206,10 +208,11 @@ impl<'a> ConstraintState<'a> {
         tokenizer_state: u32,
         weight: &crate::ds::weight::Weight,
     ) -> RangeSetBlaze<u32> {
+        let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
         if weight.is_full() {
             self.all_tokens_for_state(tokenizer_state)
         } else {
-            weight.tokens_for_tsid(tokenizer_state)
+            weight.tokens_for_tsid(internal_tsid)
         }
     }
 
