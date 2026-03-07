@@ -20,6 +20,10 @@ use crate::ds::leveled_gss::LeveledGSS;
 
 use super::state::ConstraintState;
 
+// SEP1_MAP: `TerminalTokensByState` is closest to sep1
+// `GrammarConstraint.possible_matches` in `grammars2024/src/constraint.rs`.
+// glrmask stores the tokenizer-state/TSID/terminal lookup directly instead of
+// sep1's internal-token-bitset representation.
 pub(crate) type TokenizerStateID = u32;
 pub(crate) type TSID = u32;
 pub(crate) type TerminalTokensByState =
@@ -31,6 +35,9 @@ pub(crate) type TerminalTokensByState =
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
+// SEP1_MAP: `Constraint` is the direct runtime-artifact analogue of sep1
+// `GrammarConstraint` in `grammars2024/src/constraint.rs`, but with sep1's
+// runtime responsibilities split away from build/config code.
 pub struct Constraint {
     
     
@@ -56,6 +63,10 @@ pub struct Constraint {
 }
 
 impl Constraint {
+    // SEP1_MAP: `start()` corresponds to sep1 `GrammarConstraint::init()` in
+    // `grammars2024/src/constraint.rs`; glrmask seeds the initial tokenizer
+    // state and parser GSS directly instead of delegating through sep1's GLR
+    // parser wrapper.
     
     pub fn start(&self) -> ConstraintState<'_> {
         
@@ -78,6 +89,8 @@ impl Constraint {
         unimplemented!()
     }
 
+    // SEP1_MAP: nearest sep1 analogue is reading `GrammarConstraint.parser_dwa`
+    // directly from `grammars2024/src/constraint.rs`; no separate accessor there.
     
     pub(crate) fn parser_dwa(&self) -> &DWA {
         unimplemented!()
