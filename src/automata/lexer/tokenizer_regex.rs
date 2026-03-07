@@ -100,6 +100,14 @@ fn build_literal_tokenizer(terminals: &[(TerminalID, Vec<u8>, bool)]) -> Tokeniz
     for (terminal, bytes, is_non_greedy) in terminals {
         let mut state = 0u32;
         let mut byte_set = U8Set::empty();
+
+        // Mark the start state (and all intermediate prefix states) as having
+        // this terminal reachable in the future.  The previous code only marked
+        // states AFTER consuming a byte, missing state 0.
+        if !bytes.is_empty() {
+            dfa.mark_possible_future_group(state, *terminal);
+        }
+
         for (index, &byte) in bytes.iter().enumerate() {
             byte_set.insert(byte);
 

@@ -302,7 +302,11 @@ impl Weight {
             return self.clone();
         }
         if self.is_full() {
-            return if other.is_full() { Self::empty() } else { Self::all() };
+            // Cannot compute all \ other without an explicit universe.
+            // Return all() as a safe over-approximation.  Callers that need
+            // exact complements should use the dedicated complement() method
+            // which returns empty() as a no-op sentinel instead.
+            return Self::all();
         }
         let mut out = BTreeMap::new();
         let right = other.expanded_entries();
@@ -325,7 +329,15 @@ impl Weight {
         } else if self.is_empty() {
             Self::all()
         } else {
-            Self::all().difference(self)
+            // Cannot compute a proper per-TSID complement without an explicit
+            // token/TSID universe.  Returning empty() makes the determinization
+            // normalization step a no-op (target ∪ empty = target), which
+            // preserves correctness at the cost of potentially more DWA states
+            // (no subset collapsing via normalization).  The previous approach
+            // was `all().difference(self)` which always returned `all()` due to
+            // the sentinel representation, causing target subsets to collapse
+            // into `Weight::all()` and producing false positives.
+            Self::empty()
         }
     }
 
