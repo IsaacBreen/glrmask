@@ -163,7 +163,7 @@ fn terminal_branches_for_tokenizer_state(
     terminal_dwa: &TerminalDWA,
     grammar: &AnalyzedGrammar,
     terminal_state: u32,
-    tokenizer_state: u32,
+    internal_tsid: u32,
 ) -> Vec<(TerminalID, u32, Weight)> {
     let Some(state) = terminal_dwa.nwa.states.get(terminal_state as usize) else {
         return Vec::new();
@@ -176,14 +176,14 @@ fn terminal_branches_for_tokenizer_state(
         }
 
         for (target, weight) in targets {
-            let tokens = weight.tokens_for_tsid(tokenizer_state);
+            let tokens = weight.tokens_for_tsid(internal_tsid);
             if tokens.is_empty() {
                 continue;
             }
             branches.push((
                 label as TerminalID,
                 *target,
-                Weight::from_token_set_for_tsid(tokenizer_state, tokens),
+                Weight::from_token_set_for_tsid(internal_tsid, tokens),
             ));
         }
     }
@@ -195,14 +195,14 @@ fn terminal_branch_groups_for_tokenizer_state(
     terminal_dwa: &TerminalDWA,
     grammar: &AnalyzedGrammar,
     terminal_state: u32,
-    tokenizer_state: u32,
+    internal_tsid: u32,
 ) -> BTreeMap<u32, BTreeMap<TerminalID, Weight>> {
     let mut groups = BTreeMap::<u32, BTreeMap<TerminalID, Weight>>::new();
     for (terminal, target, weight) in terminal_branches_for_tokenizer_state(
         terminal_dwa,
         grammar,
         terminal_state,
-        tokenizer_state,
+        internal_tsid,
     ) {
         groups
             .entry(target)
@@ -218,14 +218,14 @@ fn terminal_weights_for_tokenizer_state(
     terminal_dwa: &TerminalDWA,
     grammar: &AnalyzedGrammar,
     root_state: u32,
-    tokenizer_state: u32,
+    internal_tsid: u32,
 ) -> BTreeMap<TerminalID, Weight> {
     let mut weights = BTreeMap::new();
     for (terminal, _target, weight) in terminal_branches_for_tokenizer_state(
         terminal_dwa,
         grammar,
         root_state,
-        tokenizer_state,
+        internal_tsid,
     ) {
         weights
             .entry(terminal)
@@ -242,7 +242,7 @@ fn build_branch_bundle(
     grammar: &AnalyzedGrammar,
     table: &GLRTable,
     parser_state: u32,
-    tokenizer_state: u32,
+    internal_tsid: u32,
     target_state: u32,
     terminal_group: &BTreeMap<TerminalID, Weight>,
 ) -> Option<NWA> {
@@ -260,7 +260,7 @@ fn build_branch_bundle(
         terminal_dwa,
         grammar,
         target_state,
-        tokenizer_state,
+        internal_tsid,
     );
 
     let mut continuation_arena = NWA::new(0, 0);
@@ -276,7 +276,7 @@ fn build_branch_bundle(
             grammar,
             table,
             parser_state,
-            tokenizer_state,
+            internal_tsid,
             *next_target,
             next_group,
         ) {
@@ -344,10 +344,10 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
             terminal_dwa,
             grammar,
             root_state,
-            tokenizer_state,
+            internal_tsid,
         );
         let terminal_weights =
-            terminal_weights_for_tokenizer_state(terminal_dwa, grammar, root_state, tokenizer_state);
+            terminal_weights_for_tokenizer_state(terminal_dwa, grammar, root_state, internal_tsid);
 
         let seed_state = dwa.add_state();
         let mut seed_weight = Weight::empty();
@@ -374,7 +374,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
                     grammar,
                     table,
                     parser_state,
-                    tokenizer_state,
+                    internal_tsid,
                     *target_state,
                     terminal_group,
                 ) else {
@@ -421,13 +421,13 @@ fn root_terminal_branch_groups_for_tokenizer_state(
     terminal_dwa: &TerminalDWA,
     grammar: &AnalyzedGrammar,
     root_state: u32,
-    tokenizer_state: u32,
+    internal_tsid: u32,
 ) -> BTreeMap<u32, BTreeMap<TerminalID, Weight>> {
     terminal_branch_groups_for_tokenizer_state(
             terminal_dwa,
             grammar,
             root_state,
-            tokenizer_state,
+            internal_tsid,
     )
 }
 
