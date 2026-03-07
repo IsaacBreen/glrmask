@@ -14,6 +14,11 @@
 #![allow(unused_imports, unused_variables, dead_code)]
 #![allow(unused_imports, unused_variables, unused_mut, dead_code)]
 
+pub mod a_terminal_dwa;
+pub mod b_template_dfa;
+pub mod c_parser_dwa;
+pub mod d_resolve_negatives;
+
 use crate::Vocab;
 use crate::automata::weighted::dwa::CompDwa;
 use crate::compiler::debug::CompileDebug;
