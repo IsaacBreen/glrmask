@@ -410,13 +410,13 @@ mod tests {
         let mut state = c.start();
         for (i, _tok) in tokens.iter().enumerate() {
             let id = i as u32;
-            let mask = state.mask();
+            let mask = state.mask_view().mask();
             let (wi, bi) = (id as usize / 32, id as usize % 32);
             let allowed = wi < mask.len() && (mask[wi] >> bi) & 1 != 0;
             if !allowed {
                 return false;
             }
-            state.commit(id);
+            state.commit_token(id);
         }
         state.is_finished()
     }

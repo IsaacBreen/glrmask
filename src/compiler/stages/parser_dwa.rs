@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::automata::lexer::tokenizer::TokenizerDfa;
+use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::automata::weighted::minimize::minimize;
@@ -31,7 +31,7 @@ use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::GLRGrammar;
 use crate::compiler::glr::table::{Action, GLRTable};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
-use crate::compiler::grammar::ast::{NonterminalId, TerminalId};
+use crate::compiler::grammar::ast::{NonterminalId, TerminalID};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
@@ -44,11 +44,11 @@ use crate::compiler::glr::labels::encode_negative_label;
 #[cfg(test)]
 use crate::ds::weight::Weight;
 
-fn terminals_present_in_terminal_dwa(terminal_dwa: &crate::compiler::terminal_dwa::TerminalDwa) -> BTreeSet<TerminalId> {
+fn terminals_present_in_terminal_dwa(terminal_dwa: &crate::compiler::terminal_dwa::TerminalDwa) -> BTreeSet<TerminalID> {
     let mut terminals = BTreeSet::new();
     for state in &terminal_dwa.nwa.states {
         for &label in state.transitions.keys() {
-            let Ok(terminal) = TerminalId::try_from(label) else {
+            let Ok(terminal) = TerminalID::try_from(label) else {
                 continue;
             };
             terminals.insert(terminal);
@@ -86,7 +86,7 @@ fn terminals_present_in_terminal_dwa(terminal_dwa: &crate::compiler::terminal_dw
 pub fn build_parser_nwa(
     table: &GLRTable,
     grammar: &GLRGrammar,
-    tokenizer: &TokenizerDfa,
+    tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
 ) -> NWA {
@@ -97,7 +97,7 @@ pub fn build_parser_nwa(
     eprintln!("[glrmask::dwa]   characterize:  {:.3}s", t0.elapsed().as_secs_f64());
 
     // Pre-compute used terminals from characterizations to filter token iteration.
-    let characterized_terminals: std::collections::BTreeSet<TerminalId> =
+    let characterized_terminals: std::collections::BTreeSet<TerminalID> =
         characterizations.keys().copied().collect();
 
     let t0 = Instant::now();
@@ -299,7 +299,7 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
 pub fn build_parser_dwa(
     table: &GLRTable,
     grammar: &GLRGrammar,
-    tokenizer: &TokenizerDfa,
+    tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
 ) -> DWA {
@@ -312,7 +312,7 @@ pub fn build_parser_dwa(
 pub fn build_parser_dwa_with_debug(
     table: &GLRTable,
     grammar: &GLRGrammar,
-    tokenizer: &TokenizerDfa,
+    tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
 ) -> (DWA, crate::compiler::debug::AutomataDebug) {
@@ -323,7 +323,7 @@ pub fn build_parser_dwa_with_debug(
 fn build_parser_dwa_impl(
     table: &GLRTable,
     grammar: &GLRGrammar,
-    tokenizer: &TokenizerDfa,
+    tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
     capture_debug: bool,
@@ -333,7 +333,7 @@ fn build_parser_dwa_impl(
     // --- Step 1: Characterize & build terminal DWA ---
     let t = Instant::now();
     let characterizations = characterize_terminals(table, grammar);
-    let characterized_terminals: std::collections::BTreeSet<TerminalId> =
+    let characterized_terminals: std::collections::BTreeSet<TerminalID> =
         characterizations.keys().copied().collect();
     eprintln!("[glrmask::dwa]   characterize:  {:.3}s", t.elapsed().as_secs_f64());
 
@@ -439,15 +439,15 @@ mod tests {
     use super::*;
     use range_set_blaze::RangeSetBlaze;
     use crate::Vocab;
-    use crate::automata::lexer::tokenizer::TokenizerDfa;
+    use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::compiler::glr::analysis::GLRGrammar;
     use crate::compiler::grammar::ast::GrammarDef;
     use crate::compiler::grammar::ast::tests::*;
 
     fn make_vocab_and_preprocessing(
         gdef: &GrammarDef,
-    ) -> (Vocab, TokenizerDfa, InternalIdMap) {
-        let tok = TokenizerDfa::from_grammar_def(gdef);
+    ) -> (Vocab, Tokenizer, InternalIdMap) {
+        let tok = Tokenizer::from_grammar_def(gdef);
         // Build vocab: one token per terminal pattern.
         let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
         for (i, td) in gdef.terminals.iter().enumerate() {

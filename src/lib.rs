@@ -21,9 +21,9 @@
 //!     if state.is_finished() { break; }
 //!
 //!     // Sample from the allowed-token mask.
-//!     state.fill_mask(&mut buf);
+//!     state.mask_view().fill_mask(&mut buf);
 //!     let token = sample(logits, &buf);
-//!     state.commit(token);
+//!     state.commit_token(token);
 //! }
 //! ```
 //!

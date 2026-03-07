@@ -24,10 +24,10 @@
 
 use std::collections::{BTreeSet, BTreeMap};
 
-use crate::compiler::grammar::ast::{GrammarDef, NonterminalId, Rule, Symbol, TerminalId};
+use crate::compiler::grammar::ast::{GrammarDef, NonterminalId, Rule, Symbol, TerminalID};
 
 /// EOF pseudo-terminal. Must not collide with any real terminal.
-pub const EOF: TerminalId = u32::MAX;
+pub const EOF: TerminalID = u32::MAX;
 
 /// An augmented GLR grammar ready for table generation.
 #[derive(Debug, Clone)]
@@ -44,9 +44,9 @@ pub struct GLRGrammar {
     /// Nullable nonterminals.
     pub nullable: BTreeSet<NonterminalId>,
     /// FIRST(A) for each nonterminal A (indexed by NT id).
-    pub first: Vec<BTreeSet<TerminalId>>,
+    pub first: Vec<BTreeSet<TerminalID>>,
     /// FOLLOW(A) for each nonterminal A (indexed by NT id).
-    pub follow: Vec<BTreeSet<TerminalId>>,
+    pub follow: Vec<BTreeSet<TerminalID>>,
 }
 
 impl GLRGrammar {
@@ -66,7 +66,7 @@ impl GLRGrammar {
     }
 
     /// FIRST set for a sequence of symbols.
-    pub fn first_of_seq(&self, seq: &[Symbol]) -> BTreeSet<TerminalId> {
+    pub fn first_of_seq(&self, seq: &[Symbol]) -> BTreeSet<TerminalID> {
         unimplemented!()
     }
 
@@ -286,7 +286,7 @@ fn compute_first(
     rules: &[Rule],
     num_nt: u32,
     nullable: &BTreeSet<NonterminalId>,
-) -> Vec<BTreeSet<TerminalId>> {
+) -> Vec<BTreeSet<TerminalID>> {
     unimplemented!()
 }
 
@@ -298,9 +298,9 @@ fn compute_follow(
     rules: &[Rule],
     num_nt: u32,
     start: NonterminalId,
-    first: &[BTreeSet<TerminalId>],
+    first: &[BTreeSet<TerminalID>],
     nullable: &BTreeSet<NonterminalId>,
-) -> Vec<BTreeSet<TerminalId>> {
+) -> Vec<BTreeSet<TerminalID>> {
     unimplemented!()
 }
 

@@ -23,6 +23,17 @@ impl BitSet {
         unimplemented!()
     }
 
+    /// Create an empty bitset with capacity for `len` bits.
+    pub fn empty(len: usize) -> Self {
+        Self::new(len)
+    }
+
+    /// Create a full bitset with capacity for `len` bits.
+    pub fn all(len: usize) -> Self {
+        let _ = len;
+        unimplemented!()
+    }
+
     /// Number of bits this bitset can hold.
     pub fn len(&self) -> usize {
         unimplemented!()
@@ -36,6 +47,11 @@ impl BitSet {
     /// Get the value of bit `i`.
     pub fn get(&self, i: usize) -> bool {
         unimplemented!()
+    }
+
+    /// Whether the set contains bit `i`.
+    pub fn contains(&self, i: usize) -> bool {
+        self.get(i)
     }
 
     /// Set bit `i` to 1.
@@ -64,12 +80,47 @@ impl BitSet {
     }
 
     /// In-place OR: `self |= other`.
-    pub fn union_with(&mut self, other: &BitSet) {
+    fn union_with(&mut self, other: &BitSet) {
+        unimplemented!()
+    }
+
+    /// Return `self ∪ other`.
+    pub fn union(&self, other: &Self) -> Self {
+        let _ = other;
         unimplemented!()
     }
 
     /// In-place AND: `self &= other`.
-    pub fn intersect_with(&mut self, other: &BitSet) {
+    fn intersect_with(&mut self, other: &BitSet) {
+        unimplemented!()
+    }
+
+    /// Return `self ∩ other`.
+    pub fn intersection(&self, other: &Self) -> Self {
+        let _ = other;
+        unimplemented!()
+    }
+
+    /// Return `self \ other`.
+    pub fn difference(&self, other: &Self) -> Self {
+        let _ = other;
+        unimplemented!()
+    }
+
+    /// Return the bitwise complement within the current logical length.
+    pub fn complement(&self) -> Self {
+        unimplemented!()
+    }
+
+    /// Whether `self` and `other` share no set bits.
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        let _ = other;
+        unimplemented!()
+    }
+
+    /// Whether all set bits in `self` are also set in `other`.
+    pub fn is_subset(&self, other: &Self) -> bool {
+        let _ = other;
         unimplemented!()
     }
 
@@ -156,12 +207,10 @@ mod tests {
         b.set(1);
         b.set(2);
 
-        let mut u = a.clone();
-        u.union_with(&b);
+        let u = a.union(&b);
         assert_eq!(u.count_ones(), 3);
 
-        let mut i = a.clone();
-        i.intersect_with(&b);
+        let i = a.intersection(&b);
         assert_eq!(i.count_ones(), 1);
         assert!(i.get(1));
     }

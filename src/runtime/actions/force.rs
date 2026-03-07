@@ -8,20 +8,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use crate::ds::bitset::BitSet;
 use crate::runtime::state::ConstraintState;
-
-/// Check if the mask allows exactly one token. Returns it if so.
-#[allow(dead_code)]
-pub(crate) fn forced_token(mask: &BitSet) -> Option<u32> {
-    unimplemented!()
-}
-
-/// Check if the mask is empty (no tokens allowed).
-#[allow(dead_code)]
-pub(crate) fn is_dead(mask: &BitSet) -> bool {
-    unimplemented!()
-}
 
 impl<'a> ConstraintState<'a> {
     /// Return the sequence of tokens forced by the current grammar state.
@@ -32,7 +19,7 @@ impl<'a> ConstraintState<'a> {
     /// deterministic. Returns an empty `Vec` when no tokens are forced.
     ///
     /// The caller is responsible for committing the returned tokens via
-    /// [`commit_tokens`].
+    /// [`commit_tokens`](ConstraintState::commit_tokens).
     pub fn force(&self) -> Vec<u32> {
         unimplemented!()
     }
@@ -43,6 +30,26 @@ mod tests {
     use super::*;
     use crate::runtime::Constraint;
     use crate::Vocab;
+
+    fn single_allowed_token(mask: &[u32]) -> Option<u32> {
+        let mut found = None;
+        for (word_index, &word) in mask.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as u32;
+                let token = word_index as u32 * 32 + bit;
+                if found.replace(token).is_some() {
+                    return None;
+                }
+                bits &= bits - 1;
+            }
+        }
+        found
+    }
+
+    fn mask_is_empty(mask: &[u32]) -> bool {
+        mask.iter().all(|word| *word == 0)
+    }
 
     fn make_vocab(entries: &[&str]) -> Vocab {
         let entries: Vec<(u32, Vec<u8>)> = entries
@@ -58,32 +65,32 @@ mod tests {
         let vocab = make_vocab(&["a", "b"]);
         let c = Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
         let s = c.start();
-        let mask = s.compute_mask();
+        let mask = s.mask_view().mask();
 
         // Only "a" should be valid — forced token should be 0.
-        assert_eq!(forced_token(&mask), Some(0));
-        assert!(!is_dead(&mask));
+        assert_eq!(single_allowed_token(&mask), Some(0));
+        assert!(!mask_is_empty(&mask));
     }
 
     #[test]
     fn test_forced_single() {
-        let mut mask = BitSet::new(10);
-        mask.set(5);
-        assert_eq!(forced_token(&mask), Some(5));
+        let mut mask = vec![0u32; 1];
+        mask[0] |= 1u32 << 5;
+        assert_eq!(single_allowed_token(&mask), Some(5));
     }
 
     #[test]
     fn test_forced_multi() {
-        let mut mask = BitSet::new(10);
-        mask.set(5);
-        mask.set(7);
-        assert_eq!(forced_token(&mask), None);
+        let mut mask = vec![0u32; 1];
+        mask[0] |= 1u32 << 5;
+        mask[0] |= 1u32 << 7;
+        assert_eq!(single_allowed_token(&mask), None);
     }
 
     #[test]
     fn test_forced_empty() {
-        let mask = BitSet::new(10);
-        assert_eq!(forced_token(&mask), None);
-        assert!(is_dead(&mask));
+        let mask = vec![0u32; 1];
+        assert_eq!(single_allowed_token(&mask), None);
+        assert!(mask_is_empty(&mask));
     }
 }

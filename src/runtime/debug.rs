@@ -10,10 +10,6 @@ impl Constraint {
     /// Debug dump of internal state for troubleshooting.
     pub(crate) fn debug_dump(&self) {
         eprintln!("--- Constraint Debug Dump ---");
-        eprintln!("num_tsids: {}", self.num_tsids);
-        eprintln!("max_token: {}", self.max_token);
-        eprintln!("state_to_tsid: {:?}", self.state_to_tsid);
-        eprintln!("tsid_to_state: {:?}", self.tsid_to_state);
         eprintln!("Tokenizer DFA states: {}", self.tokenizer.dfa.num_states());
         for s in 0..self.tokenizer.dfa.num_states() {
             let fin = self.tokenizer.matched_terminals(s as u32);
@@ -34,10 +30,18 @@ impl Constraint {
             }
         }
         eprintln!("DWA states: {}", self.parser_dwa.states.len());
-        for (tsid, pm) in self.possible_matches.iter().enumerate() {
-            for (term, rs) in pm {
-                let vals: Vec<u32> = rs.iter().collect();
-                eprintln!("possible_matches[tsid={}][term={}] = {:?}", tsid, term, vals);
+        for (tokenizer_state, tsid_map) in &self.terminal_tokens_by_state {
+            for (tsid, terminal_map) in tsid_map {
+                for (term, rs) in terminal_map {
+                    let vals: Vec<u32> = rs.iter().collect();
+                    eprintln!(
+                        "terminal_tokens_by_state[state={}][tsid={}][term={}] = {:?}",
+                        tokenizer_state,
+                        tsid,
+                        term,
+                        vals
+                    );
+                }
             }
         }
         eprintln!("--- End Debug Dump ---");

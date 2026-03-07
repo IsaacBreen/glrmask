@@ -5,13 +5,13 @@
 #![allow(unused_imports)]
 
 use crate::Vocab;
-use crate::automata::lexer::tokenizer::TokenizerDfa;
+use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::equivalence_analysis::state_analysis::analyze_state_equivalences;
 use crate::compiler::stages::equivalence_analysis::vocab_analysis::analyze_vocab_equivalences;
 
 /// Run both equivalence analyses and return the joint internal-ID mapping.
-pub(crate) fn analyze_equivalences(tokenizer: &TokenizerDfa, vocab: &Vocab) -> InternalIdMap {
+pub(crate) fn analyze_equivalences(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
     InternalIdMap {
         tokenizer_states: analyze_state_equivalences(tokenizer),
         vocab_tokens: analyze_vocab_equivalences(vocab),
@@ -21,7 +21,7 @@ pub(crate) fn analyze_equivalences(tokenizer: &TokenizerDfa, vocab: &Vocab) -> I
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::lexer::tokenizer::TokenizerDfa;
+    use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::compiler::grammar::ast::{GrammarDef, Rule, Symbol, TerminalDef};
 
     #[test]
@@ -38,7 +38,7 @@ mod tests {
                 pattern: "a".into(),
             }],
         };
-        let tok = TokenizerDfa::from_grammar_def(&gdef);
+        let tok = Tokenizer::from_grammar_def(&gdef);
         let vocab = Vocab::new(
             vec![
                 (0, b"a".to_vec()),

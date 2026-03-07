@@ -18,7 +18,7 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NWAState};
-use crate::compiler::grammar_def::TerminalId;
+use crate::compiler::grammar_def::TerminalID;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
@@ -35,7 +35,7 @@ struct TemplateCompositionContext<'a> {
     bundles: &'a [TemplateBundle],
     terminal_dwa: &'a TerminalDwa,
     combined: NWA,
-    template_by_terminal: BTreeMap<TerminalId, usize>,
+    template_by_terminal: BTreeMap<TerminalID, usize>,
     blueprint_cache: HashMap<(usize, Weight), NWA>,
     total_fragment_uses: usize,
     total_fragment_states: usize,
@@ -165,7 +165,7 @@ pub struct TemplateBundle {
     /// Structural template DFA compiled from the shared characterization.
     pub template_dfa: TemplateDfa,
     /// All terminals that reuse the same parser-side template.
-    pub terminals: Vec<TerminalId>,
+    pub terminals: Vec<TerminalID>,
 }
 
 /// Group terminals that share the same parser-side characterization.
@@ -176,8 +176,8 @@ pub struct TemplateBundle {
 /// true template/tokenizer composition, but bundling equivalent parser
 /// templates keeps the architecture aligned with the intended direction.
 pub(crate) fn build_template_bundles(
-    characterizations: &BTreeMap<TerminalId, TerminalCharacterization>,
-    used_terminals: &BTreeSet<TerminalId>,
+    characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
+    used_terminals: &BTreeSet<TerminalID>,
 ) -> Vec<TemplateBundle> {
     unimplemented!()
 }

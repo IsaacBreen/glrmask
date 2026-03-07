@@ -8,19 +8,24 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;
 
-use crate::automata::lexer::tokenizer::TokenizerDfa;
+use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar_def::TerminalId;
+use crate::compiler::grammar_def::TerminalID;
 use crate::ds::leveled_gss::LeveledGSS;
 
 use crate::compiler::glr::parser::terminals_disallowed_fresh;
 
 use super::state::ConstraintState;
+
+pub(crate) type TokenizerStateID = u32;
+pub(crate) type TSID = u32;
+pub(crate) type TerminalTokensByState =
+    BTreeMap<TokenizerStateID, BTreeMap<TSID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>>;
 
 /// A compiled grammar constraint, ready for inference.
 ///
@@ -37,37 +42,19 @@ pub struct Constraint {
     pub(crate) table: GLRTable,
 
     /// The byte-level tokenizer DFA.
-    pub(crate) tokenizer: TokenizerDfa,
+    pub(crate) tokenizer: Tokenizer,
 
-    /// Number of token-set IDs.
-    pub(crate) num_tsids: u32,
-
-    /// Tokenizer DFA state → TSID mapping.
-    /// `state_to_tsid[dfa_state]` = compacted TSID (u32::MAX if unreachable).
-    pub(crate) state_to_tsid: Vec<u32>,
-
-    /// TSID → tokenizer DFA state mapping.
-    pub(crate) tsid_to_state: Vec<u32>,
-
-    /// Per-TSID: { terminal_id → token range-set }.
-    /// `possible_matches[tsid][terminal] = set of allowed token IDs`.
-    #[serde(with = "crate::runtime::serde::serde_vec_btmap_rsb")]
-    pub(crate) possible_matches: Vec<BTreeMap<TerminalId, RangeSetBlaze<u32>>>,
-
-    /// Maximum token ID in the vocabulary.
-    pub(crate) max_token: u32,
+    /// Token candidates indexed by tokenizer state, then TSID, then terminal.
+    ///
+    /// `terminal_tokens_by_state[tokenizer_state][tsid][terminal] = allowed token IDs`.
+    #[serde(with = "crate::runtime::serde::serde_nested_btmap_rsb")]
+    pub(crate) terminal_tokens_by_state: TerminalTokensByState,
 
     /// EOS token ID, if any.
     pub(crate) eos_token_id: Option<u32>,
 
     /// Token ID → byte sequence mapping.
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
-
-    /// Precomputed reachable terminals per tokenizer DFA state.
-    /// `reachable_terminals[state]` = set of terminals reachable from `state`.
-    /// Immutable after construction; avoids ~0.7ms fixed-point computation per mask.
-    #[serde(skip)]
-    pub(crate) reachable_terminals: Vec<BTreeSet<TerminalId>>,
 }
 
 impl Constraint {
@@ -94,7 +81,7 @@ impl Constraint {
     }
 
     /// Access the compiled parser DWA (for debugging/analysis).
-    pub fn parser_dwa(&self) -> &DWA {
+    pub(crate) fn parser_dwa(&self) -> &DWA {
         unimplemented!()
     }
 }

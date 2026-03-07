@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use crate::automata::dfa::DFA;
 use crate::automata::regex::{Expr, ExprGroup, ExprGroups};
-use crate::compiler::grammar_def::{GrammarDef, TerminalId};
+use crate::compiler::grammar_def::{GrammarDef, TerminalID};
 use crate::ds::u8set::U8Set;
 
 /// A tokenizer built from terminal patterns.
@@ -21,14 +21,14 @@ use crate::ds::u8set::U8Set;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenizerDFA {
+pub struct Tokenizer {
     /// The underlying multi-group DFA.
     pub dfa: DFA,
     /// Number of terminals.
     pub num_terminals: u32,
 }
 
-impl TokenizerDFA {
+impl Tokenizer {
     /// Build a tokenizer DFA from fully specified regex groups.
     pub fn from_expr_groups(groups: &[ExprGroup]) -> Self {
         unimplemented!()
@@ -38,7 +38,7 @@ impl TokenizerDFA {
     ///
     /// `terminals[i]` = (terminal_id, expression).
     /// Terminal i maps to DFA group i.
-    pub fn from_exprs(terminals: &[(TerminalId, Expr)]) -> Self {
+    pub fn from_exprs(terminals: &[(TerminalID, Expr)]) -> Self {
         unimplemented!()
     }
 
@@ -65,23 +65,23 @@ impl TokenizerDFA {
     }
 
     /// Get the set of terminals matched at the given state.
-    pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
+    pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         unimplemented!()
     }
 
     /// Get the subset of matched terminals whose regex groups are marked non-greedy.
-    pub fn matched_non_greedy_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
+    pub fn matched_non_greedy_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         unimplemented!()
     }
 
     /// Get terminals that remain reachable on some non-empty continuation.
-    pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalId> {
+    pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         unimplemented!()
     }
 
     #[allow(dead_code)]
     /// Check if a specific terminal matches at the given state.
-    pub fn terminal_matches(&self, state: u32, terminal: TerminalId) -> bool {
+    pub fn terminal_matches(&self, state: u32, terminal: TerminalID) -> bool {
         unimplemented!()
     }
 
@@ -97,7 +97,7 @@ impl TokenizerDFA {
     ///
     /// This is a backward reachability analysis: start from accepting states,
     /// then propagate backward through transitions.
-    pub fn compute_reachable_terminals(&self) -> Vec<BTreeSet<TerminalId>> {
+    pub fn compute_reachable_terminals(&self) -> Vec<BTreeSet<TerminalID>> {
         unimplemented!()
     }
 
@@ -106,7 +106,7 @@ impl TokenizerDFA {
     ///
     /// This does maximal-munch tokenization: feeds all bytes and returns
     /// terminals matched at the final state.
-    pub fn execute(&self, input: &[u8], start: u32) -> (u32, BTreeSet<TerminalId>) {
+    pub fn execute(&self, input: &[u8], start: u32) -> (u32, BTreeSet<TerminalID>) {
         unimplemented!()
     }
 
@@ -167,9 +167,6 @@ impl TokenizerDFA {
     }
 }
 
-/// Compatibility alias retained while acronym capitalization settles.
-pub type TokenizerDfa = TokenizerDFA;
-
 /// Result of executing the tokenizer with intermediate match tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizerResult {
@@ -177,7 +174,7 @@ pub struct TokenizerResult {
     pub end_state: u32,
     /// Matches found at each prefix: `(byte_offset, matched_terminals)`.
     /// `byte_offset` is 1-indexed (number of bytes consumed).
-    pub matches: Vec<(usize, BTreeSet<TerminalId>)>,
+    pub matches: Vec<(usize, BTreeSet<TerminalID>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +352,7 @@ mod tests {
                 },
             ],
         };
-        let tok = TokenizerDfa::from_grammar_def(&gdef);
+        let tok = Tokenizer::from_grammar_def(&gdef);
 
         let (_s, m) = tok.execute(b"a", tok.start_state());
         assert!(m.contains(&0));
@@ -388,7 +385,7 @@ mod tests {
                 },
             ],
         };
-        let tok = TokenizerDfa::from_grammar_def(&gdef);
+        let tok = Tokenizer::from_grammar_def(&gdef);
 
         // "if" should match both terminal 0 and terminal 1
         let (_s, m) = tok.execute(b"if", tok.start_state());
@@ -424,7 +421,7 @@ mod tests {
         let grammar = parse_lark(lark).unwrap();
         let terminals: Vec<_> = grammar.terminals.iter().map(|td| (td.id, parse_regex(&td.pattern))).collect();
         eprintln!("Terminals: {:?}", terminals.iter().map(|(id, _)| *id).collect::<Vec<_>>());
-        let tokenizer = TokenizerDfa::from_exprs(&terminals);
+        let tokenizer = Tokenizer::from_exprs(&terminals);
         eprintln!("DFA states: {}", tokenizer.dfa.num_states());
 
         // Check reachable terminals
@@ -475,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_preserves_non_greedy_and_future_terminal_metadata() {
-        let tokenizer = TokenizerDfa::from_expr_groups(&[
+        let tokenizer = Tokenizer::from_expr_groups(&[
             ExprGroup {
                 expr: bytes(b"a"),
                 is_non_greedy: true,
@@ -536,16 +533,22 @@ mod tests {
         constraint.debug_dump();
         
         let state = constraint.start();
-        let mask = state.compute_mask();
-        let active: Vec<usize> = (0..=5usize).filter(|i| mask.get(*i)).collect();
+        let mask = state.mask_view().mask();
+        let active: Vec<usize> = (0..=5usize)
+            .filter(|i| {
+                let word = *i / 32;
+                let bit = *i % 32;
+                word < mask.len() && (mask[word] & (1u32 << bit)) != 0
+            })
+            .collect();
         eprintln!("mask: {:?}", active);
         
-        assert!(mask.get(1), "token 1 (b\"1\") should be in mask");
-        assert!(mask.get(2), "token 2 (b\"2\") should be in mask");
-        assert!(mask.get(3), "token 3 (b\"10\") should be in mask");
-        assert!(mask.get(4), "token 4 (b\"12\") should be in mask");  
-        assert!(mask.get(5), "token 5 (b\"123\") should be in mask");
-        assert!(!mask.get(0), "token 0 (b\"0\") should NOT be in mask");
+        assert!((mask[0] & (1u32 << 1)) != 0, "token 1 (b\"1\") should be in mask");
+        assert!((mask[0] & (1u32 << 2)) != 0, "token 2 (b\"2\") should be in mask");
+        assert!((mask[0] & (1u32 << 3)) != 0, "token 3 (b\"10\") should be in mask");
+        assert!((mask[0] & (1u32 << 4)) != 0, "token 4 (b\"12\") should be in mask");
+        assert!((mask[0] & (1u32 << 5)) != 0, "token 5 (b\"123\") should be in mask");
+        assert!((mask[0] & (1u32 << 0)) == 0, "token 0 (b\"0\") should NOT be in mask");
     }
 
     #[test]
@@ -562,7 +565,7 @@ mod tests {
         }
     
         // Build tokenizer and check what " \ and \. match
-        let tok = crate::compiler::tokenizer_dfa::TokenizerDfa::from_grammar_def(&gdef);
+        let tok = crate::compiler::tokenizer_dfa::Tokenizer::from_grammar_def(&gdef);
         let init = tok.initial_state();
     
         // Single backslash
@@ -606,7 +609,7 @@ mod tests {
             eprintln!("Terminal {}: name={}, pattern={}", i, t.name, t.pattern);
         }
     
-        let tok = crate::compiler::tokenizer_dfa::TokenizerDfa::from_grammar_def(&gdef);
+        let tok = crate::compiler::tokenizer_dfa::Tokenizer::from_grammar_def(&gdef);
         let init = tok.initial_state();
         eprintln!("Num DFA states: {}", tok.num_states());
     

@@ -6,7 +6,7 @@ use crate::compiler::debug::artifacts::CompileDebug;
 use crate::compiler::glr::analysis::EOF;
 
 impl CompileDebug {
-    fn terminal_name(&self, id: crate::compiler::grammar::ast::TerminalId) -> &str {
+    fn terminal_name(&self, id: crate::compiler::grammar::ast::TerminalID) -> &str {
         unimplemented!()
     }
 

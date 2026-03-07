@@ -16,7 +16,7 @@ impl<'a> ConstraintState<'a> {
     /// no-op and the parser state is left unchanged. The next call to
     /// [`mask`] / [`fill_mask`] will reflect whatever state the parser is in
     /// after any bytes that *were* successfully committed.
-    pub fn commit(
+    pub fn commit_token(
         &mut self,
         token_id: u32,
     ) {
@@ -33,12 +33,12 @@ impl<'a> ConstraintState<'a> {
 
     /// Commit multiple tokens in sequence (batch convenience wrapper).
     ///
-    /// Equivalent to calling [`commit`] for each token ID in order.
+    /// Equivalent to calling [`commit_token`] for each token ID in order.
     pub fn commit_tokens(&mut self, tokens: &[u32]) {
         unimplemented!()
     }
 
-    /// Core byte-processing engine shared by `commit` and `commit_bytes`.
+    /// Core byte-processing engine shared by `commit_token` and `commit_bytes`.
     pub(crate) fn process_bytes_raw(&mut self, bytes: &[u8]) {
         unimplemented!()
     }

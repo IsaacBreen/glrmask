@@ -50,7 +50,7 @@ pub struct InternalIdMap {
 
 impl InternalIdMap {
     /// Build the joint mapping directly from the tokenizer and vocab.
-    pub fn build(tokenizer: &crate::automata::lexer::tokenizer::TokenizerDfa, vocab: &crate::Vocab) -> Self {
+    pub fn build(tokenizer: &crate::automata::lexer::tokenizer::Tokenizer, vocab: &crate::Vocab) -> Self {
         combined::analyze_equivalences(tokenizer, vocab)
     }
 

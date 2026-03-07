@@ -24,7 +24,7 @@ pub struct GrammarDef {
 pub type NonterminalId = u32;
 
 /// A terminal ID.
-pub type TerminalId = u32;
+pub type TerminalID = u32;
 
 /// A production rule: `lhs -> rhs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +39,7 @@ pub struct Rule {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Symbol {
     /// A terminal symbol.
-    Terminal(TerminalId),
+    Terminal(TerminalID),
     /// A nonterminal symbol.
     Nonterminal(NonterminalId),
 }
@@ -48,7 +48,7 @@ pub enum Symbol {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalDef {
     /// Unique ID of this terminal.
-    pub id: TerminalId,
+    pub id: TerminalID,
     /// Human-readable name.
     pub name: String,
     /// Regex pattern that this terminal matches.

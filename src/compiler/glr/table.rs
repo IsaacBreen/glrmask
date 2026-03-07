@@ -13,7 +13,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::analysis::{EOF, GLRGrammar};
-use crate::compiler::grammar_def::{NonterminalId, Rule, Symbol, TerminalId};
+use crate::compiler::grammar_def::{NonterminalId, Rule, Symbol, TerminalID};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -34,7 +34,7 @@ pub enum Action {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
     /// `action[state]` = map from terminal → set of actions (GLR: multiple actions allowed).
-    pub action: Vec<BTreeMap<TerminalId, Vec<Action>>>,
+    pub action: Vec<BTreeMap<TerminalID, Vec<Action>>>,
     /// `goto[state][nonterminal]` = target state.
     pub goto: Vec<BTreeMap<NonterminalId, u32>>,
     /// Number of states.
@@ -54,7 +54,7 @@ impl GLRTable {
     }
 
     /// Get all actions for (state, terminal). Returns empty slice if none.
-    pub fn actions(&self, state: u32, terminal: TerminalId) -> &[Action] {
+    pub fn actions(&self, state: u32, terminal: TerminalID) -> &[Action] {
         unimplemented!()
     }
 

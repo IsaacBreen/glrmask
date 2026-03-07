@@ -28,13 +28,24 @@ impl U8Set {
         loop {}
     }
 
-    /// Full set (all 256 bytes).
-    pub const fn full() -> Self {
+    /// Universal set (all 256 bytes).
+    pub const fn all() -> Self {
         loop {}
+    }
+
+    /// Full set (all 256 bytes).
+    const fn full() -> Self {
+        Self::all()
+    }
+
+    /// Singleton set containing just one byte.
+    pub fn single(b: u8) -> Self {
+        Self::from_byte(b)
     }
 
     /// Singleton set containing just one byte.
     pub fn from_byte(b: u8) -> Self {
+        let _ = b;
         unimplemented!()
     }
 
@@ -100,6 +111,18 @@ impl U8Set {
 
     /// Complement: all bytes NOT in this set.
     pub fn complement(&self) -> Self {
+        unimplemented!()
+    }
+
+    /// Whether `self` and `other` share no bytes.
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        let _ = other;
+        unimplemented!()
+    }
+
+    /// Whether `self ⊆ other`.
+    pub fn is_subset(&self, other: &Self) -> bool {
+        let _ = other;
         unimplemented!()
     }
 
@@ -190,7 +213,7 @@ mod tests {
         assert!(empty.is_empty());
         assert_eq!(empty.len(), 0);
 
-        let full = U8Set::full();
+        let full = U8Set::all();
         assert!(full.is_full());
         assert_eq!(full.len(), 256);
     }

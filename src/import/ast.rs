@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::{
-    GrammarDef, NonterminalId, Rule, Symbol, TerminalDef, TerminalId,
+    GrammarDef, NonterminalId, Rule, Symbol, TerminalDef, TerminalID,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ struct Lowerer {
     /// Final rules.
     rules: Vec<Rule>,
     /// Terminal name → id.
-    terminal_map: BTreeMap<String, TerminalId>,
+    terminal_map: BTreeMap<String, TerminalID>,
     /// Terminal definitions.
     terminals: Vec<TerminalDef>,
     /// Rule name → nonterminal id.
@@ -87,7 +87,7 @@ impl Lowerer {
     }
 
     /// Get or create a terminal for a literal/pattern.
-    fn terminal_id(&mut self, name: &str, pattern: &str) -> TerminalId {
+    fn terminal_id(&mut self, name: &str, pattern: &str) -> TerminalID {
         unimplemented!()
     }
 

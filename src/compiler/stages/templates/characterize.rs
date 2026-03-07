@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::glr::analysis::GLRGrammar;
 use crate::compiler::glr::table::{Action, GLRTable};
-use crate::compiler::grammar::ast::{NonterminalId, TerminalId};
+use crate::compiler::grammar::ast::{NonterminalId, TerminalID};
 
 /// Shift: from parser state `from`, terminal T shifts to state `to`.
 type InitialShift = (u32, u32);
@@ -46,7 +46,7 @@ pub struct TerminalCharacterization {
 pub(crate) fn characterize_terminals(
     table: &GLRTable,
     grammar: &GLRGrammar,
-) -> BTreeMap<TerminalId, TerminalCharacterization> {
+) -> BTreeMap<TerminalID, TerminalCharacterization> {
     let mut result = BTreeMap::new();
     let num_states = table.num_states;
 

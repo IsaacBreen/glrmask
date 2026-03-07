@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::analysis::EOF;
 use super::table::{Action, GLRTable};
-use crate::compiler::grammar::ast::TerminalId;
+use crate::compiler::grammar::ast::TerminalID;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 
 /// Maps tokenizer state ID → set of disallowed terminal IDs.
@@ -32,18 +32,13 @@ impl Merge for TerminalsDisallowed {
 /// A GSS (Graph-Structured Stack) for the parser stack state.
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
-/// A live parser state paired with a single parser instance.
-pub struct GLRParserState<'a> {
-    pub parser: &'a GLRParser,
-    pub stack: ParserGSS,
-}
-
 /// GLR parser backed by an SLR(1) table.
 ///
 /// Handles ambiguous grammars by maintaining multiple parse stacks.
 #[allow(dead_code)]
 pub struct GLRParser {
     pub table: GLRTable,
+    pub stack: ParserGSS,
 }
 
 #[allow(dead_code)]
@@ -53,33 +48,26 @@ impl GLRParser {
         unimplemented!()
     }
 
-    /// Create a fresh parser state at the start of the parse.
-    pub fn start(&self) -> GLRParserState<'_> {
-        unimplemented!()
-    }
-
     /// Can the parser continue with this terminal from at least one stack?
-    pub fn can_shift(&self, stacks: &[Vec<u32>], token: TerminalId) -> bool {
+    pub fn can_shift(&self, token: TerminalID) -> bool {
         unimplemented!()
     }
 
     /// Process one token across all active stacks.
     ///
-    /// Returns (new_stacks_after_shift, did_any_accept).
+    /// Returns (next_parser_state, did_any_accept).
     /// Reduces are processed exhaustively before shifts.
-    pub fn step(&self, stacks: &[Vec<u32>], token: TerminalId) -> (Vec<Vec<u32>>, bool) {
+    pub fn step(&self, token: TerminalID) -> (Self, bool) {
         unimplemented!()
     }
 
-    /// Enumerate all terminals that are valid continuations from the given stacks.
-    pub fn valid_terminals(&self, stacks: &[Vec<u32>]) -> Vec<TerminalId> {
+    /// Enumerate all terminals that are valid continuations from the current stacks.
+    pub fn valid_terminals(&self) -> Vec<TerminalID> {
         unimplemented!()
     }
-}
 
-impl<'a> GLRParserState<'a> {
     /// Check whether this parser state accepts a full input sequence.
-    pub fn accepts(&self, input: &[TerminalId]) -> bool {
+    pub fn accepts(&self, input: &[TerminalID]) -> bool {
         unimplemented!()
     }
 }
@@ -101,8 +89,8 @@ mod tests {
         GLRParser::new(table)
     }
 
-    fn accepts(parser: &GLRParser, input: &[TerminalId]) -> bool {
-        parser.start().accepts(input)
+    fn accepts(parser: &GLRParser, input: &[TerminalID]) -> bool {
+        parser.accepts(input)
     }
 
     #[test]
@@ -209,8 +197,7 @@ mod tests {
     fn test_valid_terminals() {
         let gdef = simple_ab_grammar(); // S → a b
         let parser = build_parser(&gdef);
-        let stacks = vec![vec![0u32]];
-        let valid = parser.valid_terminals(&stacks);
+        let valid = parser.valid_terminals();
         assert!(valid.contains(&0)); // 'a' is valid from start
         assert!(!valid.contains(&1)); // 'b' is not valid from start
     }
