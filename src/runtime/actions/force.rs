@@ -53,7 +53,7 @@ impl<'a> ConstraintState<'a> {
             };
             forced.push(token);
             cursor.commit_token(token);
-            if cursor.state.is_empty() || cursor.is_finished() {
+            if cursor.state.is_empty() || cursor.is_complete() {
                 break;
             }
         }

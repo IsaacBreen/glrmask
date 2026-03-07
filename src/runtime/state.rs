@@ -36,13 +36,19 @@ pub struct ConstraintState<'a> {
 }
 
 impl<'a> ConstraintState<'a> {
+    pub fn is_complete(&self) -> bool {
+        let initial_tsid = self.constraint.tokenizer.initial_state();
+        let Some(stack) = self.state.get(&initial_tsid) else {
+            return false;
+        };
+        !stack.is_empty() && stacks_finished(&self.constraint.table, stack)
+    }
+
     // SEP1_MAP: nearest sep1 analogue is `GrammarConstraintState::is_valid()`
     // plus sep1's completion checks inside `get_mask()`; there is no clean
     // one-method equivalent for glrmask `is_finished()`.
     
     pub fn is_finished(&self) -> bool {
-        self.state
-            .values()
-            .any(|stack| stacks_finished(&self.constraint.table, stack))
+        self.is_complete()
     }
 }

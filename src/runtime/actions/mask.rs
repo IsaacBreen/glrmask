@@ -132,7 +132,7 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        if self.is_finished() {
+        if self.is_complete() {
             if let Some(eos_token_id) = self.constraint.eos_token_id {
                 let word = eos_token_id as usize / 32;
                 let bit = eos_token_id as usize % 32;
