@@ -67,6 +67,15 @@ impl Weight {
         *self = Self::empty();
     }
 
+    /// Union all token coverage across every TSID into a single token set.
+    ///
+    /// This collapses away the TSID dimension and returns the vocab/token
+    /// dimension alone.
+    pub fn union_tokens_across_tsids(&self) -> RangeSetBlaze<u32> {
+        let _ = self;
+        unimplemented!()
+    }
+
     // ---- Queries ----
 
     /// Whether this is the universal (full) 2D range-set.
@@ -257,6 +266,15 @@ mod tests {
         let mut w = Weight::empty();
         w.insert(0..=2, &[10..=12, 20..=21]);
         assert!(w.estimated_size_bytes() >= std::mem::size_of::<Weight>());
+    }
+
+    #[test]
+    fn test_weight_union_tokens_across_tsids_shape() {
+        let w = Weight::from_compact_ranges([
+            (0..=2, [10..=12, 20..=21]),
+            (5..=5, [7..=9]),
+        ]);
+        let _tokens = w.union_tokens_across_tsids();
     }
 
     #[test]
