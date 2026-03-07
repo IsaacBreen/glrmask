@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::{
-    GrammarDef, NonterminalId, Rule, Symbol, TerminalDef, TerminalID,
+    GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
 
 // ---------------------------------------------------------------------------
@@ -64,9 +64,9 @@ struct Lowerer {
     /// Terminal name → id.
     terminal_map: BTreeMap<String, TerminalID>,
     /// Terminal definitions.
-    terminals: Vec<TerminalDef>,
+    terminals: Vec<Terminal>,
     /// Rule name → nonterminal id.
-    nt_map: BTreeMap<String, NonterminalId>,
+    nt_map: BTreeMap<String, NonterminalID>,
     /// Counter for anonymous nonterminals.
     anon_counter: u32,
 }
@@ -77,12 +77,12 @@ impl Lowerer {
     }
 
     /// Get or create a nonterminal ID for a name.
-    fn nt_id(&mut self, name: &str) -> NonterminalId {
+    fn nt_id(&mut self, name: &str) -> NonterminalID {
         unimplemented!()
     }
 
     /// Create an anonymous nonterminal.
-    fn fresh_nt(&mut self, hint: &str) -> (String, NonterminalId) {
+    fn fresh_nt(&mut self, hint: &str) -> (String, NonterminalID) {
         unimplemented!()
     }
 

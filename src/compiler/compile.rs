@@ -11,9 +11,9 @@ use crate::Vocab;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::debug::CompileDebug;
-use crate::compiler::glr::analysis::GLRGrammar;
+use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar::ast::GrammarDef;
+use crate::compiler::grammar::model::GrammarDef;
 use crate::compiler::grammar::normalize::normalize_for_mask;
 use crate::compiler::parser_dwa::build_parser_dwa;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, analyze_equivalences};
@@ -25,7 +25,7 @@ use crate::runtime::Constraint;
 /// ```text
 /// GrammarDef + Vocab
 ///       │
-///       ├── GLRGrammar::from_grammar_def()
+///       ├── AnalyzedGrammar::from_grammar_def()
 ///       │      │
 ///       │      └── GLRTable::build()
 ///       │
@@ -48,7 +48,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 /// The debug bundle captures every intermediate automaton stage so callers can
 /// inspect the terminal NWA before/after optimisations, the composed parser
 /// NWA before/after resolve_negatives, the DWA pre/post minimisation, etc.
-pub fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
+pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
     unimplemented!()
 }
 
@@ -59,7 +59,7 @@ pub fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar::ast::tests::*;
+    use crate::compiler::grammar::model::tests::*;
 
     fn mask_has_token(mask: &[u32], token: u32) -> bool {
         let word = token as usize / 32;

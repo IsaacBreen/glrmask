@@ -1,7 +1,7 @@
-//! Grammar intermediate representation.
+//! Flattened grammar model.
 //!
-//! The canonical internal representation of a grammar that all importers
-//! (EBNF, Lark, JSON Schema) compile down to.
+//! This is the canonical flattened grammar representation that all importers
+//! (EBNF, Lark, JSON Schema) compile down to before parser-table analysis.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -15,13 +15,15 @@ pub struct GrammarDef {
     /// Production rules.
     pub rules: Vec<Rule>,
     /// The start nonterminal.
-    pub start: NonterminalId,
-    /// Terminal definitions (regex patterns for each terminal).
-    pub terminals: Vec<TerminalDef>,
+    pub start: NonterminalID,
+    /// Terminal metadata.
+    pub terminals: Vec<Terminal>,
+    /// TerminalID → regex/pattern string used to build the tokenizer.
+    pub terminal_patterns: Vec<String>,
 }
 
 /// A nonterminal ID.
-pub type NonterminalId = u32;
+pub type NonterminalID = u32;
 
 /// A terminal ID.
 pub type TerminalID = u32;
@@ -30,7 +32,7 @@ pub type TerminalID = u32;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     /// Left-hand side nonterminal.
-    pub lhs: NonterminalId,
+    pub lhs: NonterminalID,
     /// Right-hand side: sequence of symbols.
     pub rhs: Vec<Symbol>,
 }
@@ -41,18 +43,16 @@ pub enum Symbol {
     /// A terminal symbol.
     Terminal(TerminalID),
     /// A nonterminal symbol.
-    Nonterminal(NonterminalId),
+    Nonterminal(NonterminalID),
 }
 
-/// Definition of a terminal symbol.
+/// Metadata for a terminal symbol in the flattened grammar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalDef {
+pub struct Terminal {
     /// Unique ID of this terminal.
     pub id: TerminalID,
     /// Human-readable name.
     pub name: String,
-    /// Regex pattern that this terminal matches.
-    pub pattern: String,
 }
 
 impl GrammarDef {
@@ -65,11 +65,24 @@ impl GrammarDef {
     pub fn num_nonterminals(&self) -> u32 {
         unimplemented!()
     }
+
+    /// Lookup the tokenizer pattern for a terminal by ID.
+    pub fn terminal_pattern(&self, terminal: TerminalID) -> &str {
+        let _ = terminal;
+        unimplemented!()
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn terminal(id: u32, name: &str) -> Terminal {
+        Terminal {
+            id,
+            name: name.into(),
+        }
+    }
 
     /// Helper: build a tiny grammar "S → a b" with 1 rule, 2 terminals.
     pub fn simple_ab_grammar() -> GrammarDef {
@@ -79,18 +92,8 @@ pub(crate) mod tests {
                 rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
             }],
             start: 0,
-            terminals: vec![
-                TerminalDef {
-                    id: 0,
-                    name: "a".into(),
-                    pattern: "a".into(),
-                },
-                TerminalDef {
-                    id: 1,
-                    name: "b".into(),
-                    pattern: "b".into(),
-                },
-            ],
+            terminals: vec![terminal(0, "a"), terminal(1, "b")],
+            terminal_patterns: vec!["a".into(), "b".into()],
         }
     }
 
@@ -108,18 +111,8 @@ pub(crate) mod tests {
                 },
             ],
             start: 0,
-            terminals: vec![
-                TerminalDef {
-                    id: 0,
-                    name: "a".into(),
-                    pattern: "a".into(),
-                },
-                TerminalDef {
-                    id: 1,
-                    name: "b".into(),
-                    pattern: "b".into(),
-                },
-            ],
+            terminals: vec![terminal(0, "a"), terminal(1, "b")],
+            terminal_patterns: vec!["a".into(), "b".into()],
         }
     }
 
@@ -139,18 +132,8 @@ pub(crate) mod tests {
                 },
             ],
             start: 0,
-            terminals: vec![
-                TerminalDef {
-                    id: 0,
-                    name: "a".into(),
-                    pattern: "a".into(),
-                },
-                TerminalDef {
-                    id: 1,
-                    name: "b".into(),
-                    pattern: "b".into(),
-                },
-            ],
+            terminals: vec![terminal(0, "a"), terminal(1, "b")],
+            terminal_patterns: vec!["a".into(), "b".into()],
         }
     }
 
@@ -174,18 +157,8 @@ pub(crate) mod tests {
                 },
             ],
             start: 0,
-            terminals: vec![
-                TerminalDef {
-                    id: 0,
-                    name: "a".into(),
-                    pattern: "a".into(),
-                },
-                TerminalDef {
-                    id: 1,
-                    name: "b".into(),
-                    pattern: "b".into(),
-                },
-            ],
+            terminals: vec![terminal(0, "a"), terminal(1, "b")],
+            terminal_patterns: vec!["a".into(), "b".into()],
         }
     }
 
@@ -201,23 +174,8 @@ pub(crate) mod tests {
                 ],
             }],
             start: 0,
-            terminals: vec![
-                TerminalDef {
-                    id: 0,
-                    name: "a".into(),
-                    pattern: "a".into(),
-                },
-                TerminalDef {
-                    id: 1,
-                    name: "b".into(),
-                    pattern: "b".into(),
-                },
-                TerminalDef {
-                    id: 2,
-                    name: "c".into(),
-                    pattern: "c".into(),
-                },
-            ],
+            terminals: vec![terminal(0, "a"), terminal(1, "b"), terminal(2, "c")],
+            terminal_patterns: vec!["a".into(), "b".into(), "c".into()],
         }
     }
 
@@ -237,23 +195,8 @@ pub(crate) mod tests {
                 },
             ],
             start: 0,
-            terminals: vec![
-                TerminalDef {
-                    id: 0,
-                    name: "a".into(),
-                    pattern: "a".into(),
-                },
-                TerminalDef {
-                    id: 1,
-                    name: "b".into(),
-                    pattern: "b".into(),
-                },
-                TerminalDef {
-                    id: 2,
-                    name: "c".into(),
-                    pattern: "c".into(),
-                },
-            ],
+            terminals: vec![terminal(0, "a"), terminal(1, "b"), terminal(2, "c")],
+            terminal_patterns: vec!["a".into(), "b".into(), "c".into()],
         }
     }
 

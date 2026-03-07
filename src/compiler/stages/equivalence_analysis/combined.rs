@@ -22,7 +22,7 @@ pub(crate) fn analyze_equivalences(tokenizer: &Tokenizer, vocab: &Vocab) -> Inte
 mod tests {
     use super::*;
     use crate::automata::lexer::tokenizer::Tokenizer;
-    use crate::compiler::grammar::ast::{GrammarDef, Rule, Symbol, TerminalDef};
+    use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
 
     #[test]
     fn test_internal_id_map_shape() {
@@ -32,7 +32,7 @@ mod tests {
                 rhs: vec![Symbol::Terminal(0)],
             }],
             start: 0,
-            terminals: vec![TerminalDef {
+            terminals: vec![Terminal {
                 id: 0,
                 name: "a".into(),
                 pattern: "a".into(),

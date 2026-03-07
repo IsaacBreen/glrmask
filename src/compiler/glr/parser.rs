@@ -12,16 +12,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::analysis::EOF;
 use super::table::{Action, GLRTable};
-use crate::compiler::grammar::ast::TerminalID;
+use crate::compiler::grammar::model::TerminalID;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 
 /// Maps tokenizer state ID → set of disallowed terminal IDs.
 pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
-
-/// Create a fresh (empty) `TerminalsDisallowed`.
-pub(crate) fn terminals_disallowed_fresh() -> TerminalsDisallowed {
-    unimplemented!()
-}
 
 impl Merge for TerminalsDisallowed {
     fn merge(&self, other: &Self) -> Self {
@@ -65,11 +60,6 @@ impl GLRParser {
     pub fn valid_terminals(&self) -> Vec<TerminalID> {
         unimplemented!()
     }
-
-    /// Check whether this parser state accepts a full input sequence.
-    pub fn accepts(&self, input: &[TerminalID]) -> bool {
-        unimplemented!()
-    }
 }
 
 // ====================================================================
@@ -79,18 +69,19 @@ impl GLRParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::glr::analysis::GLRGrammar;
-    use crate::compiler::grammar::ast::tests::*;
-    use crate::compiler::grammar::ast::{GrammarDef, Rule, Symbol, TerminalDef};
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::grammar::model::tests::*;
+    use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
 
     fn build_parser(gdef: &GrammarDef) -> GLRParser {
-        let gg = GLRGrammar::from_grammar_def(gdef);
-        let table = GLRTable::build(&gg);
+        let grammar = AnalyzedGrammar::from_grammar_def(gdef);
+        let table = GLRTable::build(&grammar);
         GLRParser::new(table)
     }
 
     fn accepts(parser: &GLRParser, input: &[TerminalID]) -> bool {
-        parser.accepts(input)
+        let _ = (parser, input);
+        unimplemented!()
     }
 
     #[test]
@@ -142,12 +133,12 @@ mod tests {
             ],
             start: 0,
             terminals: vec![
-                TerminalDef {
+                Terminal {
                     id: 0,
                     name: "a".into(),
                     pattern: "a".into(),
                 },
-                TerminalDef {
+                Terminal {
                     id: 1,
                     name: "+".into(),
                     pattern: "\\+".into(),
@@ -181,7 +172,7 @@ mod tests {
                 }, // ε
             ],
             start: 0,
-            terminals: vec![TerminalDef {
+            terminals: vec![Terminal {
                 id: 0,
                 name: "a".into(),
                 pattern: "a".into(),
@@ -206,9 +197,9 @@ mod tests {
     // Ported tests from old grammars2024/src/glr/tests.rs
     // ---------------------------------------------------------------------------
 
-    /// Shorthand for building a TerminalDef.
-    fn tdef(id: u32, name: &str) -> TerminalDef {
-        TerminalDef { id, name: name.into(), pattern: name.into() }
+    /// Shorthand for building a Terminal.
+    fn tdef(id: u32, name: &str) -> Terminal {
+        Terminal { id, name: name.into(), pattern: name.into() }
     }
 
     #[test]

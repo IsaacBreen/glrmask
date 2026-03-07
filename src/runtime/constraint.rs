@@ -18,8 +18,6 @@ use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalID;
 use crate::ds::leveled_gss::LeveledGSS;
 
-use crate::compiler::glr::parser::terminals_disallowed_fresh;
-
 use super::state::ConstraintState;
 
 pub(crate) type TokenizerStateID = u32;
@@ -66,7 +64,7 @@ impl Constraint {
         let initial_tok_state = self.tokenizer.initial_state();
 
         let mut state = BTreeMap::new();
-        let gss = LeveledGSS::from_stacks(&[(vec![initial_parser_state], terminals_disallowed_fresh())]);
+        let gss = LeveledGSS::from_stacks(&[(vec![initial_parser_state], BTreeMap::new())]);
         state.insert(initial_tok_state, gss);
 
         ConstraintState { constraint: self, state }

@@ -1,7 +1,7 @@
 //! Grammar-facing compiler structures.
 
-pub mod ast;
+pub mod model;
 pub mod normalize;
 
-pub use ast::*;
+pub use model::*;
 pub use normalize::*;

@@ -6,11 +6,11 @@ use crate::compiler::debug::artifacts::CompileDebug;
 use crate::compiler::glr::analysis::EOF;
 
 impl CompileDebug {
-    fn terminal_name(&self, id: crate::compiler::grammar::ast::TerminalID) -> &str {
+    fn terminal_name(&self, id: crate::compiler::grammar::model::TerminalID) -> &str {
         unimplemented!()
     }
 
-    fn symbol_str(&self, sym: &crate::compiler::grammar::ast::Symbol) -> String {
+    fn symbol_str(&self, sym: &crate::compiler::grammar::model::Symbol) -> String {
         unimplemented!()
     }
 }
@@ -22,7 +22,13 @@ impl std::fmt::Display for CompileDebug {
         writeln!(f, "Start: NT{}", self.grammar_def.start)?;
         writeln!(f, "Terminals:")?;
         for t in &self.grammar_def.terminals {
-            writeln!(f, "  T{}: name={:?} pattern={:?}", t.id, t.name, t.pattern)?;
+            writeln!(
+                f,
+                "  T{}: name={:?} pattern={:?}",
+                t.id,
+                t.name,
+                self.grammar_def.terminal_pattern(t.id)
+            )?;
         }
         writeln!(f, "Rules:")?;
         for (i, r) in self.grammar_def.rules.iter().enumerate() {

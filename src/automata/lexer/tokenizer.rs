@@ -250,7 +250,7 @@ fn hex_digit(b: u8) -> u8 {
 mod tests {
     use super::*;
     use crate::automata::regex::bytes;
-    use crate::compiler::grammar_def::{GrammarDef, Rule, Symbol, TerminalDef};
+    use crate::compiler::grammar_def::{GrammarDef, Rule, Symbol, Terminal};
 
     #[test]
     fn test_parse_regex_literal() {
@@ -340,12 +340,12 @@ mod tests {
             }],
             start: 0,
             terminals: vec![
-                TerminalDef {
+                Terminal {
                     id: 0,
                     name: "a".into(),
                     pattern: "a".into(),
                 },
-                TerminalDef {
+                Terminal {
                     id: 1,
                     name: "b".into(),
                     pattern: "b".into(),
@@ -373,12 +373,12 @@ mod tests {
             }],
             start: 0,
             terminals: vec![
-                TerminalDef {
+                Terminal {
                     id: 0,
                     name: "if".into(),
                     pattern: "if".into(),
                 },
-                TerminalDef {
+                Terminal {
                     id: 1,
                     name: "ident".into(),
                     pattern: "[a-z]+".into(),

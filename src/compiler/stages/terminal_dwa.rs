@@ -13,8 +13,8 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::debug::TerminalDebug;
-use crate::compiler::glr::analysis::GLRGrammar;
-use crate::compiler::grammar::ast::TerminalID;
+use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 
 #[derive(Debug, Clone)]
@@ -36,24 +36,24 @@ fn build_terminal_dwa_nwa(
     unimplemented!()
 }
 
-fn compute_ever_allowed_follows(grammar: &GLRGrammar) -> Vec<Vec<TerminalID>> {
+fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
     unimplemented!()
 }
 
-fn compute_always_allowed_follows(grammar: &GLRGrammar) -> Vec<Vec<TerminalID>> {
+fn compute_always_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
     unimplemented!()
 }
 
 fn collapse_always_allowed(
     terminal_dwa: &mut TerminalDWA,
-    grammar: &GLRGrammar,
+    grammar: &AnalyzedGrammar,
 ) -> bool {
     unimplemented!()
 }
 
 fn prune_disallowed_follows(
     terminal_dwa: &mut TerminalDWA,
-    grammar: &GLRGrammar,
+    grammar: &AnalyzedGrammar,
 ) -> bool {
     unimplemented!()
 }
@@ -62,7 +62,7 @@ fn build_terminal_dwa_impl(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-    grammar: &GLRGrammar,
+    grammar: &AnalyzedGrammar,
     used_terminals: &BTreeSet<TerminalID>,
     capture_debug: bool,
 ) -> (TerminalDWA, Option<TerminalDebug>) {
@@ -73,7 +73,7 @@ pub(crate) fn build_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-    grammar: &GLRGrammar,
+    grammar: &AnalyzedGrammar,
     used_terminals: &BTreeSet<TerminalID>,
 ) -> TerminalDWA {
     unimplemented!()
@@ -83,7 +83,7 @@ pub(crate) fn build_terminal_dwa_with_debug(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-    grammar: &GLRGrammar,
+    grammar: &AnalyzedGrammar,
     used_terminals: &BTreeSet<TerminalID>,
 ) -> (TerminalDWA, TerminalDebug) {
     unimplemented!()
@@ -98,14 +98,14 @@ mod tests {
     use range_set_blaze::RangeSetBlaze;
     use crate::automata::regex::bytes;
     use crate::automata::lexer::tokenizer::Tokenizer;
-    use crate::compiler::glr::analysis::GLRGrammar;
-    use crate::compiler::grammar::ast::tests::simple_ab_grammar;
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::grammar::model::tests::simple_ab_grammar;
     use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 
     #[test]
     fn test_build_terminal_dwa_collapses_always_allowed_follow_path() {
         let grammar = simple_ab_grammar();
-        let glr_grammar = GLRGrammar::from_grammar_def(&grammar);
+        let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
         let tokenizer = Tokenizer::from_grammar_def(&grammar);
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())], None);
         let id_map = InternalIdMap::build(&tokenizer, &vocab);
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn test_terminal_dwa_carries_tokenizer_greedy_metadata() {
         let grammar = simple_ab_grammar();
-        let glr_grammar = GLRGrammar::from_grammar_def(&grammar);
+        let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
         let tokenizer = Tokenizer::from_expr_groups(&[
             crate::automata::regex::ExprGroup {
                 expr: bytes(b"a"),

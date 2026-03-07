@@ -24,32 +24,32 @@
 
 use std::collections::{BTreeSet, BTreeMap};
 
-use crate::compiler::grammar::ast::{GrammarDef, NonterminalId, Rule, Symbol, TerminalID};
+use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
 /// EOF pseudo-terminal. Must not collide with any real terminal.
 pub const EOF: TerminalID = u32::MAX;
 
 /// An augmented GLR grammar ready for table generation.
 #[derive(Debug, Clone)]
-pub struct GLRGrammar {
+pub struct AnalyzedGrammar {
     /// All production rules (augmented start is at index 0).
     pub rules: Vec<Rule>,
     #[allow(dead_code)]
     /// Start nonterminal of the augmented grammar.
-    pub start: NonterminalId,
+    pub start: NonterminalID,
     /// Number of real terminals (not counting EOF).
     pub num_terminals: u32,
     /// Number of nonterminals (including augmented start).
     pub num_nonterminals: u32,
     /// Nullable nonterminals.
-    pub nullable: BTreeSet<NonterminalId>,
+    pub nullable: BTreeSet<NonterminalID>,
     /// FIRST(A) for each nonterminal A (indexed by NT id).
     pub first: Vec<BTreeSet<TerminalID>>,
     /// FOLLOW(A) for each nonterminal A (indexed by NT id).
     pub follow: Vec<BTreeSet<TerminalID>>,
 }
 
-impl GLRGrammar {
+impl AnalyzedGrammar {
     /// Build from a [`GrammarDef`].
     ///
     /// Augments the grammar with a new start rule `S' → S`.
@@ -100,7 +100,7 @@ impl GLRGrammar {
 /// modulo empty-string cases for epsilon-only grammars) and its SLR parse table
 /// produces an acyclic NWA/DWA, which is required for correct mask computation.
 ///
-/// Call this once in the compilation pipeline BEFORE [`GLRGrammar::from_grammar_def`].
+/// Call this once in the compilation pipeline BEFORE [`AnalyzedGrammar::from_grammar_def`].
 pub fn normalize_for_mask(g: &GrammarDef) -> GrammarDef {
     unimplemented!()
 }
@@ -144,7 +144,7 @@ pub fn normalize_for_mask(g: &GrammarDef) -> GrammarDef {
 #[allow(dead_code)]
 pub(crate) fn eliminate_direct_left_recursion(
     rules: &mut Vec<Rule>,
-    fresh_nt: &mut impl FnMut() -> NonterminalId,
+    fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) {
     unimplemented!()
 }
@@ -165,12 +165,12 @@ pub(crate) fn eliminate_direct_left_recursion(
 /// 2. Eliminate direct right recursion with an epsilon-free transformation
 ///    that introduces a fresh left-recursive auxiliary NT.
 ///
-/// `fresh_nt()` must return a fresh `NonterminalId` each time it is called.
+/// `fresh_nt()` must return a fresh `NonterminalID` each time it is called.
 /// All returned IDs must be distinct and greater than any ID already present
 /// in `rules`.
 pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
-    fresh_nt: &mut impl FnMut() -> NonterminalId,
+    fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) {
     unimplemented!()
 }
@@ -187,8 +187,8 @@ fn max_nt_id(rules: &[Rule]) -> u32 {
 /// Self-loops (A → A) represent direct right recursion and ARE included.
 fn build_right_reachability_graph(
     rules: &[Rule],
-    nullable: &BTreeSet<NonterminalId>,
-) -> BTreeMap<NonterminalId, BTreeSet<NonterminalId>> {
+    nullable: &BTreeSet<NonterminalID>,
+) -> BTreeMap<NonterminalID, BTreeSet<NonterminalID>> {
     unimplemented!()
 }
 
@@ -196,8 +196,8 @@ fn build_right_reachability_graph(
 ///
 /// Returns the cycle as a Vec where `cycle[i]` → `cycle[(i+1) % len]`.
 fn find_indirect_rr_cycle(
-    graph: &BTreeMap<NonterminalId, BTreeSet<NonterminalId>>,
-) -> Option<Vec<NonterminalId>> {
+    graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+) -> Option<Vec<NonterminalID>> {
     unimplemented!()
 }
 
@@ -208,9 +208,9 @@ fn find_indirect_rr_cycle(
 /// expanded variants.  Rules for `to_nt` itself are unchanged.
 fn inline_right_end(
     rules: &mut Vec<Rule>,
-    from_nt: NonterminalId,
-    to_nt: NonterminalId,
-    nullable: &BTreeSet<NonterminalId>,
+    from_nt: NonterminalID,
+    to_nt: NonterminalID,
+    nullable: &BTreeSet<NonterminalID>,
 ) {
     unimplemented!()
 }
@@ -239,8 +239,8 @@ fn is_direct_right_recursive(rule: &Rule) -> bool {
 /// This converts right recursion into left recursion without epsilon.
 fn resolve_direct_rr_single_nt(
     rules: &mut Vec<Rule>,
-    nt: NonterminalId,
-    new_nt: NonterminalId,
+    nt: NonterminalID,
+    new_nt: NonterminalID,
 ) {
     unimplemented!()
 }
@@ -274,7 +274,7 @@ pub(crate) fn inline_epsilon_rules(rules: &[Rule]) -> Vec<Rule> {
 // Nullable (fixed-point)
 // ---------------------------------------------------------------------------
 
-fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalId> {
+fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
     unimplemented!()
 }
 
@@ -285,7 +285,7 @@ fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalId> {
 fn compute_first(
     rules: &[Rule],
     num_nt: u32,
-    nullable: &BTreeSet<NonterminalId>,
+    nullable: &BTreeSet<NonterminalID>,
 ) -> Vec<BTreeSet<TerminalID>> {
     unimplemented!()
 }
@@ -297,9 +297,9 @@ fn compute_first(
 fn compute_follow(
     rules: &[Rule],
     num_nt: u32,
-    start: NonterminalId,
+    start: NonterminalID,
     first: &[BTreeSet<TerminalID>],
-    nullable: &BTreeSet<NonterminalId>,
+    nullable: &BTreeSet<NonterminalID>,
 ) -> Vec<BTreeSet<TerminalID>> {
     unimplemented!()
 }
@@ -307,11 +307,11 @@ fn compute_follow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar::ast::tests::*;
+    use crate::compiler::grammar::model::tests::*;
 
     #[test]
     fn test_glr_grammar_simple() {
-        let g = GLRGrammar::from_grammar_def(&simple_ab_grammar());
+        let g = AnalyzedGrammar::from_grammar_def(&simple_ab_grammar());
         // Augmented: S' → S;  S → a b
         assert_eq!(g.rules.len(), 2);
         assert_eq!(g.num_nonterminals, 2); // S, S'
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_glr_grammar_choice() {
-        let g = GLRGrammar::from_grammar_def(&choice_grammar());
+        let g = AnalyzedGrammar::from_grammar_def(&choice_grammar());
         // S → a | b  →  FIRST(S) = {a, b}
         assert!(g.first[0].contains(&0));
         assert!(g.first[0].contains(&1));
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_glr_grammar_two_nt() {
-        let g = GLRGrammar::from_grammar_def(&two_nt_grammar());
+        let g = AnalyzedGrammar::from_grammar_def(&two_nt_grammar());
         // S → A b, A → a.  FIRST(A) = {a}, FIRST(S) = FIRST(A) = {a}
         assert!(g.first[0].contains(&0)); // FIRST(S) has 'a'
         assert!(g.first[1].contains(&0)); // FIRST(A) has 'a'

@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::analysis::{EOF, GLRGrammar};
-use crate::compiler::grammar_def::{NonterminalId, Rule, Symbol, TerminalID};
+use super::analysis::{EOF, AnalyzedGrammar};
+use crate::compiler::grammar_def::{NonterminalID, Rule, Symbol, TerminalID};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -36,7 +36,7 @@ pub struct GLRTable {
     /// `action[state]` = map from terminal → set of actions (GLR: multiple actions allowed).
     pub action: Vec<BTreeMap<TerminalID, Vec<Action>>>,
     /// `goto[state][nonterminal]` = target state.
-    pub goto: Vec<BTreeMap<NonterminalId, u32>>,
+    pub goto: Vec<BTreeMap<NonterminalID, u32>>,
     /// Number of states.
     pub num_states: u32,
     /// Number of terminals.
@@ -48,8 +48,8 @@ pub struct GLRTable {
 }
 
 impl GLRTable {
-    /// Build SLR(1) parse tables from a [`GLRGrammar`].
-    pub fn build(grammar: &GLRGrammar) -> Self {
+    /// Build SLR(1) parse tables from a [`AnalyzedGrammar`].
+    pub fn build(grammar: &AnalyzedGrammar) -> Self {
         unimplemented!()
     }
 
@@ -59,7 +59,7 @@ impl GLRTable {
     }
 
     /// Get goto target for (state, nonterminal). Returns `None` for error.
-    pub fn goto_target(&self, state: u32, nt: NonterminalId) -> Option<u32> {
+    pub fn goto_target(&self, state: u32, nt: NonterminalID) -> Option<u32> {
         unimplemented!()
     }
 }
@@ -128,7 +128,7 @@ fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<It
 /// Returns:
 /// - `item_sets[state_id]` = the canonical item set.
 /// - `transitions[state_id]` = map from symbol → target state_id.
-fn build_lr0_item_sets(grammar: &GLRGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
+fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
     let rules = &grammar.rules;
 
     // State 0: closure of [S' → · S].
@@ -183,7 +183,7 @@ fn build_lr0_item_sets(grammar: &GLRGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeM
 // ---------------------------------------------------------------------------
 
 fn build_slr1_table(
-    grammar: &GLRGrammar,
+    grammar: &AnalyzedGrammar,
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GLRTable {
@@ -204,7 +204,7 @@ mod tests {
     fn test_table_simple_ab() {
         // S → a b.  Should produce 4 states: s0, s1 (after 'a'), s2 (after 'b'), s3 (accept).
         let gdef = simple_ab_grammar();
-        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
         assert!(table.num_states >= 3);
@@ -226,7 +226,7 @@ mod tests {
     fn test_table_choice() {
         // S → a | b.  State 0 should shift on both 'a' and 'b'.
         let gdef = choice_grammar();
-        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
         assert!(!table.actions(0, 0).is_empty()); // 'a'
@@ -242,13 +242,13 @@ mod tests {
                 rhs: vec![Symbol::Terminal(0)],
             }],
             start: 0,
-            terminals: vec![crate::compiler::grammar_def::TerminalDef {
+            terminals: vec![crate::compiler::grammar_def::Terminal {
                 id: 0,
                 name: "a".into(),
                 pattern: "a".into(),
             }],
         };
-        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
         // Walk: s0 --shift(a)--> s1 --reduce(S→a)--> s0 --goto(S)--> s2 --accept($)
@@ -266,7 +266,7 @@ mod tests {
     fn test_table_two_nt() {
         // S → A b, A → a.
         let gdef = two_nt_grammar();
-        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
         // State 0 should have shift on 'a'.
@@ -295,19 +295,19 @@ mod tests {
             ],
             start: 0,
             terminals: vec![
-                crate::compiler::grammar_def::TerminalDef {
+                crate::compiler::grammar_def::Terminal {
                     id: 0,
                     name: "a".into(),
                     pattern: "a".into(),
                 },
-                crate::compiler::grammar_def::TerminalDef {
+                crate::compiler::grammar_def::Terminal {
                     id: 1,
                     name: "+".into(),
                     pattern: "\\+".into(),
                 },
             ],
         };
-        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
         // The table should have been built successfully (GLR handles conflicts).

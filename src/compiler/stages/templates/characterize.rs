@@ -10,26 +10,26 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::compiler::glr::analysis::GLRGrammar;
+use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable};
-use crate::compiler::grammar::ast::{NonterminalId, TerminalID};
+use crate::compiler::grammar::model::{NonterminalID, TerminalID};
 
 /// Shift: from parser state `from`, terminal T shifts to state `to`.
 type InitialShift = (u32, u32);
 
 /// Reduce: from parser state `from`, terminal T reduces rule with
 /// `pop_count` states and LHS nonterminal `nt`.
-type InitialReduce = (u32, usize, NonterminalId);
+type InitialReduce = (u32, usize, NonterminalID);
 
 /// After reducing to nonterminal `nt_from`, if the revealed state is `revealed`,
 /// then goto(revealed, nt_from) = `goto_state`, and from `goto_state`, terminal T
 /// can shift to `shift_state`.
-type NtEscape = (NonterminalId, u32, u32, u32);
+type NtEscape = (NonterminalID, u32, u32, u32);
 
 /// After reducing to nonterminal `nt_from`, if the revealed state is `revealed`,
 /// goto(revealed, nt_from) = `goto_state`, and from `goto_state`, terminal T
 /// reduces again.
-type NtRereduce = (NonterminalId, u32, usize, NonterminalId);
+type NtRereduce = (NonterminalID, u32, usize, NonterminalID);
 
 /// Stack pattern characterization for a single terminal.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,13 +39,13 @@ pub struct TerminalCharacterization {
     pub nt_escapes: Vec<NtEscape>,
     pub nt_rereduces: Vec<NtRereduce>,
     /// All nonterminals involved in reduce cascades.
-    pub all_nts: BTreeSet<NonterminalId>,
+    pub all_nts: BTreeSet<NonterminalID>,
 }
 
 /// Characterize terminals: find all parser-stack patterns that allow them.
 pub(crate) fn characterize_terminals(
     table: &GLRTable,
-    grammar: &GLRGrammar,
+    grammar: &AnalyzedGrammar,
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
     let mut result = BTreeMap::new();
     let num_states = table.num_states;
@@ -77,8 +77,8 @@ pub(crate) fn characterize_terminals(
             }
         }
 
-        let mut visited_nts: BTreeSet<NonterminalId> = BTreeSet::new();
-        let mut nt_queue: VecDeque<NonterminalId> = tc.all_nts.iter().copied().collect();
+        let mut visited_nts: BTreeSet<NonterminalID> = BTreeSet::new();
+        let mut nt_queue: VecDeque<NonterminalID> = tc.all_nts.iter().copied().collect();
 
         while let Some(nt) = nt_queue.pop_front() {
             if !visited_nts.insert(nt) {
@@ -120,12 +120,12 @@ pub(crate) fn characterize_terminals(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar::ast::tests::simple_ab_grammar;
+    use crate::compiler::grammar::model::tests::simple_ab_grammar;
 
     #[test]
     fn test_characterize_simple_ab() {
         let gdef = simple_ab_grammar();
-        let grammar = GLRGrammar::from_grammar_def(&gdef);
+        let grammar = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&grammar);
         let chars = characterize_terminals(&table, &grammar);
 

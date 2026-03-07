@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::glr::analysis::{EOF, GLRGrammar};
+use crate::compiler::glr::analysis::{EOF, AnalyzedGrammar};
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar::ast::{GrammarDef, TerminalID};
+use crate::compiler::grammar::model::{GrammarDef, TerminalID};
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
 use crate::compiler::stages::templates::compile::TemplateBundle;
@@ -128,7 +128,7 @@ pub struct CompileDebug {
 
     /// Augmented GLR grammar (from normalized def). Carries FIRST/FOLLOW
     /// sets and nullable analysis for every nonterminal.
-    pub glr_grammar: GLRGrammar,
+    pub glr_grammar: AnalyzedGrammar,
 
     /// SLR(1) parse table. Parser DWA labels are state indices in this
     /// table. Inspect with `table.actions(state, terminal)` and
@@ -181,7 +181,7 @@ impl CompileDebug {
     pub fn from_parts(
         grammar_def: GrammarDef,
         normalized_grammar_def: GrammarDef,
-        glr_grammar: GLRGrammar,
+        glr_grammar: AnalyzedGrammar,
         glr_table: GLRTable,
         automata: AutomataDebug,
         vocab_entries: Vec<(u32, Vec<u8>)>,
