@@ -168,13 +168,21 @@ impl<'a> ConstraintState<'a> {
         terminals_disallowed: &crate::compiler::glr::parser::TerminalsDisallowed,
     ) -> RangeSetBlaze<u32> {
         let mut allowed = tokens;
-        let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) else {
+        if terminals_disallowed.is_empty()
+            || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
+        {
             return allowed;
-        };
-        let possible_matches = self.constraint.possible_matches_for_state(tokenizer_state);
-        for terminal in disallowed {
-            if let Some(token_ids) = possible_matches.get(terminal) {
-                allowed = allowed - token_ids.clone();
+        }
+
+        for (&tsid, disallowed) in terminals_disallowed {
+            if disallowed.is_empty() {
+                continue;
+            }
+            let possible_matches = self.constraint.possible_matches_for_state(tsid);
+            for terminal in disallowed {
+                if let Some(token_ids) = possible_matches.get(terminal) {
+                    allowed = allowed - token_ids.clone();
+                }
             }
         }
         allowed
