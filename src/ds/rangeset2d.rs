@@ -38,6 +38,11 @@ impl RangeSet2D {
         unimplemented!()
     }
 
+    /// Clear this 2D range-set back to the empty set.
+    pub fn clear(&mut self) {
+        *self = Self::empty();
+    }
+
     // ---- Queries ----
 
     /// Whether this is the universal (full) 2D range-set.
@@ -97,6 +102,138 @@ impl RangeSet2D {
 }
 
 // ---- Trait impls ----
+
+impl std::ops::BitOr<&RangeSet2D> for RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn bitor(self, rhs: &RangeSet2D) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+impl std::ops::BitOr<RangeSet2D> for RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn bitor(self, rhs: RangeSet2D) -> Self::Output {
+        self.union(&rhs)
+    }
+}
+
+impl std::ops::BitOr<&RangeSet2D> for &RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn bitor(self, rhs: &RangeSet2D) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+impl std::ops::BitOr<RangeSet2D> for &RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn bitor(self, rhs: RangeSet2D) -> Self::Output {
+        self.union(&rhs)
+    }
+}
+
+impl std::ops::BitAnd<&RangeSet2D> for RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn bitand(self, rhs: &RangeSet2D) -> Self::Output {
+        self.intersection(rhs)
+    }
+}
+
+impl std::ops::BitAnd<RangeSet2D> for RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn bitand(self, rhs: RangeSet2D) -> Self::Output {
+        self.intersection(&rhs)
+    }
+}
+
+impl std::ops::BitAnd<&RangeSet2D> for &RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn bitand(self, rhs: &RangeSet2D) -> Self::Output {
+        self.intersection(rhs)
+    }
+}
+
+impl std::ops::BitAnd<RangeSet2D> for &RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn bitand(self, rhs: RangeSet2D) -> Self::Output {
+        self.intersection(&rhs)
+    }
+}
+
+impl std::ops::Sub<&RangeSet2D> for RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn sub(self, rhs: &RangeSet2D) -> Self::Output {
+        self.difference(rhs)
+    }
+}
+
+impl std::ops::Sub<RangeSet2D> for RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn sub(self, rhs: RangeSet2D) -> Self::Output {
+        self.difference(&rhs)
+    }
+}
+
+impl std::ops::Sub<&RangeSet2D> for &RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn sub(self, rhs: &RangeSet2D) -> Self::Output {
+        self.difference(rhs)
+    }
+}
+
+impl std::ops::Sub<RangeSet2D> for &RangeSet2D {
+    type Output = RangeSet2D;
+
+    fn sub(self, rhs: RangeSet2D) -> Self::Output {
+        self.difference(&rhs)
+    }
+}
+
+impl std::ops::BitOrAssign<&RangeSet2D> for RangeSet2D {
+    fn bitor_assign(&mut self, rhs: &RangeSet2D) {
+        *self = self.union(rhs);
+    }
+}
+
+impl std::ops::BitOrAssign<RangeSet2D> for RangeSet2D {
+    fn bitor_assign(&mut self, rhs: RangeSet2D) {
+        *self |= &rhs;
+    }
+}
+
+impl std::ops::BitAndAssign<&RangeSet2D> for RangeSet2D {
+    fn bitand_assign(&mut self, rhs: &RangeSet2D) {
+        *self = self.intersection(rhs);
+    }
+}
+
+impl std::ops::BitAndAssign<RangeSet2D> for RangeSet2D {
+    fn bitand_assign(&mut self, rhs: RangeSet2D) {
+        *self &= &rhs;
+    }
+}
+
+impl std::ops::SubAssign<&RangeSet2D> for RangeSet2D {
+    fn sub_assign(&mut self, rhs: &RangeSet2D) {
+        *self = self.difference(rhs);
+    }
+}
+
+impl std::ops::SubAssign<RangeSet2D> for RangeSet2D {
+    fn sub_assign(&mut self, rhs: RangeSet2D) {
+        *self -= &rhs;
+    }
+}
 
 impl PartialEq for RangeSet2D {
     fn eq(&self, other: &Self) -> bool {
@@ -225,6 +362,42 @@ mod tests {
         let b = RangeSet2D::empty();
         let d = a.difference(&b);
         assert!(d.is_full());
+    }
+
+    #[test]
+    fn test_rangeset2d_clear() {
+        let mut w = RangeSet2D::all();
+        w.clear();
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn test_rangeset2d_assign_ops() {
+        let empty = RangeSet2D::empty();
+        let all = RangeSet2D::all();
+
+        let mut union_acc = RangeSet2D::empty();
+        union_acc |= &all;
+        assert!(union_acc.is_full());
+
+        let mut intersection_acc = RangeSet2D::all();
+        intersection_acc &= &empty;
+        assert!(intersection_acc.is_empty());
+
+        let mut difference_acc = RangeSet2D::all();
+        difference_acc -= &empty;
+        assert!(difference_acc.is_full());
+    }
+
+    #[test]
+    fn test_rangeset2d_operator_rhs_forms() {
+        let empty = RangeSet2D::empty();
+        let all = RangeSet2D::all();
+
+        assert!((empty.clone() | &all).is_full());
+        assert!((&empty | all.clone()).is_full());
+        assert!((all.clone() & &empty).is_empty());
+        assert!((&all - empty.clone()).is_full());
     }
 
     #[test]
