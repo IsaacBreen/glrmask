@@ -22,7 +22,14 @@ pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
 
 impl Merge for TerminalsDisallowed {
     fn merge(&self, other: &Self) -> Self {
-        unimplemented!()
+        let mut merged = self.clone();
+        for (state, terminals) in other {
+            merged
+                .entry(*state)
+                .or_default()
+                .extend(terminals.iter().copied());
+        }
+        merged
     }
 }
 
@@ -42,12 +49,13 @@ pub struct GLRParser {
 impl GLRParser {
     
     pub fn new(table: GLRTable) -> Self {
-        unimplemented!()
+        let stack = ParserGSS::from_stacks(&[(vec![0], BTreeMap::new())]);
+        Self { table, stack }
     }
 
     
     pub fn can_shift(&self, token: TerminalID) -> bool {
-        unimplemented!()
+        !advance_stacks(&self.table, &self.stack, token).is_empty()
     }
 
     
@@ -55,13 +63,232 @@ impl GLRParser {
     
     
     pub fn step(&self, token: TerminalID) -> (Self, bool) {
-        unimplemented!()
+        let next_stack = advance_stacks(&self.table, &self.stack, token);
+        let progressed = !next_stack.is_empty();
+        (
+            Self {
+                table: self.table.clone(),
+                stack: next_stack,
+            },
+            progressed,
+        )
     }
 
     
     pub fn valid_terminals(&self) -> Vec<TerminalID> {
-        unimplemented!()
+        valid_terminals_for_stacks(&self.table, &self.stack)
     }
+}
+
+fn dedup_stacks(stacks: impl IntoIterator<Item = Vec<u32>>) -> Vec<Vec<u32>> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for stack in stacks {
+        if seen.insert(stack.clone()) {
+            out.push(stack);
+        }
+    }
+    out
+}
+
+fn merge_stack_entries(
+    entries: impl IntoIterator<Item = (Vec<u32>, TerminalsDisallowed)>,
+) -> Vec<(Vec<u32>, TerminalsDisallowed)> {
+    let mut merged = BTreeMap::<Vec<u32>, TerminalsDisallowed>::new();
+    for (stack, acc) in entries {
+        merged
+            .entry(stack)
+            .and_modify(|existing| *existing = existing.merge(&acc))
+            .or_insert(acc);
+    }
+    merged.into_iter().collect()
+}
+
+fn reduce_closure_for_lookahead(
+    table: &GLRTable,
+    stacks: &[Vec<u32>],
+    lookahead: TerminalID,
+) -> Vec<Vec<u32>> {
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::new();
+
+    for stack in stacks {
+        if visited.insert(stack.clone()) {
+            queue.push_back(stack.clone());
+        }
+    }
+
+    while let Some(stack) = queue.pop_front() {
+        let Some(&state) = stack.last() else {
+            continue;
+        };
+        for action in table.actions(state, lookahead) {
+            let Action::Reduce(rule_id) = action else {
+                continue;
+            };
+            let rule = &table.rules[*rule_id as usize];
+            if stack.len() < rule.rhs.len() + 1 {
+                continue;
+            }
+            let keep_len = stack.len() - rule.rhs.len();
+            let mut reduced = stack[..keep_len].to_vec();
+            let Some(&goto_from) = reduced.last() else {
+                continue;
+            };
+            let Some(target) = table.goto_target(goto_from, rule.lhs) else {
+                continue;
+            };
+            reduced.push(target);
+            if visited.insert(reduced.clone()) {
+                queue.push_back(reduced);
+            }
+        }
+    }
+
+    visited.into_iter().collect()
+}
+
+fn reduce_closure_entries_for_lookahead(
+    table: &GLRTable,
+    entries: &[(Vec<u32>, TerminalsDisallowed)],
+    lookahead: TerminalID,
+) -> Vec<(Vec<u32>, TerminalsDisallowed)> {
+    let mut visited = BTreeMap::<Vec<u32>, TerminalsDisallowed>::new();
+    let mut queue = VecDeque::<Vec<u32>>::new();
+
+    for (stack, acc) in entries {
+        match visited.entry(stack.clone()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(acc.clone());
+                queue.push_back(stack.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let merged = slot.get().merge(acc);
+                *slot.get_mut() = merged;
+            }
+        }
+    }
+
+    while let Some(stack) = queue.pop_front() {
+        let Some(acc) = visited.get(&stack).cloned() else {
+            continue;
+        };
+        let Some(&state) = stack.last() else {
+            continue;
+        };
+        for action in table.actions(state, lookahead) {
+            let Action::Reduce(rule_id) = action else {
+                continue;
+            };
+            let rule = &table.rules[*rule_id as usize];
+            if stack.len() < rule.rhs.len() + 1 {
+                continue;
+            }
+            let keep_len = stack.len() - rule.rhs.len();
+            let mut reduced = stack[..keep_len].to_vec();
+            let Some(&goto_from) = reduced.last() else {
+                continue;
+            };
+            let Some(target) = table.goto_target(goto_from, rule.lhs) else {
+                continue;
+            };
+            reduced.push(target);
+            match visited.entry(reduced.clone()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(acc.clone());
+                    queue.push_back(reduced);
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let merged = slot.get().merge(&acc);
+                    *slot.get_mut() = merged;
+                }
+            }
+        }
+    }
+
+    visited.into_iter().collect()
+}
+
+pub(crate) fn advance_stack_vectors(
+    table: &GLRTable,
+    stacks: &[Vec<u32>],
+    token: TerminalID,
+) -> Vec<Vec<u32>> {
+    let closure = reduce_closure_for_lookahead(table, stacks, token);
+    let mut next = Vec::new();
+    for stack in closure {
+        let Some(&state) = stack.last() else {
+            continue;
+        };
+        for action in table.actions(state, token) {
+            if let Action::Shift(target) = action {
+                let mut shifted = stack.clone();
+                shifted.push(*target);
+                next.push(shifted);
+            }
+        }
+    }
+    dedup_stacks(next)
+}
+
+fn advance_stack_entries(
+    table: &GLRTable,
+    entries: &[(Vec<u32>, TerminalsDisallowed)],
+    token: TerminalID,
+) -> Vec<(Vec<u32>, TerminalsDisallowed)> {
+    let closure = reduce_closure_entries_for_lookahead(table, entries, token);
+    let mut next = Vec::new();
+    for (stack, acc) in closure {
+        let Some(&state) = stack.last() else {
+            continue;
+        };
+        for action in table.actions(state, token) {
+            if let Action::Shift(target) = action {
+                let mut shifted = stack.clone();
+                shifted.push(*target);
+                next.push((shifted, acc.clone()));
+            }
+        }
+    }
+    merge_stack_entries(next)
+}
+
+pub(crate) fn stacks_accept(table: &GLRTable, stacks: &[Vec<u32>]) -> bool {
+    reduce_closure_for_lookahead(table, stacks, EOF)
+        .into_iter()
+        .any(|stack| {
+            stack.last().is_some_and(|state| {
+                table
+                    .actions(*state, EOF)
+                    .iter()
+                    .any(|action| matches!(action, Action::Accept))
+            })
+        })
+}
+
+pub(crate) fn valid_terminals_for_stack_vectors(
+    table: &GLRTable,
+    stacks: &[Vec<u32>],
+) -> Vec<TerminalID> {
+    (0..table.num_terminals)
+        .filter(|&terminal| !advance_stack_vectors(table, stacks, terminal).is_empty())
+        .collect()
+}
+
+pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
+    let stacks = stack.to_stacks();
+    let next = advance_stack_entries(table, &stacks, token);
+    ParserGSS::from_stacks(&next)
+}
+
+pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
+    let stacks: Vec<Vec<u32>> = stack.to_stacks().into_iter().map(|(stack, _)| stack).collect();
+    stacks_accept(table, &stacks)
+}
+
+pub(crate) fn valid_terminals_for_stacks(table: &GLRTable, stack: &ParserGSS) -> Vec<TerminalID> {
+    let stacks: Vec<Vec<u32>> = stack.to_stacks().into_iter().map(|(stack, _)| stack).collect();
+    valid_terminals_for_stack_vectors(table, &stacks)
 }
 
 
@@ -81,9 +308,46 @@ mod tests {
         GLRParser::new(table)
     }
 
+    fn make_grammar(rules: Vec<Rule>, start: u32, terminals: Vec<Terminal>) -> GrammarDef {
+        let terminal_patterns = terminals.iter().map(|terminal| terminal.name.clone()).collect();
+        GrammarDef {
+            rules,
+            start,
+            terminals,
+            terminal_patterns,
+        }
+    }
+
     fn accepts(parser: &GLRParser, input: &[TerminalID]) -> bool {
-        let _ = (parser, input);
-        unimplemented!()
+        let mut current = GLRParser {
+            table: parser.table.clone(),
+            stack: parser.stack.clone(),
+        };
+        for &token in input {
+            let (next, progressed) = current.step(token);
+            if !progressed {
+                return false;
+            }
+            current = next;
+        }
+        stacks_finished(&current.table, &current.stack)
+    }
+
+    #[test]
+    fn test_advance_stacks_preserves_accumulator_state() {
+        let gdef = simple_ab_grammar();
+        let grammar = AnalyzedGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&grammar);
+
+        let mut acc = BTreeMap::new();
+        acc.insert(7, BTreeSet::from([11]));
+        let gss = ParserGSS::from_stacks(&[(vec![0], acc.clone())]);
+
+        let advanced = advance_stacks(&table, &gss, 0);
+        let stacks = advanced.to_stacks();
+
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].1, acc);
     }
 
     #[test]
@@ -118,8 +382,8 @@ mod tests {
     #[test]
     fn test_parse_ambiguous() {
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule {
                     lhs: 0,
                     rhs: vec![
@@ -133,20 +397,18 @@ mod tests {
                     rhs: vec![Symbol::Terminal(0)],
                 },
             ],
-            start: 0,
-            terminals: vec![
+            0,
+            vec![
                 Terminal {
                     id: 0,
                     name: "a".into(),
-                    pattern: "a".into(),
                 },
                 Terminal {
                     id: 1,
                     name: "+".into(),
-                    pattern: "\\+".into(),
                 },
             ],
-        };
+        );
         let parser = build_parser(&gdef);
         assert!(accepts(&parser, &[0])); 
         assert!(accepts(&parser, &[0, 1, 0])); 
@@ -158,8 +420,8 @@ mod tests {
     #[test]
     fn test_parse_nullable() {
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule {
                     lhs: 0,
                     rhs: vec![Symbol::Nonterminal(1)],
@@ -173,13 +435,12 @@ mod tests {
                     rhs: vec![],
                 }, 
             ],
-            start: 0,
-            terminals: vec![Terminal {
+            0,
+            vec![Terminal {
                 id: 0,
                 name: "a".into(),
-                pattern: "a".into(),
             }],
-        };
+        );
         let parser = build_parser(&gdef);
         assert!(accepts(&parser, &[])); 
         assert!(accepts(&parser, &[0])); 
@@ -201,7 +462,7 @@ mod tests {
 
     
     fn tdef(id: u32, name: &str) -> Terminal {
-        Terminal { id, name: name.into(), pattern: name.into() }
+        Terminal { id, name: name.into() }
     }
 
     #[test]
@@ -209,14 +470,14 @@ mod tests {
         
         
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(0)] }, 
                 Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },                          
             ],
-            start: 0,
-            terminals: vec![tdef(0, "a"), tdef(1, "b")],
-        };
+            0,
+            vec![tdef(0, "a"), tdef(1, "b")],
+        );
         let parser = build_parser(&gdef);
         
         assert!(accepts(&parser, &[1]),       "\"b\" accepted");
@@ -232,14 +493,14 @@ mod tests {
         
         
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(0)] }, 
                 Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },                          
             ],
-            start: 0,
-            terminals: vec![tdef(0, "a"), tdef(1, "b")],
-        };
+            0,
+            vec![tdef(0, "a"), tdef(1, "b")],
+        );
         let parser = build_parser(&gdef);
         
         assert!(accepts(&parser, &[1]),          "\"b\" accepted");
@@ -257,8 +518,8 @@ mod tests {
         
         
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(1), Symbol::Nonterminal(1)] }, 
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },                                               
                 Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2), Symbol::Nonterminal(2)] }, 
@@ -266,9 +527,9 @@ mod tests {
                 Rule { lhs: 2, rhs: vec![Symbol::Terminal(3), Symbol::Nonterminal(0), Symbol::Terminal(4)] },    
                 Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },                                                  
             ],
-            start: 0,
-            terminals: vec![tdef(0, "i"), tdef(1, "+"), tdef(2, "*"), tdef(3, "("), tdef(4, ")")],
-        };
+            0,
+            vec![tdef(0, "i"), tdef(1, "+"), tdef(2, "*"), tdef(3, "("), tdef(4, ")")],
+        );
         let parser = build_parser(&gdef);
         
         assert!(accepts(&parser, &[0]),                   "\"i\" accepted");
@@ -290,16 +551,16 @@ mod tests {
         
         
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] }, 
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(2)] }, 
                 Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },    
                 Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },    
             ],
-            start: 0,
-            terminals: vec![tdef(0, "x")],
-        };
+            0,
+            vec![tdef(0, "x")],
+        );
         let parser = build_parser(&gdef);
         assert!(accepts(&parser, &[0]),  "\"x\" accepted despite reduce/reduce conflict");
         assert!(!accepts(&parser, &[]), "\"\" rejected");
@@ -311,17 +572,17 @@ mod tests {
         
         
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)] }, 
                 Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },  
                 Rule { lhs: 1, rhs: vec![] },                     
                 Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },  
                 Rule { lhs: 2, rhs: vec![] },                     
             ],
-            start: 0,
-            terminals: vec![tdef(0, "x")],
-        };
+            0,
+            vec![tdef(0, "x")],
+        );
         let parser = build_parser(&gdef);
         assert!(accepts(&parser, &[]),       "\"\" accepted (A→ε, B→ε)");
         assert!(accepts(&parser, &[0]),      "\"x\" accepted (A→x,B→ε or A→ε,B→x)");
@@ -334,14 +595,14 @@ mod tests {
         
         
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Nonterminal(0)] }, 
                 Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },                             
             ],
-            start: 0,
-            terminals: vec![tdef(0, "a")],
-        };
+            0,
+            vec![tdef(0, "a")],
+        );
         let parser = build_parser(&gdef);
         assert!(accepts(&parser, &[0]),       "\"a\" accepted");
         assert!(accepts(&parser, &[0, 0]),    "\"aa\" accepted");
@@ -354,15 +615,15 @@ mod tests {
         
         
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(0)] }, 
                 Rule { lhs: 1, rhs: vec![Symbol::Terminal(1)] }, 
                 Rule { lhs: 1, rhs: vec![] },                    
             ],
-            start: 0,
-            terminals: vec![tdef(0, "c"), tdef(1, "d")],
-        };
+            0,
+            vec![tdef(0, "c"), tdef(1, "d")],
+        );
         let parser = build_parser(&gdef);
         
         assert!(accepts(&parser, &[1, 0]), "\"dc\" accepted (A → d c)");
@@ -381,15 +642,15 @@ mod tests {
         
         
         
-        let gdef = GrammarDef {
-            rules: vec![
+        let gdef = make_grammar(
+            vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2), Symbol::Nonterminal(0)] }, 
                 Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2), Symbol::Nonterminal(0), Symbol::Terminal(3), Symbol::Nonterminal(0)] }, 
                 Rule { lhs: 0, rhs: vec![Symbol::Terminal(4)] }, 
             ],
-            start: 0,
-            terminals: vec![tdef(0, "if"), tdef(1, "id"), tdef(2, "then"), tdef(3, "else"), tdef(4, "other")],
-        };
+            0,
+            vec![tdef(0, "if"), tdef(1, "id"), tdef(2, "then"), tdef(3, "else"), tdef(4, "other")],
+        );
         let parser = build_parser(&gdef);
         
         assert!(accepts(&parser, &[0, 1, 2, 0, 1, 2, 4, 3, 4]),

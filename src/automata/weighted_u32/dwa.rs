@@ -39,32 +39,42 @@ pub struct DWA {
 impl DWA {
     
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
-        unimplemented!()
+        let _ = (num_tsids, max_token);
+        Self {
+            states: vec![DWAState::default()],
+            start_state: 0,
+        }
     }
 
     
     pub fn add_state(&mut self) -> u32 {
-        unimplemented!()
+        let id = self.states.len() as u32;
+        self.states.push(DWAState::default());
+        id
     }
 
     
     pub fn num_states(&self) -> u32 {
-        unimplemented!()
+        self.states.len() as u32
     }
 
     
     pub fn num_transitions(&self) -> usize {
-        unimplemented!()
+        self.states.iter().map(|state| state.transitions.len()).sum()
     }
 
     
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
-        unimplemented!()
+        if let Some(entry) = self.states.get_mut(state as usize) {
+            entry.final_weight = Some(weight);
+        }
     }
 
     
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
-        unimplemented!()
+        if let Some(entry) = self.states.get_mut(from as usize) {
+            entry.transitions.insert(label, (to, weight));
+        }
     }
 
     
@@ -73,12 +83,29 @@ impl DWA {
     
     
     pub fn eval_word(&self, word: &[Label]) -> Weight {
-        unimplemented!()
+        let mut state = self.start_state;
+        let mut weight = Weight::all();
+        for &label in word {
+            let Some((next, edge_weight)) = self.states[state as usize].transitions.get(&label) else {
+                return Weight::empty();
+            };
+            weight = weight.intersection(edge_weight);
+            state = *next;
+        }
+        match self.states.get(state as usize).and_then(|state| state.final_weight.as_ref()) {
+            Some(final_weight) => weight.intersection(final_weight),
+            None => Weight::empty(),
+        }
     }
 
     
     pub fn labels(&self) -> Vec<Label> {
-        unimplemented!()
+        self.states
+            .iter()
+            .flat_map(|state| state.transitions.keys().copied())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     
@@ -130,7 +157,7 @@ impl DWA {
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
     ) -> DWADisplayWithSymbols<'a> {
-        unimplemented!()
+        DWADisplayWithSymbols { dwa: self, symbols }
     }
 
     
@@ -141,7 +168,12 @@ impl DWA {
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
     ) -> DWADisplayWithAllMaps<'a> {
-        unimplemented!()
+        DWADisplayWithAllMaps {
+            dwa: self,
+            symbols,
+            tsid_names,
+            token_names,
+        }
     }
 }
 
@@ -219,19 +251,26 @@ pub struct DWADisplayWithAllMaps<'a> {
 
 impl std::fmt::Display for DWADisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        unimplemented!()
+        let _ = (self.tsid_names, self.token_names);
+        let dwa = self.dwa;
+        let syms = self.symbols;
+        writeln!(f, "DWA: {} states, start=State {}", dwa.states.len(), dwa.start_state)?;
+        fmt_dwa_states(dwa, f,
+            &|label| syms.get(&label).cloned().unwrap_or_else(|| label.to_string()),
+            &|weight| format!("{weight}"),
+        )
     }
 }
 
 impl PartialEq for DWA {
     fn eq(&self, other: &Self) -> bool {
-        unimplemented!()
+        self.start_state == other.start_state && self.states == other.states
     }
 }
 
 impl PartialEq for DWAState {
     fn eq(&self, other: &Self) -> bool {
-        unimplemented!()
+        self.transitions == other.transitions && self.final_weight == other.final_weight
     }
 }
 

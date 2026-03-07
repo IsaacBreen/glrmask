@@ -37,18 +37,15 @@ impl Constraint {
             }
         }
         eprintln!("DWA states: {}", self.parser_dwa.states.len());
-        for (tokenizer_state, tsid_map) in &self.terminal_tokens_by_state {
-            for (tsid, terminal_map) in tsid_map {
-                for (term, rs) in terminal_map {
-                    let vals: Vec<u32> = rs.iter().collect();
-                    eprintln!(
-                        "terminal_tokens_by_state[state={}][tsid={}][term={}] = {:?}",
-                        tokenizer_state,
-                        tsid,
-                        term,
-                        vals
-                    );
-                }
+        for tokenizer_state in self.terminal_tokens_by_state.keys() {
+            for (term, rs) in self.possible_matches_for_state(*tokenizer_state) {
+                let vals: Vec<u32> = rs.iter().collect();
+                eprintln!(
+                    "possible_matches[state={}][term={}] = {:?}",
+                    tokenizer_state,
+                    term,
+                    vals
+                );
             }
         }
         eprintln!("--- End Debug Dump ---");
@@ -69,7 +66,7 @@ impl Constraint {
             let next = self.tokenizer.dfa.get_transition(state, byte);
             let is_dead = next == crate::automata::dfa::DEAD;
             let finals = if !is_dead {
-                self.tokenizer.dfa.finalizers(next).iter().copied().collect::<Vec<_>>()
+                self.tokenizer.dfa.finalizers(next).iter().collect::<Vec<_>>()
             } else {
                 vec![]
             };
@@ -89,6 +86,6 @@ impl Constraint {
     // compiled constraint for runtime debugging.
     
     pub(crate) fn tokenizer_initial_state(&self) -> u32 {
-        unimplemented!()
+        self.tokenizer.initial_state_id()
     }
 }

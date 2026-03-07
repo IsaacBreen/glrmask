@@ -2,11 +2,101 @@
 //! sep1-style DFA rewrite.
 // SEP1_MAP: The nearest sep1 analogue is the lexer determinization work inside `dfa_u8/dfa.rs`; glrmask keeps the stage boundary in its own placeholder file.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+
+use crate::ds::bitset::BitSet;
+
 use super::dfa::DFA;
 use super::nfa::NFA;
 
 impl NFA {
     pub fn to_dfa(&self) -> DFA {
-        todo!("lexer NFA determinization is intentionally deferred until the sep1-style DFA rewrite")
+        let group_count = self
+            .states
+            .iter()
+            .flat_map(|state| state.finalizers.iter().chain(state.non_greedy_finalizers.iter()))
+            .max()
+            .map(|group| *group as usize + 1)
+            .unwrap_or(0);
+
+        let mut reachable_groups = vec![BTreeSet::new(); self.states.len()];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for state_id in (0..self.states.len()).rev() {
+                let mut next_groups = reachable_groups[state_id].clone();
+                next_groups.extend(self.states[state_id].finalizers.iter().copied());
+                next_groups.extend(self.states[state_id].non_greedy_finalizers.iter().copied());
+                for &next in &self.states[state_id].epsilon_transitions {
+                    next_groups.extend(reachable_groups[next as usize].iter().copied());
+                }
+                for (_, next) in &self.states[state_id].transitions {
+                    next_groups.extend(reachable_groups[*next as usize].iter().copied());
+                }
+                if next_groups != reachable_groups[state_id] {
+                    reachable_groups[state_id] = next_groups;
+                    changed = true;
+                }
+            }
+        }
+
+        let mut dfa = DFA::new(1);
+        dfa.ensure_group_capacity(group_count);
+
+        let mut subset_map = HashMap::<Vec<u32>, u32>::new();
+        let mut worklist = VecDeque::new();
+
+        let mut start = BTreeSet::new();
+        start.insert(0);
+        let start_closure = self.epsilon_closure(&start);
+        let start_key: Vec<u32> = start_closure.iter().copied().collect();
+        subset_map.insert(start_key.clone(), 0);
+        worklist.push_back(start_key);
+
+        while let Some(subset_key) = worklist.pop_front() {
+            let dfa_state = subset_map[&subset_key];
+            let subset: BTreeSet<u32> = subset_key.iter().copied().collect();
+
+            let mut finalizers = BitSet::new(group_count);
+            let mut non_greedy = BitSet::new(group_count);
+            let mut future = BitSet::new(group_count);
+            let mut transitions = BTreeMap::<u8, BTreeSet<u32>>::new();
+
+            for &nfa_state_id in &subset {
+                let nfa_state = &self.states[nfa_state_id as usize];
+                for &group in &nfa_state.finalizers {
+                    finalizers.set(group as usize);
+                }
+                for &group in &nfa_state.non_greedy_finalizers {
+                    non_greedy.set(group as usize);
+                }
+                for &group in &reachable_groups[nfa_state_id as usize] {
+                    future.set(group as usize);
+                }
+                for (set, next) in &nfa_state.transitions {
+                    for byte in set.iter() {
+                        transitions.entry(byte).or_default().insert(*next);
+                    }
+                }
+            }
+
+            dfa.overwrite_state_metadata(dfa_state, finalizers, non_greedy, future);
+
+            for (byte, targets) in transitions {
+                let closure = self.epsilon_closure(&targets);
+                let key: Vec<u32> = closure.iter().copied().collect();
+                let next_dfa_state = if let Some(existing) = subset_map.get(&key).copied() {
+                    existing
+                } else {
+                    let new_state = dfa.add_state();
+                    subset_map.insert(key.clone(), new_state);
+                    worklist.push_back(key);
+                    new_state
+                };
+                dfa.add_transition(dfa_state, byte, next_dfa_state);
+            }
+        }
+
+        dfa
     }
 }

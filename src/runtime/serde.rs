@@ -9,29 +9,115 @@ use std::collections::BTreeMap;
 
 use crate::runtime::Constraint;
 
+fn encode_ranges(set: &RangeSetBlaze<u32>) -> Vec<[u32; 2]> {
+    set.ranges()
+        .map(|range| [*range.start(), *range.end()])
+        .collect()
+}
+
+fn decode_ranges(ranges: Vec<[u32; 2]>) -> RangeSetBlaze<u32> {
+    ranges
+        .into_iter()
+        .map(|[start, end]| start..=end)
+        .collect()
+}
+
 // SEP1_MAP: this file is closest to sep1 cache serialization in
 // `grammars2024/src/constraint.rs::{save_to_cache,load_from_cache}`.
 // glrmask also keeps a custom nested-map serde helper here with no exact sep1
 // equivalent.
 pub(in crate::runtime) mod serde_nested_btmap_rsb {
     use range_set_blaze::RangeSetBlaze;
-    use serde::{Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
     pub(in crate::runtime) fn serialize<S: Serializer>(
         value: &BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, RangeSetBlaze<u32>>>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        let _ = value;
-        let _ = serializer;
-        unimplemented!()
+        let encoded: BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, Vec<[u32; 2]>>>> = value
+            .iter()
+            .map(|(&tokenizer_state, tsid_map)| {
+                let encoded_tsid_map = tsid_map
+                    .iter()
+                    .map(|(&tsid, terminal_map)| {
+                        let encoded_terminal_map = terminal_map
+                            .iter()
+                            .map(|(&terminal, token_set)| {
+                                (terminal, super::encode_ranges(token_set))
+                            })
+                            .collect();
+                        (tsid, encoded_terminal_map)
+                    })
+                    .collect();
+                (tokenizer_state, encoded_tsid_map)
+            })
+            .collect();
+        encoded.serialize(serializer)
     }
 
     pub(in crate::runtime) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, RangeSetBlaze<u32>>>>, D::Error> {
-        let _ = deserializer;
-        unimplemented!()
+        let encoded =
+            BTreeMap::<u32, BTreeMap<u32, BTreeMap<u32, Vec<[u32; 2]>>>>::deserialize(
+                deserializer,
+            )?;
+        Ok(encoded
+            .into_iter()
+            .map(|(tokenizer_state, tsid_map)| {
+                let decoded_tsid_map = tsid_map
+                    .into_iter()
+                    .map(|(tsid, terminal_map)| {
+                        let decoded_terminal_map = terminal_map
+                            .into_iter()
+                            .map(|(terminal, ranges)| (terminal, super::decode_ranges(ranges)))
+                            .collect();
+                        (tsid, decoded_terminal_map)
+                    })
+                    .collect();
+                (tokenizer_state, decoded_tsid_map)
+            })
+            .collect())
+    }
+}
+
+pub(in crate::runtime) mod serde_btmap_rsb {
+    use range_set_blaze::RangeSetBlaze;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub(in crate::runtime) fn serialize<S: Serializer>(
+        value: &BTreeMap<u32, BTreeMap<u32, RangeSetBlaze<u32>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let encoded: BTreeMap<u32, BTreeMap<u32, Vec<[u32; 2]>>> = value
+            .iter()
+            .map(|(&tokenizer_state, terminal_map)| {
+                let encoded_terminal_map = terminal_map
+                    .iter()
+                    .map(|(&terminal, token_set)| (terminal, super::encode_ranges(token_set)))
+                    .collect();
+                (tokenizer_state, encoded_terminal_map)
+            })
+            .collect();
+        encoded.serialize(serializer)
+    }
+
+    pub(in crate::runtime) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<u32, BTreeMap<u32, RangeSetBlaze<u32>>>, D::Error> {
+        let encoded = BTreeMap::<u32, BTreeMap<u32, Vec<[u32; 2]>>>::deserialize(deserializer)?;
+        Ok(encoded
+            .into_iter()
+            .map(|(tokenizer_state, terminal_map)| {
+                let decoded_terminal_map = terminal_map
+                    .into_iter()
+                    .map(|(terminal, ranges)| (terminal, super::decode_ranges(ranges)))
+                    .collect();
+                (tokenizer_state, decoded_terminal_map)
+            })
+            .collect())
     }
 }
 
@@ -43,7 +129,7 @@ impl Constraint {
     
     
     pub fn save(&self) -> Vec<u8> {
-        unimplemented!()
+        bincode::serialize(self).expect("Constraint serialization should succeed")
     }
 
     // SEP1_MAP: `load()` is the direct glrmask analogue of sep1
@@ -51,7 +137,7 @@ impl Constraint {
     // again using bytes instead of filesystem paths.
     
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        let _ = bytes;
-        unimplemented!()
+        bincode::deserialize(bytes)
+            .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))
     }
 }

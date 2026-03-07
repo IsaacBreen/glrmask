@@ -52,17 +52,25 @@ pub struct GLRTable {
 impl GLRTable {
     
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
-        unimplemented!()
+        let (item_sets, transitions) = build_lr0_item_sets(grammar);
+        build_slr1_table(grammar, &item_sets, &transitions)
     }
 
     
     pub fn actions(&self, state: u32, terminal: TerminalID) -> &[Action] {
-        unimplemented!()
+        static EMPTY: [Action; 0] = [];
+        self.action
+            .get(state as usize)
+            .and_then(|by_terminal| by_terminal.get(&terminal))
+            .map(Vec::as_slice)
+            .unwrap_or(&EMPTY)
     }
 
     
     pub fn goto_target(&self, state: u32, nt: NonterminalID) -> Option<u32> {
-        unimplemented!()
+        self.goto
+            .get(state as usize)
+            .and_then(|by_nt| by_nt.get(&nt).copied())
     }
 }
 
@@ -79,7 +87,7 @@ struct Item {
 
 impl Item {
     fn new(rule: u32, dot: u32) -> Self {
-        unimplemented!()
+        Self { rule, dot }
     }
 
     
@@ -189,8 +197,53 @@ fn build_slr1_table(
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GLRTable {
-        unimplemented!()
+    let mut action = vec![BTreeMap::<TerminalID, Vec<Action>>::new(); item_sets.len()];
+    let mut goto = vec![BTreeMap::<NonterminalID, u32>::new(); item_sets.len()];
+
+    for (state_id, items) in item_sets.iter().enumerate() {
+        for (symbol, &target) in &transitions[state_id] {
+            match symbol {
+                Symbol::Terminal(terminal) => {
+                    action[state_id]
+                        .entry(*terminal)
+                        .or_default()
+                        .push(Action::Shift(target));
+                }
+                Symbol::Nonterminal(nonterminal) => {
+                    goto[state_id].insert(*nonterminal, target);
+                }
+            }
+        }
+
+        for item in items {
+            let rule = &grammar.rules[item.rule as usize];
+            if item.dot as usize != rule.rhs.len() {
+                continue;
+            }
+
+            if item.rule == 0 {
+                action[state_id].entry(EOF).or_default().push(Action::Accept);
+                continue;
+            }
+
+            for &lookahead in &grammar.follow[rule.lhs as usize] {
+                action[state_id]
+                    .entry(lookahead)
+                    .or_default()
+                    .push(Action::Reduce(item.rule));
+            }
+        }
     }
+
+    GLRTable {
+        action,
+        goto,
+        num_states: item_sets.len() as u32,
+        num_terminals: grammar.num_terminals,
+        num_rules: grammar.rules.len() as u32,
+        rules: grammar.rules.clone(),
+    }
+}
 
 
 
@@ -247,8 +300,8 @@ mod tests {
             terminals: vec![crate::compiler::grammar_def::Terminal {
                 id: 0,
                 name: "a".into(),
-                pattern: "a".into(),
             }],
+            terminal_patterns: vec!["a".into()],
         };
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
@@ -300,14 +353,13 @@ mod tests {
                 crate::compiler::grammar_def::Terminal {
                     id: 0,
                     name: "a".into(),
-                    pattern: "a".into(),
                 },
                 crate::compiler::grammar_def::Terminal {
                     id: 1,
                     name: "+".into(),
-                    pattern: "\\+".into(),
                 },
             ],
+            terminal_patterns: vec!["a".into(), "\\+".into()],
         };
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);

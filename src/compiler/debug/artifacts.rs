@@ -189,6 +189,22 @@ impl CompileDebug {
         vocab_entries: Vec<(u32, Vec<u8>)>,
         eos_token_id: Option<u32>,
     ) -> Self {
-        unimplemented!()
+        Self {
+            grammar_def,
+            normalized_grammar_def,
+            glr_grammar,
+            glr_table,
+            characterizations: automata.characterizations,
+            terminal_dwa: automata.terminal_dwa,
+            terminal_debug: automata.terminal_debug,
+            templates: automata.templates,
+            parser_nwa_before_resolve: automata.parser_nwa_before_resolve,
+            parser_nwa_after_resolve: automata.parser_nwa_after_resolve,
+            parser_dwa_pre_minimize: automata.parser_dwa_pre_minimize,
+            parser_dwa: automata.parser_dwa,
+            id_map: automata.id_map,
+            vocab_entries,
+            eos_token_id,
+        }
     }
 }

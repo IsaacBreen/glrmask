@@ -27,12 +27,15 @@ pub struct U8Set {
 impl U8Set {
     
     pub const fn empty() -> Self {
-        loop {}
+        Self { lo: 0, hi: 0 }
     }
 
     
     pub const fn all() -> Self {
-        loop {}
+        Self {
+            lo: u128::MAX,
+            hi: u128::MAX,
+        }
     }
 
     
@@ -47,129 +50,184 @@ impl U8Set {
 
     
     pub fn from_byte(b: u8) -> Self {
-        let _ = b;
-        unimplemented!()
+        if b < 128 {
+            Self {
+                lo: 1u128 << b,
+                hi: 0,
+            }
+        } else {
+            Self {
+                lo: 0,
+                hi: 1u128 << (b - 128),
+            }
+        }
     }
 
     
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        unimplemented!()
+        let mut set = Self::empty();
+        for &b in bytes {
+            set.insert(b);
+        }
+        set
     }
 
     
     pub fn from_range(lo: u8, hi: u8) -> Self {
-        unimplemented!()
+        let mut set = Self::empty();
+        for b in lo..=hi {
+            set.insert(b);
+        }
+        set
     }
 
     
     pub fn from_predicate(f: impl Fn(u8) -> bool) -> Self {
-        unimplemented!()
+        let mut set = Self::empty();
+        for b in 0..=u8::MAX {
+            if f(b) {
+                set.insert(b);
+            }
+        }
+        set
     }
 
     
     pub fn is_empty(&self) -> bool {
-        unimplemented!()
+        self.lo == 0 && self.hi == 0
     }
 
     
     pub fn len(&self) -> usize {
-        unimplemented!()
+        self.lo.count_ones() as usize + self.hi.count_ones() as usize
     }
 
     
     pub fn is_full(&self) -> bool {
-        unimplemented!()
+        self.lo == u128::MAX && self.hi == u128::MAX
     }
 
     
     pub fn contains(&self, b: u8) -> bool {
-        unimplemented!()
+        if b < 128 {
+            (self.lo & (1u128 << b)) != 0
+        } else {
+            (self.hi & (1u128 << (b - 128))) != 0
+        }
     }
 
     
     pub fn insert(&mut self, b: u8) -> bool {
-        unimplemented!()
+        let old = self.contains(b);
+        if b < 128 {
+            self.lo |= 1u128 << b;
+        } else {
+            self.hi |= 1u128 << (b - 128);
+        }
+        !old
     }
 
     
     pub fn remove(&mut self, b: u8) -> bool {
-        unimplemented!()
+        let old = self.contains(b);
+        if b < 128 {
+            self.lo &= !(1u128 << b);
+        } else {
+            self.hi &= !(1u128 << (b - 128));
+        }
+        old
     }
 
     
     pub fn union(&self, other: &Self) -> Self {
-        unimplemented!()
+        Self {
+            lo: self.lo | other.lo,
+            hi: self.hi | other.hi,
+        }
     }
 
     
     pub fn intersection(&self, other: &Self) -> Self {
-        unimplemented!()
+        Self {
+            lo: self.lo & other.lo,
+            hi: self.hi & other.hi,
+        }
     }
 
     
     pub fn difference(&self, other: &Self) -> Self {
-        unimplemented!()
+        Self {
+            lo: self.lo & !other.lo,
+            hi: self.hi & !other.hi,
+        }
     }
 
     
     pub fn complement(&self) -> Self {
-        unimplemented!()
+        Self {
+            lo: !self.lo,
+            hi: !self.hi,
+        }
     }
 
     
     pub fn is_disjoint(&self, other: &Self) -> bool {
-        let _ = other;
-        unimplemented!()
+        (self.lo & other.lo) == 0 && (self.hi & other.hi) == 0
     }
 
     
     pub fn is_subset(&self, other: &Self) -> bool {
-        let _ = other;
-        unimplemented!()
+        (self.lo & !other.lo) == 0 && (self.hi & !other.hi) == 0
     }
 
     
     pub fn iter(&self) -> U8SetIter {
-        unimplemented!()
+        U8SetIter {
+            lo: self.lo,
+            hi: self.hi,
+            phase: 0,
+        }
     }
 }
 
 impl Default for U8Set {
     fn default() -> Self {
-        unimplemented!()
+        Self::empty()
     }
 }
 
 impl BitOr for U8Set {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
-        unimplemented!()
+        self.union(&rhs)
     }
 }
 
 impl BitOrAssign for U8Set {
     fn bitor_assign(&mut self, rhs: Self) {
-        unimplemented!()
+        self.lo |= rhs.lo;
+        self.hi |= rhs.hi;
     }
 }
 
 impl BitAnd for U8Set {
     type Output = Self;
     fn bitand(self, rhs: Self) -> Self {
-        unimplemented!()
+        self.intersection(&rhs)
     }
 }
 
 impl BitAndAssign for U8Set {
     fn bitand_assign(&mut self, rhs: Self) {
-        unimplemented!()
+        self.lo &= rhs.lo;
+        self.hi &= rhs.hi;
     }
 }
 
 impl Not for U8Set {
     type Output = Self;
     fn not(self) -> Self {
-        unimplemented!()
+        self.complement()
     }
 }
 
@@ -186,7 +244,14 @@ impl fmt::Debug for U8Set {
 
 impl fmt::Display for U8Set {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
+        write!(f, "{{")?;
+        for (i, b) in self.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "0x{b:02X}")?;
+        }
+        write!(f, "}}")
     }
 }
 
@@ -201,7 +266,27 @@ impl Iterator for U8SetIter {
     type Item = u8;
 
     fn next(&mut self) -> Option<u8> {
-        unimplemented!()
+        loop {
+            match self.phase {
+                0 => {
+                    if self.lo != 0 {
+                        let tz = self.lo.trailing_zeros() as u8;
+                        self.lo &= self.lo - 1;
+                        return Some(tz);
+                    }
+                    self.phase = 1;
+                }
+                1 => {
+                    if self.hi != 0 {
+                        let tz = self.hi.trailing_zeros() as u8;
+                        self.hi &= self.hi - 1;
+                        return Some(128 + tz);
+                    }
+                    self.phase = 2;
+                }
+                _ => return None,
+            }
+        }
     }
 }
 

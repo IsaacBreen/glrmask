@@ -22,10 +22,14 @@ use super::state::ConstraintState;
 
 // SEP1_MAP: `TerminalTokensByState` is closest to sep1
 // `GrammarConstraint.possible_matches` in `grammars2024/src/constraint.rs`.
-// glrmask stores the tokenizer-state/TSID/terminal lookup directly instead of
-// sep1's internal-token-bitset representation.
+// glrmask still stores a compatibility-era tokenizer-state/TSID/terminal lookup
+// directly instead of sep1's flatter `possible_matches` view, but runtime code
+// should increasingly project through `possible_matches_for_state()` rather than
+// treat this nested shape as the target abstraction.
 pub(crate) type TokenizerStateID = u32;
 pub(crate) type TSID = u32;
+pub(crate) type PossibleMatchesByState =
+    BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
 pub(crate) type TerminalTokensByState =
     BTreeMap<TokenizerStateID, BTreeMap<TSID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>>;
 
@@ -48,6 +52,9 @@ pub struct Constraint {
 
     
     pub(crate) tokenizer: Tokenizer,
+
+    #[serde(with = "crate::runtime::serde::serde_btmap_rsb")]
+    pub(crate) possible_matches: PossibleMatchesByState,
 
     
     
@@ -86,13 +93,32 @@ impl Constraint {
     
     
     pub fn mask_len(&self) -> usize {
-        unimplemented!()
+        self.token_bytes
+            .keys()
+            .max()
+            .map(|token_id| (*token_id as usize / 32) + 1)
+            .unwrap_or(0)
     }
 
     // SEP1_MAP: nearest sep1 analogue is reading `GrammarConstraint.parser_dwa`
     // directly from `grammars2024/src/constraint.rs`; no separate accessor there.
     
     pub(crate) fn parser_dwa(&self) -> &DWA {
-        unimplemented!()
+        &self.parser_dwa
+    }
+
+    // SEP1_MAP: this is the nearest local projection of sep1's `possible_matches`
+    // lookup: a tokenizer-state-indexed mapping from terminal to matching LLM tokens.
+    // Storage is still using the cleanup-era nested map, but runtime callers should
+    // prefer this projected surface over reaching into `terminal_tokens_by_state`
+    // directly.
+    pub(crate) fn possible_matches_for_state(
+        &self,
+        tokenizer_state: u32,
+    ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
+        self.possible_matches
+            .get(&tokenizer_state)
+            .cloned()
+            .unwrap_or_default()
     }
 }

@@ -60,18 +60,30 @@ pub struct Terminal {
 impl GrammarDef {
     
     pub fn num_terminals(&self) -> u32 {
-        unimplemented!()
+        self.terminals.len() as u32
     }
 
     
     pub fn num_nonterminals(&self) -> u32 {
-        unimplemented!()
+        self.rules
+            .iter()
+            .flat_map(|rule| {
+                std::iter::once(rule.lhs).chain(rule.rhs.iter().filter_map(|sym| match sym {
+                    Symbol::Nonterminal(id) => Some(*id),
+                    Symbol::Terminal(_) => None,
+                }))
+            })
+            .max()
+            .map(|id| id + 1)
+            .unwrap_or(0)
     }
 
     
     pub fn terminal_pattern(&self, terminal: TerminalID) -> &str {
-        let _ = terminal;
-        unimplemented!()
+        self.terminal_patterns
+            .get(terminal as usize)
+            .map(String::as_str)
+            .unwrap_or("")
     }
 }
 

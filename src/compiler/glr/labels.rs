@@ -9,21 +9,17 @@
 pub const DEFAULT_LABEL: i32 = i32::MAX - 1;
 
 pub(crate) fn encode_positive_label(state: u32) -> i32 {
-    let _ = state;
-    unimplemented!()
+    state as i32
 }
 
 pub(crate) fn encode_negative_label(state: u32) -> i32 {
-    let _ = state;
-    unimplemented!()
+    i32::MIN.wrapping_add(state as i32)
 }
 
 pub(crate) fn is_negative_label(label: i32) -> bool {
-    let _ = label;
-    unimplemented!()
+    label < 0 && label != DEFAULT_LABEL
 }
 
 pub(crate) fn negative_to_positive_label(label: i32) -> i32 {
-    let _ = label;
-    unimplemented!()
+    label.wrapping_sub(i32::MIN)
 }

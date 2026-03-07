@@ -13,7 +13,7 @@
 
 // SEP1_MAP: This file corresponds to sep1's weighted NWA surface inside `dwa_i32`, but glrmask keeps `NWA` storage in its own file instead of sep1's denser module layout.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use crate::ds::weight::Weight;
 
@@ -41,40 +41,146 @@ pub struct NWA {
     pub start_states: Vec<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NwaTraversalData {
+    pub comp_id: Vec<usize>,
+    pub sccs: Vec<Vec<usize>>,
+    pub topo: Vec<usize>,
+}
+
 impl NWA {
     
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
-        unimplemented!()
+        let _ = (num_tsids, max_token);
+        Self {
+            states: Vec::new(),
+            start_states: Vec::new(),
+        }
     }
 
     
     pub fn add_state(&mut self) -> u32 {
-        unimplemented!()
+        let id = self.states.len() as u32;
+        self.states.push(NWAState::default());
+        id
     }
 
     
     pub fn num_states(&self) -> u32 {
-        unimplemented!()
+        self.states.len() as u32
     }
 
     
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
-        unimplemented!()
+        if let Some(entry) = self.states.get_mut(state as usize) {
+            entry.final_weight = Some(weight);
+        }
     }
 
     
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
-        unimplemented!()
+        if let Some(entry) = self.states.get_mut(from as usize) {
+            entry.transitions.entry(label).or_default().push((to, weight));
+        }
     }
 
     
     pub fn add_epsilon(&mut self, from: u32, to: u32, weight: Weight) {
-        unimplemented!()
+        if let Some(entry) = self.states.get_mut(from as usize) {
+            entry.epsilons.push((to, weight));
+        }
     }
 
     
     pub fn num_transitions(&self) -> usize {
-        unimplemented!()
+        self.states
+            .iter()
+            .map(|state| state.epsilons.len() + state.transitions.values().map(Vec::len).sum::<usize>())
+            .sum()
+    }
+
+    pub fn reverse(&self) -> Self {
+        let mut rev = Self {
+            states: vec![NWAState::default(); self.states.len()],
+            start_states: Vec::new(),
+        };
+
+        let super_start = rev.add_state();
+        rev.start_states.push(super_start);
+
+        for (src, state) in self.states.iter().enumerate() {
+            for (&label, targets) in &state.transitions {
+                for (dst, weight) in targets {
+                    rev.add_transition(*dst, label, src as u32, weight.clone());
+                }
+            }
+            for (dst, weight) in &state.epsilons {
+                rev.add_epsilon(*dst, src as u32, weight.clone());
+            }
+            if let Some(final_weight) = &state.final_weight {
+                if !final_weight.is_empty() {
+                    rev.add_epsilon(super_start, src as u32, final_weight.clone());
+                }
+            }
+        }
+
+        for &start in &self.start_states {
+            if let Some(state) = rev.states.get_mut(start as usize) {
+                let updated = match &state.final_weight {
+                    Some(existing) => existing.union(&Weight::all()),
+                    None => Weight::all(),
+                };
+                state.final_weight = Some(updated);
+            }
+        }
+
+        rev
+    }
+
+    pub fn compute_traversal_data(&self) -> NwaTraversalData {
+        let (sccs, comp_id) = compute_sccs(self);
+        let mut scc_adj = vec![HashSet::new(); sccs.len()];
+        let mut indeg = vec![0usize; sccs.len()];
+
+        for (src, state) in self.states.iter().enumerate() {
+            let src_comp = comp_id[src];
+            let mut neighbors = Vec::new();
+            for targets in state.transitions.values() {
+                for (dst, _) in targets {
+                    neighbors.push(*dst as usize);
+                }
+            }
+            for (dst, _) in &state.epsilons {
+                neighbors.push(*dst as usize);
+            }
+
+            for dst in neighbors {
+                let dst_comp = comp_id[dst];
+                if src_comp != dst_comp && scc_adj[src_comp].insert(dst_comp) {
+                    indeg[dst_comp] += 1;
+                }
+            }
+        }
+
+        let mut topo = Vec::with_capacity(sccs.len());
+        let mut queue = VecDeque::new();
+        for (comp, degree) in indeg.iter().enumerate() {
+            if *degree == 0 {
+                queue.push_back(comp);
+            }
+        }
+
+        while let Some(comp) = queue.pop_front() {
+            topo.push(comp);
+            for &next in &scc_adj[comp] {
+                indeg[next] -= 1;
+                if indeg[next] == 0 {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        NwaTraversalData { comp_id, sccs, topo }
     }
 
     
@@ -149,7 +255,7 @@ impl NWA {
 
     
     pub fn max_position(&self) -> u32 {
-        unimplemented!()
+        self.states.len().saturating_sub(1) as u32
     }
 
     
@@ -159,7 +265,7 @@ impl NWA {
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
     ) -> NWADisplayWithSymbols<'a> {
-        unimplemented!()
+        NWADisplayWithSymbols { nwa: self, symbols }
     }
 
     
@@ -170,8 +276,85 @@ impl NWA {
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
     ) -> NWADisplayWithAllMaps<'a> {
-        unimplemented!()
+        NWADisplayWithAllMaps {
+            nwa: self,
+            symbols,
+            tsid_names,
+            token_names,
+        }
     }
+}
+
+fn compute_sccs(nwa: &NWA) -> (Vec<Vec<usize>>, Vec<usize>) {
+    let num_states = nwa.states.len();
+    let mut adj = vec![Vec::new(); num_states];
+    let mut rev_adj = vec![Vec::new(); num_states];
+
+    for (src, state) in nwa.states.iter().enumerate() {
+        let mut neighbors = Vec::new();
+        for targets in state.transitions.values() {
+            for (dst, _) in targets {
+                neighbors.push(*dst as usize);
+            }
+        }
+        for (dst, _) in &state.epsilons {
+            neighbors.push(*dst as usize);
+        }
+
+        for dst in neighbors {
+            adj[src].push(dst);
+            rev_adj[dst].push(src);
+        }
+    }
+
+    let mut order = Vec::new();
+    let mut visited = vec![false; num_states];
+    for start in 0..num_states {
+        if visited[start] {
+            continue;
+        }
+        let mut stack = vec![(start, false)];
+        while let Some((state, processed)) = stack.pop() {
+            if processed {
+                order.push(state);
+                continue;
+            }
+            if visited[state] {
+                continue;
+            }
+            visited[state] = true;
+            stack.push((state, true));
+            for &next in &adj[state] {
+                if !visited[next] {
+                    stack.push((next, false));
+                }
+            }
+        }
+    }
+
+    let mut comp_id = vec![usize::MAX; num_states];
+    let mut sccs = Vec::new();
+    for &start in order.iter().rev() {
+        if comp_id[start] != usize::MAX {
+            continue;
+        }
+        let comp = sccs.len();
+        let mut stack = vec![start];
+        comp_id[start] = comp;
+        let mut component = Vec::new();
+        while let Some(state) = stack.pop() {
+            component.push(state);
+            for &prev in &rev_adj[state] {
+                if comp_id[prev] == usize::MAX {
+                    comp_id[prev] = comp;
+                    stack.push(prev);
+                }
+            }
+        }
+        sccs.push(component);
+    }
+
+    (sccs, comp_id)
 }
 
 
@@ -261,7 +444,15 @@ pub struct NWADisplayWithAllMaps<'a> {
 
 impl std::fmt::Display for NWADisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        unimplemented!()
+        let nwa = self.nwa;
+        let syms = self.symbols;
+        writeln!(f, "NWA: {} states, start={:?}", nwa.states.len(), nwa.start_states)?;
+        fmt_nwa_states(
+            nwa,
+            f,
+            &|label| syms.get(&label).cloned().unwrap_or_else(|| label.to_string()),
+            &|weight| format!("{}", weight.display_with_names(self.tsid_names, self.token_names)),
+        )
     }
 }
 

@@ -27,7 +27,38 @@ impl<'a> ConstraintState<'a> {
     
     
     pub fn force(&self) -> Vec<u32> {
-        unimplemented!()
+        fn single_allowed_token(mask: &[u32]) -> Option<u32> {
+            let mut found = None;
+            for (word_index, &word) in mask.iter().enumerate() {
+                let mut bits = word;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as u32;
+                    let token = word_index as u32 * 32 + bit;
+                    if found.replace(token).is_some() {
+                        return None;
+                    }
+                    bits &= bits - 1;
+                }
+            }
+            found
+        }
+
+        let mut forced = Vec::new();
+        let mut cursor = self.clone();
+
+        loop {
+            let mask = cursor.mask();
+            let Some(token) = single_allowed_token(&mask) else {
+                break;
+            };
+            forced.push(token);
+            cursor.commit_token(token);
+            if cursor.state.is_empty() || cursor.is_finished() {
+                break;
+            }
+        }
+
+        forced
     }
 }
 
@@ -71,7 +102,7 @@ mod tests {
         let vocab = make_vocab(&["a", "b"]);
         let c = Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
         let s = c.start();
-        let mask = s.mask_view().mask();
+        let mask = s.mask();
 
         
         assert_eq!(single_allowed_token(&mask), Some(0));

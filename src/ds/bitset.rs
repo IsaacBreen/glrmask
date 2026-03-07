@@ -22,7 +22,10 @@ pub struct BitSet {
 impl BitSet {
     
     pub fn new(len: usize) -> Self {
-        unimplemented!()
+        Self {
+            words: vec![0; len.div_ceil(64)],
+            len,
+        }
     }
 
     
@@ -32,23 +35,32 @@ impl BitSet {
 
     
     pub fn all(len: usize) -> Self {
-        let _ = len;
-        unimplemented!()
+        let mut set = Self {
+            words: vec![u64::MAX; len.div_ceil(64)],
+            len,
+        };
+        set.mask_unused_bits();
+        set
     }
 
     
     pub fn len(&self) -> usize {
-        unimplemented!()
+        self.len
     }
 
     
     pub fn is_empty(&self) -> bool {
-        unimplemented!()
+        self.is_zero()
     }
 
     
     pub fn get(&self, i: usize) -> bool {
-        unimplemented!()
+        if i >= self.len {
+            return false;
+        }
+        let word = i / 64;
+        let bit = i % 64;
+        (self.words[word] & (1u64 << bit)) != 0
     }
 
     
@@ -58,72 +70,108 @@ impl BitSet {
 
     
     pub fn set(&mut self, i: usize) {
-        unimplemented!()
+        if i >= self.len {
+            return;
+        }
+        let word = i / 64;
+        let bit = i % 64;
+        self.words[word] |= 1u64 << bit;
     }
 
     
     pub fn clear(&mut self, i: usize) {
-        unimplemented!()
+        if i >= self.len {
+            return;
+        }
+        let word = i / 64;
+        let bit = i % 64;
+        self.words[word] &= !(1u64 << bit);
     }
 
     
     pub fn clear_all(&mut self) {
-        unimplemented!()
+        self.words.fill(0);
     }
 
     
     pub fn count_ones(&self) -> usize {
-        unimplemented!()
+        self.words.iter().map(|word| word.count_ones() as usize).sum()
     }
 
     
     pub fn is_zero(&self) -> bool {
-        unimplemented!()
+        self.words.iter().all(|&word| word == 0)
     }
 
     
     fn union_with(&mut self, other: &BitSet) {
-        unimplemented!()
+        debug_assert_eq!(self.len, other.len);
+        for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
+            *lhs |= *rhs;
+        }
     }
 
     
     pub fn union(&self, other: &Self) -> Self {
-        let _ = other;
-        unimplemented!()
+        debug_assert_eq!(self.len, other.len);
+        let mut out = self.clone();
+        out.union_with(other);
+        out
     }
 
     
     fn intersect_with(&mut self, other: &BitSet) {
-        unimplemented!()
+        debug_assert_eq!(self.len, other.len);
+        for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
+            *lhs &= *rhs;
+        }
     }
 
     
     pub fn intersection(&self, other: &Self) -> Self {
-        let _ = other;
-        unimplemented!()
+        debug_assert_eq!(self.len, other.len);
+        let mut out = self.clone();
+        out.intersect_with(other);
+        out
     }
 
     
     pub fn difference(&self, other: &Self) -> Self {
-        let _ = other;
-        unimplemented!()
+        debug_assert_eq!(self.len, other.len);
+        let mut out = self.clone();
+        for (lhs, rhs) in out.words.iter_mut().zip(&other.words) {
+            *lhs &= !*rhs;
+        }
+        out.mask_unused_bits();
+        out
     }
 
     
     pub fn complement(&self) -> Self {
-        unimplemented!()
+        let mut out = self.clone();
+        for word in &mut out.words {
+            *word = !*word;
+        }
+        out.mask_unused_bits();
+        out
     }
 
     
     pub fn is_disjoint(&self, other: &Self) -> bool {
-        let _ = other;
-        unimplemented!()
+        debug_assert_eq!(self.len, other.len);
+        self.words
+            .iter()
+            .zip(&other.words)
+            .all(|(lhs, rhs)| (*lhs & *rhs) == 0)
     }
 
     
     pub fn is_subset(&self, other: &Self) -> bool {
-        let _ = other;
-        unimplemented!()
+        debug_assert_eq!(self.len, other.len);
+        self.words
+            .iter()
+            .zip(&other.words)
+            .all(|(lhs, rhs)| (*lhs & !*rhs) == 0)
     }
 
     
@@ -132,6 +180,10 @@ impl BitSet {
             let base = word_idx * 64;
             BitIter { word, base }
         })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.iter_ones()
     }
 
     
@@ -159,6 +211,22 @@ impl BitSet {
                 buf[base + 1] = (word >> 32) as u32;
             }
         }
+    }
+
+    fn mask_unused_bits(&mut self) {
+        let rem = self.len % 64;
+        if rem == 0 {
+            return;
+        }
+        if let Some(last) = self.words.last_mut() {
+            *last &= (1u64 << rem) - 1;
+        }
+    }
+}
+
+impl Default for BitSet {
+    fn default() -> Self {
+        Self::new(0)
     }
 }
 

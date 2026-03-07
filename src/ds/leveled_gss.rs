@@ -62,11 +62,17 @@ enum Upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     fn max_depth(&self) -> isize {
-        unimplemented!()
+        match self {
+            Upper::Branch(branch) => branch.max_depth,
+            Upper::Interface(interface) => interface.inner.max_depth,
+        }
     }
 
     fn children_keys(&self) -> Vec<T> {
-        unimplemented!()
+        match self {
+            Upper::Branch(branch) => branch.children.keys().cloned().collect(),
+            Upper::Interface(interface) => interface.inner.children.keys().cloned().collect(),
+        }
     }
 }
 

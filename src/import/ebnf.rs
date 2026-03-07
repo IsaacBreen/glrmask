@@ -108,8 +108,15 @@ impl<'a> Lexer<'a> {
                     Some(b'"') => s.push('"'),
                     Some(b'\'') => s.push('\''),
                     Some(b'x') => {
-        unimplemented!()
-    }
+                        let hi = self.advance().ok_or_else(|| {
+                            GlrMaskError::GrammarParse("incomplete hex escape".into())
+                        })?;
+                        let lo = self.advance().ok_or_else(|| {
+                            GlrMaskError::GrammarParse("incomplete hex escape".into())
+                        })?;
+                        let value = (hex_digit(hi)? << 4) | hex_digit(lo)?;
+                        s.push(value as char);
+                    }
                     Some(c) => {
                         s.push('\\');
                         s.push(c as char);
@@ -131,20 +138,92 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_char_class(&mut self) -> Result<(String, bool), GlrMaskError> {
-        unimplemented!()
+        let mut negate = false;
+        if self.peek() == Some(b'^') {
+            negate = true;
+            self.pos += 1;
+        }
+
+        let mut def = String::new();
+        while let Some(byte) = self.advance() {
+            if byte == b']' {
+                return Ok((def, negate));
+            }
+            if byte == b'\\' {
+                let escaped = self.advance().ok_or_else(|| {
+                    GlrMaskError::GrammarParse("unterminated char class escape".into())
+                })?;
+                def.push('\\');
+                def.push(escaped as char);
+            } else {
+                def.push(byte as char);
+            }
+        }
+        Err(GlrMaskError::GrammarParse("unterminated char class".into()))
     }
 
     fn lex_ident(&mut self, first: u8) -> String {
-        unimplemented!()
+        let mut ident = String::from(first as char);
+        while let Some(byte) = self.peek() {
+            if (byte as char).is_ascii_alphanumeric() || byte == b'_' {
+                ident.push(byte as char);
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        ident
     }
 
     fn tokenize(&mut self) -> Result<Vec<Token>, GlrMaskError> {
-        unimplemented!()
+        let mut tokens = Vec::new();
+        while let Some(byte) = self.advance() {
+            match byte {
+                b' ' | b'\t' | b'\r' => self.skip_whitespace_inline(),
+                b'\n' => tokens.push(Token::Newline),
+                b'#' => self.skip_comment(),
+                b'(' => tokens.push(Token::LParen),
+                b')' => tokens.push(Token::RParen),
+                b'|' => tokens.push(Token::Pipe),
+                b'*' => tokens.push(Token::Star),
+                b'+' => tokens.push(Token::Plus),
+                b'?' => tokens.push(Token::Question),
+                b'.' => tokens.push(Token::Dot),
+                b':' => {
+                    if self.peek() == Some(b':') && self.input.get(self.pos + 1) == Some(&b'=') {
+                        self.pos += 2;
+                    } else if self.peek() == Some(b'=') {
+                        self.pos += 1;
+                    }
+                    tokens.push(Token::Separator);
+                }
+                b'"' | b'\'' => tokens.push(Token::Literal(self.lex_string(byte)?)),
+                b'[' => {
+                    let (def, negate) = self.lex_char_class()?;
+                    tokens.push(Token::CharClass { def, negate });
+                }
+                b if (b as char).is_ascii_alphabetic() || b == b'_' => {
+                    tokens.push(Token::Ident(self.lex_ident(b)));
+                }
+                _ => {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "unexpected character '{}'",
+                        byte as char
+                    )));
+                }
+            }
+        }
+        Ok(tokens)
     }
 }
 
 fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
-    unimplemented!()
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(10 + (b - b'a')),
+        b'A'..=b'F' => Ok(10 + (b - b'A')),
+        _ => Err(GlrMaskError::GrammarParse(format!("invalid hex digit '{}'", b as char))),
+    }
 }
 
 
@@ -158,52 +237,143 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        unimplemented!()
+        Self { tokens, pos: 0 }
     }
 
     fn peek(&self) -> Option<&Token> {
-        unimplemented!()
+        self.tokens.get(self.pos)
     }
 
     fn advance(&mut self) -> Option<Token> {
-        unimplemented!()
+        let token = self.tokens.get(self.pos).cloned()?;
+        self.pos += 1;
+        Some(token)
     }
 
     fn expect(&mut self, expected: &Token) -> Result<(), GlrMaskError> {
-        unimplemented!()
+        let actual = self.advance().ok_or_else(|| {
+            GlrMaskError::GrammarParse("unexpected end of input".into())
+        })?;
+        if &actual == expected {
+            Ok(())
+        } else {
+            Err(GlrMaskError::GrammarParse(format!(
+                "expected {:?}, found {:?}",
+                expected, actual
+            )))
+        }
     }
 
     fn skip_newlines(&mut self) {
-        unimplemented!()
+        while matches!(self.peek(), Some(Token::Newline)) {
+            self.pos += 1;
+        }
     }
 
     
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
-        unimplemented!()
+        self.skip_newlines();
+        let mut rules = Vec::new();
+        while self.peek().is_some() {
+            let name = match self.advance() {
+                Some(Token::Ident(name)) => name,
+                Some(token) => {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "expected rule name, found {:?}",
+                        token
+                    )));
+                }
+                None => break,
+            };
+            self.expect(&Token::Separator)?;
+            let expr = self.parse_alternatives()?;
+            rules.push((name, expr));
+            self.skip_newlines();
+        }
+
+        let start = rules
+            .first()
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| GlrMaskError::GrammarParse("empty grammar".into()))?;
+        Ok(NamedGrammar { rules, start })
     }
 
     
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!()
+        let mut options = vec![self.parse_sequence()?];
+        while matches!(self.peek(), Some(Token::Pipe)) {
+            self.advance();
+            options.push(self.parse_sequence()?);
+        }
+        Ok(if options.len() == 1 {
+            options.pop().unwrap()
+        } else {
+            GrammarExpr::Choice(options)
+        })
     }
 
     
     fn parse_sequence(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!()
+        let mut items = Vec::new();
+        while self.is_unit_start() {
+            items.push(self.parse_unit()?);
+        }
+        Ok(match items.len() {
+            0 => GrammarExpr::Sequence(Vec::new()),
+            1 => items.pop().unwrap(),
+            _ => GrammarExpr::Sequence(items),
+        })
     }
 
     fn is_unit_start(&self) -> bool {
-        unimplemented!()
+        matches!(
+            self.peek(),
+            Some(Token::Ident(_))
+                | Some(Token::Literal(_))
+                | Some(Token::CharClass { .. })
+                | Some(Token::LParen)
+                | Some(Token::Dot)
+        )
     }
 
     
     fn parse_unit(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!()
+        let atom = self.parse_atom()?;
+        Ok(match self.peek() {
+            Some(Token::Question) => {
+                self.advance();
+                GrammarExpr::Optional(Box::new(atom))
+            }
+            Some(Token::Star) => {
+                self.advance();
+                GrammarExpr::Repeat(Box::new(atom))
+            }
+            Some(Token::Plus) => {
+                self.advance();
+                GrammarExpr::RepeatOne(Box::new(atom))
+            }
+            _ => atom,
+        })
     }
 
     
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        unimplemented!()
+        match self.advance() {
+            Some(Token::Ident(name)) => Ok(GrammarExpr::Ref(name)),
+            Some(Token::Literal(literal)) => Ok(GrammarExpr::Literal(literal.into_bytes())),
+            Some(Token::CharClass { def, negate }) => Ok(GrammarExpr::CharClass { def, negate }),
+            Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
+            Some(Token::LParen) => {
+                let expr = self.parse_alternatives()?;
+                self.expect(&Token::RParen)?;
+                Ok(expr)
+            }
+            Some(token) => Err(GlrMaskError::GrammarParse(format!(
+                "unexpected token {:?}",
+                token
+            ))),
+            None => Err(GlrMaskError::GrammarParse("unexpected end of input".into())),
+        }
     }
 }
 
@@ -213,13 +383,17 @@ impl Parser {
 
 
 pub fn parse_ebnf(input: &str) -> Result<GrammarDef, GlrMaskError> {
-    unimplemented!()
+    let named = parse_ebnf_to_named(input)?;
+    lower(&named)
 }
 
 #[allow(dead_code)]
     
 pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
-    unimplemented!()
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize()?;
+    let mut parser = Parser::new(tokens);
+    parser.parse_grammar()
 }
 
 

@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::compiler::glr::parser::ParserGSS;
+use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
 
 use super::constraint::Constraint;
 
@@ -41,6 +41,8 @@ impl<'a> ConstraintState<'a> {
     // one-method equivalent for glrmask `is_finished()`.
     
     pub fn is_finished(&self) -> bool {
-        unimplemented!()
+        self.state
+            .values()
+            .any(|stack| stacks_finished(&self.constraint.table, stack))
     }
 }

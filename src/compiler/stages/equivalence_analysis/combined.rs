@@ -37,8 +37,8 @@ mod tests {
             terminals: vec![Terminal {
                 id: 0,
                 name: "a".into(),
-                pattern: "a".into(),
             }],
+            terminal_patterns: vec!["a".into()],
         };
         let tok = Tokenizer::from_grammar_def(&gdef);
         let vocab = Vocab::new(

@@ -14,7 +14,7 @@ im = "15"
 range-set-blaze = "0.3.0"
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1"
 serde_json = "1"
 
