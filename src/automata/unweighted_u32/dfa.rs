@@ -9,18 +9,18 @@ use std::collections::BTreeMap;
 pub type Label = i32;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DfaState {
+pub struct DFAState {
     pub is_accepting: bool,
     pub transitions: BTreeMap<Label, u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Dfa {
-    pub states: Vec<DfaState>,
+pub struct DFA {
+    pub states: Vec<DFAState>,
     pub start_state: u32,
 }
 
-impl Dfa {
+impl DFA {
     #[allow(unused_variables, unused_mut, dead_code)]
     pub fn new() -> Self {
         unimplemented!()
@@ -47,7 +47,7 @@ impl Dfa {
     }
 }
 
-impl std::fmt::Display for Dfa {
+impl std::fmt::Display for DFA {
     #[allow(unused_variables, unused_mut, dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unimplemented!()

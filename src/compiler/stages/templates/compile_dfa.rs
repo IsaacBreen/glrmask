@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::automata::unweighted_u32::dfa::Dfa as UnweightedDfa;
+use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
 
