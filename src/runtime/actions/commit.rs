@@ -49,6 +49,13 @@ impl<'a> ConstraintState<'a> {
             return;
         }
 
+        // SEP1_MAP: `compute_commit_maps()` — sep1 collects matched terminal
+        // IDs directly from the `TokenizerMatch::id` field and expands each
+        // through `mutually_greedy_group()`.  glrmask does not yet have greedy
+        // groups, so we collect `matched.id` directly; the previous version
+        // redundantly re-queried `all_matched_terminals(matched.end_state)`
+        // which performs an unnecessary DFA-state lookup for information already
+        // present in the match record.
         let mut state_map = BTreeMap::new();
         let mut terminals_map = BTreeMap::<u32, BTreeSet<u32>>::new();
         for (&tokenizer_state, _) in &self.state {
@@ -57,10 +64,12 @@ impl<'a> ConstraintState<'a> {
                 state_map.insert(tokenizer_state, end_state);
             }
             for matched in exec.matches {
+                // TODO: expand via mutually_greedy_group() once greedy groups
+                // are wired into glrmask (see sep1 compute_commit_maps).
                 terminals_map
                     .entry(tokenizer_state)
                     .or_default()
-                    .extend(self.constraint.tokenizer.all_matched_terminals(matched.end_state));
+                    .insert(matched.id);
             }
         }
 

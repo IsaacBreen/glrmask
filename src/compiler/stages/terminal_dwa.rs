@@ -483,15 +483,14 @@ fn build_token_suffix_paths(
     built_suffix_nodes: &mut HashSet<(u32, u32, usize)>,
     suffix_nodes: &mut HashMap<(u32, u32, usize), u32>,
     source_node: u32,
+    current_state: u32,
     origin_state: u32,
     token_id: u32,
     token_bytes: &[u8],
     offset: usize,
-    states_by_width: &[u32],
     leaf_state: u32,
     grammar: &AnalyzedGrammar,
 ) {
-    let current_state = states_by_width[offset];
     let exec = tokenizer.execute_from_state(&token_bytes[offset..], current_state);
     let token_weight = Weight::from_token_set_for_tsid(
         origin_state,
@@ -516,11 +515,11 @@ fn build_token_suffix_paths(
                     built_suffix_nodes,
                     suffix_nodes,
                     continuation_state,
+                    matched.end_state,
                     origin_state,
                     token_id,
                     token_bytes,
                     next_offset,
-                    states_by_width,
                     leaf_state,
                     grammar,
                 );
@@ -582,10 +581,10 @@ pub(crate) fn build_terminal_dwa(
                     &mut suffix_nodes,
                     root,
                     *original_state,
+                    *original_state,
                     *token_id,
                     token_bytes,
                     0,
-                    &states_by_width,
                     leaf_state,
                     grammar,
                 );
