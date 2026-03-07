@@ -132,12 +132,18 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        if self.is_complete() {
-            if let Some(eos_token_id) = self.constraint.eos_token_id {
-                let word = eos_token_id as usize / 32;
-                let bit = eos_token_id as usize % 32;
+        // SEP1_MAP: sep1 always removes EOS from the DWA-produced mask, then
+        // adds it back only if the parse is complete.  This prevents EOS from
+        // leaking through DWA weights when the grammar isn't actually finished.
+        if let Some(eos_token_id) = self.constraint.eos_token_id {
+            let word = eos_token_id as usize / 32;
+            let bit = eos_token_id as usize % 32;
+            if let Some(slot) = buf.get_mut(word) {
+                *slot &= !(1u32 << bit); // defensively remove EOS
+            }
+            if self.is_complete() {
                 if let Some(slot) = buf.get_mut(word) {
-                    *slot |= 1u32 << bit;
+                    *slot |= 1u32 << bit; // add back only when complete
                 }
             }
         }
