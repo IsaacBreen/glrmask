@@ -90,12 +90,6 @@ pub struct Constraint {
     #[serde(with = "crate::runtime::constraint::serde_vec_btmap_rsb")]
     pub(crate) possible_matches: Vec<BTreeMap<TerminalId, RangeSetBlaze<u32>>>,
 
-    /// Per-TSID: tokens that reach a non-dead tokenizer state without
-    /// completing any terminal match. These tokens advance the tokenizer
-    /// without triggering parser actions.
-    #[serde(with = "crate::runtime::constraint::serde_vec_rsb")]
-    pub(crate) passthrough_tokens: Vec<RangeSetBlaze<u32>>,
-
     /// Maximum token ID in the vocabulary.
     pub(crate) max_token: u32,
 

@@ -24,10 +24,6 @@ pub struct VocabPreprocessing {
     /// `possible_matches[tsid]` = map from terminal_id → token range-set of token positions.
     /// A "token position" is just the token index in the vocab.
     pub possible_matches: Vec<BTreeMap<TerminalId, RangeSetBlaze<u32>>>,
-    /// `passthrough_tokens[tsid]` = set of tokens that reach a non-dead
-    /// tokenizer state from this TSID but don't match any terminal.
-    /// These tokens just advance the tokenizer without triggering parser actions.
-    pub passthrough_tokens: Vec<RangeSetBlaze<u32>>,
     /// Number of unique TSIDs.
     pub num_tsids: u32,
     /// `state_to_tsid[dfa_state]` = compacted TSID (u32::MAX if unreachable).
@@ -47,7 +43,7 @@ impl VocabPreprocessing {
     ///
     /// If `used_terminals` is provided, TSIDs whose start state cannot reach
     /// any terminal in the set are skipped in Phase 3 (their `possible_matches`
-    /// and `passthrough_tokens` entries remain empty). This can dramatically
+    /// entries remain empty). This can dramatically
     /// reduce Phase 3 cost when only a few terminals are actually used by
     /// the grammar's parse table.
     pub fn compute(
