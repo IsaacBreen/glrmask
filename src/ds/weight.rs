@@ -38,6 +38,19 @@ impl Weight {
         unimplemented!()
     }
 
+    /// Construct a weight from compact TSID-range → token-range entries.
+    ///
+    /// Each item supplies one inclusive TSID range plus one or more inclusive
+    /// token ranges that should apply across that TSID span.
+    pub fn from_compact_ranges<I, J>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = (std::ops::RangeInclusive<u32>, J)>,
+        J: IntoIterator<Item = std::ops::RangeInclusive<u32>>,
+    {
+        let _ = entries;
+        unimplemented!()
+    }
+
     /// Clear this 2D range-set back to the empty set.
     pub fn clear(&mut self) {
         *self = Self::empty();
@@ -349,6 +362,15 @@ mod tests {
         let w = Weight::all();
         assert!(w.is_full());
         assert!(!w.is_empty());
+    }
+
+    #[test]
+    fn test_weight_from_compact_ranges_shape() {
+        let w = Weight::from_compact_ranges([
+            (0..=2, [10..=12, 20..=21]),
+            (5..=5, [7..=9]),
+        ]);
+        assert!(w.estimated_size_bytes() >= std::mem::size_of::<Weight>());
     }
 
     #[test]
