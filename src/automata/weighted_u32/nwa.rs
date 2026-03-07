@@ -41,6 +41,19 @@ pub struct NWA {
     pub start_states: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NwaBody {
+    pub start_states: Vec<u32>,
+}
+
+impl NwaBody {
+    pub fn union(left: &Self, right: &Self) -> Self {
+        let mut start_states = left.start_states.clone();
+        start_states.extend(right.start_states.iter().copied());
+        Self { start_states }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwaTraversalData {
     pub comp_id: Vec<usize>,
@@ -97,6 +110,60 @@ impl NWA {
             .iter()
             .map(|state| state.epsilons.len() + state.transitions.values().map(Vec::len).sum::<usize>())
             .sum()
+    }
+
+    pub fn body(&self) -> NwaBody {
+        NwaBody {
+            start_states: self.start_states.clone(),
+        }
+    }
+
+    pub fn append_with_body(&mut self, other: &NWA) -> NwaBody {
+        let offset = self.states.len() as u32;
+        for _ in &other.states {
+            self.add_state();
+        }
+
+        for (state_id, state) in other.states.iter().enumerate() {
+            let dst_state = offset + state_id as u32;
+            if let Some(final_weight) = state.final_weight.clone() {
+                self.set_final_weight(dst_state, final_weight);
+            }
+            for (&label, targets) in &state.transitions {
+                for (target, weight) in targets {
+                    self.add_transition(dst_state, label, offset + *target, weight.clone());
+                }
+            }
+            for (target, weight) in &state.epsilons {
+                self.add_epsilon(dst_state, offset + *target, weight.clone());
+            }
+        }
+
+        NwaBody {
+            start_states: other.start_states.iter().map(|state| offset + *state).collect(),
+        }
+    }
+
+    pub fn concatenate_in_place(&mut self, left: &NWA, right_body: &NwaBody) -> NwaBody {
+        let offset = self.states.len() as u32;
+        let left_body = self.append_with_body(left);
+
+        for state_id in offset as usize..(offset as usize + left.states.len()) {
+            if let Some(final_weight) = self.states[state_id].final_weight.take() {
+                if !final_weight.is_empty() {
+                    for &right_start in &right_body.start_states {
+                        self.add_epsilon(state_id as u32, right_start, final_weight.clone());
+                    }
+                }
+            }
+        }
+
+        left_body
+    }
+
+    pub fn union_in_place(&mut self, other: &NWA, existing_body: &NwaBody) -> NwaBody {
+        let other_body = self.append_with_body(other);
+        NwaBody::union(existing_body, &other_body)
     }
 
     pub fn reverse(&self) -> Self {

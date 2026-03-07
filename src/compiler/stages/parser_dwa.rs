@@ -31,7 +31,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::automata::weighted::minimize::minimize;
-use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::encode_positive_label;
 use crate::compiler::glr::table::{Action, GLRTable};
@@ -159,30 +159,6 @@ fn append_nwa(into: &mut NWA, other: &NWA) {
         .extend(other.start_states.iter().map(|state| offset + *state));
 }
 
-fn concatenate_nwa_in_place(left: &mut NWA, right: &NWA) {
-    let accepting_states: Vec<(u32, Weight)> = left
-        .states
-        .iter()
-        .enumerate()
-        .filter_map(|(state_id, state)| {
-            state.final_weight.clone().map(|weight| (state_id as u32, weight))
-        })
-        .collect();
-
-    let offset = left.states.len() as u32;
-    append_nwa(left, right);
-    let continuation_starts: Vec<u32> = right.start_states.iter().map(|state| offset + *state).collect();
-
-    for (state_id, weight) in accepting_states {
-        if let Some(state) = left.states.get_mut(state_id as usize) {
-            state.final_weight = None;
-        }
-        for start in &continuation_starts {
-            left.add_epsilon(state_id, *start, weight.clone());
-        }
-    }
-}
-
 fn terminal_branches_for_tokenizer_state(
     terminal_dwa: &TerminalDWA,
     grammar: &AnalyzedGrammar,
@@ -287,9 +263,10 @@ fn build_branch_bundle(
         tokenizer_state,
     );
 
-    let mut continuation_union = NWA::new(0, 0);
-    continuation_union.states.clear();
-    continuation_union.start_states.clear();
+    let mut continuation_arena = NWA::new(0, 0);
+    continuation_arena.states.clear();
+    continuation_arena.start_states.clear();
+    let mut continuation_body = NwaBody::default();
     let mut has_continuation = false;
 
     for (next_target, next_group) in &continuation_groups {
@@ -303,13 +280,20 @@ fn build_branch_bundle(
             *next_target,
             next_group,
         ) {
-            append_nwa(&mut continuation_union, &next_bundle);
-            has_continuation = true;
+            continuation_body = if has_continuation {
+                continuation_arena.union_in_place(&next_bundle, &continuation_body)
+            } else {
+                has_continuation = true;
+                continuation_arena.append_with_body(&next_bundle)
+            };
         }
     }
 
     if has_continuation {
-        concatenate_nwa_in_place(&mut bundle, &continuation_union);
+        let mut composed = continuation_arena;
+        let composed_body = composed.concatenate_in_place(&bundle, &continuation_body);
+        composed.start_states = composed_body.start_states.clone();
+        bundle = composed;
     }
 
     Some(bundle)
