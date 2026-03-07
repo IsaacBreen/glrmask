@@ -9,8 +9,7 @@
 #![allow(unused_imports)]
 
 use crate::ds::bitset::BitSet;
-
-use super::state::ConstraintState;
+use crate::runtime::state::ConstraintState;
 
 /// Check if the mask allows exactly one token. Returns it if so.
 #[allow(dead_code)]

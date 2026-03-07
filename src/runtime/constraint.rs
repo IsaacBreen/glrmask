@@ -18,8 +18,7 @@ use crate::compiler::glr::table::GlrTable;
 use crate::compiler::grammar_def::TerminalId;
 use crate::ds::leveled_gss::LeveledGSS;
 
-use super::glr::terminals_disallowed_fresh;
-use super::state::ConstraintState;
+use super::state::{ConstraintState, terminals_disallowed_fresh};
 
 /// A compiled grammar constraint, ready for inference.
 ///

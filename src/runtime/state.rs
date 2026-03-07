@@ -12,10 +12,34 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compiler::grammar_def::TerminalId;
 use crate::ds::bitset::BitSet;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 
 use super::constraint::Constraint;
-use super::glr::ParserGSS;
-use super::mask::FlatStateStacks;
+use super::actions::mask::FlatStateStacks;
+
+/// Maps tokenizer state ID → set of disallowed terminal IDs.
+///
+/// Used as the GSS accumulator to track which (tsid, terminal) pairs should
+/// be excluded during mask computation.
+pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
+
+/// Create a fresh (empty) `TerminalsDisallowed`.
+pub(crate) fn terminals_disallowed_fresh() -> TerminalsDisallowed {
+    unimplemented!()
+}
+
+impl Merge for TerminalsDisallowed {
+    fn merge(&self, other: &Self) -> Self {
+        unimplemented!()
+    }
+}
+
+/// A GSS (Graph-Structured Stack) for the runtime parser state.
+///
+/// Stack items are `u32` parser state IDs. The accumulator is
+/// [`TerminalsDisallowed`].
+pub(crate) type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
+
 /// Per-sequence constraint state.
 ///
 /// Tracks the current parse + tokenizer state. Computes token masks and

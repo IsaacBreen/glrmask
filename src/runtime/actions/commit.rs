@@ -7,7 +7,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use super::state::ConstraintState;
+use crate::runtime::state::ConstraintState;
 
 impl<'a> ConstraintState<'a> {
     /// Commit a token: advance the constraint state.
