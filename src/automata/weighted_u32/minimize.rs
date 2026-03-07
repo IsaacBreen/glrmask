@@ -1,6 +1,6 @@
-//! Dwa minimization.
+//! DWA minimization.
 //!
-//! Signature-based partition minimization for acyclic [`Dwa`]s.
+//! Signature-based partition minimization for acyclic [`DWA`]s.
 //!
 //! States are processed bottom-up (by height).  Two states are merged iff
 //! they agree on:
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use rustc_hash::FxHashMap;
 
-use super::dwa::{Dwa, DwaState};
+use super::dwa::{DWA, DWAState};
 use super::nwa::Label;
 use crate::ds::weight::Weight;
 
@@ -27,8 +27,8 @@ use crate::ds::weight::Weight;
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Minimize a [`Dwa`] by merging states with identical behaviour.
-pub fn minimize(dwa: &Dwa) -> Dwa {
+/// Minimize a [`DWA`] by merging states with identical behaviour.
+pub fn minimize(dwa: &DWA) -> DWA {
     unimplemented!()
 }
 
@@ -36,7 +36,7 @@ pub fn minimize(dwa: &Dwa) -> Dwa {
 // Heights
 // ---------------------------------------------------------------------------
 
-fn compute_heights(dwa: &Dwa) -> Vec<u32> {
+fn compute_heights(dwa: &DWA) -> Vec<u32> {
     unimplemented!()
 }
 
@@ -54,7 +54,7 @@ struct Sig {
     transitions: Vec<(Label, u32, Weight)>,
 }
 
-fn state_signature(st: &DwaState, class: &[u32]) -> Sig {
+fn state_signature(st: &DWAState, class: &[u32]) -> Sig {
     unimplemented!()
 }
 
@@ -72,7 +72,7 @@ mod tests {
         // Already-minimal 2-state DWA.
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = CompDwa::new(nt, max_tok);
+        let mut dwa = DWA::new(nt, max_tok);
         let s1 = dwa.add_state();
         let w_all = Weight::all();
         dwa.add_transition(0, 0, s1, w_all.clone());
@@ -87,7 +87,7 @@ mod tests {
         // s0 --0--> s1, s0 --1--> s2. s1 and s2 have identical behaviour.
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = CompDwa::new(nt, max_tok);
+        let mut dwa = DWA::new(nt, max_tok);
         let s1 = dwa.add_state();
         let s2 = dwa.add_state();
         let w = Weight::all();
@@ -111,7 +111,7 @@ mod tests {
         // s0 --0--> s1, s0 --1--> s2.  s1 and s2 have different final weights.
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = CompDwa::new(nt, max_tok);
+        let mut dwa = DWA::new(nt, max_tok);
         let s1 = dwa.add_state();
         let s2 = dwa.add_state();
         let w = Weight::all();
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_minimize_single_state() {
-        let dwa = CompDwa::new(1, 5);
+        let dwa = DWA::new(1, 5);
         let min = minimize(&dwa);
         assert_eq!(min.num_states(), 1);
     }
@@ -139,7 +139,7 @@ mod tests {
         // s0 --0--> s1 --1--> s2 (accepting).  All unique, no merges.
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = CompDwa::new(nt, max_tok);
+        let mut dwa = DWA::new(nt, max_tok);
         let s1 = dwa.add_state();
         let s2 = dwa.add_state();
         let w = Weight::all();
@@ -160,7 +160,7 @@ mod tests {
         // s3 ≡ s4, then s1 ≡ s2.
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = CompDwa::new(nt, max_tok);
+        let mut dwa = DWA::new(nt, max_tok);
         let s1 = dwa.add_state();
         let s2 = dwa.add_state();
         let s3 = dwa.add_state();
@@ -196,7 +196,7 @@ mod tests {
         // Net: 6 → 5 states.
         let nt = 1u32;
         let max_tok = 200u32;
-        let mut d = CompDwa::new(nt, max_tok);
+        let mut d = DWA::new(nt, max_tok);
         let s1 = d.add_state();
         let s2 = d.add_state();
         let s3 = d.add_state();
@@ -250,7 +250,7 @@ mod tests {
         let w_2 = Weight::all();
 
         // DWA A: narrow edge weight on s1 → s2
-        let mut a = CompDwa::new(nt, max_tok);
+        let mut a = DWA::new(nt, max_tok);
         let s1a = a.add_state();
         let s2a = a.add_state();
         a.add_transition(0, b'a' as i32, s1a, w_all.clone());
@@ -258,7 +258,7 @@ mod tests {
         a.set_final_weight(s2a, w_2.clone());
 
         // DWA B: all weight on every edge
-        let mut b = CompDwa::new(nt, max_tok);
+        let mut b = DWA::new(nt, max_tok);
         let s1b = b.add_state();
         let s2b = b.add_state();
         b.add_transition(0, b'a' as i32, s1b, w_all.clone());
@@ -299,7 +299,7 @@ mod tests {
         let w0 = Weight::empty();
 
         // DWA a: explicit transitions to dead-end sinks on all four labels
-        let mut a = CompDwa::new(nt, max_tok);
+        let mut a = DWA::new(nt, max_tok);
         let s1a = a.add_state();
         let s2a = a.add_state();
         a.add_transition(0, 0, s1a, w1.clone());

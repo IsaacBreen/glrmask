@@ -193,15 +193,6 @@ impl std::fmt::Display for NWADisplayWithAllMaps<'_> {
     }
 }
 
-/// Compatibility alias retained while acronym capitalization settles.
-pub type Nwa = NWA;
-/// Compatibility alias retained while acronym capitalization settles.
-pub type NwaState = NWAState;
-/// Compatibility alias retained while acronym capitalization settles.
-pub type NwaDisplayWithSymbols<'a> = NWADisplayWithSymbols<'a>;
-/// Compatibility alias retained while acronym capitalization settles.
-pub type NwaDisplayWithAllMaps<'a> = NWADisplayWithAllMaps<'a>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_nwa_basic() {
-        let mut nwa = Nwa::new(2, 10);
+        let mut nwa = NWA::new(2, 10);
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();

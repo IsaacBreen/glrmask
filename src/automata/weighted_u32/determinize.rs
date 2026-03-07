@@ -1,4 +1,4 @@
-//! Acyclic NWA → Dwa determinization.
+//! Acyclic NWA → DWA determinization.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -10,8 +10,8 @@ use std::hash::{Hash, Hasher};
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
-use super::dwa::{Dwa, DwaState};
-use super::nwa::{Label, Nwa};
+use super::dwa::{DWA, DWAState};
+use super::nwa::{Label, NWA};
 use crate::ds::weight::Weight;
 use crate::GlrMaskError;
 
@@ -24,7 +24,7 @@ type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);
 /// Determinize an acyclic NWA into a compilation-time DWA.
 ///
 /// Returns an error if the NWA contains cycles.
-pub fn determinize(nwa: &Nwa) -> Result<Dwa, GlrMaskError> {
+pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     unimplemented!()
 }
 
@@ -32,7 +32,7 @@ pub fn determinize(nwa: &Nwa) -> Result<Dwa, GlrMaskError> {
 // Topological sort  (Kahn's algorithm)
 // ---------------------------------------------------------------------------
 
-fn topo_sort(nwa: &Nwa) -> Result<Vec<u32>, GlrMaskError> {
+fn topo_sort(nwa: &NWA) -> Result<Vec<u32>, GlrMaskError> {
     unimplemented!()
 }
 
@@ -41,7 +41,7 @@ fn topo_sort(nwa: &Nwa) -> Result<Vec<u32>, GlrMaskError> {
 // ---------------------------------------------------------------------------
 
 /// For each NWA state, compute the set of states reachable via ε-transitions.
-fn unweighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeSet<u32>> {
+fn unweighted_epsilon_closures(nwa: &NWA, topo: &[u32]) -> Vec<BTreeSet<u32>> {
     unimplemented!()
 }
 
@@ -54,7 +54,7 @@ fn unweighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeSet<u32>> {
 /// Returns:
 /// - `subsets[dwa_id]` = set of NWA states forming that DWA state.
 /// - `transitions[dwa_id]` = vec of (label, target_dwa_id).
-fn unweighted_subset_construction(nwa: &Nwa, eps_uw: &[BTreeSet<u32>]) -> SubsetTransitions {
+fn unweighted_subset_construction(nwa: &NWA, eps_uw: &[BTreeSet<u32>]) -> SubsetTransitions {
     unimplemented!()
 }
 
@@ -77,7 +77,7 @@ fn intern_subset(
 ///   closure[u] = { (v, w) | v reachable from u via ε, w = ∩ of edge-weights }
 ///
 /// Multiple paths to the same state v are combined with ∪.
-fn weighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeMap<u32, Weight>> {
+fn weighted_epsilon_closures(nwa: &NWA, topo: &[u32]) -> Vec<BTreeMap<u32, Weight>> {
     unimplemented!()
 }
 
@@ -86,11 +86,11 @@ fn weighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeMap<u32, Weigh
 // ---------------------------------------------------------------------------
 
 fn build_comp_dwa(
-    nwa: &Nwa,
+    nwa: &NWA,
     subsets: &[BTreeSet<u32>],
     uw_transitions: &[Vec<(Label, u32)>],
     eps_w: &[BTreeMap<u32, Weight>],
-) -> Result<Dwa, GlrMaskError> {
+) -> Result<DWA, GlrMaskError> {
     unimplemented!()
 }
 
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn test_determinize_trivial_accepting() {
         // Single-state accepting NWA → single-state accepting DWA.
-        let mut nwa = Nwa::new(1, 5);
+        let mut nwa = NWA::new(1, 5);
         let s = nwa.add_state();
         nwa.start_states.push(s);
         nwa.set_final_weight(s, Weight::all());
@@ -129,7 +129,7 @@ mod tests {
         // s0 --label 0--> s1 (accepting)
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut nwa = Nwa::new(nt, max_tok);
+        let mut nwa = NWA::new(nt, max_tok);
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
@@ -156,7 +156,7 @@ mod tests {
         // s0 --0,w2--> s2 (accepting)
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut nwa = Nwa::new(nt, max_tok);
+        let mut nwa = NWA::new(nt, max_tok);
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
@@ -179,7 +179,7 @@ mod tests {
         // s0 --ε--> s1 --label 0--> s2 (accepting)
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut nwa = Nwa::new(nt, max_tok);
+        let mut nwa = NWA::new(nt, max_tok);
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_determinize_cycle_rejected() {
-        let mut nwa = Nwa::new(1, 5);
+        let mut nwa = NWA::new(1, 5);
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
@@ -209,9 +209,9 @@ mod tests {
 
     #[test]
     fn test_determinize_empty_nwa() {
-        let nwa = Nwa::new(1, 5);
+        let nwa = NWA::new(1, 5);
         let dwa = determinize(&nwa).unwrap();
-        // `Dwa::new()` creates a single dead start state.
+        // `DWA::new()` creates a single dead start state.
         assert_eq!(dwa.num_states(), 1);
         assert!(dwa.states[0].final_weight.is_none());
     }
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn test_determinize_no_start_states() {
         // NWA with states but no start states → start subset = ∅ → 1 dead DWA state.
-        let mut nwa = Nwa::new(1, 5);
+        let mut nwa = NWA::new(1, 5);
         let s0 = nwa.add_state();
         nwa.set_final_weight(s0, Weight::all());
         // No start_states pushed.
@@ -233,7 +233,7 @@ mod tests {
         // s0 --0,w_all--> s1 --ε,w_all--> s2 --1,w_all--> s3 (accepting)
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut nwa = Nwa::new(nt, max_tok);
+        let mut nwa = NWA::new(nt, max_tok);
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
@@ -261,7 +261,7 @@ mod tests {
         // Only positions in w_small should survive.
         let nt = 1u32;
         let max_tok = 10u32;
-        let mut nwa = Nwa::new(nt, max_tok);
+        let mut nwa = NWA::new(nt, max_tok);
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
@@ -290,7 +290,7 @@ mod tests {
         //   eval("bc") contains pos 1 but NOT pos 0
         let nt = 1u32;
         let max_tok = 200u32; // Must cover 'a'=97, 'b'=98, 'c'=99
-        let mut nwa = Nwa::new(nt, max_tok);
+        let mut nwa = NWA::new(nt, max_tok);
         let w_all = Weight::all();
         let w0 = Weight::empty();
         let w1 = Weight::all();
@@ -347,7 +347,7 @@ mod tests {
         // per-transition weights; the resulting weight is the union: w0 ∪ w1.
         let nt = 1u32;
         let max_tok = 200u32;
-        let mut nwa = Nwa::new(nt, max_tok);
+        let mut nwa = NWA::new(nt, max_tok);
         let w_all = Weight::all();
         let w0 = Weight::empty();
         let w1 = Weight::all();

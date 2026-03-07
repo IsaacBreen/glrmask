@@ -8,7 +8,7 @@
 #![allow(unused_imports)]
 
 use crate::Vocab;
-use crate::automata::weighted::dwa::CompDwa;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::lexer::tokenizer::TokenizerDfa;
 use crate::compiler::debug::CompileDebug;
 use crate::compiler::glr::analysis::GlrGrammar;
@@ -35,7 +35,7 @@ use crate::runtime::Constraint;
 ///       │
 ///       └── build_parser_dwa()  ← uses table + grammar + tokenizer + vocab + id_map
 ///              │
-///              └── determinize + minimize → CompDwa
+///              └── determinize + minimize → DWA
 ///                     │
 ///                     └── Constraint { parser_dwa, table, tokenizer, id_map-derived metadata, ... }
 /// ```

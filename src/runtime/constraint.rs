@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::lexer::tokenizer::TokenizerDfa;
-use crate::automata::weighted::dwa::Dwa;
+use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GlrTable;
 use crate::compiler::grammar_def::TerminalId;
 use crate::ds::leveled_gss::LeveledGSS;
@@ -30,7 +30,7 @@ use super::state::ConstraintState;
 pub struct Constraint {
     /// The compiled parser DWA.
     /// Labels = parser state IDs (i32), weights = token bitvectors.
-    pub(crate) parser_dwa: Dwa,
+    pub(crate) parser_dwa: DWA,
 
     /// The GLR parse table.
     pub(crate) table: GlrTable,
@@ -93,7 +93,7 @@ impl Constraint {
     }
 
     /// Access the compiled parser DWA (for debugging/analysis).
-    pub fn parser_dwa(&self) -> &Dwa {
+    pub fn parser_dwa(&self) -> &DWA {
         unimplemented!()
     }
 }

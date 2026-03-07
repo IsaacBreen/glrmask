@@ -15,7 +15,7 @@
 //! 1. **Characterize** each terminal: find all stack patterns that make it valid.
 //! 2. **Bundle equivalent templates** so parser-side structure is shared.
 //! 3. **Build NWA** from template bundles (labels = parser state IDs, weights = token sets).
-//! 3. **Determinize + minimize** → CompDwa → Dwa.
+//! 3. **Determinize + minimize** → DWA.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -25,9 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::lexer::tokenizer::TokenizerDfa;
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::dwa::{CompDwa, CompDwaState};
+use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::automata::weighted::minimize::minimize;
-use crate::automata::weighted::nwa::Nwa;
+use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::GlrGrammar;
 use crate::compiler::glr::table::{Action, GlrTable};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
@@ -89,7 +89,7 @@ pub fn build_parser_nwa(
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-) -> Nwa {
+) -> NWA {
     use std::time::Instant;
 
     let t0 = Instant::now();
@@ -182,10 +182,10 @@ pub fn build_parser_nwa(
     nwa
 }
 
-/// Check if a CompDwa is acyclic (no self-loops or back-edges) over *all* states.
+/// Check if a `DWA` is acyclic (no self-loops or back-edges) over *all* states.
 ///
 /// Used to decide whether acyclic minimization can be applied.
-fn is_acyclic(dwa: &CompDwa) -> bool {
+fn is_acyclic(dwa: &DWA) -> bool {
     let n = dwa.states.len();
     // Quick check: any self-loops?
     for (i, st) in dwa.states.iter().enumerate() {
@@ -197,7 +197,7 @@ fn is_acyclic(dwa: &CompDwa) -> bool {
     }
     // Full DFS cycle check.
     let mut color = vec![0u8; n]; // 0=white, 1=gray, 2=black
-    fn dfs(u: usize, states: &[CompDwaState], color: &mut [u8]) -> bool {
+    fn dfs(u: usize, states: &[DWAState], color: &mut [u8]) -> bool {
         color[u] = 1;
         for (target, _) in states[u].transitions.values() {
             let v = *target as usize;
@@ -236,7 +236,7 @@ fn is_acyclic(dwa: &CompDwa) -> bool {
 ///
 /// Returns `Some(cycle_path)` if a reachable cycle is found (state indices
 /// starting and ending at the cycle entry point), `None` if acyclic.
-fn find_cycle_in_non_accepting_states(dwa: &CompDwa) -> Option<Vec<usize>> {
+fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
     let n = dwa.states.len();
     let non_accepting: Vec<bool> = dwa.states.iter().map(|s| s.final_weight.is_none()).collect();
     let start = dwa.start_state as usize;
@@ -249,7 +249,7 @@ fn find_cycle_in_non_accepting_states(dwa: &CompDwa) -> Option<Vec<usize>> {
 
     fn dfs(
         u: usize,
-        states: &[CompDwaState],
+        states: &[DWAState],
         non_accepting: &[bool],
         color: &mut [u8],
         parent: &mut [usize],
@@ -302,7 +302,7 @@ pub fn build_parser_dwa(
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-) -> CompDwa {
+) -> DWA {
     let (dwa, _) = build_parser_dwa_impl(table, grammar, tokenizer, vocab, id_map, false);
     dwa
 }
@@ -315,7 +315,7 @@ pub fn build_parser_dwa_with_debug(
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-) -> (CompDwa, crate::compiler::debug::AutomataDebug) {
+) -> (DWA, crate::compiler::debug::AutomataDebug) {
     let (dwa, dbg) = build_parser_dwa_impl(table, grammar, tokenizer, vocab, id_map, true);
     (dwa, dbg.expect("debug=true must produce Some"))
 }
@@ -327,7 +327,7 @@ fn build_parser_dwa_impl(
     vocab: &Vocab,
     id_map: &InternalIdMap,
     capture_debug: bool,
-) -> (CompDwa, Option<crate::compiler::debug::AutomataDebug>) {
+) -> (DWA, Option<crate::compiler::debug::AutomataDebug>) {
     use std::time::Instant;
 
     // --- Step 1: Characterize & build terminal DWA ---
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_resolve_negative_codes_simple_cancellation() {
-        let mut nwa = Nwa::new(1, 2);
+        let mut nwa = NWA::new(1, 2);
         let start = nwa.add_state();
         let mid = nwa.add_state();
         let end = nwa.add_state();

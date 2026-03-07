@@ -35,7 +35,7 @@ pub struct DWA {
 }
 
 impl DWA {
-    /// Create a new Dwa with a single (empty) start state.
+    /// Create a new DWA with a single (empty) start state.
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         unimplemented!()
     }
@@ -191,23 +191,6 @@ impl PartialEq for DWAState {
     }
 }
 
-/// Compatibility alias retained while compiler-side naming is still settling.
-pub type Dwa = DWA;
-/// Compatibility alias retained while compiler-side naming is still settling.
-pub type DwaState = DWAState;
-/// Compatibility alias retained while compiler-side naming is still settling.
-pub type DwaDisplayWithSymbols<'a> = DWADisplayWithSymbols<'a>;
-/// Compatibility alias retained while compiler-side naming is still settling.
-pub type DwaDisplayWithAllMaps<'a> = DWADisplayWithAllMaps<'a>;
-/// Compatibility alias retained while compiler-side naming is still settling.
-pub type CompDwa = DWA;
-/// Compatibility alias retained while compiler-side naming is still settling.
-pub type CompDwaState = DWAState;
-/// Preferred acronym-capitalized alias for compilation-time DWA.
-pub type CompDWA = DWA;
-/// Preferred acronym-capitalized alias for compilation-time DWA state.
-pub type CompDWAState = DWAState;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,7 +201,7 @@ mod tests {
         // Simple 2-state DWA: s0 --label 0--> s1 (accepting).
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = Dwa::new(nt, max_tok);
+        let mut dwa = DWA::new(nt, max_tok);
         let s1 = dwa.add_state();
 
         let w_trans = Weight::all();
@@ -233,7 +216,7 @@ mod tests {
     #[test]
     fn test_dwa_eval_word_reject() {
         let nt = 1u32;
-        let dwa = Dwa::new(nt, 5);
+        let dwa = DWA::new(nt, 5);
         // No transition for label 0 → empty result.
         let result = dwa.eval_word(&[0]);
         assert!(result.is_empty());

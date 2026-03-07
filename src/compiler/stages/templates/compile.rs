@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::automata::unweighted_u32::dfa::Dfa as UnweightedDfa;
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::dwa::CompDwa;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
-use crate::automata::weighted::nwa::{Nwa, NwaState};
+use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::grammar_def::TerminalId;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
@@ -34,9 +34,9 @@ struct TemplateFragment {
 struct TemplateCompositionContext<'a> {
     bundles: &'a [TemplateBundle],
     terminal_dwa: &'a TerminalDwa,
-    combined: Nwa,
+    combined: NWA,
     template_by_terminal: BTreeMap<TerminalId, usize>,
-    blueprint_cache: HashMap<(usize, Weight), Nwa>,
+    blueprint_cache: HashMap<(usize, Weight), NWA>,
     total_fragment_uses: usize,
     total_fragment_states: usize,
 }
@@ -58,7 +58,7 @@ impl<'a> TemplateCompositionContext<'a> {
         Self {
             bundles,
             terminal_dwa,
-            combined: Nwa::new(num_tsids, max_token),
+            combined: NWA::new(num_tsids, max_token),
             template_by_terminal,
             blueprint_cache: HashMap::new(),
             total_fragment_uses: 0,
@@ -183,7 +183,7 @@ pub(crate) fn build_template_bundles(
 }
 
 fn ensure_nt_stack_state(
-    nwa: &mut Nwa,
+    nwa: &mut NWA,
     nt_stacks: &mut BTreeMap<u32, Vec<u32>>,
     nt: u32,
     depth: usize,
@@ -192,11 +192,11 @@ fn ensure_nt_stack_state(
     unimplemented!()
 }
 
-fn build_template_structure_nwa(characterization: &TerminalCharacterization) -> Nwa {
+fn build_template_structure_nwa(characterization: &TerminalCharacterization) -> NWA {
     unimplemented!()
 }
 
-fn is_acyclic(dwa: &CompDwa) -> bool {
+fn is_acyclic(dwa: &DWA) -> bool {
     unimplemented!()
 }
 
@@ -209,11 +209,11 @@ fn instantiate_template_dfa(
     terminal_weight: &Weight,
     num_tsids: u32,
     max_token: u32,
-) -> Nwa {
+) -> NWA {
     unimplemented!()
 }
 
-fn append_nwa(target: &mut Nwa, fragment: &Nwa) -> u32 {
+fn append_nwa(target: &mut NWA, fragment: &NWA) -> u32 {
     unimplemented!()
 }
 
@@ -223,7 +223,7 @@ pub(crate) fn build_template_nwa_from_bundles(
     terminal_dwa: &TerminalDwa,
     num_tsids: u32,
     max_token: u32,
-) -> Nwa {
+) -> NWA {
     unimplemented!()
 }
 

@@ -348,8 +348,3 @@ mod tests {
     }
 }
 
-/// Compatibility alias for older `RangeSet2D`-oriented naming.
-pub type RangeSet2D = Weight;
-
-/// Compatibility alias for older `RangeSet2DDisplayWithMaps` naming.
-pub type RangeSet2DDisplayWithMaps<'a> = WeightDisplayWithMaps<'a>;

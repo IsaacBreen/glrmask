@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::automata::weighted::dwa::CompDWA;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::{EOF, GLRGrammar};
 use crate::compiler::glr::table::GLRTable;
@@ -71,10 +71,10 @@ pub struct AutomataDebug {
     pub parser_nwa_after_resolve: NWA,
 
     /// Parser DWA after determinization (before minimization).
-    pub parser_dwa_pre_minimize: CompDWA,
+    pub parser_dwa_pre_minimize: DWA,
 
     /// Final parser DWA (after minimization).
-    pub parser_dwa: CompDWA,
+    pub parser_dwa: DWA,
 
     /// Compiler-side internal ID mappings.
     pub id_map: InternalIdMap,
@@ -158,10 +158,10 @@ pub struct CompileDebug {
     pub parser_nwa_after_resolve: NWA,
 
     /// Parser DWA after determinization (before minimization).
-    pub parser_dwa_pre_minimize: CompDWA,
+    pub parser_dwa_pre_minimize: DWA,
 
     /// Final parser DWA (after minimization).
-    pub parser_dwa: CompDWA,
+    pub parser_dwa: DWA,
 
     // --- Vocab ---
 

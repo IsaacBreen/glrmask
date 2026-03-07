@@ -7,31 +7,31 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use crate::automata::weighted::nwa::Nwa;
+use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::ds::weight::Weight;
 
-pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {
+pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
     unimplemented!()
 }
 
-pub(crate) fn apply_cancellations(nwa: &mut Nwa) {
+pub(crate) fn apply_cancellations(nwa: &mut NWA) {
     unimplemented!()
 }
 
-pub(crate) fn apply_finality_fixpoint(nwa: &mut Nwa) {
+pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     unimplemented!()
 }
 
-pub(crate) fn remove_negative_transitions(nwa: &mut Nwa) {
+pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
     unimplemented!()
 }
 
-pub(crate) fn remove_redundant_default_transitions(nwa: &mut Nwa) {
+pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
     unimplemented!()
 }
 
-pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut Nwa) {
+pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     unimplemented!()
 }
 
@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn removes_default_transition_to_terminal_final_state() {
-        let mut nwa = Nwa::new(1, 3);
+        let mut nwa = NWA::new(1, 3);
         let start = nwa.add_state();
         let end = nwa.add_state();
         nwa.start_states.push(start);
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn removes_default_only_chain_after_finality_propagation() {
-        let mut nwa = Nwa::new(1, 3);
+        let mut nwa = NWA::new(1, 3);
         let start = nwa.add_state();
         let mid = nwa.add_state();
         let end = nwa.add_state();
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn keeps_default_transition_when_target_is_not_terminal() {
-        let mut nwa = Nwa::new(1, 3);
+        let mut nwa = NWA::new(1, 3);
         let start = nwa.add_state();
         let mid = nwa.add_state();
         let end = nwa.add_state();

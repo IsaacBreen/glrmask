@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;
 
-use crate::automata::weighted::dwa::Dwa;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::Label;
 use crate::ds::bitset::BitSet;
 
@@ -38,7 +38,7 @@ pub(crate) type FlatStateStacks = BTreeMap<u32, Vec<Vec<u32>>>;
 /// Returns a BitSet where bit `i` is set iff token `i` is allowed.
 pub(crate) fn compute_mask_from_state_map(
     state: &FlatStateStacks,
-    dwa: &Dwa,
+    dwa: &DWA,
     state_to_tsid: &[u32],
     max_token: u32,
     num_tsids: u32,
@@ -51,7 +51,7 @@ pub(crate) fn compute_mask_from_state_map(
 /// Projects DWA weights to the target TSID column *first*, then intersects
 /// in token-space only. This avoids carrying N×M-space accumulators when
 /// only a single TSID column is needed.
-fn walk_dwa_weighted(dwa: &Dwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> RangeSetBlaze<u32> {
+fn walk_dwa_weighted(dwa: &DWA, stack: &[u32], tsid: u32, _num_tsids: u32) -> RangeSetBlaze<u32> {
     unimplemented!()
 }
 
@@ -63,14 +63,14 @@ mod tests {
 
     #[test]
     fn test_walk_dwa_empty_stack() {
-        let dwa = Dwa::new(1, 5);
+        let dwa = DWA::new(1, 5);
         let tokens = walk_dwa_weighted(&dwa, &[], 0, 1);
         assert!(tokens.is_empty());
     }
 
     #[test]
     fn test_walk_dwa_no_transition() {
-        let dwa = Dwa::new(1, 5);
+        let dwa = DWA::new(1, 5);
         let tokens = walk_dwa_weighted(&dwa, &[0], 0, 1);
         assert!(tokens.is_empty());
     }
@@ -79,7 +79,7 @@ mod tests {
     fn test_walk_dwa_simple_accepting() {
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = Dwa::new(nt, max_tok);
+        let mut dwa = DWA::new(nt, max_tok);
         let s1 = dwa.add_state();
 
         let w_all = Weight::all();
