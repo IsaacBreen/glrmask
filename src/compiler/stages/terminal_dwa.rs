@@ -490,10 +490,17 @@ fn build_token_suffix_paths(
     offset: usize,
     leaf_state: u32,
     grammar: &AnalyzedGrammar,
+    // The internal TSID (equivalence class) for `origin_state`.  Weights must
+    // be keyed by this value so that the consumer
+    // (`terminal_branches_for_tokenizer_state`) can look them up via
+    // `weight.tokens_for_tsid(internal_tsid)`.  Previously the code used
+    // `origin_state` directly, which only worked when the identity mapping was
+    // in effect (internal_tsid == origin_state).
+    internal_tsid: u32,
 ) {
     let exec = tokenizer.execute_from_state(&token_bytes[offset..], current_state);
     let token_weight = Weight::from_token_set_for_tsid(
-        origin_state,
+        internal_tsid,
         RangeSetBlaze::from_iter([token_id..=token_id]),
     );
 
@@ -522,6 +529,7 @@ fn build_token_suffix_paths(
                     next_offset,
                     leaf_state,
                     grammar,
+                    internal_tsid,
                 );
             }
             continuation_state
@@ -587,6 +595,7 @@ pub(crate) fn build_terminal_dwa(
                     0,
                     leaf_state,
                     grammar,
+                    internal_tsid,
                 );
             }
         }
