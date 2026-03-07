@@ -75,6 +75,76 @@ impl NWA {
         unimplemented!()
     }
 
+    /// Check whether the labelled/epsilon transition graph is acyclic.
+    pub fn is_acyclic(&self) -> bool {
+        let num_states = self.states.len();
+
+        for (state_id, state) in self.states.iter().enumerate() {
+            if state
+                .transitions
+                .values()
+                .flatten()
+                .any(|(target, _)| *target as usize == state_id)
+            {
+                return false;
+            }
+            if state
+                .epsilons
+                .iter()
+                .any(|(target, _)| *target as usize == state_id)
+            {
+                return false;
+            }
+        }
+
+        fn visit(state_id: usize, states: &[NWAState], colors: &mut [u8]) -> bool {
+            colors[state_id] = 1;
+
+            for (target, _) in states[state_id].transitions.values().flatten() {
+                let target = *target as usize;
+                if target >= colors.len() {
+                    continue;
+                }
+                match colors[target] {
+                    1 => return false,
+                    0 => {
+                        if !visit(target, states, colors) {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            for (target, _) in &states[state_id].epsilons {
+                let target = *target as usize;
+                if target >= colors.len() {
+                    continue;
+                }
+                match colors[target] {
+                    1 => return false,
+                    0 => {
+                        if !visit(target, states, colors) {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            colors[state_id] = 2;
+            true
+        }
+
+        let mut colors = vec![0u8; num_states];
+        for state_id in 0..num_states {
+            if colors[state_id] == 0 && !visit(state_id, &self.states, &mut colors) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Maximum position in the weight space.
     pub fn max_position(&self) -> u32 {
         unimplemented!()

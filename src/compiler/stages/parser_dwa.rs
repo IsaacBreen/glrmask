@@ -39,192 +39,6 @@ use crate::compiler::stages::templates::compile::{build_template_bundles, build_
 use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::Vocab;
 
-#[cfg(test)]
-use crate::compiler::glr::labels::encode_negative_label;
-#[cfg(test)]
-use crate::ds::weight::Weight;
-
-fn terminals_present_in_terminal_dwa(terminal_dwa: &crate::compiler::terminal_dwa::TerminalDwa) -> BTreeSet<TerminalID> {
-    let mut terminals = BTreeSet::new();
-    for state in &terminal_dwa.nwa.states {
-        for &label in state.transitions.keys() {
-            let Ok(terminal) = TerminalID::try_from(label) else {
-                continue;
-            };
-            terminals.insert(terminal);
-        }
-    }
-    terminals
-}
-
-// ---------------------------------------------------------------------------
-// NWA construction from characterizations
-// ---------------------------------------------------------------------------
-
-/// Build the parser NWA from terminal characterizations and internal ID mappings.
-///
-/// The NWA labels are parser state IDs (non-negative i32).
-/// The weights encode which LLM tokens are valid, in TSID × token space.
-///
-/// The NWA reads the parser stack **bottom-to-top**. For a reduce at `from_state`
-/// with pop_count `p` revealing state `revealed`, the stack word is:
-///   [...prefix, revealed, skip{p-1}, from_state]
-/// where skip{p-1} are the p-1 intermediate states between revealed and from_state.
-///
-/// Instead of using explicit per-state self-loops (which create O(num_states)
-/// transitions and cause the NWA to be cyclic), we use DEFAULT_LABEL as a
-/// single wildcard transition.  The determinizer treats DEFAULT as a normal
-/// label.  At runtime, the DWA walker falls back to DEFAULT when no specific
-/// transition matches.
-///
-/// NWA patterns:
-/// - **Shift**: `skip_start --[DEFAULT]--> skip_start` (self-loop, matches any prefix)
-///              `skip_start --[from_state]--> accept(token_weight)`
-/// - **Reduce** (pop_count=P, revealed=R, from_state=S):
-///              `skip_start --[R]--> mid_0 --[DEFAULT]--> mid_1 ... --[S]--> accept`
-#[allow(dead_code)]
-pub fn build_parser_nwa(
-    table: &GLRTable,
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-) -> NWA {
-    use std::time::Instant;
-
-    let t0 = Instant::now();
-    let characterizations = characterize_terminals(table, grammar);
-    eprintln!("[glrmask::dwa]   characterize:  {:.3}s", t0.elapsed().as_secs_f64());
-
-    // Pre-compute used terminals from characterizations to filter token iteration.
-    let characterized_terminals: std::collections::BTreeSet<TerminalID> =
-        characterizations.keys().copied().collect();
-
-    let t0 = Instant::now();
-    let terminal_dwa = build_terminal_dwa(tokenizer, vocab, id_map, grammar, &characterized_terminals);
-    eprintln!("[glrmask::dwa]   terminal_dwa:  {:.3}s ({} nwa states)", t0.elapsed().as_secs_f64(), terminal_dwa.nwa.states.len());
-    debug_assert_eq!(terminal_dwa.nwa.start_states.len(), terminal_dwa.tsid_roots.len());
-
-    let t0 = Instant::now();
-    let used_terminals = terminals_present_in_terminal_dwa(&terminal_dwa);
-    let template_bundles = build_template_bundles(&characterizations, &used_terminals);
-    eprintln!("[glrmask::dwa]   bundles:       {:.3}s ({} bundles, {} used terminals)", t0.elapsed().as_secs_f64(), template_bundles.len(), used_terminals.len());
-
-    let t0 = Instant::now();
-    let mut nwa = build_template_nwa_from_bundles(
-        &template_bundles,
-        &terminal_dwa,
-        id_map.num_tsids(),
-        id_map.max_token_id(),
-    );
-    eprintln!("[glrmask::dwa]   compose NWA:   {:.3}s ({} states, {} transitions)", t0.elapsed().as_secs_f64(), nwa.states.len(), nwa.num_transitions());
-
-    // Dump NWA before resolve_negatives if GLRMASK_DUMP_DWA is set
-    if std::env::var("GLRMASK_DUMP_DWA").unwrap_or_default() == "1" {
-        eprintln!("\n=== NWA BEFORE resolve_negatives ({} states, {} transitions) ===", nwa.states.len(), nwa.num_transitions());
-        eprintln!("  start_states: {:?}", nwa.start_states);
-        for (i, state) in nwa.states.iter().enumerate() {
-            let has_content = !state.transitions.is_empty() || !state.epsilons.is_empty() || state.final_weight.is_some();
-            if !has_content { continue; }
-            eprintln!("  state {}:", i);
-            for (&label, targets) in &state.transitions {
-                for (dest, _w) in targets {
-                    let label_str = if label == DEFAULT_LABEL {
-                        "DEFAULT".to_string()
-                    } else if is_negative_label(label) {
-                        format!("neg({})", negative_to_positive_label(label))
-                    } else {
-                        format!("{}", label)
-                    };
-                    eprintln!("    --[{}]--> {}", label_str, dest);
-                }
-            }
-            for (dest, _w) in &state.epsilons {
-                eprintln!("    --[eps]--> {}", dest);
-            }
-            if state.final_weight.is_some() {
-                eprintln!("    FINAL");
-            }
-        }
-    }
-
-    let t0 = Instant::now();
-    resolve_negative_codes_in_nwa(&mut nwa);
-    eprintln!("[glrmask::dwa]   resolve neg:   {:.3}s", t0.elapsed().as_secs_f64());
-
-    // Dump NWA after resolve_negatives if GLRMASK_DUMP_DWA is set
-    if std::env::var("GLRMASK_DUMP_DWA").unwrap_or_default() == "1" {
-        eprintln!("\n=== NWA AFTER resolve_negatives ({} states, {} transitions) ===", nwa.states.len(), nwa.num_transitions());
-        eprintln!("  start_states: {:?}", nwa.start_states);
-        for (i, state) in nwa.states.iter().enumerate() {
-            let has_content = !state.transitions.is_empty() || !state.epsilons.is_empty() || state.final_weight.is_some();
-            if !has_content { continue; }
-            eprintln!("  state {}:", i);
-            for (&label, targets) in &state.transitions {
-                for (dest, _w) in targets {
-                    let label_str = if label == DEFAULT_LABEL {
-                        "DEFAULT".to_string()
-                    } else {
-                        format!("{}", label)
-                    };
-                    eprintln!("    --[{}]--> {}", label_str, dest);
-                }
-            }
-            for (dest, _w) in &state.epsilons {
-                eprintln!("    --[eps]--> {}", dest);
-            }
-            if state.final_weight.is_some() {
-                eprintln!("    FINAL");
-            }
-        }
-    }
-
-    nwa
-}
-
-/// Check if a `DWA` is acyclic (no self-loops or back-edges) over *all* states.
-///
-/// Used to decide whether acyclic minimization can be applied.
-fn is_acyclic(dwa: &DWA) -> bool {
-    let n = dwa.states.len();
-    // Quick check: any self-loops?
-    for (i, st) in dwa.states.iter().enumerate() {
-        for (target, _) in st.transitions.values() {
-            if *target as usize == i {
-                return false;
-            }
-        }
-    }
-    // Full DFS cycle check.
-    let mut color = vec![0u8; n]; // 0=white, 1=gray, 2=black
-    fn dfs(u: usize, states: &[DWAState], color: &mut [u8]) -> bool {
-        color[u] = 1;
-        for (target, _) in states[u].transitions.values() {
-            let v = *target as usize;
-            if v >= color.len() {
-                continue;
-            }
-            match color[v] {
-                1 => return false, // back edge → cycle
-                0 => {
-                    if !dfs(v, states, color) {
-                        return false;
-                    }
-                }
-                _ => {}
-            }
-        }
-        color[u] = 2;
-        true
-    }
-    for i in 0..n {
-        if color[i] == 0 && !dfs(i, &dwa.states, &mut color) {
-            return false;
-        }
-    }
-    true
-}
-
 /// Detect cycles in the non-accepting subgraph that are **reachable from the
 /// DWA's start state**.
 ///
@@ -247,7 +61,7 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
     let mut color = vec![0u8; n]; // 0=white, 1=gray(on path), 2=black(done)
     let mut parent = vec![usize::MAX; n];
 
-    fn dfs(
+    fn visit_cycle_path(
         u: usize,
         states: &[DWAState],
         non_accepting: &[bool],
@@ -267,7 +81,7 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
                 }
                 0 => {
                     parent[v] = u;
-                    if let Some(cs) = dfs(v, states, non_accepting, color, parent) {
+                    if let Some(cs) = visit_cycle_path(v, states, non_accepting, color, parent) {
                         return Some(cs);
                     }
                 }
@@ -280,7 +94,7 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
 
     // Only start from `start_state` — this restricts the search to states
     // actually reachable in execution.
-    if let Some(cycle_start) = dfs(start, &dwa.states, &non_accepting, &mut color, &mut parent) {
+    if let Some(cycle_start) = visit_cycle_path(start, &dwa.states, &non_accepting, &mut color, &mut parent) {
         // Reconstruct cycle: walk parent pointers back to cycle_start.
         let mut path = vec![cycle_start];
         let mut cur = parent[cycle_start];
@@ -295,7 +109,8 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
     None
 }
 
-/// Build the full parser DWA by constructing the NWA, determinizing, and minimizing.
+/// Build the full parser DWA by constructing the parser NWA,
+/// resolving negatives, determinizing, and minimizing.
 pub fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -303,58 +118,30 @@ pub fn build_parser_dwa(
     vocab: &Vocab,
     id_map: &InternalIdMap,
 ) -> DWA {
-    let (dwa, _) = build_parser_dwa_impl(table, grammar, tokenizer, vocab, id_map, false);
-    dwa
-}
-
-/// Build the full parser DWA, returning an [`AutomataDebug`] bundle alongside.
-#[allow(dead_code)]
-pub fn build_parser_dwa_with_debug(
-    table: &GLRTable,
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-) -> (DWA, crate::compiler::debug::AutomataDebug) {
-    let (dwa, dbg) = build_parser_dwa_impl(table, grammar, tokenizer, vocab, id_map, true);
-    (dwa, dbg.expect("debug=true must produce Some"))
-}
-
-fn build_parser_dwa_impl(
-    table: &GLRTable,
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-    capture_debug: bool,
-) -> (DWA, Option<crate::compiler::debug::AutomataDebug>) {
     use std::time::Instant;
 
-    // --- Step 1: Characterize & build terminal DWA ---
     let t = Instant::now();
     let characterizations = characterize_terminals(table, grammar);
-    let characterized_terminals: std::collections::BTreeSet<TerminalID> =
+    let characterized_terminals: BTreeSet<TerminalID> =
         characterizations.keys().copied().collect();
     eprintln!("[glrmask::dwa]   characterize:  {:.3}s", t.elapsed().as_secs_f64());
 
     let t = Instant::now();
-    let (terminal_dwa, terminal_debug) = if capture_debug {
-        use crate::compiler::terminal_dwa::build_terminal_dwa_with_debug;
-        let (dwa, dbg) = build_terminal_dwa_with_debug(tokenizer, vocab, id_map, grammar, &characterized_terminals);
-        (dwa, Some(dbg))
-    } else {
-        (build_terminal_dwa(tokenizer, vocab, id_map, grammar, &characterized_terminals), None)
-    };
+    let terminal_dwa = build_terminal_dwa(tokenizer, vocab, id_map, grammar, &characterized_terminals);
     eprintln!("[glrmask::dwa]   terminal_dwa:  {:.3}s ({} nwa states)", t.elapsed().as_secs_f64(), terminal_dwa.nwa.states.len());
     debug_assert_eq!(terminal_dwa.nwa.start_states.len(), terminal_dwa.tsid_roots.len());
 
-    // --- Step 2: Template bundles ---
     let t = Instant::now();
-    let used_terminals = terminals_present_in_terminal_dwa(&terminal_dwa);
+    let used_terminals: BTreeSet<TerminalID> = terminal_dwa
+        .nwa
+        .states
+        .iter()
+        .flat_map(|state| state.transitions.keys())
+        .filter_map(|&label| TerminalID::try_from(label).ok())
+        .collect();
     let template_bundles = build_template_bundles(&characterizations, &used_terminals);
     eprintln!("[glrmask::dwa]   bundles:       {:.3}s ({} bundles, {} used terminals)", t.elapsed().as_secs_f64(), template_bundles.len(), used_terminals.len());
 
-    // --- Step 3: Compose NWA ---
     let t = Instant::now();
     let mut nwa = build_template_nwa_from_bundles(
         &template_bundles,
@@ -364,26 +151,19 @@ fn build_parser_dwa_impl(
     );
     eprintln!("[glrmask::dwa]   compose NWA:   {:.3}s ({} states, {} transitions)", t.elapsed().as_secs_f64(), nwa.states.len(), nwa.num_transitions());
 
-    let nwa_before_resolve = if capture_debug { Some(nwa.clone()) } else { None };
-
-    // --- Step 4: Resolve negatives ---
     let t = Instant::now();
     resolve_negative_codes_in_nwa(&mut nwa);
     eprintln!("[glrmask::dwa]   resolve neg:   {:.3}s", t.elapsed().as_secs_f64());
-
-    let nwa_after_resolve = if capture_debug { Some(nwa.clone()) } else { None };
 
     let t_build = Instant::now();
     eprintln!("[glrmask::dwa] NWA build:      {:.3}s ({} states, {} transitions)",
         t_build.elapsed().as_secs_f64(), nwa.states.len(),
         nwa.states.iter().map(|s| s.transitions.len()).sum::<usize>());
 
-    // --- Step 5: Determinize ---
     let t = Instant::now();
     let dwa = determinize(&nwa).unwrap();
     eprintln!("[glrmask::dwa] Determinize:    {:.3}s ({} states)", t.elapsed().as_secs_f64(), dwa.num_states());
 
-    // Acyclicity check
     if let Some(cycle) = find_cycle_in_non_accepting_states(&dwa) {
         panic!(
             "parser DWA has a graph-reachable cycle in non-accepting states\n\
@@ -398,36 +178,15 @@ fn build_parser_dwa_impl(
         );
     }
 
-    let dwa_pre_minimize = if capture_debug { Some(dwa.clone()) } else { None };
-
-    // --- Step 6: Minimize ---
     let t = Instant::now();
-    let final_dwa = if is_acyclic(&dwa) {
+    if dwa.is_acyclic() {
         let result = minimize(&dwa);
         eprintln!("[glrmask::dwa] Minimize:       {:.3}s ({} → {} states)", t.elapsed().as_secs_f64(), dwa.num_states(), result.num_states());
         result
     } else {
         eprintln!("[glrmask::dwa] Minimize:       skipped (cyclic DWA)");
         dwa
-    };
-
-    let debug = if capture_debug {
-        Some(crate::compiler::debug::AutomataDebug {
-            characterizations: characterizations.clone(),
-            terminal_dwa,
-            terminal_debug: terminal_debug.unwrap(),
-            template_bundles,
-            parser_nwa_before_resolve: nwa_before_resolve.unwrap(),
-            parser_nwa_after_resolve: nwa_after_resolve.unwrap(),
-            parser_dwa_pre_minimize: dwa_pre_minimize.unwrap(),
-            parser_dwa: final_dwa.clone(),
-            id_map: id_map.clone(),
-        })
-    } else {
-        None
-    };
-
-    (final_dwa, debug)
+    }
 }
 
 // ====================================================================
@@ -471,48 +230,6 @@ mod tests {
 
         // Terminal 'b' (id=1): might have shift or reduce.
         assert!(chars.contains_key(&1));
-    }
-
-    #[test]
-    fn test_build_parser_nwa_simple() {
-        let gdef = simple_ab_grammar();
-        let gg = AnalyzedGrammar::from_grammar_def(&gdef);
-        let table = GLRTable::build(&gg);
-        let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
-
-        let nwa = build_parser_nwa(&table, &gg, &tok, &vocab, &vp);
-        assert!(nwa.num_states() > 1);
-        assert!(nwa.num_transitions() > 0);
-        assert!(nwa.states.iter().all(|state| {
-            state
-                .transitions
-                .keys()
-                .all(|label| !is_negative_label(*label))
-        }));
-    }
-
-    #[test]
-    fn test_resolve_negative_codes_simple_cancellation() {
-        let mut nwa = NWA::new(1, 2);
-        let start = nwa.add_state();
-        let mid = nwa.add_state();
-        let end = nwa.add_state();
-        nwa.start_states.push(start);
-
-        let w = Weight::empty();
-        nwa.add_transition(start, 0, mid, w.clone());
-        nwa.add_transition(mid, encode_negative_label(0), end, w.clone());
-        nwa.set_final_weight(end, w.clone());
-
-        resolve_negative_codes_in_nwa(&mut nwa);
-
-        assert!(nwa.states.iter().all(|state| {
-            state
-                .transitions
-                .keys()
-                .all(|label| !is_negative_label(*label))
-        }));
-        assert_eq!(nwa.states[mid as usize].final_weight.as_ref(), Some(&w));
     }
 
     #[test]

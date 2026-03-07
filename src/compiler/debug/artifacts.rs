@@ -41,14 +41,14 @@ pub struct TerminalDebug {
 }
 
 // ---------------------------------------------------------------------------
-// Automata-only debug (returned by build_parser_dwa_impl)
+// Automata-only debug captured during parser-DWA construction
 // ---------------------------------------------------------------------------
 
 /// Intermediate automata captured during DWA construction.
 ///
-/// This is the subset of debug data that `build_parser_dwa_with_debug`
-/// can produce on its own. [`compile_with_debug`] combines this with
-/// grammar-level metadata to form the full [`CompileDebug`].
+/// This is the subset of debug data produced by the parser-DWA stage itself.
+/// [`compile_with_debug`] combines this with grammar-level metadata to form
+/// the full [`CompileDebug`].
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AutomataDebug {

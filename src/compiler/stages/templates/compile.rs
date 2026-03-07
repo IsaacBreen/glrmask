@@ -196,10 +196,6 @@ fn build_template_structure_nwa(characterization: &TerminalCharacterization) -> 
     unimplemented!()
 }
 
-fn is_acyclic(dwa: &DWA) -> bool {
-    unimplemented!()
-}
-
 fn build_template_dfa(characterization: &TerminalCharacterization) -> TemplateDfa {
     unimplemented!()
 }

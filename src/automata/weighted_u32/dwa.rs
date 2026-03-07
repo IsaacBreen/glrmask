@@ -79,6 +79,48 @@ impl DWA {
         unimplemented!()
     }
 
+    /// Check whether the transition graph is acyclic.
+    pub fn is_acyclic(&self) -> bool {
+        let num_states = self.states.len();
+
+        for (state_id, state) in self.states.iter().enumerate() {
+            for (target, _) in state.transitions.values() {
+                if *target as usize == state_id {
+                    return false;
+                }
+            }
+        }
+
+        fn visit(state_id: usize, states: &[DWAState], colors: &mut [u8]) -> bool {
+            colors[state_id] = 1;
+            for (target, _) in states[state_id].transitions.values() {
+                let target = *target as usize;
+                if target >= colors.len() {
+                    continue;
+                }
+                match colors[target] {
+                    1 => return false,
+                    0 => {
+                        if !visit(target, states, colors) {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            colors[state_id] = 2;
+            true
+        }
+
+        let mut colors = vec![0u8; num_states];
+        for state_id in 0..num_states {
+            if colors[state_id] == 0 && !visit(state_id, &self.states, &mut colors) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Return a wrapper that prints this DWA using a symbol→name map.
     ///
     /// Labels not present in the map print as raw integers.
