@@ -8,6 +8,7 @@
 pub mod debug;
 pub mod glr;
 pub mod grammar;
+pub mod import;
 pub mod labels;
 pub mod stages;
 

@@ -107,31 +107,6 @@ pub struct Constraint {
 }
 
 impl Constraint {
-    /// Compile a constraint from an EBNF grammar string.
-    pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        unimplemented!()
-    }
-
-    /// Compile a constraint from an EBNF grammar string, returning a
-    /// [`CompileDebug`](crate::compiler::debug::CompileDebug) bundle
-    /// alongside the constraint.
-    pub fn from_ebnf_with_debug(
-        ebnf: &str,
-        vocab: &crate::Vocab,
-    ) -> crate::Result<(Self, crate::compiler::debug::CompileDebug)> {
-        unimplemented!()
-    }
-
-    /// Compile a constraint from a Lark grammar string.
-    pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        unimplemented!()
-    }
-
-    /// Compile a constraint from a JSON Schema string.
-    pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        unimplemented!()
-    }
-
     /// Serialize this constraint to a byte vector (bincode format).
     ///
     /// Infallible — panics only if memory is exhausted (which will crash anyway).
