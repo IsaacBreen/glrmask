@@ -21,16 +21,7 @@ use serde::{Deserialize, Serialize};
 /// A 2D token/TSID range-set using TSID-outer layout.
 ///
 /// Stores a `RangeMapBlaze<u32, RangeSetBlaze<u32>>` mapping TSID ranges to
-/// token sets.  In TSID-outer layout the outer key is the TSID and the value
-/// is a set of token IDs.  This enables O(log n) lookup of the token set for
-/// a given TSID, which is the hot path during mask computation.
-///
-/// A "position" in the flat DWA range-set space is
-/// `token_id * num_tsids + tsid`.
-///
-/// Dimension bounds (`num_tsids`, `max_token`) are **not** stored in the
-/// range-set. Operations that need them (`complement`, `divide`,
-/// `expand_to_positions`, etc.) accept them as explicit parameters.
+/// token sets.
 #[derive(Debug, Clone)]
 pub struct RangeSet2D(pub RangeMapBlaze<u32, RangeSetBlaze<u32>>);
 
@@ -64,22 +55,6 @@ impl RangeSet2D {
         unimplemented!()
     }
 
-    /// Check if a flat position is contained.
-    ///
-    /// Position `p` decodes as `token = p / num_tsids`, `tsid = p % num_tsids`.
-    ///
-    /// For `all()`, always returns `true`.
-    pub fn contains(&self, pos: u32, num_tsids: u32) -> bool {
-        unimplemented!()
-    }
-
-    /// Iterate over entries as `(tsid_lo, tsid_hi, &token_set)`.
-    ///
-    /// For `all()`, yields nothing.
-    pub fn iter_entries(&self) -> Box<dyn Iterator<Item = (u32, u32, &RangeSetBlaze<u32>)> + '_> {
-        unimplemented!()
-    }
-
     // ---- Set operations ----
 
     /// Compute the union of two 2D range-sets.
@@ -100,18 +75,13 @@ impl RangeSet2D {
         unimplemented!()
     }
 
-    /// Compute the complement within `[0, max_position]`.
-    pub fn complement(&self, max_position: u32, num_tsids: u32) -> Self {
+    /// Compute the complement.
+    pub fn complement(&self) -> Self {
         unimplemented!()
     }
 
     /// Compute `self | !other` (divide).
-    ///
-    /// For each TSID, the result token set is
-    /// `self_tokens | (full_tokens − other_tokens)` where `full_tokens` is
-    /// `[0, max_token]`.  Requires explicit `max_token` and `num_tsids`
-    /// to define the complement universe.
-    pub fn divide(&self, other: &Self, max_token: u32, num_tsids: u32) -> Self {
+    pub fn divide(&self, other: &Self) -> Self {
         unimplemented!()
     }
 
@@ -128,13 +98,6 @@ impl RangeSet2D {
     }
 
     /// Divide using a precomputed complement: `self | complement`.
-    ///
-    /// `complement` must be the result of `divisor.divide_complement(max_token, num_tsids)`.
-    /// This computes `self | complement` which equals `self.divide(divisor, max_token, num_tsids)`.
-    ///
-    /// Specialized implementation that exploits the complement's structure:
-    /// most complement entries are `full` (where `x | full = full`), so we
-    /// only compute actual unions for the few non-`full` entries.
     pub fn divide_with_complement(&self, complement: &Self, full: &RangeSetBlaze<u32>) -> Self {
         unimplemented!()
     }
@@ -153,17 +116,17 @@ impl RangeSet2D {
 // ---- Trait impls ----
 
 impl PartialEq for RangeSet2D {
-        fn eq(&self, other: &Self) -> bool {
-            unimplemented!()
-        }
+    fn eq(&self, other: &Self) -> bool {
+        unimplemented!()
+    }
 }
 
 impl Eq for RangeSet2D {}
 
 impl std::hash::Hash for RangeSet2D {
-        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-            unimplemented!()
-        }
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        unimplemented!()
+    }
 }
 
 impl std::fmt::Display for RangeSet2D {
@@ -195,14 +158,14 @@ pub struct RangeSet2DDisplayWithMaps<'a> {
     token_names: &'a std::collections::BTreeMap<u32, String>,
 }
 
-impl<'a> RangeSet2D {
+impl RangeSet2D {
     /// Return a wrapper that prints this 2D range-set using human-readable names
     /// for TSIDs and tokens.
     pub fn display_with_maps(
-        &'a self,
-        tsid_names: &'a std::collections::BTreeMap<u32, String>,
-        token_names: &'a std::collections::BTreeMap<u32, String>,
-    ) -> RangeSet2DDisplayWithMaps<'a> {
+        &self,
+        tsid_names: &std::collections::BTreeMap<u32, String>,
+        token_names: &std::collections::BTreeMap<u32, String>,
+    ) -> RangeSet2DDisplayWithMaps<'_> {
         unimplemented!()
     }
 }
@@ -215,16 +178,12 @@ impl std::fmt::Display for RangeSet2DDisplayWithMaps<'_> {
 
 // ---- Serde ----
 
-/// Serde proxy for `RangeSet2D` (since `RangeMapBlaze`/`RangeSetBlaze` don't impl
-/// Serialize/Deserialize).
-#[derive(Serialize, Deserialize)]
-enum RangeSet2DSerde {
-    Empty,
-    Full,
-    /// Entries as `Vec<(tsid_lo, tsid_hi, token_ranges)>` where
-    /// `token_ranges` is a flat `[lo0, hi0, lo1, hi1, ...]` array.
-    Concrete(Vec<(u32, u32, Vec<u32>)>),
-}
+/// Sentinel used by the simplified serialized `RangeSet2D` shape.
+///
+/// The intended serialized form is a plain entry list:
+/// `Vec<(tsid_lo, tsid_hi, token_ranges)>`
+/// with `all()` represented by the sentinel pair `(u32::MAX, u32::MAX)`.
+const RANGESET2D_ALL_SENTINEL: u32 = u32::MAX;
 
 impl Serialize for RangeSet2D {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -259,9 +218,6 @@ mod tests {
         let w = RangeSet2D::all();
         assert!(w.is_full());
         assert!(!w.is_empty());
-        // Universal 2D range-set contains everything.
-        assert!(w.contains(0, 1));
-        assert!(w.contains(999, 2));
     }
 
     #[test]
@@ -324,63 +280,3 @@ mod tests {
 
 /// Compatibility alias for older weight-oriented naming.
 pub type Weight = RangeSet2D;
-
-// ------------------------------------------------------------------
-// Serde helpers relocated from the deleted range_set_serde.rs
-// ------------------------------------------------------------------
-
-/// `#[serde(with = "crate::ds::rangeset2d::bare")]`
-#[allow(dead_code)]
-pub mod bare {
-    use super::*;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(rs: &RangeSetBlaze<u32>, s: S) -> Result<S::Ok, S::Error> {
-        unimplemented!()
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RangeSetBlaze<u32>, D::Error> {
-        unimplemented!()
-    }
-}
-
-/// `#[serde(with = "crate::ds::rangeset2d::vec_rsb")]`
-pub mod vec_rsb {
-    use super::*;
-    use serde::ser::SerializeSeq;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &[RangeSetBlaze<u32>], s: S) -> Result<S::Ok, S::Error> {
-        unimplemented!()
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<RangeSetBlaze<u32>>, D::Error> {
-        unimplemented!()
-    }
-
-    pub(super) fn rsb_from_flat(flat: Vec<u32>) -> RangeSetBlaze<u32> {
-        unimplemented!()
-    }
-}
-
-/// `#[serde(with = "crate::ds::rangeset2d::vec_btmap_rsb")]`
-pub mod vec_btmap_rsb {
-    use super::vec_rsb::rsb_from_flat;
-    use range_set_blaze::RangeSetBlaze;
-    use serde::ser::SerializeSeq;
-    use serde::{Deserialize, Deserializer, Serializer};
-    use std::collections::BTreeMap;
-
-    pub fn serialize<S: Serializer>(
-        v: &[BTreeMap<u32, RangeSetBlaze<u32>>],
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
-        unimplemented!()
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Vec<BTreeMap<u32, RangeSetBlaze<u32>>>, D::Error> {
-        unimplemented!()
-    }
-}

@@ -37,6 +37,43 @@ impl Merge for TerminalsDisallowed {
     }
 }
 
+pub(crate) mod serde_vec_rsb {
+    use range_set_blaze::RangeSetBlaze;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &[RangeSetBlaze<u32>],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        unimplemented!()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<RangeSetBlaze<u32>>, D::Error> {
+        unimplemented!()
+    }
+}
+
+pub(crate) mod serde_vec_btmap_rsb {
+    use range_set_blaze::RangeSetBlaze;
+    use serde::{Deserializer, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(
+        value: &[BTreeMap<u32, RangeSetBlaze<u32>>],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        unimplemented!()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<BTreeMap<u32, RangeSetBlaze<u32>>>, D::Error> {
+        unimplemented!()
+    }
+}
+
 /// A GSS (Graph-Structured Stack) for the GLR parser.
 ///
 /// Stack items are `u32` parser state IDs.
@@ -72,13 +109,13 @@ pub struct Constraint {
 
     /// Per-TSID: { terminal_id → token range-set }.
     /// `possible_matches[tsid][terminal] = set of allowed token IDs`.
-    #[serde(with = "crate::ds::rangeset2d::vec_btmap_rsb")]
+    #[serde(with = "crate::runtime::state::serde_vec_btmap_rsb")]
     pub(crate) possible_matches: Vec<BTreeMap<TerminalId, RangeSetBlaze<u32>>>,
 
     /// Per-TSID: tokens that reach a non-dead tokenizer state without
     /// completing any terminal match. These tokens advance the tokenizer
     /// without triggering parser actions.
-    #[serde(with = "crate::ds::rangeset2d::vec_rsb")]
+    #[serde(with = "crate::runtime::state::serde_vec_rsb")]
     pub(crate) passthrough_tokens: Vec<RangeSetBlaze<u32>>,
 
     /// Maximum token ID in the vocabulary.

@@ -6,11 +6,6 @@
 
 pub use range_set_blaze::RangeSetBlaze;
 
-pub use crate::ds::rangeset2d::{
-    RangeSet2D,
-    bare,
-    vec_btmap_rsb,
-    vec_rsb,
-};
+pub use crate::ds::rangeset2d::RangeSet2D;
 
 pub type Weight = crate::ds::rangeset2d::RangeSet2D;
