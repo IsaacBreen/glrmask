@@ -1,4 +1,4 @@
-//! Runtime debug helpers for compiled constraints.
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -7,7 +7,7 @@
 use crate::runtime::Constraint;
 
 impl Constraint {
-    /// Debug dump of internal state for troubleshooting.
+    
     pub(crate) fn debug_dump(&self) {
         eprintln!("--- Constraint Debug Dump ---");
         eprintln!("Tokenizer DFA states: {}", self.tokenizer.dfa.num_states());
@@ -47,7 +47,7 @@ impl Constraint {
         eprintln!("--- End Debug Dump ---");
     }
 
-    /// Debug: trace tokenizer behavior for specific bytes from a given starting state.
+    
     pub(crate) fn debug_tokenizer(&self, input: &[u8], start_state: u32) {
         let result = self.tokenizer.execute_all_matches(input, start_state);
         eprintln!(
@@ -74,7 +74,7 @@ impl Constraint {
         }
     }
 
-    /// Get the tokenizer's initial state (for debugging).
+    
     pub(crate) fn tokenizer_initial_state(&self) -> u32 {
         unimplemented!()
     }

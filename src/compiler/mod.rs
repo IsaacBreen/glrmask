@@ -1,6 +1,6 @@
-//! Compiler: transforms grammars + vocabularies into compiled constraints.
-//!
-//! Pipeline: grammar IR → GLR table → tokenizer DFA → parser DWA → optimize → Constraint
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

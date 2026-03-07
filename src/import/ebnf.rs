@@ -1,27 +1,27 @@
-//! EBNF grammar parser.
-//!
-//! Parses Extended Backus-Naur Form grammars into the internal `GrammarDef` IR.
-//!
-//! # Supported syntax
-//!
-//! ```text
-//! # Comments start with #
-//! rule_name ::= expression
-//! rule_name : expression         # colon also accepted
-//!
-//! # Expressions
-//! a b c           # sequence (concatenation)
-//! a | b | c       # choice (alternation)
-//! (expr)          # grouping
-//! expr?           # optional (zero or one)
-//! expr*           # Kleene star (zero or more)
-//! expr+           # one or more
-//! "text"          # literal string (double quotes)
-//! 'text'          # literal string (single quotes)
-//! [a-z]           # character class
-//! [^a-z]          # negated character class
-//! rule_name       # rule reference
-//! ```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -31,9 +31,9 @@ use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
 
-// ---------------------------------------------------------------------------
-// Tokenizer
-// ---------------------------------------------------------------------------
+
+
+
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -46,7 +46,7 @@ enum Token {
     Star,
     Plus,
     Question,
-    Separator, // ::= or :
+    Separator, 
     Newline,
     Dot,
 }
@@ -145,9 +145,9 @@ fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
     unimplemented!()
 }
 
-// ---------------------------------------------------------------------------
-// Parser: tokens → NamedGrammar
-// ---------------------------------------------------------------------------
+
+
+
 
 struct Parser {
     tokens: Vec<Token>,
@@ -175,17 +175,17 @@ impl Parser {
         unimplemented!()
     }
 
-    /// Parse the full grammar.
+    
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
         unimplemented!()
     }
 
-    /// `alternatives = sequence ("|" sequence)*`
+    
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         unimplemented!()
     }
 
-    /// `sequence = unit+`
+    
     fn parse_sequence(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         unimplemented!()
     }
@@ -194,35 +194,35 @@ impl Parser {
         unimplemented!()
     }
 
-    /// `unit = atom quantifier?`
+    
     fn parse_unit(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         unimplemented!()
     }
 
-    /// `atom = IDENT | LITERAL | CHARCLASS | "(" alternatives ")" | "."`
+    
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         unimplemented!()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
-/// Parse an EBNF grammar string into a `GrammarDef`.
+
+
+
+
 pub fn parse_ebnf(input: &str) -> Result<GrammarDef, GlrMaskError> {
     unimplemented!()
 }
 
 #[allow(dead_code)]
-    /// Parse an EBNF grammar string into a `NamedGrammar` (intermediate form).
+    
 pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     unimplemented!()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+
+
+
 
 #[cfg(test)]
 mod tests {
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_parse_dot_wildcard() {
         let g = parse_ebnf("start ::= . .").unwrap();
-        assert_eq!(g.num_terminals(), 1); // both dots share the _any terminal
+        assert_eq!(g.num_terminals(), 1); 
     }
 
     #[test]

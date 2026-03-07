@@ -1,4 +1,4 @@
-//! Data structures used throughout the library.
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

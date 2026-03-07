@@ -1,7 +1,5 @@
-//! Template DFA compilation surface.
-//!
-//! This module now only owns the terminal → template-DFA mapping used by the
-//! parser-side template pipeline.
+//! NOTE: template DFA compilation is intentionally deferred.
+//! Keep only the terminal → template-DFA mapping surface in this cleanup pass.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

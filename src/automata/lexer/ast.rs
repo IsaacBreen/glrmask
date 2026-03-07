@@ -1,9 +1,6 @@
-//! Regular-expression AST surface for the lexer pipeline.
-//!
-//! This file now keeps only the structural regex representation and the small
-//! helper constructors that other lexer-side code still refers to. The old
-//! Regex/DFA-behavior tests that exercised removed helper surface are
-//! intentionally omitted until the sep1-style lexer rewrite lands.
+//! NOTE: keep only the structural regex AST and helper constructors here.
+//! The old Regex/DFA-behavior tests are intentionally omitted until the
+//! sep1-style lexer rewrite lands.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -93,7 +90,6 @@ impl From<&str> for Expr {
 
 #[cfg(test)]
 mod tests {
-    // The old AST tests were tightly coupled to removed Regex / DFA helper
-    // surface and are intentionally omitted until the sep1-style lexer rewrite
-    // lands.
+    // NOTE: the old AST tests are intentionally omitted until the sep1-style
+    // lexer rewrite lands.
 }

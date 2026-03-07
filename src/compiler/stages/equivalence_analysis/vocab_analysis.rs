@@ -1,4 +1,4 @@
-//! Vocab-token-side equivalence analysis.
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use crate::Vocab;
 use crate::compiler::stages::equivalence_analysis::ManyToOneIdMap;
 
-/// Analyze vocab-token equivalence classes for compiler use.
+
 pub(crate) fn analyze_vocab_equivalences(vocab: &Vocab) -> ManyToOneIdMap {
     let max_token_id = vocab
         .entries

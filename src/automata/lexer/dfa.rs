@@ -1,12 +1,8 @@
-//! Placeholder lexer DFA surface.
-//!
 //! NOTE: this file is intentionally gutted for a future `sep1`-style rewrite.
-//! The intended shape is:
-//! - explicit `CharTransitions`
-//! - `BitSet` for finalizers and possible-future-group IDs
-//! - `DFAState` should store `possible_future_group_ids`, with access flowing
-//!   through a non-public method on `DFA`
-//! - `DFA` should own `group_id_to_u8set`
+//! Keep the intended shape: explicit `CharTransitions`, `BitSet`-backed
+//! finalizers and possible-future-group IDs, `DFAState`-owned
+//! `possible_future_group_ids` behind a non-public `DFA` accessor, and
+//! `DFA`-owned `group_id_to_u8set`.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -17,14 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
-/// A group ID identifying which regex alternative is matched.
 pub type GroupId = u32;
 
-/// Placeholder for the future sep1-style transition storage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CharTransitions;
 
-/// Placeholder lexer DFA state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DFAState {
     pub transitions: CharTransitions,
@@ -33,7 +26,6 @@ pub struct DFAState {
     possible_future_group_ids: BitSet,
 }
 
-/// Placeholder lexer DFA.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DFA {
     states: Vec<DFAState>,

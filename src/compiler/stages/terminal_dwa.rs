@@ -1,7 +1,7 @@
-//! Terminal DWA construction.
-//!
-//! Cargo-check-only skeleton: signatures and module structure are preserved,
-//! but implementation bodies are intentionally gutted.
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

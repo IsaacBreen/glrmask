@@ -1,8 +1,8 @@
-//! Immutable runtime artifact.
-//!
-//! `Constraint` owns the compiled data needed by inference-time state
-//! machines. Construction and serialization live with the artifact; mutable
-//! sequence state is kept in `state.rs`.
+
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -25,41 +25,41 @@ pub(crate) type TSID = u32;
 pub(crate) type TerminalTokensByState =
     BTreeMap<TokenizerStateID, BTreeMap<TSID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>>;
 
-/// A compiled grammar constraint, ready for inference.
-///
-/// Immutable after creation. Thread-safe (`Send + Sync`).
-/// Create [`ConstraintState`] instances from this to track per-sequence state.
+
+
+
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 pub struct Constraint {
-    /// The compiled parser DWA.
-    /// Labels = parser state IDs (i32), weights = token bitvectors.
+    
+    
     pub(crate) parser_dwa: DWA,
 
-    /// The GLR parse table.
+    
     pub(crate) table: GLRTable,
 
-    /// The byte-level tokenizer DFA.
+    
     pub(crate) tokenizer: Tokenizer,
 
-    /// Token candidates indexed by tokenizer state, then TSID, then terminal.
-    ///
-    /// `terminal_tokens_by_state[tokenizer_state][tsid][terminal] = allowed token IDs`.
+    
+    
+    
     #[serde(with = "crate::runtime::serde::serde_nested_btmap_rsb")]
     pub(crate) terminal_tokens_by_state: TerminalTokensByState,
 
-    /// EOS token ID, if any.
+    
     pub(crate) eos_token_id: Option<u32>,
 
-    /// Token ID → byte sequence mapping.
+    
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
 }
 
 impl Constraint {
-    /// Create a new `ConstraintState` at the start position.
+    
     pub fn start(&self) -> ConstraintState<'_> {
-        // The initial parser state is 0.
-        // The initial tokenizer state is 0 (initial DFA state).
+        
+        
         let initial_parser_state = 0u32;
         let initial_tok_state = self.tokenizer.initial_state();
 
@@ -70,15 +70,15 @@ impl Constraint {
         ConstraintState { constraint: self, state }
     }
 
-    /// Number of `u32` words required in a mask buffer for this vocabulary.
-    ///
-    /// Allocate the buffer with `vec![0u32; self.constraint.mask_len()]`.
-    /// Token `i` is allowed iff `buf[i / 32] & (1u32 << (i % 32)) != 0`.
+    
+    
+    
+    
     pub fn mask_len(&self) -> usize {
         unimplemented!()
     }
 
-    /// Access the compiled parser DWA (for debugging/analysis).
+    
     pub(crate) fn parser_dwa(&self) -> &DWA {
         unimplemented!()
     }

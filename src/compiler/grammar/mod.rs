@@ -1,4 +1,4 @@
-//! Grammar-facing compiler structures.
+
 
 pub mod model;
 pub mod normalize;

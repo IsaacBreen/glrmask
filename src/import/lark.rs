@@ -1,30 +1,30 @@
-//! Lark grammar parser.
-//!
-//! Parses Lark-format grammars into the internal `GrammarDef` IR.
-//!
-//! # Supported syntax
-//!
-//! ```text
-//! // Comments start with //
-//! rule_name: expression
-//!
-//! // Lowercase names are rules, UPPERCASE names are terminals.
-//! // Terminals are defined with regex patterns:
-//! TERMINAL: /regex/
-//! TERMINAL: "literal"
-//!
-//! // Expressions:
-//! a b c             // sequence
-//! a | b | c         // choice
-//! (expr)            // grouping
-//! expr?             // optional
-//! expr*             // zero or more
-//! expr+             // one or more
-//! "literal"         // literal string
-//! /regex/           // regex terminal
-//! rule_name         // rule reference
-//! TERMINAL_NAME     // terminal reference
-//! ```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -34,16 +34,16 @@ use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
 
-// ---------------------------------------------------------------------------
-// Tokenizer
-// ---------------------------------------------------------------------------
+
+
+
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Ident(String),    // lowercase rule name
-    Terminal(String), // UPPERCASE terminal name
-    Literal(String),  // "string"
-    Regex(String),    // /regex/
+    Ident(String),    
+    Terminal(String), 
+    Literal(String),  
+    Regex(String),    
     LParen,
     RParen,
     LBracket,
@@ -55,10 +55,10 @@ enum Token {
     Colon,
     Newline,
     Dot,
-    Tilde, // ~
+    Tilde, 
     Number(usize),
     Comma,
-    Arrow, // ->
+    Arrow, 
 }
 
 struct Lexer<'a> {
@@ -115,7 +115,7 @@ impl<'a> Lexer<'a> {
                     Some(b'\\') => s.push('\\'),
                     Some(b'"') => s.push('"'),
                     Some(b'x') => {
-                        // Hex escape: \xHH
+                        
                         let h1 = self.advance().ok_or_else(|| {
                             GlrMaskError::GrammarParse("unterminated \\x escape".into())
                         })?;
@@ -201,7 +201,7 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'#') => self.skip_comment(),
                 Some(b'%') => {
-                    // Skip %ignore and other directives (rest of line).
+                    
                     self.pos += 1;
                     self.skip_comment();
                 }
@@ -300,27 +300,27 @@ impl<'a> Lexer<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tilde repetition desugaring
-// ---------------------------------------------------------------------------
 
-/// Desugar `expr~min` (exact) or `expr~min..max` (bounded) into existing
-/// GrammarExpr types.
-///
-/// - `expr~N`       → `Seq([expr; N])`
-/// - `expr~min..max` → `Seq([expr; min] ++ nested_optional(expr, max-min))`
-///
-/// When `max` is `None`, it means exact repetition with count `min`.
+
+
+
+
+
+
+
+
+
+
 fn desugar_tilde(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
     let max = max.unwrap_or(min);
     assert!(max >= min, "tilde max must be >= min");
 
     let mut parts: Vec<GrammarExpr> = Vec::with_capacity(max);
-    // Mandatory copies.
+    
     for _ in 0..min {
         parts.push(atom.clone());
     }
-    // Optional tail: nested right-to-left.
+    
     let extra = max - min;
     if extra > 0 {
         let mut tail = GrammarExpr::Optional(Box::new(atom.clone()));
@@ -340,9 +340,9 @@ fn desugar_tilde(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarEx
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parser: tokens → NamedGrammar
-// ---------------------------------------------------------------------------
+
+
+
 
 struct Parser {
     tokens: Vec<Token>,
@@ -405,10 +405,10 @@ impl Parser {
 
             let expr = self.parse_alternatives()?;
 
-            // Skip optional alias (-> name).
+            
             if self.peek() == Some(&Token::Arrow) {
                 self.pos += 1;
-                // Skip the alias name.
+                
                 match self.advance() {
                     Some(Token::Ident(_)) | Some(Token::Terminal(_)) => {}
                     _ => {}
@@ -423,7 +423,7 @@ impl Parser {
             return Err(GlrMaskError::GrammarParse("empty grammar".into()));
         }
 
-        // Prefer a rule named "start"; fall back to the first rule.
+        
         let start = if rules.iter().any(|(name, _)| name == "start") {
             "start".to_string()
         } else {
@@ -437,13 +437,13 @@ impl Parser {
         let mut alts = vec![first];
 
         loop {
-            // Direct pipe continuation.
+            
             if self.peek() == Some(&Token::Pipe) {
                 self.pos += 1;
                 alts.push(self.parse_sequence()?);
                 continue;
             }
-            // Multi-line continuation: newline(s) then pipe.
+            
             let saved = self.pos;
             let mut saw_newline = false;
             while self.peek() == Some(&Token::Newline) {
@@ -455,7 +455,7 @@ impl Parser {
                 alts.push(self.parse_sequence()?);
                 continue;
             }
-            // Not a continuation — restore position.
+            
             self.pos = saved;
             break;
         }
@@ -513,13 +513,13 @@ impl Parser {
                 Ok(GrammarExpr::Optional(Box::new(atom)))
             }
             Some(Token::Tilde) => {
-                // Bounded repetition: expr~N or expr~N..M
+                
                 self.pos += 1;
                 let min = match self.advance() {
                     Some(Token::Number(n)) => n,
                     _ => return Err(GlrMaskError::GrammarParse("expected number after ~".into())),
                 };
-                // Check for ..M
+                
                 let max = if self.peek() == Some(&Token::Dot) {
                     let saved = self.pos;
                     self.pos += 1;
@@ -534,7 +534,7 @@ impl Parser {
                             }
                         }
                     } else {
-                        // Single dot — not a range; restore.
+                        
                         self.pos = saved;
                         None
                     }
@@ -552,7 +552,7 @@ impl Parser {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(s)) => Ok(GrammarExpr::Literal(s.into_bytes())),
             Some(Token::Regex(rx)) => {
-                // Use RawRegex to preserve the pattern as-is (avoids double-wrapping brackets).
+                
                 Ok(GrammarExpr::RawRegex(rx))
             }
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
@@ -574,11 +574,11 @@ impl Parser {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
-/// Parse a Lark grammar string into a `GrammarDef`.
+
+
+
+
 pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;
@@ -588,7 +588,7 @@ pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
 }
 
 #[allow(dead_code)]
-    /// Parse a Lark grammar string into a `NamedGrammar`.
+    
 pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;
@@ -596,9 +596,9 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     parser.parse_grammar()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+
+
+
 
 #[cfg(test)]
 mod tests {

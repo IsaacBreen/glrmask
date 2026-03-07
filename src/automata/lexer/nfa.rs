@@ -1,8 +1,6 @@
-//! Placeholder lexer NFA surface.
-//!
-//! This file is intentionally gutted. The lexer NFA should be reintroduced
-//! only as the minimal regex-compilation input needed by the future sep1-style
-//! DFA pipeline, rather than preserving the old helper-heavy surface.
+//! NOTE: this file is intentionally gutted.
+//! Reintroduce only the minimal lexer NFA needed as input to the future
+//! sep1-style DFA pipeline.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -14,7 +12,6 @@ use crate::ds::u8set::U8Set;
 
 use super::dfa::{DFA, GroupId};
 
-/// Placeholder lexer NFA state.
 #[derive(Debug, Clone)]
 pub struct NFAState {
     pub transitions: Vec<(U8Set, u32)>,
@@ -23,7 +20,6 @@ pub struct NFAState {
     pub non_greedy_finalizers: BTreeSet<GroupId>,
 }
 
-/// Placeholder lexer NFA.
 #[derive(Debug, Clone)]
 pub struct NFA {
     states: Vec<NFAState>,

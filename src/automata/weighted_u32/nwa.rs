@@ -1,11 +1,11 @@
-//! Nondeterministic Weighted Automaton (NWA).
-//!
-//! The NWA is the intermediate representation produced by the compiler
-//! (one NWA per grammar nonterminal, or a combined super-NWA) before
-//! determinization into a [`DWA`](super::dwa::DWA).
-//!
-//! Transition labels are `i32` (grammar symbol IDs). Weights are [`Weight`]
-//! sets representing which (token, TSID) positions survive a transition.
+
+
+
+
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -15,67 +15,67 @@ use std::collections::BTreeMap;
 
 use crate::ds::weight::Weight;
 
-/// Grammar-symbol label.
+
 pub type Label = i32;
 
-/// A single NWA state.
+
 #[derive(Debug, Clone, Default)]
 pub struct NWAState {
-    /// Optional final (accepting) weight.  `Some(w)` means the state is
-    /// accepting and the set of surviving positions is `w`.
+    
+    
     pub final_weight: Option<Weight>,
-    /// Label-keyed transitions: label → list of (target, weight).
+    
     pub transitions: BTreeMap<Label, Vec<(u32, Weight)>>,
-    /// ε-transitions: (target, weight).
+    
     pub epsilons: Vec<(u32, Weight)>,
 }
 
-/// A Nondeterministic Weighted Automaton.
+
 #[derive(Debug, Clone)]
 pub struct NWA {
-    /// All states.
+    
     pub states: Vec<NWAState>,
-    /// Start states (subset construction begins from the ε-closure of these).
+    
     pub start_states: Vec<u32>,
 }
 
 impl NWA {
-    /// Create an empty NWA.
+    
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         unimplemented!()
     }
 
-    /// Add a new state and return its ID.
+    
     pub fn add_state(&mut self) -> u32 {
         unimplemented!()
     }
 
-    /// Number of states.
+    
     pub fn num_states(&self) -> u32 {
         unimplemented!()
     }
 
-    /// Set the final weight for a state (makes it accepting).
+    
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
         unimplemented!()
     }
 
-    /// Add a labelled transition.
+    
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
         unimplemented!()
     }
 
-    /// Add an ε-transition.
+    
     pub fn add_epsilon(&mut self, from: u32, to: u32, weight: Weight) {
         unimplemented!()
     }
 
-    /// Total number of transitions (labelled + ε).
+    
     pub fn num_transitions(&self) -> usize {
         unimplemented!()
     }
 
-    /// Check whether the labelled/epsilon transition graph is acyclic.
+    
     pub fn is_acyclic(&self) -> bool {
         let num_states = self.states.len();
 
@@ -145,14 +145,14 @@ impl NWA {
         true
     }
 
-    /// Maximum position in the weight space.
+    
     pub fn max_position(&self) -> u32 {
         unimplemented!()
     }
 
-    /// Return a wrapper that prints this NWA using a symbol→name map.
-    ///
-    /// Labels not present in the map print as raw integers.
+    
+    
+    
     pub fn display_with_symbols<'a>(
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
@@ -160,8 +160,8 @@ impl NWA {
         unimplemented!()
     }
 
-    /// Return a wrapper that prints this NWA using maps for symbols, TSIDs,
-    /// and token IDs.
+    
+    
     pub fn display_with_all_maps<'a>(
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
@@ -172,11 +172,11 @@ impl NWA {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Display helpers
-// ---------------------------------------------------------------------------
 
-/// Shared formatting logic for NWA states.
+
+
+
+
 fn fmt_nwa_states(
     nwa: &NWA,
     f: &mut std::fmt::Formatter<'_>,
@@ -190,16 +190,16 @@ fn fmt_nwa_states(
             continue;
         }
 
-        // State header — finality implied by final: block, not header tag
+        
         let start_mark = if start_set.contains(&(i as u32)) { " [START]" } else { "" };
         writeln!(f, "  State {i}{start_mark}")?;
 
-        // Final weight on its own line
+        
         if let Some(w) = &st.final_weight {
             writeln!(f, "    final: {}", weight_fn(w))?;
         }
 
-        // Transitions
+        
         for (label, targets) in &st.transitions {
             let lbl = label_fn(*label);
             for (tgt, w) in targets {
@@ -208,7 +208,7 @@ fn fmt_nwa_states(
             }
         }
 
-        // Epsilon transitions
+        
         for (tgt, w) in &st.epsilons {
             writeln!(f, "    ε → State {tgt}")?;
             writeln!(f, "      weight: {}", weight_fn(w))?;
@@ -217,9 +217,9 @@ fn fmt_nwa_states(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Display
-// ---------------------------------------------------------------------------
+
+
+
 
 impl std::fmt::Display for NWA {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -228,7 +228,7 @@ impl std::fmt::Display for NWA {
     }
 }
 
-/// Wrapper to display an [`NWA`] with human-readable symbol names.
+
 pub struct NWADisplayWithSymbols<'a> {
     nwa: &'a NWA,
     symbols: &'a std::collections::BTreeMap<Label, String>,
@@ -249,7 +249,7 @@ impl std::fmt::Display for NWADisplayWithSymbols<'_> {
     }
 }
 
-/// Wrapper to display an [`NWA`] with maps for symbols, TSIDs, and tokens.
+
 pub struct NWADisplayWithAllMaps<'a> {
     nwa: &'a NWA,
     symbols: &'a std::collections::BTreeMap<Label, String>,

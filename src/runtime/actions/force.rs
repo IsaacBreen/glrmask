@@ -1,8 +1,8 @@
-//! Forced token computation.
-//!
-//! When only one token is allowed by the mask, it can be "forced" without
-//! sampling. This module provides utilities for detecting and returning
-//! forced tokens.
+
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -11,15 +11,15 @@
 use crate::runtime::state::ConstraintState;
 
 impl<'a> ConstraintState<'a> {
-    /// Return the sequence of tokens forced by the current grammar state.
-    ///
-    /// A token is *forced* when it is the only non-EOS option in the mask.
-    /// The method repeatedly computes the mask, collects any single forced
-    /// token, simulates a commit, and continues until the state is no longer
-    /// deterministic. Returns an empty `Vec` when no tokens are forced.
-    ///
-    /// The caller is responsible for committing the returned tokens via
-    /// [`commit_tokens`](ConstraintState::commit_tokens).
+    
+    
+    
+    
+    
+    
+    
+    
+    
     pub fn force(&self) -> Vec<u32> {
         unimplemented!()
     }
@@ -67,7 +67,7 @@ mod tests {
         let s = c.start();
         let mask = s.mask_view().mask();
 
-        // Only "a" should be valid — forced token should be 0.
+        
         assert_eq!(single_allowed_token(&mask), Some(0));
         assert!(!mask_is_empty(&mask));
     }

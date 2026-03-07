@@ -1,21 +1,21 @@
-//! Parser DWA construction.
-//!
-//! Converts the GLR parse table into a Nondeterministic Weighted Automaton (NWA)
-//! that reads parser state stacks bottom-to-top and signals which tokens are
-//! valid at each position. Then determinizes and minimizes to get a DWA.
-//!
-//! # Architecture
-//!
-//! The DWA labels are parser state IDs (i32). At runtime, the GLR parser's
-//! Graph-Structured Stack (GSS) provides the "word" that the DWA reads.
-//! The DWA weights encode which LLM tokens are valid.
-//!
-//! # Algorithm overview
-//!
-//! 1. **Characterize** each terminal: find all stack patterns that make it valid.
-//! 2. **Bundle equivalent templates** so parser-side structure is shared.
-//! 3. **Build NWA** from template bundles (labels = parser state IDs, weights = token sets).
-//! 3. **Determinize + minimize** → DWA.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -40,26 +40,26 @@ use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::Vocab;
 use crate::ds::weight::Weight;
 
-/// Detect cycles in the non-accepting subgraph that are **reachable from the
-/// DWA's start state**.
-///
-/// This checks whether any cycle can actually arise during constrained
-/// generation.  Accepting states are treated as sinks: once the DWA enters
-/// an accepting state the characterisation is done.  Unreachable states
-/// (disconnected from the start state) are excluded, so structural cycles
-/// that can never appear in a real execution do not trigger this check.
-///
-/// Returns `Some(cycle_path)` if a reachable cycle is found (state indices
-/// starting and ending at the cycle entry point), `None` if acyclic.
+
+
+
+
+
+
+
+
+
+
+
 fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
     let n = dwa.states.len();
     let non_accepting: Vec<bool> = dwa.states.iter().map(|s| s.final_weight.is_none()).collect();
     let start = dwa.start_state as usize;
     if start >= n || !non_accepting[start] {
-        return None; // start is accepting or out-of-bounds — nothing to check
+        return None; 
     }
 
-    let mut color = vec![0u8; n]; // 0=white, 1=gray(on path), 2=black(done)
+    let mut color = vec![0u8; n]; 
     let mut parent = vec![usize::MAX; n];
 
     fn visit_cycle_path(
@@ -73,12 +73,12 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
         for (v, _) in states[u].transitions.values() {
             let v = *v as usize;
             if v >= color.len() || !non_accepting[v] {
-                continue; // accepting states are sinks — don't recurse
+                continue; 
             }
             match color[v] {
                 1 => {
                     parent[v] = u;
-                    return Some(v); // back edge → v is the cycle entry
+                    return Some(v); 
                 }
                 0 => {
                     parent[v] = u;
@@ -93,10 +93,10 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
         None
     }
 
-    // Only start from `start_state` — this restricts the search to states
-    // actually reachable in execution.
+    
+    
     if let Some(cycle_start) = visit_cycle_path(start, &dwa.states, &non_accepting, &mut color, &mut parent) {
-        // Reconstruct cycle: walk parent pointers back to cycle_start.
+        
         let mut path = vec![cycle_start];
         let mut cur = parent[cycle_start];
         while cur != cycle_start && cur != usize::MAX {
@@ -110,8 +110,8 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
     None
 }
 
-/// Build the full parser DWA by constructing the parser NWA,
-/// resolving negatives, determinizing, and minimizing.
+
+
 pub fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -179,9 +179,9 @@ pub fn build_parser_dwa(
     }
 }
 
-// ====================================================================
-// Tests
-// ====================================================================
+
+
+
 
 #[cfg(test)]
 mod tests {
@@ -197,7 +197,7 @@ mod tests {
         gdef: &GrammarDef,
     ) -> (Vocab, Tokenizer, InternalIdMap) {
         let tok = Tokenizer::from_grammar_def(gdef);
-        // Build vocab: one token per terminal pattern.
+        
         let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
         for (i, td) in gdef.terminals.iter().enumerate() {
             entries.push((i as u32, td.name.as_bytes().to_vec()));
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_build_parser_dwa_choice() {
-        let gdef = choice_grammar(); // S → a | b
+        let gdef = choice_grammar(); 
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
         let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);

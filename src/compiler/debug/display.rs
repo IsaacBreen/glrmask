@@ -1,4 +1,4 @@
-//! Presentation helpers for compiler debug artifacts.
+
 
 use std::collections::BTreeMap;
 
@@ -17,7 +17,7 @@ impl CompileDebug {
 
 impl std::fmt::Display for CompileDebug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // ===== 1. Grammar =====
+        
         writeln!(f, "═══ GRAMMAR (original) ═══")?;
         writeln!(f, "Start: NT{}", self.grammar_def.start)?;
         writeln!(f, "Terminals:")?;
@@ -36,7 +36,7 @@ impl std::fmt::Display for CompileDebug {
             writeln!(f, "  [{}] NT{} → {}", i, r.lhs, rhs.join(" "))?;
         }
 
-        // ===== 2. Normalized grammar =====
+        
         writeln!(f, "\n═══ GRAMMAR (normalized for mask) ═══")?;
         writeln!(f, "Start: NT{}", self.normalized_grammar_def.start)?;
         if self.normalized_grammar_def.terminals.len() != self.grammar_def.terminals.len() {
@@ -53,7 +53,7 @@ impl std::fmt::Display for CompileDebug {
             writeln!(f, "  [{}] NT{} → {}", i, r.lhs, rhs.join(" "))?;
         }
 
-        // ===== 3. GLR Table =====
+        
         writeln!(
             f,
             "\n═══ GLR PARSE TABLE ({} states, {} rules) ═══",
@@ -90,7 +90,7 @@ impl std::fmt::Display for CompileDebug {
             }
         }
 
-        // ===== 4. Vocab =====
+        
         writeln!(f, "\n═══ VOCABULARY ({} tokens) ═══", self.vocab_entries.len())?;
         if let Some(eos) = self.eos_token_id {
             writeln!(f, "EOS token: {eos}")?;
@@ -100,19 +100,19 @@ impl std::fmt::Display for CompileDebug {
             writeln!(f, "  tok{id}: {repr:?} ({} bytes)", bytes.len())?;
         }
 
-        // ===== 5. TSID mapping =====
+        
         writeln!(f, "\n═══ TOKENIZER STATE ID MAPPING ({}) ═══", self.id_map.tokenizer_states.num_internal_ids())?;
         for (internal, dfa_states) in self.id_map.tokenizer_states.internal_to_originals.iter().enumerate() {
             writeln!(f, "  TSID {internal} ↔ DFA states {:?}", dfa_states)?;
         }
 
-        // ===== 6. Vocab token ID mapping =====
+        
         writeln!(f, "\n═══ VOCAB TOKEN ID MAPPING ({}) ═══", self.id_map.vocab_tokens.num_internal_ids())?;
         for (internal, token_ids) in self.id_map.vocab_tokens.internal_to_originals.iter().enumerate() {
             writeln!(f, "  token-class {internal} ↔ original token IDs {:?}", token_ids)?;
         }
 
-        // ===== 7. Terminal characterizations =====
+        
         writeln!(f, "\n═══ TERMINAL CHARACTERIZATIONS ═══")?;
         for (tid, tc) in &self.characterizations {
             writeln!(f, "  Terminal '{}' (T{tid}):", self.terminal_name(*tid))?;
@@ -136,7 +136,7 @@ impl std::fmt::Display for CompileDebug {
             }
         }
 
-        // ===== 8. Templates =====
+        
         writeln!(
             f,
             "\n═══ TEMPLATES ({} terminals) ═══",
@@ -172,7 +172,7 @@ impl std::fmt::Display for CompileDebug {
             })
             .collect();
 
-        // ===== 9. Terminal DWA stages =====
+        
         writeln!(f, "\n═══ TERMINAL NWA — after build (raw) ═══")?;
         write!(
             f,
@@ -201,14 +201,14 @@ impl std::fmt::Display for CompileDebug {
         )?;
         writeln!(f, "TSID roots: {:?}", self.terminal_dwa.tsid_roots)?;
 
-        // ===== 10. Parser NWA stages =====
+        
         writeln!(f, "\n═══ PARSER NWA — before resolve_negatives ═══")?;
         write!(f, "{}", self.parser_nwa_before_resolve)?;
 
         writeln!(f, "\n═══ PARSER NWA — after resolve_negatives ═══")?;
         write!(f, "{}", self.parser_nwa_after_resolve)?;
 
-        // ===== 11. Parser DWA stages =====
+        
         writeln!(f, "\n═══ PARSER DWA — pre-minimize ═══")?;
         write!(f, "{}", self.parser_dwa_pre_minimize)?;
 

@@ -1,8 +1,5 @@
-//! Placeholder for negative-label resolution in parser NWAs.
-//!
-//! The real `resolve_negatives` implementation is intentionally deferred.
-//! Parser-DWA cleanup keeps the stage boundary visible, but the algorithmic
-//! body requested by the human has been removed for now.
+//! NOTE: `resolve_negatives` is intentionally deferred.
+//! Keep only this stage boundary during the parser-DWA cleanup.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

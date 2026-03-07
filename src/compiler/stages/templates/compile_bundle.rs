@@ -1,7 +1,5 @@
-//! Template bundle assembly surface.
-//!
-//! This stage turns compiled template DFAs plus terminal weights into a parser
-//! NWA. The algorithmic body is intentionally deferred for now.
+//! NOTE: template bundle assembly is intentionally deferred.
+//! Keep only this parser-NWA assembly stage boundary for now.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

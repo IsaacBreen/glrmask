@@ -1,4 +1,4 @@
-//! Weighted automata: DWA, NWA, and algorithms (determinization, minimization).
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

@@ -1,7 +1,7 @@
-//! Grammar expression AST and lowering to `GrammarDef`.
-//!
-//! Provides a high-level grammar IR (`GrammarExpr`) that importers produce,
-//! plus logic to flatten it into the low-level `GrammarDef` consumed by the compiler.
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -14,60 +14,60 @@ use crate::compiler::grammar_def::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
 
-// ---------------------------------------------------------------------------
-// AST
-// ---------------------------------------------------------------------------
 
-/// High-level grammar expression (AST node).
+
+
+
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GrammarExpr {
-    /// Reference to a named rule.
+    
     Ref(String),
-    /// Sequence of sub-expressions (concatenation).
+    
     Sequence(Vec<GrammarExpr>),
-    /// Choice between alternatives (union).
+    
     Choice(Vec<GrammarExpr>),
-    /// Optional (zero or one).
+    
     Optional(Box<GrammarExpr>),
-    /// Kleene star (zero or more).
+    
     Repeat(Box<GrammarExpr>),
-    /// One or more.
+    
     RepeatOne(Box<GrammarExpr>),
-    /// Literal byte string.
+    
     Literal(Vec<u8>),
-    /// Character class: `def` is the bracket expression (e.g. `a-zA-Z`).
-    /// If `negate` is true, it's `[^...]`.
+    
+    
     CharClass { def: String, negate: bool },
-    /// Raw regex pattern (verbatim, e.g. from `/regex/` in Lark).
+    
     RawRegex(String),
-    /// Match any single byte (`.`).
+    
     AnyByte,
 }
 
-/// A named grammar: maps rule names to their bodies. `start` is the entry rule.
+
 #[derive(Debug, Clone)]
 pub struct NamedGrammar {
-    /// Rule name → expression. Insertion order is preserved.
+    
     pub rules: Vec<(String, GrammarExpr)>,
-    /// Name of the start rule (must appear in `rules`).
+    
     pub start: String,
 }
 
-// ---------------------------------------------------------------------------
-// Lowering: NamedGrammar → GrammarDef
-// ---------------------------------------------------------------------------
 
-/// State for the lowering pass.
+
+
+
+
 struct Lowerer {
-    /// Final rules.
+    
     rules: Vec<Rule>,
-    /// Terminal name → id.
+    
     terminal_map: BTreeMap<String, TerminalID>,
-    /// Terminal definitions.
+    
     terminals: Vec<Terminal>,
-    /// Rule name → nonterminal id.
+    
     nt_map: BTreeMap<String, NonterminalID>,
-    /// Counter for anonymous nonterminals.
+    
     anon_counter: u32,
 }
 
@@ -76,40 +76,40 @@ impl Lowerer {
         unimplemented!()
     }
 
-    /// Get or create a nonterminal ID for a name.
+    
     fn nt_id(&mut self, name: &str) -> NonterminalID {
         unimplemented!()
     }
 
-    /// Create an anonymous nonterminal.
+    
     fn fresh_nt(&mut self, hint: &str) -> (String, NonterminalID) {
         unimplemented!()
     }
 
-    /// Get or create a terminal for a literal/pattern.
+    
     fn terminal_id(&mut self, name: &str, pattern: &str) -> TerminalID {
         unimplemented!()
     }
 
-    /// Lower a `GrammarExpr` into a single `Symbol` (creating helper rules as needed).
+    
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
         unimplemented!()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Terminal rule helpers
-// ---------------------------------------------------------------------------
 
-/// Check if a rule name is a terminal name (ALL-CAPS, underscores, digits).
+
+
+
+
 fn is_terminal_name(name: &str) -> bool {
     unimplemented!()
 }
 
-/// Compile a `GrammarExpr` into a regex pattern string.
-///
-/// `terminal_patterns` maps already-compiled terminal names to their regex patterns.
-/// Returns `Err` if a referenced terminal is not yet compiled (for dependency resolution).
+
+
+
+
 fn compile_to_regex(
     expr: &GrammarExpr,
     terminal_patterns: &BTreeMap<String, String>,
@@ -117,17 +117,17 @@ fn compile_to_regex(
     unimplemented!()
 }
 
-/// Lower a `NamedGrammar` to a `GrammarDef`.
-///
-/// Terminal rules (ALL-CAPS names) are compiled to single terminals with regex
-/// patterns. Nonterminal rules (lowercase names) reference terminals directly.
+
+
+
+
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     unimplemented!()
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+
+
+
 
 fn escape_byte(b: u8) -> String {
     unimplemented!()
@@ -137,9 +137,9 @@ fn regex_escape_byte(b: u8) -> String {
     unimplemented!()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+
+
+
 
 #[cfg(test)]
 mod tests {
@@ -176,7 +176,7 @@ mod tests {
             start: "start".into(),
         };
         let gdef = lower(&g).unwrap();
-        // Two rules for start: one producing "a", one producing "b".
+        
         let start_rules: Vec<_> = gdef.rules.iter().filter(|r| r.lhs == 0).collect();
         assert_eq!(start_rules.len(), 2);
     }
@@ -191,7 +191,7 @@ mod tests {
             start: "start".into(),
         };
         let gdef = lower(&g).unwrap();
-        // start → _anon_opt, _anon_opt → "a" | ε
+        
         assert!(gdef.rules.len() >= 2);
     }
 
@@ -205,7 +205,7 @@ mod tests {
             start: "start".into(),
         };
         let gdef = lower(&g).unwrap();
-        // start → _anon_rep1, _anon_rep1 → _anon_rep1 "a" | "a"
+        
         assert!(gdef.rules.len() >= 2);
     }
 
@@ -231,7 +231,7 @@ mod tests {
             start: "start".into(),
         };
         let gdef = lower(&g).unwrap();
-        assert_eq!(gdef.start, 0); // "start" registered first
+        assert_eq!(gdef.start, 0); 
         assert!(gdef.num_nonterminals() >= 2);
     }
 }

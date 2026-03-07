@@ -1,4 +1,4 @@
-//! Combined compiler-side equivalence analysis.
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -10,7 +10,7 @@ use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::equivalence_analysis::state_analysis::analyze_state_equivalences;
 use crate::compiler::stages::equivalence_analysis::vocab_analysis::analyze_vocab_equivalences;
 
-/// Run both equivalence analyses and return the joint internal-ID mapping.
+
 pub(crate) fn analyze_equivalences(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
     InternalIdMap {
         tokenizer_states: analyze_state_equivalences(tokenizer),

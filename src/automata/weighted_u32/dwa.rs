@@ -1,6 +1,6 @@
-//! Deterministic Weighted Automaton (DWA).
-//!
-//! Shape-first compilation-time deterministic weighted automaton.
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -13,73 +13,73 @@ use serde::{Deserialize, Serialize};
 use super::nwa::Label;
 use crate::ds::weight::Weight;
 
-/// A single state in the compilation-time DWA.
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DWAState {
-    /// Label → (target_state, transition_weight).
+    
     pub transitions: BTreeMap<Label, (u32, Weight)>,
-    /// Accepting weight, or `None` if the state is non-accepting.
+    
     pub final_weight: Option<Weight>,
 }
 
-/// Compilation-time DWA.
-///
-/// Each `(state, label)` maps to at most one `(target, weight)`.  The weights
-/// are full [`Weight`] sets that track which (token, TSID) positions survive.
+
+
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DWA {
-    /// All states.
+    
     pub states: Vec<DWAState>,
-    /// Start state ID.
+    
     pub start_state: u32,
 }
 
 impl DWA {
-    /// Create a new DWA with a single (empty) start state.
+    
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         unimplemented!()
     }
 
-    /// Add a new state and return its ID.
+    
     pub fn add_state(&mut self) -> u32 {
         unimplemented!()
     }
 
-    /// Number of states.
+    
     pub fn num_states(&self) -> u32 {
         unimplemented!()
     }
 
-    /// Total number of transitions across all states.
+    
     pub fn num_transitions(&self) -> usize {
         unimplemented!()
     }
 
-    /// Set the final weight for a state.
+    
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
         unimplemented!()
     }
 
-    /// Add a labelled transition.
+    
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
         unimplemented!()
     }
 
-    /// Evaluate a word, returning the surviving weight.
-    ///
-    /// Follows transitions for each label in the word, intersecting weights.
-    /// Returns the intersection of all transition weights and the final weight
-    /// of the last state (empty weight if any step fails).
+    
+    
+    
+    
+    
     pub fn eval_word(&self, word: &[Label]) -> Weight {
         unimplemented!()
     }
 
-    /// Collect all distinct labels used in transitions.
+    
     pub fn labels(&self) -> Vec<Label> {
         unimplemented!()
     }
 
-    /// Check whether the transition graph is acyclic.
+    
     pub fn is_acyclic(&self) -> bool {
         let num_states = self.states.len();
 
@@ -121,9 +121,9 @@ impl DWA {
         true
     }
 
-    /// Return a wrapper that prints this DWA using a symbol→name map.
-    ///
-    /// Labels not present in the map print as raw integers.
+    
+    
+    
     pub fn display_with_symbols<'a>(
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
@@ -131,8 +131,8 @@ impl DWA {
         unimplemented!()
     }
 
-    /// Return a wrapper that prints this DWA using maps for symbols, TSIDs,
-    /// and token IDs.
+    
+    
     pub fn display_with_all_maps<'a>(
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
@@ -143,11 +143,11 @@ impl DWA {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Display helpers
-// ---------------------------------------------------------------------------
 
-/// Shared formatting logic for `DWA` states.
+
+
+
+
 fn fmt_dwa_states(
     dwa: &DWA,
     f: &mut std::fmt::Formatter<'_>,
@@ -175,9 +175,9 @@ fn fmt_dwa_states(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Display
-// ---------------------------------------------------------------------------
+
+
+
 
 impl std::fmt::Display for DWA {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -186,7 +186,7 @@ impl std::fmt::Display for DWA {
     }
 }
 
-/// Wrapper to display a [`DWA`] with human-readable symbol names.
+
 pub struct DWADisplayWithSymbols<'a> {
     dwa: &'a DWA,
     symbols: &'a BTreeMap<Label, String>,
@@ -207,7 +207,7 @@ impl std::fmt::Display for DWADisplayWithSymbols<'_> {
     }
 }
 
-/// Wrapper to display a [`DWA`] with maps for symbols, TSIDs, and tokens.
+
 pub struct DWADisplayWithAllMaps<'a> {
     dwa: &'a DWA,
     symbols: &'a BTreeMap<Label, String>,
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_dwa_eval_word() {
-        // Simple 2-state DWA: s0 --label 0--> s1 (accepting).
+        
         let nt = 1u32;
         let max_tok = 5u32;
         let mut dwa = DWA::new(nt, max_tok);
@@ -259,7 +259,7 @@ mod tests {
     fn test_dwa_eval_word_reject() {
         let nt = 1u32;
         let dwa = DWA::new(nt, 5);
-        // No transition for label 0 → empty result.
+        
         let result = dwa.eval_word(&[0]);
         assert!(result.is_empty());
     }

@@ -1,4 +1,4 @@
-//! GLR parser and table generation.
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

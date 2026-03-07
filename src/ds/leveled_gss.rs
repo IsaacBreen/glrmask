@@ -1,20 +1,20 @@
-//! Pure Rust, Python-free core implementation of the Leveled GSS.
-//! This module contains the generic data structures and algorithms, parameterized
-//! over stack item type `T` and accumulator type `A`.
+
+
+
 #![allow(unused_mut, unused_variables, dead_code)]
-//!
-//! - T must implement Clone + Eq + Hash
-//! - A must implement Clone + Eq + Hash + Merge
-//!
-//! The representation mirrors the Python implementation's semantics and supports:
-//! - from_stacks / to_stacks
-//! - push, pop, popn
-//! - is_empty
-//! - isolate, isolate_many
-//! - apply, prune, apply_and_prune
-//! - merge, peek, reduce_acc
-//!
-//! All logic here is pure Rust and contains no Python bindings.
+
+
+
+
+
+
+
+
+
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
-/// Trait for accumulator types that can be merged.
+
 pub trait Merge: Clone {
     fn merge(&self, other: &Self) -> Self;
 }
@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    // A simple accumulator that just collects integers.
+    
     #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
     struct IntAcc(BTreeSet<i32>);
 
@@ -120,10 +120,10 @@ mod tests {
         let gss1 = gss0.pop();
         let gss2 = gss0.pop();
 
-        // Popping is deterministic and should produce structurally identical GSS
-        // with maximum sharing.
+        
+        
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -135,9 +135,9 @@ mod tests {
 
         let gss1 = gss0.push("X".to_string()).pop();
 
-        // push followed by pop should return the exact same GSS structure.
+        
         assert!(gss0.inner_ptrs_eq(&gss1));
-        assert!(!gss0.ptr_eq(&gss1)); // The top-level Arc will be different.
+        assert!(!gss0.ptr_eq(&gss1)); 
     }
 
     #[test]
@@ -145,7 +145,7 @@ mod tests {
         let gss0 = TestGSS::empty();
         let gss1 = gss0.push("X".to_string()).pop();
 
-        // On an empty GSS, push is a no-op, so pop is also a no-op on the result.
+        
         assert!(gss0.ptr_eq(&gss1));
     }
 
@@ -158,16 +158,16 @@ mod tests {
 
         let gss_bc_from_pop = gss_abc.pop();
 
-        // Manually find the node for "B"->"C" in the original GSS
+        
         let preds = gss_abc.predecessors();
         let children_of_a = preds.get(&"A".to_string()).unwrap();
         let gss_bc_from_preds = children_of_a.values().next().unwrap().first().unwrap();
 
-        // The GSS resulting from pop should be structurally identical to the
-        // predecessor GSS found inside the original.
+        
+        
         assert!(gss_bc_from_pop.inner_ptrs_eq(gss_bc_from_preds));
 
-        // And more strongly, the children of their roots should be the *same pointers*.
+        
         let inner_pop = &gss_bc_from_pop.inner;
         let inner_preds = &gss_bc_from_preds.inner;
 
@@ -194,7 +194,7 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -208,7 +208,7 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -222,27 +222,27 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
     fn test_isolate_preserves_ptr_on_noop() {
-        // Case 1: Isolate single child, no empty. Should be a no-op.
+        
         let gss0 = gss_from_str_stacks(&[(&["A"], &[1])]);
         let gss1 = gss0.isolate(Some("A".to_string()));
         assert!(gss0.ptr_eq(&gss1));
 
-        // Case 2: Isolate None on a GSS that is only an empty path. Should be a no-op.
+        
         let gss2 = gss_from_str_stacks(&[(&[], &[1])]);
         let gss3 = gss2.isolate(None);
         assert!(gss2.ptr_eq(&gss3));
 
-        // Case 3: Isolate single child from multiple. Should NOT be a no-op.
+        
         let gss4 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
         let gss5 = gss4.isolate(Some("A".to_string()));
         assert!(!gss4.ptr_eq(&gss5));
 
-        // Case 4: Isolate None from a GSS with children. Should NOT be a no-op.
+        
         let gss6 = gss_from_str_stacks(&[(&["A"], &[1]), (&[], &[2])]);
         let gss7 = gss6.isolate(None);
         assert!(!gss6.ptr_eq(&gss7));
@@ -252,23 +252,23 @@ mod tests {
     fn test_isolate_many_preserves_ptr_on_noop() {
         let gss0 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2]), (&[], &[3])]);
 
-        // Case 1: Select all children and empty. Should be a no-op.
+        
         let gss1 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
         assert!(gss0.ptr_eq(&gss1));
 
-        // Case 2: Select a superset of children. Should be a no-op.
+        
         let gss2 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), Some("C".to_string()), None]);
         assert!(gss0.ptr_eq(&gss2));
 
-        // Case 3: Select a subset of children. Should NOT be a no-op.
+        
         let gss3 = gss0.isolate_many(vec![Some("A".to_string()), None]);
         assert!(!gss0.ptr_eq(&gss3));
 
-        // Case 4: Select all children but forget empty. Should NOT be a no-op.
+        
         let gss4 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string())]);
         assert!(!gss0.ptr_eq(&gss4));
 
-        // Case 5: GSS with no empty, select all children and None. Should NOT be a no-op.
+        
         let gss5 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
         let gss6 = gss5.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
         assert!(!gss5.ptr_eq(&gss6));
@@ -283,23 +283,23 @@ mod tests {
             (&[], &[4]),
         ]);
 
-        // Case 1: No filter applied. Should be a no-op.
+        
         let gss1 = gss0.filter_by_length(None, None);
         assert!(gss0.ptr_eq(&gss1));
 
-        // Case 2: Filter range includes all paths. Should be a no-op.
-        // Paths have lengths 0, 1, 2, 3.
+        
+        
         let gss2 = gss0.filter_by_length(Some(0), Some(3));
         assert!(gss0.ptr_eq(&gss2));
         let gss3 = gss0.filter_by_length(Some(-1), Some(10));
         assert!(gss0.ptr_eq(&gss3));
 
-        // Case 3: Filter prunes some paths. Should NOT be a no-op.
+        
         let gss4 = gss0.filter_by_length(Some(1), Some(2));
         assert!(!gss0.ptr_eq(&gss4));
         assert_eq!(gss4.to_stacks().len(), 2);
 
-        // Case 4: Filter on empty GSS.
+        
         let gss_empty = TestGSS::empty();
         let gss_empty_filtered = gss_empty.filter_by_length(Some(1), Some(2));
         assert!(gss_empty.ptr_eq(&gss_empty_filtered));
@@ -307,29 +307,29 @@ mod tests {
 
     #[test]
     fn test_prune_preserves_ptr_on_noop() {
-        // GSS with two different accumulators.
+        
         let gss0 = gss_from_str_stacks(&[
-            (&["A", "B"], &[1, 2]), // acc IntAcc({1, 2})
-            (&["X"], &[3]),       // acc IntAcc({3})
-            (&[], &[1, 3]),       // acc IntAcc({1, 3})
+            (&["A", "B"], &[1, 2]), 
+            (&["X"], &[3]),       
+            (&[], &[1, 3]),       
         ]);
 
-        // Case 1: Predicate keeps everything. Should be a no-op.
+        
         let gss1 = gss0.prune(|_acc| true);
         assert!(gss0.ptr_eq(&gss1));
 
-        // Case 2: Predicate prunes something. Should NOT be a no-op.
+        
         let gss2 = gss0.prune(|acc| acc.0.contains(&1));
         assert!(!gss0.ptr_eq(&gss2));
-        // The path ["X"] with acc {3} should be pruned.
+        
         assert_eq!(gss2.to_stacks().len(), 2);
 
-        // Case 3: Predicate prunes everything. Result should be empty.
+        
         let gss3 = gss0.prune(|_acc| false);
         assert!(gss3.is_empty());
         assert!(!gss0.ptr_eq(&gss3));
 
-        // Case 4: Prune on empty GSS.
+        
         let gss_empty = TestGSS::empty();
         let gss_empty_pruned = gss_empty.prune(|_acc| true);
         assert!(gss_empty.ptr_eq(&gss_empty_pruned));
@@ -339,38 +339,38 @@ mod tests {
     fn test_normalization_sharing_factor_regression() {
         type TestGSSInt = LeveledGSS<i32, IntAcc>;
 
-        // Manually construct the GSS from the log to reproduce the issue.
-        // The key is to create a structure that is not fully optimal,
-        // with multiple paths to similar substructures that are not yet shared.
+        
+        
+        
 
-        // 1. Build the shared terminal `Lower` node.
-        // This corresponds to `Lower @ ... (MaxDepth: 0) [TERMINAL]` in the log.
+        
+        
         let l_terminal = new_lower::<i32>(IHashMap::new(), true);
 
-        // 2. Build the `Lower` node that is a parent to the terminal via edge 500.
-        // This is a shared structural component.
+        
+        
         let l_500_parent = new_lower(
             IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth, l_terminal.clone())),
             false,
         );
 
-        // 3. Build the `Interface` nodes.
+        
 
-        // The branch for path `... -> 295 -> 569 -> 500`
+        
         let i_54_inner = new_lower(
             IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth, l_500_parent.clone())),
             false,
         );
         let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
 
-        // The branch with 10 parallel interfaces. Their `inner` is `l_500_parent`.
+        
         let acc_vals = vec![38, 39, 40, 44, 45, 46, 47, 48, 49, 50];
         let interfaces_10: Vec<_> = acc_vals
             .iter()
             .map(|&acc| new_interface(l_500_parent.clone(), IntAcc::new(&[acc])))
             .collect();
 
-        // 4. Build the `UpperBranch` nodes.
+        
         let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
         let mut children_101 = IHashMap::new();
         for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
@@ -383,7 +383,7 @@ mod tests {
             None,
         );
 
-        // 5. Build the root, which has two children for edge 295 at different depths.
+        
         let mut children_295 = OrdMap::new();
         children_295.insert(i_54.max_depth(), i_54);
         children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
@@ -392,10 +392,10 @@ mod tests {
 
         let gss = TestGSSInt { inner: root_inner };
 
-        // 6. Check stats before normalization to confirm we've built the right structure.
+        
         let stats_before = gss.stats();
 
-        // 7. Normalize and check stats after.
+        
         let gss_after = gss.normalize();
         let stats_after = gss_after.stats();
 
@@ -405,12 +405,12 @@ mod tests {
         println!("Stats before: {:?}", stats_before);
         println!("Stats after: {:?}", stats_after);
 
-        // The number of paths must be conserved.
+        
         assert_eq!(gss.to_stacks().len(), 11);
         assert_eq!(gss_after.to_stacks().len(), 11);
 
-        // Normalization should not increase the number of nodes.
-        // In this case, fusing balances out other changes, so it's equal.
+        
+        
         assert!(
             stats_after.total_unique_nodes <= stats_before.total_unique_nodes,
             "total unique nodes increased: {} vs {}",
@@ -418,16 +418,16 @@ mod tests {
             stats_after.total_unique_nodes
         );
 
-        // The number of unique lower nodes should be preserved.
+        
         assert_eq!(stats_before.num_lower_nodes, 3);
         assert_eq!(stats_after.num_lower_nodes, 2);
 
-        // The multi-depth slot at the root should be fused.
+        
         assert_eq!(stats_before.num_multi_depth_slots_upper, 1);
         assert_eq!(stats_after.num_multi_depth_slots_upper, 0);
 
-        // The number of structurally unique nodes should also decrease as the
-        // graph becomes more regular after fusing.
+        
+        
         assert!(
             stats_after.num_structurally_unique_nodes < stats_before.num_structurally_unique_nodes,
             "num structurally unique nodes did not decrease: {} vs {}",
@@ -446,7 +446,7 @@ mod tests {
             (&["E"], &[3]),
         ]);
 
-        // Split at depth 1
+        
         let (below1, above1) = gss.split_at_depth(1);
 
         let expected_below1 = gss_from_str_stacks(&[
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(below1.to_stacks().into_iter().collect::<HashSet<_>>(), expected_below1.to_stacks().into_iter().collect::<HashSet<_>>());
         assert_eq!(above1.to_stacks().into_iter().collect::<HashSet<_>>(), expected_above1.to_stacks().into_iter().collect::<HashSet<_>>());
 
-        // Split at depth 2
+        
         let (below2, above2) = gss.split_at_depth(2);
         let expected_below2 = gss_from_str_stacks(&[
             (&["A"], &[1]),
@@ -481,10 +481,10 @@ mod tests {
     #[test]
     fn test_accs_by_depth() {
         let gss = gss_from_str_stacks(&[
-            (&["A", "B"], &[1]), // len 2
-            (&["C", "D"], &[2]), // len 2
-            (&["E"], &[3]),       // len 1
-            (&[], &[4]),         // len 0
+            (&["A", "B"], &[1]), 
+            (&["C", "D"], &[2]), 
+            (&["E"], &[3]),       
+            (&[], &[4]),         
         ]);
 
         let accs = gss.accs_by_depth();
@@ -502,38 +502,38 @@ mod tests {
 
     #[test]
     fn test_popn_with_underflow_basic() {
-        // Create GSS with stacks of varying depths
+        
         let gss = gss_from_str_stacks(&[
-            (&["A", "B", "C"], &[1]),  // depth 3
-            (&["X", "Y"], &[2]),       // depth 2
-            (&["Z"], &[3]),            // depth 1
-            (&[], &[4]),               // depth 0 (empty)
+            (&["A", "B", "C"], &[1]),  
+            (&["X", "Y"], &[2]),       
+            (&["Z"], &[3]),            
+            (&[], &[4]),               
         ]);
 
         let (result, underflows) = gss.popn_with_underflow(3);
 
-        // Only the depth-3 stack should remain (as empty after popping 3)
+        
         let result_stacks = result.to_stacks();
         assert_eq!(result_stacks.len(), 1);
-        // The remaining stack should be empty with acc {1}
+        
         assert!(result_stacks.iter().any(|(stack, acc)| stack.is_empty() && acc.0.contains(&1)));
 
-        // Underflows should have 3 entries for the 3 stacks that underflowed
+        
         assert_eq!(underflows.len(), 3);
-        // [X,Y] was 1 short: shortfall = 1
+        
         assert!(underflows.get(&1).map(|a| a.0.contains(&2)).unwrap_or(false), 
             "Expected shortfall 1 to contain acc 2, got {:?}", underflows);
-        // [Z] was 2 short: shortfall = 2
+        
         assert!(underflows.get(&2).map(|a| a.0.contains(&3)).unwrap_or(false),
             "Expected shortfall 2 to contain acc 3, got {:?}", underflows);
-        // [] was 3 short: shortfall = 3
+        
         assert!(underflows.get(&3).map(|a| a.0.contains(&4)).unwrap_or(false),
             "Expected shortfall 3 to contain acc 4, got {:?}", underflows);
     }
 
     #[test]
     fn test_popn_with_underflow_no_underflow() {
-        // All stacks have enough depth
+        
         let gss = gss_from_str_stacks(&[
             (&["A", "B", "C"], &[1]),
             (&["X", "Y", "Z"], &[2]),
@@ -541,17 +541,17 @@ mod tests {
 
         let (result, underflows) = gss.popn_with_underflow(2);
 
-        // Both stacks should remain with 1 element each
+        
         let result_stacks = result.to_stacks();
         assert_eq!(result_stacks.len(), 2);
         
-        // No underflows
+        
         assert!(underflows.is_empty(), "Expected no underflows, got {:?}", underflows);
     }
 
     #[test]
     fn test_popn_with_underflow_all_underflow() {
-        // All stacks are too short
+        
         let gss = gss_from_str_stacks(&[
             (&["A"], &[1]),
             (&["B"], &[2]),
@@ -560,15 +560,15 @@ mod tests {
 
         let (result, underflows) = gss.popn_with_underflow(5);
 
-        // All stacks underflowed, result should be empty
+        
         assert!(result.is_empty(), "Expected empty GSS, got {:?}", result.to_stacks());
 
-        // All underflows should be recorded
-        // [A] was 4 short, [B] was 4 short, [] was 5 short
+        
+        
         assert!(underflows.contains_key(&4), "Expected shortfall 4");
         assert!(underflows.contains_key(&5), "Expected shortfall 5");
         
-        // Shortfall 4 should have merged accs {1, 2}
+        
         let shortfall_4 = underflows.get(&4).unwrap();
         assert!(shortfall_4.0.contains(&1) && shortfall_4.0.contains(&2));
     }
@@ -582,16 +582,16 @@ mod tests {
 
         let (result, underflows) = gss.popn_with_underflow(0);
 
-        // n=0 should return the GSS unchanged
+        
         assert_eq!(result.to_stacks().len(), gss.to_stacks().len());
         assert!(underflows.is_empty());
     }
 }
 
 
-// --------------------
-// Small, reusable helpers
-// --------------------
+
+
+
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GSSPathsInfo {
@@ -707,9 +707,9 @@ where
     new_branch(IHashMap::new(), None)
 }
 
-// --------------------
-// Filtering
-// --------------------
+
+
+
 
 fn filter_lower<T: Clone + Eq + Hash>(
     node: &Arc<Lower<T>>,
@@ -738,7 +738,7 @@ fn filter_lower<T: Clone + Eq + Hash>(
                 if let Some(new_child) =
                     filter_lower(child, current_depth + 1, min_len, max_len)
                 {
-                    // Preserve identicality if pointer and depth key match
+                    
                     if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
                         same_kids = false;
                     }
@@ -756,11 +756,11 @@ fn filter_lower<T: Clone + Eq + Hash>(
             children_identical &= same_kids;
         }
     } else {
-        // We cannot descend; identical only if there were no children to begin with
+        
         children_identical = node.children.is_empty();
     }
 
-    // If nothing changed at this node, return the original pointer for maximal sharing.
+    
     if keep_empty == node.empty && children_identical {
         return Some(node.clone());
     }
@@ -824,11 +824,11 @@ where
                     children_identical &= same_kids;
                 }
             } else {
-                // We cannot descend; identical only if there were no children to begin with
+                
                 children_identical = b.children.is_empty();
             }
 
-            // If nothing changed at this node, return original pointer for maximal sharing.
+            
             if new_empty == b.empty && children_identical {
                 return Some(node.clone());
             }
@@ -1102,9 +1102,9 @@ fn accs_by_depth_upper<T, A>(
     }
 }
 
-// --------------------
-// Conversions and merges
-// --------------------
+
+
+
 
 fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> Arc<Lower<T>> {
     if Arc::ptr_eq(l1, l2) {
@@ -1168,9 +1168,9 @@ where
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 {
-    // Keep as Interface if:
-    // - both represent exactly the same set of stacks (lower identity: inner pointer-eq), or
-    // - both already have the same accumulator.
+    
+    
+    
     if a.acc == b.acc || Arc::ptr_eq(&a.inner, &b.inner) {
         let merged_lower = merge_lower(&a.inner, &b.inner);
         let new_acc = a.acc.merge(&b.acc);
@@ -1212,7 +1212,7 @@ where
             .flat_map(|kids| kids.values())
             .collect();
 
-        // Leaf-branch with explicit empty: represent as Interface with lower.empty=True and no children
+        
         if all_children.is_empty() {
             if let Some(empty) = &b.empty {
                 let lower_root = new_lower(IHashMap::new(), true);
@@ -1221,7 +1221,7 @@ where
             return node.clone();
         }
 
-        // Must have all Interface children to be promotable
+        
         if !all_children
             .iter()
             .all(|c| matches!(&***c, Upper::Interface(_)))
@@ -1229,7 +1229,7 @@ where
             return node.clone();
         }
 
-        // Collect all accumulators present across U.empty and children's acc
+        
         let mut accs: HashSet<A> = HashSet::new();
         if let Some(empty) = &b.empty {
             accs.insert(empty.clone());
@@ -1242,7 +1242,7 @@ where
 
         if accs.len() <= 1 {
             if let Some(the_acc) = accs.into_iter().next() {
-                // Build lower layer by collapsing interface children to lowers
+                
                 let mut l_children: Children<T, Lower<T>> = IHashMap::new();
                 for (v, kids) in b.children.iter() {
                     let mut v_map: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
@@ -1314,7 +1314,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Clone + Eq + Hash + std::fmt::De
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LeveledGSSStats")
-            // .field("top_values", &self.top_values)
+            
             .field("num_upperbranch_nodes", &self.num_upperbranch_nodes)
             .field("num_interface_nodes", &self.num_interface_nodes)
             .field("num_lower_nodes", &self.num_lower_nodes)
@@ -1327,9 +1327,9 @@ impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Clone + Eq + Hash + std::fmt::De
             .field("max_upper_depth", &self.max_upper_depth)
             .field("max_lower_depth", &self.max_lower_depth)
             .field("distinct_values_count", &self.distinct_values_count)
-            // .field("distinct_values", &self.distinct_values)
+            
             .field("unique_accumulators_count", &self.unique_accumulators_count)
-            // .field("unique_accumulators", &self.unique_accumulators)
+            
             .field("total_accumulator_instances", &self.total_accumulator_instances)
             .field("num_upper_with_empty", &self.num_upper_with_empty)
             .field("num_interfaces_with_empty", &self.num_interfaces_with_empty)
@@ -1358,7 +1358,7 @@ where
         .flat_map(|kids| kids.values())
         .collect();
     if all_children.is_empty() {
-        // Under new rule, leaf UpperBranch with an empty acc is promotable.
+        
         return node.empty.is_some();
     }
     if !all_children
@@ -1379,14 +1379,14 @@ where
     accs.len() <= 1
 }
 
-// --------------------
-// Normalization (hash-cons + depth fusion)
-// --------------------
+
+
+
 
 #[derive(Clone, PartialEq, Eq)]
 struct LowerSig<T: Clone + Eq + Hash> {
     empty: bool,
-    // Order-independent: label -> sorted list of canonical child ids
+    
     edges: StdHashMap<T, Vec<usize>>,
 }
 
@@ -1394,7 +1394,7 @@ struct LowerSig<T: Clone + Eq + Hash> {
 enum UpperSig<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     Branch {
         empty: Option<A>,
-        // Order-independent: label -> sorted list of canonical child ids (Upper)
+        
         edges: StdHashMap<T, Vec<usize>>,
     },
     Interface {
@@ -1404,7 +1404,7 @@ enum UpperSig<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
 }
 
 struct NormalizationLowerInterner<T: Clone + Eq + Hash> {
-    // hash -> bucket of (signature, canonical id, canonical node)
+    
     map: StdHashMap<u64, Vec<(LowerSig<T>, usize, Arc<Lower<T>>)>>,
     next_id: usize,
 }
@@ -1422,7 +1422,7 @@ struct NormalizationUpperInterner<
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 > {
-    // hash -> bucket of (signature, canonical id, canonical node)
+    
     map: StdHashMap<u64, Vec<(UpperSig<T, A>, usize, Arc<Upper<T, A>>)>>,
     next_id: usize,
 }
@@ -1452,7 +1452,7 @@ fn lower_sig_hash<T: Clone + Eq + Hash>(sig: &LowerSig<T>) -> u64 {
     for (k, ids) in &sig.edges {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         k.hash(&mut h);
-        ids.hash(&mut h); // ids are sorted
+        ids.hash(&mut h); 
         let e = h.finish();
         xor_acc ^= e;
         sum_acc = sum_acc.wrapping_add(e);
@@ -1479,7 +1479,7 @@ fn upper_sig_hash<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
             for (k, ids) in edges {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 k.hash(&mut h);
-                ids.hash(&mut h); // ids are sorted
+                ids.hash(&mut h); 
                 let e = h.finish();
                 xor_acc ^= e;
                 sum_acc = sum_acc.wrapping_add(e);
@@ -1509,7 +1509,7 @@ where
         return (*id, arc.clone());
     }
 
-    // Recurse: canonicalize children first.
+    
     let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Lower<T>>)>> = StdHashMap::new();
     for (v, kids) in node.children.iter() {
         let entry = edges_raw.entry(v.clone()).or_default();
@@ -1519,7 +1519,7 @@ where
         }
     }
 
-    // Build order-independent signature: label -> sorted child ids
+    
     let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
     for (v, items) in &edges_raw {
         let mut ids: Vec<usize> = items.iter().map(|(cid, _)| *cid).collect();
@@ -1541,7 +1541,7 @@ where
         }
     }
 
-    // Rebuild canonical children: deduplicate by depth key, merging if necessary.
+    
     let mut new_children: Children<T, Lower<T>> = IHashMap::new();
     for (v, items) in edges_raw {
         let mut ord: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
@@ -1589,7 +1589,7 @@ where
 
     match &**node {
         Upper::Branch(b) => {
-            // Recurse into children.
+            
             let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Upper<T, A>>)>> = StdHashMap::new();
             for (v, kids) in b.children.iter() {
                 let entry = edges_raw.entry(v.clone()).or_default();
@@ -1605,7 +1605,7 @@ where
                 }
             }
 
-            // Compute signature (branch)
+            
             let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
             for (v, items) in &edges_raw {
                 let mut ids: Vec<usize> = items.iter().map(|(cid, _)| *cid).collect();
@@ -1627,7 +1627,7 @@ where
                 }
             }
 
-            // Build new branch with canonical children; dedup per depth.
+            
             let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
             for (v, items) in &edges_raw {
                 let mut ord: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
@@ -1645,23 +1645,23 @@ where
                 }
             }
             let new_b = new_branch(new_children, b.empty.clone());
-            let mut new_node = try_promote(&new_b); // Might become Interface
+            let mut new_node = try_promote(&new_b); 
 
-            // If promoted, ensure the new inner Lower node is canonical.
+            
             match &*new_node {
                 Upper::Interface(i2) => {
-                    let i2_owned = i2.clone(); // Take ownership of the Arc<Interface<T, A>>
-                    // The inner node was just created by try_promote. It's not in any cache.
-                    // We need to canonicalize it.
+                    let i2_owned = i2.clone(); 
+                    
+                    
                     let (inner_id, canonical_inner) = normalize_canonicalize_lower(
                         &i2_owned.inner,
                         memo_lower,
                         interner_lower,
                     );
-                    // Rebuild the interface with the canonical inner.
+                    
                     new_node = new_interface(canonical_inner, i2_owned.acc.clone());
 
-                    // Compute interface signature for interning the Upper node.
+                    
                     sig = UpperSig::Interface {
                         acc: i2_owned.acc.clone(),
                         inner_id,
@@ -1669,11 +1669,11 @@ where
                     h = upper_sig_hash(&sig);
                 }
                 Upper::Branch(_) => {
-                    // keep branch signature as computed
+                    
                 }
             }
 
-            // Intern (possibly with updated signature)
+            
             if let Some(bucket) = interner_upper.map.get_mut(&h) {
                 for (existing_sig, id, arc) in bucket.iter() {
                     if existing_sig == &sig {
@@ -1727,9 +1727,9 @@ where
     }
 }
 
-// --------------------
-// Public GSS type
-// --------------------
+
+
+
 
 #[derive(Clone)]
 pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
@@ -1750,28 +1750,28 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// Return a usize that uniquely identifies this GSS's inner Arc pointer.
-    /// Two GSSes with the same ptr_key share the exact same inner structure.
+    
+    
     pub fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.inner) as usize
     }
 
-    /// For each top-level edge value T, return a usize key that identifies the
-    /// structural identity of the sub-tree below that edge (based on Arc pointer).
-    /// Two edges with the same key will produce identical GSSes when isolated and popped.
-    /// This enables deduplication: if edges share the same sub-tree, only one
-    /// isolate+pop is needed.
+    
+    
+    
+    
+    
     pub fn children_dedup_keys(&self) -> StdHashMap<T, usize> {
         let mut result = StdHashMap::new();
         let children = match &*self.inner {
             Upper::Branch(b) => &b.children,
             Upper::Interface(i) => {
-                // Interface wraps Lower which has untyped children — return empty
+                
                 return result;
             }
         };
         for (v, kids) in children.iter() {
-            // Use combined hash of all Arc child pointers for this edge
+            
             let mut key: usize = 0;
             for (depth, child) in kids.iter() {
                 key = key.wrapping_mul(31).wrapping_add(Arc::as_ptr(child) as usize)
@@ -1847,7 +1847,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
-        // Canonicalize: merge accumulators for identical stacks
+        
         let mut canon: StdHashMap<Vec<T>, A> = StdHashMap::new();
         for (vals, acc) in stacks {
             if let Some(existing) = canon.get_mut(vals) {
@@ -1858,7 +1858,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        // Build a trie: map value -> { end: Option<A>, sub: Trie }
+        
         struct Entry<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
             end: Option<A>,
             sub: StdHashMap<T, Entry<T, A>>,
@@ -1938,8 +1938,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
             }
 
-            // If all children are Interfaces and share a single accumulator (including root_empty),
-            // we can represent this level as an Interface with a Lower tree.
+            
+            
             let all_interfaces = all_child_nodes
                 .iter()
                 .all(|c| matches!(&**c, Upper::Interface(_)));
@@ -2061,10 +2061,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner: new_inner }
     }
 
-    /// Push multiple values at once, creating a GSS with one edge per value,
-    /// all pointing to the same current GSS as child. This is equivalent to
-    /// doing N individual pushes followed by merging the results, but O(N)
-    /// instead of O(N log N).
+    
+    
+    
+    
     pub fn push_many(&self, values: impl IntoIterator<Item = T>) -> Self {
         if self.is_empty() {
             return self.clone();
@@ -2208,23 +2208,23 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner: new_inner }
     }
 
-    /// Pop n elements from all stacks, returning underflow information.
-    ///
-    /// Returns `(new_gss, underflows)` where:
-    /// - `new_gss` contains only stacks that had >= n elements (now popped)
-    /// - `underflows` maps shortfall -> merged accumulator
-    ///   - Key 1 means the stack was 1 element short of n
-    ///   - Key n means the stack was empty (n levels short)
-    ///
-    /// Unlike `popn`, this method does NOT preserve empty stacks. Stacks that
-    /// underflow are removed from the GSS and their accumulators are collected
-    /// in the returned HashMap.
-    ///
-    /// Example: `popn_with_underflow(3)` on `[[A,B,C], [X,Y], [Z], []]`:
-    /// - Stack `[A,B,C]` -> contributes to `new_gss` as `[]`
-    /// - Stack `[X,Y]` -> `underflows[1]` (1 level short of 3)
-    /// - Stack `[Z]` -> `underflows[2]` (2 levels short of 3)
-    /// - Stack `[]` -> `underflows[3]` (3 levels short of 3)
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     pub fn popn_with_underflow(&self, n: isize) -> (Self, StdHashMap<usize, A>) {
         if n <= 0 {
             return (self.clone(), StdHashMap::new());
@@ -2276,11 +2276,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 it.fold(first, |acc, next| merge_lower(&acc, &next))
             };
 
-            // Unlike popn, we do NOT add the empty endpoint here.
-            // Instead, we record it as an underflow.
+            
+            
             if node.empty && k >= 1 {
-                // This path had fewer than k elements remaining.
-                // Shortfall = k (we needed k more but hit empty)
+                
+                
                 merge_underflow(underflows, k as usize, acc.clone());
             }
 
@@ -2312,9 +2312,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         }
                     }
 
-                    // Record underflow for empty branches instead of preserving them
+                    
                     if let Some(acc) = &b.empty {
-                        // Shortfall = k (we needed k more but this was empty)
+                        
                         merge_underflow(underflows, k as usize, acc.clone());
                     }
 
@@ -2364,7 +2364,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     pub fn isolate(&self, value: Option<T>) -> Self {
-        // Fast-path: if the isolation would yield an identical structure, return self.
+        
         if let Some(ref v) = value {
             match &*self.inner {
                 Upper::Branch(b) => {
@@ -2434,7 +2434,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     pub fn isolate_many<I: IntoIterator<Item = Option<T>>>(&self, values: I) -> Self {
         let values_set: HashSet<Option<T>> = values.into_iter().collect();
 
-        // Fast-path: if the selection keeps everything exactly as-is, return self.
+        
         match &*self.inner {
             Upper::Branch(b) => {
                 let all_children_kept = b
@@ -2509,7 +2509,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         B: Merge + Clone + Eq + Hash,
         F: FnMut(&A) -> B,
     {
-        // Memoize per-accumulator transformation so the closure is not invoked more than once per unique A.
+        
         let mut acc_memo: StdHashMap<A, B> = StdHashMap::new();
 
         fn map_acc<A, B, F>(a: &A, memo: &mut StdHashMap<A, B>, f: &mut F) -> B
@@ -2569,7 +2569,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     where
         P: FnMut(&A) -> bool,
     {
-        // Memoize per-accumulator predicate
+        
         let mut acc_memo: StdHashMap<A, bool> = StdHashMap::new();
 
         fn test_acc<A, P>(a: &A, memo: &mut StdHashMap<A, bool>, p: &mut P) -> bool
@@ -2635,7 +2635,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         children_identical &= same_kids;
                     }
 
-                    // If nothing changed, preserve pointer.
+                    
                     if new_empty == b.empty && children_identical {
                         return Some(node.clone());
                     }
@@ -2659,7 +2659,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         B: Merge + Clone + Eq + Hash,
         M: FnMut(&A) -> Option<B>,
     {
-        // Memoize per-accumulator mutate/prune
+        
         let mut acc_memo: StdHashMap<A, Option<B>> = StdHashMap::new();
 
         fn mutate_acc<A, B, M>(
@@ -2737,9 +2737,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    /// Merge many GSSes efficiently using balanced binary merging.
-    /// For N GSSes with non-overlapping top edges (common case), this is O(N log N).
-    /// Much faster than sequential fold which is O(N²) for deep structures.
+    
+    
+    
     pub fn merge_many(gsses: impl IntoIterator<Item = Self>) -> Self {
         let mut items: Vec<Self> = gsses.into_iter().collect();
         if items.is_empty() {
@@ -2919,13 +2919,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     pub fn normalize(&self) -> Self {
-        // 1) Fuse all levels to collapse per-value multiplicity across depths.
-        //    This dramatically reduces branching in most real-world cases.
+        
+        
         let fused = self.fuse(None);
 
-        // 2) Hash-cons the resulting DAG bottom-up to maximally share all equal subgraphs.
-        //    We memoize by pointer to avoid repeated work and use interners keyed by
-        //    order-independent structural signatures.
+        
+        
+        
         let mut memo_upper: StdHashMap<usize, (usize, Arc<Upper<T, A>>)> = StdHashMap::new();
         let mut memo_lower: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
         let mut interner_upper: NormalizationUpperInterner<T, A> = Default::default();
@@ -2939,8 +2939,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             &mut interner_lower,
         );
 
-        // Typically the inner pointer changes due to canonicalization. We just return the
-        // canonicalized GSS regardless.
+        
+        
         LeveledGSS { inner }
     }
 
@@ -2952,9 +2952,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         let mut canonical_roots = Vec::new();
         for root in roots.into_iter() {
-            // 1) Fuse first for optimal structure (collapses multi-depth slots)
+            
             let fused = root.fuse(None);
-            // 2) Canonicalize/Hash-cons
+            
             let (_id, inner) = normalize_canonicalize_upper::<T, A>(
                 &fused.inner,
                 &mut memo_upper,
@@ -2998,22 +2998,22 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.children_keys().into_iter().collect()
     }
 
-    /// Visit each unique accumulator present anywhere in the structure exactly once.
-    ///
-    /// This traverses the DAG of `Upper` nodes, deduplicating both shared subgraphs
-    /// (by pointer) and accumulators (by value). The visitor is invoked at most once
-    /// for each distinct accumulator value `A` that appears as:
-    /// - `Interface.acc`
-    /// - `Upper::Branch.empty` (when present)
-    ///
-    /// The visit order is not specified.
+    
+    
+    
+    
+    
+    
+    
+    
+    
     pub fn visit_accs<F>(&self, mut f: F)
     where
         F: FnMut(&A),
     {
-        // Deduplicate by accumulator value so the visitor sees each A once.
+        
         let mut seen: HashSet<A> = HashSet::new();
-        // Deduplicate by node pointer to avoid revisiting shared subgraphs.
+        
         let mut visited: HashSet<usize> = HashSet::new();
         let mut queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
 
@@ -3046,7 +3046,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     pub fn reduce_acc(&self) -> Option<A> {
-        // Collect unique accumulators, then merge them all
+        
         let mut unique: HashSet<A> = HashSet::new();
         let mut queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
         let mut visited: HashSet<usize> = HashSet::new();
@@ -3196,10 +3196,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                             num_interfaces_with_empty += 1;
                         }
 
-                        // The inner Lower node is part of the graph and needs to be traversed.
+                        
                         lower_queue.push_back(i.inner.clone());
 
-                        // The conceptual edge from Interface to Lower should be counted.
+                        
                         interface_to_lower_edges += 1;
                         *incoming_edges.entry(Arc::as_ptr(&i.inner) as usize).or_insert(0) += 1;
                     }
@@ -3231,13 +3231,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        // Compute the number of structurally unique nodes in the maximally compressed
-        // nondeterministic DAG obtained by merging isomorphic subgraphs of the current GSS,
-        // completely ignoring accumulators. This baseline is always <= total_unique_nodes.
+        
+        
+        
         #[derive(Clone, PartialEq, Eq)]
         struct StatsSig<T: Clone + Eq + Hash> {
             terminal: bool,
-            // label -> sorted, deduplicated list of canonical child ids (set per label)
+            
             edges: StdHashMap<T, Vec<usize>>,
         }
 
@@ -3255,7 +3255,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             for (k, ids) in &sig.edges {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 k.hash(&mut h);
-                ids.hash(&mut h); // ids sorted and deduplicated
+                ids.hash(&mut h); 
                 let e = h.finish();
                 xor_acc ^= e;
                 sum_acc = sum_acc.wrapping_add(e);
@@ -3730,21 +3730,21 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         result
     }
 
-    /// Extract the single path from a GSS that has exactly one path.
-    /// Returns Some((edges_from_deep_to_shallow, bottom_accumulator)) if single path,
-    /// None if the GSS has multiple paths or is empty.
-    /// This is O(depth) with no allocations besides the Vec.
+    
+    
+    
+    
     pub fn try_extract_single_path(&self) -> Option<(Vec<T>, A)> {
         let mut edges = Vec::new();
 
         match &*self.inner {
             Upper::Branch(b) => {
                 if b.children.is_empty() {
-                    // Empty branch — return accumulator if present
+                    
                     return b.empty.as_ref().map(|acc| (edges, acc.clone()));
                 }
                 if b.empty.is_some() || b.children.len() != 1 {
-                    return None; // multiple paths
+                    return None; 
                 }
                 let (edge, ordmap) = b.children.iter().next().unwrap();
                 if ordmap.len() != 1 { return None; }

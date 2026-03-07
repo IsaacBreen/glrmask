@@ -1,6 +1,6 @@
-//! Dense bitvector implementation.
-//!
-//! Used for token masks and set operations on token IDs.
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -8,9 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A dense bitvector stored as a `Vec<u64>`.
-///
-/// Bit `i` is stored in word `i / 64`, bit position `i % 64`.
+
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BitSet {
     words: Vec<u64>,
@@ -18,113 +18,113 @@ pub struct BitSet {
 }
 
 impl BitSet {
-    /// Create a new bitset that can hold at least `len` bits, all initially zero.
+    
     pub fn new(len: usize) -> Self {
         unimplemented!()
     }
 
-    /// Create an empty bitset with capacity for `len` bits.
+    
     pub fn empty(len: usize) -> Self {
         Self::new(len)
     }
 
-    /// Create a full bitset with capacity for `len` bits.
+    
     pub fn all(len: usize) -> Self {
         let _ = len;
         unimplemented!()
     }
 
-    /// Number of bits this bitset can hold.
+    
     pub fn len(&self) -> usize {
         unimplemented!()
     }
 
-    /// Whether the bitset has zero capacity.
+    
     pub fn is_empty(&self) -> bool {
         unimplemented!()
     }
 
-    /// Get the value of bit `i`.
+    
     pub fn get(&self, i: usize) -> bool {
         unimplemented!()
     }
 
-    /// Whether the set contains bit `i`.
+    
     pub fn contains(&self, i: usize) -> bool {
         self.get(i)
     }
 
-    /// Set bit `i` to 1.
+    
     pub fn set(&mut self, i: usize) {
         unimplemented!()
     }
 
-    /// Clear bit `i` to 0.
+    
     pub fn clear(&mut self, i: usize) {
         unimplemented!()
     }
 
-    /// Set all bits to 0.
+    
     pub fn clear_all(&mut self) {
         unimplemented!()
     }
 
-    /// Number of set bits (population count).
+    
     pub fn count_ones(&self) -> usize {
         unimplemented!()
     }
 
-    /// Whether all bits are zero.
+    
     pub fn is_zero(&self) -> bool {
         unimplemented!()
     }
 
-    /// In-place OR: `self |= other`.
+    
     fn union_with(&mut self, other: &BitSet) {
         unimplemented!()
     }
 
-    /// Return `self ∪ other`.
+    
     pub fn union(&self, other: &Self) -> Self {
         let _ = other;
         unimplemented!()
     }
 
-    /// In-place AND: `self &= other`.
+    
     fn intersect_with(&mut self, other: &BitSet) {
         unimplemented!()
     }
 
-    /// Return `self ∩ other`.
+    
     pub fn intersection(&self, other: &Self) -> Self {
         let _ = other;
         unimplemented!()
     }
 
-    /// Return `self \ other`.
+    
     pub fn difference(&self, other: &Self) -> Self {
         let _ = other;
         unimplemented!()
     }
 
-    /// Return the bitwise complement within the current logical length.
+    
     pub fn complement(&self) -> Self {
         unimplemented!()
     }
 
-    /// Whether `self` and `other` share no set bits.
+    
     pub fn is_disjoint(&self, other: &Self) -> bool {
         let _ = other;
         unimplemented!()
     }
 
-    /// Whether all set bits in `self` are also set in `other`.
+    
     pub fn is_subset(&self, other: &Self) -> bool {
         let _ = other;
         unimplemented!()
     }
 
-    /// Iterator over set bit indices.
+    
     pub fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
         self.words.iter().enumerate().flat_map(|(word_idx, &word)| {
             let base = word_idx * 64;
@@ -132,22 +132,22 @@ impl BitSet {
         })
     }
 
-    /// Access the underlying word slice (for filling masks as `&[u64]`).
+    
     pub fn words(&self) -> &[u64] {
         &self.words
     }
 
-    /// Mutable access to underlying words.
+    
     pub fn words_mut(&mut self) -> &mut [u64] {
         &mut self.words
     }
 
-    /// Fill a `&mut [u32]` mask buffer from this bitset.
-    ///
-    /// The mask uses the convention: token `i` is allowed iff
-    /// `buf[i / 32] & (1u32 << (i % 32)) != 0`.
+    
+    
+    
+    
     pub fn fill_u32_mask(&self, buf: &mut [u32]) {
-        // Each u64 word maps to two consecutive u32 entries
+        
         for (i, &word) in self.words.iter().enumerate() {
             let base = i * 2;
             if base < buf.len() {
@@ -160,7 +160,7 @@ impl BitSet {
     }
 }
 
-/// Iterator over set bits in a u64 word.
+
 struct BitIter {
     word: u64,
     base: usize,
@@ -174,7 +174,7 @@ impl Iterator for BitIter {
             return None;
         }
         let tz = self.word.trailing_zeros() as usize;
-        self.word &= self.word - 1; // clear lowest set bit
+        self.word &= self.word - 1; 
         Some(self.base + tz)
     }
 }

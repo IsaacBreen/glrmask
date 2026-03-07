@@ -1,4 +1,4 @@
-//! Unweighted DFA skeleton used by parser templates.
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

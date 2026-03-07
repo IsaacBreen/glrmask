@@ -1,7 +1,5 @@
-//! Runtime-facing tokenizer surface.
-//!
-//! Regex parsing / compilation helpers live in `tokenizer_regex.rs` so this
-//! file can stay focused on tokenizer stepping and match reporting.
+//! NOTE: regex parsing and compilation helpers live in `tokenizer_regex.rs`.
+//! Keep this file focused on the runtime-facing tokenizer surface.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -16,12 +14,9 @@ use crate::compiler::grammar_def::TerminalID;
 
 pub use super::tokenizer_regex::parse_regex;
 
-/// A tokenizer built from terminal patterns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {
-    /// The underlying multi-group DFA.
     pub dfa: DFA,
-    /// Number of terminals.
     pub num_terminals: u32,
 }
 
@@ -95,7 +90,6 @@ impl Tokenizer {
     }
 }
 
-/// Result of executing the tokenizer with intermediate match tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizerResult {
     pub end_state: u32,
@@ -104,7 +98,6 @@ pub struct TokenizerResult {
 
 #[cfg(test)]
 mod tests {
-    // The old tokenizer tests were tightly coupled to the removed lexer
-    // sentinel model and the pre-cleanup DFA/NFA helper surface. They are
-    // intentionally omitted until the sep1-style lexer automata rewrite lands.
+    // NOTE: the old tokenizer tests are intentionally omitted until the
+    // sep1-style lexer automata rewrite lands.
 }

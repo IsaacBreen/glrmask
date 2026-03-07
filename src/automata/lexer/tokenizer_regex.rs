@@ -1,7 +1,5 @@
-//! Tokenizer regex parsing / construction helpers.
-//!
-//! This file owns the regex-facing builder surface so `Tokenizer` itself can
-//! stay focused on runtime stepping/execution behavior.
+//! NOTE: tokenizer regex parsing and construction stay in this split-out file
+//! so `Tokenizer` remains focused on runtime stepping.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -14,23 +12,19 @@ use crate::ds::u8set::U8Set;
 use super::tokenizer::Tokenizer;
 
 impl Tokenizer {
-    /// Build a tokenizer DFA from fully specified regex groups.
     pub fn from_expr_groups(_groups: &[ExprGroup]) -> Self {
         todo!("tokenizer regex compilation is intentionally deferred during lexer automata cleanup")
     }
 
-    /// Build a tokenizer DFA from terminal expressions.
     pub fn from_exprs(_terminals: &[(TerminalID, Expr)]) -> Self {
         todo!("tokenizer regex compilation is intentionally deferred during lexer automata cleanup")
     }
 
-    /// Build a tokenizer DFA from a `GrammarDef` by parsing terminal patterns.
     pub fn from_grammar_def(_grammar: &GrammarDef) -> Self {
         todo!("tokenizer regex compilation is intentionally deferred during lexer automata cleanup")
     }
 }
 
-/// Parse a simple regex pattern string into an `Expr` AST.
 pub fn parse_regex(_pattern: &str) -> Expr {
     todo!("tokenizer regex parsing is intentionally deferred during lexer automata cleanup")
 }

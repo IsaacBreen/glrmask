@@ -1,7 +1,7 @@
-//! 256-bit set for byte values.
-//!
-//! `U8Set` represents a set of byte values (0..=255) using two `u128` words.
-//! This is the fundamental building block for byte-level automata transitions.
+
+
+
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -12,10 +12,10 @@ use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
 use serde::{Deserialize, Serialize};
 
-/// A set of byte values stored as 256 bits (two `u128`s).
-///
-/// - `lo` covers bytes 0..128
-/// - `hi` covers bytes 128..256
+
+
+
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct U8Set {
     lo: u128,
@@ -23,110 +23,110 @@ pub struct U8Set {
 }
 
 impl U8Set {
-    /// Empty set.
+    
     pub const fn empty() -> Self {
         loop {}
     }
 
-    /// Universal set (all 256 bytes).
+    
     pub const fn all() -> Self {
         loop {}
     }
 
-    /// Full set (all 256 bytes).
+    
     const fn full() -> Self {
         Self::all()
     }
 
-    /// Singleton set containing just one byte.
+    
     pub fn single(b: u8) -> Self {
         Self::from_byte(b)
     }
 
-    /// Singleton set containing just one byte.
+    
     pub fn from_byte(b: u8) -> Self {
         let _ = b;
         unimplemented!()
     }
 
-    /// Set from a byte slice.
+    
     pub fn from_bytes(bytes: &[u8]) -> Self {
         unimplemented!()
     }
 
-    /// Set from an inclusive byte range `[lo, hi]`.
+    
     pub fn from_range(lo: u8, hi: u8) -> Self {
         unimplemented!()
     }
 
-    /// Set from a predicate function.
+    
     pub fn from_predicate(f: impl Fn(u8) -> bool) -> Self {
         unimplemented!()
     }
 
-    /// Whether the set is empty.
+    
     pub fn is_empty(&self) -> bool {
         unimplemented!()
     }
 
-    /// Number of bytes in the set.
+    
     pub fn len(&self) -> usize {
         unimplemented!()
     }
 
-    /// Whether the set contains all 256 bytes.
+    
     pub fn is_full(&self) -> bool {
         unimplemented!()
     }
 
-    /// Check if a byte is in the set.
+    
     pub fn contains(&self, b: u8) -> bool {
         unimplemented!()
     }
 
-    /// Insert a byte into the set. Returns true if the byte was not already present.
+    
     pub fn insert(&mut self, b: u8) -> bool {
         unimplemented!()
     }
 
-    /// Remove a byte from the set. Returns true if the byte was present.
+    
     pub fn remove(&mut self, b: u8) -> bool {
         unimplemented!()
     }
 
-    /// Union of two sets.
+    
     pub fn union(&self, other: &Self) -> Self {
         unimplemented!()
     }
 
-    /// Intersection of two sets.
+    
     pub fn intersection(&self, other: &Self) -> Self {
         unimplemented!()
     }
 
-    /// Set difference: `self \ other`.
+    
     pub fn difference(&self, other: &Self) -> Self {
         unimplemented!()
     }
 
-    /// Complement: all bytes NOT in this set.
+    
     pub fn complement(&self) -> Self {
         unimplemented!()
     }
 
-    /// Whether `self` and `other` share no bytes.
+    
     pub fn is_disjoint(&self, other: &Self) -> bool {
         let _ = other;
         unimplemented!()
     }
 
-    /// Whether `self ⊆ other`.
+    
     pub fn is_subset(&self, other: &Self) -> bool {
         let _ = other;
         unimplemented!()
     }
 
-    /// Iterator over all bytes in the set, in ascending order.
+    
     pub fn iter(&self) -> U8SetIter {
         unimplemented!()
     }
@@ -188,11 +188,11 @@ impl fmt::Display for U8Set {
     }
 }
 
-/// Iterator over bytes in a `U8Set`.
+
 pub struct U8SetIter {
     lo: u128,
     hi: u128,
-    phase: u8, // 0 = processing lo, 1 = processing hi, 2 = done
+    phase: u8, 
 }
 
 impl Iterator for U8SetIter {
@@ -224,7 +224,7 @@ mod tests {
         assert!(!s.contains(42));
         assert!(s.insert(42));
         assert!(s.contains(42));
-        assert!(!s.insert(42)); // already present
+        assert!(!s.insert(42)); 
         assert_eq!(s.len(), 1);
     }
 
@@ -255,13 +255,13 @@ mod tests {
         let b = U8Set::from_range(5, 15);
 
         let u = a.union(&b);
-        assert_eq!(u.len(), 16); // 0..=15
+        assert_eq!(u.len(), 16); 
 
         let i = a.intersection(&b);
-        assert_eq!(i.len(), 6); // 5..=10
+        assert_eq!(i.len(), 6); 
 
         let d = a.difference(&b);
-        assert_eq!(d.len(), 5); // 0..=4
+        assert_eq!(d.len(), 5); 
 
         let c = a.complement();
         assert_eq!(c.len(), 256 - 11);

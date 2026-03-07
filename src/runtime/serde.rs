@@ -1,4 +1,4 @@
-//! Runtime serialization helpers for compiled constraints.
+
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -32,14 +32,14 @@ pub(in crate::runtime) mod serde_nested_btmap_rsb {
 }
 
 impl Constraint {
-    /// Serialize this constraint to a byte vector (bincode format).
-    ///
-    /// Infallible — panics only if memory is exhausted (which will crash anyway).
+    
+    
+    
     pub fn save(&self) -> Vec<u8> {
         unimplemented!()
     }
 
-    /// Deserialize a constraint from bytes (bincode format).
+    
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
         let _ = bytes;
         unimplemented!()
