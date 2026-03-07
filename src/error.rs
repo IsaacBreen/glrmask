@@ -3,6 +3,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: There is no meaningful sep1 crate-level equivalent for this file; sep1 mostly uses ad hoc `Result<_, String>`-style errors instead of one central public error enum.
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]

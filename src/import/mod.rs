@@ -8,6 +8,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: This import facade corresponds to sep1's `interface/` entrypoints plus the high-level constructor helpers in `pipeline.rs`.
+
 pub mod ast;
 pub mod ebnf;
 pub mod json_schema;

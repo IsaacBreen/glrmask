@@ -7,6 +7,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: `GrammarExpr` and `NamedGrammar` are the closest glrmask analogue of sep1's grammar-import layer in `interface/interface.rs`, lowered later into compiler-local numeric IDs.
+
 use std::collections::BTreeMap;
 
 use crate::GlrMaskError;

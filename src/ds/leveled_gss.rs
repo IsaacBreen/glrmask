@@ -20,6 +20,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: This file is the direct glrmask analogue of sep1's `datastructures/leveled_gss.rs`.
+
 use im::{HashMap as IHashMap, OrdMap};
 use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;

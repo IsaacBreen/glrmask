@@ -6,6 +6,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// SEP1_MAP: `DWA` and `DWAState` are the direct glrmask analogue of sep1's weighted deterministic automaton in `dwa_i32/dwa.rs`.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

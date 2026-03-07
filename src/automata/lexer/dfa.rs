@@ -3,6 +3,7 @@
 //! finalizers and possible-future-group IDs, `DFAState`-owned
 //! `possible_future_group_ids` behind a non-public `DFA` accessor, and
 //! `DFA`-owned `group_id_to_u8set`.
+// SEP1_MAP: This placeholder is the direct target shape from sep1's `dfa_u8/dfa.rs` DFA storage.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

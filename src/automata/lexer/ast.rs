@@ -1,6 +1,7 @@
 //! NOTE: keep only the structural regex AST and helper constructors here.
 //! The old Regex/DFA-behavior tests are intentionally omitted until the
 //! sep1-style lexer rewrite lands.
+// SEP1_MAP: `Expr`, `ExprGroup`, and the helper constructors are the direct glrmask analogue of sep1's regex-expression surface in `finite_automata.rs`.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
