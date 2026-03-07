@@ -3,7 +3,7 @@
 //! `Constraint` holds all compiled artifacts needed at inference time.
 //! `ConstraintState` tracks per-sequence state and computes token masks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::dfa::DEAD;
 use crate::automata::weighted::dwa::CompDwa;
@@ -66,6 +66,12 @@ pub struct Constraint {
 
     /// Token ID → byte sequence mapping.
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
+
+    /// Precomputed reachable terminals per tokenizer DFA state.
+    /// `reachable_terminals[state]` = set of terminals reachable from `state`.
+    /// Immutable after construction; avoids ~0.7ms fixed-point computation per mask.
+    #[serde(skip)]
+    pub(crate) reachable_terminals: Vec<BTreeSet<TerminalId>>,
 }
 
 impl Constraint {
@@ -73,6 +79,17 @@ impl Constraint {
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         let gdef = crate::frontend::ebnf::parse_ebnf(ebnf)?;
         Ok(crate::compiler::pipeline::compile(&gdef, vocab))
+    }
+
+    /// Compile a constraint from an EBNF grammar string, returning a
+    /// [`CompileDebug`](crate::compiler::debug::CompileDebug) bundle
+    /// alongside the constraint.
+    pub fn from_ebnf_with_debug(
+        ebnf: &str,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<(Self, crate::compiler::debug::CompileDebug)> {
+        let gdef = crate::frontend::ebnf::parse_ebnf(ebnf)?;
+        Ok(crate::compiler::pipeline::compile_with_debug(&gdef, vocab))
     }
 
     /// Compile a constraint from a Lark grammar string.
@@ -97,8 +114,13 @@ impl Constraint {
 
     /// Deserialize a constraint from bytes (bincode format).
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        bincode::deserialize(bytes)
-            .map_err(|e| crate::GlrMaskError::Serialization(format!("deserialize: {e}")))
+        let mut c: Self = bincode::deserialize(bytes)
+            .map_err(|e| crate::GlrMaskError::Serialization(format!("deserialize: {e}")))?;
+        // Recompute reachable_terminals (skipped by serde).
+        if c.reachable_terminals.is_empty() {
+            c.reachable_terminals = c.tokenizer.compute_reachable_terminals();
+        }
+        Ok(c)
     }
 
     /// Create a new `ConstraintState` at the start position.
@@ -196,6 +218,11 @@ impl Constraint {
     pub fn mask_len(&self) -> usize {
         (self.max_token as usize / 32) + 1
     }
+
+    /// Access the compiled parser DWA (for debugging/analysis).
+    pub fn parser_dwa(&self) -> &CompDwa {
+        &self.parser_dwa
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,16 +256,118 @@ impl<'a> ConstraintState<'a> {
     /// **Note**: prefer [`mask`] or [`fill_mask`] which return `u32` words matching the
     /// plan's public API. This method is retained for white-box tests only.
     pub(crate) fn compute_mask(&self) -> BitSet {
-        // Phase 1: DWA overapproximation.
+        let _t_mask_start = std::time::Instant::now();
+
+        // One-time stats dump when GLRMASK_DUMP_STATS=1
+        {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
+            let dump_limit = std::env::var("GLRMASK_DUMP_STATS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            if dump_limit > 0 && DUMP_COUNT.fetch_add(1, Ordering::Relaxed) < dump_limit
+            {
+                // DWA stats
+                let dwa = &self.constraint.parser_dwa;
+                let dwa_states = dwa.num_states();
+                let dwa_transitions = dwa.num_transitions();
+                let mut dwa_total_ranges = 0usize;
+                let mut dwa_total_entries = 0usize;
+                let mut dwa_distinct_rangesets = 0usize;
+                for s in &dwa.states {
+                    for (_label, (_target, w)) in &s.transitions {
+                        dwa_total_ranges += w.num_ranges();
+                        dwa_total_entries += w.num_entries();
+                        dwa_distinct_rangesets += 1;
+                    }
+                    if let Some(fw) = &s.final_weight {
+                        dwa_total_ranges += fw.num_ranges();
+                        dwa_total_entries += fw.num_entries();
+                        dwa_distinct_rangesets += 1;
+                    }
+                }
+                eprintln!("[STATS] DWA: states={}, transitions={}, total_weight_objects={}, total_outer_entries={}, total_ranges={}",
+                    dwa_states, dwa_transitions, dwa_distinct_rangesets, dwa_total_entries, dwa_total_ranges);
+                eprintln!("[STATS] DWA: num_tsids={}, max_token={}", dwa.num_tsids, dwa.max_token);
+
+                // GLR table stats
+                let tbl = &self.constraint.table;
+                eprintln!("[STATS] GLR table: states={}, terminals={}, rules={}", tbl.num_states, tbl.num_terminals, tbl.num_rules);
+                let mut total_actions = 0usize;
+                for state_actions in &tbl.action {
+                    for (_term, actions) in state_actions {
+                        total_actions += actions.len();
+                    }
+                }
+                let mut total_gotos = 0usize;
+                for state_gotos in &tbl.goto {
+                    total_gotos += state_gotos.len();
+                }
+                eprintln!("[STATS] GLR table: total_action_entries={}, total_goto_entries={}", total_actions, total_gotos);
+
+                // Tokenizer stats
+                eprintln!("[STATS] Tokenizer: dfa_states={}", self.constraint.tokenizer.dfa.num_states());
+
+                // GSS stats per active tokenizer state
+                for (&tok_state, gss) in &self.state {
+                    let stats = gss.stats();
+                    eprintln!("[STATS] GSS[tok_state={}]: top_values={:?}, total_unique_nodes={}, total_edges={}, \
+                        upper_branch={}, interface={}, lower={}, max_upper_depth={}, max_lower_depth={}, \
+                        structural_sharing={:.2}",
+                        tok_state,
+                        stats.top_values,
+                        stats.total_unique_nodes,
+                        stats.total_edges,
+                        stats.num_upperbranch_nodes,
+                        stats.num_interface_nodes,
+                        stats.num_lower_nodes,
+                        stats.max_upper_depth,
+                        stats.max_lower_depth,
+                        stats.structural_sharing_factor,
+                    );
+                }
+
+                // Vocab stats
+                eprintln!("[STATS] Vocab: max_token={}, num_tsids={}, token_bytes_count={}",
+                    self.constraint.max_token, self.constraint.num_tsids,
+                    self.constraint.token_bytes.len());
+
+                // possible_matches stats
+                let mut pm_total_ranges = 0usize;
+                let mut pm_total_terminals = 0usize;
+                for tsid_map in &self.constraint.possible_matches {
+                    pm_total_terminals += tsid_map.len();
+                    for (_term, rs) in tsid_map {
+                        pm_total_ranges += rs.num_ranges();
+                    }
+                }
+                eprintln!("[STATS] possible_matches: {} TSIDs, total_terminals={}, total_ranges={}",
+                    self.constraint.possible_matches.len(), pm_total_terminals, pm_total_ranges);
+
+                // passthrough_tokens stats
+                let mut pt_total_ranges = 0usize;
+                let mut pt_total_cardinality = 0u64;
+                for rs in &self.constraint.passthrough_tokens {
+                    pt_total_ranges += rs.num_ranges();
+                    pt_total_cardinality += rs.cardinality();
+                }
+                eprintln!("[STATS] passthrough_tokens: {} TSIDs, total_ranges={}, total_cardinality={}",
+                    self.constraint.passthrough_tokens.len(), pt_total_ranges, pt_total_cardinality);
+            }
+        }
+        
+        // Detect skip-DWA mode: the DWA has ≤1 state (dummy from GLRMASK_SKIP_DWA=1).
+        let skip_dwa = self.constraint.parser_dwa.states.len() <= 1;
+        
+        // Phase 1a: Build stacks from GSS.
+        let _t_stacks_start = std::time::Instant::now();
         let mut stacks_map: BTreeMap<u32, Vec<Vec<u32>>> = self.state.iter().map(|(&tok_state, gss)| {
             let stacks: Vec<Vec<u32>> = gss.to_stacks().into_iter().map(|(s, _acc)| s).collect();
             (tok_state, stacks)
         }).collect();
 
         // ε-reduce closure: extend stacks at initial tokenizer state.
-        // After a commit, stacks may have un-reduced ε-productions at the top.
-        // The DWA expects fully-reduced stacks, so apply all possible ε-reductions
-        // (pop_count=0 rules) to produce additional stack variants.
         let initial_tok = self.constraint.tokenizer.initial_state();
         if let Some(stacks) = stacks_map.get_mut(&initial_tok) {
             let mut extra: Vec<Vec<u32>> = Vec::new();
@@ -247,88 +376,211 @@ impl<'a> ConstraintState<'a> {
             }
             stacks.extend(extra);
         }
+        let _t_stacks = _t_stacks_start.elapsed();
 
-        let mut mask = super::mask::compute_mask(
-            &stacks_map,
-            &self.constraint.parser_dwa,
-            &self.constraint.state_to_tsid,
-            self.constraint.max_token,
-            self.constraint.num_tsids,
-        );
-
-        // Phase 2: Post-filter by simulating commit for each candidate token.
-        // This removes false positives from the DWA overapproximation.
-        //
-        // A token is valid iff after commit the resulting state:
-        // - Has stacks at the initial tokenizer state (clean terminal boundary), OR
-        // - Has passthrough stacks where the tokenizer can still reach terminals
-        //   that the parser can consume (verified via reachable_terminals).
-        let reachable = self.constraint.tokenizer.compute_reachable_terminals();
-        let initial_tok = self.constraint.tokenizer.initial_state();
-        let candidates: Vec<usize> = mask.iter_ones().collect();
-        let _dwa_count = candidates.len();
-        let mut _filtered = 0usize;
-        for token_id in candidates {
-            // Skip EOS token in post-filter — handled separately below.
-            if self.constraint.eos_token_id == Some(token_id as u32) {
-                continue;
-            }
-            let mut trial = self.clone();
-            trial.commit(token_id as u32);
-            let viable = has_viable_state(&trial.state, &self.constraint.table, &reachable, initial_tok, &self.constraint.tokenizer.dfa);
-            if !viable {
-                mask.clear(token_id);
-                _filtered += 1;
-            }
-
-        }
-
-
-        // Phase 3: Rescue — trial-commit tokens that the DWA might have missed.
-        //
-        // The DWA overapproximation can miss tokens when cascading reduces
-        // (e.g., _star → _star "," JSON_INTEGER with pop_count > 0) create
-        // stack patterns the determinized DWA doesn't represent.
-        //
-        // For each TSID in the current state, collect all token IDs from
-        // possible_matches that are NOT already in the mask, then trial-commit
-        // each to verify viability.
-        {
-            let mut rescue_candidates = BitSet::new(self.constraint.max_token as usize + 1);
-            for &tok_state in self.state.keys() {
+        // Phase 1b: DWA walk.
+        let _t_dwa_start = std::time::Instant::now();
+        let mut mask = if skip_dwa {
+            // Skip-DWA mode: use possible_matches + expected terminals directly.
+            // Compute expected_per_tok and reachable inline (only for skip-DWA).
+            let reachable = &self.constraint.reachable_terminals;
+            let expected_per_tok = self.compute_expected_per_tok();
+            let vocab_size = self.constraint.max_token as usize + 1;
+            let mut m = BitSet::new(vocab_size);
+            for (&tok_state, _gss) in &self.state {
                 let tsid = if (tok_state as usize) < self.constraint.state_to_tsid.len() {
                     self.constraint.state_to_tsid[tok_state as usize]
                 } else {
                     continue;
                 };
-                if tsid == u32::MAX || (tsid as usize) >= self.constraint.possible_matches.len() {
-                    continue;
+                if tsid == u32::MAX { continue; }
+                let expected = match expected_per_tok.get(&tok_state) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if (tsid as usize) < self.constraint.possible_matches.len() {
+                    for &terminal in expected {
+                        if let Some(token_set) = self.constraint.possible_matches[tsid as usize].get(&terminal) {
+                            for token_id in token_set.iter_values() {
+                                if token_id <= self.constraint.max_token {
+                                    m.set(token_id as usize);
+                                }
+                            }
+                        }
+                    }
                 }
-                for token_set in self.constraint.possible_matches[tsid as usize].values() {
-                    for token_id in token_set.iter_values() {
-                        if token_id <= self.constraint.max_token && !mask.get(token_id as usize) {
-                            rescue_candidates.set(token_id as usize);
+                // Also add passthrough tokens if any expected terminal is reachable.
+                if (tsid as usize) < self.constraint.passthrough_tokens.len() {
+                    let tok_reachable = &reachable[tok_state as usize];
+                    let any_expected_reachable = expected.iter().any(|t| tok_reachable.contains(t));
+                    if any_expected_reachable {
+                        for token_id in self.constraint.passthrough_tokens[tsid as usize].iter_values() {
+                            if token_id <= self.constraint.max_token {
+                                m.set(token_id as usize);
+                            }
                         }
                     }
                 }
             }
-
-            let mut _rescued = 0usize;
-            for token_id in rescue_candidates.iter_ones() {
-                // Skip EOS — handled separately below.
-                if self.constraint.eos_token_id == Some(token_id as u32) {
-                    continue;
+            m
+        } else {
+            // DWA dump when GLRMASK_DUMP_DWA=1
+            if std::env::var("GLRMASK_DUMP_DWA").unwrap_or_default() == "1" {
+                let dwa = &self.constraint.parser_dwa;
+                eprintln!("\n=== DWA DUMP ===");
+                eprintln!("num_states={}, num_tsids={}, max_token={}, start={}",
+                    dwa.num_states(), dwa.num_tsids, dwa.max_token, dwa.start_state);
+                for (i, state) in dwa.states.iter().enumerate() {
+                    eprintln!("  state {}:", i);
+                    for (label, (target, weight)) in &state.transitions {
+                        eprintln!("    --[label={}]--> state {} ({} entries, {} ranges)",
+                            label, target, weight.num_entries(), weight.num_ranges());
+                        for tsid in 0..dwa.num_tsids {
+                            let tokens = weight.tokens_for_tsid(tsid);
+                            if !tokens.is_empty() {
+                                let vals: Vec<u32> = tokens.iter_values().collect();
+                                eprintln!("      TSID {} → tokens: {:?}", tsid, vals);
+                            }
+                        }
+                    }
+                    if let Some(ref fw) = state.final_weight {
+                        eprintln!("    FINAL ({} entries, {} ranges)", fw.num_entries(), fw.num_ranges());
+                        for tsid in 0..dwa.num_tsids {
+                            let tokens = fw.tokens_for_tsid(tsid);
+                            if !tokens.is_empty() {
+                                let vals: Vec<u32> = tokens.iter_values().collect();
+                                eprintln!("      TSID {} → tokens: {:?}", tsid, vals);
+                            }
+                        }
+                    }
                 }
-                let mut trial = self.clone();
-                trial.commit(token_id as u32);
-                let viable = has_viable_state(&trial.state, &self.constraint.table, &reachable, initial_tok, &self.constraint.tokenizer.dfa);
-                if viable {
-                    mask.set(token_id);
-                    _rescued += 1;
+                eprintln!("=== Stacks being walked ===");
+                for (&tok_state, stacks) in &stacks_map {
+                    let tsid = if (tok_state as usize) < self.constraint.state_to_tsid.len() {
+                        self.constraint.state_to_tsid[tok_state as usize]
+                    } else { u32::MAX };
+                    eprintln!("  tok_state={}, tsid={}", tok_state, tsid);
+                    for stack in stacks {
+                        eprintln!("    stack: {:?}", stack);
+                    }
+                }
+                eprintln!("=== END DWA DUMP ===\n");
+            }
+            super::mask::compute_mask(
+                &stacks_map,
+                &self.constraint.parser_dwa,
+                &self.constraint.state_to_tsid,
+                self.constraint.max_token,
+                self.constraint.num_tsids,
+            )
+        };
+        let _t_dwa = _t_dwa_start.elapsed();
+
+        let _t_phase1 = _t_mask_start.elapsed();
+
+        // Compute expected terminals per tokenizer state (needed for Phase 2/3).
+        let _t_expected_start = std::time::Instant::now();
+        let reachable = &self.constraint.reachable_terminals;
+        let expected_per_tok = self.compute_expected_per_tok();
+        let _t_expected = _t_expected_start.elapsed();
+
+        // Phase 2: Fast DWA false-positive filter.
+        //
+        // Walk the tokenizer DFA for each DWA-approved token's bytes. At the
+        // first terminal boundary, check if the matched terminal is in the
+        // expected set for the active tokenizer state. If NO active state
+        // produces an expected first terminal, do a full trial-commit to verify.
+        //
+        // This catches the common DWA false positive: multi-byte tokens whose
+        // first byte matches a terminal the parser doesn't expect (e.g. token
+        // "[]" after "[" already committed, or token '{"' after '{').
+        //
+        // Cost: O(DWA_candidates × avg_bytes_to_first_terminal) for the fast
+        // check (~µs), plus O(false_positive_count × commit_cost) for the
+        // trial commits (typically 0-2 tokens).
+        let _dwa_count = mask.count_ones();
+        let mut _filtered = 0usize;
+        // Collect candidate token IDs to avoid mutating mask while iterating.
+        let dwa_candidates: Vec<usize> = mask.iter_ones().collect();
+        for token_id in dwa_candidates {
+            if self.constraint.eos_token_id == Some(token_id as u32) {
+                continue;
+            }
+            let bytes = match self.constraint.token_bytes.get(&(token_id as u32)) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // Check: for any active tokenizer state, does the first terminal
+            // match in this token's bytes use an expected terminal?
+            let mut any_path_valid = false;
+            for (&tok_state, _gss) in &self.state {
+                let expected = match expected_per_tok.get(&tok_state) {
+                    Some(e) => e,
+                    None => { any_path_valid = true; continue; }
+                };
+
+                let mut state = tok_state;
+                let mut found_terminal = false;
+                let mut first_terminal_expected = false;
+                for &byte in bytes.iter() {
+                    state = self.constraint.tokenizer.dfa.get_transition(state, byte);
+                    if state == crate::automata::dfa::DEAD {
+                        break;
+                    }
+                    let finals = self.constraint.tokenizer.dfa.finalizers(state);
+                    if !finals.is_empty() {
+                        found_terminal = true;
+                        if finals.iter().any(|&gid| expected.contains(&(gid as TerminalId))) {
+                            first_terminal_expected = true;
+                        }
+                        break; // Only check the first terminal boundary.
+                    }
+                }
+
+                if !found_terminal || first_terminal_expected {
+                    // No terminal boundary in this token → passthrough, DWA
+                    // accepted for valid reasons. Or first terminal was expected.
+                    any_path_valid = true;
+                    break;
                 }
             }
 
+            if !any_path_valid {
+                // First-terminal check failed for all active tokenizer states.
+                // Full trial-commit to confirm it's actually a false positive.
+                let mut trial = self.clone();
+                trial.commit(token_id as u32);
+                let viable = has_viable_state(
+                    &trial.state,
+                    &self.constraint.table,
+                    &reachable,
+                    initial_tok,
+                    &self.constraint.tokenizer.dfa,
+                );
+                if !viable {
+                    mask.clear(token_id);
+                    _filtered += 1;
+                }
+            }
         }
+
+        let _t_phase2 = _t_mask_start.elapsed();
+
+        // Phase 3: Rescue — REMOVED.
+        //
+        // Previously, this phase trial-committed tokens that the DWA might
+        // have missed (DWA false negatives from determinization precision loss).
+        // It has been removed so the fast path (DWA + post-filter) stands on
+        // its own. Any remaining DWA false negatives will surface as missing
+        // tokens in the mask.
+        let _rescued_terminal = 0usize;
+        let _filtered_terminal = 0usize;
+        let _terminal_count = 0usize;
+        let _rescued_passthrough = 0usize;
+        let _passthrough_count = 0usize;
+
+        let _t_phase3 = _t_mask_start.elapsed();
 
         // EOS token handling: EOS is not a regular byte-sequence token.
         // Remove it from the DWA/post-filter result and add it back only
@@ -340,7 +592,77 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
+        eprintln!("[compute_mask] stacks={:.3}ms dwa_walk={:.3}ms expected={:.3}ms phase1_total={:.3}ms phase2(post-filter)={:.3}ms[{} cands, {} filtered] phase3(rescue)={:.3}ms[term_cands={}, term_filtered={}, term_rescued={}, pt_cands={}, pt_rescued={}] total={:.3}ms",
+            _t_stacks.as_secs_f64() * 1000.0,
+            _t_dwa.as_secs_f64() * 1000.0,
+            _t_expected.as_secs_f64() * 1000.0,
+            _t_phase1.as_secs_f64() * 1000.0,
+            (_t_phase2 - _t_phase1 - _t_expected).as_secs_f64() * 1000.0,
+            _dwa_count, _filtered,
+            (_t_phase3 - _t_phase2).as_secs_f64() * 1000.0,
+            _terminal_count, _filtered_terminal, _rescued_terminal, _passthrough_count, _rescued_passthrough,
+            _t_mask_start.elapsed().as_secs_f64() * 1000.0,
+        );
+
         mask
+    }
+
+    /// Compute expected terminals per tokenizer state from parser stacks.
+    /// Includes reduce-cascade expansion.
+    fn compute_expected_per_tok(&self) -> BTreeMap<u32, BTreeSet<TerminalId>> {
+        let mut expected_per_tok: BTreeMap<u32, BTreeSet<TerminalId>> = BTreeMap::new();
+        for (&tok_state, gss) in &self.state {
+            let expected = expected_per_tok.entry(tok_state).or_default();
+            let top_states = gss.peek();
+            for &top in &top_states {
+                if let Some(actions_map) = self.constraint.table.action.get(top as usize) {
+                    for &terminal in actions_map.keys() {
+                        if terminal < self.constraint.table.num_terminals {
+                            expected.insert(terminal);
+                        }
+                    }
+                }
+            }
+            // Reduce cascade: discover additional expected terminals after
+            // reduce actions expose deeper parser states.
+            {
+                let mut reduce_queue: Vec<(u32, u32)> = Vec::new();
+                for &top in &top_states {
+                    if let Some(actions_map) = self.constraint.table.action.get(top as usize) {
+                        for (_terminal, actions) in actions_map {
+                            for action in actions {
+                                if let crate::compiler::glr::table::Action::Reduce(rule_idx) = action {
+                                    reduce_queue.push((top, *rule_idx));
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut visited_reduces: BTreeSet<(u32, u32)> = BTreeSet::new();
+                while let Some((top, rule_idx)) = reduce_queue.pop() {
+                    if !visited_reduces.insert((top, rule_idx)) {
+                        continue;
+                    }
+                    let rule = &self.constraint.table.rules[rule_idx as usize];
+                    let pop_count = rule.rhs.len();
+                    for (stack, _) in gss.to_stacks() {
+                        if stack.len() > pop_count {
+                            let exposed = stack[stack.len() - 1 - pop_count];
+                            if let Some(goto_state) = self.constraint.table.goto_target(exposed, rule.lhs) {
+                                if let Some(actions_map) = self.constraint.table.action.get(goto_state as usize) {
+                                    for &terminal in actions_map.keys() {
+                                        if terminal < self.constraint.table.num_terminals {
+                                            expected.insert(terminal);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        expected_per_tok
     }
 
     /// Whether the current state is accepting (grammar allows end-of-input here).

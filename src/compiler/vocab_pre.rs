@@ -39,7 +39,17 @@ impl VocabPreprocessing {
     /// For each reachable tokenizer DFA state (TSID) and each LLM token,
     /// run the token's bytes through the tokenizer and record which
     /// terminals match.
-    pub fn compute(tokenizer: &TokenizerDfa, vocab: &Vocab) -> Self {
+    ///
+    /// If `used_terminals` is provided, TSIDs whose start state cannot reach
+    /// any terminal in the set are skipped in Phase 3 (their `possible_matches`
+    /// and `passthrough_tokens` entries remain empty). This can dramatically
+    /// reduce Phase 3 cost when only a few terminals are actually used by
+    /// the grammar's parse table.
+    pub fn compute(
+        tokenizer: &TokenizerDfa,
+        vocab: &Vocab,
+        used_terminals: Option<&BTreeSet<TerminalId>>,
+    ) -> Self {
         use std::time::Instant;
         let t_start = Instant::now();
 
@@ -52,28 +62,54 @@ impl VocabPreprocessing {
         };
 
         // Phase 1: Find all reachable DFA states.
+        //
+        // When used_terminals is provided, we can use a fast byte-level
+        // reachability analysis instead of running full tokens through the DFA.
+        // The byte-level analysis over-approximates (some states may be reachable
+        // by bytes but not by complete tokens), but extra TSIDs are harmless
+        // because Phase 3 and token iteration skip useless TSIDs anyway.
         let t = Instant::now();
-        let mut reachable: BTreeSet<u32> = BTreeSet::new();
-        reachable.insert(tokenizer.start_state());
-
-        // BFS: only process newly discovered states each round.
-        let mut frontier: Vec<u32> = vec![tokenizer.start_state()];
-        let mut iterations = 0u32;
-        while !frontier.is_empty() {
-            iterations += 1;
-            let mut next_frontier = Vec::new();
-            for &start_state in &frontier {
-                for (_token_id, token_bytes) in &vocab.entries {
-                    let (end_state, _) = tokenizer.execute(token_bytes, start_state);
-                    if end_state != DEAD && reachable.insert(end_state) {
-                        next_frontier.push(end_state);
+        let (reachable, phase1_method) = if used_terminals.is_some() {
+            // Fast path: byte-level reachability via DFA transition table.
+            let mut visited = vec![false; num_dfa_states as usize];
+            let mut frontier = vec![tokenizer.start_state()];
+            visited[tokenizer.start_state() as usize] = true;
+            while let Some(state) = frontier.pop() {
+                for byte in 0..=255u8 {
+                    let next = tokenizer.dfa.get_transition(state, byte);
+                    if next != DEAD && !(visited[next as usize]) {
+                        visited[next as usize] = true;
+                        frontier.push(next);
                     }
                 }
             }
-            frontier = next_frontier;
-        }
-        eprintln!("[vocab_pre] Phase 1 (reachable): {:.3}s ({} states, {} iters, {} DFA states)",
-            t.elapsed().as_secs_f64(), reachable.len(), iterations, num_dfa_states);
+            let reachable: BTreeSet<u32> = (0..num_dfa_states)
+                .filter(|&s| visited[s as usize])
+                .collect();
+            (reachable, "byte-reachable")
+        } else {
+            // Full BFS with token execution (original behavior for tests).
+            let mut reachable: BTreeSet<u32> = BTreeSet::new();
+            reachable.insert(tokenizer.start_state());
+            let mut frontier: Vec<u32> = vec![tokenizer.start_state()];
+            let mut _iterations = 0u32;
+            while !frontier.is_empty() {
+                _iterations += 1;
+                let mut next_frontier = Vec::new();
+                for &start_state in &frontier {
+                    for (_token_id, token_bytes) in &vocab.entries {
+                        let (end_state, _) = tokenizer.execute(token_bytes, start_state);
+                        if end_state != DEAD && reachable.insert(end_state) {
+                            next_frontier.push(end_state);
+                        }
+                    }
+                }
+                frontier = next_frontier;
+            }
+            (reachable, "token-BFS")
+        };
+        eprintln!("[vocab_pre] Phase 1 (reachable): {:.3}s ({} states, {}, {} DFA states)",
+            t.elapsed().as_secs_f64(), reachable.len(), phase1_method, num_dfa_states);
 
         // Phase 2: Assign TSID indices.
         let t = Instant::now();
@@ -89,39 +125,80 @@ impl VocabPreprocessing {
 
         // Phase 3: For each TSID, run all tokens and collect matches.
         // Parallelized across TSIDs with rayon for ~8-10x speedup.
+        // When used_terminals is provided, skip TSIDs whose start state
+        // can never reach any used terminal (reachability check).
         let t = Instant::now();
         let reachable = tokenizer.compute_reachable_terminals();
+
+        // Pre-compute which TSIDs to skip based on terminal reachability.
+        let skip_tsid: Vec<bool> = if let Some(used) = used_terminals {
+            tsid_to_state.iter().map(|&dfa_state| {
+                let state_reachable = &reachable[dfa_state as usize];
+                !state_reachable.iter().any(|t| used.contains(t))
+            }).collect()
+        } else {
+            vec![false; num_tsids as usize]
+        };
+        let skipped_count = skip_tsid.iter().filter(|&&s| s).count();
 
         #[cfg(feature = "rayon")]
         let (possible_matches, passthrough_tokens) = {
             use rayon::prelude::*;
             let results: Vec<(BTreeMap<TerminalId, RangeSet>, RangeSet)> = tsid_to_state
                 .par_iter()
-                .map(|&dfa_state| {
-                    let mut pm: BTreeMap<TerminalId, RangeSet> = BTreeMap::new();
-                    let mut pt = RangeSet::new();
+                .enumerate()
+                .map(|(tsid_idx, &dfa_state)| {
+                    if skip_tsid[tsid_idx] {
+                        return (BTreeMap::new(), RangeSet::new());
+                    }
+                    // Collect (terminal, token_id) pairs for batch RangeSet construction.
+                    // Uses zero-allocation callback to avoid BTreeSet per match.
+                    let mut pairs: Vec<(TerminalId, u32)> = Vec::new();
+                    let mut pt_ids: Vec<u32> = Vec::new();
                     for &(token_id, ref token_bytes) in &vocab.entries {
-                        let result = tokenizer.execute_all_matches(token_bytes, dfa_state);
-                        let mut all_matched = BTreeSet::new();
-                        for (_offset, terminals) in &result.matches {
-                            for &terminal in terminals {
-                                all_matched.insert(terminal);
-                                pm.entry(terminal).or_default().insert(token_id);
+                        let mut any_matched = false;
+                        let end_state = tokenizer.execute_all_matches_cb(token_bytes, dfa_state, |_offset, finalizers| {
+                            for &gid in finalizers {
+                                any_matched = true;
+                                pairs.push((gid as TerminalId, token_id));
                             }
-                        }
-                        if result.end_state != DEAD {
-                            if let Some(rt) = reachable.get(result.end_state as usize) {
+                        });
+                        if end_state != DEAD {
+                            if let Some(rt) = reachable.get(end_state as usize) {
                                 for &reachable_terminal in rt {
-                                    if !all_matched.contains(&reachable_terminal) {
-                                        pm.entry(reachable_terminal).or_default().insert(token_id);
-                                    }
+                                    // Duplicates handled by sort+dedup below.
+                                    pairs.push((reachable_terminal, token_id));
                                 }
                             }
-                            if all_matched.is_empty() {
-                                pt.insert(token_id);
+                            if !any_matched {
+                                pt_ids.push(token_id);
                             }
                         }
                     }
+                    // Sort by (terminal, token_id), dedup, then batch-build RangeSets.
+                    pairs.sort_unstable();
+                    pairs.dedup();
+                    let mut pm: BTreeMap<TerminalId, RangeSet> = BTreeMap::new();
+                    let mut i = 0;
+                    while i < pairs.len() {
+                        let terminal = pairs[i].0;
+                        let start = i;
+                        while i < pairs.len() && pairs[i].0 == terminal {
+                            i += 1;
+                        }
+                        let rs = RangeSet::from_ranges(
+                            pairs[start..i].iter().map(|&(_, tid)| (tid, tid))
+                        );
+                        pm.insert(terminal, rs);
+                    }
+                    // Batch-build passthrough RangeSet.
+                    let pt = if !pt_ids.is_empty() {
+                        pt_ids.sort_unstable();
+                        pt_ids.dedup();
+                        RangeSet::from_ranges(pt_ids.iter().map(|&tid| (tid, tid)))
+                    } else {
+                        RangeSet::new()
+                    };
                     (pm, pt)
                 })
                 .collect();
@@ -136,44 +213,68 @@ impl VocabPreprocessing {
 
         #[cfg(not(feature = "rayon"))]
         let (possible_matches, passthrough_tokens) = {
+            // Collect (terminal, token_id) pairs per TSID, then batch-build RangeSets
+            // to avoid the per-insert Arc clone in RangeSet::insert().
             let mut possible_matches: Vec<BTreeMap<TerminalId, RangeSet>> =
                 vec![BTreeMap::new(); num_tsids as usize];
             let mut passthrough_tokens: Vec<RangeSet> =
                 vec![RangeSet::new(); num_tsids as usize];
             for (tsid, &dfa_state) in tsid_to_state.iter().enumerate() {
+                if skip_tsid[tsid] {
+                    continue;
+                }
+                // Collect (terminal, token_id) pairs for batch RangeSet construction.
+                // Uses zero-allocation callback to avoid BTreeSet per match.
+                let mut pairs: Vec<(TerminalId, u32)> = Vec::new();
+                let mut pt_ids: Vec<u32> = Vec::new();
                 for &(token_id, ref token_bytes) in &vocab.entries {
-                    let result = tokenizer.execute_all_matches(token_bytes, dfa_state);
-                    let mut all_matched = BTreeSet::new();
-                    for (_offset, terminals) in &result.matches {
-                        for &terminal in terminals {
-                            all_matched.insert(terminal);
-                            possible_matches[tsid]
-                                .entry(terminal)
-                                .or_default()
-                                .insert(token_id);
+                    let mut any_matched = false;
+                    let end_state = tokenizer.execute_all_matches_cb(token_bytes, dfa_state, |_offset, finalizers| {
+                        for &gid in finalizers {
+                            any_matched = true;
+                            pairs.push((gid as TerminalId, token_id));
                         }
-                    }
-                    if result.end_state != DEAD {
-                        if let Some(rt) = reachable.get(result.end_state as usize) {
+                    });
+                    if end_state != DEAD {
+                        if let Some(rt) = reachable.get(end_state as usize) {
                             for &reachable_terminal in rt {
-                                if !all_matched.contains(&reachable_terminal) {
-                                    possible_matches[tsid]
-                                        .entry(reachable_terminal)
-                                        .or_default()
-                                        .insert(token_id);
-                                }
+                                // Duplicates handled by sort+dedup below.
+                                pairs.push((reachable_terminal, token_id));
                             }
                         }
-                        if all_matched.is_empty() {
-                            passthrough_tokens[tsid].insert(token_id);
+                        if !any_matched {
+                            pt_ids.push(token_id);
                         }
                     }
+                }
+                // Sort by (terminal, token_id), dedup, then batch-build RangeSets.
+                pairs.sort_unstable();
+                pairs.dedup();
+                let mut i = 0;
+                while i < pairs.len() {
+                    let terminal = pairs[i].0;
+                    let start = i;
+                    while i < pairs.len() && pairs[i].0 == terminal {
+                        i += 1;
+                    }
+                    let rs = RangeSet::from_ranges(
+                        pairs[start..i].iter().map(|&(_, tid)| (tid, tid))
+                    );
+                    possible_matches[tsid].insert(terminal, rs);
+                }
+                // Batch-build passthrough RangeSet.
+                if !pt_ids.is_empty() {
+                    pt_ids.sort_unstable();
+                    pt_ids.dedup();
+                    passthrough_tokens[tsid] = RangeSet::from_ranges(
+                        pt_ids.iter().map(|&tid| (tid, tid))
+                    );
                 }
             }
             (possible_matches, passthrough_tokens)
         };
 
-        eprintln!("[vocab_pre] Phase 3 (matches):   {:.3}s", t.elapsed().as_secs_f64());
+        eprintln!("[vocab_pre] Phase 3 (matches):   {:.3}s (skipped {}/{} TSIDs)", t.elapsed().as_secs_f64(), skipped_count, num_tsids);
         eprintln!("[vocab_pre] Total:                {:.3}s", t_start.elapsed().as_secs_f64());
 
         Self {
@@ -230,7 +331,7 @@ mod tests {
             ],
             None,
         );
-        let vp = VocabPreprocessing::compute(&tok, &vocab);
+        let vp = VocabPreprocessing::compute(&tok, &vocab, None);
 
         assert!(vp.num_tsids >= 1);
 

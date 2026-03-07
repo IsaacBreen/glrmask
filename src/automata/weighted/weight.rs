@@ -153,6 +153,11 @@ pub struct Weight {
     entries: Vec<(u32, u32, RangeSet)>,
     /// Number of token-set IDs (always ≥ 1).
     num_tsids: u32,
+    /// Conservative flag: `true` means this weight covers all positions.
+    /// Only set by `Weight::all()`.  Used for fast-path short-circuits
+    /// in `intersection`, `union`, and `divide`.
+    #[serde(default)]
+    pub(crate) is_full: bool,
 }
 
 impl Weight {
@@ -163,6 +168,7 @@ impl Weight {
         Self {
             entries: Vec::new(),
             num_tsids: num_tsids.max(1),
+            is_full: false,
         }
     }
 
@@ -178,6 +184,7 @@ impl Weight {
         Self {
             entries,
             num_tsids: num_tsids.max(1),
+            is_full: false,
         }
     }
 
@@ -191,6 +198,7 @@ impl Weight {
         Self {
             entries: vec![(tsid, tsid, RangeSet::from_range(token, token))],
             num_tsids,
+            is_full: false,
         }
     }
 
@@ -211,7 +219,7 @@ impl Weight {
             .iter_ranges()
             .map(|(lo, hi)| (lo, hi, token_rs.clone()))
             .collect();
-        Self { entries, num_tsids }
+        Self { entries, num_tsids, is_full: false }
     }
 
     /// Create a weight covering all positions from 0 to `max_position`
@@ -222,6 +230,7 @@ impl Weight {
             return Self {
                 entries: vec![(0, 0, RangeSet::from_range(0, max_position))],
                 num_tsids,
+                is_full: true,
             };
         }
 
@@ -233,6 +242,7 @@ impl Weight {
             return Self {
                 entries: vec![(0, max_tsid, full_tokens)],
                 num_tsids,
+                is_full: true,
             };
         }
 
@@ -244,7 +254,7 @@ impl Weight {
             let prefix_tokens = RangeSet::from_range(0, max_token - 1);
             entries.push((max_tsid + 1, num_tsids - 1, prefix_tokens));
         }
-        Self { entries, num_tsids }
+        Self { entries, num_tsids, is_full: true }
     }
 
     /// Construct from flat position ranges (position = token × num_tsids + tsid).
@@ -316,7 +326,7 @@ impl Weight {
             entries.push((start, cur_end, cur_rs));
         }
 
-        Self { entries, num_tsids }
+        Self { entries, num_tsids, is_full: false }
     }
 
     // ---- Queries ----
@@ -417,6 +427,11 @@ impl Weight {
     /// Compute the union of two weights.
     pub fn union(&self, other: &Self) -> Self {
         debug_assert_eq!(self.num_tsids, other.num_tsids);
+        if self.is_full || other.is_full {
+            // all | x = all.  Return whichever is full (both may be;
+            // choosing `self` is fine since structurally they are equal).
+            return if self.is_full { self.clone() } else { other.clone() };
+        }
         if self.is_empty() {
             return other.clone();
         }
@@ -436,10 +451,56 @@ impl Weight {
         if self.is_empty() || other.is_empty() {
             return Self::empty(self.num_tsids);
         }
-        Self::merge(self, other, |a, b| match (a, b) {
-            (Some(a), Some(b)) => a.intersection(b),
-            _ => RangeSet::new(),
-        })
+        // Fast path: all ∩ x = x.
+        if self.is_full {
+            return other.clone();
+        }
+        if other.is_full {
+            return self.clone();
+        }
+        // Specialized two-pointer sweep (avoids boundary collection + sort
+        // in the generic merge path).
+        let mut entries: Vec<(u32, u32, RangeSet)> = Vec::new();
+        let mut ai = 0usize;
+        let mut bi = 0usize;
+        let a = &self.entries;
+        let b = &other.entries;
+        while ai < a.len() && bi < b.len() {
+            let (a_lo, a_hi, ref a_rs) = a[ai];
+            let (b_lo, b_hi, ref b_rs) = b[bi];
+            // No TSID overlap → advance the earlier range.
+            if a_hi < b_lo {
+                ai += 1;
+                continue;
+            }
+            if b_hi < a_lo {
+                bi += 1;
+                continue;
+            }
+            // Overlapping TSID interval.
+            let lo = a_lo.max(b_lo);
+            let hi = a_hi.min(b_hi);
+            let rs = a_rs.intersection(b_rs);
+            if !rs.is_empty() {
+                // Try to coalesce with the previous entry.
+                if let Some(last) = entries.last_mut() {
+                    if last.2 == rs && last.1 + 1 == lo {
+                        last.1 = hi;
+                    } else {
+                        entries.push((lo, hi, rs));
+                    }
+                } else {
+                    entries.push((lo, hi, rs));
+                }
+            }
+            // Advance the pointer whose range ends first.
+            if a_hi <= b_hi {
+                ai += 1;
+            } else {
+                bi += 1;
+            }
+        }
+        Self { entries, num_tsids: self.num_tsids, is_full: false }
     }
 
     /// Compute the set difference `self − other`.
@@ -447,6 +508,10 @@ impl Weight {
         debug_assert_eq!(self.num_tsids, other.num_tsids);
         if self.is_empty() || other.is_empty() {
             return self.clone();
+        }
+        // Fast path: anything minus ALL = empty
+        if other.is_full {
+            return Self::empty(self.num_tsids);
         }
         Self::merge(self, other, |a, b| match (a, b) {
             (Some(a), Some(b)) => a.difference(b),
@@ -468,17 +533,203 @@ impl Weight {
     /// complement universe.
     pub fn divide(&self, other: &Self, max_token: u32) -> Self {
         debug_assert_eq!(self.num_tsids, other.num_tsids);
+        // Fast path: divide(all, any) = all  (full | (full - b) = full for all b)
+        if self.is_full {
+            return self.clone();
+        }
+        // Fast path: divide(w, all) = w  (a | (full - full) = a | ∅ = a)
+        if other.is_full {
+            return self.clone();
+        }
+        // Use complement approach: divide(a, b) = a | !b
+        // This correctly handles TSIDs not covered by either input.
         let full = RangeSet::from_range(0, max_token);
-        Self::merge(self, other, |a, b| {
-            let rhs_comp = match b {
-                Some(b) => full.difference(b),
-                None => full.clone(),
-            };
-            match a {
-                Some(a) => a.union(&rhs_comp),
-                None => rhs_comp,
+        let comp = other.divide_complement(max_token);
+        self.divide_with_complement(&comp, &full)
+    }
+
+    /// Compute the "divide complement" of `self` within `[0, max_token]`.
+    ///
+    /// Returns a weight covering ALL TSIDs (0..num_tsids-1) where:
+    /// - TSIDs with entries get `full.difference(entry_value)`
+    /// - TSIDs without entries get `full` (the full token range)
+    ///
+    /// This can be precomputed once for a divisor and reused across
+    /// multiple `divide_with_complement` calls.
+    pub fn divide_complement(&self, max_token: u32) -> Self {
+        if self.is_full {
+            return Self::empty(self.num_tsids);
+        }
+        let full = RangeSet::from_range(0, max_token);
+        let nt = self.num_tsids.max(1);
+        let mut entries: Vec<(u32, u32, RangeSet)> = Vec::new();
+        let mut pos = 0u32;
+
+        for &(lo, hi, ref rs) in &self.entries {
+            // Gap before this entry: fill with `full`
+            if pos < lo {
+                entries.push((pos, lo - 1, full.clone()));
             }
-        })
+            // This entry: complement
+            let comp = full.difference(rs);
+            if !comp.is_empty() {
+                entries.push((lo, hi, comp));
+            }
+            pos = hi + 1;
+        }
+        // Trailing gap: fill with `full`
+        if pos < nt {
+            entries.push((pos, nt - 1, full.clone()));
+        }
+
+        // Coalesce adjacent entries with same value
+        let mut coalesced: Vec<(u32, u32, RangeSet)> = Vec::with_capacity(entries.len());
+        for (lo, hi, rs) in entries {
+            if let Some(last) = coalesced.last_mut() {
+                if last.2 == rs && last.1 + 1 == lo {
+                    last.1 = hi;
+                    continue;
+                }
+            }
+            coalesced.push((lo, hi, rs));
+        }
+
+        Self {
+            entries: coalesced,
+            num_tsids: nt,
+            is_full: false,
+        }
+    }
+
+    /// Divide using a precomputed complement: `self | complement`.
+    ///
+    /// `complement` must be the result of `divisor.divide_complement(max_token)`.
+    /// This computes `self | complement` which equals `self.divide(divisor, max_token)`.
+    ///
+    /// Specialized implementation that exploits the complement's structure:
+    /// most complement entries are `full` (where `x | full = full`), so we
+    /// only compute actual unions for the few non-`full` entries.
+    pub fn divide_with_complement(&self, complement: &Self, full: &RangeSet) -> Self {
+        // Fast path: self | complement where self is full → full
+        if self.is_full {
+            return self.clone();
+        }
+
+        let nt = self.num_tsids.max(1);
+
+        // Walk through complement entries. The complement covers all TSIDs
+        // (except gaps where divisor had full value — result there is self_val).
+        //
+        // For complement entries with value == full: result = full (skip self lookup)
+        // For complement entries with value != full: result = self_val | comp_val
+        // For gaps in complement: result = self_val (if any)
+
+        let mut entries: Vec<(u32, u32, RangeSet)> = Vec::with_capacity(
+            complement.entries.len() + self.entries.len(),
+        );
+        let mut a_idx: usize = 0; // index into self.entries
+        let mut pos: u32 = 0;
+
+        for &(c_lo, c_hi, ref c_rs) in &complement.entries {
+            // Process any self entries before this complement entry
+            // (in gaps where complement has no entry)
+            while a_idx < self.entries.len() && self.entries[a_idx].1 < c_lo {
+                let (a_lo, a_hi, ref a_rs) = self.entries[a_idx];
+                if a_lo >= pos {
+                    Self::push_coalesce(&mut entries, a_lo, a_hi, a_rs.clone());
+                } else if a_hi >= pos {
+                    Self::push_coalesce(&mut entries, pos, a_hi, a_rs.clone());
+                }
+                a_idx += 1;
+            }
+
+            // Check if complement value is full (most common case)
+            if *c_rs == *full {
+                Self::push_coalesce(&mut entries, c_lo, c_hi, full.clone());
+            } else {
+                // Need to check self's entries overlapping [c_lo, c_hi]
+                // and compute unions for overlapping sub-ranges.
+                let mut sub_pos = c_lo;
+
+                // Find the first self entry that could overlap [c_lo, c_hi]
+                let mut local_ai = a_idx;
+                while local_ai < self.entries.len() && self.entries[local_ai].1 < c_lo {
+                    local_ai += 1;
+                }
+
+                while sub_pos <= c_hi {
+                    if local_ai >= self.entries.len() || self.entries[local_ai].0 > c_hi {
+                        // No more self entries in range: rest is just comp value
+                        Self::push_coalesce(&mut entries, sub_pos, c_hi, c_rs.clone());
+                        break;
+                    }
+
+                    let (a_lo, a_hi, ref a_rs) = self.entries[local_ai];
+
+                    // Gap before self entry: just complement value
+                    if sub_pos < a_lo && a_lo <= c_hi {
+                        Self::push_coalesce(
+                            &mut entries,
+                            sub_pos,
+                            (a_lo - 1).min(c_hi),
+                            c_rs.clone(),
+                        );
+                        sub_pos = a_lo;
+                    }
+
+                    if a_lo > c_hi {
+                        // Self entry starts after complement entry
+                        Self::push_coalesce(&mut entries, sub_pos, c_hi, c_rs.clone());
+                        break;
+                    }
+
+                    // Overlap: compute union
+                    let overlap_lo = sub_pos.max(a_lo);
+                    let overlap_hi = a_hi.min(c_hi);
+                    let union_rs = a_rs.union(c_rs);
+                    Self::push_coalesce(&mut entries, overlap_lo, overlap_hi, union_rs);
+
+                    sub_pos = overlap_hi + 1;
+                    if a_hi <= c_hi {
+                        local_ai += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            pos = c_hi + 1;
+        }
+
+        // Process any remaining self entries after the last complement entry
+        while a_idx < self.entries.len() {
+            let (a_lo, a_hi, ref a_rs) = self.entries[a_idx];
+            if a_hi >= pos {
+                let eff_lo = a_lo.max(pos);
+                Self::push_coalesce(&mut entries, eff_lo, a_hi, a_rs.clone());
+            }
+            a_idx += 1;
+        }
+
+        Self {
+            entries,
+            num_tsids: nt,
+            is_full: false,
+        }
+    }
+
+    /// Push an entry with coalescing: merge with the previous entry if
+    /// it has the same value and is adjacent.
+    fn push_coalesce(entries: &mut Vec<(u32, u32, RangeSet)>, lo: u32, hi: u32, rs: RangeSet) {
+        if rs.is_empty() || lo > hi {
+            return;
+        }
+        if let Some(last) = entries.last_mut() {
+            if last.2 == rs && last.1 + 1 == lo {
+                last.1 = hi;
+                return;
+            }
+        }
+        entries.push((lo, hi, rs));
     }
 
     /// Check whether two weights are disjoint.
@@ -536,6 +787,10 @@ impl Weight {
     /// partitioned into uniform sub-intervals, and the `combine` closure is
     /// called for each.  Adjacent intervals with identical results are
     /// coalesced.
+    ///
+    /// NOTE: This function only visits TSID ranges covered by at least one
+    /// boundary point.  If `combine(None, None)` can return a non-empty
+    /// result, callers must ensure all relevant TSIDs are covered.
     fn merge<F>(a: &Weight, b: &Weight, combine: F) -> Weight
     where
         F: Fn(Option<&RangeSet>, Option<&RangeSet>) -> RangeSet,
@@ -569,6 +824,10 @@ impl Weight {
         let mut cur_end: u32 = 0;
         let mut cur_value = RangeSet::new();
 
+        // Position-tracking indices — advance linearly instead of binary search
+        let mut a_idx: usize = 0;
+        let mut b_idx: usize = 0;
+
         for (idx, &start) in boundaries.iter().enumerate() {
             let end = if idx + 1 < boundaries.len() {
                 boundaries[idx + 1] - 1
@@ -580,8 +839,36 @@ impl Weight {
                 continue;
             }
 
-            let a_val = a.get_value(start);
-            let b_val = b.get_value(start);
+            // Advance a_idx past entries that end before `start`
+            while a_idx < a.entries.len() && a.entries[a_idx].1 < start {
+                a_idx += 1;
+            }
+            let a_val = if a_idx < a.entries.len() {
+                let (a_lo, a_hi, ref a_rs) = a.entries[a_idx];
+                if start >= a_lo && start <= a_hi {
+                    Some(a_rs)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Advance b_idx past entries that end before `start`
+            while b_idx < b.entries.len() && b.entries[b_idx].1 < start {
+                b_idx += 1;
+            }
+            let b_val = if b_idx < b.entries.len() {
+                let (b_lo, b_hi, ref b_rs) = b.entries[b_idx];
+                if start >= b_lo && start <= b_hi {
+                    Some(b_rs)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let combined = combine(a_val, b_val);
 
             if combined.is_empty() {
@@ -608,7 +895,7 @@ impl Weight {
             entries.push((range_start, cur_end, cur_value));
         }
 
-        Weight { entries, num_tsids }
+        Weight { entries, num_tsids, is_full: false }
     }
 }
 
@@ -635,19 +922,117 @@ impl std::hash::Hash for Weight {
 }
 
 impl std::fmt::Display for Weight {
+    /// Compact structural display: `{tsid_range: token_set, ...}`
+    ///
+    /// Examples:
+    /// - `{0: {0, 3, 5}, 1..=3: {1..=5, 7, 9..=11}}`
+    /// - `∅` (empty weight)
+    /// - `ALL` (full weight)
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Weight(tsids={}, [", self.num_tsids)?;
+        if self.is_empty() {
+            return write!(f, "∅");
+        }
+        if self.is_full {
+            return write!(f, "ALL");
+        }
+        write!(f, "{{")?;
         for (i, (lo, hi, rs)) in self.entries.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
             if lo == hi {
-                write!(f, "{lo}→{rs}")?;
+                write!(f, "{lo}: {rs}")?;
             } else {
-                write!(f, "{lo}..={hi}→{rs}")?;
+                write!(f, "{lo}..={hi}: {rs}")?;
             }
         }
-        write!(f, "])")
+        write!(f, "}}")
+    }
+}
+
+/// Maximum number of entries before falling back to compact display in
+/// the symbol-aware weight formatter.
+const WEIGHT_SYMBOL_EXPAND_LIMIT: usize = 64;
+
+/// Wrapper to display a [`Weight`] with human-readable names for both
+/// the TSID dimension and the token dimension.
+///
+/// If either dimension exceeds [`WEIGHT_SYMBOL_EXPAND_LIMIT`], falls back
+/// to the compact/default representation.
+pub struct WeightDisplayWithMaps<'a> {
+    weight: &'a Weight,
+    /// TSID → name (e.g. "root", "state3").
+    tsid_names: &'a std::collections::BTreeMap<u32, String>,
+    /// token_id → name (e.g. `"a"`, `"$"`).
+    token_names: &'a std::collections::BTreeMap<u32, String>,
+}
+
+impl<'a> Weight {
+    /// Return a wrapper that prints this weight using human-readable names
+    /// for TSIDs and tokens.
+    pub fn display_with_maps(
+        &'a self,
+        tsid_names: &'a std::collections::BTreeMap<u32, String>,
+        token_names: &'a std::collections::BTreeMap<u32, String>,
+    ) -> WeightDisplayWithMaps<'a> {
+        WeightDisplayWithMaps {
+            weight: self,
+            tsid_names,
+            token_names,
+        }
+    }
+}
+
+impl std::fmt::Display for WeightDisplayWithMaps<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let w = self.weight;
+        if w.is_empty() {
+            return write!(f, "∅");
+        }
+        if w.is_full {
+            return write!(f, "ALL");
+        }
+
+        // Size guard: if too many entries, fall back to compact form.
+        let total_token_ranges: usize = w.entries.iter().map(|(_, _, rs)| rs.num_ranges()).sum();
+        if w.entries.len() + total_token_ranges > WEIGHT_SYMBOL_EXPAND_LIMIT {
+            return write!(f, "{w}");
+        }
+
+        write!(f, "{{")?;
+        for (i, (lo, hi, rs)) in w.entries.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            // TSID part
+            if lo == hi {
+                match self.tsid_names.get(lo) {
+                    Some(name) => write!(f, "{name}")?,
+                    None => write!(f, "tsid{lo}")?,
+                }
+            } else {
+                write!(f, "tsid{lo}..={hi}")?;
+            }
+            write!(f, ": [")?;
+            // Token part — expand individual values when small
+            let mut first = true;
+            for (tlo, thi) in rs.iter_ranges() {
+                if !first {
+                    write!(f, ", ")?;
+                }
+                first = false;
+                if tlo == thi {
+                    match self.token_names.get(&tlo) {
+                        Some(name) => write!(f, "{name}")?,
+                        None => write!(f, "tok{tlo}")?,
+                    }
+                } else {
+                    write!(f, "tok{tlo}..={thi}")?;
+                }
+            }
+            write!(f, "]")?;
+        }
+        write!(f, "}}")
     }
 }
 
@@ -915,8 +1300,13 @@ mod tests {
     fn test_weight_display() {
         let w = Weight::from_position(5, 2);
         let s = format!("{w}");
-        assert!(s.contains("Weight"));
-        assert!(s.contains("tsids=2"));
+        // New compact format: {tsid: {token_ranges}}
+        assert!(s.contains("{"));
+        assert!(s.contains("}"));
+
+        // Empty weight
+        let empty = Weight::empty(2);
+        assert_eq!(format!("{empty}"), "∅");
     }
 
     // -- Coalesce helper test --

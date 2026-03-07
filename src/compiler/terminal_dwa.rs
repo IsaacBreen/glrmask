@@ -7,7 +7,7 @@
 //! walks actual vocabulary tokens through the tokenizer and builds terminal-path
 //! structure instead of projecting everything from `possible_matches`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::Vocab;
 use crate::automata::weighted::nwa::Nwa;
@@ -21,252 +21,304 @@ use crate::ds::RangeSet;
 
 /// Reduced terminal-side compilation artifact.
 #[derive(Debug, Clone)]
-pub(crate) struct TerminalDwa {
-    pub(crate) nwa: Nwa,
-    pub(crate) tsid_roots: Vec<u32>,
+pub struct TerminalDwa {
+    pub nwa: Nwa,
+    pub tsid_roots: Vec<u32>,
     /// Non-greedy terminals at each tokenizer state; reserved for future use by
     /// the suffix-pruning optimisation.
     #[allow(dead_code)]
-    pub(crate) non_greedy_terminals_by_tokenizer_state: Vec<BTreeSet<TerminalId>>,
+    pub non_greedy_terminals_by_tokenizer_state: Vec<BTreeSet<TerminalId>>,
     /// Terminals still reachable on a non-empty continuation at each tokenizer
     /// state; reserved for the suffix-pruning optimisation.
     #[allow(dead_code)]
-    pub(crate) possible_future_terminals_by_tokenizer_state: Vec<BTreeSet<TerminalId>>,
+    pub possible_future_terminals_by_tokenizer_state: Vec<BTreeSet<TerminalId>>,
 }
 
-fn add_or_union_transition(nwa: &mut Nwa, from: u32, label: i32, to: u32, weight: Weight) {
-    let targets = nwa.states[from as usize].transitions.entry(label).or_default();
-    if let Some((_, existing)) = targets.iter_mut().find(|(dest, _)| *dest == to) {
-        *existing = existing.union(&weight);
-    } else {
-        targets.push((to, weight));
+
+/// Build a terminal DWA NWA by iterating over tokens directly.
+///
+/// For each (TSID, token), runs the tokenizer and discovers all terminal
+/// match chains. Continuation NWA states are keyed by the hash of the
+/// remaining byte suffix (equivalent to trie-node sharing) to avoid
+/// determinization-explosion from over-shared states.
+fn build_terminal_dwa_nwa(
+    tokenizer: &TokenizerDfa,
+    vocab: &Vocab,
+    vocab_pre: &VocabPreprocessing,
+    used_terminals: &BTreeSet<TerminalId>,
+) -> TerminalDwa {
+    use rustc_hash::FxHashMap;
+    use std::hash::{Hash, Hasher};
+
+    let num_tsids = vocab_pre.num_tsids;
+    let max_token = vocab_pre.max_token;
+    let mut nwa = Nwa::new(num_tsids, max_token);
+
+    // Leaf state.
+    let leaf_state = nwa.add_state();
+    nwa.set_final_weight(leaf_state, Weight::all(nwa.max_position(), num_tsids));
+
+    // Root states: one per TSID.
+    let mut tsid_roots: Vec<u32> = Vec::with_capacity(num_tsids as usize);
+    for _tsid in 0..num_tsids {
+        let root = nwa.add_state();
+        tsid_roots.push(root);
+        nwa.start_states.push(root);
     }
-}
 
-#[derive(Debug, Default, Clone)]
-struct VocabTrieNode {
-    children: BTreeMap<u8, usize>,
-    terminal_tokens: RangeSet,
-    reachable_tokens: RangeSet,
-}
+    // Continuation NWA states keyed by the hash of the remaining byte suffix.
+    // Two tokens with identical remaining bytes share the same state.
+    let mut cont_states: FxHashMap<u64, u32> = FxHashMap::default();
+    let hash_suffix = |bytes: &[u8]| -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    };
 
-fn build_vocab_trie(vocab: &Vocab) -> Vec<VocabTrieNode> {
-    let mut nodes = vec![VocabTrieNode::default()];
-    for (token_id, token_bytes) in &vocab.entries {
-        let mut node_id = 0usize;
-        nodes[node_id].reachable_tokens.insert(*token_id);
-        for &byte in token_bytes {
-            let next = if let Some(&child) = nodes[node_id].children.get(&byte) {
-                child
-            } else {
-                let child = nodes.len();
-                nodes.push(VocabTrieNode::default());
-                nodes[node_id].children.insert(byte, child);
-                child
-            };
-            node_id = next;
-            nodes[node_id].reachable_tokens.insert(*token_id);
+    // Pending transitions: (src_nwa, terminal, dst_nwa) → Vec<(tsid, token_id)>.
+    // FxHashMap for faster hashing of small integer tuples.
+    let mut pending: FxHashMap<(u32, i32, u32), Vec<(u32, u32)>> = FxHashMap::default();
+
+    let max_token_len = vocab.entries.iter().map(|(_, b)| b.len()).max().unwrap_or(0);
+
+    // Pre-compute which terminals are reachable from each tokenizer state.
+    // This lets us skip entire TSIDs whose start state can never produce a
+    // used terminal match.
+    let reachable_terminals = tokenizer.compute_reachable_terminals();
+
+    // Fast O(1) lookup for used terminals (replaces BTreeSet::contains in hot loop).
+    let max_terminal_id = used_terminals.iter().copied().max().unwrap_or(0) as usize;
+    let mut used_terminal_flags: Vec<bool> = vec![false; max_terminal_id + 1];
+    for &t in used_terminals {
+        used_terminal_flags[t as usize] = true;
+    }
+
+    // Pre-compute which DFA states have at least one used-terminal finalizer.
+    // This lets execute_all_matches_cb_filtered skip callbacks entirely for
+    // states that only match unused terminals (~99.7% of callbacks for
+    // object_simple schema).
+    let state_has_used: Vec<bool> = (0..tokenizer.num_states())
+        .map(|s| {
+            tokenizer.dfa.finalizers(s)
+                .iter()
+                .any(|&gid| gid < used_terminal_flags.len() && used_terminal_flags[gid])
+        })
+        .collect();
+
+    eprintln!("[terminal_dwa] START: {} TSIDs, {} tokens, max_token_len={}",
+        num_tsids, vocab.entries.len(), max_token_len);
+
+    let t_start = std::time::Instant::now();
+    let mut total_depth0_calls: u64 = 0;
+    let mut total_depth0_skipped: u64 = 0;
+    let mut total_cache_hits: u64 = 0;
+    let mut total_matches: u64 = 0;
+    let mut total_used_matches: u64 = 0;
+    let mut total_callbacks: u64 = 0;
+    let mut skipped_tsids: u32 = 0;
+
+    // Cache for continuation execute_all_matches results (depth > 0).
+    // Key: hash of remaining byte suffix. Value: matches from initial_state.
+    let mut cont_cache: FxHashMap<u64, Vec<(usize, BTreeSet<TerminalId>)>> = FxHashMap::default();
+
+    // TSID-first loop with continuation caching.
+    for (tsid_idx, &tok_start_state) in vocab_pre.tsid_to_state.iter().enumerate() {
+        let tsid = tsid_idx as u32;
+        let src_root = tsid_roots[tsid_idx];
+
+        // Skip TSIDs whose tokenizer start state can never reach any used terminal.
+        let state_reachable = &reachable_terminals[tok_start_state as usize];
+        if !state_reachable.iter().any(|t| used_terminals.contains(t)) {
+            skipped_tsids += 1;
+            continue;
         }
-        nodes[node_id].terminal_tokens.insert(*token_id);
-    }
-    nodes
-}
 
-#[derive(Debug)]
-struct TerminalPrecomputer<'a> {
-    tokenizer: &'a TokenizerDfa,
-    vocab_pre: &'a VocabPreprocessing,
-    trie: Vec<VocabTrieNode>,
-    nwa: Nwa,
-    leaf_state: u32,
-    tsid_roots: Vec<u32>,
-    pending_transitions: BTreeMap<u32, BTreeMap<i32, BTreeMap<u32, Weight>>>,
-    pending_token_ids: Vec<Vec<Vec<u32>>>,
-    live_tokens: BTreeMap<u32, Weight>,
-}
-
-impl<'a> TerminalPrecomputer<'a> {
-    fn new(tokenizer: &'a TokenizerDfa, vocab: &Vocab, vocab_pre: &'a VocabPreprocessing) -> Self {
-        let mut nwa = Nwa::new(vocab_pre.num_tsids, vocab_pre.max_token);
-        let leaf_state = nwa.add_state();
-        nwa.set_final_weight(leaf_state, Weight::all(nwa.max_position(), vocab_pre.num_tsids));
-
-        Self {
-            tokenizer,
-            vocab_pre,
-            trie: build_vocab_trie(vocab),
-            nwa,
-            leaf_state,
-            tsid_roots: Vec::with_capacity(vocab_pre.num_tsids as usize),
-            pending_transitions: BTreeMap::new(),
-            pending_token_ids: Vec::new(),
-            live_tokens: BTreeMap::new(),
-        }
-    }
-
-    fn weight_from_tokens(&self, tsid: u32, token_ids: &RangeSet) -> Weight {
-        Weight::from_entries(vec![(tsid, tsid, token_ids.clone())], self.vocab_pre.num_tsids)
-    }
-
-    fn update_live_tokens(&mut self, dst: u32, weight: &Weight) {
-        if let Some(existing) = self.live_tokens.get_mut(&dst) {
-            *existing = existing.union(weight);
-        } else {
-            self.live_tokens.insert(dst, weight.clone());
-        }
-    }
-
-    fn add_pending_transition(&mut self, src: u32, label: i32, dst: u32, weight: Weight) {
-        self.update_live_tokens(dst, &weight);
-        self.pending_transitions
-            .entry(src)
-            .or_default()
-            .entry(label)
-            .or_default()
-            .entry(dst)
-            .and_modify(|existing| *existing = existing.union(&weight))
-            .or_insert(weight);
-    }
-
-    fn add_pending_token_ids(&mut self, src: u32, label: i32, token_ids: &RangeSet) {
-        if label < 0 {
-            return;
-        }
-        let label_idx = label as usize;
-        let src_idx = src as usize;
-        if src_idx >= self.pending_token_ids.len() {
-            self.pending_token_ids.resize_with(src_idx + 1, Vec::new);
-        }
-        if label_idx >= self.pending_token_ids[src_idx].len() {
-            self.pending_token_ids[src_idx].resize_with(label_idx + 1, Vec::new);
-        }
-        self.pending_token_ids[src_idx][label_idx].extend(token_ids.iter_values());
-    }
-
-    fn flush_pending_token_ids(&mut self, tsid: u32) {
-        let leaf_state = self.leaf_state;
-        let pending = std::mem::take(&mut self.pending_token_ids);
-        for (src, labels) in pending.into_iter().enumerate() {
-            for (label_idx, mut token_ids) in labels.into_iter().enumerate() {
-                if token_ids.is_empty() {
-                    continue;
-                }
-                token_ids.sort_unstable();
-                token_ids.dedup();
-                let mut tokens = RangeSet::new();
-                for token_id in token_ids {
-                    tokens.insert(token_id);
-                }
-                let weight = self.weight_from_tokens(tsid, &tokens);
-                self.add_pending_transition(src as u32, label_idx as i32, leaf_state, weight);
+        let t_tsid = std::time::Instant::now();
+        for &(token_id, ref token_bytes) in &vocab.entries {
+            if token_bytes.is_empty() {
+                continue;
             }
-        }
-    }
 
-    fn flush_pending_transitions(&mut self) {
-        for (src, labels) in std::mem::take(&mut self.pending_transitions) {
-            for (label, targets) in labels {
-                for (dst, weight) in targets {
-                    add_or_union_transition(&mut self.nwa, src, label, dst, weight);
-                }
+            // First-byte pre-filter: skip tokens whose first byte immediately
+            // leads to the DEAD state from this TSID's tokenizer start state.
+            // This avoids the overhead of setting up the DFA walk callback for
+            // tokens that can never produce any terminal match.
+            if tokenizer.dfa.get_transition(tok_start_state, token_bytes[0])
+                == crate::automata::dfa::DEAD
+            {
+                total_depth0_skipped += 1;
+                continue;
             }
-        }
-    }
 
-    fn get_or_create_assoc_state(
-        &mut self,
-        assoc_by_state: &mut BTreeMap<u32, Vec<u32>>,
-        tokenizer_state: u32,
-    ) -> u32 {
-        if let Some(existing) = assoc_by_state.get(&tokenizer_state).and_then(|states| states.first()).copied() {
-            existing
-        } else {
-            let state = self.nwa.add_state();
-            assoc_by_state.insert(tokenizer_state, vec![state]);
-            state
-        }
-    }
+            // Stack: (byte_offset, start_state_for_execute, src_nwa_state, depth)
+            let mut stack: Vec<(usize, u32, u32, usize)> = Vec::with_capacity(4);
+            stack.push((0, tok_start_state, src_root, 0));
 
-    fn dfs(&mut self, tsid: u32, node_id: usize, assoc_by_state: BTreeMap<u32, Vec<u32>>) {
-        let children: Vec<(u8, usize)> = self.trie[node_id]
-            .children
-            .iter()
-            .map(|(&byte, &child_id)| (byte, child_id))
-            .collect();
-
-        for (byte, child_id) in children {
-            let child = self.trie[child_id].clone();
-            let continuation_tokens = child.reachable_tokens.difference(&child.terminal_tokens);
-            let mut next_level_assoc: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-
-            for (tokenizer_state, src_nodes) in &assoc_by_state {
-                let next_state = self.tokenizer.dfa.get_transition(*tokenizer_state, byte);
-                if next_state == crate::automata::dfa::DEAD {
+            // Dedup: prevent re-processing the same (offset, depth).
+            let mut visited: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+            while let Some((byte_offset, start_state, src_state, depth)) = stack.pop() {
+                if depth > max_token_len || byte_offset >= token_bytes.len() {
                     continue;
                 }
 
-                next_level_assoc
-                    .entry(next_state)
-                    .or_default()
-                    .extend(src_nodes.iter().copied());
+                let remaining = &token_bytes[byte_offset..];
 
-                let matched_terminals = self.tokenizer.matched_terminals(next_state);
-                if matched_terminals.is_empty() {
-                    continue;
-                }
-
-                let continuation_state = if continuation_tokens.is_empty() {
-                    None
-                } else {
-                    Some(self.get_or_create_assoc_state(
-                        &mut next_level_assoc,
-                        self.tokenizer.initial_state(),
-                    ))
-                };
-                let continuation_weight = continuation_state
-                    .map(|_| self.weight_from_tokens(tsid, &continuation_tokens));
-
-                for &src_node in src_nodes {
-                    for terminal in &matched_terminals {
-                        if !child.terminal_tokens.is_empty() {
-                            self.add_pending_token_ids(src_node, *terminal as i32, &child.terminal_tokens);
+                if depth == 0 {
+                    // Zero-allocation depth-0: use filtered callback-based execute.
+                    // Only fires callback at DFA states with used-terminal finalizers.
+                    total_depth0_calls += 1;
+                    tokenizer.execute_all_matches_cb_filtered(remaining, start_state, &state_has_used, |match_offset, finalizers| {
+                        let abs_offset = byte_offset + match_offset;
+                        let is_leaf = abs_offset == token_bytes.len();
+                        total_callbacks += 1;
+                        total_matches += finalizers.len() as u64;
+                        for &gid in finalizers {
+                            let terminal = gid as TerminalId;
+                            if gid >= used_terminal_flags.len() || !used_terminal_flags[gid] {
+                                continue;
+                            }
+                            total_used_matches += 1;
+                            if is_leaf {
+                                pending
+                                    .entry((src_state, terminal as i32, leaf_state))
+                                    .or_default()
+                                    .push((tsid, token_id));
+                            } else {
+                                let suffix = &token_bytes[abs_offset..];
+                                let sh = hash_suffix(suffix);
+                                let cont = *cont_states
+                                    .entry(sh)
+                                    .or_insert_with(|| nwa.add_state());
+                                pending
+                                    .entry((src_state, terminal as i32, cont))
+                                    .or_default()
+                                    .push((tsid, token_id));
+                                if visited.insert((abs_offset, depth + 1)) {
+                                    stack.push((
+                                        abs_offset,
+                                        tokenizer.initial_state(),
+                                        cont,
+                                        depth + 1,
+                                    ));
+                                }
+                            }
                         }
-                        if let (Some(dst), Some(weight)) = (continuation_state, continuation_weight.as_ref()) {
-                            self.add_pending_transition(src_node, *terminal as i32, dst, weight.clone());
+                    });
+                } else {
+                    // Depth > 0: use cached results (all start from initial_state).
+                    let sh = hash_suffix(remaining);
+                    if !cont_cache.contains_key(&sh) {
+                        let result = tokenizer.execute_all_matches(remaining, tokenizer.initial_state());
+                        cont_cache.insert(sh, result.matches);
+                    } else {
+                        total_cache_hits += 1;
+                    }
+                    let matches = cont_cache.get(&hash_suffix(remaining)).unwrap();
+
+                    for &(match_offset, ref matched_terminals) in matches.iter() {
+                        let abs_offset = byte_offset + match_offset;
+                        let is_leaf = abs_offset == token_bytes.len();
+
+                        total_matches += matched_terminals.len() as u64;
+                        for &terminal in matched_terminals {
+                            if (terminal as usize) >= used_terminal_flags.len() || !used_terminal_flags[terminal as usize] {
+                                continue;
+                            }
+                            if is_leaf {
+                                pending
+                                    .entry((src_state, terminal as i32, leaf_state))
+                                    .or_default()
+                                    .push((tsid, token_id));
+                            } else {
+                                let suffix = &token_bytes[abs_offset..];
+                                let sh = hash_suffix(suffix);
+                                let cont = *cont_states
+                                    .entry(sh)
+                                    .or_insert_with(|| nwa.add_state());
+                                pending
+                                    .entry((src_state, terminal as i32, cont))
+                                    .or_default()
+                                    .push((tsid, token_id));
+                                if visited.insert((abs_offset, depth + 1)) {
+                                    stack.push((
+                                        abs_offset,
+                                        tokenizer.initial_state(),
+                                        cont,
+                                        depth + 1,
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
 
-            if !next_level_assoc.is_empty() {
-                self.dfs(tsid, child_id, next_level_assoc);
-            }
+        if tsid_idx % 10 == 0 || tsid_idx == num_tsids as usize - 1 {
+            eprintln!("[terminal_dwa] TSID {}/{}: {:.3}s (pending={}, cont_states={}, cache_hits={})",
+                tsid_idx + 1, num_tsids, t_tsid.elapsed().as_secs_f64(), pending.len(), cont_states.len(), total_cache_hits);
         }
     }
 
-    fn run_dfs(mut self) -> TerminalDwa {
-        for (tsid, &tokenizer_state) in self.vocab_pre.tsid_to_state.iter().enumerate() {
-            let root = self.nwa.add_state();
-            self.tsid_roots.push(root);
-            self.nwa.start_states.push(root);
-            self.live_tokens.insert(root, self.weight_from_tokens(tsid as u32, &self.trie[0].reachable_tokens));
+    let t_iter = t_start.elapsed();
+    eprintln!("[terminal_dwa] token iteration: {:.3}s (depth0={}, skipped_1st_byte={}, callbacks={}, matches={}, used_matches={}, cache_hits={}, pending={}, cont_states={}, skipped_tsids={}/{})",
+        t_iter.as_secs_f64(), total_depth0_calls, total_depth0_skipped, total_callbacks, total_matches, total_used_matches, total_cache_hits, pending.len(), cont_states.len(), skipped_tsids, num_tsids);
 
-            let assoc_by_state = BTreeMap::from([(tokenizer_state, vec![root])]);
-            self.dfs(tsid as u32, 0, assoc_by_state);
-            self.flush_pending_token_ids(tsid as u32);
-        }
+    let t2 = std::time::Instant::now();
+    // Convert pending into NWA transitions with proper weights.
+    // Group by (src, label) → Vec<(dst, Weight)> to avoid O(N²) linear scans.
+    let pending_count = pending.len();
+    let mut by_src_label: FxHashMap<(u32, i32), Vec<(u32, Weight)>> = FxHashMap::default();
+    let mut weight_progress = 0usize;
 
-        self.flush_pending_transitions();
-        TerminalDwa {
-            nwa: self.nwa,
-            tsid_roots: self.tsid_roots,
-            non_greedy_terminals_by_tokenizer_state: (0..self.tokenizer.num_states())
-                .map(|state| self.tokenizer.matched_non_greedy_terminals(state))
-                .collect(),
-            possible_future_terminals_by_tokenizer_state: (0..self.tokenizer.num_states())
-                .map(|state| self.tokenizer.possible_future_terminals(state))
-                .collect(),
+    for ((src, label, dst), mut pairs) in pending {
+        weight_progress += 1;
+        if weight_progress % 500_000 == 0 || weight_progress == pending_count {
+            eprintln!("[terminal_dwa] weight progress: {}/{} ({:.1}s)",
+                weight_progress, pending_count, t2.elapsed().as_secs_f64());
         }
+        // Sort by (tsid, token_id) and dedup, then batch-build RangeSets.
+        pairs.sort_unstable();
+        pairs.dedup();
+
+        let mut entries: Vec<(u32, u32, RangeSet)> = Vec::new();
+        let mut i = 0;
+        while i < pairs.len() {
+            let tsid = pairs[i].0;
+            let start = i;
+            while i < pairs.len() && pairs[i].0 == tsid {
+                i += 1;
+            }
+            // Build RangeSet from sorted token_ids without per-insert cloning.
+            let rs = RangeSet::from_ranges(
+                pairs[start..i].iter().map(|&(_, tid)| (tid, tid))
+            );
+            entries.push((tsid, tsid, rs));
+        }
+        let weight = Weight::from_entries(entries, num_tsids);
+
+        by_src_label.entry((src, label)).or_default().push((dst, weight));
+    }
+
+    // Bulk-insert transitions into NWA (avoids linear scanning per insertion).
+    for ((src, label), targets) in by_src_label {
+        let nwa_targets = nwa.states[src as usize].transitions.entry(label).or_default();
+        nwa_targets.extend(targets);
+    }
+
+    let t_weights = t2.elapsed();
+    eprintln!("[terminal_dwa] weight construction: {:.3}s (nwa_states={})",
+        t_weights.as_secs_f64(), nwa.num_states());
+
+    TerminalDwa {
+        nwa,
+        tsid_roots,
+        non_greedy_terminals_by_tokenizer_state: (0..tokenizer.num_states())
+            .map(|state| tokenizer.matched_non_greedy_terminals(state))
+            .collect(),
+        possible_future_terminals_by_tokenizer_state: (0..tokenizer.num_states())
+            .map(|state| tokenizer.possible_future_terminals(state))
+            .collect(),
     }
 }
 
@@ -359,79 +411,70 @@ fn collapse_always_allowed(
     }
 
     let num_states = nwa.states.len();
+
+    // ---------------------------------------------------------------
+    // Phase 1: BFS to compute reachability + incoming labels per state.
+    // No Weight operations needed — just set operations on labels.
+    // ---------------------------------------------------------------
+    let mut reachable = vec![false; num_states];
     let mut incoming: Vec<BTreeSet<i32>> = vec![BTreeSet::new(); num_states];
-    let mut domain: Vec<Weight> = (0..num_states)
-        .map(|_| Weight::empty(nwa.num_tsids))
-        .collect();
-    let all_positions = Weight::all(nwa.max_position(), nwa.num_tsids);
+    let all_labels: Vec<i32> = (0..terminals_count as i32).collect();
 
     let mut queue = std::collections::VecDeque::new();
-    let mut in_queue = vec![false; num_states];
     for &start in &nwa.start_states {
-        domain[start as usize] = all_positions.clone();
-        queue.push_back(start);
-        in_queue[start as usize] = true;
+        if !reachable[start as usize] {
+            reachable[start as usize] = true;
+            incoming[start as usize].extend(all_labels.iter().copied());
+            queue.push_back(start);
+        }
     }
 
     while let Some(state_id) = queue.pop_front() {
-        in_queue[state_id as usize] = false;
-        let state_domain = domain[state_id as usize].clone();
-        if state_domain.is_empty() {
-            continue;
-        }
         let state = &nwa.states[state_id as usize];
         let incoming_labels: Vec<i32> = incoming[state_id as usize].iter().copied().collect();
 
         for (dest, _) in &state.epsilons {
             let dest_idx = *dest as usize;
-            let updated = domain[dest_idx].union(&state_domain);
-            if !updated.is_subset(&domain[dest_idx]) {
-                domain[dest_idx] = updated;
-                if !in_queue[dest_idx] {
-                    in_queue[dest_idx] = true;
-                    queue.push_back(*dest);
-                }
-            }
+            let was_reachable = reachable[dest_idx];
+            reachable[dest_idx] = true;
+            let old_len = incoming[dest_idx].len();
             incoming[dest_idx].extend(incoming_labels.iter().copied());
+            if !was_reachable || incoming[dest_idx].len() != old_len {
+                queue.push_back(*dest);
+            }
         }
 
         for (&label, targets) in &state.transitions {
             if label < 0 || label as usize >= terminals_count {
                 continue;
             }
-            for (dest, weight) in targets {
+            for (dest, _) in targets {
                 let dest_idx = *dest as usize;
-                let contrib = state_domain.intersection(weight);
-                if !contrib.is_empty() {
-                    let updated = domain[dest_idx].union(&contrib);
-                    if !updated.is_subset(&domain[dest_idx]) {
-                        domain[dest_idx] = updated;
-                        if !in_queue[dest_idx] {
-                            in_queue[dest_idx] = true;
-                            queue.push_back(*dest);
-                        }
-                    }
-                }
-                if incoming[dest_idx].insert(label) && !in_queue[dest_idx] {
-                    in_queue[dest_idx] = true;
+                let was_reachable = reachable[dest_idx];
+                reachable[dest_idx] = true;
+                let added = incoming[dest_idx].insert(label);
+                if !was_reachable || added {
                     queue.push_back(*dest);
                 }
             }
         }
     }
 
-    let all_labels: Vec<i32> = (0..terminals_count as i32).collect();
-    for &start in &nwa.start_states {
-        incoming[start as usize].extend(all_labels.iter().copied());
-    }
+    // States with incoming epsilon transitions get all labels (conservative).
     for state_id in 0..num_states {
         if !nwa.states[state_id].epsilons.is_empty() {
             incoming[state_id].extend(all_labels.iter().copied());
         }
     }
 
+    // ---------------------------------------------------------------
+    // Phase 2: Compute allowed-by-state from incoming labels.
+    // ---------------------------------------------------------------
     let mut allowed_by_state: Vec<BTreeSet<i32>> = vec![BTreeSet::new(); num_states];
     for state_id in 0..num_states {
+        if !reachable[state_id] {
+            continue;
+        }
         let mut labels = incoming[state_id].iter();
         let Some(&first_label) = labels.next() else {
             continue;
@@ -459,11 +502,16 @@ fn collapse_always_allowed(
         allowed_by_state[state_id] = allowed;
     }
 
+    // ---------------------------------------------------------------
+    // Phase 3: Collapse transitions.
+    // Conservative check: weight ⊆ final_weight (no domain intersection).
+    // This is stricter than the full check but avoids all Weight propagation.
+    // ---------------------------------------------------------------
     let final_weights: Vec<Option<Weight>> = nwa.states.iter().map(|state| state.final_weight.clone()).collect();
     let mut changed = false;
     for state_id in 0..num_states {
         let allowed = &allowed_by_state[state_id];
-        if allowed.is_empty() || domain[state_id].is_empty() {
+        if allowed.is_empty() || !reachable[state_id] {
             continue;
         }
 
@@ -480,8 +528,10 @@ fn collapse_always_allowed(
                     retained.push((*dest, weight.clone()));
                     continue;
                 };
-                let reach = domain[state_id].intersection(weight);
-                if !reach.is_empty() && reach.is_subset(final_weight) {
+                // Conservative: check weight ⊆ final_weight directly.
+                // Since domain ∩ weight ⊆ weight, if weight ⊆ final_weight then
+                // domain ∩ weight ⊆ final_weight certainly holds.
+                if weight.is_subset(final_weight) {
                     let collapsed = final_weight.intersection(weight);
                     let updated = state
                         .final_weight
@@ -686,22 +736,69 @@ pub(crate) fn build_terminal_dwa(
     vocab: &Vocab,
     vocab_pre: &VocabPreprocessing,
     grammar: &GlrGrammar,
+    used_terminals: &BTreeSet<TerminalId>,
 ) -> TerminalDwa {
-    let mut terminal_dwa = TerminalPrecomputer::new(tokenizer, vocab, vocab_pre).run_dfs();
+    let (dwa, _) = build_terminal_dwa_impl(tokenizer, vocab, vocab_pre, grammar, used_terminals, false);
+    dwa
+}
 
+/// Build the terminal DWA, returning [`TerminalDebug`] alongside.
+pub(crate) fn build_terminal_dwa_with_debug(
+    tokenizer: &TokenizerDfa,
+    vocab: &Vocab,
+    vocab_pre: &VocabPreprocessing,
+    grammar: &GlrGrammar,
+    used_terminals: &BTreeSet<TerminalId>,
+) -> (TerminalDwa, crate::compiler::debug::TerminalDebug) {
+    let (dwa, dbg) = build_terminal_dwa_impl(tokenizer, vocab, vocab_pre, grammar, used_terminals, true);
+    (dwa, dbg.expect("debug=true must produce Some"))
+}
+
+fn build_terminal_dwa_impl(
+    tokenizer: &TokenizerDfa,
+    vocab: &Vocab,
+    vocab_pre: &VocabPreprocessing,
+    grammar: &GlrGrammar,
+    used_terminals: &BTreeSet<TerminalId>,
+    capture_debug: bool,
+) -> (TerminalDwa, Option<crate::compiler::debug::TerminalDebug>) {
+    let mut terminal_dwa = build_terminal_dwa_nwa(tokenizer, vocab, vocab_pre, used_terminals);
+
+    let nwa_after_build = if capture_debug { Some(terminal_dwa.nwa.clone()) } else { None };
+
+    let t_post = std::time::Instant::now();
     let always_allowed_by_label = compute_always_allowed_follows(grammar);
+    let t_collapse = std::time::Instant::now();
     let _ = collapse_always_allowed(
         &mut terminal_dwa.nwa,
         &always_allowed_by_label,
         grammar.num_terminals as usize,
     );
+    let t_collapse_done = t_collapse.elapsed();
+
+    let nwa_after_collapse = if capture_debug { Some(terminal_dwa.nwa.clone()) } else { None };
+
     let ever_allowed_by_label = compute_ever_allowed_follows(grammar);
+    let t_prune = std::time::Instant::now();
     let _ = prune_disallowed_follows(
         &mut terminal_dwa.nwa,
         &ever_allowed_by_label,
         grammar.num_terminals as usize,
     );
-    terminal_dwa
+    let t_prune_done = t_prune.elapsed();
+    eprintln!("[terminal_dwa] follow-path: {:.3}s (collapse={:.3}s, prune={:.3}s)",
+        t_post.elapsed().as_secs_f64(), t_collapse_done.as_secs_f64(), t_prune_done.as_secs_f64());
+
+    let debug = if capture_debug {
+        Some(crate::compiler::debug::TerminalDebug {
+            nwa_after_build: nwa_after_build.unwrap(),
+            nwa_after_collapse: nwa_after_collapse.unwrap(),
+        })
+    } else {
+        None
+    };
+
+    (terminal_dwa, debug)
 }
 
 #[cfg(test)]
@@ -719,9 +816,10 @@ mod tests {
         let glr_grammar = GlrGrammar::from_grammar_def(&grammar);
         let tokenizer = TokenizerDfa::from_grammar_def(&grammar);
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())], None);
-        let vocab_pre = VocabPreprocessing::compute(&tokenizer, &vocab);
+        let vocab_pre = VocabPreprocessing::compute(&tokenizer, &vocab, None);
 
-        let terminal_dwa = build_terminal_dwa(&tokenizer, &vocab, &vocab_pre, &glr_grammar);
+        let all_terminals: BTreeSet<TerminalId> = (0..glr_grammar.num_terminals).collect();
+        let terminal_dwa = build_terminal_dwa(&tokenizer, &vocab, &vocab_pre, &glr_grammar, &all_terminals);
         let initial_tsid = vocab_pre.state_to_tsid[tokenizer.initial_state() as usize] as usize;
         let root = terminal_dwa.tsid_roots[initial_tsid];
         let a_targets = &terminal_dwa.nwa.states[root as usize].transitions[&0];
@@ -758,9 +856,10 @@ mod tests {
             },
         ]);
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())], None);
-        let vocab_pre = VocabPreprocessing::compute(&tokenizer, &vocab);
+        let vocab_pre = VocabPreprocessing::compute(&tokenizer, &vocab, None);
 
-        let terminal_dwa = build_terminal_dwa(&tokenizer, &vocab, &vocab_pre, &glr_grammar);
+        let all_terminals: BTreeSet<TerminalId> = (0..glr_grammar.num_terminals).collect();
+        let terminal_dwa = build_terminal_dwa(&tokenizer, &vocab, &vocab_pre, &glr_grammar, &all_terminals);
         let state_after_a = tokenizer.run(b"a") as usize;
 
         assert!(terminal_dwa.non_greedy_terminals_by_tokenizer_state[state_after_a].contains(&0));

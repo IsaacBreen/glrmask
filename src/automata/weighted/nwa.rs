@@ -97,6 +97,135 @@ impl Nwa {
             .saturating_mul(self.num_tsids.max(1))
             .saturating_add(self.num_tsids.max(1) - 1)
     }
+
+    /// Return a wrapper that prints this NWA using a symbol→name map.
+    ///
+    /// Labels not present in the map print as raw integers.
+    pub fn display_with_symbols<'a>(
+        &'a self,
+        symbols: &'a std::collections::BTreeMap<Label, String>,
+    ) -> NwaDisplayWithSymbols<'a> {
+        NwaDisplayWithSymbols { nwa: self, symbols }
+    }
+
+    /// Return a wrapper that prints this NWA using maps for symbols, TSIDs,
+    /// and token IDs.
+    pub fn display_with_all_maps<'a>(
+        &'a self,
+        symbols: &'a std::collections::BTreeMap<Label, String>,
+        tsid_names: &'a std::collections::BTreeMap<u32, String>,
+        token_names: &'a std::collections::BTreeMap<u32, String>,
+    ) -> NwaDisplayWithAllMaps<'a> {
+        NwaDisplayWithAllMaps { nwa: self, symbols, tsid_names, token_names }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
+
+/// Shared formatting logic for NWA states.
+fn fmt_nwa_states(
+    nwa: &Nwa,
+    f: &mut std::fmt::Formatter<'_>,
+    label_fn: &dyn Fn(Label) -> String,
+    weight_fn: &dyn Fn(&Weight) -> String,
+) -> std::fmt::Result {
+    let start_set: std::collections::BTreeSet<u32> = nwa.start_states.iter().copied().collect();
+
+    for (i, st) in nwa.states.iter().enumerate() {
+        if st.transitions.is_empty() && st.epsilons.is_empty() && st.final_weight.is_none() {
+            continue;
+        }
+
+        // State header — finality implied by final: block, not header tag
+        let start_mark = if start_set.contains(&(i as u32)) { " [START]" } else { "" };
+        writeln!(f, "  State {i}{start_mark}")?;
+
+        // Final weight on its own line
+        if let Some(w) = &st.final_weight {
+            writeln!(f, "    final: {}", weight_fn(w))?;
+        }
+
+        // Transitions
+        for (label, targets) in &st.transitions {
+            let lbl = label_fn(*label);
+            for (tgt, w) in targets {
+                writeln!(f, "    {lbl} → State {tgt}")?;
+                writeln!(f, "      weight: {}", weight_fn(w))?;
+            }
+        }
+
+        // Epsilon transitions
+        for (tgt, w) in &st.epsilons {
+            writeln!(f, "    ε → State {tgt}")?;
+            writeln!(f, "      weight: {}", weight_fn(w))?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Display
+// ---------------------------------------------------------------------------
+
+impl std::fmt::Display for Nwa {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "NWA: {} states, start={:?}, tsids={}, max_token={}",
+            self.states.len(), self.start_states, self.num_tsids, self.max_token)?;
+        fmt_nwa_states(self, f,
+            &|label| format!("{label}"),
+            &|w| format!("{w}"),
+        )
+    }
+}
+
+/// Wrapper to display an [`Nwa`] with human-readable symbol names.
+pub struct NwaDisplayWithSymbols<'a> {
+    nwa: &'a Nwa,
+    symbols: &'a std::collections::BTreeMap<Label, String>,
+}
+
+impl std::fmt::Display for NwaDisplayWithSymbols<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let nwa = self.nwa;
+        writeln!(f, "NWA: {} states, start={:?}, tsids={}, max_token={}",
+            nwa.states.len(), nwa.start_states, nwa.num_tsids, nwa.max_token)?;
+        let syms = self.symbols;
+        fmt_nwa_states(nwa, f,
+            &|label| match syms.get(&label) {
+                Some(name) => name.clone(),
+                None => format!("{label}"),
+            },
+            &|w| format!("{w}"),
+        )
+    }
+}
+
+/// Wrapper to display an [`Nwa`] with maps for symbols, TSIDs, and tokens.
+pub struct NwaDisplayWithAllMaps<'a> {
+    nwa: &'a Nwa,
+    symbols: &'a std::collections::BTreeMap<Label, String>,
+    tsid_names: &'a std::collections::BTreeMap<u32, String>,
+    token_names: &'a std::collections::BTreeMap<u32, String>,
+}
+
+impl std::fmt::Display for NwaDisplayWithAllMaps<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let nwa = self.nwa;
+        writeln!(f, "NWA: {} states, start={:?}, tsids={}, max_token={}",
+            nwa.states.len(), nwa.start_states, nwa.num_tsids, nwa.max_token)?;
+        let syms = self.symbols;
+        let tsid_m = self.tsid_names;
+        let tok_m = self.token_names;
+        fmt_nwa_states(nwa, f,
+            &|label| match syms.get(&label) {
+                Some(name) => name.clone(),
+                None => format!("{label}"),
+            },
+            &|w| format!("{}", w.display_with_maps(tsid_m, tok_m)),
+        )
+    }
 }
 
 #[cfg(test)]

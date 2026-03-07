@@ -80,10 +80,14 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
     // ---------------------------------------------------------------
 
     /// A weighted subset that can be used as a HashMap key.
+    /// Pre-computes a hash fingerprint so HashMap lookups are O(1)
+    /// instead of iterating all entries and their RangeSet ranges.
     #[derive(Clone)]
     struct WeightedSubset {
         /// Sorted by NWA state ID.
         entries: Vec<(u32, Weight)>,
+        /// Pre-computed hash fingerprint.
+        cached_hash: u64,
     }
 
     impl PartialEq for WeightedSubset {
@@ -96,18 +100,22 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
 
     impl Hash for WeightedSubset {
         fn hash<H: Hasher>(&self, state: &mut H) {
-            self.entries.len().hash(state);
-            for (id, w) in &self.entries {
-                id.hash(state);
-                w.hash(state);
-            }
+            self.cached_hash.hash(state);
         }
     }
 
     impl WeightedSubset {
         fn from_btree(map: &BTreeMap<u32, Weight>) -> Self {
             let entries: Vec<(u32, Weight)> = map.iter().map(|(k, v)| (*k, v.clone())).collect();
-            Self { entries }
+            // Pre-compute hash using FxHasher for consistency with the FxHashMap.
+            let mut hasher = rustc_hash::FxHasher::default();
+            entries.len().hash(&mut hasher);
+            for (id, w) in &entries {
+                id.hash(&mut hasher);
+                w.hash(&mut hasher);
+            }
+            let cached_hash = hasher.finish();
+            Self { entries, cached_hash }
         }
     }
 
@@ -125,7 +133,97 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
         }
     }
 
-    let initial_closure = epsilon_closure(nwa, &start_map);
+    // ---------------------------------------------------------------
+    // Pre-compute per-NWA-state epsilon closures if ε-subgraph is acyclic
+    // ---------------------------------------------------------------
+    //
+    // For each NWA state u, eps_lookup[u] = { (v, w) : v reachable from u via ε }.
+    // If the ε-subgraph has cycles, fall back to on-demand worklist closures.
+    let t_eps_precomp = std::time::Instant::now();
+    let eps_lookup: Option<Vec<Vec<(u32, Weight)>>> = {
+        // Topo-sort the epsilon subgraph.
+        let n_local = nwa.states.len();
+        let mut eps_indegree = vec![0u32; n_local];
+        for st in &nwa.states {
+            for (t, _) in &st.epsilons {
+                eps_indegree[*t as usize] += 1;
+            }
+        }
+        let mut eps_queue: VecDeque<u32> = eps_indegree
+            .iter()
+            .enumerate()
+            .filter(|&(_, d)| *d == 0)
+            .map(|(i, _)| i as u32)
+            .collect();
+        let mut topo = Vec::with_capacity(n_local);
+        while let Some(u) = eps_queue.pop_front() {
+            topo.push(u);
+            for (v, _) in &nwa.states[u as usize].epsilons {
+                let d = &mut eps_indegree[*v as usize];
+                *d -= 1;
+                if *d == 0 {
+                    eps_queue.push_back(*v);
+                }
+            }
+        }
+
+        if topo.len() == n_local {
+            // ε-subgraph is acyclic — precompute closures in reverse topo order.
+            let max_pos_local = nwa.max_position();
+            // Use FxHashMap per state during construction for O(1) lookups.
+            let mut lookup_maps: Vec<rustc_hash::FxHashMap<u32, Weight>> =
+                (0..n_local).map(|i| {
+                    let mut m = rustc_hash::FxHashMap::default();
+                    m.insert(i as u32, Weight::all(max_pos_local, nt));
+                    m
+                }).collect();
+            // Process in reverse topo order.
+            for &u in topo.iter().rev() {
+                let eps: Vec<(u32, Weight)> = nwa.states[u as usize].epsilons.clone();
+                for (t, w_eps) in eps {
+                    let t_entries: Vec<(u32, Weight)> = lookup_maps[t as usize]
+                        .iter().map(|(&k, v)| (k, v.clone())).collect();
+                    for (v, w_v) in t_entries {
+                        let combined = w_eps.intersection(&w_v);
+                        if combined.is_empty() {
+                            continue;
+                        }
+                        lookup_maps[u as usize]
+                            .entry(v)
+                            .and_modify(|e| *e = e.union(&combined))
+                            .or_insert(combined);
+                    }
+                }
+            }
+            // Convert to sorted Vec for efficient iteration in the worklist.
+            let lookup: Vec<Vec<(u32, Weight)>> = lookup_maps.into_iter().map(|m| {
+                let mut v: Vec<(u32, Weight)> = m.into_iter().collect();
+                v.sort_by_key(|(id, _)| *id);
+                v
+            }).collect();
+            Some(lookup)
+        } else {
+            None
+        }
+    };
+    let t_eps_precomp_elapsed = t_eps_precomp.elapsed();
+
+    let initial_closure = if eps_lookup.is_some() {
+        let lookup = eps_lookup.as_ref().unwrap();
+        let mut result: BTreeMap<u32, Weight> = BTreeMap::new();
+        for (&u, w_u) in &start_map {
+            for (v, w_eps) in &lookup[u as usize] {
+                let combined = w_u.intersection(w_eps);
+                if combined.is_empty() { continue; }
+                result.entry(*v)
+                    .and_modify(|e| *e = e.union(&combined))
+                    .or_insert(combined);
+            }
+        }
+        result
+    } else {
+        epsilon_closure(nwa, &start_map)
+    };
     if initial_closure.is_empty() {
         return CompDwa::new(nt, max_tok);
     }
@@ -139,6 +237,21 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
     let mut closures: Vec<BTreeMap<u32, Weight>> = Vec::new(); // closures[dwa_id]
     let mut worklist: VecDeque<u32> = VecDeque::new();
 
+    // -- instrumentation --
+    let mut total_merged_size: usize = 0;
+    let mut total_labels: usize = 0;
+    let mut total_eps_calls: usize = 0;
+    let mut total_intersections: usize = 0;
+    let mut total_divides: usize = 0;
+    let mut divide_full_skips: usize = 0;
+    let t_det_start = std::time::Instant::now();
+    let mut t_final_w = std::time::Duration::ZERO;
+    let mut t_trans_collect = std::time::Duration::ZERO;
+    let mut t_eps_closure = std::time::Duration::ZERO;
+    let mut t_normalize = std::time::Duration::ZERO;
+    let mut t_hashing = std::time::Duration::ZERO;
+    let mut t_clone = std::time::Duration::ZERO;
+
     let initial_key = WeightedSubset::from_btree(&initial_closure);
     let start_id = states.len() as u32;
     states.push(CompDwaState::default());
@@ -146,13 +259,21 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
     subset_map.insert(initial_key, start_id);
     worklist.push_back(start_id);
 
+    // Precompute the full RangeSet once for all normalization operations.
+    let full_rs = crate::ds::RangeSet::from_range(0, max_tok);
+
     while let Some(dwa_sid) = worklist.pop_front() {
+        let t0_clone = std::time::Instant::now();
         let merged = closures[dwa_sid as usize].clone();
+        t_clone += t0_clone.elapsed();
+        total_merged_size += merged.len();
 
         // --- Final weight ---
+        let t0_fw = std::time::Instant::now();
         let mut final_w: Option<Weight> = None;
         for (nwa_st, w_acc) in &merged {
             if let Some(fw) = &nwa.states[*nwa_st as usize].final_weight {
+                total_intersections += 1;
                 let c = w_acc.intersection(fw);
                 if !c.is_empty() {
                     final_w = Some(match final_w {
@@ -163,6 +284,7 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
             }
         }
         states[dwa_sid as usize].final_weight = final_w;
+        t_final_w += t0_fw.elapsed();
 
         // --- Collect transitions with DEFAULT_LABEL expansion ---
         //
@@ -173,68 +295,75 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
         // specific NWA transitions at all.
         use crate::compiler::parser_dwa::DEFAULT_LABEL;
 
-        // First, collect all specific labels across the entire subset,
-        // and record which NWA states have DEFAULT transitions.
-        let mut specific_labels: BTreeSet<Label> = BTreeSet::new();
-        for (nwa_u, _) in &merged {
-            for (label, _) in &nwa.states[*nwa_u as usize].transitions {
-                if *label != DEFAULT_LABEL {
-                    specific_labels.insert(*label);
-                }
-            }
-        }
+        let t0_trans = std::time::Instant::now();
 
+        // Single-pass approach: iterate merged states once, populate by_label.
+        // For DEFAULT handling, precompute each state's DEFAULT targets.
+        let mut specific_labels: BTreeSet<Label> = BTreeSet::new();
         let mut by_label: BTreeMap<Label, BTreeMap<u32, Weight>> = BTreeMap::new();
         let mut edge_weights: BTreeMap<Label, Weight> = BTreeMap::new();
-
-        // For each specific label: use specific transition if available,
-        // otherwise fall back to DEFAULT transition.
-        for &label in &specific_labels {
-            for (nwa_u, w_u) in &merged {
-                let st = &nwa.states[*nwa_u as usize];
-                let targets = st
-                    .transitions
-                    .get(&label)
-                    .or_else(|| st.transitions.get(&DEFAULT_LABEL));
-                if let Some(targets) = targets {
-                    for (nwa_v, w_trans) in targets {
-                        let next_w = w_u.intersection(w_trans);
-                        if next_w.is_empty() {
-                            continue;
-                        }
-                        edge_weights
-                            .entry(label)
-                            .and_modify(|e| *e = e.union(&next_w))
-                            .or_insert_with(|| next_w.clone());
-                        by_label
-                            .entry(label)
-                            .or_default()
-                            .entry(*nwa_v)
-                            .and_modify(|e| *e = e.union(&next_w))
-                            .or_insert_with(|| next_w.clone());
-                    }
-                }
-            }
+        
+        // Phase 1: Collect specific transitions directly into by_label.
+        // Also track which states have DEFAULT and their specific label sets.
+        struct DefaultInfo<'a> {
+            w_u: &'a Weight,
+            targets: &'a [(u32, Weight)],
+            specific_set: BTreeSet<Label>,
         }
-
-        // Build a DEFAULT DWA transition from pure-DEFAULT contributions.
-        // Applies to any label not in specific_labels.
+        let mut default_states: Vec<DefaultInfo<'_>> = Vec::new();
+        
         for (nwa_u, w_u) in &merged {
-            if let Some(targets) = nwa.states[*nwa_u as usize]
-                .transitions
-                .get(&DEFAULT_LABEL)
-            {
+            let st = &nwa.states[*nwa_u as usize];
+            let has_default = st.transitions.contains_key(&DEFAULT_LABEL);
+            let mut state_specifics = BTreeSet::new();
+            
+            for (&label, targets) in &st.transitions {
+                if label == DEFAULT_LABEL { continue; }
+                specific_labels.insert(label);
+                state_specifics.insert(label);
+                
                 for (nwa_v, w_trans) in targets {
+                    total_intersections += 1;
                     let next_w = w_u.intersection(w_trans);
-                    if next_w.is_empty() {
-                        continue;
-                    }
+                    if next_w.is_empty() { continue; }
                     edge_weights
-                        .entry(DEFAULT_LABEL)
+                        .entry(label)
                         .and_modify(|e| *e = e.union(&next_w))
                         .or_insert_with(|| next_w.clone());
                     by_label
-                        .entry(DEFAULT_LABEL)
+                        .entry(label)
+                        .or_default()
+                        .entry(*nwa_v)
+                        .and_modify(|e| *e = e.union(&next_w))
+                        .or_insert_with(|| next_w.clone());
+                }
+            }
+            
+            if has_default {
+                default_states.push(DefaultInfo {
+                    w_u,
+                    targets: st.transitions.get(&DEFAULT_LABEL).unwrap(),
+                    specific_set: state_specifics,
+                });
+            }
+        }
+        total_labels += specific_labels.len();
+        
+        // Phase 2: Apply DEFAULT transitions to specific labels
+        // where the state doesn't have a specific transition.
+        for di in &default_states {
+            for &label in &specific_labels {
+                if di.specific_set.contains(&label) { continue; }
+                for (nwa_v, w_trans) in di.targets {
+                    total_intersections += 1;
+                    let next_w = di.w_u.intersection(w_trans);
+                    if next_w.is_empty() { continue; }
+                    edge_weights
+                        .entry(label)
+                        .and_modify(|e| *e = e.union(&next_w))
+                        .or_insert_with(|| next_w.clone());
+                    by_label
+                        .entry(label)
                         .or_default()
                         .entry(*nwa_v)
                         .and_modify(|e| *e = e.union(&next_w))
@@ -243,9 +372,65 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
             }
         }
 
+        // Phase 3: Build a DEFAULT DWA transition from pure-DEFAULT contributions.
+        // Applies to any label not in specific_labels.
+        for di in &default_states {
+            for (nwa_v, w_trans) in di.targets {
+                let next_w = di.w_u.intersection(w_trans);
+                if next_w.is_empty() { continue; }
+                edge_weights
+                    .entry(DEFAULT_LABEL)
+                    .and_modify(|e| *e = e.union(&next_w))
+                    .or_insert_with(|| next_w.clone());
+                by_label
+                    .entry(DEFAULT_LABEL)
+                    .or_default()
+                    .entry(*nwa_v)
+                    .and_modify(|e| *e = e.union(&next_w))
+                    .or_insert_with(|| next_w.clone());
+            }
+        }
+        t_trans_collect += t0_trans.elapsed();
+
         // --- Build DWA edges ---
         for (label, next_pre_closure) in by_label {
-            let next_closure = epsilon_closure(nwa, &next_pre_closure);
+            total_eps_calls += 1;
+            let t0_eps = std::time::Instant::now();
+            let next_closure = if let Some(ref lookup) = eps_lookup {
+                // Fast path: if all states in the pre-closure have trivial
+                // epsilon closures (only self → w_all), skip the intersection loop.
+                let all_trivial = next_pre_closure.keys().all(|u| {
+                    let entries = &lookup[*u as usize];
+                    entries.len() == 1 && entries[0].0 == *u && entries[0].1.is_full
+                });
+                if all_trivial {
+                    // Closure is identical to pre_closure.
+                    next_pre_closure
+                } else {
+                    let mut result: BTreeMap<u32, Weight> = BTreeMap::new();
+                    for (&u, w_u) in &next_pre_closure {
+                        let entries = &lookup[u as usize];
+                        if entries.len() == 1 && entries[0].0 == u && entries[0].1.is_full {
+                            // Trivial: self with w_all → just copy w_u
+                            result.entry(u)
+                                .and_modify(|e| *e = e.union(w_u))
+                                .or_insert_with(|| w_u.clone());
+                        } else {
+                            for (v, w_eps) in entries {
+                                let combined = w_u.intersection(w_eps);
+                                if combined.is_empty() { continue; }
+                                result.entry(*v)
+                                    .and_modify(|e| *e = e.union(&combined))
+                                    .or_insert(combined);
+                            }
+                        }
+                    }
+                    result
+                }
+            } else {
+                epsilon_closure(nwa, &next_pre_closure)
+            };
+            t_eps_closure += t0_eps.elapsed();
             if next_closure.is_empty() {
                 continue;
             }
@@ -254,30 +439,74 @@ pub fn determinize(nwa: &Nwa) -> CompDwa {
 
             // Normalize: divide each weight in the closure by w_edge.
             // In Boolean semiring: w / v = w | !v
-            let mut normalized: BTreeMap<u32, Weight> = BTreeMap::new();
+            // Precompute the complement of w_edge once, then use it for all states.
+            let t0_norm = std::time::Instant::now();
+            let edge_is_full = w_edge.is_full;
+            let w_edge_comp = if !edge_is_full {
+                Some(w_edge.divide_complement(max_tok))
+            } else {
+                None
+            };
+
+            // Build the WeightedSubset key directly (entries Vec + hash).
+            // Skip BTreeMap construction — only build it on cache miss.
+            let mut key_entries: Vec<(u32, Weight)> = Vec::new();
+            let mut hasher = rustc_hash::FxHasher::default();
+
             for (id, w) in &next_closure {
-                let norm = w.divide(&w_edge, max_tok);
+                total_divides += 1;
+                if edge_is_full || w.is_full {
+                    divide_full_skips += 1;
+                }
+                let norm = if w.is_full {
+                    w.clone()
+                } else if edge_is_full {
+                    w.clone()
+                } else {
+                    w.divide_with_complement(w_edge_comp.as_ref().unwrap(), &full_rs)
+                };
                 if !norm.is_empty() {
-                    normalized.insert(*id, norm);
+                    id.hash(&mut hasher);
+                    norm.hash(&mut hasher);
+                    key_entries.push((*id, norm));
                 }
             }
+            key_entries.len().hash(&mut hasher);
+            let key = WeightedSubset {
+                entries: key_entries,
+                cached_hash: hasher.finish(),
+            };
+            t_normalize += t0_norm.elapsed();
 
-            let key = WeightedSubset::from_btree(&normalized);
+            let t0_hash = std::time::Instant::now();
             let target_id = if let Some(&existing) = subset_map.get(&key) {
                 existing
             } else {
                 let new_id = states.len() as u32;
                 states.push(CompDwaState::default());
+                // Convert the key's entries Vec to a BTreeMap for the closure store.
+                let normalized: BTreeMap<u32, Weight> =
+                    key.entries.iter().cloned().collect();
                 closures.push(normalized);
                 subset_map.insert(key, new_id);
                 worklist.push_back(new_id);
                 new_id
             };
+            t_hashing += t0_hash.elapsed();
 
             states[dwa_sid as usize]
                 .transitions
                 .insert(label, (target_id, w_edge));
         }
+    }
+
+    let dwa_states = states.len();
+    if dwa_states > 50 {
+        let avg_merged = if dwa_states > 0 { total_merged_size / dwa_states } else { 0 };
+        eprintln!("[determinize] dwa_states={}, avg_merged={}, total_labels={}, total_intersections={}, total_eps_calls={}, time={:.3}s",
+            dwa_states, avg_merged, total_labels, total_intersections, total_eps_calls, t_det_start.elapsed().as_secs_f64());
+        eprintln!("[determinize]   final_w={:.3}s, trans_collect={:.3}s, eps_closure={:.3}s, normalize={:.3}s, hashing={:.3}s, clone={:.3}s, eps_precomp={:.3}s, divides={}/{} skipped",
+            t_final_w.as_secs_f64(), t_trans_collect.as_secs_f64(), t_eps_closure.as_secs_f64(), t_normalize.as_secs_f64(), t_hashing.as_secs_f64(), t_clone.as_secs_f64(), t_eps_precomp_elapsed.as_secs_f64(), divide_full_skips, total_divides);
     }
 
     CompDwa {
@@ -580,7 +809,7 @@ fn build_comp_dwa(
                         // captures the source-side filtering; the target
                         // state's closure will be applied when that state
                         // is entered.
-                        let _ = nwa_v; // target id used for routing, not weight calc
+                        let _ = nwa_v;
                         let c = w_u.intersection(w_trans);
                         if !c.is_empty() {
                             tw = Some(match tw {

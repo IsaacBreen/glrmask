@@ -2,6 +2,7 @@
 //!
 //! Pipeline: grammar IR → GLR table → tokenizer DFA → parser DWA → optimize → Constraint
 
+pub mod debug;
 pub mod glr;
 pub mod grammar_def;
 pub mod labels;

@@ -235,6 +235,68 @@ impl TokenizerDfa {
     pub fn initial_state(&self) -> u32 {
         0
     }
+
+    /// Execute the tokenizer on a byte string, calling a callback for each match.
+    ///
+    /// This is a zero-allocation version of `execute_all_matches`. The callback
+    /// receives `(byte_offset, &BTreeSet<GroupId>)` where `byte_offset` is
+    /// 1-indexed and the set references the DFA's stored finalizer set directly
+    /// (no copying). Returns the end state after all bytes are consumed.
+    pub fn execute_all_matches_cb<F>(
+        &self,
+        input: &[u8],
+        start: u32,
+        mut cb: F,
+    ) -> u32
+    where
+        F: FnMut(usize, &BTreeSet<usize>),
+    {
+        let mut state = start;
+        for (i, &b) in input.iter().enumerate() {
+            state = self.dfa.get_transition(state, b);
+            if state == crate::automata::dfa::DEAD {
+                return state;
+            }
+            let finalizers = self.dfa.finalizers(state);
+            if !finalizers.is_empty() {
+                cb(i + 1, finalizers);
+            }
+        }
+        state
+    }
+
+    /// Execute with callback, but only fire the callback for states with at
+    /// least one finalizer in the `state_has_used` precomputed filter.
+    ///
+    /// `state_has_used[s]` should be `true` iff DFA state `s` has at least one
+    /// finalizer that the caller considers "used". This avoids callback
+    /// overhead for the (common) case where a state only matches unused
+    /// terminals.
+    pub fn execute_all_matches_cb_filtered<F>(
+        &self,
+        input: &[u8],
+        start: u32,
+        state_has_used: &[bool],
+        mut cb: F,
+    ) -> u32
+    where
+        F: FnMut(usize, &BTreeSet<usize>),
+    {
+        let mut state = start;
+        for (i, &b) in input.iter().enumerate() {
+            state = self.dfa.get_transition(state, b);
+            if state == crate::automata::dfa::DEAD {
+                return state;
+            }
+            if (state as usize) < state_has_used.len() && state_has_used[state as usize] {
+                let finalizers = self.dfa.finalizers(state);
+                if !finalizers.is_empty() {
+                    cb(i + 1, finalizers);
+                }
+            }
+        }
+        state
+    }
 }
 
 /// Result of executing the tokenizer with intermediate match tracking.

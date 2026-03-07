@@ -50,6 +50,7 @@ pub(crate) mod runtime;
 
 // Re-export public API types
 pub use runtime::{Constraint, ConstraintState};
+pub use compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 
 use thiserror::Error;
 

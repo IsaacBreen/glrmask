@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 
 use crate::automata::weighted::dwa::CompDwa;
 use crate::automata::weighted::nwa::Label;
-use crate::automata::weighted::weight::Weight;
 use crate::ds::bitset::BitSet;
 use crate::ds::rangeset::RangeSet;
 
@@ -65,43 +64,36 @@ pub fn compute_mask(
 
 /// Walk the DWA with weight intersection along the path.
 ///
-/// Reads parser state IDs from the stack bottom-to-top. At each step,
-/// intersects the running accumulator with the transition weight.
-/// The final result is the projection of (accumulated ∩ final_weight) to TSID.
-fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, num_tsids: u32) -> RangeSet {
+/// Projects DWA weights to the target TSID column *first*, then intersects
+/// in token-space only. This avoids carrying N×M-space accumulators when
+/// only a single TSID column is needed.
+fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> RangeSet {
     use crate::compiler::parser_dwa::DEFAULT_LABEL;
 
     if stack.is_empty() || dwa.states.is_empty() {
         return RangeSet::new();
     }
 
-    let max_pos = dwa.max_token * num_tsids + num_tsids.saturating_sub(1);
-    let mut acc = Weight::all(max_pos, num_tsids);
+    // Start with the full token range as the accumulator (token-space).
+    let mut acc = RangeSet::from_range(0, dwa.max_token);
     let mut dwa_state = dwa.start_state;
 
     // Read stack bottom-to-top.
-    for (_i, &parser_state) in stack.iter().enumerate() {
+    for &parser_state in stack.iter() {
         let label: Label = parser_state as i32;
-        // Try specific transition first.
-        if let Some(&(next_state, ref weight)) =
-            dwa.states[dwa_state as usize].transitions.get(&label)
-        {
+        // Try specific transition first, then DEFAULT fallback.
+        let transition = dwa.states[dwa_state as usize]
+            .transitions
+            .get(&label)
+            .or_else(|| dwa.states[dwa_state as usize].transitions.get(&DEFAULT_LABEL));
+
+        if let Some(&(next_state, ref weight)) = transition {
             if next_state as usize >= dwa.states.len() {
                 return RangeSet::new();
             }
-            acc = acc.intersection(weight);
-            if acc.is_empty() {
-                return RangeSet::new();
-            }
-            dwa_state = next_state;
-        } else if let Some(&(next_state, ref weight)) =
-            dwa.states[dwa_state as usize].transitions.get(&DEFAULT_LABEL)
-        {
-            // DEFAULT fallback: matches any parser state not explicitly listed.
-            if next_state as usize >= dwa.states.len() {
-                return RangeSet::new();
-            }
-            acc = acc.intersection(weight);
+            // Project to TSID column, then intersect in token-space.
+            let projected = weight.tokens_for_tsid(tsid);
+            acc = acc.intersection(&projected);
             if acc.is_empty() {
                 return RangeSet::new();
             }
@@ -117,8 +109,8 @@ fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, num_tsids: u32) ->
         return RangeSet::new();
     }
     if let Some(ref final_weight) = dwa.states[dwa_state as usize].final_weight {
-        let result = acc.intersection(final_weight);
-        result.tokens_for_tsid(tsid)
+        let projected_final = final_weight.tokens_for_tsid(tsid);
+        acc.intersection(&projected_final)
     } else {
         RangeSet::new()
     }
@@ -127,6 +119,7 @@ fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, num_tsids: u32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automata::weighted::weight::Weight;
 
     #[test]
     fn test_walk_dwa_empty_stack() {

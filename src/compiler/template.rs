@@ -7,7 +7,7 @@
 //! should at least build the parser-side bundles explicitly instead of hiding
 //! that structure inside `parser_dwa.rs`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::CompDwa;
@@ -31,6 +31,9 @@ struct TemplateCompositionContext<'a> {
     terminal_dwa: &'a TerminalDwa,
     combined: Nwa,
     template_by_terminal: BTreeMap<TerminalId, usize>,
+    blueprint_cache: HashMap<(usize, Weight), Nwa>,
+    total_fragment_uses: usize,
+    total_fragment_states: usize,
 }
 
 impl<'a> TemplateCompositionContext<'a> {
@@ -52,6 +55,9 @@ impl<'a> TemplateCompositionContext<'a> {
             terminal_dwa,
             combined: Nwa::new(num_tsids, max_token),
             template_by_terminal,
+            blueprint_cache: HashMap::new(),
+            total_fragment_uses: 0,
+            total_fragment_states: 0,
         }
     }
 
@@ -62,29 +68,53 @@ impl<'a> TemplateCompositionContext<'a> {
         num_tsids: u32,
         max_token: u32,
     ) -> TemplateFragment {
-        // Always instantiate a fresh fragment rather than caching by (bundle, weight).
-        // Sharing fragment states across multiple terminal-DWA transitions that use
-        // the same template creates cycles in the combined NWA: if transition A→B and
-        // B→C both use the same fragment F, then compose_terminal_state adds
-        //   body_B → F.start  (from A→B)  and  F.final → body_B  (from B→C)
-        // which, combined with the F-internal path F.start →…→ F.final, forms a cycle.
-        // Fresh instantiation gives each transition its own independent states,
-        // eliminating the back-edge opportunity while preserving correct semantics
-        // (determinization + minimization recover the shared structure).
-        let fragment = instantiate_template_dfa(
-            &self.bundles[bundle_idx].template_dfa,
-            transition_weight,
-            num_tsids,
-            max_token,
-        );
-        let offset = append_nwa(&mut self.combined, &fragment);
-        let start_states = fragment
+        // Cache the *blueprint* NWA per (bundle, weight) to avoid repeated
+        // instantiate_template_dfa calls, but append a fresh copy to `combined`
+        // for each use so that each transition gets independent NWA state IDs.
+        //
+        // This prevents cycles: sharing actual NWA state IDs between transitions
+        // A→B and B→C creates cycle body_B → F.start →…→ F.final → body_B.
+        // Fresh copies eliminate that back-edge opportunity while keeping build
+        // cost proportional to (unique templates × uses) rather than (total transitions).
+        let key = (bundle_idx, transition_weight.clone());
+        if !self.blueprint_cache.contains_key(&key) {
+            let blueprint = instantiate_template_dfa(
+                &self.bundles[bundle_idx].template_dfa,
+                transition_weight,
+                num_tsids,
+                max_token,
+            );
+            self.blueprint_cache.insert(key.clone(), blueprint);
+        }
+        let blueprint = &self.blueprint_cache[&key];
+        self.total_fragment_uses += 1;
+        self.total_fragment_states += blueprint.states.len();
+        let offset = append_nwa(&mut self.combined, blueprint);
+
+        // Diagnostic: verify append worked
+        if std::env::var("GLRMASK_DUMP_DWA").unwrap_or_default() == "1" {
+            eprintln!("  [fragment] bundle={}, offset={}, blueprint_states={}", bundle_idx, offset, blueprint.states.len());
+            for (i, state) in blueprint.states.iter().enumerate() {
+                let trans_count: usize = state.transitions.values().map(|v| v.len()).sum();
+                let has_final = state.final_weight.is_some();
+                eprintln!("    bp_state {}: {} trans, {} eps, final={}", i, trans_count, state.epsilons.len(), has_final);
+            }
+            for i in 0..blueprint.states.len() {
+                let combined_idx = offset as usize + i;
+                let cs = &self.combined.states[combined_idx];
+                let ct: usize = cs.transitions.values().map(|v| v.len()).sum();
+                let has_final = cs.final_weight.is_some();
+                eprintln!("    combined_state {}: {} trans, {} eps, final={}", combined_idx, ct, cs.epsilons.len(), has_final);
+            }
+        }
+
+        let start_states = blueprint
             .start_states
             .iter()
             .map(|state| offset + *state)
             .collect();
         let mut final_states = Vec::new();
-        for (fragment_sid, fragment_state) in fragment.states.iter().enumerate() {
+        for (fragment_sid, fragment_state) in blueprint.states.iter().enumerate() {
             let Some(final_weight) = &fragment_state.final_weight else {
                 continue;
             };
@@ -144,17 +174,17 @@ impl<'a> TemplateCompositionContext<'a> {
 
 /// A compiled structural template DFA, independent of lexical weights.
 #[derive(Debug, Clone)]
-pub(crate) struct TemplateDfa {
-    pub(crate) dfa: CompDwa,
+pub struct TemplateDfa {
+    pub dfa: CompDwa,
 }
 
 /// A parser-side template bundle shared by one or more terminals.
 #[derive(Debug, Clone)]
-pub(crate) struct TemplateBundle {
+pub struct TemplateBundle {
     /// Structural template DFA compiled from the shared characterization.
-    pub(crate) template_dfa: TemplateDfa,
+    pub template_dfa: TemplateDfa,
     /// All terminals that reuse the same parser-side template.
-    pub(crate) terminals: Vec<TerminalId>,
+    pub terminals: Vec<TerminalId>,
 }
 
 /// Group terminals that share the same parser-side characterization.
@@ -290,16 +320,104 @@ fn is_acyclic(dwa: &CompDwa) -> bool {
 
 fn build_template_dfa(characterization: &TerminalCharacterization) -> TemplateDfa {
     let mut nwa = build_template_structure_nwa(characterization);
+
+    // Dump template NWA before resolve
+    if std::env::var("GLRMASK_DUMP_DWA").unwrap_or_default() == "1" {
+        eprintln!("\n  [template] NWA before resolve ({} states):", nwa.states.len());
+        eprintln!("    starts: {:?}", nwa.start_states);
+        for (i, state) in nwa.states.iter().enumerate() {
+            let mut parts = Vec::new();
+            for (&label, targets) in &state.transitions {
+                for (dest, _) in targets {
+                    let label_str = if label == crate::compiler::labels::DEFAULT_LABEL {
+                        "DEFAULT".to_string()
+                    } else if crate::compiler::labels::is_negative_label(label) {
+                        format!("neg({})", crate::compiler::labels::negative_to_positive_label(label))
+                    } else {
+                        format!("{}", label)
+                    };
+                    parts.push(format!("--[{}]-->{}", label_str, dest));
+                }
+            }
+            for (dest, _) in &state.epsilons {
+                parts.push(format!("--[eps]-->{}", dest));
+            }
+            if state.final_weight.is_some() {
+                parts.push("FINAL".to_string());
+            }
+            if !parts.is_empty() {
+                eprintln!("    state {}: {}", i, parts.join(", "));
+            }
+        }
+    }
+
     resolve_negative_codes_in_nwa(&mut nwa);
+
+    // Dump template NWA after resolve
+    if std::env::var("GLRMASK_DUMP_DWA").unwrap_or_default() == "1" {
+        eprintln!("  [template] NWA after resolve ({} states):", nwa.states.len());
+        for (i, state) in nwa.states.iter().enumerate() {
+            let mut parts = Vec::new();
+            for (&label, targets) in &state.transitions {
+                for (dest, _) in targets {
+                    parts.push(format!("--[{}]-->{}", label, dest));
+                }
+            }
+            for (dest, _) in &state.epsilons {
+                parts.push(format!("--[eps]-->{}", dest));
+            }
+            if state.final_weight.is_some() {
+                parts.push("FINAL".to_string());
+            }
+            if !parts.is_empty() {
+                eprintln!("    state {}: {}", i, parts.join(", "));
+            }
+        }
+    }
+
     let dfa = determinize(&nwa);
+
+    // Dump template DFA
+    if std::env::var("GLRMASK_DUMP_DWA").unwrap_or_default() == "1" {
+        eprintln!("  [template] DFA ({} states, start={}):", dfa.num_states(), dfa.start_state);
+        for (i, state) in dfa.states.iter().enumerate() {
+            let mut parts = Vec::new();
+            for (&label, (target, _)) in &state.transitions {
+                parts.push(format!("--[{}]-->{}", label, target));
+            }
+            if state.final_weight.is_some() {
+                parts.push("FINAL".to_string());
+            }
+            if !parts.is_empty() {
+                eprintln!("    state {}: {}", i, parts.join(", "));
+            }
+        }
+    }
+
     assert!(
         is_acyclic(&dfa),
-        "template DFA is cyclic after determinization — \
-         the grammar normalization pipeline (epsilon elimination + right recursion elimination) \
-         must produce an acyclic NWA/DWA; a cyclic result indicates a construction bug"
+        "template DFA is cyclic after determinization"
     );
+    let minimized = minimize_acyclic(&dfa);
+
+    if std::env::var("GLRMASK_DUMP_DWA").unwrap_or_default() == "1" {
+        eprintln!("  [template] Minimized DFA ({} states, start={}):", minimized.num_states(), minimized.start_state);
+        for (i, state) in minimized.states.iter().enumerate() {
+            let mut parts = Vec::new();
+            for (&label, (target, _)) in &state.transitions {
+                parts.push(format!("--[{}]-->{}", label, target));
+            }
+            if state.final_weight.is_some() {
+                parts.push("FINAL".to_string());
+            }
+            if !parts.is_empty() {
+                eprintln!("    state {}: {}", i, parts.join(", "));
+            }
+        }
+    }
+
     TemplateDfa {
-        dfa: minimize_acyclic(&dfa),
+        dfa: minimized,
     }
 }
 
@@ -383,6 +501,17 @@ pub(crate) fn build_template_nwa_from_bundles(
         .iter()
         .map(|state| context.compose_terminal_state(*state, &mut body_cache, num_tsids, max_token))
         .collect();
+    // Compute blueprint size histogram
+    let mut size_hist: BTreeMap<usize, usize> = BTreeMap::new();
+    for bp in context.blueprint_cache.values() {
+        *size_hist.entry(bp.states.len()).or_insert(0) += 1;
+    }
+    // Count unique bundle indices used
+    let unique_bundles: std::collections::HashSet<usize> = context.blueprint_cache.keys().map(|(b,_)| *b).collect();
+    eprintln!("[compose] blueprint_cache={} unique entries, terminal_states={}, body_cache={} entries, fragment_uses={}, fragment_states={}, unique_bundles={}, size_hist={:?}, total_nwa_states={}",
+        context.blueprint_cache.len(), terminal_dwa.nwa.states.len(), body_cache.len(),
+        context.total_fragment_uses, context.total_fragment_states,
+        unique_bundles.len(), size_hist, context.combined.states.len());
     context.combined
 }
 

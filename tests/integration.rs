@@ -568,13 +568,17 @@ fn test_plan_api_force_nondeterministic() {
 fn test_ported_trivial() {
     // IDs: "a"→0, "$"→1
     let vocab = make_vocab(&["a", "$"]);
-    let c = Constraint::from_ebnf(
+
+    // Print the debug bundle so we can inspect compilation stages.
+    let (c, debug) = Constraint::from_ebnf_with_debug(
         r#"s ::= A EOF
            A ::= 'a'
            EOF ::= '$'"#,
         &vocab,
     )
     .unwrap();
+    eprintln!("\n{debug}");
+
     let mut s = c.start();
 
     let mask = s.mask();
