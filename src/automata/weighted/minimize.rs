@@ -299,7 +299,7 @@ mod tests {
         let s4 = d.add_state();
         let _s5 = d.add_state(); // Unreachable
         let w_all = Weight::full();
-        let w1 = Weight::from_positions(&RangeSet::from_range(1, 1), nt);
+        let w1 = Weight::from_positions(&TokenSet::from_iter([1..=1]), nt);
 
         d.add_transition(0, b'a' as i32, s1, w_all.clone());
         d.add_transition(0, b'b' as i32, s2, w_all.clone());
@@ -342,8 +342,8 @@ mod tests {
         let nt = 1u32;
         let max_tok = 5u32;
         let w_all = Weight::full();
-        let w_1_2 = Weight::from_positions(&RangeSet::from_range(1, 2), nt);
-        let w_2 = Weight::from_positions(&RangeSet::from_range(2, 2), nt);
+        let w_1_2 = Weight::from_positions(&TokenSet::from_iter([1..=2]), nt);
+        let w_2 = Weight::from_positions(&TokenSet::from_iter([2..=2]), nt);
 
         // DWA A: narrow edge weight on s1 → s2
         let mut a = CompDwa::new(nt, max_tok);
@@ -390,9 +390,9 @@ mod tests {
         // Result: 3 states → 2 states.
         let nt = 1u32;
         let max_tok = 10u32;
-        let w1 = Weight::from_positions(&RangeSet::from_range(1, 1), nt);
-        let w_0_1 = Weight::from_positions(&RangeSet::from_range(0, 1), nt);
-        let w0 = Weight::from_positions(&RangeSet::from_range(0, 0), nt);
+        let w1 = Weight::from_positions(&TokenSet::from_iter([1..=1]), nt);
+        let w_0_1 = Weight::from_positions(&TokenSet::from_iter([0..=1]), nt);
+        let w0 = Weight::from_positions(&TokenSet::from_iter([0..=0]), nt);
 
         // DWA a: explicit transitions to dead-end sinks on all four labels
         let mut a = CompDwa::new(nt, max_tok);

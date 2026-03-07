@@ -1019,7 +1019,7 @@ mod tests {
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w_small = Weight::from_positions(&RangeSet::from_range(2, 5), nt);
+        let w_small = Weight::from_positions(&TokenSet::from_iter([2..=5]), nt);
         let w_all = Weight::full();
         nwa.add_transition(s0, 0, s1, w_small);
         nwa.set_final_weight(s1, w_all);
@@ -1047,8 +1047,8 @@ mod tests {
         let max_tok = 200u32; // Must cover 'a'=97, 'b'=98, 'c'=99
         let mut nwa = Nwa::new(nt, max_tok);
         let w_all = Weight::full();
-        let w0 = Weight::from_positions(&RangeSet::from_range(0, 0), nt);
-        let w1 = Weight::from_positions(&RangeSet::from_range(1, 1), nt);
+        let w0 = Weight::from_positions(&TokenSet::from_iter([0..=0]), nt);
+        let w1 = Weight::from_positions(&TokenSet::from_iter([1..=1]), nt);
 
         // Path 1: s0 --'a'--> s1 --'c'--> s2 (final, w0)
         let s0 = nwa.add_state();
@@ -1108,8 +1108,8 @@ mod tests {
         let max_tok = 200u32;
         let mut nwa = Nwa::new(nt, max_tok);
         let w_all = Weight::full();
-        let w0 = Weight::from_positions(&RangeSet::from_range(0, 0), nt);
-        let w1 = Weight::from_positions(&RangeSet::from_range(1, 1), nt);
+        let w0 = Weight::from_positions(&TokenSet::from_iter([0..=0]), nt);
+        let w1 = Weight::from_positions(&TokenSet::from_iter([1..=1]), nt);
 
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();

@@ -92,7 +92,11 @@ fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, _num_tsids: u32) -
                 return TokenSet::new();
             }
             // Project to TSID column, then intersect in token-space.
-            let projected = weight.tokens_for_tsid(tsid);
+            let projected = if weight.is_full() {
+                TokenSet::from_iter([0..=dwa.max_token])
+            } else {
+                weight.tokens_for_tsid(tsid)
+            };
             acc = &acc & &projected;
             if acc.is_empty() {
                 return TokenSet::new();
@@ -109,7 +113,11 @@ fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, _num_tsids: u32) -
         return TokenSet::new();
     }
     if let Some(ref final_weight) = dwa.states[dwa_state as usize].final_weight {
-        let projected_final = final_weight.tokens_for_tsid(tsid);
+        let projected_final = if final_weight.is_full() {
+            TokenSet::from_iter([0..=dwa.max_token])
+        } else {
+            final_weight.tokens_for_tsid(tsid)
+        };
         &acc & &projected_final
     } else {
         TokenSet::new()
