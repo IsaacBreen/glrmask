@@ -29,7 +29,7 @@ pub struct DwaState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dwa {
     /// All states.
-    pub states: Vec<CompDwaState>,
+    pub states: Vec<DwaState>,
     /// Start state ID.
     pub start_state: u32,
     /// Number of TSIDs.
@@ -109,7 +109,7 @@ impl Dwa {
 // Display helpers
 // ---------------------------------------------------------------------------
 
-/// Shared formatting logic for CompDwa states.
+/// Shared formatting logic for `Dwa` states.
 fn fmt_dwa_states(
     dwa: &Dwa,
     f: &mut std::fmt::Formatter<'_>,
@@ -195,7 +195,9 @@ impl PartialEq for DwaState {
     }
 }
 
+/// Compatibility alias retained while compiler-side naming is still settling.
 pub type CompDwa = Dwa;
+/// Compatibility alias retained while compiler-side naming is still settling.
 pub type CompDwaState = DwaState;
 
 #[cfg(test)]

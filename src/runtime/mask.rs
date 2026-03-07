@@ -18,10 +18,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::automata::weighted::dwa::CompDwa;
+use crate::automata::weighted::dwa::Dwa;
 use crate::automata::weighted::nwa::Label;
 use crate::ds::bitset::BitSet;
 use crate::automata::weighted::weight::TokenSet;
+
+/// Flat low-level tokenizer-state → parser-stack map used by the runtime mask walk.
+pub(crate) type FlatStateStacks = BTreeMap<u32, Vec<Vec<u32>>>;
 
 /// Low-level mask helper over an explicit tokenizer-state → stack-map shape.
 ///
@@ -32,9 +35,9 @@ use crate::automata::weighted::weight::TokenSet;
 /// `num_tsids`: number of token-set IDs
 ///
 /// Returns a BitSet where bit `i` is set iff token `i` is allowed.
-pub fn compute_mask_from_state_map(
-    state: &BTreeMap<u32, Vec<Vec<u32>>>,
-    dwa: &CompDwa,
+pub(crate) fn compute_mask_from_state_map(
+    state: &FlatStateStacks,
+    dwa: &Dwa,
     state_to_tsid: &[u32],
     max_token: u32,
     num_tsids: u32,
@@ -47,7 +50,7 @@ pub fn compute_mask_from_state_map(
 /// Projects DWA weights to the target TSID column *first*, then intersects
 /// in token-space only. This avoids carrying N×M-space accumulators when
 /// only a single TSID column is needed.
-fn walk_dwa_weighted(dwa: &CompDwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> TokenSet {
+fn walk_dwa_weighted(dwa: &Dwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> TokenSet {
     unimplemented!()
 }
 
@@ -58,14 +61,14 @@ mod tests {
 
     #[test]
     fn test_walk_dwa_empty_stack() {
-        let dwa = CompDwa::new(1, 5);
+        let dwa = Dwa::new(1, 5);
         let tokens = walk_dwa_weighted(&dwa, &[], 0, 1);
         assert!(tokens.is_empty());
     }
 
     #[test]
     fn test_walk_dwa_no_transition() {
-        let dwa = CompDwa::new(1, 5);
+        let dwa = Dwa::new(1, 5);
         let tokens = walk_dwa_weighted(&dwa, &[0], 0, 1);
         assert!(tokens.is_empty());
     }
@@ -74,7 +77,7 @@ mod tests {
     fn test_walk_dwa_simple_accepting() {
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = CompDwa::new(nt, max_tok);
+        let mut dwa = Dwa::new(nt, max_tok);
         let s1 = dwa.add_state();
 
         let w_all = Weight::full();

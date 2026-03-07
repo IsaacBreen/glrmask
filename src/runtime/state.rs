@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::dfa::DEAD;
-use crate::automata::weighted::dwa::CompDwa;
+use crate::automata::weighted::dwa::Dwa;
 use crate::compiler::glr::table::{Action, GlrTable};
 use crate::compiler::grammar_def::TerminalId;
 use crate::compiler::tokenizer_dfa::TokenizerDfa;
@@ -19,6 +19,7 @@ use crate::automata::weighted::weight::TokenSet;
 
 use super::gss_acc::{TerminalsDisallowed, terminals_disallowed_fresh};
 use super::leveled_gss::LeveledGSS;
+use super::mask::FlatStateStacks;
 
 /// A GSS (Graph-Structured Stack) for the GLR parser.
 ///
@@ -35,7 +36,7 @@ pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 pub struct Constraint {
     /// The compiled parser DWA.
     /// Labels = parser state IDs (i32), weights = token bitvectors.
-    pub(crate) parser_dwa: CompDwa,
+    pub(crate) parser_dwa: Dwa,
 
     /// The GLR parse table.
     pub(crate) table: GlrTable,
@@ -215,7 +216,7 @@ impl Constraint {
     }
 
     /// Access the compiled parser DWA (for debugging/analysis).
-    pub fn parser_dwa(&self) -> &CompDwa {
+    pub fn parser_dwa(&self) -> &Dwa {
         unimplemented!()
     }
 }
@@ -246,6 +247,12 @@ impl<'a> ConstraintState<'a> {
     /// map-based helper lives in [src/runtime/mask.rs](src/runtime/mask.rs).
     /// Prefer [`mask`] or [`fill_mask`] for the public `u32`-word mask shape.
     pub(crate) fn compute_mask(&self) -> BitSet {
+        unimplemented!()
+    }
+
+    /// Flatten the live parser GSS map into the low-level list-of-stacks shape
+    /// consumed by the runtime mask helper layer.
+    fn flat_state_stacks(&self) -> FlatStateStacks {
         unimplemented!()
     }
 
