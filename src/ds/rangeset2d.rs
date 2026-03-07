@@ -85,23 +85,6 @@ impl RangeSet2D {
         unimplemented!()
     }
 
-    /// Compute the "divide complement" of `self` within `[0, max_token]`.
-    ///
-    /// Returns a 2D range-set covering ALL TSIDs (0..num_tsids-1) where:
-    /// - TSIDs with entries get `full.difference(entry_value)`
-    /// - TSIDs without entries get `full` (the full token range)
-    ///
-    /// This can be precomputed once for a divisor and reused across
-    /// multiple `divide_with_complement` calls.
-    pub fn divide_complement(&self, max_token: u32, num_tsids: u32) -> Self {
-        unimplemented!()
-    }
-
-    /// Divide using a precomputed complement: `self | complement`.
-    pub fn divide_with_complement(&self, complement: &Self, full: &RangeSetBlaze<u32>) -> Self {
-        unimplemented!()
-    }
-
     /// Check whether two 2D range-sets are disjoint.
     pub fn is_disjoint(&self, other: &Self) -> bool {
         unimplemented!()
