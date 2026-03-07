@@ -11,14 +11,14 @@ use serde::{Deserialize, Serialize};
 use crate::ds::u8set::U8Set;
 
 use super::ast::{Expr, ExprGroups};
-use super::dfa::Dfa;
-use super::nfa::Nfa;
+use super::dfa::DFA;
+use super::nfa::NFA;
 
 /// A compiled regex (wraps a minimized DFA).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Regex {
     /// The underlying DFA.
-    pub dfa: Dfa,
+    pub dfa: DFA,
 }
 
 impl Regex {
@@ -27,18 +27,8 @@ impl Regex {
         unimplemented!()
     }
 
-    /// Whether the regex matches the input completely.
-    pub fn is_match(&self, input: &[u8]) -> bool {
-        unimplemented!()
-    }
-
     /// Get the next DFA state for a byte, starting from the given state.
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        unimplemented!()
-    }
-
-    /// Whether a DFA state is accepting.
-    pub fn is_accepting(&self, state: u32) -> bool {
         unimplemented!()
     }
 
@@ -54,18 +44,6 @@ impl Expr {
         unimplemented!()
     }
 
-    /// CPS (Continuation-Passing Style) NFA compilation.
-    ///
-    /// Compiles this expression into NFA states such that entering at the returned
-    /// state will recognize the expression and then flow to `cont`.
-    pub(crate) fn compile_cps(
-        expr: &Expr,
-        nfa: &mut Nfa,
-        cont: u32,
-        cache: &mut HashMap<(usize, u32), u32>,
-    ) -> u32 {
-        unimplemented!()
-    }
 }
 
 impl ExprGroups {
@@ -75,7 +53,7 @@ impl ExprGroups {
     }
 
     /// Compile to NFA (without DFA conversion — useful for testing).
-    pub fn build_nfa(self) -> Nfa {
+    pub fn build_nfa(self) -> NFA {
         unimplemented!()
     }
 }

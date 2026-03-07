@@ -1,19 +1,12 @@
-//! Lexer-side DFA minimization.
+//! Lexer-side DFA minimization placeholder.
+//!
+//! This file is intentionally gutted. The future lexer-DFA minimization step
+//! should be straightforward once the sep1-style DFA shape is in place.
 
-use super::dfa::Dfa;
+use super::dfa::DFA;
 
-impl Dfa {
-    /// Minimize this DFA using Hopcroft's algorithm. Returns a new minimized DFA.
-    pub fn minimize(&self) -> Dfa {
-        unimplemented!()
+impl DFA {
+    pub fn minimize(&self) -> DFA {
+        todo!("lexer DFA minimization is self-explanatory and intentionally deferred")
     }
-}
-
-/// Hopcroft's DFA minimization algorithm.
-///
-/// Groups states into equivalence classes based on their transition behavior
-/// and finalizer sets. States with different finalizers or different transition
-/// signatures (w.r.t. equivalence classes) are separated.
-fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
-    unimplemented!()
 }
