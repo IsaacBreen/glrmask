@@ -223,6 +223,48 @@ mod tests {
     }
 
     #[test]
+    fn test_possible_matches_union_covers_all_tokenizer_reachable_tokens() {
+        let gdef = simple_ab_grammar();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"ab".to_vec()),
+                (3, b"ba".to_vec()),
+                (4, b"x".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+
+        for tokenizer_state in 0..constraint.tokenizer.num_states() {
+            let mut expected = std::collections::BTreeSet::new();
+            for (token_id, token_bytes) in &vocab.entries {
+                let exec = constraint
+                    .tokenizer
+                    .execute_from_state(token_bytes, tokenizer_state);
+                if !exec.matches.is_empty() {
+                    expected.insert(*token_id);
+                }
+            }
+
+            let actual: std::collections::BTreeSet<u32> = constraint
+                .possible_matches_for_state(tokenizer_state)
+                .values()
+                .flat_map(|token_ids| token_ids.iter())
+                .collect();
+
+            assert_eq!(
+                actual,
+                expected,
+                "possible_matches union should equal all tokenizer-reachable tokens for state {}",
+                tokenizer_state
+            );
+        }
+    }
+
+    #[test]
     fn test_compile_choice() {
         let gdef = choice_grammar(); 
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
