@@ -10,8 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::compiler::glr::analysis::GlrGrammar;
-use crate::compiler::glr::table::{Action, GlrTable};
+use crate::compiler::glr::analysis::GLRGrammar;
+use crate::compiler::glr::table::{Action, GLRTable};
 use crate::compiler::grammar::ast::{NonterminalId, TerminalId};
 
 /// Shift: from parser state `from`, terminal T shifts to state `to`.
@@ -44,8 +44,8 @@ pub struct TerminalCharacterization {
 
 /// Characterize terminals: find all parser-stack patterns that allow them.
 pub(crate) fn characterize_terminals(
-    table: &GlrTable,
-    grammar: &GlrGrammar,
+    table: &GLRTable,
+    grammar: &GLRGrammar,
 ) -> BTreeMap<TerminalId, TerminalCharacterization> {
     let mut result = BTreeMap::new();
     let num_states = table.num_states;
@@ -125,8 +125,8 @@ mod tests {
     #[test]
     fn test_characterize_simple_ab() {
         let gdef = simple_ab_grammar();
-        let grammar = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&grammar);
+        let grammar = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&grammar);
         let chars = characterize_terminals(&table, &grammar);
 
         assert!(chars.contains_key(&0));

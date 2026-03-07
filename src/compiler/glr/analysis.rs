@@ -76,9 +76,6 @@ impl GLRGrammar {
     }
 }
 
-/// Compatibility alias retained while acronym capitalization settles.
-pub type GlrGrammar = GLRGrammar;
-
 // ---------------------------------------------------------------------------
 // Grammar normalization for mask computation
 // ---------------------------------------------------------------------------
@@ -103,7 +100,7 @@ pub type GlrGrammar = GLRGrammar;
 /// modulo empty-string cases for epsilon-only grammars) and its SLR parse table
 /// produces an acyclic NWA/DWA, which is required for correct mask computation.
 ///
-/// Call this once in the compilation pipeline BEFORE [`GlrGrammar::from_grammar_def`].
+/// Call this once in the compilation pipeline BEFORE [`GLRGrammar::from_grammar_def`].
 pub fn normalize_for_mask(g: &GrammarDef) -> GrammarDef {
     unimplemented!()
 }
@@ -314,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_glr_grammar_simple() {
-        let g = GlrGrammar::from_grammar_def(&simple_ab_grammar());
+        let g = GLRGrammar::from_grammar_def(&simple_ab_grammar());
         // Augmented: S' → S;  S → a b
         assert_eq!(g.rules.len(), 2);
         assert_eq!(g.num_nonterminals, 2); // S, S'
@@ -329,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_glr_grammar_choice() {
-        let g = GlrGrammar::from_grammar_def(&choice_grammar());
+        let g = GLRGrammar::from_grammar_def(&choice_grammar());
         // S → a | b  →  FIRST(S) = {a, b}
         assert!(g.first[0].contains(&0));
         assert!(g.first[0].contains(&1));
@@ -337,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_glr_grammar_two_nt() {
-        let g = GlrGrammar::from_grammar_def(&two_nt_grammar());
+        let g = GLRGrammar::from_grammar_def(&two_nt_grammar());
         // S → A b, A → a.  FIRST(A) = {a}, FIRST(S) = FIRST(A) = {a}
         assert!(g.first[0].contains(&0)); // FIRST(S) has 'a'
         assert!(g.first[1].contains(&0)); // FIRST(A) has 'a'

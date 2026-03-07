@@ -28,8 +28,8 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::glr::analysis::GlrGrammar;
-use crate::compiler::glr::table::{Action, GlrTable};
+use crate::compiler::glr::analysis::GLRGrammar;
+use crate::compiler::glr::table::{Action, GLRTable};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::compiler::grammar::ast::{NonterminalId, TerminalId};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
@@ -84,8 +84,8 @@ fn terminals_present_in_terminal_dwa(terminal_dwa: &crate::compiler::terminal_dw
 ///              `skip_start --[R]--> mid_0 --[DEFAULT]--> mid_1 ... --[S]--> accept`
 #[allow(dead_code)]
 pub fn build_parser_nwa(
-    table: &GlrTable,
-    grammar: &GlrGrammar,
+    table: &GLRTable,
+    grammar: &GLRGrammar,
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
     id_map: &InternalIdMap,
@@ -297,8 +297,8 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
 
 /// Build the full parser DWA by constructing the NWA, determinizing, and minimizing.
 pub fn build_parser_dwa(
-    table: &GlrTable,
-    grammar: &GlrGrammar,
+    table: &GLRTable,
+    grammar: &GLRGrammar,
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
     id_map: &InternalIdMap,
@@ -310,8 +310,8 @@ pub fn build_parser_dwa(
 /// Build the full parser DWA, returning an [`AutomataDebug`] bundle alongside.
 #[allow(dead_code)]
 pub fn build_parser_dwa_with_debug(
-    table: &GlrTable,
-    grammar: &GlrGrammar,
+    table: &GLRTable,
+    grammar: &GLRGrammar,
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
     id_map: &InternalIdMap,
@@ -321,8 +321,8 @@ pub fn build_parser_dwa_with_debug(
 }
 
 fn build_parser_dwa_impl(
-    table: &GlrTable,
-    grammar: &GlrGrammar,
+    table: &GLRTable,
+    grammar: &GLRGrammar,
     tokenizer: &TokenizerDfa,
     vocab: &Vocab,
     id_map: &InternalIdMap,
@@ -440,7 +440,7 @@ mod tests {
     use range_set_blaze::RangeSetBlaze;
     use crate::Vocab;
     use crate::automata::lexer::tokenizer::TokenizerDfa;
-    use crate::compiler::glr::analysis::GlrGrammar;
+    use crate::compiler::glr::analysis::GLRGrammar;
     use crate::compiler::grammar::ast::GrammarDef;
     use crate::compiler::grammar::ast::tests::*;
 
@@ -461,8 +461,8 @@ mod tests {
     #[test]
     fn test_characterize_simple_ab() {
         let gdef = simple_ab_grammar(); // S → a b
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
         let chars = characterize_terminals(&table, &gg);
 
         // Terminal 'a' (id=0): should have shift from some state.
@@ -476,8 +476,8 @@ mod tests {
     #[test]
     fn test_build_parser_nwa_simple() {
         let gdef = simple_ab_grammar();
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
         let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
         let nwa = build_parser_nwa(&table, &gg, &tok, &vocab, &vp);
@@ -518,8 +518,8 @@ mod tests {
     #[test]
     fn test_build_parser_dwa_simple() {
         let gdef = simple_ab_grammar();
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
         let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
         let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp);
@@ -529,8 +529,8 @@ mod tests {
     #[test]
     fn test_build_parser_dwa_choice() {
         let gdef = choice_grammar(); // S → a | b
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
         let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
         let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp);

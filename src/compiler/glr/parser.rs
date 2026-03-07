@@ -8,29 +8,53 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::analysis::EOF;
-use super::table::{Action, GlrTable};
+use super::table::{Action, GLRTable};
 use crate::compiler::grammar::ast::TerminalId;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
+
+/// Maps tokenizer state ID → set of disallowed terminal IDs.
+pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
+
+/// Create a fresh (empty) `TerminalsDisallowed`.
+pub(crate) fn terminals_disallowed_fresh() -> TerminalsDisallowed {
+    unimplemented!()
+}
+
+impl Merge for TerminalsDisallowed {
+    fn merge(&self, other: &Self) -> Self {
+        unimplemented!()
+    }
+}
+
+/// A GSS (Graph-Structured Stack) for the parser stack state.
+pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
+
+/// A live parser state paired with a single parser instance.
+pub struct GLRParserState<'a> {
+    pub parser: &'a GLRParser,
+    pub stack: ParserGSS,
+}
 
 /// GLR parser backed by an SLR(1) table.
 ///
 /// Handles ambiguous grammars by maintaining multiple parse stacks.
 #[allow(dead_code)]
-pub struct GlrParser {
-    pub table: GlrTable,
+pub struct GLRParser {
+    pub table: GLRTable,
 }
 
 #[allow(dead_code)]
-impl GlrParser {
+impl GLRParser {
     /// Create a new parser from a table.
-    pub fn new(table: GlrTable) -> Self {
+    pub fn new(table: GLRTable) -> Self {
         unimplemented!()
     }
 
-    /// Parse a sequence of terminal IDs. Returns `true` if the input is accepted.
-    pub fn parse(&self, input: &[TerminalId]) -> bool {
+    /// Create a fresh parser state at the start of the parse.
+    pub fn start(&self) -> GLRParserState<'_> {
         unimplemented!()
     }
 
@@ -53,6 +77,13 @@ impl GlrParser {
     }
 }
 
+impl<'a> GLRParserState<'a> {
+    /// Check whether this parser state accepts a full input sequence.
+    pub fn accepts(&self, input: &[TerminalId]) -> bool {
+        unimplemented!()
+    }
+}
+
 // ====================================================================
 // Tests
 // ====================================================================
@@ -60,43 +91,47 @@ impl GlrParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::glr::analysis::GlrGrammar;
+    use crate::compiler::glr::analysis::GLRGrammar;
     use crate::compiler::grammar::ast::tests::*;
     use crate::compiler::grammar::ast::{GrammarDef, Rule, Symbol, TerminalDef};
 
-    fn build_parser(gdef: &GrammarDef) -> GlrParser {
-        let gg = GlrGrammar::from_grammar_def(gdef);
-        let table = GlrTable::build(&gg);
-        GlrParser::new(table)
+    fn build_parser(gdef: &GrammarDef) -> GLRParser {
+        let gg = GLRGrammar::from_grammar_def(gdef);
+        let table = GLRTable::build(&gg);
+        GLRParser::new(table)
+    }
+
+    fn accepts(parser: &GLRParser, input: &[TerminalId]) -> bool {
+        parser.start().accepts(input)
     }
 
     #[test]
     fn test_parse_simple_ab() {
         let gdef = simple_ab_grammar(); // S → a b
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0, 1])); // "a b" — accepted
-        assert!(!parser.parse(&[0])); // "a" alone — rejected
-        assert!(!parser.parse(&[1, 0])); // "b a" — rejected
-        assert!(!parser.parse(&[])); // empty — rejected
+        assert!(accepts(&parser, &[0, 1])); // "a b" — accepted
+        assert!(!accepts(&parser, &[0])); // "a" alone — rejected
+        assert!(!accepts(&parser, &[1, 0])); // "b a" — rejected
+        assert!(!accepts(&parser, &[])); // empty — rejected
     }
 
     #[test]
     fn test_parse_choice() {
         let gdef = choice_grammar(); // S → a | b
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0])); // "a"
-        assert!(parser.parse(&[1])); // "b"
-        assert!(!parser.parse(&[0, 1])); // "a b" — too long
-        assert!(!parser.parse(&[])); // empty
+        assert!(accepts(&parser, &[0])); // "a"
+        assert!(accepts(&parser, &[1])); // "b"
+        assert!(!accepts(&parser, &[0, 1])); // "a b" — too long
+        assert!(!accepts(&parser, &[])); // empty
     }
 
     #[test]
     fn test_parse_two_nt() {
         let gdef = two_nt_grammar(); // S → A b, A → a
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0, 1])); // "a b"
-        assert!(!parser.parse(&[0])); // "a" alone
-        assert!(!parser.parse(&[1])); // "b" alone
+        assert!(accepts(&parser, &[0, 1])); // "a b"
+        assert!(!accepts(&parser, &[0])); // "a" alone
+        assert!(!accepts(&parser, &[1])); // "b" alone
     }
 
     #[test]
@@ -132,11 +167,11 @@ mod tests {
             ],
         };
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0])); // "a"
-        assert!(parser.parse(&[0, 1, 0])); // "a + a"
-        assert!(parser.parse(&[0, 1, 0, 1, 0])); // "a + a + a"
-        assert!(!parser.parse(&[1])); // "+" alone
-        assert!(!parser.parse(&[0, 1])); // "a +"
+        assert!(accepts(&parser, &[0])); // "a"
+        assert!(accepts(&parser, &[0, 1, 0])); // "a + a"
+        assert!(accepts(&parser, &[0, 1, 0, 1, 0])); // "a + a + a"
+        assert!(!accepts(&parser, &[1])); // "+" alone
+        assert!(!accepts(&parser, &[0, 1])); // "a +"
     }
 
     #[test]
@@ -165,9 +200,9 @@ mod tests {
             }],
         };
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[])); // empty (S → A → ε)
-        assert!(parser.parse(&[0])); // "a" (S → A → a)
-        assert!(!parser.parse(&[0, 0])); // "a a" — too long
+        assert!(accepts(&parser, &[])); // empty (S → A → ε)
+        assert!(accepts(&parser, &[0])); // "a" (S → A → a)
+        assert!(!accepts(&parser, &[0, 0])); // "a a" — too long
     }
 
     #[test]
@@ -204,12 +239,12 @@ mod tests {
         };
         let parser = build_parser(&gdef);
         // Accepted: b a*
-        assert!(parser.parse(&[1]),       "\"b\" accepted");
-        assert!(parser.parse(&[1, 0]),    "\"ba\" accepted");
-        assert!(parser.parse(&[1, 0, 0]), "\"baa\" accepted");
+        assert!(accepts(&parser, &[1]),       "\"b\" accepted");
+        assert!(accepts(&parser, &[1, 0]),    "\"ba\" accepted");
+        assert!(accepts(&parser, &[1, 0, 0]), "\"baa\" accepted");
         // Rejected
-        assert!(!parser.parse(&[0]),    "\"a\" rejected (must start with 'b')");
-        assert!(!parser.parse(&[1, 1]), "\"bb\" rejected (two 'b's)");
+        assert!(!accepts(&parser, &[0]),    "\"a\" rejected (must start with 'b')");
+        assert!(!accepts(&parser, &[1, 1]), "\"bb\" rejected (two 'b's)");
     }
 
     #[test]
@@ -227,14 +262,14 @@ mod tests {
         };
         let parser = build_parser(&gdef);
         // Accepted: a* b
-        assert!(parser.parse(&[1]),          "\"b\" accepted");
-        assert!(parser.parse(&[0, 1]),       "\"ab\" accepted");
-        assert!(parser.parse(&[0, 0, 1]),    "\"aab\" accepted");
-        assert!(parser.parse(&[0, 0, 0, 1]), "\"aaab\" accepted");
+        assert!(accepts(&parser, &[1]),          "\"b\" accepted");
+        assert!(accepts(&parser, &[0, 1]),       "\"ab\" accepted");
+        assert!(accepts(&parser, &[0, 0, 1]),    "\"aab\" accepted");
+        assert!(accepts(&parser, &[0, 0, 0, 1]), "\"aaab\" accepted");
         // Rejected
-        assert!(!parser.parse(&[0]),     "\"a\" rejected (must end in 'b')");
-        assert!(!parser.parse(&[1, 0]),  "\"ba\" rejected");
-        assert!(!parser.parse(&[1, 1]),  "\"bb\" rejected");
+        assert!(!accepts(&parser, &[0]),     "\"a\" rejected (must end in 'b')");
+        assert!(!accepts(&parser, &[1, 0]),  "\"ba\" rejected");
+        assert!(!accepts(&parser, &[1, 1]),  "\"bb\" rejected");
     }
 
     #[test]
@@ -256,17 +291,17 @@ mod tests {
         };
         let parser = build_parser(&gdef);
         // Accepted
-        assert!(parser.parse(&[0]),                   "\"i\" accepted");
-        assert!(parser.parse(&[0, 1, 0]),             "\"i+i\" accepted");
-        assert!(parser.parse(&[0, 2, 0]),             "\"i*i\" accepted");
-        assert!(parser.parse(&[0, 1, 0, 2, 0]),       "\"i+i*i\" accepted");
-        assert!(parser.parse(&[3, 0, 1, 0, 4, 2, 0]), "\"(i+i)*i\" accepted");
+        assert!(accepts(&parser, &[0]),                   "\"i\" accepted");
+        assert!(accepts(&parser, &[0, 1, 0]),             "\"i+i\" accepted");
+        assert!(accepts(&parser, &[0, 2, 0]),             "\"i*i\" accepted");
+        assert!(accepts(&parser, &[0, 1, 0, 2, 0]),       "\"i+i*i\" accepted");
+        assert!(accepts(&parser, &[3, 0, 1, 0, 4, 2, 0]), "\"(i+i)*i\" accepted");
         // Rejected
-        assert!(!parser.parse(&[0, 1]),       "\"i+\" rejected (incomplete)");
-        assert!(!parser.parse(&[0, 1, 1, 0]), "\"i++i\" rejected (invalid)");
-        assert!(!parser.parse(&[]),           "\"\" rejected (empty)");
-        assert!(!parser.parse(&[4]),          "\")\" rejected");
-        assert!(!parser.parse(&[3, 0]),       "\"(i\" rejected (unclosed paren)");
+        assert!(!accepts(&parser, &[0, 1]),       "\"i+\" rejected (incomplete)");
+        assert!(!accepts(&parser, &[0, 1, 1, 0]), "\"i++i\" rejected (invalid)");
+        assert!(!accepts(&parser, &[]),           "\"\" rejected (empty)");
+        assert!(!accepts(&parser, &[4]),          "\")\" rejected");
+        assert!(!accepts(&parser, &[3, 0]),       "\"(i\" rejected (unclosed paren)");
     }
 
     #[test]
@@ -286,8 +321,8 @@ mod tests {
             terminals: vec![tdef(0, "x")],
         };
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0]),  "\"x\" accepted despite reduce/reduce conflict");
-        assert!(!parser.parse(&[]), "\"\" rejected");
+        assert!(accepts(&parser, &[0]),  "\"x\" accepted despite reduce/reduce conflict");
+        assert!(!accepts(&parser, &[]), "\"\" rejected");
     }
 
     #[test]
@@ -308,10 +343,10 @@ mod tests {
             terminals: vec![tdef(0, "x")],
         };
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[]),       "\"\" accepted (A→ε, B→ε)");
-        assert!(parser.parse(&[0]),      "\"x\" accepted (A→x,B→ε or A→ε,B→x)");
-        assert!(parser.parse(&[0, 0]),   "\"xx\" accepted (A→x, B→x)");
-        assert!(!parser.parse(&[0, 0, 0]), "\"xxx\" rejected");
+        assert!(accepts(&parser, &[]),       "\"\" accepted (A→ε, B→ε)");
+        assert!(accepts(&parser, &[0]),      "\"x\" accepted (A→x,B→ε or A→ε,B→x)");
+        assert!(accepts(&parser, &[0, 0]),   "\"xx\" accepted (A→x, B→x)");
+        assert!(!accepts(&parser, &[0, 0, 0]), "\"xxx\" rejected");
     }
 
     #[test]
@@ -328,10 +363,10 @@ mod tests {
             terminals: vec![tdef(0, "a")],
         };
         let parser = build_parser(&gdef);
-        assert!(parser.parse(&[0]),       "\"a\" accepted");
-        assert!(parser.parse(&[0, 0]),    "\"aa\" accepted");
-        assert!(parser.parse(&[0, 0, 0]), "\"aaa\" accepted (many parse trees)");
-        assert!(!parser.parse(&[]),       "\"\" rejected (S not nullable)");
+        assert!(accepts(&parser, &[0]),       "\"a\" accepted");
+        assert!(accepts(&parser, &[0, 0]),    "\"aa\" accepted");
+        assert!(accepts(&parser, &[0, 0, 0]), "\"aaa\" accepted (many parse trees)");
+        assert!(!accepts(&parser, &[]),       "\"\" rejected (S not nullable)");
     }
 
     #[test]
@@ -350,11 +385,11 @@ mod tests {
         };
         let parser = build_parser(&gdef);
         // Accepted
-        assert!(parser.parse(&[1, 0]), "\"dc\" accepted (A → d c)");
-        assert!(parser.parse(&[0]),    "\"c\" accepted (A → ε c via B→ε)");
+        assert!(accepts(&parser, &[1, 0]), "\"dc\" accepted (A → d c)");
+        assert!(accepts(&parser, &[0]),    "\"c\" accepted (A → ε c via B→ε)");
         // Rejected
-        assert!(!parser.parse(&[1]),   "\"d\" rejected (missing 'c')");
-        assert!(!parser.parse(&[]),    "\"\" rejected (A always requires 'c')");
+        assert!(!accepts(&parser, &[1]),   "\"d\" rejected (missing 'c')");
+        assert!(!accepts(&parser, &[]),    "\"\" rejected (A always requires 'c')");
     }
 
     #[test]
@@ -377,11 +412,11 @@ mod tests {
         };
         let parser = build_parser(&gdef);
         // Ambiguous dangling-else input: accepted through GLR's parallel exploration
-        assert!(parser.parse(&[0, 1, 2, 0, 1, 2, 4, 3, 4]),
+        assert!(accepts(&parser, &[0, 1, 2, 0, 1, 2, 4, 3, 4]),
             "ambiguous 'if id then if id then other else other' should be accepted");
         // Simpler cases
-        assert!(parser.parse(&[4]),          "\"other\" accepted");
-        assert!(parser.parse(&[0, 1, 2, 4]), "\"if id then other\" accepted");
-        assert!(!parser.parse(&[0, 1, 2]),   "\"if id then\" rejected (incomplete)");
+        assert!(accepts(&parser, &[4]),          "\"other\" accepted");
+        assert!(accepts(&parser, &[0, 1, 2, 4]), "\"if id then other\" accepted");
+        assert!(!accepts(&parser, &[0, 1, 2]),   "\"if id then\" rejected (incomplete)");
     }
 }

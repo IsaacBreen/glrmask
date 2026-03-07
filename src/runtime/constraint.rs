@@ -14,11 +14,13 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::lexer::tokenizer::TokenizerDfa;
 use crate::automata::weighted::dwa::DWA;
-use crate::compiler::glr::table::GlrTable;
+use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalId;
 use crate::ds::leveled_gss::LeveledGSS;
 
-use super::state::{ConstraintState, terminals_disallowed_fresh};
+use crate::compiler::glr::parser::terminals_disallowed_fresh;
+
+use super::state::ConstraintState;
 
 /// A compiled grammar constraint, ready for inference.
 ///
@@ -32,7 +34,7 @@ pub struct Constraint {
     pub(crate) parser_dwa: DWA,
 
     /// The GLR parse table.
-    pub(crate) table: GlrTable,
+    pub(crate) table: GLRTable,
 
     /// The byte-level tokenizer DFA.
     pub(crate) tokenizer: TokenizerDfa,

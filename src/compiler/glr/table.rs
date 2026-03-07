@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::analysis::{EOF, GLRGrammar, GlrGrammar};
+use super::analysis::{EOF, GLRGrammar};
 use crate::compiler::grammar_def::{NonterminalId, Rule, Symbol, TerminalId};
 
 // ---------------------------------------------------------------------------
@@ -63,9 +63,6 @@ impl GLRTable {
         unimplemented!()
     }
 }
-
-/// Compatibility alias retained while acronym capitalization settles.
-pub type GlrTable = GLRTable;
 
 // ---------------------------------------------------------------------------
 // LR(0) items
@@ -189,7 +186,7 @@ fn build_slr1_table(
     grammar: &GLRGrammar,
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
-) -> GlrTable {
+) -> GLRTable {
         unimplemented!()
     }
 
@@ -207,8 +204,8 @@ mod tests {
     fn test_table_simple_ab() {
         // S → a b.  Should produce 4 states: s0, s1 (after 'a'), s2 (after 'b'), s3 (accept).
         let gdef = simple_ab_grammar();
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
 
         assert!(table.num_states >= 3);
 
@@ -229,8 +226,8 @@ mod tests {
     fn test_table_choice() {
         // S → a | b.  State 0 should shift on both 'a' and 'b'.
         let gdef = choice_grammar();
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
 
         assert!(!table.actions(0, 0).is_empty()); // 'a'
         assert!(!table.actions(0, 1).is_empty()); // 'b'
@@ -251,8 +248,8 @@ mod tests {
                 pattern: "a".into(),
             }],
         };
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
 
         // Walk: s0 --shift(a)--> s1 --reduce(S→a)--> s0 --goto(S)--> s2 --accept($)
         // Check that after shifting 'a', there's a reduce on $.
@@ -269,8 +266,8 @@ mod tests {
     fn test_table_two_nt() {
         // S → A b, A → a.
         let gdef = two_nt_grammar();
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
 
         // State 0 should have shift on 'a'.
         assert!(!table.actions(0, 0).is_empty());
@@ -310,8 +307,8 @@ mod tests {
                 },
             ],
         };
-        let gg = GlrGrammar::from_grammar_def(&gdef);
-        let table = GlrTable::build(&gg);
+        let gg = GLRGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&gg);
 
         // The table should have been built successfully (GLR handles conflicts).
         assert!(table.num_states > 0);

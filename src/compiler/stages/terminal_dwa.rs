@@ -98,14 +98,14 @@ mod tests {
     use range_set_blaze::RangeSetBlaze;
     use crate::automata::regex::bytes;
     use crate::automata::lexer::tokenizer::TokenizerDfa;
-    use crate::compiler::glr::analysis::GlrGrammar;
+    use crate::compiler::glr::analysis::GLRGrammar;
     use crate::compiler::grammar::ast::tests::simple_ab_grammar;
     use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 
     #[test]
     fn test_build_terminal_dwa_collapses_always_allowed_follow_path() {
         let grammar = simple_ab_grammar();
-        let glr_grammar = GlrGrammar::from_grammar_def(&grammar);
+        let glr_grammar = GLRGrammar::from_grammar_def(&grammar);
         let tokenizer = TokenizerDfa::from_grammar_def(&grammar);
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())], None);
         let id_map = InternalIdMap::build(&tokenizer, &vocab);
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn test_terminal_dwa_carries_tokenizer_greedy_metadata() {
         let grammar = simple_ab_grammar();
-        let glr_grammar = GlrGrammar::from_grammar_def(&grammar);
+        let glr_grammar = GLRGrammar::from_grammar_def(&grammar);
         let tokenizer = TokenizerDfa::from_expr_groups(&[
             crate::automata::regex::ExprGroup {
                 expr: bytes(b"a"),

@@ -11,8 +11,8 @@ use crate::Vocab;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::lexer::tokenizer::TokenizerDfa;
 use crate::compiler::debug::CompileDebug;
-use crate::compiler::glr::analysis::GlrGrammar;
-use crate::compiler::glr::table::GlrTable;
+use crate::compiler::glr::analysis::GLRGrammar;
+use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::ast::GrammarDef;
 use crate::compiler::grammar::normalize::normalize_for_mask;
 use crate::compiler::parser_dwa::build_parser_dwa;
@@ -25,9 +25,9 @@ use crate::runtime::Constraint;
 /// ```text
 /// GrammarDef + Vocab
 ///       │
-///       ├── GlrGrammar::from_grammar_def()
+///       ├── GLRGrammar::from_grammar_def()
 ///       │      │
-///       │      └── GlrTable::build()
+///       │      └── GLRTable::build()
 ///       │
 ///       ├── TokenizerDfa::from_grammar_def()
 ///       │      │
