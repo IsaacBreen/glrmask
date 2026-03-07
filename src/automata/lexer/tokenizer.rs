@@ -25,6 +25,7 @@ pub struct Tokenizer {
 pub struct TokenizerMatch {
     pub id: TerminalID,
     pub width: usize,
+    pub end_state: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +110,7 @@ impl Tokenizer {
                 matches.push(TokenizerMatch {
                     id: terminal,
                     width: index + 1,
+                    end_state: state,
                 });
             }
         }

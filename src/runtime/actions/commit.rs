@@ -49,18 +49,6 @@ impl<'a> ConstraintState<'a> {
             return;
         }
 
-        let mut terminals_for_prefix = |tokenizer_state: u32, width: usize| -> BTreeSet<u32> {
-            let exec = self
-                .constraint
-                .tokenizer
-                .execute_from_state(&bytes[..width], tokenizer_state);
-            let Some(prefix_end_state) = exec.end_state else {
-                return BTreeSet::new();
-            };
-
-            self.constraint.tokenizer.all_matched_terminals(prefix_end_state)
-        };
-
         let mut state_map = BTreeMap::new();
         let mut terminals_map = BTreeMap::<u32, BTreeSet<u32>>::new();
         for (&tokenizer_state, _) in &self.state {
@@ -72,7 +60,7 @@ impl<'a> ConstraintState<'a> {
                 terminals_map
                     .entry(tokenizer_state)
                     .or_default()
-                    .extend(terminals_for_prefix(tokenizer_state, matched.width));
+                    .extend(self.constraint.tokenizer.all_matched_terminals(matched.end_state));
             }
         }
 
