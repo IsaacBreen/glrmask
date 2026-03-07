@@ -28,7 +28,7 @@ pub type GroupId = usize;
 /// States are numbered `0..num_states`. Transitions are stored in a flat
 /// array of size `num_states * 256`. State 0 is the start state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dfa {
+pub struct DFA {
     /// Flat transition table: `transitions[state * 256 + byte] = next_state`.
     /// `DEAD` means no transition.
     transitions: Vec<u32>,
@@ -43,7 +43,7 @@ pub struct Dfa {
     num_states: usize,
 }
 
-impl Dfa {
+impl DFA {
     /// Create a DFA with the given number of states (all transitions dead, no finalizers).
     pub fn new(num_states: usize) -> Self {
         unimplemented!()
@@ -137,25 +137,14 @@ impl Dfa {
         unimplemented!()
     }
 
-    /// Minimize this DFA using Hopcroft's algorithm. Returns a new minimized DFA.
-    pub fn minimize(&self) -> Dfa {
-        unimplemented!()
-    }
-
     /// Recompute `possible_future_group_ids` from the current transition graph.
     pub fn recompute_possible_future_group_ids(&mut self) {
         unimplemented!()
     }
 }
 
-/// Hopcroft's DFA minimization algorithm.
-///
-/// Groups states into equivalence classes based on their transition behavior
-/// and finalizer sets. States with different finalizers or different transition
-/// signatures (w.r.t. equivalence classes) are separated.
-fn hopcroft_minimize(dfa: &Dfa) -> Dfa {
-    unimplemented!()
-}
+/// Compatibility alias retained while acronym capitalization settles.
+pub type Dfa = DFA;
 
 #[cfg(test)]
 mod tests {

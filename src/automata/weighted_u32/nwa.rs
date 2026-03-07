@@ -2,11 +2,10 @@
 //!
 //! The NWA is the intermediate representation produced by the compiler
 //! (one NWA per grammar nonterminal, or a combined super-NWA) before
-//! determinization into a [`Dwa`](super::dwa::Dwa).
+//! determinization into a [`DWA`](super::dwa::DWA).
 //!
-//! Transition labels are `i32` (grammar symbol IDs).  Weights are
-//! [`Weight`](super::weight::Weight) sets representing which
-//! (token, TSID) positions survive a transition.
+//! Transition labels are `i32` (grammar symbol IDs). Weights are [`Weight`]
+//! sets representing which (token, TSID) positions survive a transition.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -14,14 +13,14 @@
 
 use std::collections::BTreeMap;
 
-use super::weight::Weight;
+use crate::ds::rangeset2d::Weight;
 
 /// Grammar-symbol label.
 pub type Label = i32;
 
 /// A single NWA state.
 #[derive(Debug, Clone, Default)]
-pub struct NwaState {
+pub struct NWAState {
     /// Optional final (accepting) weight.  `Some(w)` means the state is
     /// accepting and the set of surviving positions is `w`.
     pub final_weight: Option<Weight>,
@@ -33,18 +32,14 @@ pub struct NwaState {
 
 /// A Nondeterministic Weighted Automaton.
 #[derive(Debug, Clone)]
-pub struct Nwa {
+pub struct NWA {
     /// All states.
-    pub states: Vec<NwaState>,
+    pub states: Vec<NWAState>,
     /// Start states (subset construction begins from the ε-closure of these).
     pub start_states: Vec<u32>,
-    /// Number of TSIDs (dimension bound for weight operations).
-    pub num_tsids: u32,
-    /// Maximum token ID (dimension bound for weight operations).
-    pub max_token: u32,
 }
 
-impl Nwa {
+impl NWA {
     /// Create an empty NWA.
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         unimplemented!()
@@ -91,7 +86,7 @@ impl Nwa {
     pub fn display_with_symbols<'a>(
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
-    ) -> NwaDisplayWithSymbols<'a> {
+    ) -> NWADisplayWithSymbols<'a> {
         unimplemented!()
     }
 
@@ -102,7 +97,7 @@ impl Nwa {
         symbols: &'a std::collections::BTreeMap<Label, String>,
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
-    ) -> NwaDisplayWithAllMaps<'a> {
+    ) -> NWADisplayWithAllMaps<'a> {
         unimplemented!()
     }
 }
@@ -113,7 +108,7 @@ impl Nwa {
 
 /// Shared formatting logic for NWA states.
 fn fmt_nwa_states(
-    nwa: &Nwa,
+    nwa: &NWA,
     f: &mut std::fmt::Formatter<'_>,
     label_fn: &dyn Fn(Label) -> String,
     weight_fn: &dyn Fn(&Weight) -> String,
@@ -156,23 +151,23 @@ fn fmt_nwa_states(
 // Display
 // ---------------------------------------------------------------------------
 
-impl std::fmt::Display for Nwa {
+impl std::fmt::Display for NWA {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    unimplemented!()
-}
+        writeln!(f, "NWA: {} states, start={:?}", self.states.len(), self.start_states)?;
+        fmt_nwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
+    }
 }
 
-/// Wrapper to display an [`Nwa`] with human-readable symbol names.
-pub struct NwaDisplayWithSymbols<'a> {
-    nwa: &'a Nwa,
+/// Wrapper to display an [`NWA`] with human-readable symbol names.
+pub struct NWADisplayWithSymbols<'a> {
+    nwa: &'a NWA,
     symbols: &'a std::collections::BTreeMap<Label, String>,
 }
 
-impl std::fmt::Display for NwaDisplayWithSymbols<'_> {
+impl std::fmt::Display for NWADisplayWithSymbols<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let nwa = self.nwa;
-        writeln!(f, "NWA: {} states, start={:?}, tsids={}, max_token={}",
-            nwa.states.len(), nwa.start_states, nwa.num_tsids, nwa.max_token)?;
+        writeln!(f, "NWA: {} states, start={:?}", nwa.states.len(), nwa.start_states)?;
         let syms = self.symbols;
         fmt_nwa_states(nwa, f,
             &|label| match syms.get(&label) {
@@ -184,19 +179,28 @@ impl std::fmt::Display for NwaDisplayWithSymbols<'_> {
     }
 }
 
-/// Wrapper to display an [`Nwa`] with maps for symbols, TSIDs, and tokens.
-pub struct NwaDisplayWithAllMaps<'a> {
-    nwa: &'a Nwa,
+/// Wrapper to display an [`NWA`] with maps for symbols, TSIDs, and tokens.
+pub struct NWADisplayWithAllMaps<'a> {
+    nwa: &'a NWA,
     symbols: &'a std::collections::BTreeMap<Label, String>,
     tsid_names: &'a std::collections::BTreeMap<u32, String>,
     token_names: &'a std::collections::BTreeMap<u32, String>,
 }
 
-impl std::fmt::Display for NwaDisplayWithAllMaps<'_> {
+impl std::fmt::Display for NWADisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unimplemented!()
     }
 }
+
+/// Compatibility alias retained while acronym capitalization settles.
+pub type Nwa = NWA;
+/// Compatibility alias retained while acronym capitalization settles.
+pub type NwaState = NWAState;
+/// Compatibility alias retained while acronym capitalization settles.
+pub type NwaDisplayWithSymbols<'a> = NWADisplayWithSymbols<'a>;
+/// Compatibility alias retained while acronym capitalization settles.
+pub type NwaDisplayWithAllMaps<'a> = NWADisplayWithAllMaps<'a>;
 
 #[cfg(test)]
 mod tests {

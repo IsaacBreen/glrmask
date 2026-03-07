@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::automata::dfa::Dfa;
+use crate::automata::dfa::DFA;
 use crate::automata::regex::{Expr, ExprGroup, ExprGroups};
 use crate::compiler::grammar_def::{GrammarDef, TerminalId};
 use crate::ds::u8set::U8Set;
@@ -21,14 +21,14 @@ use crate::ds::u8set::U8Set;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenizerDfa {
+pub struct TokenizerDFA {
     /// The underlying multi-group DFA.
-    pub dfa: Dfa,
+    pub dfa: DFA,
     /// Number of terminals.
     pub num_terminals: u32,
 }
 
-impl TokenizerDfa {
+impl TokenizerDFA {
     /// Build a tokenizer DFA from fully specified regex groups.
     pub fn from_expr_groups(groups: &[ExprGroup]) -> Self {
         unimplemented!()
@@ -166,6 +166,9 @@ impl TokenizerDfa {
         unimplemented!()
     }
 }
+
+/// Compatibility alias retained while acronym capitalization settles.
+pub type TokenizerDfa = TokenizerDFA;
 
 /// Result of executing the tokenizer with intermediate match tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -11,11 +11,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::nwa::Label;
-use super::weight::Weight;
+use crate::ds::rangeset2d::Weight;
 
 /// A single state in the compilation-time DWA.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DwaState {
+pub struct DWAState {
     /// Label → (target_state, transition_weight).
     pub transitions: BTreeMap<Label, (u32, Weight)>,
     /// Accepting weight, or `None` if the state is non-accepting.
@@ -27,18 +27,14 @@ pub struct DwaState {
 /// Each `(state, label)` maps to at most one `(target, weight)`.  The weights
 /// are full [`Weight`] sets that track which (token, TSID) positions survive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dwa {
+pub struct DWA {
     /// All states.
-    pub states: Vec<DwaState>,
+    pub states: Vec<DWAState>,
     /// Start state ID.
     pub start_state: u32,
-    /// Number of TSIDs.
-    pub num_tsids: u32,
-    /// Maximum token ID.
-    pub max_token: u32,
 }
 
-impl Dwa {
+impl DWA {
     /// Create a new Dwa with a single (empty) start state.
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         unimplemented!()
@@ -89,7 +85,7 @@ impl Dwa {
     pub fn display_with_symbols<'a>(
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
-    ) -> DwaDisplayWithSymbols<'a> {
+    ) -> DWADisplayWithSymbols<'a> {
         unimplemented!()
     }
 
@@ -100,7 +96,7 @@ impl Dwa {
         symbols: &'a BTreeMap<Label, String>,
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
         token_names: &'a std::collections::BTreeMap<u32, String>,
-    ) -> DwaDisplayWithAllMaps<'a> {
+    ) -> DWADisplayWithAllMaps<'a> {
         unimplemented!()
     }
 }
@@ -109,9 +105,9 @@ impl Dwa {
 // Display helpers
 // ---------------------------------------------------------------------------
 
-/// Shared formatting logic for `Dwa` states.
+/// Shared formatting logic for `DWA` states.
 fn fmt_dwa_states(
-    dwa: &Dwa,
+    dwa: &DWA,
     f: &mut std::fmt::Formatter<'_>,
     label_fn: &dyn Fn(Label) -> String,
     weight_fn: &dyn Fn(&Weight) -> String,
@@ -141,23 +137,23 @@ fn fmt_dwa_states(
 // Display
 // ---------------------------------------------------------------------------
 
-impl std::fmt::Display for Dwa {
+impl std::fmt::Display for DWA {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    unimplemented!()
-}
+        writeln!(f, "DWA: {} states, start=State {}", self.states.len(), self.start_state)?;
+        fmt_dwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
+    }
 }
 
-/// Wrapper to display a [`Dwa`] with human-readable symbol names.
-pub struct DwaDisplayWithSymbols<'a> {
-    dwa: &'a Dwa,
+/// Wrapper to display a [`DWA`] with human-readable symbol names.
+pub struct DWADisplayWithSymbols<'a> {
+    dwa: &'a DWA,
     symbols: &'a BTreeMap<Label, String>,
 }
 
-impl std::fmt::Display for DwaDisplayWithSymbols<'_> {
+impl std::fmt::Display for DWADisplayWithSymbols<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let dwa = self.dwa;
-        writeln!(f, "DWA: {} states, start=State {}, tsids={}, max_token={}",
-            dwa.states.len(), dwa.start_state, dwa.num_tsids, dwa.max_token)?;
+        writeln!(f, "DWA: {} states, start=State {}", dwa.states.len(), dwa.start_state)?;
         let syms = self.symbols;
         fmt_dwa_states(dwa, f,
             &|label| match syms.get(&label) {
@@ -169,36 +165,48 @@ impl std::fmt::Display for DwaDisplayWithSymbols<'_> {
     }
 }
 
-/// Wrapper to display a [`Dwa`] with maps for symbols, TSIDs, and tokens.
-pub struct DwaDisplayWithAllMaps<'a> {
-    dwa: &'a Dwa,
+/// Wrapper to display a [`DWA`] with maps for symbols, TSIDs, and tokens.
+pub struct DWADisplayWithAllMaps<'a> {
+    dwa: &'a DWA,
     symbols: &'a BTreeMap<Label, String>,
     tsid_names: &'a std::collections::BTreeMap<u32, String>,
     token_names: &'a std::collections::BTreeMap<u32, String>,
 }
 
-impl std::fmt::Display for DwaDisplayWithAllMaps<'_> {
+impl std::fmt::Display for DWADisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unimplemented!()
     }
 }
 
-impl PartialEq for Dwa {
+impl PartialEq for DWA {
     fn eq(&self, other: &Self) -> bool {
         unimplemented!()
     }
 }
 
-impl PartialEq for DwaState {
+impl PartialEq for DWAState {
     fn eq(&self, other: &Self) -> bool {
         unimplemented!()
     }
 }
 
 /// Compatibility alias retained while compiler-side naming is still settling.
-pub type CompDwa = Dwa;
+pub type Dwa = DWA;
 /// Compatibility alias retained while compiler-side naming is still settling.
-pub type CompDwaState = DwaState;
+pub type DwaState = DWAState;
+/// Compatibility alias retained while compiler-side naming is still settling.
+pub type DwaDisplayWithSymbols<'a> = DWADisplayWithSymbols<'a>;
+/// Compatibility alias retained while compiler-side naming is still settling.
+pub type DwaDisplayWithAllMaps<'a> = DWADisplayWithAllMaps<'a>;
+/// Compatibility alias retained while compiler-side naming is still settling.
+pub type CompDwa = DWA;
+/// Compatibility alias retained while compiler-side naming is still settling.
+pub type CompDwaState = DWAState;
+/// Preferred acronym-capitalized alias for compilation-time DWA.
+pub type CompDWA = DWA;
+/// Preferred acronym-capitalized alias for compilation-time DWA state.
+pub type CompDWAState = DWAState;
 
 #[cfg(test)]
 mod tests {

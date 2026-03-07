@@ -9,13 +9,13 @@ pub mod debug;
 pub mod glr;
 pub mod grammar;
 pub mod labels;
-pub mod pipeline;
+pub mod stages;
 
 pub use crate::automata::lexer::tokenizer as tokenizer_dfa;
 pub use grammar::ast as grammar_def;
-pub use pipeline::vocab_pre;
+pub use stages::vocab_pre;
 
-pub use pipeline::parser_dwa;
-pub use pipeline::resolve_negatives;
-pub use pipeline::template_dfa as template;
-pub use pipeline::terminal_dwa;
+pub use stages::parser_dwa;
+pub use stages::resolve_negatives;
+pub use stages::template_dfa as template;
+pub use stages::terminal_dwa;

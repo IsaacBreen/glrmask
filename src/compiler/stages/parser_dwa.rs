@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::automata::lexer::tokenizer::TokenizerDfa;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::{CompDwa, CompDwaState};
-use crate::automata::weighted::minimize::minimize_acyclic;
+use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::Nwa;
 use crate::compiler::glr::analysis::GlrGrammar;
 use crate::compiler::glr::table::{Action, GlrTable};
@@ -34,13 +34,13 @@ use crate::compiler::grammar::ast::{NonterminalId, TerminalId};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::compiler::template::{build_template_bundles, build_template_nwa_from_bundles};
-use crate::compiler::pipeline::vocab_pre::VocabPreprocessing;
+use crate::compiler::stages::vocab_pre::VocabPreprocessing;
 use crate::Vocab;
 
 pub use crate::compiler::labels::DEFAULT_LABEL;
 
 #[cfg(test)]
-use crate::automata::weighted::weight::Weight;
+use crate::ds::rangeset2d::Weight;
 #[cfg(test)]
 use crate::compiler::labels::{encode_negative_label, is_negative_label};
 
@@ -300,7 +300,7 @@ pub fn build_parser_nwa(
 
 /// Check if a CompDwa is acyclic (no self-loops or back-edges) over *all* states.
 ///
-/// Used to decide whether `minimize_acyclic` can be applied.
+/// Used to decide whether acyclic minimization can be applied.
 fn is_acyclic(dwa: &CompDwa) -> bool {
     let n = dwa.states.len();
     // Quick check: any self-loops?
@@ -496,7 +496,7 @@ fn build_parser_dwa_impl(
 
     // --- Step 5: Determinize ---
     let t = Instant::now();
-    let dwa = determinize(&nwa);
+    let dwa = determinize(&nwa).unwrap();
     eprintln!("[glrmask::dwa] Determinize:    {:.3}s ({} states)", t.elapsed().as_secs_f64(), dwa.num_states());
 
     // Acyclicity check
@@ -519,7 +519,7 @@ fn build_parser_dwa_impl(
     // --- Step 6: Minimize ---
     let t = Instant::now();
     let final_dwa = if is_acyclic(&dwa) {
-        let result = minimize_acyclic(&dwa);
+        let result = minimize(&dwa);
         eprintln!("[glrmask::dwa] Minimize:       {:.3}s ({} → {} states)", t.elapsed().as_secs_f64(), dwa.num_states(), result.num_states());
         result
     } else {

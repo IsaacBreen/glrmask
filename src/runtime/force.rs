@@ -10,6 +10,8 @@
 
 use crate::ds::bitset::BitSet;
 
+use super::state::ConstraintState;
+
 /// Check if the mask allows exactly one token. Returns it if so.
 #[allow(dead_code)]
 pub(crate) fn forced_token(mask: &BitSet) -> Option<u32> {
@@ -22,10 +24,25 @@ pub(crate) fn is_dead(mask: &BitSet) -> bool {
     unimplemented!()
 }
 
+impl<'a> ConstraintState<'a> {
+    /// Return the sequence of tokens forced by the current grammar state.
+    ///
+    /// A token is *forced* when it is the only non-EOS option in the mask.
+    /// The method repeatedly computes the mask, collects any single forced
+    /// token, simulates a commit, and continues until the state is no longer
+    /// deterministic. Returns an empty `Vec` when no tokens are forced.
+    ///
+    /// The caller is responsible for committing the returned tokens via
+    /// [`commit_tokens`].
+    pub fn force(&self) -> Vec<u32> {
+        unimplemented!()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::state::Constraint;
+    use crate::runtime::Constraint;
     use crate::Vocab;
 
     fn make_vocab(entries: &[&str]) -> Vocab {

@@ -31,7 +31,7 @@ pub const EOF: TerminalId = u32::MAX;
 
 /// An augmented GLR grammar ready for table generation.
 #[derive(Debug, Clone)]
-pub struct GlrGrammar {
+pub struct GLRGrammar {
     /// All production rules (augmented start is at index 0).
     pub rules: Vec<Rule>,
     #[allow(dead_code)]
@@ -49,7 +49,7 @@ pub struct GlrGrammar {
     pub follow: Vec<BTreeSet<TerminalId>>,
 }
 
-impl GlrGrammar {
+impl GLRGrammar {
     /// Build from a [`GrammarDef`].
     ///
     /// Augments the grammar with a new start rule `S' → S`.
@@ -75,6 +75,9 @@ impl GlrGrammar {
         unimplemented!()
     }
 }
+
+/// Compatibility alias retained while acronym capitalization settles.
+pub type GlrGrammar = GLRGrammar;
 
 // ---------------------------------------------------------------------------
 // Grammar normalization for mask computation

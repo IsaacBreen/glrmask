@@ -59,7 +59,7 @@ fn walk_dwa_weighted(dwa: &Dwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> Ra
 mod tests {
     use super::*;
     use range_set_blaze::RangeSetBlaze;
-    use crate::automata::weighted::weight::Weight;
+    use crate::ds::rangeset2d::Weight;
 
     #[test]
     fn test_walk_dwa_empty_stack() {

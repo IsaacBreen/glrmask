@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::analysis::{EOF, GlrGrammar};
+use super::analysis::{EOF, GLRGrammar, GlrGrammar};
 use crate::compiler::grammar_def::{NonterminalId, Rule, Symbol, TerminalId};
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ pub enum Action {
 
 /// A GLR parse table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlrTable {
+pub struct GLRTable {
     /// `action[state]` = map from terminal → set of actions (GLR: multiple actions allowed).
     pub action: Vec<BTreeMap<TerminalId, Vec<Action>>>,
     /// `goto[state][nonterminal]` = target state.
@@ -47,9 +47,9 @@ pub struct GlrTable {
     pub rules: Vec<Rule>,
 }
 
-impl GlrTable {
-    /// Build SLR(1) parse tables from a [`GlrGrammar`].
-    pub fn build(grammar: &GlrGrammar) -> Self {
+impl GLRTable {
+    /// Build SLR(1) parse tables from a [`GLRGrammar`].
+    pub fn build(grammar: &GLRGrammar) -> Self {
         unimplemented!()
     }
 
@@ -63,6 +63,9 @@ impl GlrTable {
         unimplemented!()
     }
 }
+
+/// Compatibility alias retained while acronym capitalization settles.
+pub type GlrTable = GLRTable;
 
 // ---------------------------------------------------------------------------
 // LR(0) items
@@ -128,7 +131,7 @@ fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<It
 /// Returns:
 /// - `item_sets[state_id]` = the canonical item set.
 /// - `transitions[state_id]` = map from symbol → target state_id.
-fn build_lr0_item_sets(grammar: &GlrGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
+fn build_lr0_item_sets(grammar: &GLRGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
     let rules = &grammar.rules;
 
     // State 0: closure of [S' → · S].
@@ -183,7 +186,7 @@ fn build_lr0_item_sets(grammar: &GlrGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeM
 // ---------------------------------------------------------------------------
 
 fn build_slr1_table(
-    grammar: &GlrGrammar,
+    grammar: &GLRGrammar,
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GlrTable {

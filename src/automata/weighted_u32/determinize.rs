@@ -1,11 +1,4 @@
-//! NWA → Dwa determinization.
-//!
-//! Provides two flavors:
-//!
-//! - [`determinize`] – general-purpose weighted subset construction that
-//!   handles arbitrary NWAs (including those with cycles).
-//! - [`determinize_acyclic`] – optimised two-phase algorithm for acyclic
-//!   NWAs.  Returns an error if the NWA contains cycles.
+//! Acyclic NWA → Dwa determinization.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -19,7 +12,7 @@ use rustc_hash::FxHashMap;
 
 use super::dwa::{Dwa, DwaState};
 use super::nwa::{Label, Nwa};
-use super::weight::Weight;
+use crate::ds::rangeset2d::Weight;
 use crate::GlrMaskError;
 
 type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);
@@ -28,18 +21,10 @@ type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Determinize an NWA into a compilation-time DWA.
-///
-/// Works for arbitrary NWAs (acyclic or cyclic).  Uses a worklist-based
-/// weighted subset construction with fixed-point ε-closures.
-pub fn determinize(nwa: &Nwa) -> Dwa {
-    unimplemented!()
-}
-
 /// Determinize an acyclic NWA into a compilation-time DWA.
 ///
 /// Returns an error if the NWA contains cycles.
-pub fn determinize_acyclic(nwa: &Nwa) -> Result<Dwa, GlrMaskError> {
+pub fn determinize(nwa: &Nwa) -> Result<Dwa, GlrMaskError> {
     unimplemented!()
 }
 
@@ -134,7 +119,7 @@ mod tests {
         nwa.start_states.push(s);
         nwa.set_final_weight(s, Weight::all());
 
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
         assert_eq!(dwa.num_states(), 1);
         assert!(dwa.states[0].final_weight.is_some());
     }
@@ -153,7 +138,7 @@ mod tests {
         nwa.add_transition(s0, 0, s1, w_all.clone());
         nwa.set_final_weight(s1, w_all);
 
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
         assert_eq!(dwa.num_states(), 2);
         assert!(dwa.states[0].final_weight.is_none());
         assert!(dwa.states[1].final_weight.is_some());
@@ -184,7 +169,7 @@ mod tests {
         nwa.set_final_weight(s1, Weight::all());
         nwa.set_final_weight(s2, Weight::all());
 
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
         let result = dwa.eval_word(&[0]);
         assert!(!result.is_empty());
     }
@@ -205,7 +190,7 @@ mod tests {
         nwa.add_transition(s1, 0, s2, w_all.clone());
         nwa.set_final_weight(s2, w_all);
 
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
         assert!(!dwa.eval_word(&[0]).is_empty());
     }
 
@@ -219,13 +204,13 @@ mod tests {
         nwa.add_epsilon(s0, s1, w.clone());
         nwa.add_epsilon(s1, s0, w);
 
-        assert!(determinize_acyclic(&nwa).is_err());
+        assert!(determinize(&nwa).is_err());
     }
 
     #[test]
     fn test_determinize_empty_nwa() {
         let nwa = Nwa::new(1, 5);
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
         // `Dwa::new()` creates a single dead start state.
         assert_eq!(dwa.num_states(), 1);
         assert!(dwa.states[0].final_weight.is_none());
@@ -238,7 +223,7 @@ mod tests {
         let s0 = nwa.add_state();
         nwa.set_final_weight(s0, Weight::all());
         // No start_states pushed.
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
         assert_eq!(dwa.num_states(), 1);
         assert!(dwa.states[0].final_weight.is_none());
     }
@@ -261,7 +246,7 @@ mod tests {
         nwa.add_transition(s2, 1, s3, w_all.clone());
         nwa.set_final_weight(s3, w_all);
 
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
         // Word [0, 1] should reach the accepting state.
         assert!(!dwa.eval_word(&[0, 1]).is_empty());
         // Word [0] alone should NOT be accepting.
@@ -286,7 +271,7 @@ mod tests {
         nwa.add_transition(s0, 0, s1, w_small);
         nwa.set_final_weight(s1, w_all);
 
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
         let result = dwa.eval_word(&[0]);
         assert!(!result.is_empty());
     }
@@ -332,7 +317,7 @@ mod tests {
         nwa.add_epsilon(super_start, s3, w_all.clone());
         nwa.start_states.push(super_start);
 
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
 
         // eval("ac") should contain pos 0 only
         let r_ac = dwa.eval_word(&[b'a' as i32, b'c' as i32]);
@@ -379,7 +364,7 @@ mod tests {
         nwa.add_epsilon(super_start, s1, w_all.clone());
         nwa.start_states.push(super_start);
 
-        let dwa = determinize_acyclic(&nwa).unwrap();
+        let dwa = determinize(&nwa).unwrap();
 
         // eval("x") should contain both pos 0 (from s0 branch) and pos 1 (from s1 branch)
         let r = dwa.eval_word(&[b'x' as i32]);

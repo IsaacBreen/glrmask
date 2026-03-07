@@ -21,14 +21,14 @@ use rustc_hash::FxHashMap;
 
 use super::dwa::{Dwa, DwaState};
 use super::nwa::Label;
-use super::weight::Weight;
+use crate::ds::rangeset2d::Weight;
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Minimize a [`Dwa`] by merging states with identical behaviour.
-pub fn minimize_acyclic(dwa: &Dwa) -> Dwa {
+pub fn minimize(dwa: &Dwa) -> Dwa {
     unimplemented!()
 }
 
@@ -78,7 +78,7 @@ mod tests {
         dwa.add_transition(0, 0, s1, w_all.clone());
         dwa.set_final_weight(s1, w_all);
 
-        let min = minimize_acyclic(&dwa);
+        let min = minimize(&dwa);
         assert_eq!(min.num_states(), 2);
     }
 
@@ -97,7 +97,7 @@ mod tests {
         dwa.set_final_weight(s2, w);
 
         assert_eq!(dwa.num_states(), 3);
-        let min = minimize_acyclic(&dwa);
+        let min = minimize(&dwa);
         // s1 and s2 should merge.
         assert_eq!(min.num_states(), 2);
 
@@ -122,7 +122,7 @@ mod tests {
         dwa.set_final_weight(s1, w1);
         dwa.set_final_weight(s2, w2);
 
-        let min = minimize_acyclic(&dwa);
+        let min = minimize(&dwa);
         // Cannot merge: different final weights.
         assert_eq!(min.num_states(), 3);
     }
@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn test_minimize_single_state() {
         let dwa = CompDwa::new(1, 5);
-        let min = minimize_acyclic(&dwa);
+        let min = minimize(&dwa);
         assert_eq!(min.num_states(), 1);
     }
 
@@ -147,7 +147,7 @@ mod tests {
         dwa.add_transition(s1, 1, s2, w.clone());
         dwa.set_final_weight(s2, w);
 
-        let min = minimize_acyclic(&dwa);
+        let min = minimize(&dwa);
         assert_eq!(min.num_states(), 3);
         assert!(!min.eval_word(&[0, 1]).is_empty());
     }
@@ -174,7 +174,7 @@ mod tests {
         dwa.set_final_weight(s4, w);
 
         assert_eq!(dwa.num_states(), 5);
-        let min = minimize_acyclic(&dwa);
+        let min = minimize(&dwa);
         // s3 ≡ s4, s1 ≡ s2 → 3 states.
         assert_eq!(min.num_states(), 3);
         assert!(!min.eval_word(&[0, 2]).is_empty());
@@ -191,8 +191,8 @@ mod tests {
         //   s0 --'c'--> s3 --'y'--> s4
         //   s5: added but unreachable (no incoming transitions)
         //
-        // minimize_acyclic merges s2 ≡ s3 (identical signatures).
-        // s5 remains because minimize_acyclic does not prune unreachable states.
+        // minimize merges s2 ≡ s3 (identical signatures).
+        // s5 remains because minimize does not prune unreachable states.
         // Net: 6 → 5 states.
         let nt = 1u32;
         let max_tok = 200u32;
@@ -214,7 +214,7 @@ mod tests {
         d.set_final_weight(s4, w1);
 
         assert_eq!(d.num_states(), 6);
-        let min = minimize_acyclic(&d);
+        let min = minimize(&d);
         // s2 ≡ s3 merged; s5 stays (unreachable but distinct from final s4).
         assert_eq!(min.num_states(), 5, "s2≡s3 should merge; expect 5 states, got {}", min.num_states());
 
@@ -271,8 +271,8 @@ mod tests {
         assert!(!a.eval_word(&word).is_empty(), "'ab' must be accepted");
 
         // After minimisation the equivalence is still preserved
-        let min_a = minimize_acyclic(&a);
-        let min_b = minimize_acyclic(&b);
+        let min_a = minimize(&a);
+        let min_b = minimize(&b);
         assert_eq!(min_a.eval_word(&word), min_b.eval_word(&word), "minimised A and B must still agree on 'ab'");
         assert_eq!(min_a.num_states(), min_b.num_states(), "A and B have the same state count after minimisation");
 
@@ -290,7 +290,7 @@ mod tests {
         // either one produces an empty result.
         //
         // Both s1a and s2a are non-accepting dead sinks with no outgoing transitions —
-        // their signatures are identical, so minimize_acyclic should merge them.
+        // their signatures are identical, so minimize should merge them.
         // Result: 3 states → 2 states.
         let nt = 1u32;
         let max_tok = 10u32;
@@ -315,7 +315,7 @@ mod tests {
 
         // After minimisation: s1a ≡ s2a (both non-accepting with no transitions) → merge.
         // s0 remains distinct (has outgoing transitions).  Result: 2 states.
-        let min_a = minimize_acyclic(&a);
+        let min_a = minimize(&a);
         assert_eq!(min_a.num_states(), 2, "s1a≡s2a should merge: expect 2 states, got {}", min_a.num_states());
 
         // Minimised a still rejects everything

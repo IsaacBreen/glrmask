@@ -10,16 +10,16 @@
 use std::collections::BTreeSet;
 
 use crate::Vocab;
-use crate::automata::lexer::tokenizer::TokenizerDfa;
-use crate::automata::weighted::nwa::Nwa;
+use crate::automata::lexer::tokenizer::TokenizerDFA;
+use crate::automata::weighted::nwa::NWA;
 use crate::compiler::debug::TerminalDebug;
-use crate::compiler::glr::analysis::GlrGrammar;
+use crate::compiler::glr::analysis::GLRGrammar;
 use crate::compiler::grammar::ast::TerminalId;
-use crate::compiler::pipeline::vocab_pre::VocabPreprocessing;
+use crate::compiler::stages::vocab_pre::VocabPreprocessing;
 
 #[derive(Debug, Clone)]
-pub struct TerminalDwa {
-    pub nwa: Nwa,
+pub struct TerminalDWA {
+    pub nwa: NWA,
     pub tsid_roots: Vec<u32>,
     #[allow(dead_code)]
     pub non_greedy_terminals_by_tokenizer_state: Vec<BTreeSet<TerminalId>>,
@@ -28,66 +28,69 @@ pub struct TerminalDwa {
 }
 
 fn build_terminal_dwa_nwa(
-    tokenizer: &TokenizerDfa,
+    tokenizer: &TokenizerDFA,
     vocab: &Vocab,
     vocab_pre: &VocabPreprocessing,
     used_terminals: &BTreeSet<TerminalId>,
-) -> TerminalDwa {
+) -> TerminalDWA {
     unimplemented!()
 }
 
-fn compute_ever_allowed_follows(grammar: &GlrGrammar) -> Vec<Vec<TerminalId>> {
+fn compute_ever_allowed_follows(grammar: &GLRGrammar) -> Vec<Vec<TerminalId>> {
     unimplemented!()
 }
 
-fn compute_always_allowed_follows(grammar: &GlrGrammar) -> Vec<Vec<TerminalId>> {
+fn compute_always_allowed_follows(grammar: &GLRGrammar) -> Vec<Vec<TerminalId>> {
     unimplemented!()
 }
 
 fn collapse_always_allowed(
-    terminal_dwa: &mut TerminalDwa,
-    grammar: &GlrGrammar,
+    terminal_dwa: &mut TerminalDWA,
+    grammar: &GLRGrammar,
 ) -> bool {
     unimplemented!()
 }
 
 fn prune_disallowed_follows(
-    terminal_dwa: &mut TerminalDwa,
-    grammar: &GlrGrammar,
+    terminal_dwa: &mut TerminalDWA,
+    grammar: &GLRGrammar,
 ) -> bool {
     unimplemented!()
 }
 
 fn build_terminal_dwa_impl(
-    tokenizer: &TokenizerDfa,
+    tokenizer: &TokenizerDFA,
     vocab: &Vocab,
     vocab_pre: &VocabPreprocessing,
-    grammar: &GlrGrammar,
+    grammar: &GLRGrammar,
     used_terminals: &BTreeSet<TerminalId>,
     capture_debug: bool,
-) -> (TerminalDwa, Option<TerminalDebug>) {
+) -> (TerminalDWA, Option<TerminalDebug>) {
     unimplemented!()
 }
 
 pub(crate) fn build_terminal_dwa(
-    tokenizer: &TokenizerDfa,
+    tokenizer: &TokenizerDFA,
     vocab: &Vocab,
     vocab_pre: &VocabPreprocessing,
-    grammar: &GlrGrammar,
+    grammar: &GLRGrammar,
     used_terminals: &BTreeSet<TerminalId>,
-) -> TerminalDwa {
+) -> TerminalDWA {
     unimplemented!()
 }
 
 pub(crate) fn build_terminal_dwa_with_debug(
-    tokenizer: &TokenizerDfa,
+    tokenizer: &TokenizerDFA,
     vocab: &Vocab,
     vocab_pre: &VocabPreprocessing,
-    grammar: &GlrGrammar,
+    grammar: &GLRGrammar,
     used_terminals: &BTreeSet<TerminalId>,
-) -> (TerminalDwa, TerminalDebug) {
+) -> (TerminalDWA, TerminalDebug) {
     unimplemented!()
 }
+
+/// Compatibility alias retained while acronym capitalization settles.
+pub type TerminalDwa = TerminalDWA;
 
 #[cfg(test)]
 mod tests {
@@ -97,7 +100,7 @@ mod tests {
     use crate::automata::lexer::tokenizer::TokenizerDfa;
     use crate::compiler::glr::analysis::GlrGrammar;
     use crate::compiler::grammar::ast::tests::simple_ab_grammar;
-    use crate::compiler::pipeline::vocab_pre::VocabPreprocessing;
+    use crate::compiler::stages::vocab_pre::VocabPreprocessing;
 
     #[test]
     fn test_build_terminal_dwa_collapses_always_allowed_follow_path() {

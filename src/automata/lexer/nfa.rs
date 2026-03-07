@@ -11,11 +11,11 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crate::ds::u8set::U8Set;
 
-use super::dfa::{Dfa, GroupId};
+use super::dfa::{DFA, GroupId};
 
 /// An NFA state.
 #[derive(Debug, Clone)]
-struct NfaState {
+struct NFAState {
     /// Byte transitions: `(byte_set, target_state)`.
     /// Multiple entries can overlap (nondeterminism).
     transitions: Vec<(U8Set, u32)>,
@@ -27,7 +27,7 @@ struct NfaState {
     non_greedy_finalizers: BTreeSet<GroupId>,
 }
 
-impl NfaState {
+impl NFAState {
     fn new() -> Self {
         unimplemented!()
     }
@@ -37,11 +37,11 @@ impl NfaState {
 ///
 /// States are numbered `0..num_states()`. State 0 is the start state.
 #[derive(Debug, Clone)]
-pub struct Nfa {
-    states: Vec<NfaState>,
+pub struct NFA {
+    states: Vec<NFAState>,
 }
 
-impl Nfa {
+impl NFA {
     /// Create an NFA with the given number of states.
     pub fn new(num_states: usize) -> Self {
         unimplemented!()
@@ -97,29 +97,10 @@ impl Nfa {
         unimplemented!()
     }
 
-    /// Convert this NFA to a DFA via subset construction.
-    ///
-    /// Uses input equivalence classes to reduce the alphabet size,
-    /// then builds the DFA using the standard powerset/subset construction.
-    pub fn to_dfa(&self) -> Dfa {
-        unimplemented!()
-    }
-
-    /// Standard subset construction NFA → DFA.
-    fn subset_construction(&self) -> Dfa {
-        unimplemented!()
-    }
-
-    /// Compute input equivalence classes.
-    ///
-    /// Returns `(class_map, num_classes, class_members)` where:
-    /// - `class_map[byte]` = class ID for that byte
-    /// - `num_classes` = number of distinct classes
-    /// - `class_members[class]` = one representative byte for each class
-    fn compute_equivalence_classes(&self) -> (Vec<u8>, u8, Vec<u8>) {
-        unimplemented!()
-    }
 }
+
+/// Compatibility alias retained while acronym capitalization settles.
+pub type Nfa = NFA;
 
 #[cfg(test)]
 mod tests {

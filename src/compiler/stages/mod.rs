@@ -31,7 +31,7 @@ use crate::compiler::glr::table::GlrTable;
 use crate::compiler::grammar::ast::GrammarDef;
 use crate::compiler::grammar::normalize::normalize_for_mask;
 use crate::compiler::parser_dwa::build_parser_dwa;
-use crate::compiler::pipeline::vocab_pre::VocabPreprocessing;
+use crate::compiler::stages::vocab_pre::VocabPreprocessing;
 use crate::runtime::Constraint;
 
 /// Compile a grammar definition and vocabulary into a `Constraint`.
