@@ -4,10 +4,10 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+pub use range_set_blaze::RangeSetBlaze;
+
 pub use crate::ds::rangeset2d::{
     RangeSet2D,
-    TokenSet,
-    Tsid,
     bare,
     vec_btmap_rsb,
     vec_rsb,

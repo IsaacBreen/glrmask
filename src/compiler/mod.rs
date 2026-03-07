@@ -7,11 +7,13 @@
 
 pub mod debug;
 pub mod glr;
-pub mod grammar_def;
+pub mod grammar;
 pub mod labels;
 pub mod pipeline;
-pub mod tokenizer_dfa;
-pub mod vocab_pre;
+
+pub use crate::automata::lexer::tokenizer as tokenizer_dfa;
+pub use grammar::ast as grammar_def;
+pub use pipeline::vocab_pre;
 
 pub use pipeline::parser_dwa;
 pub use pipeline::resolve_negatives;

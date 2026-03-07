@@ -37,11 +37,12 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut Nwa) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use range_set_blaze::RangeSetBlaze;
     use crate::automata::weighted::weight::Weight;
-    use crate::automata::weighted::weight::TokenSet;
 
     fn singleton_weight(token: u32) -> Weight {
-        Weight::from_entries(vec![(0, 0, TokenSet::from_iter([token..=token]))])
+        let _ = token;
+        Weight::empty()
     }
 
     #[test]

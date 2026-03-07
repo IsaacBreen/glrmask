@@ -3,6 +3,8 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
-pub mod grammar;
+pub mod analysis;
 pub mod parser;
 pub mod table;
+
+pub use analysis as grammar;

@@ -7,5 +7,6 @@ pub mod ast;
 pub mod compile;
 pub mod dfa;
 pub mod nfa;
+pub mod tokenizer;
 
 pub use ast as regex;

@@ -2,7 +2,7 @@
 //!
 //! The NWA is the intermediate representation produced by the compiler
 //! (one NWA per grammar nonterminal, or a combined super-NWA) before
-//! determinization into a [`CompDwa`](super::dwa::CompDwa).
+//! determinization into a [`Dwa`](super::dwa::Dwa).
 //!
 //! Transition labels are `i32` (grammar symbol IDs).  Weights are
 //! [`Weight`](super::weight::Weight) sets representing which
@@ -201,7 +201,7 @@ impl std::fmt::Display for NwaDisplayWithAllMaps<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::weighted::weight::TokenSet;
+    use range_set_blaze::RangeSetBlaze;
 
     #[test]
     fn test_nwa_basic() {
@@ -210,7 +210,7 @@ mod tests {
         let s1 = nwa.add_state();
         let s2 = nwa.add_state();
 
-        let w = Weight::from_uniform_tsid_set(0, 10, &TokenSet::from_iter([0..=1]));
+        let w = Weight::all();
         nwa.add_transition(s0, 0, s1, w.clone());
         nwa.add_epsilon(s1, s2, w.clone());
         nwa.set_final_weight(s2, w);

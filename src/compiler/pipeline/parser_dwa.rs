@@ -23,18 +23,18 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crate::automata::lexer::tokenizer::TokenizerDfa;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::{CompDwa, CompDwaState};
 use crate::automata::weighted::minimize::minimize_acyclic;
 use crate::automata::weighted::nwa::Nwa;
-use crate::compiler::glr::grammar::GlrGrammar;
+use crate::compiler::glr::analysis::GlrGrammar;
 use crate::compiler::glr::table::{Action, GlrTable};
-use crate::compiler::grammar_def::{NonterminalId, TerminalId};
+use crate::compiler::grammar::ast::{NonterminalId, TerminalId};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::compiler::template::{build_template_bundles, build_template_nwa_from_bundles};
-use crate::compiler::tokenizer_dfa::TokenizerDfa;
-use crate::compiler::vocab_pre::VocabPreprocessing;
+use crate::compiler::pipeline::vocab_pre::VocabPreprocessing;
 use crate::Vocab;
 
 pub use crate::compiler::labels::DEFAULT_LABEL;
@@ -553,12 +553,12 @@ fn build_parser_dwa_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use range_set_blaze::RangeSetBlaze;
     use crate::Vocab;
-    use crate::compiler::glr::grammar::GlrGrammar;
-    use crate::compiler::grammar_def::GrammarDef;
-    use crate::compiler::grammar_def::tests::*;
-    use crate::compiler::tokenizer_dfa::TokenizerDfa;
-    use crate::automata::weighted::weight::TokenSet;
+    use crate::automata::lexer::tokenizer::TokenizerDfa;
+    use crate::compiler::glr::analysis::GlrGrammar;
+    use crate::compiler::grammar::ast::GrammarDef;
+    use crate::compiler::grammar::ast::tests::*;
 
     fn make_vocab_and_preprocessing(
         gdef: &GrammarDef,
@@ -615,7 +615,7 @@ mod tests {
         let end = nwa.add_state();
         nwa.start_states.push(start);
 
-        let w = Weight::from_entries(vec![(0, 0, TokenSet::from_iter([2..=2]))]);
+        let w = Weight::empty();
         nwa.add_transition(start, 0, mid, w.clone());
         nwa.add_transition(mid, encode_negative_label(0), end, w.clone());
         nwa.set_final_weight(end, w.clone());

@@ -6,7 +6,9 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
+pub mod ast;
 pub mod ebnf;
-pub mod grammar_expr;
 pub mod json_schema;
 pub mod lark;
+
+pub use ast as grammar_expr;

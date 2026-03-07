@@ -4,6 +4,7 @@
 #![allow(unused_variables)]
 
 pub mod bitset;
+pub mod leveled_gss;
 pub mod rangeset2d;
 pub mod u8set;
 

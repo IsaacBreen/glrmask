@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::grammar::{EOF, GlrGrammar};
+use super::analysis::{EOF, GlrGrammar};
 use crate::compiler::grammar_def::{NonterminalId, Rule, Symbol, TerminalId};
 
 // ---------------------------------------------------------------------------

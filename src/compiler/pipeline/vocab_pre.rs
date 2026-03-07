@@ -11,22 +11,23 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use range_set_blaze::RangeSetBlaze;
+
 use crate::Vocab;
 use crate::automata::dfa::DEAD;
-use crate::compiler::grammar_def::TerminalId;
-use crate::compiler::tokenizer_dfa::TokenizerDfa;
-use crate::automata::weighted::weight::TokenSet;
+use crate::automata::lexer::tokenizer::TokenizerDfa;
+use crate::compiler::grammar::ast::TerminalId;
 
 /// Result of vocabulary preprocessing.
 #[derive(Debug, Clone)]
 pub struct VocabPreprocessing {
-    /// `possible_matches[tsid]` = map from terminal_id → TokenSet of token positions.
+    /// `possible_matches[tsid]` = map from terminal_id → token range-set of token positions.
     /// A "token position" is just the token index in the vocab.
-    pub possible_matches: Vec<BTreeMap<TerminalId, TokenSet>>,
+    pub possible_matches: Vec<BTreeMap<TerminalId, RangeSetBlaze<u32>>>,
     /// `passthrough_tokens[tsid]` = set of tokens that reach a non-dead
     /// tokenizer state from this TSID but don't match any terminal.
     /// These tokens just advance the tokenizer without triggering parser actions.
-    pub passthrough_tokens: Vec<TokenSet>,
+    pub passthrough_tokens: Vec<RangeSetBlaze<u32>>,
     /// Number of unique TSIDs.
     pub num_tsids: u32,
     /// `state_to_tsid[dfa_state]` = compacted TSID (u32::MAX if unreachable).
@@ -65,8 +66,8 @@ impl VocabPreprocessing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar_def::{GrammarDef, Rule, Symbol, TerminalDef};
-    use crate::compiler::tokenizer_dfa::TokenizerDfa;
+    use crate::automata::lexer::tokenizer::TokenizerDfa;
+    use crate::compiler::grammar::ast::{GrammarDef, Rule, Symbol, TerminalDef};
 
     #[test]
     fn test_vocab_preprocessing_basic() {

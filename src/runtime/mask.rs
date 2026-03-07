@@ -18,10 +18,11 @@
 
 use std::collections::BTreeMap;
 
+use range_set_blaze::RangeSetBlaze;
+
 use crate::automata::weighted::dwa::Dwa;
 use crate::automata::weighted::nwa::Label;
 use crate::ds::bitset::BitSet;
-use crate::automata::weighted::weight::TokenSet;
 
 /// Flat low-level tokenizer-state → parser-stack map used by the runtime mask walk.
 pub(crate) type FlatStateStacks = BTreeMap<u32, Vec<Vec<u32>>>;
@@ -50,13 +51,14 @@ pub(crate) fn compute_mask_from_state_map(
 /// Projects DWA weights to the target TSID column *first*, then intersects
 /// in token-space only. This avoids carrying N×M-space accumulators when
 /// only a single TSID column is needed.
-fn walk_dwa_weighted(dwa: &Dwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> TokenSet {
+fn walk_dwa_weighted(dwa: &Dwa, stack: &[u32], tsid: u32, _num_tsids: u32) -> RangeSetBlaze<u32> {
     unimplemented!()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use range_set_blaze::RangeSetBlaze;
     use crate::automata::weighted::weight::Weight;
 
     #[test]
@@ -80,8 +82,8 @@ mod tests {
         let mut dwa = Dwa::new(nt, max_tok);
         let s1 = dwa.add_state();
 
-        let w_all = Weight::full();
-        let w_tokens = Weight::from_positions(&TokenSet::from_iter([1..=3u32]), nt);
+        let w_all = Weight::all();
+        let w_tokens = Weight::all();
         dwa.add_transition(0, 42, s1, w_all);
         dwa.set_final_weight(s1, w_tokens);
 

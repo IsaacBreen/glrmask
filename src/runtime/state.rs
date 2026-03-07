@@ -9,17 +9,33 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use range_set_blaze::RangeSetBlaze;
+
 use crate::automata::dfa::DEAD;
+use crate::automata::lexer::tokenizer::TokenizerDfa;
 use crate::automata::weighted::dwa::Dwa;
 use crate::compiler::glr::table::{Action, GlrTable};
 use crate::compiler::grammar_def::TerminalId;
-use crate::compiler::tokenizer_dfa::TokenizerDfa;
 use crate::ds::bitset::BitSet;
-use crate::automata::weighted::weight::TokenSet;
-
-use super::gss_acc::{TerminalsDisallowed, terminals_disallowed_fresh};
-use super::leveled_gss::LeveledGSS;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use super::mask::FlatStateStacks;
+
+/// Maps tokenizer state ID → set of disallowed terminal IDs.
+///
+/// Used as the GSS accumulator to track which (tsid, terminal) pairs
+/// should be excluded during mask computation.
+pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
+
+/// Create a fresh (empty) `TerminalsDisallowed`.
+fn terminals_disallowed_fresh() -> TerminalsDisallowed {
+    unimplemented!()
+}
+
+impl Merge for TerminalsDisallowed {
+    fn merge(&self, other: &Self) -> Self {
+        unimplemented!()
+    }
+}
 
 /// A GSS (Graph-Structured Stack) for the GLR parser.
 ///
@@ -54,16 +70,16 @@ pub struct Constraint {
     /// TSID → tokenizer DFA state mapping.
     pub(crate) tsid_to_state: Vec<u32>,
 
-    /// Per-TSID: { terminal_id → token TokenSet }.
+    /// Per-TSID: { terminal_id → token range-set }.
     /// `possible_matches[tsid][terminal] = set of allowed token IDs`.
     #[serde(with = "crate::ds::rangeset2d::vec_btmap_rsb")]
-    pub(crate) possible_matches: Vec<BTreeMap<TerminalId, TokenSet>>,
+    pub(crate) possible_matches: Vec<BTreeMap<TerminalId, RangeSetBlaze<u32>>>,
 
     /// Per-TSID: tokens that reach a non-dead tokenizer state without
     /// completing any terminal match. These tokens advance the tokenizer
     /// without triggering parser actions.
     #[serde(with = "crate::ds::rangeset2d::vec_rsb")]
-    pub(crate) passthrough_tokens: Vec<TokenSet>,
+    pub(crate) passthrough_tokens: Vec<RangeSetBlaze<u32>>,
 
     /// Maximum token ID in the vocabulary.
     pub(crate) max_token: u32,

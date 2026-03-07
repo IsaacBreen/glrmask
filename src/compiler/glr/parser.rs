@@ -10,9 +10,9 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use super::grammar::EOF;
+use super::analysis::EOF;
 use super::table::{Action, GlrTable};
-use crate::compiler::grammar_def::TerminalId;
+use crate::compiler::grammar::ast::TerminalId;
 
 /// GLR parser backed by an SLR(1) table.
 ///
@@ -60,9 +60,9 @@ impl GlrParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::glr::grammar::GlrGrammar;
-    use crate::compiler::grammar_def::tests::*;
-    use crate::compiler::grammar_def::{GrammarDef, Rule, Symbol, TerminalDef};
+    use crate::compiler::glr::analysis::GlrGrammar;
+    use crate::compiler::grammar::ast::tests::*;
+    use crate::compiler::grammar::ast::{GrammarDef, Rule, Symbol, TerminalDef};
 
     fn build_parser(gdef: &GrammarDef) -> GlrParser {
         let gg = GlrGrammar::from_grammar_def(gdef);

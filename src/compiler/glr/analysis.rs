@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeSet, BTreeMap};
 
-use super::super::grammar_def::{GrammarDef, NonterminalId, Rule, Symbol, TerminalId};
+use crate::compiler::grammar::ast::{GrammarDef, NonterminalId, Rule, Symbol, TerminalId};
 
 /// EOF pseudo-terminal. Must not collide with any real terminal.
 pub const EOF: TerminalId = u32::MAX;
@@ -307,7 +307,7 @@ fn compute_follow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar_def::tests::*;
+    use crate::compiler::grammar::ast::tests::*;
 
     #[test]
     fn test_glr_grammar_simple() {

@@ -1,4 +1,4 @@
-//! NWA → CompDwa determinization.
+//! NWA → Dwa determinization.
 //!
 //! Provides two flavors:
 //!
@@ -14,11 +14,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
+use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
-use super::dwa::{CompDwa, CompDwaState};
+use super::dwa::{Dwa, DwaState};
 use super::nwa::{Label, Nwa};
-use super::weight::{TokenSet, Weight};
+use super::weight::Weight;
 use crate::GlrMaskError;
 
 type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);
@@ -31,14 +32,14 @@ type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);
 ///
 /// Works for arbitrary NWAs (acyclic or cyclic).  Uses a worklist-based
 /// weighted subset construction with fixed-point ε-closures.
-pub fn determinize(nwa: &Nwa) -> CompDwa {
+pub fn determinize(nwa: &Nwa) -> Dwa {
     unimplemented!()
 }
 
 /// Determinize an acyclic NWA into a compilation-time DWA.
 ///
 /// Returns an error if the NWA contains cycles.
-pub fn determinize_acyclic(nwa: &Nwa) -> Result<CompDwa, GlrMaskError> {
+pub fn determinize_acyclic(nwa: &Nwa) -> Result<Dwa, GlrMaskError> {
     unimplemented!()
 }
 
@@ -96,7 +97,7 @@ fn weighted_epsilon_closures(nwa: &Nwa, topo: &[u32]) -> Vec<BTreeMap<u32, Weigh
 }
 
 // ---------------------------------------------------------------------------
-// Build CompDwa with weights
+// Build Dwa with weights
 // ---------------------------------------------------------------------------
 
 fn build_comp_dwa(
@@ -104,7 +105,7 @@ fn build_comp_dwa(
     subsets: &[BTreeSet<u32>],
     uw_transitions: &[Vec<(Label, u32)>],
     eps_w: &[BTreeMap<u32, Weight>],
-) -> Result<CompDwa, GlrMaskError> {
+) -> Result<Dwa, GlrMaskError> {
     unimplemented!()
 }
 
@@ -123,7 +124,7 @@ fn merge_weighted_closures(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::weighted::weight::TokenSet;
+    use range_set_blaze::RangeSetBlaze;
 
     #[test]
     fn test_determinize_trivial_accepting() {
@@ -131,7 +132,7 @@ mod tests {
         let mut nwa = Nwa::new(1, 5);
         let s = nwa.add_state();
         nwa.start_states.push(s);
-        nwa.set_final_weight(s, Weight::full());
+        nwa.set_final_weight(s, Weight::all());
 
         let dwa = determinize_acyclic(&nwa).unwrap();
         assert_eq!(dwa.num_states(), 1);
@@ -148,7 +149,7 @@ mod tests {
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w_all = Weight::full();
+        let w_all = Weight::all();
         nwa.add_transition(s0, 0, s1, w_all.clone());
         nwa.set_final_weight(s1, w_all);
 
@@ -176,12 +177,12 @@ mod tests {
         let s2 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w1 = Weight::from_positions(&TokenSet::from_iter([0..=2]), nt);
-        let w2 = Weight::from_positions(&TokenSet::from_iter([3..=5]), nt);
+        let w1 = Weight::empty();
+        let w2 = Weight::all();
         nwa.add_transition(s0, 0, s1, w1);
         nwa.add_transition(s0, 0, s2, w2);
-        nwa.set_final_weight(s1, Weight::full());
-        nwa.set_final_weight(s2, Weight::full());
+        nwa.set_final_weight(s1, Weight::all());
+        nwa.set_final_weight(s2, Weight::all());
 
         let dwa = determinize_acyclic(&nwa).unwrap();
         let result = dwa.eval_word(&[0]);
@@ -201,7 +202,7 @@ mod tests {
         let s2 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w_all = Weight::full();
+        let w_all = Weight::all();
         nwa.add_epsilon(s0, s1, w_all.clone());
         nwa.add_transition(s1, 0, s2, w_all.clone());
         nwa.set_final_weight(s2, w_all);
@@ -216,7 +217,7 @@ mod tests {
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
-        let w = Weight::full();
+        let w = Weight::all();
         nwa.add_epsilon(s0, s1, w.clone());
         nwa.add_epsilon(s1, s0, w);
 
@@ -227,7 +228,7 @@ mod tests {
     fn test_determinize_empty_nwa() {
         let nwa = Nwa::new(1, 5);
         let dwa = determinize_acyclic(&nwa).unwrap();
-        // CompDwa::new creates a single dead start state.
+        // `Dwa::new()` creates a single dead start state.
         assert_eq!(dwa.num_states(), 1);
         assert!(dwa.states[0].final_weight.is_none());
     }
@@ -237,7 +238,7 @@ mod tests {
         // NWA with states but no start states → start subset = ∅ → 1 dead DWA state.
         let mut nwa = Nwa::new(1, 5);
         let s0 = nwa.add_state();
-        nwa.set_final_weight(s0, Weight::full());
+        nwa.set_final_weight(s0, Weight::all());
         // No start_states pushed.
         let dwa = determinize_acyclic(&nwa).unwrap();
         assert_eq!(dwa.num_states(), 1);
@@ -256,7 +257,7 @@ mod tests {
         let s3 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w_all = Weight::full();
+        let w_all = Weight::all();
         nwa.add_transition(s0, 0, s1, w_all.clone());
         nwa.add_epsilon(s1, s2, w_all.clone());
         nwa.add_transition(s2, 1, s3, w_all.clone());
@@ -282,8 +283,8 @@ mod tests {
         let s1 = nwa.add_state();
         nwa.start_states.push(s0);
 
-        let w_small = Weight::from_positions(&TokenSet::from_iter([2..=5]), nt);
-        let w_all = Weight::full();
+        let w_small = Weight::empty();
+        let w_all = Weight::all();
         nwa.add_transition(s0, 0, s1, w_small);
         nwa.set_final_weight(s1, w_all);
 
@@ -309,9 +310,9 @@ mod tests {
         let nt = 1u32;
         let max_tok = 200u32; // Must cover 'a'=97, 'b'=98, 'c'=99
         let mut nwa = Nwa::new(nt, max_tok);
-        let w_all = Weight::full();
-        let w0 = Weight::from_positions(&TokenSet::from_iter([0..=0]), nt);
-        let w1 = Weight::from_positions(&TokenSet::from_iter([1..=1]), nt);
+        let w_all = Weight::all();
+        let w0 = Weight::empty();
+        let w1 = Weight::all();
 
         // Path 1: s0 --'a'--> s1 --'c'--> s2 (final, w0)
         let s0 = nwa.add_state();
@@ -370,9 +371,9 @@ mod tests {
         let nt = 1u32;
         let max_tok = 200u32;
         let mut nwa = Nwa::new(nt, max_tok);
-        let w_all = Weight::full();
-        let w0 = Weight::from_positions(&TokenSet::from_iter([0..=0]), nt);
-        let w1 = Weight::from_positions(&TokenSet::from_iter([1..=1]), nt);
+        let w_all = Weight::all();
+        let w0 = Weight::empty();
+        let w1 = Weight::all();
 
         let s0 = nwa.add_state();
         let s1 = nwa.add_state();

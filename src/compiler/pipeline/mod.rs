@@ -16,20 +16,22 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+pub mod vocab_pre;
+pub mod terminal_dwa;
+pub mod template_dfa;
 pub mod parser_dwa;
 pub mod resolve_negatives;
-pub mod template_dfa;
-pub mod terminal_dwa;
 
 use crate::Vocab;
 use crate::automata::weighted::dwa::CompDwa;
+use crate::automata::lexer::tokenizer::TokenizerDfa;
 use crate::compiler::debug::CompileDebug;
-use crate::compiler::glr::grammar::{GlrGrammar, normalize_for_mask};
+use crate::compiler::glr::analysis::GlrGrammar;
 use crate::compiler::glr::table::GlrTable;
-use crate::compiler::grammar_def::GrammarDef;
+use crate::compiler::grammar::ast::GrammarDef;
+use crate::compiler::grammar::normalize::normalize_for_mask;
 use crate::compiler::parser_dwa::build_parser_dwa;
-use crate::compiler::tokenizer_dfa::TokenizerDfa;
-use crate::compiler::vocab_pre::VocabPreprocessing;
+use crate::compiler::pipeline::vocab_pre::VocabPreprocessing;
 use crate::runtime::Constraint;
 
 /// Compile a grammar definition and vocabulary into a `Constraint`.
@@ -72,7 +74,7 @@ pub fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar_def::tests::*;
+    use crate::compiler::grammar::ast::tests::*;
 
     #[test]
     fn test_compile_simple_ab() {

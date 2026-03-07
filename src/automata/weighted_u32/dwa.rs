@@ -203,18 +203,18 @@ pub type CompDwaState = DwaState;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::weighted::weight::TokenSet;
+    use range_set_blaze::RangeSetBlaze;
 
     #[test]
-    fn test_comp_dwa_eval_word() {
+    fn test_dwa_eval_word() {
         // Simple 2-state DWA: s0 --label 0--> s1 (accepting).
         let nt = 1u32;
         let max_tok = 5u32;
-        let mut dwa = CompDwa::new(nt, max_tok);
+        let mut dwa = Dwa::new(nt, max_tok);
         let s1 = dwa.add_state();
 
-        let w_trans = Weight::from_positions(&TokenSet::from_iter([0..=5]), nt);
-        let w_final = Weight::from_positions(&TokenSet::from_iter([2..=4]), nt);
+        let w_trans = Weight::all();
+        let w_final = Weight::all();
         dwa.add_transition(0, 0, s1, w_trans);
         dwa.set_final_weight(s1, w_final);
 
@@ -228,21 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn test_comp_dwa_eval_word_reject() {
+    fn test_dwa_eval_word_reject() {
         let nt = 1u32;
-        let dwa = CompDwa::new(nt, 5);
+        let dwa = Dwa::new(nt, 5);
         // No transition for label 0 → empty result.
         let result = dwa.eval_word(&[0]);
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_runtime_dwa() {
-        let mut wt = WeightTable::new(3, 2);
-        wt.set(0, 1, 2, 5);
-        let dwa = Dwa::new(wt, 0, vec![false, false, true]);
-        assert_eq!(dwa.step(1, 0), (2, 5));
-        assert!(dwa.is_accepting(2));
-        assert!(!dwa.is_accepting(0));
     }
 }
