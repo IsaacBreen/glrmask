@@ -8,7 +8,7 @@
 #![allow(unused_imports)]
 
 use crate::automata::weighted::nwa::Nwa;
-use crate::ds::rangeset2d::Weight;
+use crate::ds::weight::Weight;
 
 pub(crate) fn compute_cancellations(nwa: &Nwa) -> Vec<(u32, u32, Weight)> {
     unimplemented!()
@@ -38,7 +38,7 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut Nwa) {
 mod tests {
     use super::*;
     use range_set_blaze::RangeSetBlaze;
-    use crate::ds::rangeset2d::Weight;
+    use crate::ds::weight::Weight;
 
     fn singleton_weight(token: u32) -> Weight {
         let _ = token;

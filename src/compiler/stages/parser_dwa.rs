@@ -39,7 +39,7 @@ use crate::compiler::template::{build_template_bundles, build_template_nwa_from_
 use crate::Vocab;
 
 #[cfg(test)]
-use crate::ds::rangeset2d::Weight;
+use crate::ds::weight::Weight;
 #[cfg(test)]
 use crate::compiler::stages::parser_labels::encode_negative_label;
 

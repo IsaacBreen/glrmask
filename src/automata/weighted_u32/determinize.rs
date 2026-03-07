@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 
 use super::dwa::{Dwa, DwaState};
 use super::nwa::{Label, Nwa};
-use crate::ds::rangeset2d::Weight;
+use crate::ds::weight::Weight;
 use crate::GlrMaskError;
 
 type SubsetTransitions = (Vec<BTreeSet<u32>>, Vec<Vec<(Label, u32)>>);

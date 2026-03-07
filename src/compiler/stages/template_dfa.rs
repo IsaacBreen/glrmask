@@ -18,7 +18,7 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::CompDwa;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{Nwa, NwaState};
-use crate::ds::rangeset2d::Weight;
+use crate::ds::weight::Weight;
 use crate::compiler::grammar_def::TerminalId;
 use crate::compiler::stages::parser_labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label};
 use crate::compiler::parser_dwa::TerminalCharacterization;

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ds::rangeset2d::Weight;
+use crate::ds::weight::Weight;
 
 /// Grammar-symbol label.
 pub type Label = i32;

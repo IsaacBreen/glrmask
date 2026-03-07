@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::nwa::Label;
-use crate::ds::rangeset2d::Weight;
+use crate::ds::weight::Weight;
 
 /// A single state in the compilation-time DWA.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

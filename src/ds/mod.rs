@@ -5,6 +5,6 @@
 
 pub mod bitset;
 pub mod leveled_gss;
-pub mod rangeset2d;
+pub mod weight;
 pub mod u8set;
 

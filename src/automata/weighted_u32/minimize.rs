@@ -21,7 +21,7 @@ use rustc_hash::FxHashMap;
 
 use super::dwa::{Dwa, DwaState};
 use super::nwa::Label;
-use crate::ds::rangeset2d::Weight;
+use crate::ds::weight::Weight;
 
 // ---------------------------------------------------------------------------
 // Public API
