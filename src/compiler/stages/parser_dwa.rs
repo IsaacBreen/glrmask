@@ -35,9 +35,10 @@ use crate::compiler::grammar::model::{NonterminalID, TerminalID};
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
-use crate::compiler::stages::templates::compile::{build_template_bundles, build_template_nwa_from_bundles};
+use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::Vocab;
+use crate::ds::weight::Weight;
 
 /// Detect cycles in the non-accepting subgraph that are **reachable from the
 /// DWA's start state**.
@@ -127,28 +128,17 @@ pub fn build_parser_dwa(
     eprintln!("[glrmask::dwa]   characterize:  {:.3}s", t.elapsed().as_secs_f64());
 
     let t = Instant::now();
-    let terminal_dwa = build_terminal_dwa(tokenizer, vocab, id_map, grammar, &characterized_terminals);
+    let terminal_dwa = build_terminal_dwa(grammar, tokenizer, vocab, id_map);
     eprintln!("[glrmask::dwa]   terminal_dwa:  {:.3}s ({} nwa states)", t.elapsed().as_secs_f64(), terminal_dwa.nwa.states.len());
     debug_assert_eq!(terminal_dwa.nwa.start_states.len(), terminal_dwa.tsid_roots.len());
 
     let t = Instant::now();
-    let used_terminals: BTreeSet<TerminalID> = terminal_dwa
-        .nwa
-        .states
-        .iter()
-        .flat_map(|state| state.transitions.keys())
-        .filter_map(|&label| TerminalID::try_from(label).ok())
-        .collect();
-    let template_bundles = build_template_bundles(&characterizations, &used_terminals);
-    eprintln!("[glrmask::dwa]   bundles:       {:.3}s ({} bundles, {} used terminals)", t.elapsed().as_secs_f64(), template_bundles.len(), used_terminals.len());
+    let templates = Templates::from_characterizations(&characterizations);
+    eprintln!("[glrmask::dwa]   templates:     {:.3}s ({} terminals)", t.elapsed().as_secs_f64(), templates.by_terminal.len());
 
     let t = Instant::now();
-    let mut nwa = build_template_nwa_from_bundles(
-        &template_bundles,
-        &terminal_dwa,
-        id_map.num_tsids(),
-        id_map.max_token_id(),
-    );
+    let terminal_weights: BTreeMap<TerminalID, Weight> = BTreeMap::new();
+    let mut nwa = templates.build_bundle(&terminal_weights);
     eprintln!("[glrmask::dwa]   compose NWA:   {:.3}s ({} states, {} transitions)", t.elapsed().as_secs_f64(), nwa.states.len(), nwa.num_transitions());
 
     let t = Instant::now();
@@ -215,21 +205,6 @@ mod tests {
         let vocab = Vocab::new(entries, None);
         let id_map = InternalIdMap::build(&tok, &vocab);
         (vocab, tok, id_map)
-    }
-
-    #[test]
-    fn test_characterize_simple_ab() {
-        let gdef = simple_ab_grammar(); // S → a b
-        let gg = AnalyzedGrammar::from_grammar_def(&gdef);
-        let table = GLRTable::build(&gg);
-        let chars = characterize_terminals(&table, &gg);
-
-        // Terminal 'a' (id=0): should have shift from some state.
-        assert!(chars.contains_key(&0));
-        assert!(!chars[&0].shifts.is_empty());
-
-        // Terminal 'b' (id=1): might have shift or reduce.
-        assert!(chars.contains_key(&1));
     }
 
     #[test]

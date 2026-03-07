@@ -20,5 +20,5 @@ pub use stages::equivalence_analysis;
 
 pub use stages::parser_dwa;
 pub use stages::resolve_negatives;
-pub use stages::templates::compile as template;
+pub use stages::templates::compile_dfa as template;
 pub use stages::terminal_dwa;

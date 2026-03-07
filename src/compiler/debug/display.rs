@@ -136,21 +136,16 @@ impl std::fmt::Display for CompileDebug {
             }
         }
 
-        // ===== 8. Template bundles =====
+        // ===== 8. Templates =====
         writeln!(
             f,
-            "\n═══ TEMPLATE BUNDLES ({} bundles) ═══",
-            self.template_bundles.len()
+            "\n═══ TEMPLATES ({} terminals) ═══",
+            self.templates.by_terminal.len()
         )?;
-        for (i, b) in self.template_bundles.iter().enumerate() {
-            let tnames: Vec<String> = b
-                .terminals
-                .iter()
-                .map(|t| format!("'{}'(T{t})", self.terminal_name(*t)))
-                .collect();
-            writeln!(f, "  Bundle {i}: terminals=[{}]", tnames.join(", "))?;
+        for (terminal, template_dfa) in &self.templates.by_terminal {
+            writeln!(f, "  Terminal '{}'(T{terminal})", self.terminal_name(*terminal))?;
             writeln!(f, "    Template DFA:")?;
-            write!(f, "{}", b.template_dfa.dfa)?;
+            write!(f, "{}", template_dfa)?;
         }
 
         let terminal_symbols: BTreeMap<i32, String> = self

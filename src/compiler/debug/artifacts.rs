@@ -17,7 +17,7 @@ use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::{GrammarDef, TerminalID};
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
-use crate::compiler::stages::templates::compile::TemplateBundle;
+use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::TerminalDWA;
 
 // ---------------------------------------------------------------------------
@@ -61,8 +61,8 @@ pub struct AutomataDebug {
     /// Terminal-side stage snapshots (raw → collapse → prune).
     pub terminal_debug: TerminalDebug,
 
-    /// Template bundles grouping equivalent characterizations.
-    pub template_bundles: Vec<TemplateBundle>,
+    /// Compiled parser-side templates keyed by terminal ID.
+    pub templates: Templates,
 
     /// Composed parser NWA before resolve_negatives.
     pub parser_nwa_before_resolve: NWA,
@@ -95,7 +95,7 @@ pub struct AutomataDebug {
 ///
 /// - **`grammar_def`**: the original (user-facing) grammar, with terminal
 ///   names, patterns, and rules. Terminal IDs in `characterizations`,
-///   `template_bundles`, and NWA weights map to `grammar_def.terminals[id]`.
+///   `templates`, and NWA weights map to `grammar_def.terminals[id]`.
 /// - **`normalized_grammar_def`**: the grammar after `normalize_for_mask()`
 ///   (epsilon elimination, right-recursion rewrite). The GLR table and all
 ///   parser-side automata are built from this version. Compare with
@@ -148,8 +148,8 @@ pub struct CompileDebug {
 
     // --- Parser side ---
 
-    /// Template bundles grouping equivalent characterizations.
-    pub template_bundles: Vec<TemplateBundle>,
+    /// Compiled parser-side templates keyed by terminal ID.
+    pub templates: Templates,
 
     /// Composed parser NWA before resolve_negatives.
     pub parser_nwa_before_resolve: NWA,

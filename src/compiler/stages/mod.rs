@@ -5,7 +5,8 @@
 //!
 //! Intended stage order:
 //! `equivalence_analysis` → `templates::characterize` → `terminal_dwa`
-//! → `templates::compile` → `parser_dwa` → `resolve_negatives`.
+//! → `templates::compile_dfa` / `templates::compile_bundle`
+//! → `parser_dwa` → `resolve_negatives`.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
