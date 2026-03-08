@@ -10,6 +10,6 @@ pub mod dfa;
 pub mod minimize;
 pub mod nfa;
 pub mod tokenizer;
-pub mod tokenizer_regex;
+pub mod regex;
 
-pub use ast as regex;
+pub use ast as regex_ast;

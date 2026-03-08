@@ -58,19 +58,17 @@ use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal, Termin
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn tdef(id: u32, name: &str) -> Terminal {
-    Terminal {
+    Terminal::Literal {
         id,
-        name: name.into(),
+        bytes: name.as_bytes().to_vec(),
     }
 }
 
 fn make_grammar(rules: Vec<Rule>, start: u32, terminals: Vec<Terminal>) -> GrammarDef {
-    let terminal_patterns = terminals.iter().map(|t| t.name.clone()).collect();
     GrammarDef {
         rules,
         start,
         terminals,
-        terminal_patterns,
     }
 }
 

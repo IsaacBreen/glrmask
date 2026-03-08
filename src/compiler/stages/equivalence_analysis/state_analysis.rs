@@ -108,12 +108,11 @@ mod tests {
         let terminals: Vec<Terminal> = patterns
             .iter()
             .enumerate()
-            .map(|(i, name)| Terminal {
+            .map(|(i, name)| Terminal::Literal {
                 id: i as u32,
-                name: name.to_string(),
+                bytes: name.as_bytes().to_vec(),
             })
             .collect();
-        let terminal_patterns: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
         let rules = vec![Rule {
             lhs: 0,
             rhs: vec![Symbol::Terminal(0)],
@@ -122,9 +121,8 @@ mod tests {
             rules,
             start: 0,
             terminals,
-            terminal_patterns,
         };
-        Tokenizer::from_grammar_def(&gdef)
+        crate::compiler::compile::build_tokenizer(&gdef)
     }
 
     #[test]

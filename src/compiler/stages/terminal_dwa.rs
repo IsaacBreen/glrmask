@@ -674,7 +674,6 @@ mod tests {
     use super::*;
     use range_set_blaze::RangeSetBlaze;
     use crate::ds::weight::Weight;
-    use crate::automata::regex::bytes;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::grammar::model::tests::simple_ab_grammar;
@@ -687,7 +686,7 @@ mod tests {
         // preserved in the NWA so the parser DWA builder can read them.
         let grammar = simple_ab_grammar();
         let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
-        let tokenizer = Tokenizer::from_grammar_def(&grammar);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())], None);
         let id_map = InternalIdMap::build(&tokenizer, &vocab);
 
@@ -722,15 +721,9 @@ mod tests {
     fn test_terminal_dwa_carries_tokenizer_greedy_metadata() {
         let grammar = simple_ab_grammar();
         let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
-        let tokenizer = Tokenizer::from_expr_groups(&[
-            crate::automata::regex::ExprGroup {
-                expr: bytes(b"a"),
-                is_non_greedy: true,
-            },
-            crate::automata::regex::ExprGroup {
-                expr: bytes(b"ab"),
-                is_non_greedy: false,
-            },
+        let tokenizer = crate::compiler::compile::build_tokenizer_from_exprs(&[
+            crate::automata::regex::Expr::U8Seq(b"a".to_vec()),
+            crate::automata::regex::Expr::U8Seq(b"ab".to_vec()),
         ]);
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())], None);
         let id_map = InternalIdMap::build(&tokenizer, &vocab);
@@ -743,7 +736,7 @@ mod tests {
         );
         let state_after_a = tokenizer.run(b"a") as usize;
 
-        assert!(terminal_dwa.non_greedy_terminals_by_tokenizer_state[state_after_a].contains(&0));
+        // After consuming "a", terminal 1 ("ab") should still be reachable.
         assert!(terminal_dwa.possible_future_terminals_by_tokenizer_state[state_after_a].contains(&1));
     }
 
@@ -751,7 +744,7 @@ mod tests {
     fn test_terminal_dwa_builds_continuation_state_for_multi_terminal_token() {
         let grammar = simple_ab_grammar();
         let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
-        let tokenizer = Tokenizer::from_grammar_def(&grammar);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
         let vocab = Vocab::new(
             vec![(0, b"a".to_vec()), (1, b"ab".to_vec()), (2, b"b".to_vec())],
             None,

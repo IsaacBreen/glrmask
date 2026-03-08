@@ -1,4 +1,4 @@
-//! NOTE: regex parsing and compilation helpers live in `tokenizer_regex.rs`.
+//! NOTE: regex parsing and compilation helpers live in `regex.rs`.
 //! Keep this file focused on the runtime-facing tokenizer surface.
 #![allow(dead_code)]
 #![allow(unused_mut)]
@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
 use crate::compiler::grammar_def::TerminalID;
+use crate::ds::u8set::U8Set;
 
-pub use super::tokenizer_regex::parse_regex;
+pub use super::regex::parse_regex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {

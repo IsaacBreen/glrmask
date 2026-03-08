@@ -5,13 +5,13 @@ use crate::compiler::debug::artifacts::CompileDebug;
 use crate::compiler::glr::analysis::EOF;
 
 impl CompileDebug {
-    fn terminal_name(&self, id: crate::compiler::grammar::model::TerminalID) -> &str {
+    fn terminal_name(&self, id: crate::compiler::grammar::model::TerminalID) -> String {
         self.grammar_def
             .terminals
             .iter()
-            .find(|terminal| terminal.id == id)
-            .map(|terminal| terminal.name.as_str())
-            .unwrap_or("?")
+            .find(|terminal| terminal.id() == id)
+            .map(|terminal| terminal.name())
+            .unwrap_or_else(|| "?".into())
     }
 
     fn symbol_str(&self, sym: &crate::compiler::grammar::model::Symbol) -> String {
@@ -36,9 +36,9 @@ impl std::fmt::Display for CompileDebug {
             writeln!(
                 f,
                 "  T{}: name={:?} pattern={:?}",
-                t.id,
-                t.name,
-                self.grammar_def.terminal_pattern(t.id)
+                t.id(),
+                t.name(),
+                self.grammar_def.terminal_pattern(t.id())
             )?;
         }
         writeln!(f, "Rules:")?;
@@ -163,7 +163,7 @@ impl std::fmt::Display for CompileDebug {
             .grammar_def
             .terminals
             .iter()
-            .map(|t| (t.id as i32, format!("'{}'", t.name)))
+            .map(|t| (t.id() as i32, format!("'{}'", t.name())))
             .collect();
 
         let tsid_names: BTreeMap<u32, String> = self

@@ -511,7 +511,7 @@ mod tests {
     use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
 
     fn term(id: u32, name: &str) -> Terminal {
-        Terminal { id, name: name.into() }
+        Terminal::Literal { id, bytes: name.as_bytes().to_vec() }
     }
 
     #[test]
@@ -566,7 +566,6 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a")],
-            terminal_patterns: vec!["a".into()],
         };
         let g = AnalyzedGrammar::from_grammar_def(&gdef);
         let result = g.debug_check_grammar_preconditions();
@@ -585,7 +584,6 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a")],
-            terminal_patterns: vec!["a".into()],
         };
         let g = AnalyzedGrammar::from_grammar_def(&gdef);
         let result = g.debug_check_grammar_preconditions();
@@ -604,7 +602,6 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a"), term(1, "b")],
-            terminal_patterns: vec!["a".into(), "b".into()],
         };
         let g = AnalyzedGrammar::from_grammar_def(&gdef);
         let result = g.debug_check_grammar_preconditions();
@@ -624,7 +621,6 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a")],
-            terminal_patterns: vec!["a".into()],
         };
         let g = AnalyzedGrammar::from_grammar_def(&gdef);
         let result = g.debug_check_grammar_preconditions();

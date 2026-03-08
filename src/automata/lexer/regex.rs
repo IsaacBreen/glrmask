@@ -1,190 +1,15 @@
-//! NOTE: tokenizer regex parsing and construction stay in this split-out file
-//! so `Tokenizer` remains focused on runtime stepping.
+//! Regex string → `Expr` parsing.
+//!
+//! This module is concerned only with turning a regex pattern string into an
+//! `Expr` AST. Tokenizer construction and expression analysis live under the
+//! compiler module (`compiler::compile`).
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use crate::automata::regex::{Expr, ExprGroup};
-use crate::compiler::grammar_def::{GrammarDef, TerminalID};
+use crate::automata::regex::Expr;
 use crate::ds::u8set::U8Set;
-
-use super::tokenizer::Tokenizer;
-
-fn literal_from_expr(expr: &Expr) -> Option<Vec<u8>> {
-    match expr {
-        Expr::U8Seq(bytes) => Some(bytes.clone()),
-        Expr::Shared(inner) => literal_from_expr(inner),
-        Expr::Epsilon => Some(Vec::new()),
-        _ => None,
-    }
-}
-
-fn finite_literals_from_expr(expr: &Expr, cap: usize) -> Option<Vec<Vec<u8>>> {
-    fn product(left: Vec<Vec<u8>>, right: Vec<Vec<u8>>, cap: usize) -> Option<Vec<Vec<u8>>> {
-        let mut out = Vec::new();
-        for lhs in &left {
-            for rhs in &right {
-                let mut bytes = lhs.clone();
-                bytes.extend(rhs);
-                out.push(bytes);
-                if out.len() > cap {
-                    return None;
-                }
-            }
-        }
-        Some(out)
-    }
-
-    match expr {
-        Expr::U8Seq(bytes) => Some(vec![bytes.clone()]),
-        Expr::U8Class(set) => {
-            let out: Vec<Vec<u8>> = set.iter().map(|byte| vec![byte]).collect();
-            (out.len() <= cap).then_some(out)
-        }
-        Expr::Seq(parts) => {
-            let mut current = vec![Vec::new()];
-            for part in parts {
-                current = product(current, finite_literals_from_expr(part, cap)?, cap)?;
-            }
-            Some(current)
-        }
-        Expr::Choice(options) => {
-            let mut out = Vec::new();
-            for option in options {
-                out.extend(finite_literals_from_expr(option, cap)?);
-                if out.len() > cap {
-                    return None;
-                }
-            }
-            Some(out)
-        }
-        Expr::Repeat { expr, min, max } => {
-            let Some(max) = max else {
-                return None;
-            };
-            let inner = finite_literals_from_expr(expr, cap)?;
-            let mut out = Vec::new();
-            for count in *min..=*max {
-                let mut variants = vec![Vec::new()];
-                for _ in 0..count {
-                    variants = product(variants, inner.clone(), cap)?;
-                }
-                out.extend(variants);
-                if out.len() > cap {
-                    return None;
-                }
-            }
-            Some(out)
-        }
-        Expr::Shared(inner) => finite_literals_from_expr(inner, cap),
-        Expr::Epsilon => Some(vec![Vec::new()]),
-    }
-}
-
-fn build_literal_tokenizer(terminals: &[(TerminalID, Vec<u8>, bool)]) -> Tokenizer {
-    let num_terminals = terminals
-        .iter()
-        .map(|(terminal, _, _)| *terminal)
-        .max()
-        .map(|terminal| terminal as usize + 1)
-        .unwrap_or(0);
-
-    let mut dfa = crate::automata::dfa::DFA::new(1);
-    dfa.ensure_group_capacity(num_terminals);
-
-    let mut prefixes = std::collections::BTreeMap::<Vec<u8>, u32>::new();
-    prefixes.insert(Vec::new(), 0);
-
-    for (terminal, bytes, is_non_greedy) in terminals {
-        let mut state = 0u32;
-        let mut byte_set = U8Set::empty();
-
-        // Mark the start state (and all intermediate prefix states) as having
-        // this terminal reachable in the future.  The previous code only marked
-        // states AFTER consuming a byte, missing state 0.
-        if !bytes.is_empty() {
-            dfa.mark_possible_future_group(state, *terminal);
-        }
-
-        for (index, &byte) in bytes.iter().enumerate() {
-            byte_set.insert(byte);
-
-            let prefix = bytes[..=index].to_vec();
-            let next_state = if let Some(&existing) = prefixes.get(&prefix) {
-                existing
-            } else {
-                let id = dfa.add_state();
-                prefixes.insert(prefix, id);
-                id
-            };
-
-            if dfa.step(state, byte).is_none() {
-                dfa.add_transition(state, byte, next_state);
-            }
-            state = next_state;
-
-            if index + 1 < bytes.len() {
-                dfa.mark_possible_future_group(state, *terminal);
-            }
-        }
-
-        dfa.mark_finalizer(state, *terminal);
-        if *is_non_greedy {
-            dfa.mark_non_greedy_finalizer(state, *terminal);
-        }
-        dfa.set_group_u8set(*terminal, byte_set);
-    }
-
-    Tokenizer {
-        dfa,
-        num_terminals: num_terminals as u32,
-    }
-}
-
-impl Tokenizer {
-    pub fn from_expr_groups(_groups: &[ExprGroup]) -> Self {
-        let terminals: Vec<_> = _groups
-            .iter()
-            .enumerate()
-            .flat_map(|(terminal, group)| {
-                finite_literals_from_expr(&group.expr, 4096)
-                    .into_iter()
-                    .flatten()
-                    .map(move |bytes| (terminal as TerminalID, bytes, group.is_non_greedy))
-            })
-            .collect();
-        build_literal_tokenizer(&terminals)
-    }
-
-    pub fn from_exprs(_terminals: &[(TerminalID, Expr)]) -> Self {
-        let terminals: Vec<_> = _terminals
-            .iter()
-            .flat_map(|(terminal, expr)| {
-                finite_literals_from_expr(expr, 4096)
-                    .into_iter()
-                    .flatten()
-                    .map(move |bytes| (*terminal, bytes, false))
-            })
-            .collect();
-        build_literal_tokenizer(&terminals)
-    }
-
-    pub fn from_grammar_def(_grammar: &GrammarDef) -> Self {
-        let terminals: Vec<_> = _grammar
-            .terminals
-            .iter()
-            .flat_map(|terminal| {
-                let expr = parse_regex(_grammar.terminal_pattern(terminal.id));
-                finite_literals_from_expr(&expr, 4096)
-                    .unwrap_or_else(|| vec![unescape_literal(_grammar.terminal_pattern(terminal.id).as_bytes())])
-                    .into_iter()
-                    .map(move |bytes| (terminal.id, bytes, false))
-            })
-            .collect();
-        build_literal_tokenizer(&terminals)
-    }
-}
 
 pub fn parse_regex(_pattern: &str) -> Expr {
     let bytes = _pattern.as_bytes();
@@ -196,7 +21,7 @@ pub fn parse_regex(_pattern: &str) -> Expr {
     }
 }
 
-fn unescape_literal(input: &[u8]) -> Vec<u8> {
+pub(crate) fn unescape_literal(input: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(input.len());
     let mut index = 0;
     while index < input.len() {

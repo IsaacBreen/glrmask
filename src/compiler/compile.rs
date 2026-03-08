@@ -5,13 +5,15 @@
 
 
 use crate::Vocab;
+use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::regex::parse_regex;
+use crate::automata::regex::{Expr, ExprGroup, ExprGroups};
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
-use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar::model::GrammarDef;
+use crate::compiler::grammar::model::{GrammarDef, Terminal};
 use crate::compiler::grammar::normalize::normalize_for_mask;
 use crate::compiler::parser_dwa::build_parser_dwa_from_terminal_dwa;
 use crate::compiler::possible_matches::build_possible_matches_by_state;
@@ -20,6 +22,48 @@ use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::runtime::Constraint;
+
+// ── Tokenizer construction ──────────────────────────────────────────────────
+
+/// Build a [`Tokenizer`] from a [`GrammarDef`].
+///
+/// Each terminal is compiled through the NFA→DFA pipeline via [`ExprGroups`].
+/// The group index matches the terminal ID (guaranteed by construction).
+pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
+    let groups: Vec<ExprGroup> = grammar
+        .terminals
+        .iter()
+        .map(|terminal| {
+            let expr = match terminal {
+                Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
+                Terminal::Pattern { pattern, .. } => parse_regex(pattern),
+                Terminal::Expr { expr, .. } => expr.clone(),
+            };
+            ExprGroup { expr, is_non_greedy: false }
+        })
+        .collect();
+    let regex = ExprGroups { groups }.build();
+    Tokenizer {
+        dfa: regex.dfa,
+        num_terminals: grammar.num_terminals(),
+    }
+}
+
+/// Build a [`Tokenizer`] from a slice of regex expressions.
+///
+/// Each expression's index becomes its `TerminalID`.
+pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
+    let groups: Vec<ExprGroup> = exprs
+        .iter()
+        .map(|expr| ExprGroup { expr: expr.clone(), is_non_greedy: false })
+        .collect();
+    let num = groups.len() as u32;
+    let regex = ExprGroups { groups }.build();
+    Tokenizer {
+        dfa: regex.dfa,
+        num_terminals: num,
+    }
+}
 
 fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(pattern.len());
@@ -56,7 +100,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     }
 
     let table = GLRTable::build(&glr_grammar);
-    let tokenizer = Tokenizer::from_grammar_def(&normalized);
+    let tokenizer = build_tokenizer(&normalized);
     let id_map = InternalIdMap::build(&tokenizer, vocab);
 
     let possible_matches_by_state = build_possible_matches_by_state(&normalized, &tokenizer, vocab);
@@ -100,7 +144,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     }
 
     let table = GLRTable::build(&glr_grammar);
-    let tokenizer = Tokenizer::from_grammar_def(&normalized);
+    let tokenizer = build_tokenizer(&normalized);
     let id_map = InternalIdMap::build(&tokenizer, vocab);
 
     let possible_matches_by_state = build_possible_matches_by_state(&normalized, &tokenizer, vocab);

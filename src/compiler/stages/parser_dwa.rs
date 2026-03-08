@@ -414,11 +414,11 @@ mod tests {
     fn make_vocab_and_preprocessing(
         gdef: &GrammarDef,
     ) -> (Vocab, Tokenizer, InternalIdMap) {
-        let tok = Tokenizer::from_grammar_def(gdef);
+        let tok = crate::compiler::compile::build_tokenizer(gdef);
         
         let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
         for (i, td) in gdef.terminals.iter().enumerate() {
-            entries.push((i as u32, td.name.as_bytes().to_vec()));
+            entries.push((i as u32, td.name().as_bytes().to_vec()));
         }
         let vocab = Vocab::new(entries, None);
         let id_map = InternalIdMap::build(&tok, &vocab);

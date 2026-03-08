@@ -270,11 +270,10 @@ mod tests {
                 rhs: vec![Symbol::Terminal(0)],
             }],
             start: 0,
-            terminals: vec![crate::compiler::grammar_def::Terminal {
+            terminals: vec![crate::compiler::grammar_def::Terminal::Literal {
                 id: 0,
-                name: "a".into(),
+                bytes: b"a".to_vec(),
             }],
-            terminal_patterns: vec!["a".into()],
         };
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
@@ -323,16 +322,15 @@ mod tests {
             ],
             start: 0,
             terminals: vec![
-                crate::compiler::grammar_def::Terminal {
+                crate::compiler::grammar_def::Terminal::Literal {
                     id: 0,
-                    name: "a".into(),
+                    bytes: b"a".to_vec(),
                 },
-                crate::compiler::grammar_def::Terminal {
+                crate::compiler::grammar_def::Terminal::Literal {
                     id: 1,
-                    name: "+".into(),
+                    bytes: b"+".to_vec(),
                 },
             ],
-            terminal_patterns: vec!["a".into(), "\\+".into()],
         };
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);

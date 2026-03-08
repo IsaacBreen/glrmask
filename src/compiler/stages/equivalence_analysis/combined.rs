@@ -21,7 +21,7 @@ pub(crate) fn analyze_equivalences(tokenizer: &Tokenizer, vocab: &Vocab) -> Inte
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::lexer::tokenizer::Tokenizer;
+    use crate::compiler::compile::build_tokenizer;
     use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
 
     #[test]
@@ -32,13 +32,12 @@ mod tests {
                 rhs: vec![Symbol::Terminal(0)],
             }],
             start: 0,
-            terminals: vec![Terminal {
+            terminals: vec![Terminal::Literal {
                 id: 0,
-                name: "a".into(),
+                bytes: b"a".to_vec(),
             }],
-            terminal_patterns: vec!["a".into()],
         };
-        let tok = Tokenizer::from_grammar_def(&gdef);
+        let tok = build_tokenizer(&gdef);
         let vocab = Vocab::new(
             vec![
                 (0, b"a".to_vec()),

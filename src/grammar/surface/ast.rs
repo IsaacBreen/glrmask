@@ -97,10 +97,21 @@ impl Lowerer {
         }
         let id = self.terminals.len() as TerminalID;
         self.terminal_map.insert(pattern.to_string(), id);
-        self.terminals.push(Terminal {
-            id,
-            name: name.to_string(),
-        });
+        // Decide variant: if the pattern is the same as the escaped literal of
+        // the name bytes, store as Literal; otherwise store as Pattern.
+        let name_bytes = name.as_bytes();
+        let escaped: String = name_bytes.iter().map(|&b| escape_byte(b)).collect();
+        if escaped == pattern {
+            self.terminals.push(Terminal::Literal {
+                id,
+                bytes: name_bytes.to_vec(),
+            });
+        } else {
+            self.terminals.push(Terminal::Pattern {
+                id,
+                pattern: pattern.to_string(),
+            });
+        }
         id
     }
 
@@ -268,18 +279,12 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         }
     }
 
-    let mut terminal_patterns = vec![String::new(); lowerer.terminals.len()];
-    for (pattern, id) in &lowerer.terminal_map {
-        terminal_patterns[*id as usize] = pattern.clone();
-    }
-
     let start = lowerer.nt_id(&grammar.start);
 
     Ok(GrammarDef {
         rules: lowerer.rules,
         start,
         terminals: lowerer.terminals,
-        terminal_patterns,
     })
 }
 

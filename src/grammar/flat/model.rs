@@ -6,17 +6,17 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::automata::regex::Expr;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrammarDef {
-    
+
     pub rules: Vec<Rule>,
-    
+
     pub start: NonterminalID,
-    
+
     pub terminals: Vec<Terminal>,
-    
-    pub terminal_patterns: Vec<String>,
 }
 
 
@@ -45,11 +45,60 @@ pub enum Symbol {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Terminal {
-    
-    pub id: TerminalID,
-    
-    pub name: String,
+pub enum Terminal {
+    /// An exact byte sequence (e.g., a keyword or punctuation).
+    Literal { id: TerminalID, bytes: Vec<u8> },
+    /// A regex pattern string (e.g., `[a-z]+` or `\\d`).
+    Pattern { id: TerminalID, pattern: String },
+    /// A pre-parsed regex expression.
+    Expr { id: TerminalID, expr: Expr },
+}
+
+impl Terminal {
+    /// Return the terminal's numeric ID.
+    pub fn id(&self) -> TerminalID {
+        match self {
+            Terminal::Literal { id, .. } => *id,
+            Terminal::Pattern { id, .. } => *id,
+            Terminal::Expr { id, .. } => *id,
+        }
+    }
+
+    /// Return a display name for the terminal.
+    pub fn name(&self) -> String {
+        match self {
+            Terminal::Literal { bytes, .. } => String::from_utf8_lossy(bytes).into_owned(),
+            Terminal::Pattern { pattern, .. } => pattern.clone(),
+            Terminal::Expr { expr, .. } => format!("{:?}", expr),
+        }
+    }
+
+    /// Return the regex pattern string for the terminal.
+    /// For literals, this escapes the bytes into a regex-safe pattern.
+    /// For `Expr` variants, returns the debug representation (callers should
+    /// prefer working with the `Expr` directly when possible).
+    pub fn pattern(&self) -> String {
+        match self {
+            Terminal::Literal { bytes, .. } => {
+                bytes.iter().map(|&b| escape_byte_for_regex(b)).collect()
+            }
+            Terminal::Pattern { pattern, .. } => pattern.clone(),
+            Terminal::Expr { expr, .. } => format!("{:?}", expr),
+        }
+    }
+}
+
+/// Escape a single byte into its regex-pattern representation.
+fn escape_byte_for_regex(b: u8) -> String {
+    match b {
+        b'\n' => "\\n".into(),
+        b'\r' => "\\r".into(),
+        b'\t' => "\\t".into(),
+        b'\\' => "\\\\".into(),
+        b'"' => "\\\"".into(),
+        byte if byte.is_ascii_graphic() || byte == b' ' => (byte as char).to_string(),
+        byte => format!("\\x{byte:02x}"),
+    }
 }
 
 impl GrammarDef {
@@ -74,11 +123,12 @@ impl GrammarDef {
     }
 
     
-    pub fn terminal_pattern(&self, terminal: TerminalID) -> &str {
-        self.terminal_patterns
-            .get(terminal as usize)
-            .map(String::as_str)
-            .unwrap_or("")
+    pub fn terminal_pattern(&self, terminal: TerminalID) -> String {
+        self.terminals
+            .iter()
+            .find(|t| t.id() == terminal)
+            .map(|t| t.pattern())
+            .unwrap_or_default()
     }
 }
 
@@ -86,14 +136,14 @@ impl GrammarDef {
 pub(crate) mod tests {
     use super::*;
 
-    fn terminal(id: u32, name: &str) -> Terminal {
-        Terminal {
+    fn literal(id: u32, s: &str) -> Terminal {
+        Terminal::Literal {
             id,
-            name: name.into(),
+            bytes: s.as_bytes().to_vec(),
         }
     }
 
-    
+
     pub fn simple_ab_grammar() -> GrammarDef {
         GrammarDef {
             rules: vec![Rule {
@@ -101,12 +151,11 @@ pub(crate) mod tests {
                 rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
             }],
             start: 0,
-            terminals: vec![terminal(0, "a"), terminal(1, "b")],
-            terminal_patterns: vec!["a".into(), "b".into()],
+            terminals: vec![literal(0, "a"), literal(1, "b")],
         }
     }
 
-    
+
     pub fn choice_grammar() -> GrammarDef {
         GrammarDef {
             rules: vec![
@@ -120,15 +169,14 @@ pub(crate) mod tests {
                 },
             ],
             start: 0,
-            terminals: vec![terminal(0, "a"), terminal(1, "b")],
-            terminal_patterns: vec!["a".into(), "b".into()],
+            terminals: vec![literal(0, "a"), literal(1, "b")],
         }
     }
 
-    
+
     pub fn two_nt_grammar() -> GrammarDef {
-        
-        
+
+
         GrammarDef {
             rules: vec![
                 Rule {
@@ -141,15 +189,14 @@ pub(crate) mod tests {
                 },
             ],
             start: 0,
-            terminals: vec![terminal(0, "a"), terminal(1, "b")],
-            terminal_patterns: vec!["a".into(), "b".into()],
+            terminals: vec![literal(0, "a"), literal(1, "b")],
         }
     }
 
-    
+
     pub fn nested_nt_grammar() -> GrammarDef {
-        
-        
+
+
         GrammarDef {
             rules: vec![
                 Rule {
@@ -166,12 +213,11 @@ pub(crate) mod tests {
                 },
             ],
             start: 0,
-            terminals: vec![terminal(0, "a"), terminal(1, "b")],
-            terminal_patterns: vec!["a".into(), "b".into()],
+            terminals: vec![literal(0, "a"), literal(1, "b")],
         }
     }
 
-    
+
     pub fn three_terminal_grammar() -> GrammarDef {
         GrammarDef {
             rules: vec![Rule {
@@ -183,15 +229,14 @@ pub(crate) mod tests {
                 ],
             }],
             start: 0,
-            terminals: vec![terminal(0, "a"), terminal(1, "b"), terminal(2, "c")],
-            terminal_patterns: vec!["a".into(), "b".into(), "c".into()],
+            terminals: vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
         }
     }
 
-    
+
     pub fn nested_two_rhs_grammar() -> GrammarDef {
-        
-        
+
+
         GrammarDef {
             rules: vec![
                 Rule {
@@ -204,8 +249,7 @@ pub(crate) mod tests {
                 },
             ],
             start: 0,
-            terminals: vec![terminal(0, "a"), terminal(1, "b"), terminal(2, "c")],
-            terminal_patterns: vec!["a".into(), "b".into(), "c".into()],
+            terminals: vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
         }
     }
 

@@ -298,12 +298,10 @@ mod tests {
     }
 
     fn make_grammar(rules: Vec<Rule>, start: u32, terminals: Vec<Terminal>) -> GrammarDef {
-        let terminal_patterns = terminals.iter().map(|terminal| terminal.name.clone()).collect();
         GrammarDef {
             rules,
             start,
             terminals,
-            terminal_patterns,
         }
     }
 
@@ -388,13 +386,13 @@ mod tests {
             ],
             0,
             vec![
-                Terminal {
+                Terminal::Literal {
                     id: 0,
-                    name: "a".into(),
+                    bytes: b"a".to_vec(),
                 },
-                Terminal {
+                Terminal::Literal {
                     id: 1,
-                    name: "+".into(),
+                    bytes: b"+".to_vec(),
                 },
             ],
         );
@@ -425,9 +423,9 @@ mod tests {
                 }, 
             ],
             0,
-            vec![Terminal {
+            vec![Terminal::Literal {
                 id: 0,
-                name: "a".into(),
+                bytes: b"a".to_vec(),
             }],
         );
         let parser = build_parser(&gdef);
@@ -451,7 +449,7 @@ mod tests {
 
     
     fn tdef(id: u32, name: &str) -> Terminal {
-        Terminal { id, name: name.into() }
+        Terminal::Literal { id, bytes: name.as_bytes().to_vec() }
     }
 
     #[test]
