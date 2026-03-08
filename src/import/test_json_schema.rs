@@ -52,7 +52,7 @@ fn schema_accepts(schema: &str, inputs: &[&str]) {
                 byte,
                 i
             );
-            s.commit(byte as u32);
+            s.commit_token(byte as u32);
         }
     }
 }
@@ -79,7 +79,7 @@ fn test_ebnf_ws_nullable() {
     let mut s = c.start();
 
     // Commit '{'
-    s.commit(b'{' as u32);
+    s.commit_token(b'{' as u32);
 
     // '}' should be valid (WS is nullable)
     let mask = s.mask();
@@ -103,7 +103,7 @@ WS ::= ( ' ' | '\\t' | '\\n' | '\\r' )*";
     let c = ebnf_constraint(ebnf);
     let mut s = c.start();
 
-    s.commit(b'{' as u32);
+    s.commit_token(b'{' as u32);
     let mask = s.mask();
 
     assert!(
@@ -307,7 +307,8 @@ fn test_schema_const2() {
             *byte as char,
             byte
         );
-        s.commit(*byte as u32);
+        let token_id = *byte as u32;
+        s.commit_token(token_id)
     }
 }
 

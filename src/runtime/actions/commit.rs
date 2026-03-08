@@ -9,10 +9,6 @@ use crate::compiler::glr::parser::advance_stacks;
 use crate::ds::leveled_gss::LeveledGSS;
 
 impl<'a> ConstraintState<'a> {
-    pub fn commit(&mut self, token_id: u32) {
-        self.commit_token(token_id)
-    }
-
     pub fn commit_token(
         &mut self,
         token_id: u32,
