@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeSet, BTreeMap};
+use std::collections::{BTreeSet, BTreeMap, HashSet};
 
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
@@ -49,28 +49,42 @@ impl AnalyzedGrammar {
     }
 
     /// Debug check: asserts the grammar has no right recursion, no indirect left
-    /// recursion, and no nullable nonterminals.  These are preconditions required
-    /// by the terminal-characterization stage (`characterize.rs`).
+    /// recursion, and no nullable nonterminals.
     ///
-    /// Violations are reported as an `Err` with a structured diagnostic message
-    /// listing every violated condition and the nonterminals involved.
-    ///
-    /// **Note:** This check is intentionally separate from the panic inside
-    /// `characterize_terminal`.  By running it *before* characterisation we
-    /// produce an actionable description of the grammar shape that caused
-    /// the failure, making it easier to locate the rule that needs
-    /// transformation.
+    /// Calls [`check_no_nullable_nonterminals`] and
+    /// [`check_recursion_boundedness`] and merges their results.
     pub fn debug_check_grammar_preconditions(&self) -> Result<(), String> {
         let mut violations: Vec<String> = Vec::new();
+        if let Err(msg) = self.check_no_nullable_nonterminals() {
+            violations.push(msg);
+        }
+        if let Err(msg) = self.check_recursion_boundedness() {
+            violations.push(msg);
+        }
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "grammar precondition violations ({} found):\n{}",
+                violations.len(),
+                violations.iter()
+                    .enumerate()
+                    .map(|(i, v)| format!("  {}. {}", i + 1, v))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ))
+        }
+    }
 
-        // 1. Nullable nonterminals (skip the augmented start symbol)
+    /// Check that no nonterminal is nullable (derives ε).
+    pub fn check_no_nullable_nonterminals(&self) -> Result<(), String> {
         if !self.nullable.is_empty() {
             let ids: Vec<u32> = self.nullable.iter()
                 .filter(|&&nt| nt < self.num_nonterminals - 1) // skip augmented start
                 .copied()
                 .collect();
             if !ids.is_empty() {
-                violations.push(format!(
+                return Err(format!(
                     "nullable nonterminals detected: {:?}. \
                      Rules with ε-productions or all-nullable RHS create \
                      reduce chains that the characterisation stage cannot \
@@ -79,8 +93,14 @@ impl AnalyzedGrammar {
                 ));
             }
         }
+        Ok(())
+    }
 
-        // 2. Right recursion (direct or indirect)
+    /// Check that the grammar has no right-recursive or indirect
+    /// left-recursive cycles.
+    pub fn check_recursion_boundedness(&self) -> Result<(), String> {
+        let mut violations: Vec<String> = Vec::new();
+
         let rr_graph = build_right_reachability_graph(&self.rules, &self.nullable);
         if let Some(cycle) = find_indirect_rr_cycle(&rr_graph) {
             violations.push(format!(
@@ -92,11 +112,8 @@ impl AnalyzedGrammar {
             ));
         }
 
-        // 3. Indirect left recursion
         let lr_graph = build_left_reachability_graph(&self.rules, &self.nullable);
         if let Some(cycle) = find_indirect_lr_cycle(&lr_graph) {
-            // Direct left recursion (cycle of length 1, A→A...) is fine for
-            // GLR; only indirect cycles (length ≥ 2) are flagged.
             if cycle.len() >= 2 {
                 violations.push(format!(
                     "indirect left-recursive cycle detected: {:?}. \
@@ -110,15 +127,7 @@ impl AnalyzedGrammar {
         if violations.is_empty() {
             Ok(())
         } else {
-            Err(format!(
-                "grammar precondition violations ({} found):\n{}",
-                violations.len(),
-                violations.iter()
-                    .enumerate()
-                    .map(|(i, v)| format!("  {}. {}", i + 1, v))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ))
+            Err(violations.join("\n"))
         }
     }
 
@@ -160,12 +169,39 @@ pub(crate) fn eliminate_direct_left_recursion(
     let _ = fresh_nt;
 }
 
+/// Eliminate right recursion (both indirect and direct).
+///
+/// 1. Break indirect right-recursive cycles by inlining right ends.
+/// 2. Convert direct right recursion `A → α A` to left recursion
+///    using a fresh nonterminal.
 pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) {
-    let _ = rules;
-    let _ = fresh_nt;
+    // Step 1: Resolve indirect right recursion by inlining right ends
+    const MAX_INDIRECT_ROUNDS: usize = 200;
+    for _ in 0..MAX_INDIRECT_ROUNDS {
+        let num_nt = max_nt_id(rules) + 1;
+        let nullable = compute_nullable(rules, num_nt);
+        let graph = build_right_reachability_graph(rules, &nullable);
+        match find_cycle_excluding_self_loops(&graph) {
+            Some(cycle) => {
+                let from = cycle[0];
+                let to = cycle[1 % cycle.len()];
+                inline_right_end(rules, from, to, &nullable);
+            }
+            None => break,
+        }
+    }
+
+    // Step 2: Resolve direct right recursion for each nonterminal
+    let all_nts: BTreeSet<NonterminalID> = rules.iter().map(|r| r.lhs).collect();
+    for nt in all_nts {
+        if rules.iter().any(|r| r.lhs == nt && is_direct_right_recursive(r)) {
+            let new_nt = fresh_nt();
+            resolve_direct_rr_single_nt(rules, nt, new_nt);
+        }
+    }
 }
 
 fn max_nt_id(rules: &[Rule]) -> u32 {
@@ -323,34 +359,415 @@ fn find_indirect_lr_cycle(
     None
 }
 
+/// Find a cycle of length ≥ 2 in the graph (self-loops are skipped).
+/// Used by `eliminate_right_recursion` to find indirect cycles.
+fn find_cycle_excluding_self_loops(
+    graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+) -> Option<Vec<NonterminalID>> {
+    fn dfs(
+        node: NonterminalID,
+        graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+        colors: &mut BTreeMap<NonterminalID, u8>,
+        stack: &mut Vec<NonterminalID>,
+    ) -> Option<Vec<NonterminalID>> {
+        colors.insert(node, 1);
+        stack.push(node);
+        for &next in graph.get(&node).into_iter().flatten() {
+            if next == node {
+                continue; // skip self-loops
+            }
+            match colors.get(&next).copied().unwrap_or(0) {
+                0 => {
+                    if let Some(cycle) = dfs(next, graph, colors, stack) {
+                        return Some(cycle);
+                    }
+                }
+                1 => {
+                    if let Some(start) = stack.iter().position(|&entry| entry == next) {
+                        return Some(stack[start..].to_vec());
+                    }
+                }
+                _ => {}
+            }
+        }
+        stack.pop();
+        colors.insert(node, 2);
+        None
+    }
+
+    let mut colors = BTreeMap::new();
+    let mut stack = Vec::new();
+    for &node in graph.keys() {
+        if colors.get(&node).copied().unwrap_or(0) == 0 {
+            if let Some(cycle) = dfs(node, graph, &mut colors, &mut stack) {
+                return Some(cycle);
+            }
+        }
+    }
+    None
+}
+
+/// Inline right-end: for rules `from_nt → α to_nt β` where β is all-nullable,
+/// replace the `to_nt` occurrence with each of `to_nt`'s alternative RHSs.
+///
+/// This breaks indirect right-recursive cycles by removing the edge
+/// `from_nt → to_nt` in the right-reachability graph.
 fn inline_right_end(
     rules: &mut Vec<Rule>,
     from_nt: NonterminalID,
     to_nt: NonterminalID,
     nullable: &BTreeSet<NonterminalID>,
 ) {
-    let _ = rules;
-    let _ = from_nt;
-    let _ = to_nt;
-    let _ = nullable;
+    let to_rhss: Vec<Vec<Symbol>> = rules
+        .iter()
+        .filter(|r| r.lhs == to_nt)
+        .map(|r| r.rhs.clone())
+        .collect();
+    if to_rhss.is_empty() {
+        return;
+    }
+
+    let mut new_rules = Vec::new();
+    for rule in rules.iter() {
+        if rule.lhs != from_nt {
+            new_rules.push(rule.clone());
+            continue;
+        }
+        let pos = find_right_end_position(&rule.rhs, to_nt, nullable);
+        if let Some(pos) = pos {
+            for to_rhs in &to_rhss {
+                let mut rhs = rule.rhs[..pos].to_vec();
+                rhs.extend(to_rhs.iter().cloned());
+                rhs.extend(rule.rhs[pos + 1..].iter().cloned());
+                new_rules.push(Rule { lhs: from_nt, rhs });
+            }
+        } else {
+            new_rules.push(rule.clone());
+        }
+    }
+    *rules = new_rules;
+}
+
+/// Find the rightmost position of `target_nt` in `rhs` such that everything
+/// after it is a nullable nonterminal.  Returns `None` if no such position.
+fn find_right_end_position(
+    rhs: &[Symbol],
+    target_nt: NonterminalID,
+    nullable: &BTreeSet<NonterminalID>,
+) -> Option<usize> {
+    for i in (0..rhs.len()).rev() {
+        match &rhs[i] {
+            Symbol::Nonterminal(nt) if *nt == target_nt => return Some(i),
+            Symbol::Nonterminal(nt) if nullable.contains(nt) => continue,
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn is_direct_right_recursive(rule: &Rule) -> bool {
     matches!(rule.rhs.last(), Some(Symbol::Nonterminal(nonterminal)) if *nonterminal == rule.lhs)
 }
 
+/// Resolve direct right recursion for a single nonterminal.
+///
+/// Given recursive rules `A → α A` and base rules `A → β`, transform to:
+/// - Base rules (unchanged): `A → β`
+/// - Composed rules: `A → new_nt β` (for each base rule)
+/// - Tail rules: `new_nt → α` (body of each recursive rule, without trailing A)
+/// - Left-recursive tails: `new_nt → new_nt α`
+///
+/// Note: if α is empty (rule `A → A`), this produces `new_nt → ε`.
+/// The subsequent ε-elimination pass handles that.
 fn resolve_direct_rr_single_nt(
     rules: &mut Vec<Rule>,
     nt: NonterminalID,
     new_nt: NonterminalID,
 ) {
-    let _ = rules;
-    let _ = nt;
-    let _ = new_nt;
+    let (recursive, non_recursive): (Vec<Rule>, Vec<Rule>) = rules
+        .iter()
+        .filter(|r| r.lhs == nt)
+        .cloned()
+        .partition(|r| is_direct_right_recursive(r));
+
+    if recursive.is_empty() {
+        return;
+    }
+
+    // Keep all rules NOT for this NT
+    let mut new_rules: Vec<Rule> = rules.iter().filter(|r| r.lhs != nt).cloned().collect();
+
+    // Keep base rules: A → β
+    new_rules.extend(non_recursive.iter().cloned());
+
+    // Add A → new_nt β for each base rule
+    for base in &non_recursive {
+        let mut rhs = vec![Symbol::Nonterminal(new_nt)];
+        rhs.extend(base.rhs.iter().cloned());
+        new_rules.push(Rule { lhs: nt, rhs });
+    }
+
+    // Add new_nt → α (body without trailing A) for each recursive rule
+    for rec in &recursive {
+        let body = rec.rhs[..rec.rhs.len() - 1].to_vec();
+        new_rules.push(Rule { lhs: new_nt, rhs: body });
+    }
+
+    // Add new_nt → new_nt α (left-recursive) for each recursive rule
+    for rec in &recursive {
+        let body = &rec.rhs[..rec.rhs.len() - 1];
+        let mut rhs = vec![Symbol::Nonterminal(new_nt)];
+        rhs.extend(body.iter().cloned());
+        new_rules.push(Rule { lhs: new_nt, rhs });
+    }
+
+    *rules = new_rules;
 }
 
-pub(crate) fn inline_epsilon_rules(rules: &[Rule]) -> Vec<Rule> {
-    rules.to_vec()
+/// Inline null productions (ε-elimination).
+///
+/// For every production `A → α B β` where `B` is nullable, generate all
+/// 2^k variants (power-set of nullable positions) with nullable NTs either
+/// present or absent.  All ε-productions (empty RHS) are removed from the
+/// output.
+pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+    let nullable = compute_nullable(rules, num_nt);
+    if nullable.is_empty() {
+        return rules.to_vec();
+    }
+
+    let mut seen = HashSet::<Rule>::new();
+    let mut out = Vec::new();
+
+    for rule in rules {
+        let nullable_positions: Vec<usize> = rule
+            .rhs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, sym)| match sym {
+                Symbol::Nonterminal(nt) if nullable.contains(nt) => Some(i),
+                _ => None,
+            })
+            .collect();
+
+        let k = nullable_positions.len();
+        // Safety guard: refuse power-set expansion beyond 20 nullable positions
+        assert!(
+            k <= 20,
+            "production for NT {} has {} nullable positions; refusing power-set",
+            rule.lhs, k,
+        );
+
+        for mask in 0u64..(1u64 << k) {
+            let new_rhs: Vec<Symbol> = rule
+                .rhs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    match nullable_positions.binary_search(i) {
+                        Ok(idx) => mask & (1u64 << idx) != 0, // bit set → keep
+                        Err(_) => true,                        // non-nullable → always keep
+                    }
+                })
+                .map(|(_, sym)| sym.clone())
+                .collect();
+
+            // Drop ε-rules
+            if new_rhs.is_empty() {
+                continue;
+            }
+
+            let candidate = Rule {
+                lhs: rule.lhs,
+                rhs: new_rhs,
+            };
+            if seen.insert(candidate.clone()) {
+                out.push(candidate);
+            }
+        }
+    }
+
+    out
+}
+
+/// Eliminate hidden left recursion.
+///
+/// Hidden left recursion occurs when `A → β B …` where every symbol in
+/// `β` is nullable and `B` is in an indirect left-recursive cycle with `A`.
+/// We add shortened rules with the nullable prefix removed, exposing the
+/// left recursion so it becomes direct (which GLR handles natively).
+fn eliminate_hidden_left_recursion(
+    rules: &mut Vec<Rule>,
+    nullable: &BTreeSet<NonterminalID>,
+) {
+    const MAX_ITERATIONS: usize = 20;
+
+    for _ in 0..MAX_ITERATIONS {
+        let lr_graph = build_left_reachability_graph(rules, nullable);
+        let cycle = match find_indirect_lr_cycle(&lr_graph) {
+            Some(c) => c,
+            None => break,
+        };
+        let cycle_nodes: BTreeSet<NonterminalID> = cycle.into_iter().collect();
+
+        let mut additions = Vec::new();
+        for rule in rules.iter() {
+            if !cycle_nodes.contains(&rule.lhs) {
+                continue;
+            }
+            // Compute length of nullable prefix
+            let mut prefix_end = 0;
+            for sym in &rule.rhs {
+                match sym {
+                    Symbol::Nonterminal(nt) if nullable.contains(nt) => prefix_end += 1,
+                    _ => break,
+                }
+            }
+            // For each skip length, if next symbol is a cycle member, add shortened rule
+            for skip in 1..=prefix_end {
+                let suffix = &rule.rhs[skip..];
+                if let Some(Symbol::Nonterminal(nt)) = suffix.first() {
+                    if cycle_nodes.contains(nt) {
+                        additions.push(Rule {
+                            lhs: rule.lhs,
+                            rhs: suffix.to_vec(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if additions.is_empty() {
+            break;
+        }
+        rules.extend(additions);
+    }
+}
+
+/// Remove rules for nonterminals not reachable from the start symbol.
+fn remove_unreachable_rules(rules: &[Rule], start: NonterminalID) -> Vec<Rule> {
+    let mut reachable = BTreeSet::new();
+    let mut worklist = vec![start];
+    while let Some(nt) = worklist.pop() {
+        if !reachable.insert(nt) {
+            continue;
+        }
+        for rule in rules {
+            if rule.lhs == nt {
+                for sym in &rule.rhs {
+                    if let Symbol::Nonterminal(n) = sym {
+                        if !reachable.contains(n) {
+                            worklist.push(*n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    rules
+        .iter()
+        .filter(|r| reachable.contains(&r.lhs))
+        .cloned()
+        .collect()
+}
+
+/// Deduplicate rules, preserving order of first occurrence.
+fn dedup_rules(rules: &mut Vec<Rule>) {
+    let mut seen = HashSet::with_capacity(rules.len());
+    rules.retain(|r| seen.insert(r.clone()));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grammar Normalization Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Transforms a grammar so that it satisfies the preconditions required by the
+// terminal-characterization stage:
+//
+//   1. No nullable nonterminals — every nonterminal derives at least one
+//      terminal symbol.
+//   2. No right recursion — neither direct (A → α A) nor indirect
+//      (A →* α B, B →* β A).
+//   3. No indirect left recursion — only direct left recursion (A → A α) is
+//      permitted (safe for GLR).
+//
+// The pipeline runs a fixed-point loop of three phases (phase numbering
+// follows sep1's convention; Phase 1 is the nullable-terminal transformation
+// performed earlier in compile.rs):
+//
+//   ┌─────────────────────────────────────────────────┐
+//   │  Phase 2: Inline null productions               │
+//   │  (ε-elimination via power-set expansion)        │
+//   ├─────────────────────────────────────────────────┤
+//   │  Phase 3: Right-recursion elimination           │
+//   │  (indirect via right-end inlining, then         │
+//   │   direct via left-recursion conversion)         │
+//   ├─────────────────────────────────────────────────┤
+//   │  Phase 4: Hidden left-recursion elimination     │
+//   │  (expose hidden LR by removing nullable         │
+//   │   prefixes)                                     │
+//   └──────────────────────┬──────────────────────────┘
+//                          │ loop until fixed point
+//                          ▼
+//   ┌─────────────────────────────────────────────────┐
+//   │  Final: ε-elimination + unreachable pruning     │
+//   └─────────────────────────────────────────────────┘
+//
+// Each phase may introduce new productions or fresh nonterminals that
+// re-trigger earlier phases, hence the fixed-point loop.
+
+/// Run the full grammar normalization pipeline.
+///
+/// Returns a new `GrammarDef` that satisfies the characterization
+/// preconditions (no nullable NTs, no right recursion, no indirect LR).
+pub fn normalize_grammar(grammar: &GrammarDef) -> GrammarDef {
+    use std::cell::Cell;
+
+    let mut rules = grammar.rules.clone();
+    let next_nt = Cell::new(grammar.num_nonterminals());
+    let mut fresh_nt = || {
+        let id = next_nt.get();
+        next_nt.set(id + 1);
+        id
+    };
+
+    const MAX_PASSES: usize = 100;
+    for _ in 0..MAX_PASSES {
+        let snap = rules.clone();
+
+        // Phase 2: Inline null productions (ε-elimination)
+        rules = inline_null_productions(&rules, next_nt.get());
+
+        // Phase 3: Right-recursion elimination
+        eliminate_right_recursion(&mut rules, &mut fresh_nt);
+
+        // Phase 4: Hidden left-recursion elimination
+        let nullable = compute_nullable(&rules, next_nt.get());
+        eliminate_hidden_left_recursion(&mut rules, &nullable);
+
+        // Dedup before fixed-point check
+        dedup_rules(&mut rules);
+
+        if rules == snap {
+            break;
+        }
+    }
+
+    // Final ε-elimination pass (right-recursion conversion may
+    // re-introduce ε-rules for fresh tail nonterminals)
+    rules = inline_null_productions(&rules, next_nt.get());
+
+    // Remove unreachable productions
+    rules = remove_unreachable_rules(&rules, grammar.start);
+
+    // Final dedup
+    dedup_rules(&mut rules);
+
+    GrammarDef {
+        rules,
+        start: grammar.start,
+        terminals: grammar.terminals.clone(),
+    }
 }
 
 fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
@@ -590,4 +1007,113 @@ mod tests {
             Err(msg) => assert!(!msg.contains("indirect left-recursive"),
                 "direct left recursion should not be flagged as indirect: {}", msg),
         }
-    }}
+    }
+
+    // ── Normalization tests ──────────────────────────────────────────────
+
+    /// inline_null_productions: simple ε-rule is removed, power-set
+    /// variants are generated.
+    #[test]
+    fn test_inline_null_productions_basic() {
+        // A -> B 'a'  ;  B -> 'b' | ε
+        let rules = vec![
+            Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(0)] },
+            Rule { lhs: 1, rhs: vec![Symbol::Terminal(1)] },
+            Rule { lhs: 1, rhs: vec![] }, // B -> ε
+        ];
+        let result = inline_null_productions(&rules, 2);
+        // B -> ε is removed; A -> B 'a' spawns A -> 'a' (B omitted)
+        assert!(result.iter().all(|r| !r.rhs.is_empty()), "no ε-rules in output");
+        assert!(result.iter().any(|r| r.lhs == 0 && r.rhs == vec![Symbol::Terminal(0)]),
+            "A -> 'a' should be generated");
+        assert!(result.iter().any(|r| r.lhs == 0 && r.rhs == vec![Symbol::Nonterminal(1), Symbol::Terminal(0)]),
+            "original A -> B 'a' should still be present");
+    }
+
+    /// inline_null_productions: no-op when nothing is nullable.
+    #[test]
+    fn test_inline_null_productions_nothing_nullable() {
+        let rules = vec![
+            Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)] },
+        ];
+        let result = inline_null_productions(&rules, 1);
+        assert_eq!(result, rules);
+    }
+
+    /// normalize_grammar: an ε-producing grammar is cleaned up so the
+    /// analysed grammar passes all precondition checks.
+    #[test]
+    fn test_normalize_removes_nullables() {
+        // S -> A ; A -> ε | 'a'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+                Rule { lhs: 1, rhs: vec![] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+            ],
+            start: 0,
+            terminals: vec![term(0, "a")],
+        };
+        let norm = normalize_grammar(&gdef);
+        let g = AnalyzedGrammar::from_grammar_def(&norm);
+        assert!(g.check_no_nullable_nonterminals().is_ok(),
+            "after normalization no NT should be nullable");
+    }
+
+    /// normalize_grammar: right recursion is converted to left recursion.
+    #[test]
+    fn test_normalize_eliminates_right_recursion() {
+        // S -> 'a' S | 'a'
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(0)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
+            ],
+            start: 0,
+            terminals: vec![term(0, "a")],
+        };
+        let norm = normalize_grammar(&gdef);
+        let g = AnalyzedGrammar::from_grammar_def(&norm);
+        assert!(g.check_recursion_boundedness().is_ok(),
+            "after normalization there should be no right recursion");
+    }
+
+    /// normalize_grammar produces a grammar that passes ALL precondition
+    /// checks for a grammar that originally violated all three.
+    #[test]
+    fn test_normalize_full_pipeline() {
+        // S -> A ; A -> B 'a' | ε ; B -> 'b' A (indirect RR via A→B→A)
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(2), Symbol::Terminal(0)] },
+                Rule { lhs: 1, rhs: vec![] }, // A -> ε
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(1), Symbol::Nonterminal(1)] },
+            ],
+            start: 0,
+            terminals: vec![term(0, "a"), term(1, "b")],
+        };
+        // Before normalization, the grammar has nullable NTs
+        let g_before = AnalyzedGrammar::from_grammar_def(&gdef);
+        assert!(g_before.debug_check_grammar_preconditions().is_err());
+
+        let norm = normalize_grammar(&gdef);
+        let g = AnalyzedGrammar::from_grammar_def(&norm);
+        assert!(g.debug_check_grammar_preconditions().is_ok(),
+            "normalized grammar should pass all precondition checks");
+    }
+
+    /// Split checks: check_no_nullable_nonterminals returns Ok for non-nullable grammar.
+    #[test]
+    fn test_split_check_nullable_ok() {
+        let g = AnalyzedGrammar::from_grammar_def(&simple_ab_grammar());
+        assert!(g.check_no_nullable_nonterminals().is_ok());
+    }
+
+    /// Split checks: check_recursion_boundedness returns Ok for non-recursive grammar.
+    #[test]
+    fn test_split_check_recursion_ok() {
+        let g = AnalyzedGrammar::from_grammar_def(&simple_ab_grammar());
+        assert!(g.check_recursion_boundedness().is_ok());
+    }
+}

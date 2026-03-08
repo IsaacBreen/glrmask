@@ -11,7 +11,7 @@ use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
-use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::glr::analysis::{AnalyzedGrammar, normalize_grammar};
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
 use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
@@ -158,7 +158,10 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     // Step 3: Expand grammar rules to inline the optionality of nullable
     //         terminals.
-    let normalized = expand_nullable_terminals(grammar, &nullable_terminals);
+    let expanded = expand_nullable_terminals(grammar, &nullable_terminals);
+
+    // Step 4: Normalize grammar (ε-elimination, right-recursion removal, etc.)
+    let normalized = normalize_grammar(&expanded);
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
@@ -211,7 +214,10 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     let nullable_terminals = tokenizer.drain_nullable_terminals();
 
     // Step 3: Expand grammar rules for nullable terminal optionality.
-    let normalized = expand_nullable_terminals(grammar, &nullable_terminals);
+    let expanded = expand_nullable_terminals(grammar, &nullable_terminals);
+
+    // Step 4: Normalize grammar (ε-elimination, right-recursion removal, etc.)
+    let normalized = normalize_grammar(&expanded);
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
