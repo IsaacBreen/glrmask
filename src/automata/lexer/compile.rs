@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ds::u8set::U8Set;
 
-use super::ast::{Expr, ExprGroups};
+use super::ast::Expr;
 use super::dfa::DFA;
 use super::nfa::NFA;
 
@@ -142,46 +142,36 @@ impl Regex {
 }
 
 impl Expr {
-    
     pub fn build(self) -> Regex {
-        ExprGroups {
-            groups: vec![super::ast::ExprGroup {
-                expr: self,
-                is_non_greedy: false,
-            }],
-        }
-        .build()
+        build_regex(&[self])
     }
-
 }
 
-impl ExprGroups {
-    
-    pub fn build(self) -> Regex {
-        let group_sets: Vec<U8Set> = self
-            .groups
-            .iter()
-            .map(|group| expr_u8set(&group.expr))
-            .collect();
-        let mut dfa = self.build_nfa().to_dfa();
-        dfa.ensure_group_capacity(group_sets.len());
-        for (group_id, set) in group_sets.into_iter().enumerate() {
-            dfa.set_group_u8set(group_id as u32, set);
-        }
-        Regex { dfa }
+/// Compile multiple expressions into a single multi-group [`Regex`].
+///
+/// Each expression's index becomes its group ID in the resulting DFA.
+pub fn build_regex(exprs: &[Expr]) -> Regex {
+    let group_sets: Vec<U8Set> = exprs
+        .iter()
+        .map(|expr| expr_u8set(expr))
+        .collect();
+    let mut dfa = build_regex_nfa(exprs).to_dfa();
+    dfa.ensure_group_capacity(group_sets.len());
+    for (group_id, set) in group_sets.into_iter().enumerate() {
+        dfa.set_group_u8set(group_id as u32, set);
     }
+    Regex { dfa }
+}
 
-    
-    pub fn build_nfa(self) -> NFA {
-        let mut nfa = NFA::new(1);
-        for (group_id, group) in self.groups.into_iter().enumerate() {
-            let accept = nfa.add_state();
-            compile_expr(&group.expr, &mut nfa, 0, accept);
-            nfa.add_finalizer(accept, group_id as u32);
-            if group.is_non_greedy {
-                nfa.add_non_greedy_finalizer(accept, group_id as u32);
-            }
-        }
-        nfa
+/// Compile multiple expressions into a single NFA (without determinization).
+///
+/// Each expression's index becomes its group ID.
+pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
+    let mut nfa = NFA::new(1);
+    for (group_id, expr) in exprs.iter().enumerate() {
+        let accept = nfa.add_state();
+        compile_expr(expr, &mut nfa, 0, accept);
+        nfa.add_finalizer(accept, group_id as u32);
     }
+    nfa
 }

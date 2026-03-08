@@ -7,7 +7,8 @@
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::regex::parse_regex;
-use crate::automata::regex::{Expr, ExprGroup, ExprGroups};
+use crate::automata::lexer::compile::build_regex;
+use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
@@ -27,22 +28,19 @@ use crate::runtime::Constraint;
 
 /// Build a [`Tokenizer`] from a [`GrammarDef`].
 ///
-/// Each terminal is compiled through the NFA→DFA pipeline via [`ExprGroups`].
+/// Each terminal is compiled through the NFA→DFA pipeline via [`build_regex`].
 /// The group index matches the terminal ID (guaranteed by construction).
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
-    let groups: Vec<ExprGroup> = grammar
+    let exprs: Vec<Expr> = grammar
         .terminals
         .iter()
-        .map(|terminal| {
-            let expr = match terminal {
-                Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
-                Terminal::Pattern { pattern, .. } => parse_regex(pattern),
-                Terminal::Expr { expr, .. } => expr.clone(),
-            };
-            ExprGroup { expr, is_non_greedy: false }
+        .map(|terminal| match terminal {
+            Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
+            Terminal::Pattern { pattern, .. } => parse_regex(pattern),
+            Terminal::Expr { expr, .. } => expr.clone(),
         })
         .collect();
-    let regex = ExprGroups { groups }.build();
+    let regex = build_regex(&exprs);
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: grammar.num_terminals(),
@@ -53,12 +51,8 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
 ///
 /// Each expression's index becomes its `TerminalID`.
 pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
-    let groups: Vec<ExprGroup> = exprs
-        .iter()
-        .map(|expr| ExprGroup { expr: expr.clone(), is_non_greedy: false })
-        .collect();
-    let num = groups.len() as u32;
-    let regex = ExprGroups { groups }.build();
+    let num = exprs.len() as u32;
+    let regex = build_regex(exprs);
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: num,

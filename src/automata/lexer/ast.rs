@@ -27,17 +27,6 @@ pub enum Expr {
     Epsilon,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExprGroup {
-    pub expr: Expr,
-    pub is_non_greedy: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ExprGroups {
-    pub groups: Vec<ExprGroup>,
-}
-
 pub fn byte(b: u8) -> Expr {
     Expr::U8Seq(vec![b])
 }
