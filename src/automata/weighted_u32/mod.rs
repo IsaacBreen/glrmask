@@ -12,3 +12,6 @@ pub mod nwa;
 
 #[cfg(test)]
 mod test_weighted_automata;
+
+#[cfg(test)]
+mod test_determinization;
