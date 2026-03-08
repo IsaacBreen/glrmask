@@ -9,15 +9,31 @@ use crate::compiler::glr::parser::advance_stacks;
 use crate::ds::leveled_gss::LeveledGSS;
 
 impl<'a> ConstraintState<'a> {
+    /// Commit a sampled token, advancing the constraint state.
+    ///
+    /// `token_id` must be a token that exists in the vocabulary the constraint
+    /// was built with.  Committing a token that is grammatically invalid (not
+    /// in the current mask) drives the constraint into a fail state — this is
+    /// normal and observable via an all-zero mask.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `token_id` is not present in the vocabulary at all.  This is
+    /// always a programming error (mismatched vocabulary, stale token mapping,
+    /// or off-by-one bug) and is caught unconditionally in both debug and
+    /// release builds.
+    #[track_caller]
     pub fn commit_token(
         &mut self,
         token_id: u32,
     ) {
-        if let Some(bytes) = self.constraint.token_bytes.get(&token_id).cloned() {
-            self.commit_bytes(&bytes);
-        } else {
-            self.state.clear();
-        }
+        let bytes = self.constraint.token_bytes
+            .get(&token_id)
+            .unwrap_or_else(|| {
+                panic!("commit_token: token_id {token_id} not in vocabulary")
+            })
+            .clone();
+        self.commit_bytes(&bytes);
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) {

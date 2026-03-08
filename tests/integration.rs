@@ -216,19 +216,16 @@ fn test_json_schema_invalid_json() {
 // ====================================================================
 
 #[test]
+#[should_panic(expected = "not in vocabulary")]
 fn test_commit_invalid_token() {
-    // commit() is infallible: committing a token not in the mask is a no-op.
-    // (Token 1 = "b" is NOT allowed by grammar `"a"` at the first step.)
+    // Committing a token ID that does not exist in the vocabulary is a
+    // programming error and should panic (even in release builds).
     let vocab = make_vocab(&["a", "b"]);
     let c = Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
     let mut s = c.start();
 
-    // Token 99 is not in the vocabulary at all — should be a no-op.
+    // Token 99 is not in the vocabulary — should panic.
     s.commit_token(99);
-    let mask = s.mask();
-    // State unchanged: "a" still the only valid next token.
-    assert!(token_allowed(&mask, 0), "'a' still allowed after no-op commit");
-    assert!(!token_allowed(&mask, 1), "'b' still not allowed");
 }
 
 #[test]
@@ -772,14 +769,14 @@ fn test_ported_a_plus_commit_equivalence() {
     );
 }
 
-/// Ambiguous grammar: s ::= FSTRING_MIDDLE FSTRING_MIDDLE; FSTRING_MIDDLE ::= 'a'+.
+/// Ambiguous grammar: s ::= A A; A ::= 'a'+.
 /// With only "a" in vocab the constraint should keep token 0 allowed across many commits.
 #[test]
 fn test_ported_hideous_ambiguity() {
     let vocab = make_vocab(&["a"]);
     let c = Constraint::from_ebnf(
-        r#"s ::= FSTRING_MIDDLE FSTRING_MIDDLE
-           FSTRING_MIDDLE ::= 'a'+"#,
+        r#"s ::= A A
+           A ::= 'a'+"#,
         &vocab,
     )
     .unwrap();
