@@ -15,7 +15,6 @@ use crate::compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::{GrammarDef, Terminal};
-use crate::compiler::grammar::normalize::normalize_for_mask;
 use crate::compiler::parser_dwa::build_parser_dwa_from_terminal_dwa;
 use crate::compiler::possible_matches::build_possible_matches_by_state;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
@@ -82,7 +81,7 @@ fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
 
 
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    let normalized = normalize_for_mask(grammar);
+    let normalized = grammar.clone();
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
     // Debug check: verify grammar preconditions before expensive pipeline stages.
@@ -129,7 +128,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
 
 pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
-    let normalized = normalize_for_mask(grammar);
+    let normalized = grammar.clone();
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
     #[cfg(debug_assertions)]

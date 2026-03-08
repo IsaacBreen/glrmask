@@ -174,11 +174,6 @@ impl AnalyzedGrammar {
 }
 
 
-pub fn normalize_for_mask(g: &GrammarDef) -> GrammarDef {
-    g.clone()
-}
-
-
 #[allow(dead_code)]
 pub(crate) fn eliminate_direct_left_recursion(
     rules: &mut Vec<Rule>,

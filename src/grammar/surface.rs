@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::GlrMaskError;
-use crate::grammar::flat::model::{
+use crate::grammar::flat::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
 
