@@ -179,7 +179,7 @@ fn parse_simple_ebnf(ebnf: &str) -> crate::Result<GrammarDef> {
 
 
 fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
-    let grammar = parse_simple_ebnf(ebnf)?;
+    let grammar = ebnf::parse_ebnf(ebnf)?;
     Ok(compile(&grammar, vocab))
 }
 
@@ -188,7 +188,7 @@ fn from_ebnf_with_debug(
     ebnf: &str,
     vocab: &crate::Vocab,
 ) -> crate::Result<(Constraint, CompileDebug)> {
-    let grammar = parse_simple_ebnf(ebnf)?;
+    let grammar = ebnf::parse_ebnf(ebnf)?;
     Ok(compile_with_debug(&grammar, vocab))
 }
 

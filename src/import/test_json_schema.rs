@@ -71,7 +71,6 @@ fn ebnf_constraint(ebnf: &str) -> Constraint {
 /// Whitespace rule is nullable via `(…)*`; after committing `{`, the `}`
 /// should be immediately valid.
 #[test]
-#[ignore] // Constraint::from_ebnf uses parse_simple_ebnf which doesn't support () * ? syntax
 fn test_ebnf_ws_nullable() {
     let c = ebnf_constraint(
         "root ::= '{' WS '}'\nWS ::= ( ' ' | '\\t' | '\\n' | '\\r' )*",
@@ -93,7 +92,7 @@ fn test_ebnf_ws_nullable() {
 ///
 /// After `{`, both `"` (starting a member) and `}` (empty object) should be valid.
 #[test]
-#[ignore] // Constraint::from_ebnf uses parse_simple_ebnf which doesn't support () * ? syntax
+#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks for complex object grammars
 fn test_ebnf_object_member_after_brace() {
     let ebnf = "\
 root ::= '{' WS member_opt WS '}'

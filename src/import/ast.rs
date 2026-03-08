@@ -140,12 +140,12 @@ impl Lowerer {
                 GrammarExpr::Repeat(inner) => {
                     let item = lowerer.lower_expr(inner);
                     lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
-                    lowerer.rules.push(Rule { lhs, rhs: vec![item, Symbol::Nonterminal(lhs)] });
+                    lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), item] });
                 }
                 GrammarExpr::RepeatOne(inner) => {
                     let item = lowerer.lower_expr(inner);
                     lowerer.rules.push(Rule { lhs, rhs: vec![item.clone()] });
-                    lowerer.rules.push(Rule { lhs, rhs: vec![item, Symbol::Nonterminal(lhs)] });
+                    lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), item] });
                 }
                 _ => {
                     let symbol = lowerer.lower_expr_terminalish(expr)?;
@@ -277,12 +277,12 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             GrammarExpr::Repeat(inner) => {
                 let symbol = lowerer.lower_expr_terminalish(inner)?;
                 lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
-                lowerer.rules.push(Rule { lhs, rhs: vec![symbol, Symbol::Nonterminal(lhs)] });
+                lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), symbol] });
             }
             GrammarExpr::RepeatOne(inner) => {
                 let symbol = lowerer.lower_expr_terminalish(inner)?;
                 lowerer.rules.push(Rule { lhs, rhs: vec![symbol.clone()] });
-                lowerer.rules.push(Rule { lhs, rhs: vec![symbol, Symbol::Nonterminal(lhs)] });
+                lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), symbol] });
             }
             _ => {
                 let symbol = lowerer.lower_expr_terminalish(expr)?;
