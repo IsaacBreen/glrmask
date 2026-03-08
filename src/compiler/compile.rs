@@ -1,7 +1,3 @@
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -46,25 +42,6 @@ fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
     }
     out
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
@@ -112,10 +89,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         token_bytes,
     }
 }
-
-
-
-
 
 
 pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
@@ -188,9 +161,6 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
 
     (constraint, debug)
 }
-
-
-
 
 
 #[cfg(test)]

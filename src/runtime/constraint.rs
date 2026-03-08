@@ -1,8 +1,3 @@
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -26,9 +21,6 @@ use super::state::ConstraintState;
 pub(crate) type TokenizerStateID = u32;
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
-
-
-
 
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

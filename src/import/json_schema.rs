@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -148,9 +135,6 @@ pub fn schema_to_named_grammar(schema: &serde_json::Value) -> Result<NamedGramma
     rules.extend(ctx.sub_rules);
     Ok(NamedGrammar { rules, start: "start".into() })
 }
-
-
-
 
 
 struct SchemaCtx {
@@ -541,10 +525,6 @@ impl SchemaCtx {
 }
 
 
-
-
-
-
 fn choice_or_single(alts: Vec<GrammarExpr>) -> GrammarExpr {
     let mut alts = alts;
     if alts.is_empty() {
@@ -566,15 +546,6 @@ fn sanitize_rule_name(s: &str) -> String {
 }
 
 
-
-
-
-
-
-
-
-
-
 fn build_optional_choice(optional_keys: &[String], kv_rules: &[(String, String)]) -> GrammarExpr {
     let mut alts = vec![GrammarExpr::Sequence(Vec::new())];
     for key in optional_keys {
@@ -584,10 +555,6 @@ fn build_optional_choice(optional_keys: &[String], kv_rules: &[(String, String)]
     }
     choice_or_single(alts)
 }
-
-
-
-
 
 
 fn build_repetition(item_rule: &str, min: usize, max: Option<usize>) -> GrammarExpr {
@@ -625,9 +592,6 @@ fn permute_properties(
         properties.swap(start, index);
     }
 }
-
-
-
 
 
 #[cfg(test)]

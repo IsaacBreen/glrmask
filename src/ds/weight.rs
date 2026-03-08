@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -16,13 +9,6 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
 
 use std::collections::{BTreeMap, BTreeSet};
-
-
-
-
-
-
-
 
 
 #[derive(Debug, Clone)]
@@ -406,7 +392,6 @@ impl Weight {
 }
 
 
-
 impl PartialEq for Weight {
     fn eq(&self, other: &Self) -> bool {
         if self.is_full() || other.is_full() {
@@ -459,12 +444,7 @@ impl std::fmt::Display for Weight {
 }
 
 
-
 const WEIGHT_NAME_EXPAND_LIMIT: usize = 64;
-
-
-
-
 
 
 pub struct WeightDisplayWithNames<'a> {
@@ -530,12 +510,6 @@ impl std::fmt::Display for WeightDisplayWithNames<'_> {
 }
 
 
-
-
-
-
-
-
 const WEIGHT_ALL_SENTINEL: u32 = u32::MAX;
 
 impl Serialize for Weight {
@@ -558,11 +532,6 @@ impl<'de> Deserialize<'de> for Weight {
         })))
     }
 }
-
-
-
-
-
 
 
 #[cfg(test)]
@@ -677,4 +646,3 @@ mod tests {
         assert_eq!(w, w2);
     }
 }
-

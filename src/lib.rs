@@ -19,4 +19,3 @@ pub use compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 pub use error::{GlrMaskError, Result};
 pub use runtime::{Constraint, ConstraintState};
 pub use vocab::Vocab;
-

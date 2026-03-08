@@ -1,5 +1,3 @@
-
-
 // SEP1_MAP: This formatter is closest to sep1's `Display` impls in glr/parser.rs plus automaton dumps from precompute4/, but sep1 has no single compile-debug pretty-printer.
 
 use std::collections::BTreeMap;

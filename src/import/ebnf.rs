@@ -1,27 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -32,9 +8,6 @@
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
-
-
-
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,9 +200,6 @@ fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
 }
 
 
-
-
-
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -378,10 +348,6 @@ impl Parser {
 }
 
 
-
-
-
-
 pub fn parse_ebnf(input: &str) -> Result<GrammarDef, GlrMaskError> {
     let named = parse_ebnf_to_named(input)?;
     lower(&named)
@@ -395,9 +361,6 @@ pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut parser = Parser::new(tokens);
     parser.parse_grammar()
 }
-
-
-
 
 
 #[cfg(test)]

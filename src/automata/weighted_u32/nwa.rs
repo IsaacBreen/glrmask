@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -425,10 +417,6 @@ fn compute_sccs(nwa: &NWA) -> (Vec<Vec<usize>>, Vec<usize>) {
 }
 
 
-
-
-
-
 fn fmt_nwa_states(
     nwa: &NWA,
     f: &mut std::fmt::Formatter<'_>,
@@ -468,9 +456,6 @@ fn fmt_nwa_states(
     }
     Ok(())
 }
-
-
-
 
 
 impl std::fmt::Display for NWA {

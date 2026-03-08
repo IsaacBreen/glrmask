@@ -1,22 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -194,68 +175,9 @@ impl AnalyzedGrammar {
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 pub fn normalize_for_mask(g: &GrammarDef) -> GrammarDef {
     g.clone()
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 #[allow(dead_code)]
@@ -266,24 +188,6 @@ pub(crate) fn eliminate_direct_left_recursion(
     let _ = rules;
     let _ = fresh_nt;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 pub(crate) fn eliminate_right_recursion(
@@ -307,10 +211,6 @@ fn max_nt_id(rules: &[Rule]) -> u32 {
         .max()
         .unwrap_or(0)
 }
-
-
-
-
 
 
 fn build_right_reachability_graph(
@@ -339,8 +239,6 @@ fn build_right_reachability_graph(
     }
     graph
 }
-
-
 
 
 fn find_indirect_rr_cycle(
@@ -460,8 +358,6 @@ fn find_indirect_lr_cycle(
 }
 
 
-
-
 fn inline_right_end(
     rules: &mut Vec<Rule>,
     from_nt: NonterminalID,
@@ -475,25 +371,9 @@ fn inline_right_end(
 }
 
 
-
 fn is_direct_right_recursive(rule: &Rule) -> bool {
     matches!(rule.rhs.last(), Some(Symbol::Nonterminal(nonterminal)) if *nonterminal == rule.lhs)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 fn resolve_direct_rr_single_nt(
@@ -507,32 +387,9 @@ fn resolve_direct_rr_single_nt(
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 pub(crate) fn inline_epsilon_rules(rules: &[Rule]) -> Vec<Rule> {
     rules.to_vec()
 }
-
-
-
 
 
 fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
@@ -556,9 +413,6 @@ fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
     }
     nullable
 }
-
-
-
 
 
 fn compute_first(
@@ -593,9 +447,6 @@ fn compute_first(
     }
     first
 }
-
-
-
 
 
 fn compute_follow(

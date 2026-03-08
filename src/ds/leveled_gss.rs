@@ -1,18 +1,4 @@
-
-
-
 #![allow(unused_mut, unused_variables, dead_code)]
-
-
-
-
-
-
-
-
-
-
-
 
 
 #![allow(dead_code)]
@@ -597,10 +583,6 @@ mod tests {
 }
 
 
-
-
-
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GSSPathsInfo {
     pub num_paths: usize,
@@ -714,9 +696,6 @@ where
 {
     new_branch(IHashMap::new(), None)
 }
-
-
-
 
 
 fn filter_lower<T: Clone + Eq + Hash>(
@@ -1111,9 +1090,6 @@ fn accs_by_depth_upper<T, A>(
 }
 
 
-
-
-
 fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> Arc<Lower<T>> {
     if Arc::ptr_eq(l1, l2) {
         return l1.clone();
@@ -1386,9 +1362,6 @@ where
     }
     accs.len() <= 1
 }
-
-
-
 
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1734,9 +1707,6 @@ where
         }
     }
 }
-
-
-
 
 
 #[derive(Clone)]

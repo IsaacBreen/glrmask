@@ -1,6 +1,3 @@
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -23,9 +20,6 @@ pub struct DWAState {
     
     pub final_weight: Option<Weight>,
 }
-
-
-
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,10 +172,6 @@ impl DWA {
 }
 
 
-
-
-
-
 fn fmt_dwa_states(
     dwa: &DWA,
     f: &mut std::fmt::Formatter<'_>,
@@ -208,9 +198,6 @@ fn fmt_dwa_states(
     }
     Ok(())
 }
-
-
-
 
 
 impl std::fmt::Display for DWA {

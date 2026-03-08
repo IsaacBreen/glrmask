@@ -1,7 +1,3 @@
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -16,10 +12,6 @@ use serde::{Deserialize, Serialize};
 
 use super::analysis::{EOF, AnalyzedGrammar};
 use crate::compiler::grammar_def::{NonterminalID, Rule, Symbol, TerminalID};
-
-
-
-
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -75,10 +67,6 @@ impl GLRTable {
 }
 
 
-
-
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Item {
     rule: u32,
@@ -96,10 +84,6 @@ impl Item {
         rhs.get(self.dot as usize)
     }
 }
-
-
-
-
 
 
 fn closure(items: &BTreeSet<Item>, rules: &[Rule]) -> BTreeSet<Item> {
@@ -132,10 +116,6 @@ fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<It
     }
     closure(&kernel, rules)
 }
-
-
-
-
 
 
 fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
@@ -187,9 +167,6 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
 
     (item_sets, transitions)
 }
-
-
-
 
 
 fn build_slr1_table(
@@ -244,9 +221,6 @@ fn build_slr1_table(
         rules: grammar.rules.clone(),
     }
 }
-
-
-
 
 
 #[cfg(test)]

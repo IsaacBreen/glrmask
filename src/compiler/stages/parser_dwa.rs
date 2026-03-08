@@ -1,21 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -44,16 +26,6 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::{build_terminal_dwa, TerminalDWA};
 use crate::Vocab;
 use crate::ds::weight::Weight;
-
-
-
-
-
-
-
-
-
-
 
 
 fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
@@ -300,7 +272,6 @@ fn build_branch_bundle(
 }
 
 
-
 pub fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -430,9 +401,6 @@ fn root_terminal_branch_groups_for_tokenizer_state(
             internal_tsid,
     )
 }
-
-
-
 
 
 #[cfg(test)]

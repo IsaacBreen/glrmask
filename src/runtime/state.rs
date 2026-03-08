@@ -1,8 +1,3 @@
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -17,11 +12,6 @@ use super::constraint::Constraint;
 // SEP1_MAP: this file maps to sep1 `GrammarConstraintState` in
 // `grammars2024/src/constraint.rs`, with execution/mask helpers split into
 // sibling files instead of living on one large impl block.
-
-
-
-
-
 
 
 #[derive(Debug, Clone)]

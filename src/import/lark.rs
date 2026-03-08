@@ -1,30 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -35,9 +8,6 @@
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
-
-
-
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -303,16 +273,6 @@ impl<'a> Lexer<'a> {
 }
 
 
-
-
-
-
-
-
-
-
-
-
 fn desugar_tilde(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
     let max = max.unwrap_or(min);
     assert!(max >= min, "tilde max must be >= min");
@@ -341,9 +301,6 @@ fn desugar_tilde(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarEx
         _ => GrammarExpr::Sequence(parts),
     }
 }
-
-
-
 
 
 struct Parser {
@@ -577,10 +534,6 @@ impl Parser {
 }
 
 
-
-
-
-
 pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;
@@ -597,9 +550,6 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut parser = Parser::new(tokens);
     parser.parse_grammar()
 }
-
-
-
 
 
 #[cfg(test)]

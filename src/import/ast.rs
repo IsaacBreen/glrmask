@@ -1,7 +1,3 @@
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -15,10 +11,6 @@ use crate::GlrMaskError;
 use crate::compiler::grammar_def::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
-
-
-
-
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,10 +46,6 @@ pub struct NamedGrammar {
     
     pub start: String,
 }
-
-
-
-
 
 
 struct Lowerer {
@@ -194,16 +182,9 @@ impl Lowerer {
 }
 
 
-
-
-
-
 fn is_terminal_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')
 }
-
-
-
 
 
 fn compile_to_regex(
@@ -236,9 +217,6 @@ fn compile_to_regex(
         GrammarExpr::AnyByte => ".".into(),
     })
 }
-
-
-
 
 
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
@@ -307,9 +285,6 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
 }
 
 
-
-
-
 fn escape_byte(b: u8) -> String {
     match b {
         b'\n' => "\\n".into(),
@@ -330,9 +305,6 @@ fn regex_escape_byte(b: u8) -> String {
         _ => escape_byte(b),
     }
 }
-
-
-
 
 
 #[cfg(test)]

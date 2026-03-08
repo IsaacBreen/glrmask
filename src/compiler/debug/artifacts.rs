@@ -1,8 +1,3 @@
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -23,10 +18,6 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::TerminalDWA;
 
 
-
-
-
-
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct TerminalDebug {
@@ -41,14 +32,6 @@ pub struct TerminalDebug {
     
     
 }
-
-
-
-
-
-
-
-
 
 
 #[derive(Debug, Clone)]
@@ -81,34 +64,6 @@ pub struct AutomataDebug {
     
     pub id_map: InternalIdMap,
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 #[derive(Debug, Clone)]

@@ -1,8 +1,3 @@
-
-
-
-
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -35,8 +30,6 @@ impl Merge for TerminalsDisallowed {
 
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
-
-
 
 
 #[allow(dead_code)]
@@ -290,9 +283,6 @@ pub(crate) fn valid_terminals_for_stacks(table: &GLRTable, stack: &ParserGSS) ->
     let stacks: Vec<Vec<u32>> = stack.to_stacks().into_iter().map(|(stack, _)| stack).collect();
     valid_terminals_for_stack_vectors(table, &stacks)
 }
-
-
-
 
 
 #[cfg(test)]
