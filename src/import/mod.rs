@@ -18,6 +18,9 @@ pub mod lark;
 #[cfg(test)]
 mod test_grammar_import;
 
+#[cfg(test)]
+mod test_json_schema;
+
 pub use ast as grammar_expr;
 
 use crate::compiler::debug::CompileDebug;
