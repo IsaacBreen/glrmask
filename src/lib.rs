@@ -10,6 +10,7 @@ pub(crate) mod automata;
 pub(crate) mod compiler;
 pub(crate) mod ds;
 mod error;
+pub(crate) mod grammar;
 pub(crate) mod import;
 pub(crate) mod runtime;
 mod vocab;
