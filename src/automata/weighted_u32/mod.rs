@@ -9,3 +9,6 @@ pub mod determinize;
 pub mod dwa;
 pub mod minimize;
 pub mod nwa;
+
+#[cfg(test)]
+mod test_weighted_automata;
