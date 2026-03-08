@@ -95,6 +95,12 @@ impl DFA {
         }
     }
 
+    pub fn clear_finalizer(&mut self, state: u32, group_id: GroupId) {
+        if let Some(entry) = self.states.get_mut(state as usize) {
+            entry.finalizers.clear(group_id as usize);
+        }
+    }
+
     pub fn mark_non_greedy_finalizer(&mut self, state: u32, group_id: GroupId) {
         if let Some(entry) = self.states.get_mut(state as usize) {
             entry.non_greedy_finalizers.set(group_id as usize);

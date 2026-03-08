@@ -18,7 +18,7 @@ pub type NonterminalID = u32;
 
 pub type TerminalID = u32;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rule {
     pub lhs: NonterminalID,
     pub rhs: Vec<Symbol>,

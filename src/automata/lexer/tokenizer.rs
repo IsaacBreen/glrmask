@@ -39,6 +39,18 @@ impl Tokenizer {
         0
     }
 
+    /// Detect nullable terminals (those that match the empty string) by
+    /// inspecting start-state finalizers, remove them from the DFA, and return
+    /// the set.  After this call the tokenizer no longer reports those
+    /// terminals as matched at state 0.
+    pub fn drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
+        let nullable = self.matched_terminals(self.start_state());
+        for &tid in &nullable {
+            self.dfa.clear_finalizer(self.start_state(), tid as u32);
+        }
+        nullable
+    }
+
     pub fn step(&self, _state: u32, _byte: u8) -> Option<u32> {
         self.dfa.step(_state, _byte)
     }
