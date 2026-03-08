@@ -70,6 +70,15 @@ fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let normalized = normalize_for_mask(grammar);
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
+
+    // Debug check: verify grammar preconditions before expensive pipeline stages.
+    // Violations here indicate the grammar (or its normalization) has shapes that
+    // will cause panics or incorrect results later in the pipeline.
+    #[cfg(debug_assertions)]
+    if let Err(msg) = glr_grammar.debug_check_grammar_preconditions() {
+        panic!("[glrmask] grammar precondition violations:\n{}", msg);
+    }
+
     let table = GLRTable::build(&glr_grammar);
     let tokenizer = Tokenizer::from_grammar_def(&normalized);
     let id_map = InternalIdMap::build(&tokenizer, vocab);
@@ -112,6 +121,12 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
     let normalized = normalize_for_mask(grammar);
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
+
+    #[cfg(debug_assertions)]
+    if let Err(msg) = glr_grammar.debug_check_grammar_preconditions() {
+        panic!("[glrmask] grammar precondition violations:\n{}", msg);
+    }
+
     let table = GLRTable::build(&glr_grammar);
     let tokenizer = Tokenizer::from_grammar_def(&normalized);
     let id_map = InternalIdMap::build(&tokenizer, vocab);
