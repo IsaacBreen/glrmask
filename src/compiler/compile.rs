@@ -81,13 +81,14 @@ fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
 
 // ── Nullable terminal expansion ─────────────────────────────────────────────
 
-/// Expand grammar rules so that nullable terminals (those matching the empty
-/// string) are treated as optional at every position they appear.
+/// Rewrite grammar rules so that nullable terminals (those matching the empty
+/// string) are treated as optional.
 ///
-/// For each rule with *k* nullable-terminal positions in its RHS, produce 2^k
-/// variants covering every subset of those positions.  Duplicate rules are
-/// removed.  Rules where all RHS symbols are removed (ε-rules) are kept — the
-/// resulting nullable nonterminals are left for downstream handling.
+/// For each nullable terminal `T`, a fresh nonterminal `NT` is allocated with
+/// two productions: `NT → ε` and `NT → T`.  Every occurrence of `T` in the
+/// original grammar rules is replaced by `NT`.  The tokenizer's start-state
+/// finalizer for `T` is assumed to already be drained before this function is
+/// called.
 pub(crate) fn expand_nullable_terminals(
     grammar: &GrammarDef,
     nullable_terminals: &std::collections::BTreeSet<TerminalID>,
@@ -96,46 +97,49 @@ pub(crate) fn expand_nullable_terminals(
         return grammar.clone();
     }
 
-    // Expand rules via power-set removal of nullable-terminal positions.
-    // Only terminal positions are considered; nullable nonterminals that
-    // arise as a consequence (e.g. `A → nullable_t`) are left in the
-    // grammar for downstream handling.
-    let mut seen = std::collections::HashSet::<Rule>::new();
-    let mut new_rules = Vec::new();
-    for rule in &grammar.rules {
-        let nullable_positions: Vec<usize> = rule
-            .rhs
-            .iter()
-            .enumerate()
-            .filter(|(_, sym)| matches!(sym, Symbol::Terminal(tid) if nullable_terminals.contains(tid)))
-            .map(|(i, _)| i)
-            .collect();
+    let mut next_nt = grammar.num_nonterminals();
 
-        let k = nullable_positions.len();
-        for mask in 0..(1u64 << k) {
-            let new_rhs: Vec<Symbol> = rule
+    // Map: nullable terminal id → fresh nonterminal id.
+    let mut nt_for_terminal = std::collections::BTreeMap::<TerminalID, NonterminalID>::new();
+    let mut extra_rules = Vec::new();
+
+    for &tid in nullable_terminals {
+        let fresh_nt = next_nt;
+        next_nt += 1;
+        nt_for_terminal.insert(tid, fresh_nt);
+
+        // NT → ε
+        extra_rules.push(Rule {
+            lhs: fresh_nt,
+            rhs: vec![],
+        });
+        // NT → T
+        extra_rules.push(Rule {
+            lhs: fresh_nt,
+            rhs: vec![Symbol::Terminal(tid)],
+        });
+    }
+
+    // Rewrite existing rules: replace nullable Terminal(T) with Nonterminal(NT).
+    let mut new_rules: Vec<Rule> = grammar
+        .rules
+        .iter()
+        .map(|rule| Rule {
+            lhs: rule.lhs,
+            rhs: rule
                 .rhs
                 .iter()
-                .enumerate()
-                .filter(|(i, _)| {
-                    if let Ok(idx) = nullable_positions.binary_search(i) {
-                        mask & (1u64 << idx) == 0
-                    } else {
-                        true
+                .map(|sym| match sym {
+                    Symbol::Terminal(tid) if nt_for_terminal.contains_key(tid) => {
+                        Symbol::Nonterminal(nt_for_terminal[tid])
                     }
+                    other => other.clone(),
                 })
-                .map(|(_, sym)| sym.clone())
-                .collect();
+                .collect(),
+        })
+        .collect();
 
-            let candidate = Rule {
-                lhs: rule.lhs,
-                rhs: new_rhs,
-            };
-            if seen.insert(candidate.clone()) {
-                new_rules.push(candidate);
-            }
-        }
-    }
+    new_rules.extend(extra_rules);
 
     GrammarDef {
         rules: new_rules,
@@ -548,61 +552,91 @@ mod tests {
     #[test]
     fn test_expand_nullable_terminals_single_nullable() {
         // Grammar: S → t0 t1, where t0 is nullable.
-        // Expected expansion: S → t0 t1 | t1
-        let gdef = simple_ab_grammar(); // S → T0 T1
+        // Expected: fresh NT2, S → NT2 t1, NT2 → ε, NT2 → t0
+        let gdef = simple_ab_grammar(); // S → T0 T1, nonterminals: {0}
         let nullable = std::collections::BTreeSet::from([0u32]);
         let expanded = expand_nullable_terminals(&gdef, &nullable);
 
-        assert_eq!(expanded.rules.len(), 2, "should have original + one expanded variant");
+        // 1 rewritten original rule + 2 fresh-NT rules = 3 total.
+        assert_eq!(expanded.rules.len(), 3);
+
+        // The fresh NT id should be grammar.num_nonterminals() = 1.
+        let fresh_nt = gdef.num_nonterminals();
+
+        // S → NT_fresh t1
+        assert_eq!(expanded.rules[0].lhs, 0);
+        assert_eq!(
+            expanded.rules[0].rhs,
+            vec![Symbol::Nonterminal(fresh_nt), Symbol::Terminal(1)]
+        );
+
+        // NT_fresh → ε and NT_fresh → t0
+        let fresh_rules: Vec<&Rule> =
+            expanded.rules.iter().filter(|r| r.lhs == fresh_nt).collect();
+        assert_eq!(fresh_rules.len(), 2);
         let rhs_set: std::collections::BTreeSet<Vec<Symbol>> =
-            expanded.rules.iter().map(|r| r.rhs.clone()).collect();
-        assert!(rhs_set.contains(&vec![Symbol::Terminal(0), Symbol::Terminal(1)]));
-        assert!(rhs_set.contains(&vec![Symbol::Terminal(1)]));
+            fresh_rules.iter().map(|r| r.rhs.clone()).collect();
+        assert!(rhs_set.contains(&vec![])); // ε
+        assert!(rhs_set.contains(&vec![Symbol::Terminal(0)])); // t0
     }
 
     #[test]
-    fn test_expand_nullable_terminals_both_nullable_no_epsilon() {
+    fn test_expand_nullable_terminals_both_nullable() {
         // Grammar: S → t0 t1, where both are nullable.
-        // Expected: S → t0 t1 | t0 | t1  (no ε-rule)
+        // Expected: fresh NT1 for t0, fresh NT2 for t1.
+        // S → NT1 NT2, NT1 → ε | t0, NT2 → ε | t1
         let gdef = simple_ab_grammar();
         let nullable = std::collections::BTreeSet::from([0u32, 1u32]);
         let expanded = expand_nullable_terminals(&gdef, &nullable);
 
-        assert_eq!(expanded.rules.len(), 4, "should be 4 variants including ε-rule");
-        let rhs_set: std::collections::BTreeSet<Vec<Symbol>> =
-            expanded.rules.iter().map(|r| r.rhs.clone()).collect();
-        assert!(rhs_set.contains(&vec![Symbol::Terminal(0), Symbol::Terminal(1)]));
-        assert!(rhs_set.contains(&vec![Symbol::Terminal(0)]));
-        assert!(rhs_set.contains(&vec![Symbol::Terminal(1)]));
-        // ε-rule IS present (nullable nonterminals are left for downstream handling).
-        assert!(rhs_set.contains(&Vec::<Symbol>::new()));
+        // 1 rewritten rule + 2*2 fresh-NT rules = 5 total.
+        assert_eq!(expanded.rules.len(), 5);
+
+        let nt0 = gdef.num_nonterminals();     // fresh NT for t0
+        let nt1 = gdef.num_nonterminals() + 1; // fresh NT for t1
+
+        // S → NT0 NT1
+        assert_eq!(
+            expanded.rules[0].rhs,
+            vec![Symbol::Nonterminal(nt0), Symbol::Nonterminal(nt1)]
+        );
     }
 
     #[test]
-    fn test_expand_nullable_terminals_cascading_nonterminal() {
+    fn test_expand_nullable_terminals_nonterminal_untouched() {
         // Grammar: S → A t1, A → t0. If t0 is nullable:
-        //   - A → t0 and A → ε (nullable nonterminal left in grammar)
-        //   - S → A t1 unchanged (only terminal positions expanded, not NT positions)
+        //   - Fresh NT for t0.
+        //   - S → A t1 unchanged (A is a nonterminal, not touched).
+        //   - A → NT_fresh (rewritten from A → t0).
         let gdef = two_nt_grammar(); // S → N1 T1, N1 → T0
         let nullable = std::collections::BTreeSet::from([0u32]);
         let expanded = expand_nullable_terminals(&gdef, &nullable);
 
-        // S → N1 T1 only (no nonterminal cascade expansion).
+        let fresh_nt = gdef.num_nonterminals(); // = 2
+
+        // S → N1 T1 — N1 is a nonterminal, not rewritten.
         let s_rules: Vec<&Rule> = expanded.rules.iter().filter(|r| r.lhs == 0).collect();
+        assert_eq!(s_rules.len(), 1);
+        assert_eq!(
+            s_rules[0].rhs,
+            vec![Symbol::Nonterminal(1), Symbol::Terminal(1)]
+        );
+
+        // N1 → NT_fresh (was N1 → T0, T0 is nullable so replaced).
         let n1_rules: Vec<&Rule> = expanded.rules.iter().filter(|r| r.lhs == 1).collect();
-        assert_eq!(s_rules.len(), 1, "S should have 1 variant (no NT cascade)");
-        assert_eq!(n1_rules.len(), 2, "N1 should have 2 variants: t0 and ε");
-        let n1_rhs_set: std::collections::BTreeSet<Vec<Symbol>> =
-            n1_rules.iter().map(|r| r.rhs.clone()).collect();
-        assert!(n1_rhs_set.contains(&vec![Symbol::Terminal(0)]));
-        assert!(n1_rhs_set.contains(&Vec::<Symbol>::new()), "N1 → ε should be present");
+        assert_eq!(n1_rules.len(), 1);
+        assert_eq!(n1_rules[0].rhs, vec![Symbol::Nonterminal(fresh_nt)]);
+
+        // Fresh NT → ε and Fresh NT → T0.
+        let fresh_rules: Vec<&Rule> =
+            expanded.rules.iter().filter(|r| r.lhs == fresh_nt).collect();
+        assert_eq!(fresh_rules.len(), 2);
     }
 
     #[test]
-    fn test_expand_nullable_terminals_dedup() {
+    fn test_expand_nullable_terminals_multiple_occurrences() {
         // Grammar: S → t0 t0, where t0 is nullable.
-        // Power-set would produce: t0 t0, t0 (pos 0 removed), t0 (pos 1 removed), ε.
-        // After dedup: t0 t0, t0 (one copy), ε.
+        // Both occurrences should be replaced by the SAME fresh NT.
         let gdef = GrammarDef {
             rules: vec![Rule {
                 lhs: 0,
@@ -616,7 +650,14 @@ mod tests {
         };
         let nullable = std::collections::BTreeSet::from([0u32]);
         let expanded = expand_nullable_terminals(&gdef, &nullable);
-        assert_eq!(expanded.rules.len(), 3, "should be 3 after dedup: [t0 t0], [t0], and [ε]");
+
+        let fresh_nt = gdef.num_nonterminals(); // = 1
+        // S → NT NT (same fresh NT for both positions) + 2 fresh-NT rules = 3.
+        assert_eq!(expanded.rules.len(), 3);
+        assert_eq!(
+            expanded.rules[0].rhs,
+            vec![Symbol::Nonterminal(fresh_nt), Symbol::Nonterminal(fresh_nt)]
+        );
     }
 
     #[test]
