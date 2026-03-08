@@ -48,6 +48,50 @@ impl DFA {
             entry.is_accepting = is_accepting;
         }
     }
+
+    /// Returns `true` if the DFA's transition graph contains no cycles.
+    pub fn is_acyclic(&self) -> bool {
+        let num_states = self.states.len();
+
+        // Quick check: self-loops.
+        for (state_id, state) in self.states.iter().enumerate() {
+            for target in state.transitions.values() {
+                if *target as usize == state_id {
+                    return false;
+                }
+            }
+        }
+
+        // Full DFS 3-coloring: 0=white, 1=gray, 2=black.
+        fn visit(state_id: usize, states: &[DFAState], colors: &mut [u8]) -> bool {
+            colors[state_id] = 1;
+            for target in states[state_id].transitions.values() {
+                let target = *target as usize;
+                if target >= colors.len() {
+                    continue;
+                }
+                match colors[target] {
+                    1 => return false,
+                    0 => {
+                        if !visit(target, states, colors) {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            colors[state_id] = 2;
+            true
+        }
+
+        let mut colors = vec![0u8; num_states];
+        for state_id in 0..num_states {
+            if colors[state_id] == 0 && !visit(state_id, &self.states, &mut colors) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl std::fmt::Display for DFA {

@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+use crate::automata::unweighted_u32::minimize::minimize as minimize_dfa;
 use crate::compiler::glr::labels::{encode_negative_label, encode_positive_label, DEFAULT_LABEL};
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
@@ -22,7 +23,14 @@ impl Templates {
     ) -> Self {
         let by_terminal = characterizations
             .iter()
-            .map(|(&terminal, characterization)| (terminal, build_template_dfa(characterization)))
+            .map(|(&terminal, characterization)| {
+                let dfa = build_template_dfa(characterization);
+                debug_assert!(
+                    dfa.is_acyclic(),
+                    "template DFA for terminal {terminal} is cyclic"
+                );
+                (terminal, minimize_dfa(&dfa))
+            })
             .collect();
         Self { by_terminal }
     }
