@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-pub use crate::grammar::surface as ast;
+pub use crate::grammar::ast as ast;
 pub mod ebnf;
 pub mod json_schema;
 pub mod lark;
@@ -14,7 +14,7 @@ mod test_grammar_import;
 #[cfg(test)]
 mod test_json_schema;
 
-pub use crate::grammar::surface as grammar_expr;
+pub use crate::grammar::ast as grammar_expr;
 
 use crate::compiler::debug::CompileDebug;
 use crate::compiler::grammar_def::{GrammarDef, Rule, Symbol, Terminal};
