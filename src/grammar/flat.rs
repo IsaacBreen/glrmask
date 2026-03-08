@@ -3,46 +3,32 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use serde::{Deserialize, Serialize};
 
 use crate::automata::regex::Expr;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrammarDef {
-
     pub rules: Vec<Rule>,
-
     pub start: NonterminalID,
-
     pub terminals: Vec<Terminal>,
 }
 
-
 pub type NonterminalID = u32;
-
 
 pub type TerminalID = u32;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
-    
     pub lhs: NonterminalID,
-    
     pub rhs: Vec<Symbol>,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Symbol {
-    
     Terminal(TerminalID),
-    
     Nonterminal(NonterminalID),
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Terminal {
@@ -102,12 +88,10 @@ fn escape_byte_for_regex(b: u8) -> String {
 }
 
 impl GrammarDef {
-    
     pub fn num_terminals(&self) -> u32 {
         self.terminals.len() as u32
     }
 
-    
     pub fn num_nonterminals(&self) -> u32 {
         self.rules
             .iter()
@@ -122,7 +106,6 @@ impl GrammarDef {
             .unwrap_or(0)
     }
 
-    
     pub fn terminal_pattern(&self, terminal: TerminalID) -> String {
         self.terminals
             .iter()
@@ -143,7 +126,6 @@ pub(crate) mod tests {
         }
     }
 
-
     pub fn simple_ab_grammar() -> GrammarDef {
         GrammarDef {
             rules: vec![Rule {
@@ -154,7 +136,6 @@ pub(crate) mod tests {
             terminals: vec![literal(0, "a"), literal(1, "b")],
         }
     }
-
 
     pub fn choice_grammar() -> GrammarDef {
         GrammarDef {
@@ -173,9 +154,7 @@ pub(crate) mod tests {
         }
     }
 
-
     pub fn two_nt_grammar() -> GrammarDef {
-
 
         GrammarDef {
             rules: vec![
@@ -193,9 +172,7 @@ pub(crate) mod tests {
         }
     }
 
-
     pub fn nested_nt_grammar() -> GrammarDef {
-
 
         GrammarDef {
             rules: vec![
@@ -217,7 +194,6 @@ pub(crate) mod tests {
         }
     }
 
-
     pub fn three_terminal_grammar() -> GrammarDef {
         GrammarDef {
             rules: vec![Rule {
@@ -233,9 +209,7 @@ pub(crate) mod tests {
         }
     }
 
-
     pub fn nested_two_rhs_grammar() -> GrammarDef {
-
 
         GrammarDef {
             rules: vec![

@@ -3,9 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BitSet {
@@ -14,7 +12,6 @@ pub struct BitSet {
 }
 
 impl BitSet {
-    
     pub fn new(len: usize) -> Self {
         Self {
             words: vec![0; len.div_ceil(64)],
@@ -22,12 +19,10 @@ impl BitSet {
         }
     }
 
-    
     pub fn empty(len: usize) -> Self {
         Self::new(len)
     }
 
-    
     pub fn all(len: usize) -> Self {
         let mut set = Self {
             words: vec![u64::MAX; len.div_ceil(64)],
@@ -37,17 +32,14 @@ impl BitSet {
         set
     }
 
-    
     pub fn len(&self) -> usize {
         self.len
     }
 
-    
     pub fn is_empty(&self) -> bool {
         self.is_zero()
     }
 
-    
     pub fn get(&self, i: usize) -> bool {
         if i >= self.len {
             return false;
@@ -57,12 +49,10 @@ impl BitSet {
         (self.words[word] & (1u64 << bit)) != 0
     }
 
-    
     pub fn contains(&self, i: usize) -> bool {
         self.get(i)
     }
 
-    
     pub fn set(&mut self, i: usize) {
         if i >= self.len {
             return;
@@ -72,7 +62,6 @@ impl BitSet {
         self.words[word] |= 1u64 << bit;
     }
 
-    
     pub fn clear(&mut self, i: usize) {
         if i >= self.len {
             return;
@@ -82,22 +71,18 @@ impl BitSet {
         self.words[word] &= !(1u64 << bit);
     }
 
-    
     pub fn clear_all(&mut self) {
         self.words.fill(0);
     }
 
-    
     pub fn count_ones(&self) -> usize {
         self.words.iter().map(|word| word.count_ones() as usize).sum()
     }
 
-    
     pub fn is_zero(&self) -> bool {
         self.words.iter().all(|&word| word == 0)
     }
 
-    
     fn union_with(&mut self, other: &BitSet) {
         debug_assert_eq!(self.len, other.len);
         for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
@@ -105,7 +90,6 @@ impl BitSet {
         }
     }
 
-    
     pub fn union(&self, other: &Self) -> Self {
         debug_assert_eq!(self.len, other.len);
         let mut out = self.clone();
@@ -113,7 +97,6 @@ impl BitSet {
         out
     }
 
-    
     fn intersect_with(&mut self, other: &BitSet) {
         debug_assert_eq!(self.len, other.len);
         for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
@@ -121,7 +104,6 @@ impl BitSet {
         }
     }
 
-    
     pub fn intersection(&self, other: &Self) -> Self {
         debug_assert_eq!(self.len, other.len);
         let mut out = self.clone();
@@ -129,7 +111,6 @@ impl BitSet {
         out
     }
 
-    
     pub fn difference(&self, other: &Self) -> Self {
         debug_assert_eq!(self.len, other.len);
         let mut out = self.clone();
@@ -140,7 +121,6 @@ impl BitSet {
         out
     }
 
-    
     pub fn complement(&self) -> Self {
         let mut out = self.clone();
         for word in &mut out.words {
@@ -150,7 +130,6 @@ impl BitSet {
         out
     }
 
-    
     pub fn is_disjoint(&self, other: &Self) -> bool {
         debug_assert_eq!(self.len, other.len);
         self.words
@@ -159,7 +138,6 @@ impl BitSet {
             .all(|(lhs, rhs)| (*lhs & *rhs) == 0)
     }
 
-    
     pub fn is_subset(&self, other: &Self) -> bool {
         debug_assert_eq!(self.len, other.len);
         self.words
@@ -168,7 +146,6 @@ impl BitSet {
             .all(|(lhs, rhs)| (*lhs & !*rhs) == 0)
     }
 
-    
     pub fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
         self.words.iter().enumerate().flat_map(|(word_idx, &word)| {
             let base = word_idx * 64;
@@ -180,20 +157,14 @@ impl BitSet {
         self.iter_ones()
     }
 
-    
     pub fn words(&self) -> &[u64] {
         &self.words
     }
 
-    
     pub fn words_mut(&mut self) -> &mut [u64] {
         &mut self.words
     }
 
-    
-    
-    
-    
     pub fn fill_u32_mask(&self, buf: &mut [u32]) {
         
         for (i, &word) in self.words.iter().enumerate() {
@@ -223,7 +194,6 @@ impl Default for BitSet {
         Self::new(0)
     }
 }
-
 
 struct BitIter {
     word: u64,

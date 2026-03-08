@@ -3,11 +3,9 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
-
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -86,7 +84,6 @@ impl<'a> Lexer<'a> {
                     Some(b'\\') => s.push('\\'),
                     Some(b'"') => s.push('"'),
                     Some(b'x') => {
-                        
                         let h1 = self.advance().ok_or_else(|| {
                             GlrMaskError::GrammarParse("unterminated \\x escape".into())
                         })?;
@@ -172,7 +169,6 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'#') => self.skip_comment(),
                 Some(b'%') => {
-                    
                     self.pos += 1;
                     self.skip_comment();
                 }
@@ -271,7 +267,6 @@ impl<'a> Lexer<'a> {
     }
 }
 
-
 fn desugar_tilde(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
     let max = max.unwrap_or(min);
     assert!(max >= min, "tilde max must be >= min");
@@ -300,7 +295,6 @@ fn desugar_tilde(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarEx
         _ => GrammarExpr::Sequence(parts),
     }
 }
-
 
 struct Parser {
     tokens: Vec<Token>,
@@ -363,7 +357,6 @@ impl Parser {
 
             let expr = self.parse_alternatives()?;
 
-            
             if self.peek() == Some(&Token::Arrow) {
                 self.pos += 1;
                 
@@ -381,7 +374,6 @@ impl Parser {
             return Err(GlrMaskError::GrammarParse("empty grammar".into()));
         }
 
-        
         let start = if rules.iter().any(|(name, _)| name == "start") {
             "start".to_string()
         } else {
@@ -471,7 +463,6 @@ impl Parser {
                 Ok(GrammarExpr::Optional(Box::new(atom)))
             }
             Some(Token::Tilde) => {
-                
                 self.pos += 1;
                 let min = match self.advance() {
                     Some(Token::Number(n)) => n,
@@ -510,7 +501,6 @@ impl Parser {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(s)) => Ok(GrammarExpr::Literal(s.into_bytes())),
             Some(Token::Regex(rx)) => {
-                
                 Ok(GrammarExpr::RawRegex(rx))
             }
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
@@ -532,7 +522,6 @@ impl Parser {
     }
 }
 
-
 pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;
@@ -549,7 +538,6 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut parser = Parser::new(tokens);
     parser.parse_grammar()
 }
-
 
 #[cfg(test)]
 mod tests {

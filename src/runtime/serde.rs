@@ -21,7 +21,6 @@ fn decode_ranges(ranges: Vec<[u32; 2]>) -> RangeSetBlaze<u32> {
         .collect()
 }
 
-
 pub(in crate::runtime) mod serde_btmap_rsb {
     use range_set_blaze::RangeSetBlaze;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -62,14 +61,10 @@ pub(in crate::runtime) mod serde_btmap_rsb {
 }
 
 impl Constraint {
-    
-    
-    
     pub fn save(&self) -> Vec<u8> {
         bincode::serialize(self).expect("Constraint serialization should succeed")
     }
 
-    
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
         bincode::deserialize(bytes)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))

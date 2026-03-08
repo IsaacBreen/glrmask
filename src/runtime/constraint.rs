@@ -19,41 +19,23 @@ pub(crate) type TokenizerStateID = u32;
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
 
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 pub struct Constraint {
-    
-    
     pub(crate) parser_dwa: DWA,
-
-    
     pub(crate) table: GLRTable,
-
-    
     pub(crate) tokenizer: Tokenizer,
 
     #[serde(with = "crate::runtime::serde::serde_btmap_rsb")]
     pub(crate) possible_matches: PossibleMatchesByState,
-
-    
-    
-    
     pub(crate) state_to_internal_tsid: Vec<u32>,
-
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
-
-    
     pub(crate) eos_token_id: Option<u32>,
-
-    
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
 }
 
 impl Constraint {
-    
     pub fn start(&self) -> ConstraintState<'_> {
-        
         
         let initial_parser_state = 0u32;
         let initial_tok_state = self.tokenizer.initial_state();
@@ -65,10 +47,6 @@ impl Constraint {
         ConstraintState { constraint: self, state }
     }
 
-    
-    
-    
-    
     pub fn mask_len(&self) -> usize {
         self.token_bytes
             .keys()
@@ -77,7 +55,6 @@ impl Constraint {
             .unwrap_or(0)
     }
 
-    
     pub(crate) fn parser_dwa(&self) -> &DWA {
         &self.parser_dwa
     }

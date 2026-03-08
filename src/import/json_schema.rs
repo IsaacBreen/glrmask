@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::HashMap;
 
 use crate::GlrMaskError;
@@ -118,14 +117,12 @@ fn convert_schema_minimal(
     }
 }
 
-
 pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskError> {
     let schema: serde_json::Value = serde_json::from_str(schema_json)
         .map_err(|err| GlrMaskError::GrammarParse(err.to_string()))?;
     let named = schema_to_named_grammar(&schema)?;
     lower(&named)
 }
-
 
 pub fn schema_to_named_grammar(schema: &serde_json::Value) -> Result<NamedGrammar, GlrMaskError> {
     let mut ctx = SchemaCtx::new(schema);
@@ -135,11 +132,9 @@ pub fn schema_to_named_grammar(schema: &serde_json::Value) -> Result<NamedGramma
     Ok(NamedGrammar { rules, start: "start".into() })
 }
 
-
 struct SchemaCtx {
     sub_rules: Vec<(String, GrammarExpr)>,
     counter: usize,
-    
     defs: HashMap<String, serde_json::Value>,
 }
 
@@ -162,10 +157,6 @@ impl SchemaCtx {
         self.counter += 1;
         name
     }
-
-    
-    
-    
 
     fn convert_schema(&mut self, schema: &serde_json::Value) -> Result<GrammarExpr, GlrMaskError> {
         match schema {
@@ -235,10 +226,6 @@ impl SchemaCtx {
         }
     }
 
-    
-    
-    
-
     fn resolve_ref(&mut self, ref_str: &str) -> Result<GrammarExpr, GlrMaskError> {
         if let Some(name) = ref_str.strip_prefix("#/$defs/") {
             let target = self
@@ -250,10 +237,6 @@ impl SchemaCtx {
         }
         Err(GlrMaskError::GrammarParse(format!("unsupported $ref '{ref_str}'")))
     }
-
-    
-    
-    
 
     fn convert_all_of(
         &mut self,
@@ -305,10 +288,6 @@ impl SchemaCtx {
         self.convert_schema(&serde_json::Value::Object(merged))
     }
 
-    
-    
-    
-
     fn convert_object(
         &mut self,
         obj: &serde_json::Map<String, serde_json::Value>,
@@ -332,17 +311,6 @@ impl SchemaCtx {
         self.build_object_rule(&properties, &required, obj.get("additionalProperties"))
     }
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
     fn build_object_rule(
         &mut self,
         properties: &[(String, serde_json::Value)],
@@ -403,10 +371,6 @@ impl SchemaCtx {
         Ok(choice_or_single(alts))
     }
 
-    
-    
-    
-
     fn convert_array(
         &mut self,
         obj: &serde_json::Map<String, serde_json::Value>,
@@ -452,11 +416,6 @@ impl SchemaCtx {
         Ok(self.json_array_generic())
     }
 
-    
-    
-    
-
-    
     fn json_value(&mut self) -> GrammarExpr {
         choice_or_single(vec![
             literal_expr(b"null"),
@@ -469,22 +428,18 @@ impl SchemaCtx {
         ])
     }
 
-    
     fn json_array_generic(&mut self) -> GrammarExpr {
         literal_expr(b"[]")
     }
 
-    
     fn json_object_generic(&mut self) -> GrammarExpr {
         literal_expr(b"{}")
     }
 
-    
     fn json_string(&mut self) -> GrammarExpr {
         GrammarExpr::RawRegex("\"[^\\\"]*\"".into())
     }
 
-    
     fn json_string_bounded(&mut self, min: usize, max: Option<usize>) -> GrammarExpr {
         match max {
             Some(max) if min == max => self.json_string_pattern(&format!("[^\\\"]{{{min}}}")),
@@ -493,22 +448,18 @@ impl SchemaCtx {
         }
     }
 
-    
     fn json_string_pattern(&self, pattern: &str) -> GrammarExpr {
         GrammarExpr::RawRegex(format!("\"{}\"", pattern))
     }
 
-    
     fn json_number(&mut self) -> GrammarExpr {
         GrammarExpr::RawRegex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?".into())
     }
 
-    
     fn json_integer(&mut self) -> GrammarExpr {
         GrammarExpr::RawRegex("-?(0|[1-9][0-9]*)".into())
     }
 
-    
     fn json_literal(&self, value: &serde_json::Value) -> GrammarExpr {
         if let Some(s) = value.as_str() {
             self.json_string_literal(s)
@@ -517,12 +468,10 @@ impl SchemaCtx {
         }
     }
 
-    
     fn json_string_literal(&self, s: &str) -> GrammarExpr {
         literal_expr(serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s)).as_bytes())
     }
 }
-
 
 fn choice_or_single(alts: Vec<GrammarExpr>) -> GrammarExpr {
     let mut alts = alts;
@@ -535,7 +484,6 @@ fn choice_or_single(alts: Vec<GrammarExpr>) -> GrammarExpr {
     }
 }
 
-
 fn sanitize_rule_name(s: &str) -> String {
     let sanitized: String = s
         .chars()
@@ -543,7 +491,6 @@ fn sanitize_rule_name(s: &str) -> String {
         .collect();
     if sanitized.is_empty() { "rule".into() } else { sanitized }
 }
-
 
 fn build_optional_choice(optional_keys: &[String], kv_rules: &[(String, String)]) -> GrammarExpr {
     let mut alts = vec![GrammarExpr::Sequence(Vec::new())];
@@ -554,7 +501,6 @@ fn build_optional_choice(optional_keys: &[String], kv_rules: &[(String, String)]
     }
     choice_or_single(alts)
 }
-
 
 fn build_repetition(item_rule: &str, min: usize, max: Option<usize>) -> GrammarExpr {
     let item = GrammarExpr::Ref(item_rule.to_string());
@@ -592,15 +538,10 @@ fn permute_properties(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Vocab;
-
-    
-    
-    
 
     #[test]
     fn test_boolean_schema() {
@@ -664,7 +605,6 @@ mod tests {
 
     #[test]
     fn test_object_only_required_comma_free() {
-        
         
         let g = json_schema_to_grammar(r#"{
             "type": "object",
@@ -764,12 +704,6 @@ mod tests {
         assert!(!g.rules.is_empty());
     }
 
-    
-    
-    
-
-    
-    
     fn accepts_sequence(schema_json: &str, tokens: &[&[u8]]) -> bool {
         let entries: Vec<(u32, Vec<u8>)> = tokens
             .iter()

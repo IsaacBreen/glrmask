@@ -2,7 +2,6 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
-
 pub mod characterize;
 pub mod compile_bundle;
 pub mod compile_dfa;

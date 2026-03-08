@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -117,25 +116,20 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Regex {
-    
     pub dfa: DFA,
 }
 
 impl Regex {
-    
     pub fn num_states(&self) -> usize {
         self.dfa.num_states()
     }
 
-    
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
         self.dfa.step(state, byte)
     }
 
-    
     pub fn get_u8set(&self, state: u32) -> U8Set {
         self.dfa.get_u8set(state)
     }

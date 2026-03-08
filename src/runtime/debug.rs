@@ -6,7 +6,6 @@
 use crate::runtime::Constraint;
 
 impl Constraint {
-    
     pub(crate) fn debug_dump(&self) {
         eprintln!("--- Constraint Debug Dump ---");
         eprintln!("Tokenizer DFA states: {}", self.tokenizer.dfa.num_states());
@@ -43,7 +42,6 @@ impl Constraint {
         eprintln!("--- End Debug Dump ---");
     }
 
-    
     pub(crate) fn debug_tokenizer(&self, input: &[u8], start_state: u32) {
         let result = self.tokenizer.execute_all_matches(input, start_state);
         eprintln!(
@@ -73,7 +71,6 @@ impl Constraint {
         }
     }
 
-    
     pub(crate) fn tokenizer_initial_state(&self) -> u32 {
         self.tokenizer.initial_state_id()
     }

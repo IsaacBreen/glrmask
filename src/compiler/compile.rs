@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::regex::parse_regex;
@@ -79,7 +78,6 @@ fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
     out
 }
 
-
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let normalized = grammar.clone();
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
@@ -125,7 +123,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         token_bytes,
     }
 }
-
 
 pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
     let normalized = grammar.clone();
@@ -197,7 +194,6 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
 
     (constraint, debug)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -284,19 +280,16 @@ mod tests {
     #[test]
     fn test_end_to_end_simple_ab() {
         
-        
         let gdef = simple_ab_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
 
-        
         let mask = state.mask();
         assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
 
-        
         state
             .commit_token(0);
         assert!(
@@ -304,12 +297,10 @@ mod tests {
             "not yet accepting after 'a'"
         );
 
-        
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "token 'a' should NOT be allowed after 'a'");
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
 
-        
         state
             .commit_token(1);
         assert!(state.is_finished(), "should accept after 'ab'");
@@ -318,20 +309,16 @@ mod tests {
     #[test]
     fn test_end_to_end_choice() {
         
-        
-        
         let gdef = choice_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
 
-        
         let mask = state.mask();
         assert!(mask_has_token(&mask, 0), "token 'a' should be allowed");
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed");
 
-        
         state
             .commit_token(0);
         assert!(
@@ -343,19 +330,16 @@ mod tests {
     #[test]
     fn test_end_to_end_two_nt() {
         
-        
         let gdef = two_nt_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
 
-        
         let mask = state.mask();
         assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
 
-        
         state
             .commit_token(0);
         assert!(
@@ -363,12 +347,10 @@ mod tests {
             "not yet accepting after 'a'"
         );
 
-        
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "token 'a' should NOT be allowed after 'a'");
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
 
-        
         state
             .commit_token(1);
         assert!(state.is_finished(), "should accept after 'ab'");
@@ -377,29 +359,24 @@ mod tests {
     #[test]
     fn test_end_to_end_nested_nt() {
         
-        
         let gdef = nested_nt_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
 
-        
         let mask = state.mask();
         assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
 
-        
         state
             .commit_token(0);
         assert!(!state.is_finished(), "not accepting after 'a'");
 
-        
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "token 'a' should NOT be allowed after 'a'");
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
 
-        
         state
             .commit_token(1);
         assert!(state.is_finished(), "should accept after 'ab'");
@@ -417,38 +394,31 @@ mod tests {
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
 
-        
         let mask = state.mask();
         assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
         assert!(!mask_has_token(&mask, 2), "token 'c' should NOT be allowed initially");
 
-        
         state.commit_token(0);
 
-        
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "no 'a' after 'a'");
         assert!(mask_has_token(&mask, 1), "'b' after 'a'");
         assert!(!mask_has_token(&mask, 2), "no 'c' after 'a'");
 
-        
         state.commit_token(1);
 
-        
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "no 'a' after 'ab'");
         assert!(!mask_has_token(&mask, 1), "no 'b' after 'ab'");
         assert!(mask_has_token(&mask, 2), "'c' after 'ab'");
 
-        
         state.commit_token(2);
         assert!(state.is_finished(), "should accept after 'abc'");
     }
 
     #[test]
     fn test_end_to_end_nested_two_rhs() {
-        
         
         let gdef = nested_two_rhs_grammar();
         let vocab = Vocab::new(
@@ -459,31 +429,25 @@ mod tests {
         let constraint = compile(&gdef, &vocab);
         let mut state = constraint.start();
 
-        
         let mask = state.mask();
         assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
         assert!(!mask_has_token(&mask, 2), "token 'c' should NOT be allowed initially");
 
-        
         state.commit_token(0);
 
-        
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "no 'a' after 'a'");
         assert!(mask_has_token(&mask, 1), "'b' after 'a'");
         assert!(!mask_has_token(&mask, 2), "no 'c' after 'a'");
 
-        
         state.commit_token(1);
 
-        
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "no 'a' after 'ab'");
         assert!(!mask_has_token(&mask, 1), "no 'b' after 'ab'");
         assert!(mask_has_token(&mask, 2), "'c' after 'ab'");
 
-        
         state.commit_token(2);
         assert!(state.is_finished(), "should accept after 'abc'");
     }

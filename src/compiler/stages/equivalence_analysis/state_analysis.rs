@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;

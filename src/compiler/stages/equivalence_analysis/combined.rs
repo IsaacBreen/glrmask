@@ -3,13 +3,11 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::equivalence_analysis::state_analysis::analyze_state_equivalences;
 use crate::compiler::stages::equivalence_analysis::vocab_analysis::analyze_vocab_equivalences;
-
 
 pub(crate) fn analyze_equivalences(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
     InternalIdMap {

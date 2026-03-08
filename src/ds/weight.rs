@@ -3,12 +3,10 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
 
 use std::collections::{BTreeMap, BTreeSet};
-
 
 #[derive(Debug, Clone)]
 pub struct Weight(pub RangeMapBlaze<u32, RangeSetBlaze<u32>>);
@@ -121,24 +119,16 @@ fn range_map_entries(weight: &Weight) -> Vec<(std::ops::RangeInclusive<u32>, Ran
 }
 
 impl Weight {
-    
-
-    
     pub fn empty() -> Self {
         Self(RangeMapBlaze::new())
     }
 
-    
     pub fn all() -> Self {
         let mut map = RangeMapBlaze::new();
         map.extend_simple(std::iter::once((WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL, sentinel_token_set())));
         Self(map)
     }
 
-    
-    
-    
-    
     pub fn from_compact_ranges<I, J>(entries: I) -> Self
     where
         I: IntoIterator<Item = (std::ops::RangeInclusive<u32>, J)>,
@@ -152,7 +142,6 @@ impl Weight {
         out
     }
 
-    
     pub fn insert(
         &mut self,
         tsid_range: std::ops::RangeInclusive<u32>,
@@ -175,15 +164,10 @@ impl Weight {
         *self = compress_expanded(&expanded);
     }
 
-    
     pub fn clear(&mut self) {
         *self = Self::empty();
     }
 
-    
-    
-    
-    
     pub fn token_union(&self) -> RangeSetBlaze<u32> {
         if self.is_full() {
             return sentinel_token_set();
@@ -195,9 +179,6 @@ impl Weight {
         out
     }
 
-    
-
-    
     pub fn is_full(&self) -> bool {
         let entries = range_map_entries(self);
         entries.len() == 1
@@ -206,30 +187,20 @@ impl Weight {
             && entries[0].1 == sentinel_token_set()
     }
 
-    
     pub fn is_empty(&self) -> bool {
         self.0.ranges().next().is_none()
     }
 
-    
     pub fn num_ranges(&self) -> usize {
         self.0.ranges().count()
     }
 
-    
-    
-    
-    
-    
     pub fn estimated_size_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.num_ranges()
                 * (std::mem::size_of::<u32>() + std::mem::size_of::<RangeSetBlaze<u32>>())
     }
 
-    
-
-    
     pub fn union(&self, other: &Self) -> Self {
         if self.is_full() || other.is_full() {
             return Self::all();
@@ -250,7 +221,6 @@ impl Weight {
         compress_expanded(&expanded)
     }
 
-    
     pub fn intersection(&self, other: &Self) -> Self {
         if self.is_empty() || other.is_empty() {
             return Self::empty();
@@ -275,10 +245,6 @@ impl Weight {
         compress_expanded(&out)
     }
 
-    
-    
-    
-    
     pub fn difference(&self, other: &Self) -> Self {
         if self.is_empty() || other.is_full() {
             return Self::empty();
@@ -307,7 +273,6 @@ impl Weight {
         compress_expanded(&out)
     }
 
-    
     pub fn complement(&self) -> Self {
         if self.is_full() {
             Self::empty()
@@ -326,7 +291,6 @@ impl Weight {
         }
     }
 
-    
     pub fn divide(&self, other: &Self) -> Self {
         self.difference(other)
     }
@@ -346,12 +310,10 @@ impl Weight {
         self.0.get(tsid).cloned().unwrap_or_else(RangeSetBlaze::new)
     }
 
-    
     pub fn is_disjoint(&self, other: &Self) -> bool {
         self.intersection(other).is_empty()
     }
 
-    
     pub fn is_subset(&self, other: &Self) -> bool {
         self.difference(other).is_empty()
     }
@@ -390,7 +352,6 @@ impl Weight {
     }
 }
 
-
 impl PartialEq for Weight {
     fn eq(&self, other: &Self) -> bool {
         if self.is_full() || other.is_full() {
@@ -412,11 +373,6 @@ impl std::hash::Hash for Weight {
 }
 
 impl std::fmt::Display for Weight {
-    
-    
-    
-    
-    
     
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_empty() {
@@ -442,21 +398,15 @@ impl std::fmt::Display for Weight {
     }
 }
 
-
 const WEIGHT_NAME_EXPAND_LIMIT: usize = 64;
-
 
 pub struct WeightDisplayWithNames<'a> {
     weight: &'a Weight,
-    
     tsid_names: &'a std::collections::BTreeMap<u32, String>,
-    
     token_names: &'a std::collections::BTreeMap<u32, String>,
 }
 
 impl Weight {
-    
-    
     pub fn display_with_names<'a>(
         &'a self,
         tsid_names: &'a std::collections::BTreeMap<u32, String>,
@@ -508,7 +458,6 @@ impl std::fmt::Display for WeightDisplayWithNames<'_> {
     }
 }
 
-
 const WEIGHT_ALL_SENTINEL: u32 = u32::MAX;
 
 impl Serialize for Weight {
@@ -531,7 +480,6 @@ impl<'de> Deserialize<'de> for Weight {
         })))
     }
 }
-
 
 #[cfg(test)]
 mod tests {

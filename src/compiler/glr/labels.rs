@@ -2,8 +2,6 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
-
-
 pub const DEFAULT_LABEL: i32 = i32::MAX - 1;
 
 pub(crate) fn encode_positive_label(state: u32) -> i32 {

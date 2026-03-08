@@ -3,12 +3,10 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::fmt;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct U8Set {
@@ -17,12 +15,10 @@ pub struct U8Set {
 }
 
 impl U8Set {
-    
     pub const fn empty() -> Self {
         Self { lo: 0, hi: 0 }
     }
 
-    
     pub const fn all() -> Self {
         Self {
             lo: u128::MAX,
@@ -30,17 +26,14 @@ impl U8Set {
         }
     }
 
-    
     const fn full() -> Self {
         Self::all()
     }
 
-    
     pub fn single(b: u8) -> Self {
         Self::from_byte(b)
     }
 
-    
     pub fn from_byte(b: u8) -> Self {
         if b < 128 {
             Self {
@@ -55,7 +48,6 @@ impl U8Set {
         }
     }
 
-    
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut set = Self::empty();
         for &b in bytes {
@@ -64,7 +56,6 @@ impl U8Set {
         set
     }
 
-    
     pub fn from_range(lo: u8, hi: u8) -> Self {
         let mut set = Self::empty();
         for b in lo..=hi {
@@ -73,7 +64,6 @@ impl U8Set {
         set
     }
 
-    
     pub fn from_predicate(f: impl Fn(u8) -> bool) -> Self {
         let mut set = Self::empty();
         for b in 0..=u8::MAX {
@@ -84,22 +74,18 @@ impl U8Set {
         set
     }
 
-    
     pub fn is_empty(&self) -> bool {
         self.lo == 0 && self.hi == 0
     }
 
-    
     pub fn len(&self) -> usize {
         self.lo.count_ones() as usize + self.hi.count_ones() as usize
     }
 
-    
     pub fn is_full(&self) -> bool {
         self.lo == u128::MAX && self.hi == u128::MAX
     }
 
-    
     pub fn contains(&self, b: u8) -> bool {
         if b < 128 {
             (self.lo & (1u128 << b)) != 0
@@ -108,7 +94,6 @@ impl U8Set {
         }
     }
 
-    
     pub fn insert(&mut self, b: u8) -> bool {
         let old = self.contains(b);
         if b < 128 {
@@ -119,7 +104,6 @@ impl U8Set {
         !old
     }
 
-    
     pub fn remove(&mut self, b: u8) -> bool {
         let old = self.contains(b);
         if b < 128 {
@@ -130,7 +114,6 @@ impl U8Set {
         old
     }
 
-    
     pub fn union(&self, other: &Self) -> Self {
         Self {
             lo: self.lo | other.lo,
@@ -138,7 +121,6 @@ impl U8Set {
         }
     }
 
-    
     pub fn intersection(&self, other: &Self) -> Self {
         Self {
             lo: self.lo & other.lo,
@@ -146,7 +128,6 @@ impl U8Set {
         }
     }
 
-    
     pub fn difference(&self, other: &Self) -> Self {
         Self {
             lo: self.lo & !other.lo,
@@ -154,7 +135,6 @@ impl U8Set {
         }
     }
 
-    
     pub fn complement(&self) -> Self {
         Self {
             lo: !self.lo,
@@ -162,17 +142,14 @@ impl U8Set {
         }
     }
 
-    
     pub fn is_disjoint(&self, other: &Self) -> bool {
         (self.lo & other.lo) == 0 && (self.hi & other.hi) == 0
     }
 
-    
     pub fn is_subset(&self, other: &Self) -> bool {
         (self.lo & !other.lo) == 0 && (self.hi & !other.hi) == 0
     }
 
-    
     pub fn iter(&self) -> U8SetIter {
         U8SetIter {
             lo: self.lo,
@@ -246,7 +223,6 @@ impl fmt::Display for U8Set {
         write!(f, "}}")
     }
 }
-
 
 pub struct U8SetIter {
     lo: u128,

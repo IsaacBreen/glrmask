@@ -8,6 +8,5 @@ mod debug;
 mod serde;
 mod state;
 
-
 pub use constraint::Constraint;
 pub use state::ConstraintState;

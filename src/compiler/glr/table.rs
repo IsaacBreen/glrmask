@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rustc_hash::FxHashMap;
@@ -12,42 +11,29 @@ use serde::{Deserialize, Serialize};
 use super::analysis::{EOF, AnalyzedGrammar};
 use crate::compiler::grammar_def::{NonterminalID, Rule, Symbol, TerminalID};
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
-    
     Shift(u32),
-    
     Reduce(u32),
-    
     Accept,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
-    
     pub action: Vec<BTreeMap<TerminalID, Vec<Action>>>,
-    
     pub goto: Vec<BTreeMap<NonterminalID, u32>>,
-    
     pub num_states: u32,
-    
     pub num_terminals: u32,
-    
     pub num_rules: u32,
-    
     pub rules: Vec<Rule>,
 }
 
 impl GLRTable {
-    
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         let (item_sets, transitions) = build_lr0_item_sets(grammar);
         build_slr1_table(grammar, &item_sets, &transitions)
     }
 
-    
     pub fn actions(&self, state: u32, terminal: TerminalID) -> &[Action] {
         static EMPTY: [Action; 0] = [];
         self.action
@@ -57,14 +43,12 @@ impl GLRTable {
             .unwrap_or(&EMPTY)
     }
 
-    
     pub fn goto_target(&self, state: u32, nt: NonterminalID) -> Option<u32> {
         self.goto
             .get(state as usize)
             .and_then(|by_nt| by_nt.get(&nt).copied())
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Item {
@@ -77,13 +61,11 @@ impl Item {
         Self { rule, dot }
     }
 
-    
     fn next_symbol<'a>(&self, rules: &'a [Rule]) -> Option<&'a Symbol> {
         let rhs = &rules[self.rule as usize].rhs;
         rhs.get(self.dot as usize)
     }
 }
-
 
 fn closure(items: &BTreeSet<Item>, rules: &[Rule]) -> BTreeSet<Item> {
     let mut result = items.clone();
@@ -105,7 +87,6 @@ fn closure(items: &BTreeSet<Item>, rules: &[Rule]) -> BTreeSet<Item> {
     result
 }
 
-
 fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<Item> {
     let mut kernel = BTreeSet::new();
     for item in items {
@@ -116,11 +97,9 @@ fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<It
     closure(&kernel, rules)
 }
 
-
 fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
     let rules = &grammar.rules;
 
-    
     let initial = {
         let mut s = BTreeSet::new();
         s.insert(Item::new(0, 0)); 
@@ -166,7 +145,6 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
 
     (item_sets, transitions)
 }
-
 
 fn build_slr1_table(
     grammar: &AnalyzedGrammar,
@@ -221,7 +199,6 @@ fn build_slr1_table(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,11 +214,9 @@ mod tests {
 
         assert!(table.num_states >= 3);
 
-        
         let a0 = table.actions(0, 0);
         assert!(a0.iter().any(|a| matches!(a, Action::Shift(_))));
 
-        
         let shift_state = match &a0[0] {
             Action::Shift(s) => *s,
             _ => panic!("expected shift"),
@@ -278,8 +253,6 @@ mod tests {
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
-        
-        
         let a0 = table.actions(0, 0);
         let s1 = match &a0[0] {
             Action::Shift(s) => *s,
@@ -296,7 +269,6 @@ mod tests {
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
-        
         assert!(!table.actions(0, 0).is_empty());
     }
 
@@ -314,7 +286,6 @@ mod tests {
                         Symbol::Nonterminal(0),
                     ],
                 },
-                
                 Rule {
                     lhs: 0,
                     rhs: vec![Symbol::Terminal(0)],
@@ -335,10 +306,8 @@ mod tests {
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
-        
         assert!(table.num_states > 0);
 
-        
         let has_conflict = (0..table.num_states).any(|s| {
             let acts = table.actions(s, 1); 
             let has_shift = acts.iter().any(|a| matches!(a, Action::Shift(_)));

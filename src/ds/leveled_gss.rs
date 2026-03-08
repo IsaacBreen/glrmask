@@ -1,17 +1,14 @@
 #![allow(unused_mut, unused_variables, dead_code)]
 
-
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use im::{HashMap as IHashMap, OrdMap};
 use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
-
 
 pub trait Merge: Clone {
     fn merge(&self, other: &Self) -> Self;
@@ -67,7 +64,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    
     #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
     struct IntAcc(BTreeSet<i32>);
 
@@ -113,8 +109,6 @@ mod tests {
         let gss1 = gss0.pop();
         let gss2 = gss0.pop();
 
-        
-        
         assert!(gss1.inner_ptrs_eq(&gss2));
         assert!(!gss1.ptr_eq(&gss2)); 
     }
@@ -128,7 +122,6 @@ mod tests {
 
         let gss1 = gss0.push("X".to_string()).pop();
 
-        
         assert!(gss0.inner_ptrs_eq(&gss1));
         assert!(!gss0.ptr_eq(&gss1)); 
     }
@@ -138,7 +131,6 @@ mod tests {
         let gss0 = TestGSS::empty();
         let gss1 = gss0.push("X".to_string()).pop();
 
-        
         assert!(gss0.ptr_eq(&gss1));
     }
 
@@ -151,16 +143,12 @@ mod tests {
 
         let gss_bc_from_pop = gss_abc.pop();
 
-        
         let preds = gss_abc.predecessors();
         let children_of_a = preds.get(&"A".to_string()).unwrap();
         let gss_bc_from_preds = children_of_a.values().next().unwrap().first().unwrap();
 
-        
-        
         assert!(gss_bc_from_pop.inner_ptrs_eq(gss_bc_from_preds));
 
-        
         let inner_pop = &gss_bc_from_pop.inner;
         let inner_preds = &gss_bc_from_preds.inner;
 
@@ -225,17 +213,14 @@ mod tests {
         let gss1 = gss0.isolate(Some("A".to_string()));
         assert!(gss0.ptr_eq(&gss1));
 
-        
         let gss2 = gss_from_str_stacks(&[(&[], &[1])]);
         let gss3 = gss2.isolate(None);
         assert!(gss2.ptr_eq(&gss3));
 
-        
         let gss4 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
         let gss5 = gss4.isolate(Some("A".to_string()));
         assert!(!gss4.ptr_eq(&gss5));
 
-        
         let gss6 = gss_from_str_stacks(&[(&["A"], &[1]), (&[], &[2])]);
         let gss7 = gss6.isolate(None);
         assert!(!gss6.ptr_eq(&gss7));
@@ -245,23 +230,18 @@ mod tests {
     fn test_isolate_many_preserves_ptr_on_noop() {
         let gss0 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2]), (&[], &[3])]);
 
-        
         let gss1 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
         assert!(gss0.ptr_eq(&gss1));
 
-        
         let gss2 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), Some("C".to_string()), None]);
         assert!(gss0.ptr_eq(&gss2));
 
-        
         let gss3 = gss0.isolate_many(vec![Some("A".to_string()), None]);
         assert!(!gss0.ptr_eq(&gss3));
 
-        
         let gss4 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string())]);
         assert!(!gss0.ptr_eq(&gss4));
 
-        
         let gss5 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
         let gss6 = gss5.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
         assert!(!gss5.ptr_eq(&gss6));
@@ -276,23 +256,18 @@ mod tests {
             (&[], &[4]),
         ]);
 
-        
         let gss1 = gss0.filter_by_length(None, None);
         assert!(gss0.ptr_eq(&gss1));
 
-        
-        
         let gss2 = gss0.filter_by_length(Some(0), Some(3));
         assert!(gss0.ptr_eq(&gss2));
         let gss3 = gss0.filter_by_length(Some(-1), Some(10));
         assert!(gss0.ptr_eq(&gss3));
 
-        
         let gss4 = gss0.filter_by_length(Some(1), Some(2));
         assert!(!gss0.ptr_eq(&gss4));
         assert_eq!(gss4.to_stacks().len(), 2);
 
-        
         let gss_empty = TestGSS::empty();
         let gss_empty_filtered = gss_empty.filter_by_length(Some(1), Some(2));
         assert!(gss_empty.ptr_eq(&gss_empty_filtered));
@@ -307,22 +282,18 @@ mod tests {
             (&[], &[1, 3]),       
         ]);
 
-        
         let gss1 = gss0.prune(|_acc| true);
         assert!(gss0.ptr_eq(&gss1));
 
-        
         let gss2 = gss0.prune(|acc| acc.0.contains(&1));
         assert!(!gss0.ptr_eq(&gss2));
         
         assert_eq!(gss2.to_stacks().len(), 2);
 
-        
         let gss3 = gss0.prune(|_acc| false);
         assert!(gss3.is_empty());
         assert!(!gss0.ptr_eq(&gss3));
 
-        
         let gss_empty = TestGSS::empty();
         let gss_empty_pruned = gss_empty.prune(|_acc| true);
         assert!(gss_empty.ptr_eq(&gss_empty_pruned));
@@ -332,38 +303,25 @@ mod tests {
     fn test_normalization_sharing_factor_regression() {
         type TestGSSInt = LeveledGSS<i32, IntAcc>;
 
-        
-        
-        
-
-        
-        
         let l_terminal = new_lower::<i32>(IHashMap::new(), true);
 
-        
-        
         let l_500_parent = new_lower(
             IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth, l_terminal.clone())),
             false,
         );
 
-        
-
-        
         let i_54_inner = new_lower(
             IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth, l_500_parent.clone())),
             false,
         );
         let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
 
-        
         let acc_vals = vec![38, 39, 40, 44, 45, 46, 47, 48, 49, 50];
         let interfaces_10: Vec<_> = acc_vals
             .iter()
             .map(|&acc| new_interface(l_500_parent.clone(), IntAcc::new(&[acc])))
             .collect();
 
-        
         let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
         let mut children_101 = IHashMap::new();
         for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
@@ -376,7 +334,6 @@ mod tests {
             None,
         );
 
-        
         let mut children_295 = OrdMap::new();
         children_295.insert(i_54.max_depth(), i_54);
         children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
@@ -385,10 +342,8 @@ mod tests {
 
         let gss = TestGSSInt { inner: root_inner };
 
-        
         let stats_before = gss.stats();
 
-        
         let gss_after = gss.normalize();
         let stats_after = gss_after.stats();
 
@@ -398,12 +353,9 @@ mod tests {
         println!("Stats before: {:?}", stats_before);
         println!("Stats after: {:?}", stats_after);
 
-        
         assert_eq!(gss.to_stacks().len(), 11);
         assert_eq!(gss_after.to_stacks().len(), 11);
 
-        
-        
         assert!(
             stats_after.total_unique_nodes <= stats_before.total_unique_nodes,
             "total unique nodes increased: {} vs {}",
@@ -411,16 +363,12 @@ mod tests {
             stats_after.total_unique_nodes
         );
 
-        
         assert_eq!(stats_before.num_lower_nodes, 3);
         assert_eq!(stats_after.num_lower_nodes, 2);
 
-        
         assert_eq!(stats_before.num_multi_depth_slots_upper, 1);
         assert_eq!(stats_after.num_multi_depth_slots_upper, 0);
 
-        
-        
         assert!(
             stats_after.num_structurally_unique_nodes < stats_before.num_structurally_unique_nodes,
             "num structurally unique nodes did not decrease: {} vs {}",
@@ -439,7 +387,6 @@ mod tests {
             (&["E"], &[3]),
         ]);
 
-        
         let (below1, above1) = gss.split_at_depth(1);
 
         let expected_below1 = gss_from_str_stacks(&[
@@ -456,7 +403,6 @@ mod tests {
         assert_eq!(below1.to_stacks().into_iter().collect::<HashSet<_>>(), expected_below1.to_stacks().into_iter().collect::<HashSet<_>>());
         assert_eq!(above1.to_stacks().into_iter().collect::<HashSet<_>>(), expected_above1.to_stacks().into_iter().collect::<HashSet<_>>());
 
-        
         let (below2, above2) = gss.split_at_depth(2);
         let expected_below2 = gss_from_str_stacks(&[
             (&["A"], &[1]),
@@ -505,13 +451,11 @@ mod tests {
 
         let (result, underflows) = gss.popn_with_underflow(3);
 
-        
         let result_stacks = result.to_stacks();
         assert_eq!(result_stacks.len(), 1);
         
         assert!(result_stacks.iter().any(|(stack, acc)| stack.is_empty() && acc.0.contains(&1)));
 
-        
         assert_eq!(underflows.len(), 3);
         
         assert!(underflows.get(&1).map(|a| a.0.contains(&2)).unwrap_or(false), 
@@ -534,10 +478,8 @@ mod tests {
 
         let (result, underflows) = gss.popn_with_underflow(2);
 
-        
         let result_stacks = result.to_stacks();
         assert_eq!(result_stacks.len(), 2);
-        
         
         assert!(underflows.is_empty(), "Expected no underflows, got {:?}", underflows);
     }
@@ -553,14 +495,10 @@ mod tests {
 
         let (result, underflows) = gss.popn_with_underflow(5);
 
-        
         assert!(result.is_empty(), "Expected empty GSS, got {:?}", result.to_stacks());
 
-        
-        
         assert!(underflows.contains_key(&4), "Expected shortfall 4");
         assert!(underflows.contains_key(&5), "Expected shortfall 5");
-        
         
         let shortfall_4 = underflows.get(&4).unwrap();
         assert!(shortfall_4.0.contains(&1) && shortfall_4.0.contains(&2));
@@ -575,12 +513,10 @@ mod tests {
 
         let (result, underflows) = gss.popn_with_underflow(0);
 
-        
         assert_eq!(result.to_stacks().len(), gss.to_stacks().len());
         assert!(underflows.is_empty());
     }
 }
-
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GSSPathsInfo {
@@ -696,7 +632,6 @@ where
     new_branch(IHashMap::new(), None)
 }
 
-
 fn filter_lower<T: Clone + Eq + Hash>(
     node: &Arc<Lower<T>>,
     current_depth: isize,
@@ -724,7 +659,6 @@ fn filter_lower<T: Clone + Eq + Hash>(
                 if let Some(new_child) =
                     filter_lower(child, current_depth + 1, min_len, max_len)
                 {
-                    
                     if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
                         same_kids = false;
                     }
@@ -746,7 +680,6 @@ fn filter_lower<T: Clone + Eq + Hash>(
         children_identical = node.children.is_empty();
     }
 
-    
     if keep_empty == node.empty && children_identical {
         return Some(node.clone());
     }
@@ -814,7 +747,6 @@ where
                 children_identical = b.children.is_empty();
             }
 
-            
             if new_empty == b.empty && children_identical {
                 return Some(node.clone());
             }
@@ -1088,7 +1020,6 @@ fn accs_by_depth_upper<T, A>(
     }
 }
 
-
 fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> Arc<Lower<T>> {
     if Arc::ptr_eq(l1, l2) {
         return l1.clone();
@@ -1151,9 +1082,6 @@ where
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 {
-    
-    
-    
     if a.acc == b.acc || Arc::ptr_eq(&a.inner, &b.inner) {
         let merged_lower = merge_lower(&a.inner, &b.inner);
         let new_acc = a.acc.merge(&b.acc);
@@ -1195,7 +1123,6 @@ where
             .flat_map(|kids| kids.values())
             .collect();
 
-        
         if all_children.is_empty() {
             if let Some(empty) = &b.empty {
                 let lower_root = new_lower(IHashMap::new(), true);
@@ -1204,7 +1131,6 @@ where
             return node.clone();
         }
 
-        
         if !all_children
             .iter()
             .all(|c| matches!(&***c, Upper::Interface(_)))
@@ -1212,7 +1138,6 @@ where
             return node.clone();
         }
 
-        
         let mut accs: HashSet<A> = HashSet::new();
         if let Some(empty) = &b.empty {
             accs.insert(empty.clone());
@@ -1362,11 +1287,9 @@ where
     accs.len() <= 1
 }
 
-
 #[derive(Clone, PartialEq, Eq)]
 struct LowerSig<T: Clone + Eq + Hash> {
     empty: bool,
-    
     edges: StdHashMap<T, Vec<usize>>,
 }
 
@@ -1374,7 +1297,6 @@ struct LowerSig<T: Clone + Eq + Hash> {
 enum UpperSig<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     Branch {
         empty: Option<A>,
-        
         edges: StdHashMap<T, Vec<usize>>,
     },
     Interface {
@@ -1384,7 +1306,6 @@ enum UpperSig<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
 }
 
 struct NormalizationLowerInterner<T: Clone + Eq + Hash> {
-    
     map: StdHashMap<u64, Vec<(LowerSig<T>, usize, Arc<Lower<T>>)>>,
     next_id: usize,
 }
@@ -1402,7 +1323,6 @@ struct NormalizationUpperInterner<
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 > {
-    
     map: StdHashMap<u64, Vec<(UpperSig<T, A>, usize, Arc<Upper<T, A>>)>>,
     next_id: usize,
 }
@@ -1489,7 +1409,6 @@ where
         return (*id, arc.clone());
     }
 
-    
     let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Lower<T>>)>> = StdHashMap::new();
     for (v, kids) in node.children.iter() {
         let entry = edges_raw.entry(v.clone()).or_default();
@@ -1499,7 +1418,6 @@ where
         }
     }
 
-    
     let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
     for (v, items) in &edges_raw {
         let mut ids: Vec<usize> = items.iter().map(|(cid, _)| *cid).collect();
@@ -1521,7 +1439,6 @@ where
         }
     }
 
-    
     let mut new_children: Children<T, Lower<T>> = IHashMap::new();
     for (v, items) in edges_raw {
         let mut ord: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
@@ -1569,7 +1486,6 @@ where
 
     match &**node {
         Upper::Branch(b) => {
-            
             let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Upper<T, A>>)>> = StdHashMap::new();
             for (v, kids) in b.children.iter() {
                 let entry = edges_raw.entry(v.clone()).or_default();
@@ -1585,7 +1501,6 @@ where
                 }
             }
 
-            
             let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
             for (v, items) in &edges_raw {
                 let mut ids: Vec<usize> = items.iter().map(|(cid, _)| *cid).collect();
@@ -1607,7 +1522,6 @@ where
                 }
             }
 
-            
             let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
             for (v, items) in &edges_raw {
                 let mut ord: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
@@ -1627,11 +1541,9 @@ where
             let new_b = new_branch(new_children, b.empty.clone());
             let mut new_node = try_promote(&new_b); 
 
-            
             match &*new_node {
                 Upper::Interface(i2) => {
                     let i2_owned = i2.clone(); 
-                    
                     
                     let (inner_id, canonical_inner) = normalize_canonicalize_lower(
                         &i2_owned.inner,
@@ -1641,7 +1553,6 @@ where
                     
                     new_node = new_interface(canonical_inner, i2_owned.acc.clone());
 
-                    
                     sig = UpperSig::Interface {
                         acc: i2_owned.acc.clone(),
                         inner_id,
@@ -1649,11 +1560,9 @@ where
                     h = upper_sig_hash(&sig);
                 }
                 Upper::Branch(_) => {
-                    
                 }
             }
 
-            
             if let Some(bucket) = interner_upper.map.get_mut(&h) {
                 for (existing_sig, id, arc) in bucket.iter() {
                     if existing_sig == &sig {
@@ -1707,7 +1616,6 @@ where
     }
 }
 
-
 #[derive(Clone)]
 pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     inner: Arc<Upper<T, A>>,
@@ -1727,23 +1635,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    
-    
     pub fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.inner) as usize
     }
 
-    
-    
-    
-    
-    
     pub fn children_dedup_keys(&self) -> StdHashMap<T, usize> {
         let mut result = StdHashMap::new();
         let children = match &*self.inner {
             Upper::Branch(b) => &b.children,
             Upper::Interface(i) => {
-                
                 return result;
             }
         };
@@ -1835,7 +1735,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        
         struct Entry<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
             end: Option<A>,
             sub: StdHashMap<T, Entry<T, A>>,
@@ -1915,8 +1814,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
             }
 
-            
-            
             let all_interfaces = all_child_nodes
                 .iter()
                 .all(|c| matches!(&**c, Upper::Interface(_)));
@@ -2038,10 +1935,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner: new_inner }
     }
 
-    
-    
-    
-    
     pub fn push_many(&self, values: impl IntoIterator<Item = T>) -> Self {
         if self.is_empty() {
             return self.clone();
@@ -2180,28 +2073,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             res
         }
 
-
         let new_inner = popn_upper::<T, A>(&self.inner, n, &mut memo_upper, &mut memo_lower);
         LeveledGSS { inner: new_inner }
     }
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
     pub fn popn_with_underflow(&self, n: isize) -> (Self, StdHashMap<usize, A>) {
         if n <= 0 {
             return (self.clone(), StdHashMap::new());
@@ -2253,10 +2128,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 it.fold(first, |acc, next| merge_lower(&acc, &next))
             };
 
-            
-            
             if node.empty && k >= 1 {
-                
                 
                 merge_underflow(underflows, k as usize, acc.clone());
             }
@@ -2289,7 +2161,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         }
                     }
 
-                    
                     if let Some(acc) = &b.empty {
                         
                         merge_underflow(underflows, k as usize, acc.clone());
@@ -2327,7 +2198,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     pub fn pop(&self) -> Self {
         self.popn(1)
     }
-
 
     pub fn is_empty(&self) -> bool {
         match &*self.inner {
@@ -2411,7 +2281,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     pub fn isolate_many<I: IntoIterator<Item = Option<T>>>(&self, values: I) -> Self {
         let values_set: HashSet<Option<T>> = values.into_iter().collect();
 
-        
         match &*self.inner {
             Upper::Branch(b) => {
                 let all_children_kept = b
@@ -2486,7 +2355,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         B: Merge + Clone + Eq + Hash,
         F: FnMut(&A) -> B,
     {
-        
         let mut acc_memo: StdHashMap<A, B> = StdHashMap::new();
 
         fn map_acc<A, B, F>(a: &A, memo: &mut StdHashMap<A, B>, f: &mut F) -> B
@@ -2546,7 +2414,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     where
         P: FnMut(&A) -> bool,
     {
-        
         let mut acc_memo: StdHashMap<A, bool> = StdHashMap::new();
 
         fn test_acc<A, P>(a: &A, memo: &mut StdHashMap<A, bool>, p: &mut P) -> bool
@@ -2612,7 +2479,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         children_identical &= same_kids;
                     }
 
-                    
                     if new_empty == b.empty && children_identical {
                         return Some(node.clone());
                     }
@@ -2636,7 +2502,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         B: Merge + Clone + Eq + Hash,
         M: FnMut(&A) -> Option<B>,
     {
-        
         let mut acc_memo: StdHashMap<A, Option<B>> = StdHashMap::new();
 
         fn mutate_acc<A, B, M>(
@@ -2714,9 +2579,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    
-    
-    
     pub fn merge_many(gsses: impl IntoIterator<Item = Self>) -> Self {
         let mut items: Vec<Self> = gsses.into_iter().collect();
         if items.is_empty() {
@@ -2897,12 +2759,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn normalize(&self) -> Self {
         
-        
         let fused = self.fuse(None);
 
-        
-        
-        
         let mut memo_upper: StdHashMap<usize, (usize, Arc<Upper<T, A>>)> = StdHashMap::new();
         let mut memo_lower: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
         let mut interner_upper: NormalizationUpperInterner<T, A> = Default::default();
@@ -2916,8 +2774,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             &mut interner_lower,
         );
 
-        
-        
         LeveledGSS { inner }
     }
 
@@ -2975,20 +2831,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.children_keys().into_iter().collect()
     }
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
     pub fn visit_accs<F>(&self, mut f: F)
     where
         F: FnMut(&A),
     {
-        
         let mut seen: HashSet<A> = HashSet::new();
         
         let mut visited: HashSet<usize> = HashSet::new();
@@ -3173,10 +3019,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                             num_interfaces_with_empty += 1;
                         }
 
-                        
                         lower_queue.push_back(i.inner.clone());
 
-                        
                         interface_to_lower_edges += 1;
                         *incoming_edges.entry(Arc::as_ptr(&i.inner) as usize).or_insert(0) += 1;
                     }
@@ -3208,13 +3052,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        
-        
-        
         #[derive(Clone, PartialEq, Eq)]
         struct StatsSig<T: Clone + Eq + Hash> {
             terminal: bool,
-            
             edges: StdHashMap<T, Vec<usize>>,
         }
 
@@ -3707,10 +3547,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         result
     }
 
-    
-    
-    
-    
     pub fn try_extract_single_path(&self) -> Option<(Vec<T>, A)> {
         let mut edges = Vec::new();
 

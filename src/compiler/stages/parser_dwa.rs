@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use range_set_blaze::RangeSetBlaze;
@@ -25,7 +24,6 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::{build_terminal_dwa, TerminalDWA};
 use crate::Vocab;
 use crate::ds::weight::Weight;
-
 
 fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
     let n = dwa.states.len();
@@ -69,8 +67,6 @@ fn find_cycle_in_non_accepting_states(dwa: &DWA) -> Option<Vec<usize>> {
         None
     }
 
-    
-    
     if let Some(cycle_start) = visit_cycle_path(start, &dwa.states, &non_accepting, &mut color, &mut parent) {
         
         let mut path = vec![cycle_start];
@@ -270,7 +266,6 @@ fn build_branch_bundle(
     Some(bundle)
 }
 
-
 pub fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -399,7 +394,6 @@ fn root_terminal_branch_groups_for_tokenizer_state(
             internal_tsid,
     )
 }
-
 
 #[cfg(test)]
 mod tests {

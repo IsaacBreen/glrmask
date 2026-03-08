@@ -2,7 +2,6 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
-
 pub mod bitset;
 pub mod char_transitions;
 pub mod leveled_gss;

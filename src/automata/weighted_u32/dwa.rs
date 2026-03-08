@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -11,26 +10,19 @@ use serde::{Deserialize, Serialize};
 use super::nwa::Label;
 use crate::ds::weight::Weight;
 
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DWAState {
-    
     pub transitions: BTreeMap<Label, (u32, Weight)>,
-    
     pub final_weight: Option<Weight>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DWA {
-    
     pub states: Vec<DWAState>,
-    
     pub start_state: u32,
 }
 
 impl DWA {
-    
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         let _ = (num_tsids, max_token);
         Self {
@@ -39,42 +31,32 @@ impl DWA {
         }
     }
 
-    
     pub fn add_state(&mut self) -> u32 {
         let id = self.states.len() as u32;
         self.states.push(DWAState::default());
         id
     }
 
-    
     pub fn num_states(&self) -> u32 {
         self.states.len() as u32
     }
 
-    
     pub fn num_transitions(&self) -> usize {
         self.states.iter().map(|state| state.transitions.len()).sum()
     }
 
-    
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
         if let Some(entry) = self.states.get_mut(state as usize) {
             entry.final_weight = Some(weight);
         }
     }
 
-    
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
         if let Some(entry) = self.states.get_mut(from as usize) {
             entry.transitions.insert(label, (to, weight));
         }
     }
 
-    
-    
-    
-    
-    
     pub fn eval_word(&self, word: &[Label]) -> Weight {
         let mut state = self.start_state;
         let mut weight = Weight::all();
@@ -91,7 +73,6 @@ impl DWA {
         }
     }
 
-    
     pub fn labels(&self) -> Vec<Label> {
         self.states
             .iter()
@@ -101,7 +82,6 @@ impl DWA {
             .collect()
     }
 
-    
     pub fn is_acyclic(&self) -> bool {
         let num_states = self.states.len();
 
@@ -143,9 +123,6 @@ impl DWA {
         true
     }
 
-    
-    
-    
     pub fn display_with_symbols<'a>(
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
@@ -153,8 +130,6 @@ impl DWA {
         DWADisplayWithSymbols { dwa: self, symbols }
     }
 
-    
-    
     pub fn display_with_all_maps<'a>(
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
@@ -169,7 +144,6 @@ impl DWA {
         }
     }
 }
-
 
 fn fmt_dwa_states(
     dwa: &DWA,
@@ -198,14 +172,12 @@ fn fmt_dwa_states(
     Ok(())
 }
 
-
 impl std::fmt::Display for DWA {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "DWA: {} states, start=State {}", self.states.len(), self.start_state)?;
         fmt_dwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
     }
 }
-
 
 pub struct DWADisplayWithSymbols<'a> {
     dwa: &'a DWA,
@@ -226,7 +198,6 @@ impl std::fmt::Display for DWADisplayWithSymbols<'_> {
         )
     }
 }
-
 
 pub struct DWADisplayWithAllMaps<'a> {
     dwa: &'a DWA,

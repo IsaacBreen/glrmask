@@ -3,11 +3,9 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
-
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -198,7 +196,6 @@ fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
     }
 }
 
-
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -239,7 +236,6 @@ impl Parser {
         }
     }
 
-    
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
         self.skip_newlines();
         let mut rules = Vec::new();
@@ -267,7 +263,6 @@ impl Parser {
         Ok(NamedGrammar { rules, start })
     }
 
-    
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         let mut options = vec![self.parse_sequence()?];
         while matches!(self.peek(), Some(Token::Pipe)) {
@@ -281,7 +276,6 @@ impl Parser {
         })
     }
 
-    
     fn parse_sequence(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         let mut items = Vec::new();
         while self.is_unit_start() {
@@ -305,7 +299,6 @@ impl Parser {
         )
     }
 
-    
     fn parse_unit(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         let atom = self.parse_atom()?;
         Ok(match self.peek() {
@@ -325,7 +318,6 @@ impl Parser {
         })
     }
 
-    
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         match self.advance() {
             Some(Token::Ident(name)) => Ok(GrammarExpr::Ref(name)),
@@ -346,7 +338,6 @@ impl Parser {
     }
 }
 
-
 pub fn parse_ebnf(input: &str) -> Result<GrammarDef, GlrMaskError> {
     let named = parse_ebnf_to_named(input)?;
     lower(&named)
@@ -360,7 +351,6 @@ pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut parser = Parser::new(tokens);
     parser.parse_grammar()
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 pub mod equivalence_analysis;
 pub mod templates;
 pub mod terminal_dwa;

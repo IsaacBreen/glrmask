@@ -6,15 +6,6 @@
 use crate::runtime::state::ConstraintState;
 
 impl<'a> ConstraintState<'a> {
-    
-    
-    
-    
-    
-    
-    
-    
-    
     pub fn force(&self) -> Vec<u32> {
         fn single_allowed_token(mask: &[u32]) -> Option<u32> {
             let mut found = None;
@@ -93,7 +84,6 @@ mod tests {
         let s = c.start();
         let mask = s.mask();
 
-        
         assert_eq!(single_allowed_token(&mask), Some(0));
         assert!(!mask_is_empty(&mask));
     }

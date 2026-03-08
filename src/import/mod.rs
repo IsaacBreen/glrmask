@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 pub use crate::grammar::surface as ast;
 pub mod ebnf;
 pub mod json_schema;
@@ -168,12 +167,10 @@ fn parse_simple_ebnf(ebnf: &str) -> crate::Result<GrammarDef> {
     })
 }
 
-
 fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
     let grammar = ebnf::parse_ebnf(ebnf)?;
     Ok(compile(&grammar, vocab))
 }
-
 
 fn from_ebnf_with_debug(
     ebnf: &str,
@@ -183,14 +180,12 @@ fn from_ebnf_with_debug(
     Ok(compile_with_debug(&grammar, vocab))
 }
 
-
 fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
     let _ = (lark, vocab);
     Err(crate::GlrMaskError::Compilation(
         "Lark import is not implemented yet".into(),
     ))
 }
-
 
 fn from_lark_with_debug(
     lark: &str,
@@ -202,12 +197,10 @@ fn from_lark_with_debug(
     ))
 }
 
-
 fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
     let grammar = json_schema::json_schema_to_grammar(schema)?;
     Ok(compile(&grammar, vocab))
 }
-
 
 fn from_json_schema_with_debug(
     schema: &str,
@@ -218,14 +211,10 @@ fn from_json_schema_with_debug(
 }
 
 impl Constraint {
-    
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         from_ebnf(ebnf, vocab)
     }
 
-    
-    
-    
     pub fn from_ebnf_with_debug(
         ebnf: &str,
         vocab: &crate::Vocab,
@@ -233,12 +222,10 @@ impl Constraint {
         from_ebnf_with_debug(ebnf, vocab)
     }
 
-    
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         from_lark(lark, vocab)
     }
 
-    
     pub(crate) fn from_lark_with_debug(
         lark: &str,
         vocab: &crate::Vocab,
@@ -246,12 +233,10 @@ impl Constraint {
         from_lark_with_debug(lark, vocab)
     }
 
-    
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         from_json_schema(schema, vocab)
     }
 
-    
     pub(crate) fn from_json_schema_with_debug(
         schema: &str,
         vocab: &crate::Vocab,

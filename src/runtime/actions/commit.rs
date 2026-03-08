@@ -13,12 +13,6 @@ impl<'a> ConstraintState<'a> {
         self.commit_token(token_id)
     }
 
-    
-    
-    
-    
-    
-    
     pub fn commit_token(
         &mut self,
         token_id: u32,
@@ -30,10 +24,6 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    
-    
-    
-    
     pub fn commit_bytes(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -163,16 +153,12 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    
-    
-    
     pub fn commit_tokens(&mut self, tokens: &[u32]) {
         for &token in tokens {
             self.commit_token(token);
         }
     }
 
-    
     pub(crate) fn process_bytes_raw(&mut self, bytes: &[u8]) {
         self.commit_bytes(bytes)
     }

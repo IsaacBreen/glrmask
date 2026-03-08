@@ -3,32 +3,22 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use crate::ds::weight::Weight;
 
-
 pub type Label = i32;
-
 
 #[derive(Debug, Clone, Default)]
 pub struct NWAState {
-    
-    
     pub final_weight: Option<Weight>,
-    
     pub transitions: BTreeMap<Label, Vec<(u32, Weight)>>,
-    
     pub epsilons: Vec<(u32, Weight)>,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct NWA {
-    
     pub states: Vec<NWAState>,
-    
     pub start_states: Vec<u32>,
 }
 
@@ -53,7 +43,6 @@ pub struct NwaTraversalData {
 }
 
 impl NWA {
-    
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         let _ = (num_tsids, max_token);
         Self {
@@ -62,40 +51,34 @@ impl NWA {
         }
     }
 
-    
     pub fn add_state(&mut self) -> u32 {
         let id = self.states.len() as u32;
         self.states.push(NWAState::default());
         id
     }
 
-    
     pub fn num_states(&self) -> u32 {
         self.states.len() as u32
     }
 
-    
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {
         if let Some(entry) = self.states.get_mut(state as usize) {
             entry.final_weight = Some(weight);
         }
     }
 
-    
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
         if let Some(entry) = self.states.get_mut(from as usize) {
             entry.transitions.entry(label).or_default().push((to, weight));
         }
     }
 
-    
     pub fn add_epsilon(&mut self, from: u32, to: u32, weight: Weight) {
         if let Some(entry) = self.states.get_mut(from as usize) {
             entry.epsilons.push((to, weight));
         }
     }
 
-    
     pub fn num_transitions(&self) -> usize {
         self.states
             .iter()
@@ -241,7 +224,6 @@ impl NWA {
         NwaTraversalData { comp_id, sccs, topo }
     }
 
-    
     pub fn is_acyclic(&self) -> bool {
         let num_states = self.states.len();
 
@@ -311,14 +293,10 @@ impl NWA {
         true
     }
 
-    
     pub fn max_position(&self) -> u32 {
         self.states.len().saturating_sub(1) as u32
     }
 
-    
-    
-    
     pub fn display_with_symbols<'a>(
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
@@ -326,8 +304,6 @@ impl NWA {
         NWADisplayWithSymbols { nwa: self, symbols }
     }
 
-    
-    
     pub fn display_with_all_maps<'a>(
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
@@ -415,7 +391,6 @@ fn compute_sccs(nwa: &NWA) -> (Vec<Vec<usize>>, Vec<usize>) {
     (sccs, comp_id)
 }
 
-
 fn fmt_nwa_states(
     nwa: &NWA,
     f: &mut std::fmt::Formatter<'_>,
@@ -429,16 +404,13 @@ fn fmt_nwa_states(
             continue;
         }
 
-        
         let start_mark = if start_set.contains(&(i as u32)) { " [START]" } else { "" };
         writeln!(f, "  State {i}{start_mark}")?;
 
-        
         if let Some(w) = &st.final_weight {
             writeln!(f, "    final: {}", weight_fn(w))?;
         }
 
-        
         for (label, targets) in &st.transitions {
             let lbl = label_fn(*label);
             for (tgt, w) in targets {
@@ -447,7 +419,6 @@ fn fmt_nwa_states(
             }
         }
 
-        
         for (tgt, w) in &st.epsilons {
             writeln!(f, "    ε → State {tgt}")?;
             writeln!(f, "      weight: {}", weight_fn(w))?;
@@ -456,14 +427,12 @@ fn fmt_nwa_states(
     Ok(())
 }
 
-
 impl std::fmt::Display for NWA {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "NWA: {} states, start={:?}", self.states.len(), self.start_states)?;
         fmt_nwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
     }
 }
-
 
 pub struct NWADisplayWithSymbols<'a> {
     nwa: &'a NWA,
@@ -484,7 +453,6 @@ impl std::fmt::Display for NWADisplayWithSymbols<'_> {
         )
     }
 }
-
 
 pub struct NWADisplayWithAllMaps<'a> {
     nwa: &'a NWA,

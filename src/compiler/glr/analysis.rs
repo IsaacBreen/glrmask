@@ -3,46 +3,26 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::{BTreeSet, BTreeMap};
 
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
-
 pub const EOF: TerminalID = u32::MAX;
-
 
 #[derive(Debug, Clone)]
 pub struct AnalyzedGrammar {
-    
     pub rules: Vec<Rule>,
     #[allow(dead_code)]
     
     pub start: NonterminalID,
-    
     pub num_terminals: u32,
-    
     pub num_nonterminals: u32,
-    
     pub nullable: BTreeSet<NonterminalID>,
-    
     pub first: Vec<BTreeSet<TerminalID>>,
-    
     pub follow: Vec<BTreeSet<TerminalID>>,
 }
 
 impl AnalyzedGrammar {
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
     pub fn from_grammar_def(g: &GrammarDef) -> Self {
         let mut rules = Vec::with_capacity(g.rules.len() + 1);
         let augmented_start = g.num_nonterminals();
@@ -142,7 +122,6 @@ impl AnalyzedGrammar {
         }
     }
 
-    
     pub fn first_of_seq(&self, seq: &[Symbol]) -> BTreeSet<TerminalID> {
         let mut out = BTreeSet::new();
         for symbol in seq {
@@ -164,7 +143,6 @@ impl AnalyzedGrammar {
         out
     }
 
-    
     pub fn seq_is_nullable(&self, seq: &[Symbol]) -> bool {
         seq.iter().all(|symbol| match symbol {
             Symbol::Terminal(_) => false,
@@ -172,7 +150,6 @@ impl AnalyzedGrammar {
         })
     }
 }
-
 
 #[allow(dead_code)]
 pub(crate) fn eliminate_direct_left_recursion(
@@ -183,7 +160,6 @@ pub(crate) fn eliminate_direct_left_recursion(
     let _ = fresh_nt;
 }
 
-
 pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
@@ -191,7 +167,6 @@ pub(crate) fn eliminate_right_recursion(
     let _ = rules;
     let _ = fresh_nt;
 }
-
 
 fn max_nt_id(rules: &[Rule]) -> u32 {
     rules
@@ -205,7 +180,6 @@ fn max_nt_id(rules: &[Rule]) -> u32 {
         .max()
         .unwrap_or(0)
 }
-
 
 fn build_right_reachability_graph(
     rules: &[Rule],
@@ -233,7 +207,6 @@ fn build_right_reachability_graph(
     }
     graph
 }
-
 
 fn find_indirect_rr_cycle(
     graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
@@ -277,7 +250,6 @@ fn find_indirect_rr_cycle(
     }
     None
 }
-
 
 /// Build a graph where an edge A → B means B appears at the left edge of
 /// a production for A (possibly after nullable symbols).
@@ -351,7 +323,6 @@ fn find_indirect_lr_cycle(
     None
 }
 
-
 fn inline_right_end(
     rules: &mut Vec<Rule>,
     from_nt: NonterminalID,
@@ -364,11 +335,9 @@ fn inline_right_end(
     let _ = nullable;
 }
 
-
 fn is_direct_right_recursive(rule: &Rule) -> bool {
     matches!(rule.rhs.last(), Some(Symbol::Nonterminal(nonterminal)) if *nonterminal == rule.lhs)
 }
-
 
 fn resolve_direct_rr_single_nt(
     rules: &mut Vec<Rule>,
@@ -380,11 +349,9 @@ fn resolve_direct_rr_single_nt(
     let _ = new_nt;
 }
 
-
 pub(crate) fn inline_epsilon_rules(rules: &[Rule]) -> Vec<Rule> {
     rules.to_vec()
 }
-
 
 fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
     let mut nullable = BTreeSet::new();
@@ -407,7 +374,6 @@ fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
     }
     nullable
 }
-
 
 fn compute_first(
     rules: &[Rule],
@@ -441,7 +407,6 @@ fn compute_first(
     }
     first
 }
-
 
 fn compute_follow(
     rules: &[Rule],

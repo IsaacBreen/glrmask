@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::BTreeMap;
 
 use crate::GlrMaskError;
@@ -11,52 +10,31 @@ use crate::grammar::flat::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum GrammarExpr {
-    
     Ref(String),
-    
     Sequence(Vec<GrammarExpr>),
-    
     Choice(Vec<GrammarExpr>),
-    
     Optional(Box<GrammarExpr>),
-    
     Repeat(Box<GrammarExpr>),
-    
     RepeatOne(Box<GrammarExpr>),
-    
     Literal(Vec<u8>),
-    
-    
     CharClass { def: String, negate: bool },
-    
     RawRegex(String),
-    
     AnyByte,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct NamedGrammar {
-    
     pub rules: Vec<(String, GrammarExpr)>,
-    
     pub start: String,
 }
 
-
 struct Lowerer {
-    
     rules: Vec<Rule>,
-    
     terminal_map: BTreeMap<String, TerminalID>,
-    
     terminals: Vec<Terminal>,
-    
     nt_map: BTreeMap<String, NonterminalID>,
-    
     anon_counter: u32,
 }
 
@@ -71,7 +49,6 @@ impl Lowerer {
         }
     }
 
-    
     fn nt_id(&mut self, name: &str) -> NonterminalID {
         if let Some(&id) = self.nt_map.get(name) {
             id
@@ -82,7 +59,6 @@ impl Lowerer {
         }
     }
 
-    
     fn fresh_nt(&mut self, hint: &str) -> (String, NonterminalID) {
         let name = format!("__{}_{}", hint, self.anon_counter);
         self.anon_counter += 1;
@@ -90,7 +66,6 @@ impl Lowerer {
         (name, id)
     }
 
-    
     fn terminal_id(&mut self, name: &str, pattern: &str) -> TerminalID {
         if let Some(&id) = self.terminal_map.get(pattern) {
             return id;
@@ -115,7 +90,6 @@ impl Lowerer {
         id
     }
 
-    
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
         fn emit(lowerer: &mut Lowerer, lhs: NonterminalID, expr: &GrammarExpr) -> Result<(), GlrMaskError> {
             match expr {
@@ -191,11 +165,9 @@ impl Lowerer {
     }
 }
 
-
 fn is_terminal_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')
 }
-
 
 fn compile_to_regex(
     expr: &GrammarExpr,
@@ -227,7 +199,6 @@ fn compile_to_regex(
         GrammarExpr::AnyByte => ".".into(),
     })
 }
-
 
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut lowerer = Lowerer::new();
@@ -288,7 +259,6 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     })
 }
 
-
 fn escape_byte(b: u8) -> String {
     match b {
         b'\n' => "\\n".into(),
@@ -309,7 +279,6 @@ fn regex_escape_byte(b: u8) -> String {
         _ => escape_byte(b),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

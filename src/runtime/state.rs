@@ -9,13 +9,9 @@ use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
 
 use super::constraint::Constraint;
 
-
-
 #[derive(Debug, Clone)]
 pub struct ConstraintState<'a> {
-    
     pub(crate) constraint: &'a Constraint,
-    
     pub(crate) state: BTreeMap<u32, ParserGSS>,
 }
 
@@ -28,7 +24,6 @@ impl<'a> ConstraintState<'a> {
         !stack.is_empty() && stacks_finished(&self.constraint.table, stack)
     }
 
-    
     pub fn is_finished(&self) -> bool {
         self.is_complete()
     }

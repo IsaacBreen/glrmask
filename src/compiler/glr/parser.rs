@@ -3,14 +3,12 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::analysis::EOF;
 use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
-
 
 pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
 
@@ -27,9 +25,7 @@ impl Merge for TerminalsDisallowed {
     }
 }
 
-
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
-
 
 #[allow(dead_code)]
 pub struct GLRParser {
@@ -39,21 +35,15 @@ pub struct GLRParser {
 
 #[allow(dead_code)]
 impl GLRParser {
-    
     pub fn new(table: GLRTable) -> Self {
         let stack = ParserGSS::from_stacks(&[(vec![0], BTreeMap::new())]);
         Self { table, stack }
     }
 
-    
     pub fn can_shift(&self, token: TerminalID) -> bool {
         !advance_stacks(&self.table, &self.stack, token).is_empty()
     }
 
-    
-    
-    
-    
     pub fn step(&self, token: TerminalID) -> (Self, bool) {
         let next_stack = advance_stacks(&self.table, &self.stack, token);
         let progressed = !next_stack.is_empty();
@@ -66,7 +56,6 @@ impl GLRParser {
         )
     }
 
-    
     pub fn valid_terminals(&self) -> Vec<TerminalID> {
         valid_terminals_for_stacks(&self.table, &self.stack)
     }
@@ -283,7 +272,6 @@ pub(crate) fn valid_terminals_for_stacks(table: &GLRTable, stack: &ParserGSS) ->
     valid_terminals_for_stack_vectors(table, &stacks)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,19 +431,12 @@ mod tests {
         assert!(!valid.contains(&1)); 
     }
 
-    
-    
-    
-
-    
     fn tdef(id: u32, name: &str) -> Terminal {
         Terminal::Literal { id, bytes: name.as_bytes().to_vec() }
     }
 
     #[test]
     fn test_ported_glr_left_recursive() {
-        
-        
         
         let gdef = make_grammar(
             vec![
@@ -477,8 +458,6 @@ mod tests {
 
     #[test]
     fn test_ported_glr_right_recursive() {
-        
-        
         
         let gdef = make_grammar(
             vec![
@@ -502,8 +481,6 @@ mod tests {
 
     #[test]
     fn test_ported_glr_expression_grammar() {
-        
-        
         
         let gdef = make_grammar(
             vec![
@@ -535,9 +512,6 @@ mod tests {
     #[test]
     fn test_ported_glr_reduce_reduce_conflict() {
         
-        
-        
-        
         let gdef = make_grammar(
             vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] }, 
@@ -555,9 +529,6 @@ mod tests {
 
     #[test]
     fn test_ported_glr_epsilon_ambiguity() {
-        
-        
-        
         
         let gdef = make_grammar(
             vec![
@@ -580,8 +551,6 @@ mod tests {
     #[test]
     fn test_ported_glr_highly_ambiguous() {
         
-        
-        
         let gdef = make_grammar(
             vec![
                 Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Nonterminal(0)] }, 
@@ -599,8 +568,6 @@ mod tests {
 
     #[test]
     fn test_ported_glr_nullable_before_terminal() {
-        
-        
         
         let gdef = make_grammar(
             vec![
@@ -622,12 +589,6 @@ mod tests {
 
     #[test]
     fn test_ported_glr_ambiguous_dangling_else() {
-        
-        
-        
-        
-        
-        
         
         let gdef = make_grammar(
             vec![

@@ -3,12 +3,10 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 use std::collections::BTreeMap;
 
 use crate::Vocab;
 use crate::compiler::stages::equivalence_analysis::ManyToOneIdMap;
-
 
 pub(crate) fn analyze_vocab_equivalences(vocab: &Vocab) -> ManyToOneIdMap {
     let max_token_id = vocab

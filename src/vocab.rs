@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Vocab {
     pub entries: Vec<(u32, Vec<u8>)>,
