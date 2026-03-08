@@ -732,8 +732,7 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         id
     };
 
-    const MAX_PASSES: usize = 100;
-    for _ in 0..MAX_PASSES {
+    loop {
         let snap = rules.clone();
 
         // Phase 2: Inline null productions (ε-elimination)
