@@ -586,7 +586,13 @@ fn build_token_suffix_paths(
                     built_suffix_nodes,
                     suffix_nodes,
                     continuation_state,
-                    matched.end_state,
+                    // After completing a terminal match the tokenizer
+                    // restarts from its initial state for the next
+                    // terminal (each terminal is an independent lex).
+                    // Previously this used `matched.end_state`, which is
+                    // a dead end in the DFA when a pattern is fully
+                    // matched.
+                    tokenizer.initial_state(),
                     origin_state,
                     token_id,
                     token_bytes,
@@ -630,21 +636,12 @@ pub(crate) fn build_terminal_dwa(
 
         for original_state in &id_map.tokenizer_states.internal_to_originals[internal_tsid as usize] {
             for (token_id, token_bytes) in &vocab.entries {
-                let mut states_by_width = Vec::with_capacity(token_bytes.len() + 1);
-                states_by_width.push(*original_state);
-                let mut current_state = *original_state;
-                let mut valid = true;
-                for &byte in token_bytes {
-                    let Some(next_state) = tokenizer.step(current_state, byte) else {
-                        valid = false;
-                        break;
-                    };
-                    current_state = next_state;
-                    states_by_width.push(current_state);
-                }
-                if !valid {
-                    continue;
-                }
+                // Skip the single-pass DFA validation: multi-terminal
+                // tokens (e.g. "ab" = terminal_A + terminal_B) involve
+                // tokenizer restarts between terminal matches, so the
+                // full byte sequence does NOT need to be walkable in a
+                // single continuous DFA pass.  build_token_suffix_paths
+                // handles partial matches naturally.
 
                 build_token_suffix_paths(
                     tokenizer,
@@ -679,7 +676,11 @@ pub(crate) fn build_terminal_dwa(
         possible_future_terminals_by_tokenizer_state,
     };
 
-    let _ = collapse_always_allowed(&mut terminal_dwa, grammar);
+    // collapse_always_allowed is disabled because it folds NWA transitions
+    // into final weights.  The downstream parser DWA builder
+    // (terminal_branches_for_tokenizer_state) only reads transitions, not
+    // final weights, so collapsing breaks multi-terminal token paths.
+    // let _ = collapse_always_allowed(&mut terminal_dwa, grammar);
     let _ = prune_disallowed_follows(&mut terminal_dwa, grammar);
 
     terminal_dwa
@@ -699,6 +700,8 @@ mod tests {
 
     #[test]
     fn test_build_terminal_dwa_collapses_always_allowed_follow_path() {
+        // With collapse_always_allowed disabled, follow transitions are
+        // preserved in the NWA so the parser DWA builder can read them.
         let grammar = simple_ab_grammar();
         let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
         let tokenizer = Tokenizer::from_grammar_def(&grammar);
@@ -722,14 +725,14 @@ mod tests {
         }
         assert!(!combined_a.is_empty() || combined_a.is_full());
 
-        for (dest, weight) in a_targets {
-            let state = &terminal_dwa.nwa.states[*dest as usize];
-            assert!(state.final_weight.is_some());
-            assert!(!state.transitions.contains_key(&1));
-            if !state.transitions.is_empty() {
-                assert!(!weight.is_empty() || weight.is_full());
-            }
-        }
+        // A continuation target for the multi-terminal token "ab" should
+        // still have a B transition (label 1) since collapse is disabled.
+        let has_b_continuation = a_targets.iter().any(|(dest, _)| {
+            terminal_dwa.nwa.states[*dest as usize]
+                .transitions
+                .contains_key(&1)
+        });
+        assert!(has_b_continuation, "continuation state should have B transition");
     }
 
     #[test]

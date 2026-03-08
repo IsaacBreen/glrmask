@@ -70,6 +70,22 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
                     }
                 }
             }
+            // Negative transitions represent GSS pushes.  When a negative
+            // transition leads to a state with a final_weight, the source
+            // state is also final — the push modifies the GSS but doesn't
+            // gate token eligibility.  Without this propagation the
+            // final_weight is stranded behind the negative edge and lost
+            // when `remove_negative_transitions` runs.
+            for (&label, targets) in nwa.states[state_id].transitions.clone().iter() {
+                if !is_negative_label(label) {
+                    continue;
+                }
+                for (dst, weight) in targets {
+                    if let Some(final_weight) = nwa.states[*dst as usize].final_weight.as_ref() {
+                        additions.push(weight.intersection(final_weight));
+                    }
+                }
+            }
 
             for addition in additions {
                 if addition.is_empty() {

@@ -278,10 +278,44 @@ impl SchemaCtx {
         parent: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let mut merged = parent.clone();
+        // Remove "allOf" to avoid infinite recursion when we call
+        // convert_schema on the merged object.
+        merged.remove("allOf");
         for schema in all {
             if let serde_json::Value::Object(obj) = schema {
                 for (key, value) in obj {
-                    merged.insert(key.clone(), value.clone());
+                    match key.as_str() {
+                        // Deep-merge "properties" so all subschema properties
+                        // are retained instead of overwritten.
+                        "properties" => {
+                            if let (Some(serde_json::Value::Object(existing)), serde_json::Value::Object(new_props)) =
+                                (merged.get_mut("properties"), value)
+                            {
+                                for (pname, pval) in new_props {
+                                    existing.insert(pname.clone(), pval.clone());
+                                }
+                            } else {
+                                merged.insert(key.clone(), value.clone());
+                            }
+                        }
+                        // Concatenate "required" arrays instead of overwriting.
+                        "required" => {
+                            if let (Some(serde_json::Value::Array(existing)), serde_json::Value::Array(new_items)) =
+                                (merged.get_mut("required"), value)
+                            {
+                                for item in new_items {
+                                    if !existing.contains(item) {
+                                        existing.push(item.clone());
+                                    }
+                                }
+                            } else {
+                                merged.insert(key.clone(), value.clone());
+                            }
+                        }
+                        _ => {
+                            merged.insert(key.clone(), value.clone());
+                        }
+                    }
                 }
             }
         }
