@@ -15,6 +15,9 @@ pub mod ebnf;
 pub mod json_schema;
 pub mod lark;
 
+#[cfg(test)]
+mod test_grammar_import;
+
 pub use ast as grammar_expr;
 
 use crate::compiler::debug::CompileDebug;
