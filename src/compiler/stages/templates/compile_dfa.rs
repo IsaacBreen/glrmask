@@ -24,12 +24,12 @@ impl Templates {
         let by_terminal = characterizations
             .iter()
             .map(|(&terminal, characterization)| {
-                let dfa = build_template_dfa(characterization);
+                let dfa = minimize_dfa(&build_template_dfa(characterization));
                 debug_assert!(
                     dfa.is_acyclic(),
-                    "template DFA for terminal {terminal} is cyclic"
+                    "template DFA for terminal {terminal} is cyclic after minimization"
                 );
-                (terminal, minimize_dfa(&dfa))
+                (terminal, dfa)
             })
             .collect();
         Self { by_terminal }

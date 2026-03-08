@@ -20,13 +20,13 @@ struct StateSignature {
 /// Minimize an acyclic unweighted DFA by merging states with identical
 /// signatures (acceptance + transition map modulo equivalence class).
 ///
-/// # Panics
-///
-/// Panics (via `debug_assert!`) if the input DFA is cyclic.
+/// Returns the input unchanged if it is cyclic (cannot minimize cyclic DFAs
+/// with this reverse-topological approach).
 pub fn minimize(dfa: &DFA) -> DFA {
-    debug_assert!(dfa.is_acyclic(), "minimize: input DFA must be acyclic");
-
     if dfa.states.is_empty() {
+        return dfa.clone();
+    }
+    if !dfa.is_acyclic() {
         return dfa.clone();
     }
 
