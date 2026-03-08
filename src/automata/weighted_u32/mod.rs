@@ -15,3 +15,6 @@ mod test_weighted_automata;
 
 #[cfg(test)]
 mod test_determinization;
+
+#[cfg(test)]
+mod test_weight_loosening;
