@@ -1,16 +1,25 @@
 //! Template-DFA compilation from terminal characterizations.
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
+//!
+//! Builds each template as a lightweight NFA (fresh intermediate states per
+//! path, epsilon-connected to NT nodes) and then determinizes + minimizes to
+//! produce an acyclic unweighted DFA.  The NFA approach mirrors sep1's
+//! `build_nfa_from_terminal_characterization` and avoids the self-loops that
+//! the old direct-DFA builder created when two reduces shared a label prefix
+//! and target NT but had different pop counts.
 
 use std::collections::BTreeMap;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::minimize::minimize as minimize_dfa;
+use crate::automata::unweighted_u32::nfa::NFA;
 use crate::compiler::glr::labels::{encode_negative_label, encode_positive_label, DEFAULT_LABEL};
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
 pub struct Templates {
@@ -24,10 +33,16 @@ impl Templates {
         let by_terminal = characterizations
             .iter()
             .map(|(&terminal, characterization)| {
-                let dfa = minimize_dfa(&build_template_dfa(characterization));
+                let nfa = build_template_nfa(characterization);
+                debug_assert!(
+                    nfa.is_acyclic(),
+                    "template NFA for terminal {terminal} is cyclic"
+                );
+                let dfa = minimize_dfa(&determinize(&nfa));
                 debug_assert!(
                     dfa.is_acyclic(),
-                    "template DFA for terminal {terminal} is cyclic after minimization"
+                    "template DFA for terminal {terminal} is cyclic \
+                     after determinization + minimization"
                 );
                 (terminal, dfa)
             })
@@ -36,123 +51,123 @@ impl Templates {
     }
 }
 
-fn build_template_dfa(tc: &TerminalCharacterization) -> UnweightedDfa {
-    let mut dfa = UnweightedDfa::new();
-    let start_state = dfa.start_state;
-    let mut nt_nodes = BTreeMap::new();
+// ---------------------------------------------------------------------------
+// NFA construction (mirrors sep1's build_nfa_from_terminal_characterization)
+// ---------------------------------------------------------------------------
 
+/// Build an unweighted NFA from a terminal characterization.
+///
+/// Each shift/reduce/escape/re-reduce path gets its own fresh intermediate
+/// states, connected to the shared start state (via epsilon) and to shared
+/// NT-node states.  This avoids the self-loops that the old direct-DFA builder
+/// introduced when two reduces shared a label prefix but had different pop
+/// counts pointing at the same NT node.
+fn build_template_nfa(tc: &TerminalCharacterization) -> NFA {
+    let mut nfa = NFA::new();
+    let start = 0u32; // NFA::new() creates state 0 as start
+
+    // Shared node for each nonterminal.
+    let mut nt_nodes = BTreeMap::new();
     for &nt in &tc.all_nts {
-        let state = dfa.add_state();
+        let state = nfa.add_state();
         nt_nodes.insert(nt, state);
     }
 
+    // -- Initial shifts -------------------------------------------------------
+    // start --ε--> s0 --[+initial]--> s1 --[-initial]--> s2 --[-shift]--> s3 [accept]
     for &(initial_state, shift_state) in &tc.shifts {
-        let accept = ensure_path(
-            &mut dfa,
-            start_state,
-            &[
-                encode_positive_label(initial_state),
-                encode_negative_label(initial_state),
-                encode_negative_label(shift_state),
-            ],
-        );
-        dfa.set_accepting(accept, true);
+        let s0 = nfa.add_state();
+        let s1 = nfa.add_state();
+        let s2 = nfa.add_state();
+        let s3 = nfa.add_state();
+
+        nfa.add_epsilon(start, s0);
+        nfa.add_transition(s0, encode_positive_label(initial_state), s1);
+        nfa.add_transition(s1, encode_negative_label(initial_state), s2);
+        nfa.add_transition(s2, encode_negative_label(shift_state), s3);
+        nfa.set_accepting(s3);
     }
 
+    // -- Initial reduces ------------------------------------------------------
+    // start --ε--> s0 --[+initial]--> (chain of DEFAULT pops) --> nt_node
     for &(initial_state, pop_count, nt) in &tc.reduces {
         let Some(&target_nt) = nt_nodes.get(&nt) else {
             continue;
         };
-        let mut path = Vec::with_capacity(1 + pop_count);
-        path.push(encode_positive_label(initial_state));
-        path.extend(std::iter::repeat(DEFAULT_LABEL).take(pop_count));
-        ensure_path_to_existing(&mut dfa, start_state, &path, target_nt);
+
+        let s0 = nfa.add_state();
+        nfa.add_epsilon(start, s0);
+
+        let first_target = if pop_count == 0 {
+            target_nt
+        } else {
+            nfa.add_state()
+        };
+        nfa.add_transition(s0, encode_positive_label(initial_state), first_target);
+
+        let mut from = first_target;
+        for i in 0..pop_count {
+            let to = if i == pop_count - 1 {
+                target_nt
+            } else {
+                nfa.add_state()
+            };
+            nfa.add_transition(from, DEFAULT_LABEL, to);
+            from = to;
+        }
     }
 
+    // -- NT escapes -----------------------------------------------------------
+    // src_nt --ε--> s0 --[+rev]--> s1 --[-rev]--> s2 --[-goto]--> s3 --[-shift]--> s4 [accept]
     for &(src_nt, revealed_state, goto_state, shift_state) in &tc.nt_escapes {
         let Some(&src_state) = nt_nodes.get(&src_nt) else {
             continue;
         };
-        let accept = ensure_path(
-            &mut dfa,
-            src_state,
-            &[
-                encode_positive_label(revealed_state),
-                encode_negative_label(revealed_state),
-                encode_negative_label(goto_state),
-                encode_negative_label(shift_state),
-            ],
-        );
-        dfa.set_accepting(accept, true);
+
+        let s0 = nfa.add_state();
+        let s1 = nfa.add_state();
+        let s2 = nfa.add_state();
+        let s3 = nfa.add_state();
+        let s4 = nfa.add_state();
+
+        nfa.add_epsilon(src_state, s0);
+        nfa.add_transition(s0, encode_positive_label(revealed_state), s1);
+        nfa.add_transition(s1, encode_negative_label(revealed_state), s2);
+        nfa.add_transition(s2, encode_negative_label(goto_state), s3);
+        nfa.add_transition(s3, encode_negative_label(shift_state), s4);
+        nfa.set_accepting(s4);
     }
 
+    // -- NT re-reduces --------------------------------------------------------
+    // src_nt --ε--> s0 --[+rev]--> (chain of DEFAULT pops) --> dst_nt
     for &(src_nt, revealed_state, pop_count, dst_nt) in &tc.nt_rereduces {
-        let (Some(&src_state), Some(&dst_state)) = (nt_nodes.get(&src_nt), nt_nodes.get(&dst_nt)) else {
+        let (Some(&src_state), Some(&dst_state)) =
+            (nt_nodes.get(&src_nt), nt_nodes.get(&dst_nt))
+        else {
             continue;
         };
-        let mut path = Vec::with_capacity(1 + pop_count);
-        path.push(encode_positive_label(revealed_state));
-        path.extend(std::iter::repeat(DEFAULT_LABEL).take(pop_count));
-        ensure_path_to_existing(&mut dfa, src_state, &path, dst_state);
-    }
 
-    dfa
-}
+        let s0 = nfa.add_state();
+        nfa.add_epsilon(src_state, s0);
 
-fn ensure_path(dfa: &mut UnweightedDfa, from: u32, labels: &[i32]) -> u32 {
-    let mut state = from;
-    for &label in labels {
-        let next = if let Some(&next) = dfa.states[state as usize].transitions.get(&label) {
-            next
+        let first_target = if pop_count == 0 {
+            dst_state
         } else {
-            let new_state = dfa.add_state();
-            dfa.add_transition(state, label, new_state);
-            new_state
+            nfa.add_state()
         };
-        state = next;
-    }
-    state
-}
+        nfa.add_transition(s0, encode_positive_label(revealed_state), first_target);
 
-fn ensure_path_to_existing(dfa: &mut UnweightedDfa, from: u32, labels: &[i32], target: u32) {
-    if labels.is_empty() {
-        return;
-    }
-
-    let mut state = from;
-    for &label in &labels[..labels.len() - 1] {
-        state = if let Some(&next) = dfa.states[state as usize].transitions.get(&label) {
-            next
-        } else {
-            let new_state = dfa.add_state();
-            dfa.add_transition(state, label, new_state);
-            new_state
-        };
-    }
-
-    let final_label = labels[labels.len() - 1];
-    if let Some(existing_target) = dfa.states[state as usize].transitions.get(&final_label).copied() {
-        merge_states(dfa, existing_target, target);
-    } else {
-        dfa.add_transition(state, final_label, target);
-    }
-}
-
-fn merge_states(dfa: &mut UnweightedDfa, keep: u32, merge: u32) {
-    if keep == merge {
-        return;
-    }
-
-    let merge_state = dfa.states[merge as usize].clone();
-    if merge_state.is_accepting {
-        dfa.set_accepting(keep, true);
-    }
-
-    for (label, target) in merge_state.transitions {
-        if let Some(existing_target) = dfa.states[keep as usize].transitions.get(&label).copied() {
-            merge_states(dfa, existing_target, target);
-        } else {
-            dfa.add_transition(keep, label, target);
+        let mut from = first_target;
+        for i in 0..pop_count {
+            let to = if i == pop_count - 1 {
+                dst_state
+            } else {
+                nfa.add_state()
+            };
+            nfa.add_transition(from, DEFAULT_LABEL, to);
+            from = to;
         }
     }
+
+    nfa
 }
