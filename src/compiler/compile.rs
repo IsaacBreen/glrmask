@@ -82,30 +82,29 @@ fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
 // ── Nullable terminal expansion ─────────────────────────────────────────────
 
 /// Rewrite grammar rules so that nullable terminals (those matching the empty
-/// string) are treated as optional.
+/// string) are treated as optional.  Operates in place on owned rule data.
 ///
-/// For each nullable terminal `T`, a fresh nonterminal `NT` is allocated with
-/// two productions: `NT → ε` and `NT → T`.  Every occurrence of `T` in the
-/// original grammar rules is replaced by `NT`.  The tokenizer's start-state
-/// finalizer for `T` is assumed to already be drained before this function is
-/// called.
+/// For each nullable terminal `T`, a fresh nonterminal `NT` is allocated
+/// (consuming from `*next_nt`) with two productions: `NT → ε` and `NT → T`.
+/// Every occurrence of `T` in the existing rules is replaced by `NT`.  The
+/// tokenizer's start-state finalizer for `T` is assumed to already be drained
+/// before this function is called.
 pub(crate) fn expand_nullable_terminals(
-    grammar: &GrammarDef,
+    rules: &mut Vec<Rule>,
+    next_nt: &mut u32,
     nullable_terminals: &std::collections::BTreeSet<TerminalID>,
-) -> GrammarDef {
+) {
     if nullable_terminals.is_empty() {
-        return grammar.clone();
+        return;
     }
-
-    let mut next_nt = grammar.num_nonterminals();
 
     // Map: nullable terminal id → fresh nonterminal id.
     let mut nt_for_terminal = std::collections::BTreeMap::<TerminalID, NonterminalID>::new();
     let mut extra_rules = Vec::new();
 
     for &tid in nullable_terminals {
-        let fresh_nt = next_nt;
-        next_nt += 1;
+        let fresh_nt = *next_nt;
+        *next_nt += 1;
         nt_for_terminal.insert(tid, fresh_nt);
 
         // NT → ε
@@ -120,32 +119,18 @@ pub(crate) fn expand_nullable_terminals(
         });
     }
 
-    // Rewrite existing rules: replace nullable Terminal(T) with Nonterminal(NT).
-    let mut new_rules: Vec<Rule> = grammar
-        .rules
-        .iter()
-        .map(|rule| Rule {
-            lhs: rule.lhs,
-            rhs: rule
-                .rhs
-                .iter()
-                .map(|sym| match sym {
-                    Symbol::Terminal(tid) if nt_for_terminal.contains_key(tid) => {
-                        Symbol::Nonterminal(nt_for_terminal[tid])
-                    }
-                    other => other.clone(),
-                })
-                .collect(),
-        })
-        .collect();
-
-    new_rules.extend(extra_rules);
-
-    GrammarDef {
-        rules: new_rules,
-        start: grammar.start,
-        terminals: grammar.terminals.clone(),
+    // Rewrite existing rules in place: replace nullable Terminal(T) with Nonterminal(NT).
+    for rule in rules.iter_mut() {
+        for sym in rule.rhs.iter_mut() {
+            if let Symbol::Terminal(tid) = sym {
+                if let Some(&nt) = nt_for_terminal.get(tid) {
+                    *sym = Symbol::Nonterminal(nt);
+                }
+            }
+        }
     }
+
+    rules.extend(extra_rules);
 }
 
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
@@ -156,12 +141,21 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     // Step 2: Drain nullable terminals from the tokenizer.
     let nullable_terminals = tokenizer.drain_nullable_terminals();
 
+    // Owned working copies of the grammar data.
+    let mut rules = grammar.rules.clone();
+    let start = grammar.start;
+    let terminals = grammar.terminals.clone();
+    let mut next_nt = grammar.num_nonterminals();
+
     // Step 3: Expand grammar rules to inline the optionality of nullable
-    //         terminals.
-    let expanded = expand_nullable_terminals(grammar, &nullable_terminals);
+    //         terminals (in place).
+    expand_nullable_terminals(&mut rules, &mut next_nt, &nullable_terminals);
 
     // Step 4: Normalize grammar (ε-elimination, right-recursion removal, etc.)
-    let normalized = normalize_grammar(&expanded);
+    normalize_grammar(&mut rules, start);
+
+    // Build the final GrammarDef for downstream consumers.
+    let normalized = GrammarDef { rules, start, terminals };
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
@@ -213,11 +207,20 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     // Step 2: Drain nullable terminals.
     let nullable_terminals = tokenizer.drain_nullable_terminals();
 
-    // Step 3: Expand grammar rules for nullable terminal optionality.
-    let expanded = expand_nullable_terminals(grammar, &nullable_terminals);
+    // Owned working copies of the grammar data.
+    let mut rules = grammar.rules.clone();
+    let start = grammar.start;
+    let terminals = grammar.terminals.clone();
+    let mut next_nt = grammar.num_nonterminals();
+
+    // Step 3: Expand grammar rules for nullable terminal optionality (in place).
+    expand_nullable_terminals(&mut rules, &mut next_nt, &nullable_terminals);
 
     // Step 4: Normalize grammar (ε-elimination, right-recursion removal, etc.)
-    let normalized = normalize_grammar(&expanded);
+    normalize_grammar(&mut rules, start);
+
+    // Build the final GrammarDef for downstream consumers.
+    let normalized = GrammarDef { rules, start, terminals };
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
@@ -550,9 +553,11 @@ mod tests {
     fn test_expand_nullable_terminals_no_nullables() {
         let gdef = simple_ab_grammar();
         let nullable = std::collections::BTreeSet::new();
-        let expanded = expand_nullable_terminals(&gdef, &nullable);
-        assert_eq!(expanded.rules.len(), gdef.rules.len());
-        assert_eq!(expanded.rules[0].rhs, gdef.rules[0].rhs);
+        let mut rules = gdef.rules.clone();
+        let mut next_nt = gdef.num_nonterminals();
+        expand_nullable_terminals(&mut rules, &mut next_nt, &nullable);
+        assert_eq!(rules.len(), gdef.rules.len());
+        assert_eq!(rules[0].rhs, gdef.rules[0].rhs);
     }
 
     #[test]
@@ -561,24 +566,26 @@ mod tests {
         // Expected: fresh NT2, S → NT2 t1, NT2 → ε, NT2 → t0
         let gdef = simple_ab_grammar(); // S → T0 T1, nonterminals: {0}
         let nullable = std::collections::BTreeSet::from([0u32]);
-        let expanded = expand_nullable_terminals(&gdef, &nullable);
+        let mut rules = gdef.rules.clone();
+        let mut next_nt = gdef.num_nonterminals();
+        expand_nullable_terminals(&mut rules, &mut next_nt, &nullable);
 
         // 1 rewritten original rule + 2 fresh-NT rules = 3 total.
-        assert_eq!(expanded.rules.len(), 3);
+        assert_eq!(rules.len(), 3);
 
         // The fresh NT id should be grammar.num_nonterminals() = 1.
         let fresh_nt = gdef.num_nonterminals();
 
         // S → NT_fresh t1
-        assert_eq!(expanded.rules[0].lhs, 0);
+        assert_eq!(rules[0].lhs, 0);
         assert_eq!(
-            expanded.rules[0].rhs,
+            rules[0].rhs,
             vec![Symbol::Nonterminal(fresh_nt), Symbol::Terminal(1)]
         );
 
         // NT_fresh → ε and NT_fresh → t0
         let fresh_rules: Vec<&Rule> =
-            expanded.rules.iter().filter(|r| r.lhs == fresh_nt).collect();
+            rules.iter().filter(|r| r.lhs == fresh_nt).collect();
         assert_eq!(fresh_rules.len(), 2);
         let rhs_set: std::collections::BTreeSet<Vec<Symbol>> =
             fresh_rules.iter().map(|r| r.rhs.clone()).collect();
@@ -593,17 +600,19 @@ mod tests {
         // S → NT1 NT2, NT1 → ε | t0, NT2 → ε | t1
         let gdef = simple_ab_grammar();
         let nullable = std::collections::BTreeSet::from([0u32, 1u32]);
-        let expanded = expand_nullable_terminals(&gdef, &nullable);
+        let mut rules = gdef.rules.clone();
+        let mut next_nt = gdef.num_nonterminals();
+        expand_nullable_terminals(&mut rules, &mut next_nt, &nullable);
 
         // 1 rewritten rule + 2*2 fresh-NT rules = 5 total.
-        assert_eq!(expanded.rules.len(), 5);
+        assert_eq!(rules.len(), 5);
 
         let nt0 = gdef.num_nonterminals();     // fresh NT for t0
         let nt1 = gdef.num_nonterminals() + 1; // fresh NT for t1
 
         // S → NT0 NT1
         assert_eq!(
-            expanded.rules[0].rhs,
+            rules[0].rhs,
             vec![Symbol::Nonterminal(nt0), Symbol::Nonterminal(nt1)]
         );
     }
@@ -616,12 +625,14 @@ mod tests {
         //   - A → NT_fresh (rewritten from A → t0).
         let gdef = two_nt_grammar(); // S → N1 T1, N1 → T0
         let nullable = std::collections::BTreeSet::from([0u32]);
-        let expanded = expand_nullable_terminals(&gdef, &nullable);
+        let mut rules = gdef.rules.clone();
+        let mut next_nt = gdef.num_nonterminals();
+        expand_nullable_terminals(&mut rules, &mut next_nt, &nullable);
 
         let fresh_nt = gdef.num_nonterminals(); // = 2
 
         // S → N1 T1 — N1 is a nonterminal, not rewritten.
-        let s_rules: Vec<&Rule> = expanded.rules.iter().filter(|r| r.lhs == 0).collect();
+        let s_rules: Vec<&Rule> = rules.iter().filter(|r| r.lhs == 0).collect();
         assert_eq!(s_rules.len(), 1);
         assert_eq!(
             s_rules[0].rhs,
@@ -629,13 +640,13 @@ mod tests {
         );
 
         // N1 → NT_fresh (was N1 → T0, T0 is nullable so replaced).
-        let n1_rules: Vec<&Rule> = expanded.rules.iter().filter(|r| r.lhs == 1).collect();
+        let n1_rules: Vec<&Rule> = rules.iter().filter(|r| r.lhs == 1).collect();
         assert_eq!(n1_rules.len(), 1);
         assert_eq!(n1_rules[0].rhs, vec![Symbol::Nonterminal(fresh_nt)]);
 
         // Fresh NT → ε and Fresh NT → T0.
         let fresh_rules: Vec<&Rule> =
-            expanded.rules.iter().filter(|r| r.lhs == fresh_nt).collect();
+            rules.iter().filter(|r| r.lhs == fresh_nt).collect();
         assert_eq!(fresh_rules.len(), 2);
     }
 
@@ -655,13 +666,15 @@ mod tests {
             }],
         };
         let nullable = std::collections::BTreeSet::from([0u32]);
-        let expanded = expand_nullable_terminals(&gdef, &nullable);
+        let mut rules = gdef.rules.clone();
+        let mut next_nt = gdef.num_nonterminals();
+        expand_nullable_terminals(&mut rules, &mut next_nt, &nullable);
 
         let fresh_nt = gdef.num_nonterminals(); // = 1
         // S → NT NT (same fresh NT for both positions) + 2 fresh-NT rules = 3.
-        assert_eq!(expanded.rules.len(), 3);
+        assert_eq!(rules.len(), 3);
         assert_eq!(
-            expanded.rules[0].rhs,
+            rules[0].rhs,
             vec![Symbol::Nonterminal(fresh_nt), Symbol::Nonterminal(fresh_nt)]
         );
     }

@@ -716,15 +716,16 @@ fn dedup_rules(rules: &mut Vec<Rule>) {
 // Each phase may introduce new productions or fresh nonterminals that
 // re-trigger earlier phases, hence the fixed-point loop.
 
-/// Run the full grammar normalization pipeline.
+/// Run the full grammar normalization pipeline (in place).
 ///
-/// Returns a new `GrammarDef` that satisfies the characterization
+/// Mutates `rules` so that they satisfy the characterization
 /// preconditions (no nullable NTs, no right recursion, no indirect LR).
-pub fn normalize_grammar(grammar: &GrammarDef) -> GrammarDef {
+/// `start` is used only for unreachable-production pruning and is never
+/// changed.
+pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     use std::cell::Cell;
 
-    let mut rules = grammar.rules.clone();
-    let next_nt = Cell::new(grammar.num_nonterminals());
+    let next_nt = Cell::new(max_nt_id(rules) + 1);
     let mut fresh_nt = || {
         let id = next_nt.get();
         next_nt.set(id + 1);
@@ -736,38 +737,32 @@ pub fn normalize_grammar(grammar: &GrammarDef) -> GrammarDef {
         let snap = rules.clone();
 
         // Phase 2: Inline null productions (ε-elimination)
-        rules = inline_null_productions(&rules, next_nt.get());
+        *rules = inline_null_productions(rules, next_nt.get());
 
         // Phase 3: Right-recursion elimination
-        eliminate_right_recursion(&mut rules, &mut fresh_nt);
+        eliminate_right_recursion(rules, &mut fresh_nt);
 
         // Phase 4: Hidden left-recursion elimination
-        let nullable = compute_nullable(&rules, next_nt.get());
-        eliminate_hidden_left_recursion(&mut rules, &nullable);
+        let nullable = compute_nullable(rules, next_nt.get());
+        eliminate_hidden_left_recursion(rules, &nullable);
 
         // Dedup before fixed-point check
-        dedup_rules(&mut rules);
+        dedup_rules(rules);
 
-        if rules == snap {
+        if *rules == snap {
             break;
         }
     }
 
     // Final ε-elimination pass (right-recursion conversion may
     // re-introduce ε-rules for fresh tail nonterminals)
-    rules = inline_null_productions(&rules, next_nt.get());
+    *rules = inline_null_productions(rules, next_nt.get());
 
     // Remove unreachable productions
-    rules = remove_unreachable_rules(&rules, grammar.start);
+    *rules = remove_unreachable_rules(rules, start);
 
     // Final dedup
-    dedup_rules(&mut rules);
-
-    GrammarDef {
-        rules,
-        start: grammar.start,
-        terminals: grammar.terminals.clone(),
-    }
+    dedup_rules(rules);
 }
 
 fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
@@ -1054,7 +1049,9 @@ mod tests {
             start: 0,
             terminals: vec![term(0, "a")],
         };
-        let norm = normalize_grammar(&gdef);
+        let mut rules = gdef.rules.clone();
+        normalize_grammar(&mut rules, gdef.start);
+        let norm = GrammarDef { rules, start: gdef.start, terminals: gdef.terminals.clone() };
         let g = AnalyzedGrammar::from_grammar_def(&norm);
         assert!(g.check_no_nullable_nonterminals().is_ok(),
             "after normalization no NT should be nullable");
@@ -1072,7 +1069,9 @@ mod tests {
             start: 0,
             terminals: vec![term(0, "a")],
         };
-        let norm = normalize_grammar(&gdef);
+        let mut rules = gdef.rules.clone();
+        normalize_grammar(&mut rules, gdef.start);
+        let norm = GrammarDef { rules, start: gdef.start, terminals: gdef.terminals.clone() };
         let g = AnalyzedGrammar::from_grammar_def(&norm);
         assert!(g.check_recursion_boundedness().is_ok(),
             "after normalization there should be no right recursion");
@@ -1097,7 +1096,9 @@ mod tests {
         let g_before = AnalyzedGrammar::from_grammar_def(&gdef);
         assert!(g_before.debug_check_grammar_preconditions().is_err());
 
-        let norm = normalize_grammar(&gdef);
+        let mut rules = gdef.rules.clone();
+        normalize_grammar(&mut rules, gdef.start);
+        let norm = GrammarDef { rules, start: gdef.start, terminals: gdef.terminals.clone() };
         let g = AnalyzedGrammar::from_grammar_def(&norm);
         assert!(g.debug_check_grammar_preconditions().is_ok(),
             "normalized grammar should pass all precondition checks");
