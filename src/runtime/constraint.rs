@@ -15,9 +15,6 @@ use crate::ds::leveled_gss::LeveledGSS;
 
 use super::state::ConstraintState;
 
-// SEP1_MAP: `PossibleMatchesByState` corresponds directly to sep1
-// `GrammarConstraint.possible_matches` in `grammars2024/src/constraint.rs`.
-// glrmask projects runtime lookups through `possible_matches_for_state()`.
 pub(crate) type TokenizerStateID = u32;
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
@@ -25,9 +22,6 @@ pub(crate) type PossibleMatchesByState =
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
-// SEP1_MAP: `Constraint` is the direct runtime-artifact analogue of sep1
-// `GrammarConstraint` in `grammars2024/src/constraint.rs`, but with sep1's
-// runtime responsibilities split away from build/config code.
 pub struct Constraint {
     
     
@@ -57,10 +51,6 @@ pub struct Constraint {
 }
 
 impl Constraint {
-    // SEP1_MAP: `start()` corresponds to sep1 `GrammarConstraint::init()` in
-    // `grammars2024/src/constraint.rs`; glrmask seeds the initial tokenizer
-    // state and parser GSS directly instead of delegating through sep1's GLR
-    // parser wrapper.
     
     pub fn start(&self) -> ConstraintState<'_> {
         
@@ -87,18 +77,11 @@ impl Constraint {
             .unwrap_or(0)
     }
 
-    // SEP1_MAP: nearest sep1 analogue is reading `GrammarConstraint.parser_dwa`
-    // directly from `grammars2024/src/constraint.rs`; no separate accessor there.
     
     pub(crate) fn parser_dwa(&self) -> &DWA {
         &self.parser_dwa
     }
 
-    // SEP1_MAP: this is the nearest local projection of sep1's `possible_matches`
-    // lookup: a tokenizer-state-indexed mapping from terminal to matching LLM tokens.
-    // Storage is still using the cleanup-era nested map, but runtime callers should
-    // prefer this projected surface over reaching into `terminal_tokens_by_state`
-    // directly.
     pub(crate) fn possible_matches_for_state(
         &self,
         tokenizer_state: u32,

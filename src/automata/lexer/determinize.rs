@@ -1,6 +1,5 @@
 //! NOTE: lexer NFA → DFA determinization is intentionally deferred until the
 //! sep1-style DFA rewrite.
-// SEP1_MAP: The nearest sep1 analogue is the lexer determinization work inside `dfa_u8/dfa.rs`; glrmask keeps the stage boundary in its own placeholder file.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 

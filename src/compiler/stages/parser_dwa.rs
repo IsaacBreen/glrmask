@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This file is the direct glrmask counterpart to sep1's `precompute4/parser_dwa.rs`, with the same high-level job but a much thinner current implementation.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -290,7 +289,6 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
     terminal_dwa: &TerminalDWA,
     id_map: &InternalIdMap,
 ) -> DWA {
-    // SEP1_MAP: Like sep1's parser-DWA builder, this stage composes terminal automata, template automata, and parser-table behavior into the final parser DWA.
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_token_id());
     let characterizations = characterize_terminals(table, grammar);
     let templates = Templates::from_characterizations(&characterizations);

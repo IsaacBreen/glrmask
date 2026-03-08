@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This stage matches sep1's `constraint_precompute.rs` terminal-DWA construction, extracted here as its own compiler phase.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -373,17 +372,6 @@ fn collapse_always_allowed(
     changed
 }
 
-// SEP1_MAP: This is the glrmask analogue of sep1's
-// `prune_nwa_disallowed_follows` in `constraint_precompute.rs`.
-// Sep1 uses a two-pass approach:
-//   Pass 1 (union): collect an upper-bound disallowed set per state.
-//   Pass 2 (intersection): narrow it to terminals disallowed on ALL
-//           incoming paths — only intersection-safe results are used
-//           for pruning.
-// The previous glrmask implementation used a single union pass, which
-// was over-aggressive: at states reachable from multiple predecessor
-// labels, it could prune transitions that were valid on at least one
-// path, producing false negatives in the mask.
 fn prune_disallowed_follows(
     terminal_dwa: &mut TerminalDWA,
     grammar: &AnalyzedGrammar,
@@ -617,7 +605,6 @@ pub(crate) fn build_terminal_dwa(
     vocab: &Vocab,
     id_map: &InternalIdMap,
 ) -> TerminalDWA {
-    // SEP1_MAP: sep1 folds this logic into the large terminal-precompute pipeline in `constraint_precompute.rs`; glrmask keeps the boundary here explicit.
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());

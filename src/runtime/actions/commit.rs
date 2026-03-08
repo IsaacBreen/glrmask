@@ -8,17 +8,11 @@ use crate::runtime::state::ConstraintState;
 use crate::compiler::glr::parser::advance_stacks;
 use crate::ds::leveled_gss::LeveledGSS;
 
-// SEP1_MAP: this file splits sep1 commit logic across the nearest pair
-// `grammars2024/src/constraint.rs::commit()` and
-// `grammars2024/src/constraint_fns.rs::commit_bytes()`.
 impl<'a> ConstraintState<'a> {
     pub fn commit(&mut self, token_id: u32) {
         self.commit_token(token_id)
     }
 
-    // SEP1_MAP: `commit_token()` is the direct analogue of sep1
-    // `GrammarConstraintState::commit()` in `grammars2024/src/constraint.rs`.
-    // glrmask keeps token commit separate from byte commit in this helper file.
     
     
     
@@ -45,13 +39,6 @@ impl<'a> ConstraintState<'a> {
             return;
         }
 
-        // SEP1_MAP: `compute_commit_maps()` — sep1 collects matched terminal
-        // IDs directly from the `TokenizerMatch::id` field and expands each
-        // through `mutually_greedy_group()`.  glrmask does not yet have greedy
-        // groups, so we collect `matched.id` directly; the previous version
-        // redundantly re-queried `all_matched_terminals(matched.end_state)`
-        // which performs an unnecessary DFA-state lookup for information already
-        // present in the match record.
         let mut state_map = BTreeMap::new();
         let mut terminals_map = BTreeMap::<u32, BTreeSet<u32>>::new();
         for (&tokenizer_state, _) in &self.state {
@@ -176,8 +163,6 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    // SEP1_MAP: no exact sep1 equivalent; sep1 callers usually loop over
-    // repeated `commit()` calls rather than using a dedicated batch helper.
     
     
     
@@ -187,10 +172,6 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    // SEP1_MAP: `process_bytes_raw()` is closest to sep1
-    // `GrammarConstraintState::commit_bytes()` in
-    // `grammars2024/src/constraint_fns.rs`, but glrmask factors the shared byte
-    // stepping engine under the public commit entrypoints.
     
     pub(crate) fn process_bytes_raw(&mut self, bytes: &[u8]) {
         self.commit_bytes(bytes)

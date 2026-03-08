@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: `GrammarDef`/`Rule`/`Symbol` are the closest glrmask analogue to sep1's `GrammarDefinition` plus `glr::grammar::{Production, Symbol}`, but flattened into compiler-local numeric IDs.
 
 use serde::{Deserialize, Serialize};
 

@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This file merges the grammar-analysis and normalization responsibilities sep1 keeps in `glr/analyze.rs` into one compiler-local pass over `GrammarDef`.
 
 use std::collections::{BTreeSet, BTreeMap};
 

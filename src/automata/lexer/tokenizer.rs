@@ -1,6 +1,5 @@
 //! NOTE: regex parsing and compilation helpers live in `tokenizer_regex.rs`.
 //! Keep this file focused on the runtime-facing tokenizer surface.
-// SEP1_MAP: This file maps most closely to sep1's `dfa_u8/tokenizer_ops.rs`, with the same tokenizer-stepping role split away from regex construction.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

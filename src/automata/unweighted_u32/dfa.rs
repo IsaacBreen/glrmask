@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This file is the direct glrmask analogue of sep1's `dfa_i32/dfa.rs`, reduced to the subset needed for template automata.
 
 use std::collections::BTreeMap;
 

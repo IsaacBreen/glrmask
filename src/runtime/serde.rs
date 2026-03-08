@@ -21,9 +21,6 @@ fn decode_ranges(ranges: Vec<[u32; 2]>) -> RangeSetBlaze<u32> {
         .collect()
 }
 
-// SEP1_MAP: this file is closest to sep1 cache serialization in
-// `grammars2024/src/constraint.rs::{save_to_cache,load_from_cache}`.
-// glrmask also keeps a custom serde helper here with no exact sep1 equivalent.
 
 pub(in crate::runtime) mod serde_btmap_rsb {
     use range_set_blaze::RangeSetBlaze;
@@ -65,9 +62,6 @@ pub(in crate::runtime) mod serde_btmap_rsb {
 }
 
 impl Constraint {
-    // SEP1_MAP: `save()` is the direct glrmask analogue of sep1
-    // `GrammarConstraint::save_to_cache()` in `grammars2024/src/constraint.rs`,
-    // but glrmask keeps the API byte-oriented instead of file-path-oriented.
     
     
     
@@ -75,9 +69,6 @@ impl Constraint {
         bincode::serialize(self).expect("Constraint serialization should succeed")
     }
 
-    // SEP1_MAP: `load()` is the direct glrmask analogue of sep1
-    // `GrammarConstraint::load_from_cache()` in `grammars2024/src/constraint.rs`,
-    // again using bytes instead of filesystem paths.
     
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
         bincode::deserialize(bytes)

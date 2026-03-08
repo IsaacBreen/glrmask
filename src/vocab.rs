@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: `Vocab` is the closest glrmask analogue to sep1's lightweight token-storage surface in `constraint_vocab.rs`, but stripped down to just the crate-facing entry list.
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Vocab {

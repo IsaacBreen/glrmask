@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This regex-to-automata build surface is closest to sep1's regex and tokenizer compilation flow spread across `finite_automata.rs` and `dfa_u8/dfa.rs`.
 
 use std::collections::HashMap;
 

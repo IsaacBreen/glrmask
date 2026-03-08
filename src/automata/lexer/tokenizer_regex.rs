@@ -1,6 +1,5 @@
 //! NOTE: tokenizer regex parsing and construction stay in this split-out file
 //! so `Tokenizer` remains focused on runtime stepping.
-// SEP1_MAP: sep1 does not keep this as one standalone file; the nearest pieces are spread across `interface/tokenizer_combinators.rs`, `interface/interface.rs`, and regex builders in `finite_automata.rs`.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

@@ -3,11 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This is the nearest analogue to sep1's `state_equivalence_analysis_fast.rs`.
-// It uses iterative partition refinement (essentially DFA minimization on the
-// tokenizer state space) to collapse states with identical terminal-match and
-// transition behaviour into equivalence classes.  The previous implementation
-// returned the identity mapping; this version gives real compression.
 
 use std::collections::BTreeMap;
 

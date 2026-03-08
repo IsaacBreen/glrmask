@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This file compresses the work sep1 spreads across `interface/json_schema/{mod,parser,convert,emit}.rs` into one crate-local importer.
 
 use std::collections::HashMap;
 

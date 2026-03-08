@@ -1,5 +1,4 @@
 //! Resolve negative parser-state labels in weighted NWAs.
-// SEP1_MAP: This placeholder stage corresponds directly to sep1's `precompute4/resolve_negatives.rs` cancellation and finality pass.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]

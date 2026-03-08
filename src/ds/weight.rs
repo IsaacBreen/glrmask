@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This file is the split-out glrmask analogue of sep1's weighted-token machinery around `dwa_i32::Weight` and related backing structures in `datastructures/`.
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};

@@ -5,13 +5,7 @@
 
 use crate::runtime::state::ConstraintState;
 
-// SEP1_MAP: this file corresponds to sep1 forcing logic in
-// `grammars2024/src/constraint.rs::force()`, but glrmask targets forced token
-// sequences instead of sep1's byte-prefix-first forcing flow.
 impl<'a> ConstraintState<'a> {
-    // SEP1_MAP: `force()` is a rewrite of sep1 `GrammarConstraintState::force()`.
-    // sep1 computes a tokenization-safe forced byte prefix first; glrmask's
-    // intended surface is token-level forcing directly.
     
     
     

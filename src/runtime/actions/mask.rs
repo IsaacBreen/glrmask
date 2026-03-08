@@ -32,8 +32,6 @@ impl Merge for AllowedWeight {
 
 type WeightedParserGSS = LeveledGSS<u32, AllowedWeight>;
 
-// SEP1_MAP: this file is the glrmask split of sep1 mask generation from
-// `grammars2024/src/constraint_fns.rs::{compute_internal_mask,get_mask,fill_mask_i32}`.
 impl<'a> ConstraintState<'a> {
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
@@ -129,9 +127,6 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        // SEP1_MAP: sep1 always removes EOS from the DWA-produced mask, then
-        // adds it back only if the parse is complete.  This prevents EOS from
-        // leaking through DWA weights when the grammar isn't actually finished.
         if let Some(eos_token_id) = self.constraint.eos_token_id {
             let word = eos_token_id as usize / 32;
             let bit = eos_token_id as usize % 32;

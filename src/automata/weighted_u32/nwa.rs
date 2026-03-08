@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This file corresponds to sep1's weighted NWA surface inside `dwa_i32`, but glrmask keeps `NWA` storage in its own file instead of sep1's denser module layout.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 

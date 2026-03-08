@@ -3,9 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: this helper is the closest glrmask analogue to the compiler-side
-// construction of sep1's `possible_matches` data that later feeds runtime mask
-// filtering.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

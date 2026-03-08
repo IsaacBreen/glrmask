@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This is the nearest glrmask analogue to sep1's `glr/parser.rs`, but kept as a lightweight compiler/test parser instead of the runtime parser state carried inside sep1 constraint execution.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

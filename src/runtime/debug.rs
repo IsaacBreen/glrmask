@@ -5,14 +5,7 @@
 
 use crate::runtime::Constraint;
 
-// SEP1_MAP: there is no clean sep1 runtime-debug module equivalent.
-// The nearest sep1 analogues are ad hoc debug helpers in
-// `grammars2024/src/constraint.rs` plus tracing/profiling in
-// `grammars2024/src/constraint_fns.rs`.
 impl Constraint {
-    // SEP1_MAP: `debug_dump()` has no direct sep1 counterpart; it is closest in
-    // role to sep1's scattered inspection helpers such as GSS formatting and
-    // terminal/DWA debug printing in `grammars2024/src/constraint.rs`.
     
     pub(crate) fn debug_dump(&self) {
         eprintln!("--- Constraint Debug Dump ---");
@@ -50,9 +43,6 @@ impl Constraint {
         eprintln!("--- End Debug Dump ---");
     }
 
-    // SEP1_MAP: `debug_tokenizer()` is closest to manually probing sep1
-    // `Tokenizer::execute_from_state()` in `grammars2024/src/dfa_u8/tokenizer_ops.rs`.
-    // sep1 does not expose this exact runtime helper method.
     
     pub(crate) fn debug_tokenizer(&self, input: &[u8], start_state: u32) {
         let result = self.tokenizer.execute_all_matches(input, start_state);
@@ -83,9 +73,6 @@ impl Constraint {
         }
     }
 
-    // SEP1_MAP: nearest sep1 analogue is `Tokenizer::initial_state_id()` in
-    // `grammars2024/src/dfa_u8/tokenizer_ops.rs`; glrmask exposes it through the
-    // compiled constraint for runtime debugging.
     
     pub(crate) fn tokenizer_initial_state(&self) -> u32 {
         self.tokenizer.initial_state_id()

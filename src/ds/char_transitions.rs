@@ -3,9 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This is the direct glrmask port of sep1's compact byte-keyed
-// transition map from `grammars2024/src/datastructures/char_transitions.rs`,
-// trimmed to the serde/runtime surface glrmask currently needs.
 
 use std::fmt;
 use std::ops::{Index, IndexMut};

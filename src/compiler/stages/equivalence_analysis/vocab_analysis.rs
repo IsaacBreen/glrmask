@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This is the closest glrmask analogue to sep1's vocab-equivalence passes in `equivalence_analysis/`, but simplified down to byte-identical token grouping.
 
 use std::collections::BTreeMap;
 

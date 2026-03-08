@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: `BitSet` is the direct glrmask analogue of sep1's compact bitset type in `datastructures/bitset.rs`.
 
 use serde::{Deserialize, Serialize};
 

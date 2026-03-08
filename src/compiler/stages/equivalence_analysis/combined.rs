@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// SEP1_MAP: This corresponds most closely to sep1's `combined_equivalence_analysis.rs`, but only returns the compact internal-ID maps glrmask's compiler consumes.
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;

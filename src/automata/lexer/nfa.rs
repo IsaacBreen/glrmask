@@ -1,7 +1,6 @@
 //! NOTE: this file is intentionally gutted.
 //! Reintroduce only the minimal lexer NFA needed as input to the future
 //! sep1-style DFA pipeline.
-// SEP1_MAP: This placeholder corresponds directly to the NFA half of sep1's `dfa_u8/dfa.rs`.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
