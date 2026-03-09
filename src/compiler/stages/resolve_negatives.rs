@@ -363,8 +363,31 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
+
+    let phase_started_at = std::time::Instant::now();
     apply_cancellations(nwa);
+    let apply_cancellations_time = phase_started_at.elapsed();
+
+    let phase_started_at = std::time::Instant::now();
     apply_finality_fixpoint(nwa);
+    let apply_finality_fixpoint_time = phase_started_at.elapsed();
+
+    let phase_started_at = std::time::Instant::now();
     remove_negative_transitions(nwa);
+    let remove_negative_transitions_time = phase_started_at.elapsed();
+
+    let phase_started_at = std::time::Instant::now();
     remove_redundant_default_transitions(nwa);
+    let remove_redundant_default_transitions_time = phase_started_at.elapsed();
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] resolve_negative_codes_detail apply_cancellations_ms={:.3} apply_finality_fixpoint_ms={:.3} remove_negative_transitions_ms={:.3} remove_redundant_default_transitions_ms={:.3}",
+            apply_cancellations_time.as_secs_f64() * 1000.0,
+            apply_finality_fixpoint_time.as_secs_f64() * 1000.0,
+            remove_negative_transitions_time.as_secs_f64() * 1000.0,
+            remove_redundant_default_transitions_time.as_secs_f64() * 1000.0,
+        );
+    }
 }

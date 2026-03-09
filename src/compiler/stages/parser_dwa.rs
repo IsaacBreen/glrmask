@@ -3,7 +3,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -26,7 +27,8 @@ type Bundle = BTreeMap<TerminalID, Weight>;
 #[derive(Debug, Clone)]
 struct Branch {
     target: u32,
-    bundle: NWA,
+    bundle_id: usize,
+    bundle: Arc<NWA>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,21 +99,75 @@ fn build_state_summaries(
     grammar: &AnalyzedGrammar,
     templates: &Templates,
 ) -> Vec<StateSummary> {
-    terminal_dwa
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
+    let mut group_targets_time = std::time::Duration::ZERO;
+    let mut build_bundle_time = std::time::Duration::ZERO;
+    let mut bundle_count = 0usize;
+    let mut unique_bundle_targets = HashSet::new();
+    let mut bundle_cache: HashMap<Vec<(TerminalID, Weight)>, (usize, Arc<NWA>)> = HashMap::new();
+    let mut bundle_cache_hits = 0usize;
+    let mut next_bundle_id = 0usize;
+
+    let summaries: Vec<StateSummary> = terminal_dwa
         .states
         .iter()
         .enumerate()
-        .map(|(state_id, state)| StateSummary {
-            final_weight: state.final_weight.clone(),
-            branches: group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32)
+        .map(|(state_id, state)| {
+            let phase_started_at = std::time::Instant::now();
+            let groups = group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32);
+            group_targets_time += phase_started_at.elapsed();
+
+            let branches = groups
                 .into_iter()
-                .map(|(target, bundle)| Branch {
-                    target,
-                    bundle: templates.build_bundle(&bundle),
+                .map(|(target, bundle)| {
+                    bundle_count += 1;
+                    let bundle_key: Vec<(TerminalID, Weight)> = bundle
+                        .iter()
+                        .map(|(&terminal, weight)| (terminal, weight.clone()))
+                        .collect();
+                    let phase_started_at = std::time::Instant::now();
+                    let (bundle_id, built_bundle) = if let Some((bundle_id, existing)) = bundle_cache.get(&bundle_key) {
+                        bundle_cache_hits += 1;
+                        (*bundle_id, Arc::clone(existing))
+                    } else {
+                        let bundle_id = next_bundle_id;
+                        next_bundle_id += 1;
+                        let built_bundle = Arc::new(templates.build_bundle(&bundle));
+                        bundle_cache.insert(bundle_key, (bundle_id, Arc::clone(&built_bundle)));
+                        (bundle_id, built_bundle)
+                    };
+                    if profile_enabled {
+                        unique_bundle_targets.insert((target, bundle_id));
+                    }
+                    build_bundle_time += phase_started_at.elapsed();
+                    Branch {
+                        target,
+                        bundle_id,
+                        bundle: built_bundle,
+                    }
                 })
-                .collect(),
+                .collect();
+
+            StateSummary {
+                final_weight: state.final_weight.clone(),
+                branches,
+            }
         })
-        .collect()
+        .collect();
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] build_state_summaries_detail group_targets_ms={:.3} build_bundle_ms={:.3} bundles={} unique_bundles={} unique_bundle_targets={} bundle_cache_hits={}",
+            group_targets_time.as_secs_f64() * 1000.0,
+            build_bundle_time.as_secs_f64() * 1000.0,
+            bundle_count,
+            bundle_cache.len(),
+            unique_bundle_targets.len(),
+            bundle_cache_hits,
+        );
+    }
+
+    summaries
 }
 
 fn concatenate_nwas(left: &NWA, right: &NWA) -> Option<NWA> {
@@ -155,7 +211,7 @@ fn compose_state(
         let Some(continuation) = compose_state(branch.target, states, memo) else {
             continue;
         };
-        let Some(branch_with_continuation) = concatenate_nwas(&branch.bundle, &continuation) else {
+        let Some(branch_with_continuation) = concatenate_nwas(branch.bundle.as_ref(), &continuation) else {
             continue;
         };
         union_optional_nwa(&mut composed, branch_with_continuation);
@@ -183,23 +239,86 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
     tokenizer: &Tokenizer,
     terminal_dwa: &DWA,
 ) -> DWA {
-    let characterizations = characterize_terminals(table, grammar);
-    let templates = Templates::from_characterizations(&characterizations);
-    let states = build_state_summaries(terminal_dwa, grammar, &templates);
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
+    let total_started_at = std::time::Instant::now();
 
+    let phase_started_at = std::time::Instant::now();
+    let characterizations = characterize_terminals(table, grammar);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] characterize_terminals_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    let templates = Templates::from_characterizations(&characterizations);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] build_templates_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    let states = build_state_summaries(terminal_dwa, grammar, &templates);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] build_state_summaries_ms={:.3} states={}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0,
+            states.len(),
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     let mut memo = BTreeMap::new();
     let Some(mut parser_nwa) = compose_state(terminal_dwa.start_state, &states, &mut memo)
     else {
         return DWA::new(0, 0);
     };
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] compose_state_ms={:.3} memo_entries={} nwa_states={}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0,
+            memo.len(),
+            parser_nwa.states.len(),
+        );
+    }
 
+    let phase_started_at = std::time::Instant::now();
     resolve_negative_codes_in_nwa(&mut parser_nwa);
-    parser_nwa.subtract_final_weights_from_outgoing();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] resolve_negative_codes_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
+    let phase_started_at = std::time::Instant::now();
+    parser_nwa.subtract_final_weights_from_outgoing();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] subtract_final_weights_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     let core_dwa = minimize(
         &determinize(&parser_nwa)
             .expect("parser NWA determinization failed despite acyclic terminal/template composition"),
     );
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} dwa_states={}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0,
+            core_dwa.states.len(),
+        );
+        eprintln!(
+            "[glrmask/profile][parser_dwa] total_ms={:.3}",
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     core_dwa
 }
