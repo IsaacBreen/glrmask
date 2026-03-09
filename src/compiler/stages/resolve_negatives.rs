@@ -405,3 +405,50 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::glr::labels::{encode_negative_label, encode_positive_label};
+
+    fn weight_1() -> Weight {
+        Weight::from_compact_ranges([(1..=1, [1..=1])])
+    }
+
+    fn weight_12() -> Weight {
+        Weight::from_compact_ranges([(1..=2, [1..=2])])
+    }
+
+    #[test]
+    fn test_compute_cancellations_widens_existing_eps_query() {
+        let mut nwa = NWA::new(0, 0);
+        for _ in 0..3 {
+            nwa.add_state();
+        }
+
+        let neg1 = encode_negative_label(1);
+        let pos1 = encode_positive_label(1);
+
+        nwa.add_transition(0, neg1, 0, weight_1());
+        nwa.add_transition(0, neg1, 2, weight_12());
+        nwa.add_epsilon(0, 1, weight_1());
+        nwa.add_transition(1, pos1, 2, weight_12());
+        nwa.add_transition(2, pos1, 1, weight_12());
+        nwa.add_epsilon(2, 0, weight_12());
+
+        let cancellations = compute_cancellations(&nwa);
+
+        assert!(
+            cancellations
+                .iter()
+                .any(|(from, to, w)| *from == 0 && *to == 2 && *w == weight_12()),
+            "expected widened epsilon 0->2 with weight_12"
+        );
+        assert!(
+            !cancellations
+                .iter()
+                .any(|(from, to, w)| *from == 0 && *to == 2 && *w == weight_1()),
+            "narrower 0->2 weight_1 should have been widened away"
+        );
+    }
+}
