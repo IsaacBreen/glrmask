@@ -545,6 +545,50 @@ mod tests {
         assert!(state.is_finished(), "should accept after 'abc'");
     }
 
+    #[test]
+    fn test_commit_preserves_longer_terminal_continuation_after_shorter_match() {
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(1)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"ab".to_vec(),
+                },
+            ],
+        };
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
+        assert!(!mask_has_token(&mask, 1), "token 'b' should not be allowed initially");
+
+        state.commit_token(0);
+        assert!(
+            !state.is_finished(),
+            "the shorter literal 'a' should not complete a grammar expecting 'ab'"
+        );
+
+        let mask = state.mask();
+        assert!(
+            mask_has_token(&mask, 1),
+            "token 'b' should remain allowed as a continuation of the longer literal 'ab'"
+        );
+
+        state.commit_token(1);
+        assert!(state.is_finished(), "should accept after committing 'ab' byte by byte");
+    }
+
     // ── Nullable terminal expansion tests ───────────────────────────────────
 
     #[test]

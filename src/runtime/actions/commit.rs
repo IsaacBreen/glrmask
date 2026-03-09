@@ -150,13 +150,11 @@ impl<'a> ConstraintState<'a> {
                     }
                 }
 
-                if exec_result.matches.is_empty() {
-                    if let Some(end_state) = exec_result.end_state {
+                if let Some(end_state) = exec_result.end_state {
                     new_overall_state
                         .entry(end_state)
                         .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
                         .or_insert(gss_at_offset);
-                    }
                 }
             }
         }
