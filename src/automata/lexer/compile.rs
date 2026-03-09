@@ -38,6 +38,98 @@ fn expr_u8set(expr: &Expr) -> U8Set {
     }
 }
 
+fn highest_power_of_two_leq(value: usize) -> usize {
+    debug_assert!(value > 0);
+    1usize << (usize::BITS - value.leading_zeros() - 1)
+}
+
+fn compile_repeat_power_cps(
+    expr: &Expr,
+    copies: usize,
+    nfa: &mut NFA,
+    end: u32,
+    cache: &mut HashMap<(usize, u32), u32>,
+) -> u32 {
+    debug_assert!(copies.is_power_of_two());
+
+    if let Some(&start) = cache.get(&(copies, end)) {
+        return start;
+    }
+
+    let start = if copies == 1 {
+        let start = nfa.add_state();
+        compile_expr(expr, nfa, start, end);
+        start
+    } else {
+        let half = copies / 2;
+        let suffix_start = compile_repeat_power_cps(expr, half, nfa, end, cache);
+        compile_repeat_power_cps(expr, half, nfa, suffix_start, cache)
+    };
+
+    cache.insert((copies, end), start);
+    start
+}
+
+fn compile_repeat_exact_cps(
+    expr: &Expr,
+    copies: usize,
+    nfa: &mut NFA,
+    end: u32,
+    power_cache: &mut HashMap<(usize, u32), u32>,
+) -> u32 {
+    if copies == 0 {
+        return end;
+    }
+
+    let largest_power = highest_power_of_two_leq(copies);
+    let suffix_start = compile_repeat_exact_cps(expr, copies - largest_power, nfa, end, power_cache);
+    compile_repeat_power_cps(expr, largest_power, nfa, suffix_start, power_cache)
+}
+
+fn compile_repeat_upto_cps(
+    expr: &Expr,
+    copies: usize,
+    nfa: &mut NFA,
+    end: u32,
+    power_cache: &mut HashMap<(usize, u32), u32>,
+    upto_cache: &mut HashMap<(usize, u32), u32>,
+) -> u32 {
+    if copies == 0 {
+        return end;
+    }
+
+    if let Some(&start) = upto_cache.get(&(copies, end)) {
+        return start;
+    }
+
+    let largest_power = highest_power_of_two_leq(copies);
+    let split = nfa.add_state();
+
+    let smaller_start = compile_repeat_upto_cps(
+        expr,
+        largest_power - 1,
+        nfa,
+        end,
+        power_cache,
+        upto_cache,
+    );
+    nfa.add_epsilon(split, smaller_start);
+
+    let suffix_start = compile_repeat_upto_cps(
+        expr,
+        copies - largest_power,
+        nfa,
+        end,
+        power_cache,
+        upto_cache,
+    );
+    let power_start = compile_repeat_power_cps(expr, largest_power, nfa, suffix_start, power_cache);
+    nfa.add_epsilon(split, power_start);
+
+    upto_cache.insert((copies, end), split);
+    split
+}
+
 fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
     match expr {
         Expr::U8Seq(bytes) => {
@@ -82,25 +174,35 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
             }
         }
         Expr::Repeat { expr, min, max } => {
-            let mut current = start;
-            for _ in 0..*min {
-                let next = nfa.add_state();
-                compile_expr(expr, nfa, current, next);
-                current = next;
-            }
-
             match max {
                 Some(max) => {
-                    let optional = max.saturating_sub(*min);
-                    for _ in 0..optional {
-                        nfa.add_epsilon(current, end);
+                    if *max < *min {
+                        return;
+                    }
+
+                    let optional = max - min;
+                    let mut power_cache = HashMap::new();
+                    let mut upto_cache = HashMap::new();
+                    let tail_start = compile_repeat_upto_cps(
+                        expr,
+                        optional,
+                        nfa,
+                        end,
+                        &mut power_cache,
+                        &mut upto_cache,
+                    );
+                    let repeat_start =
+                        compile_repeat_exact_cps(expr, *min, nfa, tail_start, &mut power_cache);
+                    nfa.add_epsilon(start, repeat_start);
+                }
+                None => {
+                    let mut current = start;
+                    for _ in 0..*min {
                         let next = nfa.add_state();
                         compile_expr(expr, nfa, current, next);
                         current = next;
                     }
-                    nfa.add_epsilon(current, end);
-                }
-                None => {
+
                     nfa.add_epsilon(current, end);
                     let loop_state = nfa.add_state();
                     compile_expr(expr, nfa, current, loop_state);
@@ -168,4 +270,55 @@ pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
         nfa.add_finalizer(accept, group_id as u32);
     }
     nfa
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::regex::{byte, bytes, choice, repeat};
+
+    fn accepts(regex: &Regex, input: &[u8]) -> bool {
+        let mut state = 0;
+        for &byte in input {
+            let Some(next) = regex.step(state, byte) else {
+                return false;
+            };
+            state = next;
+        }
+        regex.dfa.finalizers(state).contains(0)
+    }
+
+    #[test]
+    fn test_bounded_repeat_accepts_only_exact_count() {
+        let regex = repeat(bytes(b"ab"), 4, Some(4)).build();
+
+        assert!(!accepts(&regex, b""));
+        assert!(!accepts(&regex, b"ababab"));
+        assert!(accepts(&regex, b"abababab"));
+        assert!(!accepts(&regex, b"ababababab"));
+    }
+
+    #[test]
+    fn test_bounded_repeat_accepts_required_and_optional_range() {
+        let regex = repeat(choice(vec![bytes(b"ab"), bytes(b"cd")]), 2, Some(5)).build();
+
+        assert!(!accepts(&regex, b""));
+        assert!(!accepts(&regex, b"ab"));
+        assert!(accepts(&regex, b"abcd"));
+        assert!(accepts(&regex, b"ababcd"));
+        assert!(accepts(&regex, b"abcdabcd"));
+        assert!(accepts(&regex, b"abcdababcd"));
+        assert!(!accepts(&regex, b"abcdababcdab"));
+    }
+
+    #[test]
+    fn test_bounded_repeat_zero_to_range_accepts_expected_lengths() {
+        let regex = repeat(byte(b'a'), 0, Some(7)).build();
+
+        for len in 0..=7 {
+            assert!(accepts(&regex, &vec![b'a'; len]), "expected len={} to match", len);
+        }
+        assert!(!accepts(&regex, b"aaaaaaaa"));
+        assert!(!accepts(&regex, b"aaaab"));
+    }
 }
