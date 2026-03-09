@@ -181,20 +181,16 @@ fn from_ebnf_with_debug(
 }
 
 fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
-    let _ = (lark, vocab);
-    Err(crate::GlrMaskError::Compilation(
-        "Lark import is not implemented yet".into(),
-    ))
+    let grammar = lark::parse_lark(lark)?;
+    Ok(compile(&grammar, vocab))
 }
 
 fn from_lark_with_debug(
     lark: &str,
     vocab: &crate::Vocab,
 ) -> crate::Result<(Constraint, CompileDebug)> {
-    let _ = (lark, vocab);
-    Err(crate::GlrMaskError::Compilation(
-        "Lark import with debug is not implemented yet".into(),
-    ))
+    let grammar = lark::parse_lark(lark)?;
+    Ok(compile_with_debug(&grammar, vocab))
 }
 
 fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
