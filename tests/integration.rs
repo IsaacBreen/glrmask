@@ -148,6 +148,16 @@ fn test_lark_choice() {
     assert!(token_allowed(&mask, 0) && token_allowed(&mask, 1));
 }
 
+#[test]
+fn test_lark_singleton_char_class_initial_mask() {
+    let vocab = make_vocab(&["1"]);
+    let c = Constraint::from_lark(r#"start: /[1]/"#, &vocab).unwrap();
+    let s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'1' should be allowed for /[1]/");
+}
+
 // ====================================================================
 // JSON Schema integration tests
 // ====================================================================
