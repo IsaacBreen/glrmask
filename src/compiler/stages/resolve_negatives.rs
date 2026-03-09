@@ -194,6 +194,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
             }
         }
     }
+
     result
 }
 

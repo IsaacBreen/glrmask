@@ -134,6 +134,87 @@ fn compact_entries(weight: &Weight) -> Vec<WeightRangeEntry> {
         .collect()
 }
 
+fn single_compact_entry(weight: &Weight) -> Option<WeightRangeEntry> {
+    let mut entries = weight.0.range_values();
+    let (range, tokens) = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    Some(WeightRangeEntry {
+        start: *range.start(),
+        end: *range.end(),
+        tokens: Arc::clone(tokens),
+    })
+}
+
+fn insert_boundary(boundaries: &mut [u64; 4], len: &mut usize, value: u64) {
+    let mut pos = 0usize;
+    while pos < *len && boundaries[pos] < value {
+        pos += 1;
+    }
+    if pos < *len && boundaries[pos] == value {
+        return;
+    }
+    let mut i = *len;
+    while i > pos {
+        boundaries[i] = boundaries[i - 1];
+        i -= 1;
+    }
+    boundaries[pos] = value;
+    *len += 1;
+}
+
+fn combine_single_entries<F>(
+    left: &WeightRangeEntry,
+    right: &WeightRangeEntry,
+    mut combine: F,
+) -> Weight
+where
+    F: FnMut(
+        Option<&Arc<RangeSetBlaze<u32>>>,
+        Option<&Arc<RangeSetBlaze<u32>>>,
+    ) -> Option<Arc<RangeSetBlaze<u32>>>,
+{
+    let mut boundaries = [0u64; 4];
+    let mut len = 0usize;
+    insert_boundary(&mut boundaries, &mut len, u64::from(left.start));
+    insert_boundary(&mut boundaries, &mut len, u64::from(left.end) + 1);
+    insert_boundary(&mut boundaries, &mut len, u64::from(right.start));
+    insert_boundary(&mut boundaries, &mut len, u64::from(right.end) + 1);
+
+    if len < 2 {
+        return Weight::empty();
+    }
+
+    let mut map = RangeMapBlaze::new();
+    let mut pending_start = None;
+    let mut pending_end = 0u32;
+    let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
+
+    for i in 0..(len - 1) {
+        let start = boundaries[i] as u32;
+        let end = (boundaries[i + 1] - 1) as u32;
+        let left_tokens = (left.start <= start && start <= left.end).then_some(&left.tokens);
+        let right_tokens = (right.start <= start && start <= right.end).then_some(&right.tokens);
+        let Some(tokens) = combine(left_tokens, right_tokens) else {
+            flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
+            continue;
+        };
+        push_compact_range(
+            &mut map,
+            &mut pending_start,
+            &mut pending_end,
+            &mut pending_tokens,
+            start,
+            end,
+            tokens,
+        );
+    }
+
+    flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
+    Weight(map)
+}
+
 fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> Vec<u64> {
     let mut boundaries = Vec::with_capacity((left.len() + right.len()) * 2);
     for entry in left.iter().chain(right.iter()) {
@@ -345,6 +426,19 @@ impl Weight {
         if other.is_empty() {
             return self.clone();
         }
+        if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
+            return combine_single_entries(&left, &right, |left, right| match (left, right) {
+                (Some(left_tokens), Some(right_tokens)) => {
+                    if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
+                        Some(Arc::clone(left_tokens))
+                    } else {
+                        Some(shared_rangeset(left_tokens.as_ref().clone() | right_tokens.as_ref().clone()))
+                    }
+                }
+                (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
+                (None, None) => None,
+            });
+        }
         combine_compact_entries(self, other, |left, right| match (left, right) {
             (Some(left_tokens), Some(right_tokens)) => {
                 if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
@@ -395,6 +489,19 @@ impl Weight {
         }
         if other.is_full() {
             return self.clone();
+        }
+        if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
+            return combine_single_entries(&left, &right, |left, right| match (left, right) {
+                (Some(left_tokens), Some(right_tokens)) => {
+                    if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
+                        Some(Arc::clone(left_tokens))
+                    } else {
+                        let tokens = left_tokens.as_ref().clone() & right_tokens.as_ref().clone();
+                        (!tokens.is_empty()).then(|| shared_rangeset(tokens))
+                    }
+                }
+                _ => None,
+            });
         }
         combine_compact_entries(self, other, |left, right| match (left, right) {
             (Some(left_tokens), Some(right_tokens)) => {
