@@ -358,16 +358,24 @@ fn test_json_schema_allows_name_after_brace_newline_space_quote_prefix() {
 /// Ported from `test_newsletter_schema_disallows_quote_colon_minus`.
 #[test]
 fn test_json_schema_name_prefix_disallows_quote_colon_minus_token() {
-    // Keep this schema minimal: the assertion is about object-key prefix masking,
-    // not large string length bounds, and big `minLength`/`maxLength` ranges make
-    // JSON Schema compilation pathologically slow here.
     let schema = r#"{
         "type": "object",
+        "title": "Newsletter Subscription",
         "properties": {
-            "name": {"type": "string"}
+            "name": {"type": "string", "minLength": 8, "maxLength": 80},
+            "email": {"type": "string", "maxLength": 120},
+            "lists": {"type": "string", "enum": ["Daily New", "Promotion"]}
         },
         "additionalProperties": false,
-        "required": ["name"]
+        "required": ["name", "email", "lists"],
+        "x-guidance": {
+            "item_separator": ", ",
+            "key_separator": ": ",
+            "whitespace_flexible": false,
+            "whitespace_pattern": null,
+            "coerce_one_of": false,
+            "lenient": false
+        }
     }"#;
     let vocab = Vocab::new(
         vec![
