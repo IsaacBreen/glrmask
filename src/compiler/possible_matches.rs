@@ -60,13 +60,25 @@ fn possible_matches_for_node(
     let mut result = BTreeMap::new();
 
     if let Some(token_id) = node.token_id {
+        let token_range = RangeSetBlaze::from_iter([token_id..=token_id]);
         for terminal in tokenizer.all_matched_terminals(tokenizer_state) {
             result
                 .entry(terminal)
                 .and_modify(|existing: &mut RangeSetBlaze<u32>| {
-                    *existing = existing.clone() | RangeSetBlaze::from_iter([token_id..=token_id])
+                    *existing = existing.clone() | token_range.clone()
                 })
-                .or_insert_with(|| RangeSetBlaze::from_iter([token_id..=token_id]));
+                .or_insert_with(|| token_range.clone());
+        }
+
+        let matched = tokenizer.all_matched_terminals(tokenizer_state);
+        for terminal in tokenizer.tokens_accessible_from_state(tokenizer_state) {
+            if matched.contains(&terminal) {
+                continue;
+            }
+            result
+                .entry(terminal)
+                .and_modify(|existing| *existing = existing.clone() | token_range.clone())
+                .or_insert_with(|| token_range.clone());
         }
     }
 

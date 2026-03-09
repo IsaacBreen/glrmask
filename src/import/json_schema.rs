@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
@@ -12,6 +12,11 @@ use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
 fn literal_expr(bytes: &[u8]) -> GrammarExpr {
     GrammarExpr::Literal(bytes.to_vec())
 }
+
+const JSON_VALUE_RULE: &str = "__json_value";
+const JSON_ARRAY_RULE: &str = "__json_array";
+const JSON_OBJECT_RULE: &str = "__json_object";
+const JSON_MEMBER_RULE: &str = "__json_member";
 
 fn value_to_expr(value: &serde_json::Value) -> Result<GrammarExpr, GlrMaskError> {
     let rendered = serde_json::to_string(value)
@@ -136,6 +141,7 @@ struct SchemaCtx {
     sub_rules: Vec<(String, GrammarExpr)>,
     counter: usize,
     defs: HashMap<String, serde_json::Value>,
+    defined_rules: HashSet<String>,
 }
 
 impl SchemaCtx {
@@ -149,6 +155,7 @@ impl SchemaCtx {
             sub_rules: Vec::new(),
             counter: 0,
             defs,
+            defined_rules: HashSet::new(),
         }
     }
 
@@ -158,9 +165,103 @@ impl SchemaCtx {
         name
     }
 
+    fn push_rule(&mut self, name: impl Into<String>, expr: GrammarExpr) -> String {
+        let name = name.into();
+        self.sub_rules.push((name.clone(), expr));
+        name
+    }
+
+    fn json_value_ref(&mut self) -> GrammarExpr {
+        self.ensure_json_value_rule();
+        GrammarExpr::Ref(JSON_VALUE_RULE.into())
+    }
+
+    fn json_array_ref(&mut self) -> GrammarExpr {
+        self.ensure_json_array_rule();
+        GrammarExpr::Ref(JSON_ARRAY_RULE.into())
+    }
+
+    fn json_object_ref(&mut self) -> GrammarExpr {
+        self.ensure_json_object_rule();
+        GrammarExpr::Ref(JSON_OBJECT_RULE.into())
+    }
+
+    fn ensure_json_value_rule(&mut self) {
+        if !self.defined_rules.insert(JSON_VALUE_RULE.into()) {
+            return;
+        }
+        self.ensure_json_array_rule();
+        self.ensure_json_object_rule();
+        let json_string = self.json_string();
+        let json_number = self.json_number();
+        self.push_rule(
+            JSON_VALUE_RULE,
+            choice_or_single(vec![
+                literal_expr(b"null"),
+                literal_expr(b"true"),
+                literal_expr(b"false"),
+                json_string,
+                json_number,
+                GrammarExpr::Ref(JSON_ARRAY_RULE.into()),
+                GrammarExpr::Ref(JSON_OBJECT_RULE.into()),
+            ]),
+        );
+    }
+
+    fn ensure_json_member_rule(&mut self) {
+        if !self.defined_rules.insert(JSON_MEMBER_RULE.into()) {
+            return;
+        }
+        let key = self.json_string();
+        let value = self.json_value_ref();
+        self.push_rule(
+            JSON_MEMBER_RULE,
+            sequence_or_single(vec![key, literal_expr(b":"), value]),
+        );
+    }
+
+    fn ensure_json_array_rule(&mut self) {
+        if !self.defined_rules.insert(JSON_ARRAY_RULE.into()) {
+            return;
+        }
+        let item = self.json_value_ref();
+        self.push_rule(
+            JSON_ARRAY_RULE,
+            choice_or_single(vec![
+                literal_expr(b"[]"),
+                sequence_or_single(vec![
+                    literal_expr(b"["),
+                    item.clone(),
+                    repeat_expr(sequence_or_single(vec![literal_expr(b","), item]), 0, None),
+                    literal_expr(b"]"),
+                ]),
+            ]),
+        );
+    }
+
+    fn ensure_json_object_rule(&mut self) {
+        if !self.defined_rules.insert(JSON_OBJECT_RULE.into()) {
+            return;
+        }
+        self.ensure_json_member_rule();
+        let member = GrammarExpr::Ref(JSON_MEMBER_RULE.into());
+        self.push_rule(
+            JSON_OBJECT_RULE,
+            choice_or_single(vec![
+                literal_expr(b"{}"),
+                sequence_or_single(vec![
+                    literal_expr(b"{"),
+                    member.clone(),
+                    repeat_expr(sequence_or_single(vec![literal_expr(b","), member]), 0, None),
+                    literal_expr(b"}"),
+                ]),
+            ]),
+        );
+    }
+
     fn convert_schema(&mut self, schema: &serde_json::Value) -> Result<GrammarExpr, GlrMaskError> {
         match schema {
-            serde_json::Value::Bool(true) => Ok(self.json_value()),
+            serde_json::Value::Bool(true) => Ok(self.json_value_ref()),
             serde_json::Value::Bool(false) => Ok(literal_expr(b"null")),
             serde_json::Value::Object(obj) => {
                 if let Some(reference) = obj.get("$ref").and_then(serde_json::Value::as_str) {
@@ -195,6 +296,10 @@ impl SchemaCtx {
                 }
                 if obj.contains_key("properties")
                     || obj.contains_key("required")
+                    || obj.contains_key("additionalProperties")
+                    || obj.contains_key("propertyNames")
+                    || obj.contains_key("minProperties")
+                    || obj.contains_key("maxProperties")
                     || obj.get("type").and_then(serde_json::Value::as_str) == Some("object")
                 {
                     return self.convert_object(obj);
@@ -209,20 +314,49 @@ impl SchemaCtx {
                     let alts = types
                         .iter()
                         .filter_map(serde_json::Value::as_str)
-                        .map(|type_name| self.convert_schema(&serde_json::json!({"type": type_name})))
+                        .map(|type_name| self.convert_type(type_name, obj))
                         .collect::<Result<Vec<_>, _>>()?;
                     return Ok(choice_or_single(alts));
                 }
                 match obj.get("type").and_then(serde_json::Value::as_str) {
-                    Some("string") => Ok(self.json_string()),
-                    Some("integer") => Ok(self.json_integer()),
-                    Some("number") => Ok(self.json_number()),
-                    Some("boolean") => Ok(choice_or_single(vec![literal_expr(b"true"), literal_expr(b"false")])),
-                    Some("null") => Ok(literal_expr(b"null")),
-                    Some(_) | None => Ok(self.json_value()),
+                    Some(type_name) => self.convert_type(type_name, obj),
+                    None => Ok(self.json_value_ref()),
                 }
             }
             other => Ok(self.json_literal(other)),
+        }
+    }
+
+    fn convert_type(
+        &mut self,
+        type_name: &str,
+        obj: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        match type_name {
+            "string" => Ok(self.convert_string_schema(obj)),
+            "integer" => Ok(self.json_integer()),
+            "number" => Ok(self.json_number()),
+            "boolean" => Ok(choice_or_single(vec![literal_expr(b"true"), literal_expr(b"false")])),
+            "null" => Ok(literal_expr(b"null")),
+            "array" => self.convert_array(obj),
+            "object" => self.convert_object(obj),
+            _ => Ok(self.json_value_ref()),
+        }
+    }
+
+    fn convert_string_schema(
+        &mut self,
+        obj: &serde_json::Map<String, serde_json::Value>,
+    ) -> GrammarExpr {
+        if let Some(pattern) = obj.get("pattern").and_then(serde_json::Value::as_str) {
+            return self.json_string_pattern(pattern);
+        }
+        let min_len = obj.get("minLength").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+        let max_len = obj.get("maxLength").and_then(serde_json::Value::as_u64).map(|v| v as usize);
+        if min_len == 0 && max_len.is_none() {
+            self.json_string()
+        } else {
+            self.json_string_bounded(min_len, max_len)
         }
     }
 
@@ -292,11 +426,10 @@ impl SchemaCtx {
         &mut self,
         obj: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        let properties: Vec<(String, serde_json::Value)> = obj
+        let properties = obj
             .get("properties")
             .and_then(serde_json::Value::as_object)
-            .map(|map| map.iter().map(|(name, value)| (name.clone(), value.clone())).collect())
-            .unwrap_or_default();
+            .cloned();
         let required: Vec<String> = obj
             .get("required")
             .and_then(serde_json::Value::as_array)
@@ -308,67 +441,168 @@ impl SchemaCtx {
                     .collect()
             })
             .unwrap_or_default();
-        self.build_object_rule(&properties, &required, obj.get("additionalProperties"))
+        let additional = obj.get("additionalProperties");
+
+        let properties_dict = properties.as_ref();
+        let required_set: BTreeSet<String> = required.iter().cloned().collect();
+        let no_additional = matches!(additional, None | Some(serde_json::Value::Bool(false)));
+        let all_keys_required = properties_dict
+            .map(|properties| properties.keys().all(|key| required_set.contains(key)))
+            .unwrap_or(false);
+
+        let min_properties = obj.get("minProperties").and_then(serde_json::Value::as_u64);
+        let max_properties = obj.get("maxProperties").and_then(serde_json::Value::as_u64);
+        if min_properties.is_some() || max_properties.is_some() {
+            if properties_dict.is_none() || !all_keys_required || !no_additional {
+                return Err(GlrMaskError::GrammarParse(
+                    "min/maxProperties only supported when all declared properties are required and additionalProperties is false".into(),
+                ));
+            }
+            let fixed = properties_dict.map(|properties| properties.len()).unwrap_or(0) as u64;
+            if min_properties.map(|min| fixed < min).unwrap_or(false)
+                || max_properties.map(|max| fixed > max).unwrap_or(false)
+            {
+                return Err(GlrMaskError::GrammarParse(
+                    "min/maxProperties constraints are unsatisfiable for fixed required properties".into(),
+                ));
+            }
+        }
+
+        if let Some(properties) = properties_dict {
+            let additional_schema = match additional {
+                Some(serde_json::Value::Bool(false)) => None,
+                Some(serde_json::Value::Object(map)) => Some(serde_json::Value::Object(map.clone())),
+                _ => Some(serde_json::json!({})),
+            };
+            return self.build_ordered_object_rule(properties, &required, additional_schema);
+        }
+
+        if let Some(property_names) = obj.get("propertyNames") {
+            return self.build_pattern_named_object_rule(property_names);
+        }
+
+        Ok(self.json_object_ref())
     }
 
-    fn build_object_rule(
+    fn build_ordered_object_rule(
         &mut self,
-        properties: &[(String, serde_json::Value)],
+        properties: &serde_json::Map<String, serde_json::Value>,
         required: &[String],
-        additional: Option<&serde_json::Value>,
+        additional_schema: Option<serde_json::Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        if properties.is_empty() && matches!(additional, None | Some(serde_json::Value::Bool(false))) {
-            return Ok(literal_expr(b"{}"));
+        let required_set: BTreeSet<String> = required.iter().cloned().collect();
+        let mut ordered = Vec::new();
+        for (name, schema) in properties {
+            ordered.push((name.clone(), schema.clone(), required_set.contains(name)));
         }
-        if !matches!(additional, None | Some(serde_json::Value::Bool(false))) {
-            return Ok(self.json_object_generic());
-        }
-
-        let required_set: std::collections::BTreeSet<String> = required.iter().cloned().collect();
-        let optional: Vec<_> = properties
-            .iter()
-            .filter(|(name, _)| !required_set.contains(name))
-            .cloned()
-            .collect();
-        let required_props: Vec<_> = properties
-            .iter()
-            .filter(|(name, _)| required_set.contains(name))
-            .cloned()
-            .collect();
-
-        let mut alts = Vec::new();
-        let optional_count = optional.len();
-        for mask in 0..(1usize << optional_count) {
-            let mut chosen = required_props.clone();
-            for (index, prop) in optional.iter().enumerate() {
-                if (mask & (1usize << index)) != 0 {
-                    chosen.push(prop.clone());
-                }
-            }
-
-            if chosen.is_empty() {
-                alts.push(literal_expr(b"{}"));
-                continue;
-            }
-
-            let mut permutations = Vec::new();
-            permute_properties(&chosen, 0, &mut permutations);
-            for permutation in permutations {
-                let mut parts = vec![literal_expr(b"{")];
-                for (index, (name, schema)) in permutation.iter().enumerate() {
-                    if index > 0 {
-                        parts.push(literal_expr(b","));
-                    }
-                    parts.push(self.json_string_literal(name));
-                    parts.push(literal_expr(b":"));
-                    parts.push(self.convert_schema(schema)?);
-                }
-                parts.push(literal_expr(b"}"));
-                alts.push(GrammarExpr::Sequence(parts));
+        for name in required {
+            if !properties.contains_key(name) {
+                ordered.push((name.clone(), serde_json::json!({}), true));
             }
         }
 
-        Ok(choice_or_single(alts))
+        let base = self.fresh_name("obj_ord");
+        let term_nc = format!("{base}_term_nc");
+        let term_c = format!("{base}_term_c");
+
+        if let Some(schema) = additional_schema {
+            let pair = sequence_or_single(vec![self.json_string(), literal_expr(b":"), self.convert_schema(&schema)?]);
+            self.push_rule(
+                term_nc.clone(),
+                choice_or_single(vec![
+                    GrammarExpr::Sequence(Vec::new()),
+                    sequence_or_single(vec![pair.clone(), GrammarExpr::Ref(term_c.clone())]),
+                ]),
+            );
+            self.push_rule(
+                term_c.clone(),
+                choice_or_single(vec![
+                    GrammarExpr::Sequence(Vec::new()),
+                    sequence_or_single(vec![literal_expr(b","), pair, GrammarExpr::Ref(term_c.clone())]),
+                ]),
+            );
+        } else {
+            self.push_rule(term_nc.clone(), GrammarExpr::Sequence(Vec::new()));
+            self.push_rule(term_c.clone(), GrammarExpr::Sequence(Vec::new()));
+        }
+
+        for index in (0..ordered.len()).rev() {
+            let nc_name = format!("{base}_{index}_nc");
+            let c_name = format!("{base}_{index}_c");
+            let next_nc = if index + 1 < ordered.len() {
+                format!("{base}_{}_nc", index + 1)
+            } else {
+                term_nc.clone()
+            };
+            let next_c = if index + 1 < ordered.len() {
+                format!("{base}_{}_c", index + 1)
+            } else {
+                term_c.clone()
+            };
+
+            let (name, schema, required) = &ordered[index];
+            let pair = sequence_or_single(vec![
+                self.json_string_literal(name),
+                literal_expr(b":"),
+                self.convert_schema(schema)?,
+            ]);
+            let include_nc = sequence_or_single(vec![pair.clone(), GrammarExpr::Ref(next_c.clone())]);
+            let include_c = sequence_or_single(vec![literal_expr(b","), pair, GrammarExpr::Ref(next_c.clone())]);
+
+            if *required {
+                self.push_rule(nc_name, include_nc);
+                self.push_rule(c_name, include_c);
+            } else {
+                self.push_rule(
+                    nc_name,
+                    choice_or_single(vec![GrammarExpr::Ref(next_nc), include_nc]),
+                );
+                self.push_rule(
+                    c_name,
+                    choice_or_single(vec![GrammarExpr::Ref(next_c), include_c]),
+                );
+            }
+        }
+
+        let body = if ordered.is_empty() {
+            GrammarExpr::Ref(term_nc)
+        } else {
+            GrammarExpr::Ref(format!("{base}_0_nc"))
+        };
+
+        Ok(sequence_or_single(vec![literal_expr(b"{"), body, literal_expr(b"}")]))
+    }
+
+    fn build_pattern_named_object_rule(
+        &mut self,
+        property_names: &serde_json::Value,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        let property_names = property_names
+            .as_object()
+            .ok_or_else(|| GlrMaskError::GrammarParse("propertyNames must be an object with a pattern".into()))?;
+        if property_names.keys().any(|key| key != "pattern") {
+            return Err(GlrMaskError::GrammarParse(
+                "propertyNames only supports a pattern constraint".into(),
+            ));
+        }
+        let pattern = property_names
+            .get("pattern")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| GlrMaskError::GrammarParse("propertyNames.pattern must be a string".into()))?;
+        let pair = sequence_or_single(vec![
+            self.json_string_pattern(pattern),
+            literal_expr(b":"),
+            self.json_value_ref(),
+        ]);
+        Ok(choice_or_single(vec![
+            literal_expr(b"{}"),
+            sequence_or_single(vec![
+                literal_expr(b"{"),
+                pair.clone(),
+                repeat_expr(sequence_or_single(vec![literal_expr(b","), pair]), 0, None),
+                literal_expr(b"}"),
+            ]),
+        ]))
     }
 
     fn convert_array(
@@ -379,61 +613,76 @@ impl SchemaCtx {
         let max_items = obj.get("maxItems").and_then(serde_json::Value::as_u64).map(|v| v as usize);
 
         if let Some(prefix_items) = obj.get("prefixItems").and_then(serde_json::Value::as_array) {
-            let upper = max_items.unwrap_or(prefix_items.len()).min(prefix_items.len());
-            let mut alts = Vec::new();
-            for len in min_items..=upper {
-                let mut parts = vec![literal_expr(b"[")];
-                for (index, item_schema) in prefix_items.iter().take(len).enumerate() {
-                    if index > 0 {
-                        parts.push(literal_expr(b","));
-                    }
-                    parts.push(self.convert_schema(item_schema)?);
-                }
-                parts.push(literal_expr(b"]"));
-                alts.push(GrammarExpr::Sequence(parts));
+            if max_items.map(|max| max < prefix_items.len()).unwrap_or(false) {
+                return Ok(self.json_array_ref());
             }
-            return Ok(choice_or_single(alts));
+            let extra_item = match obj.get("items") {
+                Some(serde_json::Value::Object(_)) => self.convert_schema(obj.get("items").unwrap())?,
+                _ => self.json_value_ref(),
+            };
+            if prefix_items.is_empty() {
+                let extra_min = min_items;
+                return Ok(self.build_repeated_array(extra_item, extra_min, max_items));
+            }
+
+            let mut parts = vec![literal_expr(b"[")];
+            for (index, item_schema) in prefix_items.iter().enumerate() {
+                if index > 0 {
+                    parts.push(literal_expr(b","));
+                }
+                parts.push(self.convert_schema(item_schema)?);
+            }
+
+            let extra_min = min_items.saturating_sub(prefix_items.len());
+            let extra_max = max_items.map(|max| max.saturating_sub(prefix_items.len()));
+            if extra_min > 0 || extra_max.map(|max| max > 0).unwrap_or(true) {
+                parts.push(repeat_expr(
+                    sequence_or_single(vec![literal_expr(b","), extra_item]),
+                    extra_min,
+                    extra_max,
+                ));
+            }
+            parts.push(literal_expr(b"]"));
+            return Ok(sequence_or_single(parts));
         }
 
         if let Some(item_schema) = obj.get("items") {
-            if let Some(max_items) = max_items {
-                let mut alts = Vec::new();
-                for len in min_items..=max_items {
-                    let mut parts = vec![literal_expr(b"[")];
-                    for index in 0..len {
-                        if index > 0 {
-                            parts.push(literal_expr(b","));
-                        }
-                        parts.push(self.convert_schema(item_schema)?);
-                    }
-                    parts.push(literal_expr(b"]"));
-                    alts.push(GrammarExpr::Sequence(parts));
-                }
-                return Ok(choice_or_single(alts));
-            }
+            let item = self.convert_schema(item_schema)?;
+            return Ok(self.build_repeated_array(item, min_items, max_items));
         }
 
-        Ok(self.json_array_generic())
+        if min_items > 0 || max_items.is_some() {
+            let item = self.json_value_ref();
+            return Ok(self.build_repeated_array(item, min_items, max_items));
+        }
+
+        Ok(self.json_array_ref())
     }
 
-    fn json_value(&mut self) -> GrammarExpr {
-        choice_or_single(vec![
-            literal_expr(b"null"),
-            literal_expr(b"true"),
-            literal_expr(b"false"),
-            self.json_string(),
-            self.json_number(),
-            self.json_array_generic(),
-            self.json_object_generic(),
-        ])
-    }
-
-    fn json_array_generic(&mut self) -> GrammarExpr {
-        literal_expr(b"[]")
-    }
-
-    fn json_object_generic(&mut self) -> GrammarExpr {
-        literal_expr(b"{}")
+    fn build_repeated_array(
+        &mut self,
+        item_expr: GrammarExpr,
+        min_items: usize,
+        max_items: Option<usize>,
+    ) -> GrammarExpr {
+        if max_items == Some(0) {
+            return literal_expr(b"[]");
+        }
+        let non_empty = sequence_or_single(vec![
+            literal_expr(b"["),
+            item_expr.clone(),
+            repeat_expr(
+                sequence_or_single(vec![literal_expr(b","), item_expr]),
+                min_items.saturating_sub(1),
+                max_items.map(|max| max.saturating_sub(1)),
+            ),
+            literal_expr(b"]"),
+        ]);
+        if min_items == 0 {
+            choice_or_single(vec![literal_expr(b"[]"), non_empty])
+        } else {
+            non_empty
+        }
     }
 
     fn json_string(&mut self) -> GrammarExpr {
@@ -484,58 +733,53 @@ fn choice_or_single(alts: Vec<GrammarExpr>) -> GrammarExpr {
     }
 }
 
+fn sequence_or_single(parts: Vec<GrammarExpr>) -> GrammarExpr {
+    let mut parts: Vec<GrammarExpr> = parts
+        .into_iter()
+        .filter(|expr| !matches!(expr, GrammarExpr::Sequence(inner) if inner.is_empty()))
+        .collect();
+    if parts.is_empty() {
+        GrammarExpr::Sequence(Vec::new())
+    } else if parts.len() == 1 {
+        parts.pop().unwrap()
+    } else {
+        GrammarExpr::Sequence(parts)
+    }
+}
+
+fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
+    match (min, max) {
+        (0, None) => GrammarExpr::Repeat(Box::new(item)),
+        (1, None) => GrammarExpr::RepeatOne(Box::new(item)),
+        _ => {
+            let mut parts = Vec::new();
+            match max {
+                Some(max) => {
+                    for _ in 0..min {
+                        parts.push(item.clone());
+                    }
+                    for _ in min..max {
+                        parts.push(GrammarExpr::Optional(Box::new(item.clone())));
+                    }
+                }
+                None => {
+                    for _ in 0..min {
+                        parts.push(item.clone());
+                    }
+                    parts.push(GrammarExpr::Repeat(Box::new(item)));
+                }
+            }
+            sequence_or_single(parts)
+        }
+    }
+}
+
 fn sanitize_rule_name(s: &str) -> String {
     let sanitized: String = s
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect();
     if sanitized.is_empty() { "rule".into() } else { sanitized }
-}
-
-fn build_optional_choice(optional_keys: &[String], kv_rules: &[(String, String)]) -> GrammarExpr {
-    let mut alts = vec![GrammarExpr::Sequence(Vec::new())];
-    for key in optional_keys {
-        if let Some((_, rule_name)) = kv_rules.iter().find(|(name, _)| name == key) {
-            alts.push(GrammarExpr::Ref(rule_name.clone()));
-        }
-    }
-    choice_or_single(alts)
-}
-
-fn build_repetition(item_rule: &str, min: usize, max: Option<usize>) -> GrammarExpr {
-    let item = GrammarExpr::Ref(item_rule.to_string());
-    match (min, max) {
-        (0, None) => GrammarExpr::Repeat(Box::new(item)),
-        (1, None) => GrammarExpr::RepeatOne(Box::new(item)),
-        (0, Some(1)) => GrammarExpr::Optional(Box::new(item)),
-        _ => {
-            let mut parts = vec![item.clone(); min];
-            if max.map(|max| max > min).unwrap_or(false) {
-                for _ in min..max.unwrap() {
-                    parts.push(GrammarExpr::Optional(Box::new(item.clone())));
-                }
-            }
-            GrammarExpr::Sequence(parts)
-        }
-    }
-}
-
-fn permute_properties(
-    properties: &[(String, serde_json::Value)],
-    start: usize,
-    out: &mut Vec<Vec<(String, serde_json::Value)>>,
-) {
-    if start >= properties.len() {
-        out.push(properties.to_vec());
-        return;
-    }
-
-    let mut properties = properties.to_vec();
-    for index in start..properties.len() {
-        properties.swap(start, index);
-        permute_properties(&properties, start + 1, out);
-        properties.swap(start, index);
-    }
 }
 
 #[cfg(test)]
