@@ -423,10 +423,18 @@ pub(crate) fn build_terminal_dwa(
     }
 
     let _ = prune_disallowed_follows(&mut nwa, grammar);
-    minimize(
+    let dwa = minimize(
         &determinize(&nwa)
             .expect("terminal NWA determinization failed despite acyclic token trie construction"),
-    )
+    );
+    debug_assert!(
+        dwa.states
+            .get(dwa.start_state as usize)
+            .and_then(|state| state.final_weight.as_ref())
+            .is_none(),
+        "terminal-DWA start state unexpectedly has a final weight"
+    );
+    dwa
 }
 
 #[cfg(test)]
