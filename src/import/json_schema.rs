@@ -16,6 +16,7 @@ const JSON_OBJECT_RULE: &str = "json_object";
 const JSON_ARRAY_RULE: &str = "json_array";
 const JSON_KV_RULE: &str = "json_kv";
 const JSON_STRING_RULE: &str = "JSON_STRING";
+const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
 const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 const JSON_BOOL_RULE: &str = "JSON_BOOL";
@@ -405,6 +406,8 @@ struct SchemaCtx {
     anon_rule_counter: usize,
     ap_catch_all_cache: HashMap<String, (String, String)>,
     expr_dedup_cache: HashMap<String, String>,
+    json_string_exact_cache: HashMap<usize, String>,
+    json_string_upto_cache: HashMap<usize, String>,
 }
 
 impl SchemaCtx {
@@ -420,6 +423,8 @@ impl SchemaCtx {
             anon_rule_counter: 0,
             ap_catch_all_cache: HashMap::new(),
             expr_dedup_cache: HashMap::new(),
+            json_string_exact_cache: HashMap::new(),
+            json_string_upto_cache: HashMap::new(),
         };
         ctx.ensure_base_rules();
         ctx
@@ -464,6 +469,74 @@ impl SchemaCtx {
         GrammarExpr::Ref(JSON_STRING_RULE.into())
     }
 
+    fn json_string_char_ref(&self) -> GrammarExpr {
+        GrammarExpr::Ref(JSON_STRING_CHAR_RULE.into())
+    }
+
+    fn json_string_char_exact_ref(&mut self, count: usize) -> GrammarExpr {
+        match count {
+            0 => empty_expr(),
+            1 => self.json_string_char_ref(),
+            _ => {
+                if let Some(rule_name) = self.json_string_exact_cache.get(&count) {
+                    return GrammarExpr::Ref(rule_name.clone());
+                }
+
+                let chunk = highest_power_of_two_leq(count);
+                let expr = if chunk == count {
+                    let left = self.json_string_char_exact_ref(count / 2);
+                    let right = self.json_string_char_exact_ref(count / 2);
+                    sequence_or_single(vec![left, right])
+                } else {
+                    sequence_or_single(vec![
+                        self.json_string_char_exact_ref(chunk),
+                        self.json_string_char_exact_ref(count - chunk),
+                    ])
+                };
+
+                let rule = self.extract_rule(expr, &format!("json_string_char_exact_{count}"));
+                if let GrammarExpr::Ref(rule_name) = &rule {
+                    self.json_string_exact_cache.insert(count, rule_name.clone());
+                }
+                rule
+            }
+        }
+    }
+
+    fn json_string_char_upto_ref(&mut self, max: usize) -> GrammarExpr {
+        match max {
+            0 => empty_expr(),
+            1 => GrammarExpr::Optional(Box::new(self.json_string_char_ref())),
+            _ => {
+                if let Some(rule_name) = self.json_string_upto_cache.get(&max) {
+                    return GrammarExpr::Ref(rule_name.clone());
+                }
+
+                let chunk = highest_power_of_two_leq(max);
+                let expr = if chunk == max {
+                    choice_or_single(vec![
+                        self.json_string_char_upto_ref(max - 1),
+                        self.json_string_char_exact_ref(max),
+                    ])
+                } else {
+                    choice_or_single(vec![
+                        self.json_string_char_upto_ref(chunk - 1),
+                        sequence_or_single(vec![
+                            self.json_string_char_exact_ref(chunk),
+                            self.json_string_char_upto_ref(max - chunk),
+                        ]),
+                    ])
+                };
+
+                let rule = self.extract_rule(expr, &format!("json_string_char_upto_{max}"));
+                if let GrammarExpr::Ref(rule_name) = &rule {
+                    self.json_string_upto_cache.insert(max, rule_name.clone());
+                }
+                rule
+            }
+        }
+    }
+
     fn json_key_colon_ref(&self) -> GrammarExpr {
         GrammarExpr::Ref(JSON_KEY_COLON_RULE.into())
     }
@@ -485,6 +558,7 @@ impl SchemaCtx {
     }
 
     fn ensure_base_rules(&mut self) {
+        self.insert_rule(JSON_STRING_CHAR_RULE, regex_expr(JSON_STRING_CHAR_PATTERN));
         self.insert_rule(JSON_STRING_RULE, regex_expr(JSON_STRING_REGEX));
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
         self.insert_rule(
@@ -747,7 +821,7 @@ impl SchemaCtx {
         }
     }
 
-    fn build_string_expr(&self, schema: &Map<String, Value>) -> GrammarExpr {
+    fn build_string_expr(&mut self, schema: &Map<String, Value>) -> GrammarExpr {
         if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
             return json_wrapped_pattern(pattern);
         }
@@ -771,16 +845,33 @@ impl SchemaCtx {
             return self.json_string_ref();
         }
 
-        let pattern = match max_len {
-            Some(max_len) if min_len == max_len => {
-                format!(r#""(?:{}){{{}}}""#, JSON_STRING_CHAR_PATTERN, min_len)
-            }
+        let bounded_body = match max_len {
+            Some(max_len) if min_len == max_len => self.json_string_char_exact_ref(min_len),
             Some(max_len) => {
-                format!(r#""(?:{}){{{},{}}}""#, JSON_STRING_CHAR_PATTERN, min_len, max_len)
+                let mut parts = Vec::new();
+                if min_len > 0 {
+                    parts.push(self.json_string_char_exact_ref(min_len));
+                }
+                if max_len > min_len {
+                    parts.push(self.json_string_char_upto_ref(max_len - min_len));
+                }
+                sequence_or_single(parts)
             }
-            None => format!(r#""(?:{}){{{},}}""#, JSON_STRING_CHAR_PATTERN, min_len),
+            None => {
+                let mut parts = Vec::new();
+                if min_len > 0 {
+                    parts.push(self.json_string_char_exact_ref(min_len));
+                }
+                parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
+                sequence_or_single(parts)
+            }
         };
-        regex_expr(pattern)
+
+        sequence_or_single(vec![
+            literal_expr(b"\""),
+            bounded_body,
+            literal_expr(b"\""),
+        ])
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
@@ -1208,6 +1299,11 @@ fn sequence_or_single(parts: Vec<GrammarExpr>) -> GrammarExpr {
     }
 }
 
+fn highest_power_of_two_leq(value: usize) -> usize {
+    debug_assert!(value > 0);
+    1usize << (usize::BITS - 1 - value.leading_zeros())
+}
+
 fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
     match (min, max) {
         (0, None) => GrammarExpr::Repeat(Box::new(item)),
@@ -1401,6 +1497,22 @@ mod tests {
     fn test_string_min_max_length() {
         let g = json_schema_to_grammar(r#"{"type": "string", "minLength": 1, "maxLength": 5}"#).unwrap();
         assert!(!g.rules.is_empty());
+    }
+
+    #[test]
+    fn test_accepts_bounded_string_length() {
+        assert!(accepts_sequence(
+            r#"{"type": "string", "minLength": 2, "maxLength": 4}"#,
+            &[b"\"ab\""]
+        ));
+    }
+
+    #[test]
+    fn test_rejects_too_short_bounded_string_length() {
+        assert!(!accepts_sequence(
+            r#"{"type": "string", "minLength": 2, "maxLength": 4}"#,
+            &[b"\"a\""]
+        ));
     }
 
     #[test]
