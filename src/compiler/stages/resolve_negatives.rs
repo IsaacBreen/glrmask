@@ -114,19 +114,21 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                 .or_default()
                 .entry(target)
                 .or_insert_with(Weight::empty);
-            let updated_eps = if eps_entry.is_empty() {
+            let delta_eps = if eps_entry.is_empty() {
+                *eps_entry = new_eps_w.clone();
                 new_eps_w
             } else {
-                eps_entry.union(&new_eps_w)
+                let delta_eps = new_eps_w.difference(eps_entry);
+                if delta_eps.is_empty() {
+                    return;
+                }
+                *eps_entry = eps_entry.union(&delta_eps);
+                delta_eps
             };
-            if updated_eps == *eps_entry {
-                return;
-            }
-            *eps_entry = updated_eps.clone();
 
             if let Some(queries_at_a) = queries.get(&a).cloned() {
                 for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
-                    let prop_w = w_a_prime_a.intersection(&updated_eps);
+                    let prop_w = w_a_prime_a.intersection(&delta_eps);
                     if prop_w.is_empty() {
                         continue;
                     }
@@ -410,6 +412,222 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 mod tests {
     use super::*;
     use crate::compiler::glr::labels::{encode_negative_label, encode_positive_label};
+    use std::collections::BTreeMap;
+
+    fn compute_cancellations_reference(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
+        let n = nwa.states.len();
+        if n == 0 {
+            return Vec::new();
+        }
+
+        let mut queries: HashMap<u32, HashMap<QueryKey, Weight>> = HashMap::new();
+        let mut worklist = VecDeque::<(u32, u32, i32)>::new();
+        let mut in_queue = vec![HashSet::<QueryKey>::new(); n];
+        let mut new_eps_from: HashMap<u32, HashMap<u32, Weight>> = HashMap::new();
+
+        let merge_into = |entry: &mut Weight, add: Weight| {
+            if add.is_empty() {
+                return false;
+            }
+            if entry.is_empty() {
+                *entry = add;
+                return true;
+            }
+            let updated = entry.union(&add);
+            if updated != *entry {
+                *entry = updated;
+                true
+            } else {
+                false
+            }
+        };
+
+        for a in 0..n {
+            for (&label, targets) in &nwa.states[a].transitions {
+                if !is_negative_label(label) {
+                    continue;
+                }
+                let c = negative_to_positive_label(label);
+                for (b, w_ab) in targets {
+                    if *b as usize >= n || w_ab.is_empty() {
+                        continue;
+                    }
+                    let query_key = (a as u32, c);
+                    let entry = queries
+                        .entry(*b)
+                        .or_default()
+                        .entry(query_key)
+                        .or_insert_with(Weight::empty);
+                    if merge_into(entry, w_ab.clone()) {
+                        if in_queue[*b as usize].insert(query_key) {
+                            worklist.push_back((*b, a as u32, c));
+                        }
+                    }
+                }
+            }
+        }
+
+        while let Some((s, a, c)) = worklist.pop_front() {
+            in_queue[s as usize].remove(&(a, c));
+            let Some(w_as) = queries.get(&s).and_then(|m| m.get(&(a, c))).cloned() else {
+                continue;
+            };
+
+            if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+                for (&target, eps_w) in epsilons_from_s {
+                    let prop_w = w_as.intersection(eps_w);
+                    if prop_w.is_empty() {
+                        continue;
+                    }
+                    let query_key = (a, c);
+                    let entry = queries
+                        .entry(target)
+                        .or_default()
+                        .entry(query_key)
+                        .or_insert_with(Weight::empty);
+                    if merge_into(entry, prop_w) {
+                        if in_queue[target as usize].insert(query_key) {
+                            worklist.push_back((target, a, c));
+                        }
+                    }
+                }
+            }
+
+            let mut check_cancellations = |target: u32,
+                                           w_st: &Weight,
+                                           queries: &mut HashMap<u32, HashMap<QueryKey, Weight>>,
+                                           worklist: &mut VecDeque<(u32, u32, i32)>,
+                                           in_queue: &mut [HashSet<QueryKey>],
+                                           new_eps_from: &mut HashMap<u32, HashMap<u32, Weight>>| {
+                let new_eps_w = w_as.intersection(w_st);
+                if new_eps_w.is_empty() {
+                    return;
+                }
+
+                let eps_entry = new_eps_from
+                    .entry(a)
+                    .or_default()
+                    .entry(target)
+                    .or_insert_with(Weight::empty);
+                let updated_eps = if eps_entry.is_empty() {
+                    new_eps_w
+                } else {
+                    eps_entry.union(&new_eps_w)
+                };
+                if updated_eps == *eps_entry {
+                    return;
+                }
+                *eps_entry = updated_eps.clone();
+
+                if let Some(queries_at_a) = queries.get(&a).cloned() {
+                    for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
+                        let prop_w = w_a_prime_a.intersection(&updated_eps);
+                        if prop_w.is_empty() {
+                            continue;
+                        }
+                        let query_key = (a_prime, c_prime);
+                        let entry = queries
+                            .entry(target)
+                            .or_default()
+                            .entry(query_key)
+                            .or_insert_with(Weight::empty);
+                        if merge_into(entry, prop_w) {
+                            if in_queue[target as usize].insert(query_key) {
+                                worklist.push_back((target, a_prime, c_prime));
+                            }
+                        }
+                    }
+                }
+            };
+
+            if let Some(pos_targets) = nwa.states[s as usize].transitions.get(&c) {
+                for (t, w_st) in pos_targets {
+                    if *t as usize >= n {
+                        continue;
+                    }
+                    check_cancellations(
+                        *t,
+                        w_st,
+                        &mut queries,
+                        &mut worklist,
+                        &mut in_queue,
+                        &mut new_eps_from,
+                    );
+                }
+            }
+
+            if let Some(default_targets) = nwa.states[s as usize].transitions.get(&DEFAULT_LABEL) {
+                for (target, weight) in default_targets {
+                    if *target as usize >= n {
+                        continue;
+                    }
+                    check_cancellations(
+                        *target,
+                        weight,
+                        &mut queries,
+                        &mut worklist,
+                        &mut in_queue,
+                        &mut new_eps_from,
+                    );
+                }
+            }
+
+            for (t, w_st) in &nwa.states[s as usize].epsilons {
+                if *t as usize >= n {
+                    continue;
+                }
+                let prop_w = w_as.intersection(w_st);
+                if prop_w.is_empty() {
+                    continue;
+                }
+                let query_key = (a, c);
+                let entry = queries
+                    .entry(*t)
+                    .or_default()
+                    .entry(query_key)
+                    .or_insert_with(Weight::empty);
+                if merge_into(entry, prop_w) {
+                    if in_queue[*t as usize].insert(query_key) {
+                        worklist.push_back((*t, a, c));
+                    }
+                }
+            }
+        }
+
+        let mut result = Vec::new();
+        for (from, targets) in new_eps_from {
+            for (to, w) in targets {
+                if !w.is_empty() {
+                    result.push((from, to, w));
+                }
+            }
+        }
+
+        result
+    }
+
+    fn normalize_cancellations(cancellations: Vec<(u32, u32, Weight)>) -> BTreeMap<(u32, u32), Weight> {
+        cancellations
+            .into_iter()
+            .map(|(from, to, weight)| ((from, to), weight))
+            .collect()
+    }
+
+    fn add_weighted_transition(nwa: &mut NWA, from: u32, label: i32, to: u32, kind: u8) {
+        match kind {
+            1 => nwa.add_transition(from, label, to, weight_1()),
+            2 => nwa.add_transition(from, label, to, weight_12()),
+            _ => {}
+        }
+    }
+
+    fn add_weighted_epsilon(nwa: &mut NWA, from: u32, to: u32, kind: u8) {
+        match kind {
+            1 => nwa.add_epsilon(from, to, weight_1()),
+            2 => nwa.add_epsilon(from, to, weight_12()),
+            _ => {}
+        }
+    }
 
     fn weight_1() -> Weight {
         Weight::from_compact_ranges([(1..=1, [1..=1])])
@@ -450,5 +668,73 @@ mod tests {
                 .any(|(from, to, w)| *from == 0 && *to == 2 && *w == weight_1()),
             "narrower 0->2 weight_1 should have been widened away"
         );
+    }
+
+    #[test]
+    fn test_compute_cancellations_propagates_later_query_through_existing_epsilon() {
+        let mut nwa = NWA::new(0, 0);
+        for _ in 0..4 {
+            nwa.add_state();
+        }
+
+        let neg1 = encode_negative_label(1);
+        let pos1 = encode_positive_label(1);
+
+        nwa.add_transition(0, neg1, 1, weight_12());
+        nwa.add_transition(1, pos1, 2, weight_12());
+        nwa.add_transition(3, neg1, 0, weight_1());
+        nwa.add_transition(2, pos1, 1, weight_12());
+
+        let cancellations = compute_cancellations(&nwa);
+
+        assert!(
+            cancellations
+                .iter()
+                .any(|(from, to, w)| *from == 0 && *to == 2 && *w == weight_12()),
+            "expected initial epsilon 0->2 with weight_12"
+        );
+        assert!(
+            cancellations
+                .iter()
+                .any(|(from, to, w)| *from == 3 && *to == 1 && *w == weight_1()),
+            "expected later query to reuse existing epsilon and create 3->1 with weight_1"
+        );
+    }
+
+    #[test]
+    fn test_compute_cancellations_delta_matches_reference_on_small_family() {
+        let neg1 = encode_negative_label(1);
+        let pos1 = encode_positive_label(1);
+
+        for config in 0..(3usize.pow(7)) {
+            let mut code = config;
+            let mut next_kind = || {
+                let kind = (code % 3) as u8;
+                code /= 3;
+                kind
+            };
+
+            let mut nwa = NWA::new(0, 0);
+            for _ in 0..4 {
+                nwa.add_state();
+            }
+
+            add_weighted_transition(&mut nwa, 0, neg1, 0, next_kind());
+            add_weighted_transition(&mut nwa, 0, neg1, 2, next_kind());
+            add_weighted_epsilon(&mut nwa, 0, 1, next_kind());
+            add_weighted_transition(&mut nwa, 1, pos1, 2, next_kind());
+            add_weighted_transition(&mut nwa, 2, pos1, 1, next_kind());
+            add_weighted_epsilon(&mut nwa, 2, 0, next_kind());
+            add_weighted_transition(&mut nwa, 3, neg1, 0, next_kind());
+
+            let actual = normalize_cancellations(compute_cancellations(&nwa));
+            let expected = normalize_cancellations(compute_cancellations_reference(&nwa));
+
+            assert_eq!(
+                actual, expected,
+                "delta propagation diverged from reference for config {}",
+                config
+            );
+        }
     }
 }
