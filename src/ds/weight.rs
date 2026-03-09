@@ -358,6 +358,34 @@ impl Weight {
         })
     }
 
+    pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
+        let mut expanded: BTreeMap<u32, RangeSetBlaze<u32>> = BTreeMap::new();
+
+        for weight in weights {
+            if weight.is_full() {
+                return Self::all();
+            }
+            if weight.is_empty() {
+                continue;
+            }
+
+            for (range, tokens) in weight.0.range_values() {
+                for tsid in range {
+                    expanded
+                        .entry(tsid)
+                        .and_modify(|existing| *existing |= tokens.as_ref().clone())
+                        .or_insert_with(|| tokens.as_ref().clone());
+                }
+            }
+        }
+
+        if expanded.is_empty() {
+            Self::empty()
+        } else {
+            compress_expanded(&expanded)
+        }
+    }
+
     pub fn intersection(&self, other: &Self) -> Self {
         if self.is_empty() || other.is_empty() {
             return Self::empty();

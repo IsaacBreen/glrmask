@@ -78,10 +78,9 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
     while let Some(subset_key) = worklist.pop_front() {
         let from_state = subset_map[&subset_key];
-        let subset: BTreeMap<u32, Weight> = subset_key.iter().cloned().collect();
 
         let mut final_weight = Weight::empty();
-        for (nwa_state_id, path_weight) in &subset {
+        for (nwa_state_id, path_weight) in &subset_key {
             if let Some(state_final) = nwa.states[*nwa_state_id as usize].final_weight.as_ref() {
                 final_weight = final_weight.union(&path_weight.intersection(state_final));
             }
@@ -90,10 +89,9 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             dwa.set_final_weight(from_state, final_weight);
         }
 
-        let mut edge_weights: BTreeMap<i32, Weight> = BTreeMap::new();
         let mut raw_targets: BTreeMap<i32, BTreeMap<u32, Weight>> = BTreeMap::new();
 
-        for (nwa_state_id, path_weight) in &subset {
+        for (nwa_state_id, path_weight) in &subset_key {
             let state = &nwa.states[*nwa_state_id as usize];
             for (&label, targets) in &state.transitions {
                 for (dst, trans_weight) in targets {
@@ -101,9 +99,6 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                     if next_weight.is_empty() {
                         continue;
                     }
-
-                    let edge_entry = edge_weights.entry(label).or_insert_with(Weight::empty);
-                    *edge_entry = edge_entry.union(&next_weight);
 
                     let target_entry = raw_targets.entry(label).or_default();
                     let existing = target_entry.get(dst).cloned().unwrap_or_else(Weight::empty);
@@ -113,7 +108,10 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         }
 
         for (label, target_subset) in raw_targets {
-            let edge_weight = edge_weights.remove(&label).unwrap_or_else(Weight::empty);
+            if target_subset.is_empty() {
+                continue;
+            }
+            let edge_weight = Weight::union_all(target_subset.values());
             if edge_weight.is_empty() {
                 continue;
             }
@@ -124,13 +122,17 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             }
 
             let edge_complement = edge_weight.complement();
-            let normalized: BTreeMap<u32, Weight> = expanded
-                .into_iter()
-                .filter_map(|(state_id, weight)| {
-                    let normalized_weight = weight.union(&edge_complement);
-                    (!normalized_weight.is_empty()).then_some((state_id, normalized_weight))
-                })
-                .collect();
+            let normalized: BTreeMap<u32, Weight> = if edge_complement.is_empty() {
+                expanded
+            } else {
+                expanded
+                    .into_iter()
+                    .filter_map(|(state_id, weight)| {
+                        let normalized_weight = weight.union(&edge_complement);
+                        (!normalized_weight.is_empty()).then_some((state_id, normalized_weight))
+                    })
+                    .collect()
+            };
             let next_key = canonicalize(&normalized);
             if next_key.is_empty() {
                 continue;
