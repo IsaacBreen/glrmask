@@ -304,16 +304,6 @@ fn add_weighted_transition(nwa: &mut NWA, from: u32, label: i32, to: u32, weight
     }
 }
 
-fn union_final_weight(nwa: &mut NWA, state_id: u32, weight: Weight) {
-    let Some(state) = nwa.states.get_mut(state_id as usize) else {
-        return;
-    };
-    state.final_weight = Some(match state.final_weight.take() {
-        Some(existing) => existing.union(&weight),
-        None => weight,
-    });
-}
-
 fn build_token_suffix_paths(
     tokenizer: &Tokenizer,
     nwa: &mut NWA,
@@ -334,16 +324,18 @@ fn build_token_suffix_paths(
         RangeSetBlaze::from_iter([token_id..=token_id]),
     );
 
-    if exec.matches.is_empty() {
-        if let Some(end_state) = exec.end_state {
-        let accessible: BTreeSet<_> = tokenizer
-            .tokens_accessible_from_state(end_state)
-            .into_iter()
-            .collect();
-        let matches_here: BTreeSet<_> = exec.matches.iter().map(|matched| matched.id).collect();
-        if !(&accessible - &matches_here).is_empty() {
-            union_final_weight(nwa, source_node, token_weight.clone());
-        }
+    if let Some(end_state) = exec.end_state {
+        for terminal_id in tokenizer.tokens_accessible_from_state(end_state) {
+            if terminal_id >= grammar.num_terminals {
+                continue;
+            }
+            add_weighted_transition(
+                nwa,
+                source_node,
+                terminal_id as i32,
+                leaf_state,
+                token_weight.clone(),
+            );
         }
     }
 
