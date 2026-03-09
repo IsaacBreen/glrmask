@@ -171,8 +171,9 @@ pub fn build_parser_dwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
 ) -> DWA {
-    let terminal_dwa = build_terminal_dwa(grammar, tokenizer, vocab, id_map);
+    let terminal_dwa = build_terminal_dwa(grammar, tokenizer, vocab, id_map, ignore_terminal);
     build_parser_dwa_from_terminal_dwa(table, grammar, tokenizer, &terminal_dwa)
 }
 
@@ -229,7 +230,7 @@ mod tests {
         let table = GLRTable::build(&gg);
         let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
-        let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp);
+        let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp, None);
         assert!(dwa.num_states() > 0);
     }
 
@@ -240,7 +241,7 @@ mod tests {
         let table = GLRTable::build(&gg);
         let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
-        let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp);
+        let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp, None);
         assert!(dwa.num_states() > 0);
     }
 }

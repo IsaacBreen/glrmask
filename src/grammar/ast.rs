@@ -256,6 +256,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         rules: lowerer.rules,
         start,
         terminals: lowerer.terminals,
+        ignore_terminal: None,
     })
 }
 

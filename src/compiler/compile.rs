@@ -155,7 +155,8 @@ fn remap_terminal_id(terminal: &Terminal, new_id: TerminalID) -> Terminal {
 pub(crate) fn compact_unused_terminals(
     rules: &mut Vec<Rule>,
     terminals: &[Terminal],
-) -> Vec<Terminal> {
+    ignore_terminal: Option<TerminalID>,
+) -> (Vec<Terminal>, Option<TerminalID>) {
     let mut used = std::collections::BTreeSet::<TerminalID>::new();
     for rule in rules.iter() {
         for symbol in &rule.rhs {
@@ -163,6 +164,9 @@ pub(crate) fn compact_unused_terminals(
                 used.insert(*terminal_id);
             }
         }
+    }
+    if let Some(ignore_terminal) = ignore_terminal {
+        used.insert(ignore_terminal);
     }
 
     let mut remap = std::collections::BTreeMap::<TerminalID, TerminalID>::new();
@@ -187,7 +191,9 @@ pub(crate) fn compact_unused_terminals(
         }
     }
 
-    compacted
+    let remapped_ignore_terminal = ignore_terminal.and_then(|old_id| remap.get(&old_id).copied());
+
+    (compacted, remapped_ignore_terminal)
 }
 
 fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) {
@@ -204,8 +210,17 @@ fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) 
     expand_nullable_terminals(&mut rules, &mut next_nt, &nullable_terminals);
     normalize_grammar(&mut rules, start);
 
-    let terminals = compact_unused_terminals(&mut rules, &grammar.terminals);
-    let normalized = GrammarDef { rules, start, terminals };
+    let (terminals, ignore_terminal) = compact_unused_terminals(
+        &mut rules,
+        &grammar.terminals,
+        grammar.ignore_terminal,
+    );
+    let normalized = GrammarDef {
+        rules,
+        start,
+        terminals,
+        ignore_terminal,
+    };
 
     // Build the real tokenizer only from the compacted live terminal set so
     // dead terminals never make it into downstream lexer/parser stages.
@@ -240,6 +255,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         &tokenizer,
         vocab,
         &id_map,
+        normalized.ignore_terminal,
     );
     let parser_dwa = build_parser_dwa_from_terminal_dwa(
         &table,
@@ -252,6 +268,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         parser_dwa,
         table,
         tokenizer,
+        ignore_terminal: normalized.ignore_terminal,
         possible_matches: possible_matches_by_state.clone(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
@@ -282,6 +299,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         &tokenizer,
         vocab,
         &id_map,
+        normalized.ignore_terminal,
     );
     let parser_dwa = build_parser_dwa_from_terminal_dwa(
         &table,
@@ -297,6 +315,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         parser_dwa: parser_dwa.clone(),
         table: table.clone(),
         tokenizer: tokenizer.clone(),
+        ignore_terminal: normalized.ignore_terminal,
         possible_matches: possible_matches_by_state.clone(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
@@ -605,6 +624,7 @@ mod tests {
                     bytes: b"ab".to_vec(),
                 },
             ],
+            ignore_terminal: None,
         };
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -748,6 +768,7 @@ mod tests {
                 id: 0,
                 bytes: b"a".to_vec(),
             }],
+            ignore_terminal: None,
         };
         let nullable = std::collections::BTreeSet::from([0u32]);
         let mut rules = gdef.rules.clone();
@@ -812,6 +833,7 @@ mod tests {
                     bytes: b"b".to_vec(),
                 },
             ],
+            ignore_terminal: None,
         };
         let vocab = Vocab::new(
             vec![
@@ -851,7 +873,7 @@ mod tests {
             rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
         }];
 
-        let compacted = compact_unused_terminals(&mut rules, &terminals);
+        let (compacted, ignore_terminal) = compact_unused_terminals(&mut rules, &terminals, None);
 
         assert_eq!(
             rules,
@@ -866,6 +888,49 @@ mod tests {
         assert_eq!(compacted[1].id(), 1);
         assert_eq!(compacted[0].name(), "a");
         assert_eq!(compacted[1].name(), "b");
+        assert_eq!(ignore_terminal, None);
+    }
+
+    #[test]
+    fn test_compact_unused_terminals_preserves_ignore_terminal_and_remaps_it() {
+        let terminals = vec![
+            Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            },
+            Terminal::Literal {
+                id: 1,
+                bytes: b"dead".to_vec(),
+            },
+            Terminal::Pattern {
+                id: 2,
+                pattern: " +".to_string(),
+            },
+            Terminal::Literal {
+                id: 3,
+                bytes: b"b".to_vec(),
+            },
+        ];
+        let mut rules = vec![Rule {
+            lhs: 0,
+            rhs: vec![Symbol::Terminal(0), Symbol::Terminal(3)],
+        }];
+
+        let (compacted, ignore_terminal) = compact_unused_terminals(&mut rules, &terminals, Some(2));
+
+        assert_eq!(
+            rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+            }],
+            "used terminals should still be renumbered densely when an ignore terminal is retained"
+        );
+        assert_eq!(compacted.len(), 3);
+        assert_eq!(compacted[0].name(), "a");
+        assert_eq!(compacted[1].name(), " +");
+        assert_eq!(compacted[2].name(), "b");
+        assert_eq!(ignore_terminal, Some(1));
     }
 
     #[test]
@@ -890,6 +955,7 @@ mod tests {
                     bytes: b"b".to_vec(),
                 },
             ],
+            ignore_terminal: None,
         };
         let vocab = Vocab::new(
             vec![
@@ -938,5 +1004,90 @@ mod tests {
         assert!(!mask_has_token(&mask, 0), "token 'a' should not be allowed after committing 'a'");
         assert!(mask_has_token(&mask, 1), "token 'b' should remain the live continuation after remapping");
         assert!(!mask_has_token(&mask, 2), "dead terminal token 'x' should remain absent after remapping");
+    }
+
+    #[test]
+    fn test_compile_treats_ignore_terminal_as_epsilon_and_preserves_it_through_compaction() {
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(3)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"dead".to_vec(),
+                },
+                Terminal::Pattern {
+                    id: 2,
+                    pattern: " +".to_string(),
+                },
+                Terminal::Literal {
+                    id: 3,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+            ignore_terminal: Some(2),
+        };
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b" ".to_vec()),
+                (2, b"b".to_vec()),
+                (3, b" a".to_vec()),
+                (4, b" b".to_vec()),
+            ],
+            None,
+        );
+
+        let (constraint, debug) = compile_with_debug(&gdef, &vocab);
+
+        assert_eq!(constraint.ignore_terminal, Some(1));
+        assert_eq!(debug.normalized_grammar_def.terminals.len(), 3);
+        assert_eq!(debug.normalized_grammar_def.ignore_terminal, Some(1));
+        assert_eq!(
+            debug
+                .normalized_grammar_def
+                .terminals
+                .iter()
+                .map(|terminal| terminal.name())
+                .collect::<Vec<_>>(),
+            vec!["a".to_string(), " +".to_string(), "b".to_string()],
+            "the dead terminal should be removed while the ignore terminal is preserved"
+        );
+        assert_eq!(
+            debug.normalized_grammar_def.rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+            }],
+            "live grammar terminals should be remapped around the retained ignore terminal"
+        );
+
+        let mut state = constraint.start();
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
+        assert!(mask_has_token(&mask, 1), "ignore-only token ' ' should be allowed initially");
+        assert!(!mask_has_token(&mask, 2), "token 'b' should not be allowed before 'a'");
+        assert!(mask_has_token(&mask, 3), "token ' a' should be allowed via ignore+terminal composition");
+        assert!(!mask_has_token(&mask, 4), "token ' b' should not be allowed before 'a'");
+
+        state.commit_token(3);
+        assert!(!state.is_finished(), "consuming ignored space plus 'a' should still leave trailing 'b'");
+
+        let mask = state.mask();
+        assert!(!mask_has_token(&mask, 0), "token 'a' should no longer be allowed after 'a'");
+        assert!(mask_has_token(&mask, 1), "ignore-only token ' ' should still be allowed between grammar terminals");
+        assert!(mask_has_token(&mask, 2), "token 'b' should be allowed after 'a'");
+        assert!(!mask_has_token(&mask, 3), "token ' a' should not be allowed once the grammar expects 'b'");
+        assert!(mask_has_token(&mask, 4), "token ' b' should be allowed via ignore+terminal composition after 'a'");
+
+        state.commit_token(4);
+        assert!(state.is_finished(), "consuming ignored space plus 'b' should finish the grammar");
     }
 }

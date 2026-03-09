@@ -41,6 +41,7 @@ impl<'a> ConstraintState<'a> {
             return;
         }
 
+        let ignore_terminal = self.constraint.ignore_terminal;
         let mut state_map = BTreeMap::new();
         let mut terminals_map = BTreeMap::<u32, BTreeSet<u32>>::new();
         for (&tokenizer_state, _) in &self.state {
@@ -49,6 +50,9 @@ impl<'a> ConstraintState<'a> {
                 state_map.insert(tokenizer_state, end_state);
             }
             for matched in exec.matches {
+                if Some(matched.id) == ignore_terminal {
+                    continue;
+                }
                 // TODO: expand via mutually_greedy_group() once greedy groups
                 // are wired into glrmask (see sep1 compute_commit_maps).
                 terminals_map
@@ -106,6 +110,26 @@ impl<'a> ConstraintState<'a> {
                     .execute_from_state(&bytes[offset..], tokenizer_state);
 
                 for matched in &exec_result.matches {
+                    let new_offset = offset + matched.width;
+
+                    if Some(matched.id) == ignore_terminal {
+                        let next_tsid = self.constraint.tokenizer.initial_state();
+                        if new_offset == bytes.len() {
+                            new_overall_state
+                                .entry(next_tsid)
+                                .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
+                                .or_insert_with(|| gss_at_offset.clone());
+                        } else {
+                            processing_queue
+                                .entry(new_offset)
+                                .or_default()
+                                .entry(next_tsid)
+                                .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
+                                .or_insert_with(|| gss_at_offset.clone());
+                        }
+                        continue;
+                    }
+
                     let mut gss = advance_stacks(&self.constraint.table, &gss_at_offset, matched.id);
                     if gss.is_empty() {
                         continue;
@@ -133,7 +157,6 @@ impl<'a> ConstraintState<'a> {
                         continue;
                     }
 
-                    let new_offset = offset + matched.width;
                     let next_tsid = self.constraint.tokenizer.initial_state();
                     if new_offset == bytes.len() {
                         new_overall_state

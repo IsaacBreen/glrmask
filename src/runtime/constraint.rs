@@ -25,6 +25,8 @@ pub struct Constraint {
     pub(crate) parser_dwa: DWA,
     pub(crate) table: GLRTable,
     pub(crate) tokenizer: Tokenizer,
+    #[serde(default)]
+    pub(crate) ignore_terminal: Option<TerminalID>,
 
     #[serde(with = "crate::runtime::serde::serde_btmap_rsb")]
     pub(crate) possible_matches: PossibleMatchesByState,

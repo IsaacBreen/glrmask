@@ -319,11 +319,13 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut NWA,
     leaf_state: u32,
+    ignore_terminal: Option<TerminalID>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
+    epsilon_buffer: BTreeMap<(u32, u32), Weight>,
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
-    fn add_transition_from_sources(
+    fn add_match_from_sources(
         &mut self,
         sources: &[u32],
         label: TerminalID,
@@ -331,14 +333,29 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         weight: &Weight,
     ) {
         for &source in sources {
-            self.transition_buffer
-                .entry((source, label as i32, target))
-                .and_modify(|existing| *existing = existing.union(weight))
-                .or_insert_with(|| weight.clone());
+            if self.ignore_terminal == Some(label) {
+                self.epsilon_buffer
+                    .entry((source, target))
+                    .and_modify(|existing| *existing = existing.union(weight))
+                    .or_insert_with(|| weight.clone());
+            } else {
+                self.transition_buffer
+                    .entry((source, label as i32, target))
+                    .and_modify(|existing| *existing = existing.union(weight))
+                    .or_insert_with(|| weight.clone());
+            }
         }
     }
 
     fn flush_transition_buffer(&mut self) {
+        for ((from, target), weight) in std::mem::take(&mut self.epsilon_buffer) {
+            let state = self
+                .nwa
+                .states
+                .get_mut(from as usize)
+                .expect("buffered epsilon source state must exist");
+            state.epsilons.push((target, weight));
+        }
         for ((from, label, target), weight) in std::mem::take(&mut self.transition_buffer) {
             let state = self
                 .nwa
@@ -382,7 +399,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if let Some(end_state) = exec_end_state {
                         if child_node.has_token() {
                             for terminal_id in self.tokenizer.tokens_accessible_from_state(end_state) {
-                                self.add_transition_from_sources(
+                                self.add_match_from_sources(
                                     &source_nodes,
                                     terminal_id,
                                     self.leaf_state,
@@ -398,7 +415,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let next_pos = pos + matched.width;
 
                         if next_pos == segment_bytes.len() && child_node.has_token() {
-                            self.add_transition_from_sources(
+                            self.add_match_from_sources(
                                 &source_nodes,
                                 matched.id,
                                 self.leaf_state,
@@ -442,7 +459,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             self.nwa,
                         );
 
-                        self.add_transition_from_sources(
+                        self.add_match_from_sources(
                             &source_nodes,
                             matched.id,
                             destination,
@@ -521,6 +538,7 @@ pub(crate) fn build_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
 ) -> DWA {
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
     let leaf_state = nwa.add_state();
@@ -554,7 +572,9 @@ pub(crate) fn build_terminal_dwa(
             possible_matches: &mut possible_matches,
             nwa: &mut nwa,
             leaf_state,
+            ignore_terminal,
             transition_buffer: BTreeMap::new(),
+            epsilon_buffer: BTreeMap::new(),
         };
         builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
         builder.flush_transition_buffer();
@@ -565,13 +585,6 @@ pub(crate) fn build_terminal_dwa(
         &determinize(&nwa)
             .expect("terminal NWA determinization failed despite acyclic token trie construction"),
     );
-    debug_assert!(
-        dwa.states
-            .get(dwa.start_state as usize)
-            .and_then(|state| state.final_weight.as_ref())
-            .is_none(),
-        "terminal-DWA start state unexpectedly has a final weight"
-    );
     dwa
 }
 
@@ -579,6 +592,7 @@ pub(crate) fn build_terminal_dwa(
 mod tests {
     use super::*;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
     use crate::compiler::grammar::model::tests::simple_ab_grammar;
 
     #[test]
@@ -592,7 +606,7 @@ mod tests {
         );
         let id_map = InternalIdMap::build(&tokenizer, &vocab);
 
-        let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map);
+        let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
 
         assert!(
             !terminal_dwa.eval_word(&[0]).is_empty(),
@@ -601,6 +615,68 @@ mod tests {
         assert!(
             !terminal_dwa.eval_word(&[0, 1]).is_empty(),
             "terminal DWA should accept the multi-terminal path 'ab'"
+        );
+    }
+
+    #[test]
+    fn test_terminal_dwa_treats_ignore_terminal_as_epsilon() {
+        let grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Pattern {
+                    id: 1,
+                    pattern: " +".to_string(),
+                },
+                Terminal::Literal {
+                    id: 2,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+            ignore_terminal: Some(1),
+        };
+        let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
+        let vocab = Vocab::new(
+            vec![
+                (0, b" ".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b" a".to_vec()),
+                (3, b"b".to_vec()),
+            ],
+            None,
+        );
+        let id_map = InternalIdMap::build(&tokenizer, &vocab);
+
+        let terminal_dwa = build_terminal_dwa(
+            &glr_grammar,
+            &tokenizer,
+            &vocab,
+            &id_map,
+            grammar.ignore_terminal,
+        );
+
+        let empty_weight = terminal_dwa.eval_word(&[]);
+        assert!(
+            empty_weight.token_union().contains(0),
+            "ignore-only tokens should appear in the terminal DWA start-state final weight"
+        );
+
+        let a_weight = terminal_dwa.eval_word(&[0]);
+        assert!(
+            a_weight.token_union().contains(1),
+            "plain non-ignore terminal tokens should still be accepted"
+        );
+        assert!(
+            a_weight.token_union().contains(2),
+            "tokens with ignored prefixes should also be accepted on the same terminal word"
         );
     }
 }

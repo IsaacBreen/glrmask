@@ -12,6 +12,8 @@ pub struct GrammarDef {
     pub rules: Vec<Rule>,
     pub start: NonterminalID,
     pub terminals: Vec<Terminal>,
+    #[serde(default)]
+    pub ignore_terminal: Option<TerminalID>,
 }
 
 pub type NonterminalID = u32;
@@ -134,6 +136,7 @@ pub(crate) mod tests {
             }],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b")],
+            ignore_terminal: None,
         }
     }
 
@@ -151,6 +154,7 @@ pub(crate) mod tests {
             ],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b")],
+            ignore_terminal: None,
         }
     }
 
@@ -169,6 +173,7 @@ pub(crate) mod tests {
             ],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b")],
+            ignore_terminal: None,
         }
     }
 
@@ -191,6 +196,7 @@ pub(crate) mod tests {
             ],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b")],
+            ignore_terminal: None,
         }
     }
 
@@ -206,6 +212,7 @@ pub(crate) mod tests {
             }],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
+            ignore_terminal: None,
         }
     }
 
@@ -224,6 +231,7 @@ pub(crate) mod tests {
             ],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
+            ignore_terminal: None,
         }
     }
 

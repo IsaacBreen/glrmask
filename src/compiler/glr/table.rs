@@ -249,6 +249,7 @@ mod tests {
                 id: 0,
                 bytes: b"a".to_vec(),
             }],
+            ignore_terminal: None,
         };
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
@@ -302,6 +303,7 @@ mod tests {
                     bytes: b"+".to_vec(),
                 },
             ],
+            ignore_terminal: None,
         };
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);

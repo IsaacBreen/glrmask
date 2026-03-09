@@ -164,6 +164,7 @@ fn parse_simple_ebnf(ebnf: &str) -> crate::Result<GrammarDef> {
         rules,
         start: nt_map[&start_name],
         terminals,
+        ignore_terminal: None,
     })
 }
 
