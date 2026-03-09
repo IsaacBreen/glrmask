@@ -313,6 +313,13 @@ fn token_set_weight(internal_tsid: u32, token_ids: &RangeSetBlaze<usize>) -> Wei
     Weight::from_token_set_for_tsid(internal_tsid, mapped)
 }
 
+fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
+    Weight::from_token_set_for_tsid(
+        internal_tsid,
+        RangeSetBlaze::from_iter([0..=max_token_id]),
+    )
+}
+
 #[derive(Clone)]
 struct SourceAssoc {
     tsid: u32,
@@ -530,6 +537,8 @@ pub(crate) fn build_terminal_dwa(
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
+    let start_state = nwa.add_state();
+    nwa.start_states.push(start_state);
     let vocab_tree = VocabPrefixTree::build(
         &vocab
             .entries
@@ -541,7 +550,11 @@ pub(crate) fn build_terminal_dwa(
 
     for internal_tsid in 0..id_map.num_tsids() {
         let root = nwa.add_state();
-        nwa.start_states.push(root);
+        nwa.add_epsilon(
+            start_state,
+            root,
+            all_token_weight(internal_tsid, id_map.max_token_id()),
+        );
 
         let mut assoc_by_state = BTreeMap::<u32, SourceAssoc>::new();
         for original_state in &id_map.tokenizer_states.internal_to_originals[internal_tsid as usize] {

@@ -165,31 +165,6 @@ fn compose_state(
     composed
 }
 
-fn wrap_parser_dwa_with_tokenizer_seeds(
-    table: &GLRTable,
-    tokenizer: &Tokenizer,
-    core_dwa: &DWA,
-) -> DWA {
-    let core_is_dead = core_dwa
-        .states
-        .get(core_dwa.start_state as usize)
-        .map(|state| state.final_weight.is_none() && state.transitions.is_empty())
-        .unwrap_or(true);
-    if core_is_dead {
-        return DWA::new(0, 0);
-    }
-
-    let mut wrapped = DWA::new(0, 0);
-    let core_start = append_dwa(&mut wrapped, core_dwa);
-
-    for tokenizer_state in 0..tokenizer.num_states() {
-        let tsid_label = table.num_terminals as i32 + tokenizer_state as i32;
-        wrapped.add_transition(wrapped.start_state, tsid_label, core_start, Weight::all());
-    }
-
-    wrapped
-}
-
 pub fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -225,7 +200,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
             .expect("parser NWA determinization failed despite acyclic terminal/template composition"),
     );
 
-    wrap_parser_dwa_with_tokenizer_seeds(table, tokenizer, &core_dwa)
+    core_dwa
 }
 
 #[cfg(test)]
