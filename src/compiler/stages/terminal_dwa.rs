@@ -286,18 +286,6 @@ fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
     changed
 }
 
-fn add_weighted_transition(nwa: &mut NWA, from: u32, label: i32, to: u32, weight: Weight) {
-    let Some(state) = nwa.states.get_mut(from as usize) else {
-        return;
-    };
-    let targets = state.transitions.entry(label).or_default();
-    if let Some((_, existing_weight)) = targets.iter_mut().find(|(target, _)| *target == to) {
-        *existing_weight = existing_weight.union(&weight);
-    } else {
-        targets.push((to, weight));
-    }
-}
-
 fn token_weight(internal_tsid: u32, token_id: u32) -> Weight {
     Weight::from_token_set_for_tsid(
         internal_tsid,
@@ -331,6 +319,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut NWA,
     leaf_state: u32,
+    transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
@@ -342,7 +331,21 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         weight: &Weight,
     ) {
         for &source in sources {
-            add_weighted_transition(self.nwa, source, label as i32, target, weight.clone());
+            self.transition_buffer
+                .entry((source, label as i32, target))
+                .and_modify(|existing| *existing = existing.union(weight))
+                .or_insert_with(|| weight.clone());
+        }
+    }
+
+    fn flush_transition_buffer(&mut self) {
+        for ((from, label, target), weight) in std::mem::take(&mut self.transition_buffer) {
+            let state = self
+                .nwa
+                .states
+                .get_mut(from as usize)
+                .expect("buffered transition source state must exist");
+            state.transitions.entry(label).or_default().push((target, weight));
         }
     }
 
@@ -551,8 +554,10 @@ pub(crate) fn build_terminal_dwa(
             possible_matches: &mut possible_matches,
             nwa: &mut nwa,
             leaf_state,
+            transition_buffer: BTreeMap::new(),
         };
         builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
+        builder.flush_transition_buffer();
     }
 
     let _ = prune_disallowed_follows(&mut nwa, grammar);
