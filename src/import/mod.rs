@@ -212,6 +212,11 @@ fn from_json_schema_with_debug(
 
 impl Constraint {
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        if std::env::var("GLRMASK_COMPILE_DEBUG").is_ok() {
+            let (constraint, debug) = from_ebnf_with_debug(ebnf, vocab)?;
+            eprintln!("{}", debug);
+            return Ok(constraint);
+        }
         from_ebnf(ebnf, vocab)
     }
 
