@@ -20,6 +20,21 @@ impl Templates {
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
     ) -> NWA {
+        if terminal_weights.len() == 1 {
+            let mut bundle = NWA::new(0, 0);
+            let start = bundle.add_state();
+            bundle.start_states.push(start);
+
+            let (&terminal, weight) = terminal_weights.iter().next().expect("single-entry bundle");
+            if !weight.is_empty() {
+                if let Some(template) = self.by_terminal.get(&terminal) {
+                    append_template(&mut bundle, start, template, weight);
+                }
+            }
+
+            return bundle;
+        }
+
         let mut raw_bundle = NWA::new(0, 0);
         let start = raw_bundle.add_state();
         raw_bundle.start_states.push(start);
