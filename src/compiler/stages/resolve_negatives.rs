@@ -219,13 +219,48 @@ pub(crate) fn apply_cancellations(nwa: &mut NWA) {
     }
 }
 
-pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
-    let n = nwa.states.len();
-    if n == 0 {
-        return;
+fn merge_final_weight(entry: &mut Option<Weight>, add: Weight) -> bool {
+    if add.is_empty() {
+        return false;
     }
+    match entry {
+        Some(existing) => {
+            let updated = existing.union(&add);
+            if updated != *existing {
+                *existing = updated;
+                true
+            } else {
+                false
+            }
+        }
+        None => {
+            *entry = Some(add);
+            true
+        }
+    }
+}
 
+fn finality_edge_weight<'a>(nwa: &'a NWA, edge: PredEdge) -> (usize, &'a Weight) {
+    match edge {
+        PredEdge::Epsilon { from, eps_idx } => {
+            let (_, weight) = &nwa.states[from].epsilons[eps_idx];
+            (from, weight)
+        }
+        PredEdge::Negative { from, label, trans_idx } => {
+            let (_, weight) = &nwa.states[from].transitions[&label][trans_idx];
+            (from, weight)
+        }
+        PredEdge::Default { from, trans_idx } => {
+            let (_, weight) = &nwa.states[from].transitions[&DEFAULT_LABEL][trans_idx];
+            (from, weight)
+        }
+    }
+}
+
+fn build_finality_predecessors(nwa: &NWA) -> Vec<Vec<PredEdge>> {
+    let n = nwa.states.len();
     let mut preds = vec![Vec::<PredEdge>::new(); n];
+
     for (from, state) in nwa.states.iter().enumerate() {
         for (eps_idx, (target, weight)) in state.epsilons.iter().enumerate() {
             if *target as usize >= n || weight.is_empty() {
@@ -254,16 +289,97 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
         }
     }
 
-    let mut future_final = vec![None::<Weight>; n];
+    preds
+}
+
+fn build_finality_topo_order(nwa: &NWA, graph_profile_enabled: bool) -> Option<Vec<usize>> {
+    let n = nwa.states.len();
+    let mut indegree = vec![0usize; n];
+
+    for state in &nwa.states {
+        for (target, weight) in &state.epsilons {
+            if *target as usize >= n || weight.is_empty() {
+                continue;
+            }
+            indegree[*target as usize] += 1;
+        }
+        for (&label, targets) in &state.transitions {
+            if label != DEFAULT_LABEL && !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                if *target as usize >= n || weight.is_empty() {
+                    continue;
+                }
+                indegree[*target as usize] += 1;
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (state_id, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            queue.push_back(state_id);
+        }
+    }
+
+    let mut topo_order = Vec::with_capacity(n);
+    while let Some(state_id) = queue.pop_front() {
+        topo_order.push(state_id);
+        let state = &nwa.states[state_id];
+        for (target, weight) in &state.epsilons {
+            if *target as usize >= n || weight.is_empty() {
+                continue;
+            }
+            indegree[*target as usize] -= 1;
+            if indegree[*target as usize] == 0 {
+                queue.push_back(*target as usize);
+            }
+        }
+        for (&label, targets) in &state.transitions {
+            if label != DEFAULT_LABEL && !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                if *target as usize >= n || weight.is_empty() {
+                    continue;
+                }
+                indegree[*target as usize] -= 1;
+                if indegree[*target as usize] == 0 {
+                    queue.push_back(*target as usize);
+                }
+            }
+        }
+    }
+
+    let acyclic = topo_order.len() == n;
+    if graph_profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] finality_graph nodes={} acyclic={} cyclic_nodes={}",
+            n,
+            acyclic,
+            n.saturating_sub(topo_order.len()),
+        );
+    }
+
+    acyclic.then_some(topo_order)
+}
+
+fn apply_finality_fixpoint_worklist(
+    nwa: &NWA,
+    preds: &[Vec<PredEdge>],
+    future_final: &mut [Option<Weight>],
+) {
+    let n = nwa.states.len();
     let mut worklist = VecDeque::<usize>::new();
     let mut in_queue = vec![false; n];
 
     for state_id in 0..n {
-        if let Some(fw) = nwa.states[state_id].final_weight.clone() {
-            if fw.is_empty() {
-                continue;
-            }
-            future_final[state_id] = Some(fw);
+        if future_final[state_id]
+            .as_ref()
+            .map(|weight| !weight.is_empty())
+            .unwrap_or(false)
+        {
             in_queue[state_id] = true;
             worklist.push_back(state_id);
         }
@@ -279,43 +395,38 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
         }
 
         for edge in preds[state_id].iter().copied() {
-            let (pred_state, edge_weight) = match edge {
-                PredEdge::Epsilon { from, eps_idx } => {
-                    let (_, w) = &nwa.states[from].epsilons[eps_idx];
-                    (from, w)
-                }
-                PredEdge::Negative { from, label, trans_idx } => {
-                    let (_, w) = &nwa.states[from].transitions[&label][trans_idx];
-                    (from, w)
-                }
-                PredEdge::Default { from, trans_idx } => {
-                    let (_, w) = &nwa.states[from].transitions[&DEFAULT_LABEL][trans_idx];
-                    (from, w)
-                }
-            };
-
+            let (pred_state, edge_weight) = finality_edge_weight(nwa, edge);
             let add = f_s.intersection(edge_weight);
-            if add.is_empty() {
-                continue;
-            }
-
-            let updated = match &future_final[pred_state] {
-                Some(existing) => existing.union(&add),
-                None => add,
-            };
-            let changed = future_final[pred_state]
-                .as_ref()
-                .map(|existing| existing != &updated)
-                .unwrap_or(true);
-            if changed {
-                future_final[pred_state] = Some(updated);
-                if !in_queue[pred_state] {
-                    in_queue[pred_state] = true;
-                    worklist.push_back(pred_state);
-                }
+            if merge_final_weight(&mut future_final[pred_state], add) && !in_queue[pred_state] {
+                in_queue[pred_state] = true;
+                worklist.push_back(pred_state);
             }
         }
     }
+}
+
+pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
+    let n = nwa.states.len();
+    if n == 0 {
+        return;
+    }
+    let graph_profile_enabled = std::env::var_os("GLRMASK_PROFILE_FINALITY_GRAPH").is_some();
+    if graph_profile_enabled {
+        let _ = build_finality_topo_order(nwa, true);
+    }
+    let preds = build_finality_predecessors(nwa);
+
+    let mut future_final = vec![None::<Weight>; n];
+    for state_id in 0..n {
+        if let Some(fw) = nwa.states[state_id].final_weight.clone() {
+            if fw.is_empty() {
+                continue;
+            }
+            future_final[state_id] = Some(fw);
+        }
+    }
+
+    apply_finality_fixpoint_worklist(nwa, &preds, &mut future_final);
 
     for (state_id, final_weight) in future_final.into_iter().enumerate() {
         nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
@@ -629,6 +740,70 @@ mod tests {
         }
     }
 
+    fn set_weighted_final(nwa: &mut NWA, state: u32, kind: u8) {
+        match kind {
+            1 => nwa.set_final_weight(state, weight_1()),
+            2 => nwa.set_final_weight(state, weight_12()),
+            _ => {}
+        }
+    }
+
+    fn apply_finality_fixpoint_reference(nwa: &mut NWA) {
+        let n = nwa.states.len();
+        if n == 0 {
+            return;
+        }
+
+        let mut preds = vec![Vec::<PredEdge>::new(); n];
+        for (from, state) in nwa.states.iter().enumerate() {
+            for (eps_idx, (target, weight)) in state.epsilons.iter().enumerate() {
+                if *target as usize >= n || weight.is_empty() {
+                    continue;
+                }
+                preds[*target as usize].push(PredEdge::Epsilon { from, eps_idx });
+            }
+            for (&label, targets) in &state.transitions {
+                if label != DEFAULT_LABEL && !is_negative_label(label) {
+                    continue;
+                }
+                for (trans_idx, (target, weight)) in targets.iter().enumerate() {
+                    if *target as usize >= n || weight.is_empty() {
+                        continue;
+                    }
+                    if label == DEFAULT_LABEL {
+                        preds[*target as usize].push(PredEdge::Default { from, trans_idx });
+                    } else {
+                        preds[*target as usize].push(PredEdge::Negative {
+                            from,
+                            label,
+                            trans_idx,
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut future_final = vec![None::<Weight>; n];
+        for state_id in 0..n {
+            if let Some(fw) = nwa.states[state_id].final_weight.clone() {
+                if fw.is_empty() {
+                    continue;
+                }
+                future_final[state_id] = Some(fw);
+            }
+        }
+
+        apply_finality_fixpoint_worklist(nwa, &preds, &mut future_final);
+
+        for (state_id, final_weight) in future_final.into_iter().enumerate() {
+            nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
+        }
+    }
+
+    fn final_weights(nwa: &NWA) -> Vec<Option<Weight>> {
+        nwa.states.iter().map(|state| state.final_weight.clone()).collect()
+    }
+
     fn weight_1() -> Weight {
         Weight::from_compact_ranges([(1..=1, [1..=1])])
     }
@@ -733,6 +908,83 @@ mod tests {
             assert_eq!(
                 actual, expected,
                 "delta propagation diverged from reference for config {}",
+                config
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_finality_fixpoint_matches_reference_on_small_acyclic_family() {
+        let neg1 = encode_negative_label(1);
+
+        for config in 0..(3usize.pow(6)) {
+            let mut code = config;
+            let mut next_kind = || {
+                let kind = (code % 3) as u8;
+                code /= 3;
+                kind
+            };
+
+            let mut nwa = NWA::new(0, 0);
+            for _ in 0..3 {
+                nwa.add_state();
+            }
+
+            set_weighted_final(&mut nwa, 0, next_kind());
+            set_weighted_final(&mut nwa, 1, next_kind());
+            set_weighted_final(&mut nwa, 2, next_kind());
+            add_weighted_epsilon(&mut nwa, 0, 1, next_kind());
+            add_weighted_transition(&mut nwa, 0, DEFAULT_LABEL, 2, next_kind());
+            add_weighted_transition(&mut nwa, 1, neg1, 2, next_kind());
+
+            let mut actual = nwa.clone();
+            let mut expected = nwa.clone();
+            apply_finality_fixpoint(&mut actual);
+            apply_finality_fixpoint_reference(&mut expected);
+
+            assert_eq!(
+                final_weights(&actual),
+                final_weights(&expected),
+                "acyclic finality propagation diverged for config {}",
+                config
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_finality_fixpoint_matches_reference_on_small_cyclic_family() {
+        let neg1 = encode_negative_label(1);
+
+        for config in 0..(3usize.pow(7)) {
+            let mut code = config;
+            let mut next_kind = || {
+                let kind = (code % 3) as u8;
+                code /= 3;
+                kind
+            };
+
+            let mut nwa = NWA::new(0, 0);
+            for _ in 0..3 {
+                nwa.add_state();
+            }
+
+            set_weighted_final(&mut nwa, 0, next_kind());
+            set_weighted_final(&mut nwa, 1, next_kind());
+            set_weighted_final(&mut nwa, 2, next_kind());
+            add_weighted_epsilon(&mut nwa, 0, 1, next_kind());
+            add_weighted_transition(&mut nwa, 1, DEFAULT_LABEL, 0, next_kind());
+            add_weighted_transition(&mut nwa, 1, neg1, 2, next_kind());
+            add_weighted_epsilon(&mut nwa, 2, 1, next_kind());
+
+            let mut actual = nwa.clone();
+            let mut expected = nwa.clone();
+            apply_finality_fixpoint(&mut actual);
+            apply_finality_fixpoint_reference(&mut expected);
+
+            assert_eq!(
+                final_weights(&actual),
+                final_weights(&expected),
+                "cyclic finality propagation diverged for config {}",
                 config
             );
         }

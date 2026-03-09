@@ -37,6 +37,23 @@ struct StateSummary {
     branches: Vec<Branch>,
 }
 
+#[derive(Default)]
+struct ComposeStateProfile {
+    calls: usize,
+    memo_hits: usize,
+    branches: usize,
+    accepting_ms: std::time::Duration,
+    continuation_ms: std::time::Duration,
+    concat_build_ms: std::time::Duration,
+    union_ms: std::time::Duration,
+    concat_hits: usize,
+    concat_misses: usize,
+    concat_left_states: usize,
+    concat_right_states: usize,
+    max_concat_left_states: usize,
+    max_concat_right_states: usize,
+}
+
 fn append_dwa(into: &mut DWA, other: &DWA) -> u32 {
     let offset = into.states.len() as u32;
     for _ in &other.states {
@@ -195,10 +212,18 @@ fn union_optional_nwa(acc: &mut Option<NWA>, next: &NWA) {
 fn compose_state(
     state_id: u32,
     states: &[StateSummary],
-    memo: &mut Vec<Option<Option<Arc<NWA>>>>,
-    concat_memo: &mut HashMap<(usize, u32), Option<Arc<NWA>>>,
-) -> Option<Arc<NWA>> {
+    arena: &mut NWA,
+    memo: &mut Vec<Option<Option<crate::automata::weighted::nwa::NwaBody>>>,
+    concat_memo: &mut HashMap<(usize, u32), Option<crate::automata::weighted::nwa::NwaBody>>,
+    mut profile: Option<&mut ComposeStateProfile>,
+) -> Option<crate::automata::weighted::nwa::NwaBody> {
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.calls += 1;
+    }
     if let Some(Some(cached)) = memo.get(state_id as usize) {
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.memo_hits += 1;
+        }
         return cached.clone();
     }
 
@@ -206,27 +231,73 @@ fn compose_state(
         return None;
     };
 
-    let mut composed: Option<NWA> = state.final_weight.as_ref().and_then(accepting_nwa);
+    let phase_started_at = std::time::Instant::now();
+    let mut composed = state
+        .final_weight
+        .as_ref()
+        .and_then(accepting_nwa)
+        .map(|accepting| arena.append_with_body(&accepting));
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.accepting_ms += phase_started_at.elapsed();
+    }
 
     for branch in &state.branches {
-        let Some(continuation) = compose_state(branch.target, states, memo, concat_memo) else {
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.branches += 1;
+        }
+
+        let phase_started_at = std::time::Instant::now();
+        let Some(continuation) = compose_state(
+            branch.target,
+            states,
+            arena,
+            memo,
+            concat_memo,
+            profile.as_deref_mut(),
+        ) else {
             continue;
         };
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.continuation_ms += phase_started_at.elapsed();
+        }
+
         let concat_key = (branch.bundle_id, branch.target);
         let branch_with_continuation = if let Some(cached) = concat_memo.get(&concat_key) {
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.concat_hits += 1;
+            }
             cached.clone()
         } else {
-            let built = concatenate_nwas(branch.bundle.as_ref(), continuation.as_ref()).map(Arc::new);
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.concat_misses += 1;
+                profile.concat_left_states += branch.bundle.states.len();
+                profile.concat_right_states += continuation.start_states.len();
+                profile.max_concat_left_states = profile.max_concat_left_states.max(branch.bundle.states.len());
+                profile.max_concat_right_states =
+                    profile.max_concat_right_states.max(continuation.start_states.len());
+            }
+            let phase_started_at = std::time::Instant::now();
+            let built = Some(arena.concatenate_in_place(branch.bundle.as_ref(), &continuation));
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.concat_build_ms += phase_started_at.elapsed();
+            }
             concat_memo.insert(concat_key, built.clone());
             built
         };
         let Some(branch_with_continuation) = branch_with_continuation else {
             continue;
         };
-        union_optional_nwa(&mut composed, branch_with_continuation.as_ref());
+
+        let phase_started_at = std::time::Instant::now();
+        composed = Some(match composed {
+            Some(existing) => crate::automata::weighted::nwa::NwaBody::union(&existing, &branch_with_continuation),
+            None => branch_with_continuation,
+        });
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.union_ms += phase_started_at.elapsed();
+        }
     }
 
-    let composed = composed.map(Arc::new);
     if let Some(entry) = memo.get_mut(state_id as usize) {
         *entry = Some(composed.clone());
     }
@@ -283,18 +354,24 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
     }
 
     let phase_started_at = std::time::Instant::now();
+    let mut arena = NWA::new(0, 0);
     let mut memo = vec![None; states.len()];
     let mut concat_memo = HashMap::new();
-    let Some(parser_nwa) = compose_state(
+    let compose_profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPOSE_STATE").is_some();
+    let mut compose_profile = compose_profile_enabled.then(ComposeStateProfile::default);
+    let Some(parser_body) = compose_state(
         terminal_dwa.start_state,
         &states,
+        &mut arena,
         &mut memo,
         &mut concat_memo,
+        compose_profile.as_mut(),
     )
     else {
         return DWA::new(0, 0);
     };
-    let mut parser_nwa = parser_nwa.as_ref().clone();
+    arena.start_states = parser_body.start_states.clone();
+    let mut parser_nwa = arena;
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] compose_state_ms={:.3} memo_entries={} nwa_states={}",
@@ -302,6 +379,35 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
             memo.iter().filter(|entry| entry.is_some()).count(),
             parser_nwa.states.len(),
         );
+        if let Some(profile) = compose_profile.as_ref() {
+            eprintln!(
+                "[glrmask/profile][parser_dwa] compose_state_detail calls={} memo_hits={} branches={} concat_hits={} concat_misses={} accepting_ms={:.3} continuation_ms={:.3} concat_build_ms={:.3} union_ms={:.3}",
+                profile.calls,
+                profile.memo_hits,
+                profile.branches,
+                profile.concat_hits,
+                profile.concat_misses,
+                profile.accepting_ms.as_secs_f64() * 1000.0,
+                profile.continuation_ms.as_secs_f64() * 1000.0,
+                profile.concat_build_ms.as_secs_f64() * 1000.0,
+                profile.union_ms.as_secs_f64() * 1000.0,
+            );
+            eprintln!(
+                "[glrmask/profile][parser_dwa] compose_state_concat_shapes avg_left_states={:.3} avg_right_states={:.3} max_left_states={} max_right_states={}",
+                if profile.concat_misses == 0 {
+                    0.0
+                } else {
+                    profile.concat_left_states as f64 / profile.concat_misses as f64
+                },
+                if profile.concat_misses == 0 {
+                    0.0
+                } else {
+                    profile.concat_right_states as f64 / profile.concat_misses as f64
+                },
+                profile.max_concat_left_states,
+                profile.max_concat_right_states,
+            );
+        }
     }
 
     let phase_started_at = std::time::Instant::now();
