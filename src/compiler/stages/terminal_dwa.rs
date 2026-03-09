@@ -336,14 +336,14 @@ fn build_token_suffix_paths(
 
     if exec.matches.is_empty() {
         if let Some(end_state) = exec.end_state {
-            let accessible: BTreeSet<_> = tokenizer
-                .tokens_accessible_from_state(end_state)
-                .into_iter()
-                .collect();
-            let matches_here: BTreeSet<_> = exec.matches.iter().map(|matched| matched.id).collect();
-            if !(&accessible - &matches_here).is_empty() {
-                union_final_weight(nwa, source_node, token_weight.clone());
-            }
+        let accessible: BTreeSet<_> = tokenizer
+            .tokens_accessible_from_state(end_state)
+            .into_iter()
+            .collect();
+        let matches_here: BTreeSet<_> = exec.matches.iter().map(|matched| matched.id).collect();
+        if !(&accessible - &matches_here).is_empty() {
+            union_final_weight(nwa, source_node, token_weight.clone());
+        }
         }
     }
 
@@ -387,12 +387,12 @@ fn build_token_suffix_paths(
     }
 }
 
-pub(crate) fn build_terminal_dwa_with_prefix_weights(
+pub(crate) fn build_terminal_dwa(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-) -> (DWA, Option<Weight>) {
+) -> DWA {
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
@@ -427,11 +427,6 @@ pub(crate) fn build_terminal_dwa_with_prefix_weights(
         &determinize(&nwa)
             .expect("terminal NWA determinization failed despite acyclic token trie construction"),
     );
-    let mut dwa = dwa;
-    let start_final = dwa
-        .states
-        .get_mut(dwa.start_state as usize)
-        .and_then(|state| state.final_weight.take());
     debug_assert!(
         dwa.states
             .get(dwa.start_state as usize)
@@ -439,16 +434,7 @@ pub(crate) fn build_terminal_dwa_with_prefix_weights(
             .is_none(),
         "terminal-DWA start state unexpectedly has a final weight"
     );
-    (dwa, start_final)
-}
-
-pub(crate) fn build_terminal_dwa(
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-) -> DWA {
-    build_terminal_dwa_with_prefix_weights(grammar, tokenizer, vocab, id_map).0
+    dwa
 }
 
 #[cfg(test)]
