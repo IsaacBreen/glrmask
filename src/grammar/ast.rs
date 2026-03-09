@@ -75,7 +75,7 @@ impl Lowerer {
         // Decide variant: if the pattern is the same as the escaped literal of
         // the name bytes, store as Literal; otherwise store as Pattern.
         let name_bytes = name.as_bytes();
-        let escaped: String = name_bytes.iter().map(|&b| escape_byte(b)).collect();
+        let escaped: String = name_bytes.iter().map(|&b| regex_escape_byte(b)).collect();
         if escaped == pattern {
             self.terminals.push(Terminal::Literal {
                 id,
@@ -139,7 +139,7 @@ impl Lowerer {
         Ok(match expr {
             GrammarExpr::Ref(name) => Symbol::Nonterminal(self.nt_id(name)),
             GrammarExpr::Literal(bytes) => {
-                let pattern = bytes.iter().map(|&b| escape_byte(b)).collect::<String>();
+                let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
                 Symbol::Terminal(self.terminal_id(&String::from_utf8_lossy(bytes), &pattern))
             }
             GrammarExpr::CharClass { def, negate } => {
