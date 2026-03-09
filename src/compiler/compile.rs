@@ -20,7 +20,7 @@ use crate::compiler::possible_matches::build_possible_matches_by_state;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::terminal_dwa::build_terminal_dwa;
+use crate::compiler::terminal_dwa::{build_terminal_dwa, build_terminal_nwa};
 use crate::runtime::Constraint;
 
 // ── Tokenizer construction ──────────────────────────────────────────────────
@@ -185,7 +185,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         &glr_grammar,
         &tokenizer,
         &terminal_dwa,
-        &id_map,
     );
 
     Constraint {
@@ -242,12 +241,17 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         vocab,
         &id_map,
     );
+    let terminal_nwa = build_terminal_nwa(
+        &glr_grammar,
+        &tokenizer,
+        vocab,
+        &id_map,
+    );
     let parser_dwa = build_parser_dwa_from_terminal_dwa(
         &table,
         &glr_grammar,
         &tokenizer,
         &terminal_dwa,
-        &id_map,
     );
 
     let vocab_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().cloned().collect();
@@ -273,8 +277,8 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
             characterizations,
             terminal_dwa: terminal_dwa.clone(),
             terminal_debug: TerminalDebug {
-                nwa_after_build: terminal_dwa.nwa.clone(),
-                nwa_after_collapse: terminal_dwa.nwa.clone(),
+                nwa_after_build: terminal_nwa.clone(),
+                nwa_after_collapse: terminal_nwa.clone(),
             },
             templates,
             parser_nwa_before_resolve: NWA::new(0, 0),

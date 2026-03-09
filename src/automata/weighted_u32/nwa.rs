@@ -79,6 +79,36 @@ impl NWA {
         }
     }
 
+    /// Subtract final weights from outgoing transitions (epsilon and labeled).
+    /// For any state with a final_weight, subtract that weight from all
+    /// outgoing edges.  This prevents tokens already accepted at a state
+    /// from being further processed through transitions, matching sep1 behavior.
+    pub fn subtract_final_weights_from_outgoing(&mut self) {
+        for i in 0..self.states.len() {
+            let Some(final_weight) = self.states[i].final_weight.clone() else {
+                continue;
+            };
+            if final_weight.is_empty() {
+                continue;
+            }
+            let state = &mut self.states[i];
+            for (_, w) in &mut state.epsilons {
+                *w = w.difference(&final_weight);
+            }
+            for targets in state.transitions.values_mut() {
+                for (_, w) in targets {
+                    *w = w.difference(&final_weight);
+                }
+            }
+            // Remove empty transitions
+            state.epsilons.retain(|(_, w)| !w.is_empty());
+            for targets in state.transitions.values_mut() {
+                targets.retain(|(_, w)| !w.is_empty());
+            }
+            state.transitions.retain(|_, targets| !targets.is_empty());
+        }
+    }
+
     pub fn num_transitions(&self) -> usize {
         self.states
             .iter()

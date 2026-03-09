@@ -13,7 +13,6 @@ use crate::compiler::grammar::model::{GrammarDef, TerminalID};
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::terminal_dwa::TerminalDWA;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -26,7 +25,7 @@ pub struct TerminalDebug {
 #[allow(dead_code)]
 pub struct AutomataDebug {
     pub characterizations: BTreeMap<TerminalID, TerminalCharacterization>,
-    pub terminal_dwa: TerminalDWA,
+    pub terminal_dwa: DWA,
     pub terminal_debug: TerminalDebug,
     pub templates: Templates,
     pub parser_nwa_before_resolve: NWA,
@@ -44,7 +43,7 @@ pub struct CompileDebug {
     pub glr_grammar: AnalyzedGrammar,
     pub glr_table: GLRTable,
     pub characterizations: BTreeMap<TerminalID, TerminalCharacterization>,
-    pub terminal_dwa: TerminalDWA,
+    pub terminal_dwa: DWA,
     pub terminal_debug: TerminalDebug,
     pub templates: Templates,
     pub parser_nwa_before_resolve: NWA,

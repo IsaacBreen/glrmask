@@ -194,15 +194,13 @@ impl std::fmt::Display for CompileDebug {
                 .display_with_all_maps(&terminal_symbols, &tsid_names, &token_names)
         )?;
 
-        writeln!(f, "\n═══ TERMINAL NWA — final (in terminal_dwa) ═══")?;
+        writeln!(f, "\n═══ TERMINAL DWA — final ═══")?;
         write!(
             f,
             "{}",
             self.terminal_dwa
-                .nwa
                 .display_with_all_maps(&terminal_symbols, &tsid_names, &token_names)
         )?;
-        writeln!(f, "TSID roots: {:?}", self.terminal_dwa.tsid_roots)?;
 
         writeln!(f, "\n═══ PARSER NWA — before resolve_negatives ═══")?;
         write!(f, "{}", self.parser_nwa_before_resolve)?;
