@@ -195,10 +195,10 @@ fn union_optional_nwa(acc: &mut Option<NWA>, next: &NWA) {
 fn compose_state(
     state_id: u32,
     states: &[StateSummary],
-    memo: &mut BTreeMap<u32, Option<Arc<NWA>>>,
+    memo: &mut Vec<Option<Option<Arc<NWA>>>>,
     concat_memo: &mut HashMap<(usize, u32), Option<Arc<NWA>>>,
 ) -> Option<Arc<NWA>> {
-    if let Some(cached) = memo.get(&state_id) {
+    if let Some(Some(cached)) = memo.get(state_id as usize) {
         return cached.clone();
     }
 
@@ -227,7 +227,9 @@ fn compose_state(
     }
 
     let composed = composed.map(Arc::new);
-    memo.insert(state_id, composed.clone());
+    if let Some(entry) = memo.get_mut(state_id as usize) {
+        *entry = Some(composed.clone());
+    }
     composed
 }
 
@@ -281,7 +283,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
     }
 
     let phase_started_at = std::time::Instant::now();
-    let mut memo = BTreeMap::new();
+    let mut memo = vec![None; states.len()];
     let mut concat_memo = HashMap::new();
     let Some(parser_nwa) = compose_state(
         terminal_dwa.start_state,
@@ -297,7 +299,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
         eprintln!(
             "[glrmask/profile][parser_dwa] compose_state_ms={:.3} memo_entries={} nwa_states={}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
-            memo.len(),
+            memo.iter().filter(|entry| entry.is_some()).count(),
             parser_nwa.states.len(),
         );
     }
