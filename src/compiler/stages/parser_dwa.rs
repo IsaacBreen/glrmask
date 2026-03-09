@@ -18,7 +18,7 @@ use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
-use crate::compiler::terminal_dwa::build_terminal_dwa;
+use crate::compiler::terminal_dwa::build_terminal_dwa_with_prefix_weights;
 use crate::ds::weight::Weight;
 
 type Bundle = BTreeMap<TerminalID, Weight>;
@@ -169,6 +169,8 @@ fn wrap_parser_dwa_with_tokenizer_seeds(
     table: &GLRTable,
     tokenizer: &Tokenizer,
     core_dwa: &DWA,
+    start_prefix_weight: Option<Weight>,
+    id_map: &InternalIdMap,
 ) -> DWA {
     let core_is_dead = core_dwa
         .states
@@ -181,10 +183,38 @@ fn wrap_parser_dwa_with_tokenizer_seeds(
 
     let mut wrapped = DWA::new(0, 0);
     let core_start = append_dwa(&mut wrapped, core_dwa);
+    let core_start_state = wrapped.states[core_start as usize].clone();
 
     for tokenizer_state in 0..tokenizer.num_states() {
         let tsid_label = table.num_terminals as i32 + tokenizer_state as i32;
-        wrapped.add_transition(wrapped.start_state, tsid_label, core_start, Weight::all());
+        let internal_tsid = id_map
+            .tokenizer_states
+            .original_to_internal
+            .get(tokenizer_state as usize)
+            .copied()
+            .unwrap_or(tokenizer_state);
+
+        let prefix_weight = start_prefix_weight.as_ref().and_then(|weight| {
+            let tokens = weight.tokens_for_tsid(internal_tsid);
+            if tokens.is_empty() {
+                None
+            } else {
+                Some(Weight::from_token_set_for_tsid(internal_tsid, tokens))
+            }
+        });
+
+        let target = if let Some(prefix_weight) = prefix_weight {
+            let seed_state = wrapped.add_state();
+            wrapped.set_final_weight(seed_state, prefix_weight);
+            for (&label, (next, weight)) in &core_start_state.transitions {
+                wrapped.add_transition(seed_state, label, *next, weight.clone());
+            }
+            seed_state
+        } else {
+            core_start
+        };
+
+        wrapped.add_transition(wrapped.start_state, tsid_label, target, Weight::all());
     }
 
     wrapped
@@ -197,8 +227,16 @@ pub fn build_parser_dwa(
     vocab: &Vocab,
     id_map: &InternalIdMap,
 ) -> DWA {
-    let terminal_dwa = build_terminal_dwa(grammar, tokenizer, vocab, id_map);
-    build_parser_dwa_from_terminal_dwa(table, grammar, tokenizer, &terminal_dwa)
+    let (terminal_dwa, start_prefix_weight) =
+        build_terminal_dwa_with_prefix_weights(grammar, tokenizer, vocab, id_map);
+    build_parser_dwa_from_terminal_dwa(
+        table,
+        grammar,
+        tokenizer,
+        &terminal_dwa,
+        start_prefix_weight,
+        id_map,
+    )
 }
 
 pub(crate) fn build_parser_dwa_from_terminal_dwa(
@@ -206,6 +244,8 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     terminal_dwa: &DWA,
+    start_prefix_weight: Option<Weight>,
+    id_map: &InternalIdMap,
 ) -> DWA {
     let characterizations = characterize_terminals(table, grammar);
     let templates = Templates::from_characterizations(&characterizations);
@@ -225,7 +265,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
             .expect("parser NWA determinization failed despite acyclic terminal/template composition"),
     );
 
-    wrap_parser_dwa_with_tokenizer_seeds(table, tokenizer, &core_dwa)
+    wrap_parser_dwa_with_tokenizer_seeds(table, tokenizer, &core_dwa, start_prefix_weight, id_map)
 }
 
 #[cfg(test)]

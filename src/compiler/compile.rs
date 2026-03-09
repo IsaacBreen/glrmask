@@ -20,7 +20,7 @@ use crate::compiler::possible_matches::build_possible_matches_by_state;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::terminal_dwa::build_terminal_dwa;
+use crate::compiler::terminal_dwa::build_terminal_dwa_with_prefix_weights;
 use crate::runtime::Constraint;
 
 // ── Tokenizer construction ──────────────────────────────────────────────────
@@ -174,7 +174,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> =
         vocab.entries.iter().cloned().collect();
-    let terminal_dwa = build_terminal_dwa(
+    let (terminal_dwa, start_prefix_weight) = build_terminal_dwa_with_prefix_weights(
         &glr_grammar,
         &tokenizer,
         vocab,
@@ -185,6 +185,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         &glr_grammar,
         &tokenizer,
         &terminal_dwa,
+        start_prefix_weight.clone(),
+        &id_map,
     );
 
     Constraint {
@@ -235,7 +237,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
 
     let characterizations = characterize_terminals(&table, &glr_grammar);
     let templates = Templates::from_characterizations(&characterizations);
-    let terminal_dwa = build_terminal_dwa(
+    let (terminal_dwa, start_prefix_weight) = build_terminal_dwa_with_prefix_weights(
         &glr_grammar,
         &tokenizer,
         vocab,
@@ -246,6 +248,8 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         &glr_grammar,
         &tokenizer,
         &terminal_dwa,
+        start_prefix_weight.clone(),
+        &id_map,
     );
 
     let vocab_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().cloned().collect();
