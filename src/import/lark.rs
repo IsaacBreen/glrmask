@@ -499,7 +499,13 @@ impl Parser {
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         match self.advance() {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
-            Some(Token::Literal(s)) => Ok(GrammarExpr::Literal(s.into_bytes())),
+            Some(Token::Literal(s)) => {
+                if s.is_empty() {
+                    Ok(GrammarExpr::Sequence(vec![]))
+                } else {
+                    Ok(GrammarExpr::Literal(s.into_bytes()))
+                }
+            }
             Some(Token::Regex(rx)) => {
                 Ok(GrammarExpr::RawRegex(rx))
             }

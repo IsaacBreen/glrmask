@@ -63,7 +63,11 @@ impl<'a> ConstraintState<'a> {
             gss = gss.apply_and_prune(|terminals_disallowed: &BTreeMap<u32, BTreeSet<u32>>| {
                 for (state_id, matched_terminals) in &terminals_map {
                     if let Some(disallowed) = terminals_disallowed.get(state_id) {
-                        if matched_terminals.iter().any(|terminal| disallowed.contains(terminal)) {
+                        if !matched_terminals.is_empty()
+                            && matched_terminals
+                                .iter()
+                                .all(|terminal| disallowed.contains(terminal))
+                        {
                             return None;
                         }
                     }
@@ -146,11 +150,13 @@ impl<'a> ConstraintState<'a> {
                     }
                 }
 
-                if let Some(end_state) = exec_result.end_state {
+                if exec_result.matches.is_empty() {
+                    if let Some(end_state) = exec_result.end_state {
                     new_overall_state
                         .entry(end_state)
                         .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
                         .or_insert(gss_at_offset);
+                    }
                 }
             }
         }

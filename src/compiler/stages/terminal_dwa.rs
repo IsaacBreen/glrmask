@@ -334,7 +334,8 @@ fn build_token_suffix_paths(
         RangeSetBlaze::from_iter([token_id..=token_id]),
     );
 
-    if let Some(end_state) = exec.end_state {
+    if exec.matches.is_empty() {
+        if let Some(end_state) = exec.end_state {
         let accessible: BTreeSet<_> = tokenizer
             .tokens_accessible_from_state(end_state)
             .into_iter()
@@ -342,6 +343,7 @@ fn build_token_suffix_paths(
         let matches_here: BTreeSet<_> = exec.matches.iter().map(|matched| matched.id).collect();
         if !(&accessible - &matches_here).is_empty() {
             union_final_weight(nwa, source_node, token_weight.clone());
+        }
         }
     }
 

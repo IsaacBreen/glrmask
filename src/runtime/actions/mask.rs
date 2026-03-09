@@ -16,6 +16,7 @@ impl PartialEq for AllowedWeight {
     }
 }
 
+
 impl Eq for AllowedWeight {}
 
 impl std::hash::Hash for AllowedWeight {
@@ -234,27 +235,39 @@ impl<'a> ConstraintState<'a> {
         tokens: RangeSetBlaze<u32>,
         terminals_disallowed: &crate::compiler::glr::parser::TerminalsDisallowed,
     ) -> RangeSetBlaze<u32> {
-        // Keep disallowed-terminal subtraction keyed by original tokenizer states.
-        // This matches sep1's `possible_matches` usage even when weight projection
-        // has already been lifted onto internal tsid classes.
-        let mut allowed = tokens;
         if terminals_disallowed.is_empty()
             || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
         {
-            return allowed;
+            return tokens;
         }
 
-        for (&tsid, disallowed) in terminals_disallowed {
-            if disallowed.is_empty() {
+        let mut allowed = RangeSetBlaze::new();
+        'token: for token_id in tokens.iter() {
+            let Some(bytes) = self.constraint.token_bytes.get(&token_id) else {
                 continue;
-            }
-            let possible_matches = self.constraint.possible_matches_for_state(tsid);
-            for terminal in disallowed {
-                if let Some(token_ids) = possible_matches.get(terminal) {
-                    allowed = allowed - token_ids.clone();
+            };
+
+            for (&tsid, disallowed) in terminals_disallowed {
+                if disallowed.is_empty() {
+                    continue;
+                }
+
+                let exec = self.constraint.tokenizer.execute_from_state(bytes, tsid);
+                let has_allowed_exact_match = exec
+                    .matches
+                    .iter()
+                    .any(|matched| !disallowed.contains(&matched.id));
+                let has_only_disallowed_exact_matches = !exec.matches.is_empty() && !has_allowed_exact_match;
+
+                if has_only_disallowed_exact_matches {
+                    continue 'token;
                 }
             }
+
+            allowed |= RangeSetBlaze::from_iter([token_id..=token_id]);
         }
+
         allowed
     }
 }
+

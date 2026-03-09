@@ -189,7 +189,71 @@ fn parse_char_class(_input: &[u8], _pos: usize) -> (Expr, usize) {
     if pos < _input.len() && _input[pos] == b']' {
         pos += 1;
     }
+    if negate {
+        let excluded_is_ascii = set.iter().all(|byte| byte <= 0x7F);
+        if excluded_is_ascii {
+            return (utf8_aware_negated_ascii_class(set), pos);
+        }
+    }
     (Expr::U8Class(if negate { !set } else { set }), pos)
+}
+
+fn utf8_aware_negated_ascii_class(excluded: U8Set) -> Expr {
+    let ascii_allowed = U8Set::from_predicate(|byte| byte <= 0x7F && !excluded.contains(byte));
+    let cont = U8Set::from_range(0x80, 0xBF);
+
+    let mut choices = Vec::new();
+
+    if !ascii_allowed.is_empty() {
+        choices.push(Expr::U8Class(ascii_allowed));
+    }
+
+    choices.push(Expr::Seq(vec![
+        Expr::U8Class(U8Set::from_range(0xC2, 0xDF)),
+        Expr::U8Class(cont),
+    ]));
+
+    choices.push(Expr::Seq(vec![
+        Expr::U8Class(U8Set::from_range(0xE0, 0xE0)),
+        Expr::U8Class(U8Set::from_range(0xA0, 0xBF)),
+        Expr::U8Class(cont),
+    ]));
+    choices.push(Expr::Seq(vec![
+        Expr::U8Class(U8Set::from_range(0xE1, 0xEC)),
+        Expr::U8Class(cont),
+        Expr::U8Class(cont),
+    ]));
+    choices.push(Expr::Seq(vec![
+        Expr::U8Class(U8Set::from_range(0xED, 0xED)),
+        Expr::U8Class(U8Set::from_range(0x80, 0x9F)),
+        Expr::U8Class(cont),
+    ]));
+    choices.push(Expr::Seq(vec![
+        Expr::U8Class(U8Set::from_range(0xEE, 0xEF)),
+        Expr::U8Class(cont),
+        Expr::U8Class(cont),
+    ]));
+
+    choices.push(Expr::Seq(vec![
+        Expr::U8Class(U8Set::from_range(0xF0, 0xF0)),
+        Expr::U8Class(U8Set::from_range(0x90, 0xBF)),
+        Expr::U8Class(cont),
+        Expr::U8Class(cont),
+    ]));
+    choices.push(Expr::Seq(vec![
+        Expr::U8Class(U8Set::from_range(0xF1, 0xF3)),
+        Expr::U8Class(cont),
+        Expr::U8Class(cont),
+        Expr::U8Class(cont),
+    ]));
+    choices.push(Expr::Seq(vec![
+        Expr::U8Class(U8Set::from_range(0xF4, 0xF4)),
+        Expr::U8Class(U8Set::from_range(0x80, 0x8F)),
+        Expr::U8Class(cont),
+        Expr::U8Class(cont),
+    ]));
+
+    Expr::Choice(choices)
 }
 
 fn parse_escape(_input: &[u8], _pos: usize) -> (Expr, usize) {
