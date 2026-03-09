@@ -154,7 +154,8 @@ impl PyConstraintState {
 
     /// Commit a token ID (infallible — unknown token leads to an empty next mask).
     fn commit(&mut self, token_id: u32) {
-        self.inner.with_dependent_mut(|_owner, state| state.commit(token_id));
+        self.inner
+            .with_dependent_mut(|_owner, state| state.commit_token(token_id));
     }
 
     /// Commit raw bytes through the tokenizer DFA.
