@@ -804,7 +804,7 @@ mod tests {
                     bytes: bytes.to_vec(),
                 })
                 .collect(),
-            ignore_terminal: None,
+            ..Default::default()
         };
         let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
         let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
@@ -871,6 +871,7 @@ mod tests {
                 },
             ],
             ignore_terminal: Some(1),
+            ..Default::default()
         };
         let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
         let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);

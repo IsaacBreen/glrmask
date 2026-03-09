@@ -69,7 +69,7 @@ fn make_grammar(rules: Vec<Rule>, start: u32, terminals: Vec<Terminal>) -> Gramm
         rules,
         start,
         terminals,
-        ignore_terminal: None,
+        ..Default::default()
     }
 }
 

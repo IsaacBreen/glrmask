@@ -120,7 +120,7 @@ mod tests {
             rules,
             start: 0,
             terminals,
-            ignore_terminal: None,
+            ..Default::default()
         };
         crate::compiler::compile::build_tokenizer(&gdef)
     }

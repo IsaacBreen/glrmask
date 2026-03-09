@@ -157,7 +157,11 @@ pub(crate) fn compact_unused_terminals(
     rules: &mut Vec<Rule>,
     terminals: &[Terminal],
     ignore_terminal: Option<TerminalID>,
-) -> (Vec<Terminal>, Option<TerminalID>) {
+) -> (
+    Vec<Terminal>,
+    Option<TerminalID>,
+    std::collections::BTreeMap<TerminalID, TerminalID>,
+) {
     let mut used = std::collections::BTreeSet::<TerminalID>::new();
     for rule in rules.iter() {
         for symbol in &rule.rhs {
@@ -194,7 +198,17 @@ pub(crate) fn compact_unused_terminals(
 
     let remapped_ignore_terminal = ignore_terminal.and_then(|old_id| remap.get(&old_id).copied());
 
-    (compacted, remapped_ignore_terminal)
+    (compacted, remapped_ignore_terminal, remap)
+}
+
+fn remap_terminal_names(
+    terminal_names: &std::collections::BTreeMap<TerminalID, String>,
+    remap: &std::collections::BTreeMap<TerminalID, TerminalID>,
+) -> std::collections::BTreeMap<TerminalID, String> {
+    terminal_names
+        .iter()
+        .filter_map(|(old_id, name)| remap.get(old_id).map(|new_id| (*new_id, name.clone())))
+        .collect()
 }
 
 fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) {
@@ -211,7 +225,7 @@ fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) 
     expand_nullable_terminals(&mut rules, &mut next_nt, &nullable_terminals);
     normalize_grammar(&mut rules, start);
 
-    let (terminals, ignore_terminal) = compact_unused_terminals(
+    let (terminals, ignore_terminal, terminal_remap) = compact_unused_terminals(
         &mut rules,
         &grammar.terminals,
         grammar.ignore_terminal,
@@ -220,6 +234,8 @@ fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) 
         rules,
         start,
         terminals,
+        nonterminal_names: grammar.nonterminal_names.clone(),
+        terminal_names: remap_terminal_names(&grammar.terminal_names, &terminal_remap),
         ignore_terminal,
     };
 
@@ -625,7 +641,7 @@ mod tests {
                     bytes: b"ab".to_vec(),
                 },
             ],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -769,7 +785,7 @@ mod tests {
                 id: 0,
                 bytes: b"a".to_vec(),
             }],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let nullable = std::collections::BTreeSet::from([0u32]);
         let mut rules = gdef.rules.clone();
@@ -835,7 +851,7 @@ mod tests {
                     bytes: b"b".to_vec(),
                 },
             ],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let vocab = Vocab::new(
             vec![
@@ -875,7 +891,7 @@ mod tests {
             rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
         }];
 
-        let (compacted, ignore_terminal) = compact_unused_terminals(&mut rules, &terminals, None);
+        let (compacted, ignore_terminal, remap) = compact_unused_terminals(&mut rules, &terminals, None);
 
         assert_eq!(
             rules,
@@ -891,6 +907,8 @@ mod tests {
         assert_eq!(compacted[0].name(), "a");
         assert_eq!(compacted[1].name(), "b");
         assert_eq!(ignore_terminal, None);
+        assert_eq!(remap.get(&0), Some(&0));
+        assert_eq!(remap.get(&2), Some(&1));
     }
 
     #[test]
@@ -919,7 +937,7 @@ mod tests {
             rhs: vec![Symbol::Terminal(0), Symbol::Terminal(3)],
         }];
 
-        let (compacted, ignore_terminal) = compact_unused_terminals(&mut rules, &terminals, Some(2));
+        let (compacted, ignore_terminal, remap) = compact_unused_terminals(&mut rules, &terminals, Some(2));
 
         assert_eq!(
             rules,
@@ -934,6 +952,8 @@ mod tests {
         assert_eq!(compacted[1].name(), " +");
         assert_eq!(compacted[2].name(), "b");
         assert_eq!(ignore_terminal, Some(1));
+        assert_eq!(remap.get(&2), Some(&1));
+        assert_eq!(remap.get(&3), Some(&2));
     }
 
     #[test]
@@ -959,7 +979,7 @@ mod tests {
                     bytes: b"b".to_vec(),
                 },
             ],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let vocab = Vocab::new(
             vec![
@@ -1038,6 +1058,7 @@ mod tests {
                 },
             ],
             ignore_terminal: Some(2),
+            ..Default::default()
         };
         let vocab = Vocab::new(
             vec![
@@ -1094,5 +1115,44 @@ mod tests {
 
         state.commit_token(4);
         assert!(state.is_finished(), "consuming ignored space plus 'b' should finish the grammar");
+    }
+
+    #[test]
+    fn test_prepare_grammar_for_compile_retains_and_remaps_names() {
+        let grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"dead".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 2,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+            nonterminal_names: std::collections::BTreeMap::from([(0, "start".to_string())]),
+            terminal_names: std::collections::BTreeMap::from([
+                (0, "A".to_string()),
+                (1, "DEAD".to_string()),
+                (2, "B".to_string()),
+            ]),
+            ignore_terminal: None,
+        };
+
+        let (normalized, _tokenizer) = prepare_grammar_for_compile(&grammar);
+
+        assert_eq!(normalized.nonterminal_names.get(&0).map(String::as_str), Some("start"));
+        assert_eq!(normalized.terminal_names.get(&0).map(String::as_str), Some("A"));
+        assert_eq!(normalized.terminal_names.get(&1).map(String::as_str), Some("B"));
+        assert!(!normalized.terminal_names.values().any(|name| name == "DEAD"));
     }
 }

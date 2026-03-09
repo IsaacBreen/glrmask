@@ -34,7 +34,7 @@ mod tests {
                 id: 0,
                 bytes: b"a".to_vec(),
             }],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let tok = build_tokenizer(&gdef);
         let vocab = Vocab::new(

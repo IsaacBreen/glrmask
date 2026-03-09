@@ -937,7 +937,7 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a")],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let g = AnalyzedGrammar::from_grammar_def(&gdef);
         let result = g.debug_check_grammar_preconditions();
@@ -956,7 +956,7 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a")],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let g = AnalyzedGrammar::from_grammar_def(&gdef);
         let result = g.debug_check_grammar_preconditions();
@@ -975,7 +975,7 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a"), term(1, "b")],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let g = AnalyzedGrammar::from_grammar_def(&gdef);
         let result = g.debug_check_grammar_preconditions();
@@ -995,7 +995,7 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a")],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let g = AnalyzedGrammar::from_grammar_def(&gdef);
         let result = g.debug_check_grammar_preconditions();
@@ -1051,7 +1051,7 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a")],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let mut rules = gdef.rules.clone();
         normalize_grammar(&mut rules, gdef.start);
@@ -1059,7 +1059,7 @@ mod tests {
             rules,
             start: gdef.start,
             terminals: gdef.terminals.clone(),
-            ignore_terminal: None,
+            ..Default::default()
         };
         let g = AnalyzedGrammar::from_grammar_def(&norm);
         assert!(g.check_no_nullable_nonterminals().is_ok(),
@@ -1077,7 +1077,7 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a")],
-            ignore_terminal: None,
+            ..Default::default()
         };
         let mut rules = gdef.rules.clone();
         normalize_grammar(&mut rules, gdef.start);
@@ -1085,7 +1085,7 @@ mod tests {
             rules,
             start: gdef.start,
             terminals: gdef.terminals.clone(),
-            ignore_terminal: None,
+            ..Default::default()
         };
         let g = AnalyzedGrammar::from_grammar_def(&norm);
         assert!(g.check_recursion_boundedness().is_ok(),
@@ -1106,7 +1106,7 @@ mod tests {
             ],
             start: 0,
             terminals: vec![term(0, "a"), term(1, "b")],
-            ignore_terminal: None,
+            ..Default::default()
         };
         // Before normalization, the grammar has nullable NTs
         let g_before = AnalyzedGrammar::from_grammar_def(&gdef);
@@ -1118,7 +1118,7 @@ mod tests {
             rules,
             start: gdef.start,
             terminals: gdef.terminals.clone(),
-            ignore_terminal: None,
+            ..Default::default()
         };
         let g = AnalyzedGrammar::from_grammar_def(&norm);
         assert!(g.debug_check_grammar_preconditions().is_ok(),

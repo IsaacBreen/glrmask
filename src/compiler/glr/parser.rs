@@ -290,7 +290,7 @@ mod tests {
             rules,
             start,
             terminals,
-            ignore_terminal: None,
+            ..Default::default()
         }
     }
 

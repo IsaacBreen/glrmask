@@ -3,15 +3,21 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::automata::regex::Expr;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GrammarDef {
     pub rules: Vec<Rule>,
     pub start: NonterminalID,
     pub terminals: Vec<Terminal>,
+    #[serde(default)]
+    pub nonterminal_names: BTreeMap<NonterminalID, String>,
+    #[serde(default)]
+    pub terminal_names: BTreeMap<TerminalID, String>,
     #[serde(default)]
     pub ignore_terminal: Option<TerminalID>,
 }
@@ -82,6 +88,23 @@ impl GrammarDef {
             .unwrap_or(0)
     }
 
+    pub fn nonterminal_display_name(&self, nonterminal: NonterminalID) -> Option<&str> {
+        self.nonterminal_names.get(&nonterminal).map(String::as_str)
+    }
+
+    pub fn terminal_display_name(&self, terminal: TerminalID) -> String {
+        self.terminal_names
+            .get(&terminal)
+            .cloned()
+            .or_else(|| {
+                self.terminals
+                    .iter()
+                    .find(|candidate| candidate.id() == terminal)
+                    .map(Terminal::name)
+            })
+            .unwrap_or_else(|| format!("T{terminal}"))
+    }
+
 }
 
 #[cfg(test)]
@@ -103,7 +126,7 @@ pub(crate) mod tests {
             }],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b")],
-            ignore_terminal: None,
+            ..Default::default()
         }
     }
 
@@ -121,7 +144,7 @@ pub(crate) mod tests {
             ],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b")],
-            ignore_terminal: None,
+            ..Default::default()
         }
     }
 
@@ -140,7 +163,7 @@ pub(crate) mod tests {
             ],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b")],
-            ignore_terminal: None,
+            ..Default::default()
         }
     }
 
@@ -163,7 +186,7 @@ pub(crate) mod tests {
             ],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b")],
-            ignore_terminal: None,
+            ..Default::default()
         }
     }
 
@@ -179,7 +202,7 @@ pub(crate) mod tests {
             }],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
-            ignore_terminal: None,
+            ..Default::default()
         }
     }
 
@@ -198,7 +221,7 @@ pub(crate) mod tests {
             ],
             start: 0,
             terminals: vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
-            ignore_terminal: None,
+            ..Default::default()
         }
     }
 

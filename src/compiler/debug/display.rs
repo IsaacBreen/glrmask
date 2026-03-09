@@ -5,22 +5,36 @@ use crate::compiler::debug::artifacts::CompileDebug;
 use crate::compiler::glr::analysis::EOF;
 
 impl CompileDebug {
-    fn terminal_name(&self, id: crate::compiler::grammar::model::TerminalID) -> String {
-        self.grammar_def
-            .terminals
-            .iter()
-            .find(|terminal| terminal.id() == id)
-            .map(|terminal| terminal.name())
-            .unwrap_or_else(|| "?".into())
+    fn terminal_name(
+        &self,
+        grammar: &crate::compiler::grammar::model::GrammarDef,
+        id: crate::compiler::grammar::model::TerminalID,
+    ) -> String {
+        grammar.terminal_display_name(id)
     }
 
-    fn symbol_str(&self, sym: &crate::compiler::grammar::model::Symbol) -> String {
+    fn nonterminal_str(
+        &self,
+        grammar: &crate::compiler::grammar::model::GrammarDef,
+        nonterminal: crate::compiler::grammar::model::NonterminalID,
+    ) -> String {
+        match grammar.nonterminal_display_name(nonterminal) {
+            Some(name) => format!("NT{}('{}')", nonterminal, name),
+            None => format!("NT{}", nonterminal),
+        }
+    }
+
+    fn symbol_str(
+        &self,
+        grammar: &crate::compiler::grammar::model::GrammarDef,
+        sym: &crate::compiler::grammar::model::Symbol,
+    ) -> String {
         match sym {
             crate::compiler::grammar::model::Symbol::Terminal(terminal) => {
-                format!("T{}('{}')", terminal, self.terminal_name(*terminal))
+                format!("T{}('{}')", terminal, self.terminal_name(grammar, *terminal))
             }
             crate::compiler::grammar::model::Symbol::Nonterminal(nonterminal) => {
-                format!("NT{}", nonterminal)
+                self.nonterminal_str(grammar, *nonterminal)
             }
         }
     }
@@ -30,19 +44,27 @@ impl std::fmt::Display for CompileDebug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         
         writeln!(f, "═══ GRAMMAR (original) ═══")?;
-        writeln!(f, "Start: NT{}", self.grammar_def.start)?;
+        writeln!(f, "Start: {}", self.nonterminal_str(&self.grammar_def, self.grammar_def.start))?;
         writeln!(f, "Terminals:")?;
         for t in &self.grammar_def.terminals {
             writeln!(f, "  T{}: name={:?} def={:?}", t.id(), t.name(), t)?;
         }
         writeln!(f, "Rules:")?;
         for (i, r) in self.grammar_def.rules.iter().enumerate() {
-            let rhs: Vec<String> = r.rhs.iter().map(|s| self.symbol_str(s)).collect();
-            writeln!(f, "  [{}] NT{} → {}", i, r.lhs, rhs.join(" "))?;
+            let rhs: Vec<String> = r
+                .rhs
+                .iter()
+                .map(|s| self.symbol_str(&self.grammar_def, s))
+                .collect();
+            writeln!(f, "  [{}] {} → {}", i, self.nonterminal_str(&self.grammar_def, r.lhs), rhs.join(" "))?;
         }
 
         writeln!(f, "\n═══ GRAMMAR (normalized for mask) ═══")?;
-        writeln!(f, "Start: NT{}", self.normalized_grammar_def.start)?;
+        writeln!(
+            f,
+            "Start: {}",
+            self.nonterminal_str(&self.normalized_grammar_def, self.normalized_grammar_def.start)
+        )?;
         if self.normalized_grammar_def.terminals.len() != self.grammar_def.terminals.len() {
             writeln!(
                 f,
@@ -53,8 +75,18 @@ impl std::fmt::Display for CompileDebug {
         }
         writeln!(f, "Rules:")?;
         for (i, r) in self.normalized_grammar_def.rules.iter().enumerate() {
-            let rhs: Vec<String> = r.rhs.iter().map(|s| self.symbol_str(s)).collect();
-            writeln!(f, "  [{}] NT{} → {}", i, r.lhs, rhs.join(" "))?;
+            let rhs: Vec<String> = r
+                .rhs
+                .iter()
+                .map(|s| self.symbol_str(&self.normalized_grammar_def, s))
+                .collect();
+            writeln!(
+                f,
+                "  [{}] {} → {}",
+                i,
+                self.nonterminal_str(&self.normalized_grammar_def, r.lhs),
+                rhs.join(" ")
+            )?;
         }
 
         writeln!(
@@ -74,14 +106,18 @@ impl std::fmt::Display for CompileDebug {
                 let tname = if *tid == EOF {
                     "$".to_string()
                 } else {
-                    self.terminal_name(*tid).to_string()
+                    self.terminal_name(&self.normalized_grammar_def, *tid)
                 };
                 for a in acts {
                     let astr = match a {
                         crate::compiler::glr::table::Action::Shift(s) => format!("shift {s}"),
                         crate::compiler::glr::table::Action::Reduce(r) => {
                             let rule = &self.glr_table.rules[*r as usize];
-                            format!("reduce r{r} (NT{} ← {} symbols)", rule.lhs, rule.rhs.len())
+                            format!(
+                                "reduce r{r} ({} ← {} symbols)",
+                                self.nonterminal_str(&self.normalized_grammar_def, rule.lhs),
+                                rule.rhs.len()
+                            )
                         }
                         crate::compiler::glr::table::Action::Accept => "accept".to_string(),
                     };
@@ -89,7 +125,11 @@ impl std::fmt::Display for CompileDebug {
                 }
             }
             for (nt, tgt) in gotos {
-                writeln!(f, "    goto NT{nt} → state {tgt}")?;
+                writeln!(
+                    f,
+                    "    goto {} → state {tgt}",
+                    self.nonterminal_str(&self.normalized_grammar_def, *nt)
+                )?;
             }
         }
 
@@ -114,7 +154,11 @@ impl std::fmt::Display for CompileDebug {
 
         writeln!(f, "\n═══ TERMINAL CHARACTERIZATIONS ═══")?;
         for (tid, tc) in &self.characterizations {
-            writeln!(f, "  Terminal '{}' (T{tid}):", self.terminal_name(*tid))?;
+            writeln!(
+                f,
+                "  Terminal '{}' (T{tid}):",
+                self.terminal_name(&self.normalized_grammar_def, *tid)
+            )?;
             for (from, to) in &tc.shifts {
                 writeln!(f, "    shift: state {from} → state {to}")?;
             }
@@ -141,16 +185,25 @@ impl std::fmt::Display for CompileDebug {
             self.templates.by_terminal.len()
         )?;
         for (terminal, template_dfa) in &self.templates.by_terminal {
-            writeln!(f, "  Terminal '{}'(T{terminal})", self.terminal_name(*terminal))?;
+            writeln!(
+                f,
+                "  Terminal '{}'(T{terminal})",
+                self.terminal_name(&self.normalized_grammar_def, *terminal)
+            )?;
             writeln!(f, "    Template DFA:")?;
             write!(f, "{}", template_dfa)?;
         }
 
         let terminal_symbols: BTreeMap<i32, String> = self
-            .grammar_def
+            .normalized_grammar_def
             .terminals
             .iter()
-            .map(|t| (t.id() as i32, format!("'{}'", t.name())))
+            .map(|t| {
+                (
+                    t.id() as i32,
+                    format!("'{}'", self.normalized_grammar_def.terminal_display_name(t.id())),
+                )
+            })
             .collect();
 
         // We pass an empty map here to coerce weight formatting to emit opaque TSIDs 

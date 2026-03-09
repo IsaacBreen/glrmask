@@ -36,6 +36,7 @@ struct Lowerer {
     terminals: Vec<Terminal>,
     nt_map: BTreeMap<String, NonterminalID>,
     anon_counter: u32,
+    terminal_names: BTreeMap<TerminalID, String>,
 }
 
 impl Lowerer {
@@ -46,6 +47,7 @@ impl Lowerer {
             terminals: Vec::new(),
             nt_map: BTreeMap::new(),
             anon_counter: 0,
+            terminal_names: BTreeMap::new(),
         }
     }
 
@@ -73,6 +75,7 @@ impl Lowerer {
         }
         let id = self.terminals.len() as TerminalID;
         self.terminal_map.insert(key, id);
+        self.terminal_names.insert(id, name.to_string());
         // Decide variant: if the pattern is the same as the escaped literal of
         // the name bytes, store as Literal; otherwise store as Pattern.
         let name_bytes = name.as_bytes();
@@ -254,11 +257,19 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     }
 
     let start = lowerer.nt_id(&grammar.start);
+    let nonterminal_names = lowerer
+        .nt_map
+        .iter()
+        .filter(|(name, _)| !name.starts_with("__"))
+        .map(|(name, id)| (*id, name.clone()))
+        .collect();
 
     Ok(GrammarDef {
         rules: lowerer.rules,
         start,
         terminals: lowerer.terminals,
+        nonterminal_names,
+        terminal_names: lowerer.terminal_names,
         ignore_terminal: None,
     })
 }
@@ -419,5 +430,44 @@ mod tests {
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0); 
         assert!(gdef.num_nonterminals() >= 2);
+    }
+
+    #[test]
+    fn test_lower_retains_useful_names_but_not_helper_nonterminals() {
+        let g = NamedGrammar {
+            rules: vec![
+                (
+                    "start".into(),
+                    GrammarExpr::Sequence(vec![
+                        GrammarExpr::Ref("named_nt".into()),
+                        GrammarExpr::Literal(b"term1".to_vec()),
+                    ]),
+                ),
+                (
+                    "named_nt".into(),
+                    GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"term2".to_vec()))),
+                ),
+            ],
+            start: "start".into(),
+        };
+
+        let gdef = lower(&g).unwrap();
+
+        let nonterminal_names: Vec<&str> = gdef
+            .nonterminal_names
+            .values()
+            .map(|name| name.as_str())
+            .collect();
+        assert!(nonterminal_names.contains(&"start"));
+        assert!(nonterminal_names.contains(&"named_nt"));
+        assert!(!nonterminal_names.iter().any(|name| name.starts_with("__")));
+
+        let terminal_names: Vec<&str> = gdef
+            .terminal_names
+            .values()
+            .map(|name| name.as_str())
+            .collect();
+        assert!(terminal_names.contains(&"term1"));
+        assert!(terminal_names.contains(&"term2"));
     }
 }

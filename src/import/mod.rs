@@ -125,6 +125,7 @@ fn parse_simple_ebnf(ebnf: &str) -> crate::Result<GrammarDef> {
 
     let mut terminal_map = std::collections::BTreeMap::<Vec<u8>, u32>::new();
     let mut terminals = Vec::<Terminal>::new();
+    let mut terminal_names = std::collections::BTreeMap::<u32, String>::new();
     let mut rules = Vec::<Rule>::new();
 
     for (lhs, alternatives) in productions {
@@ -147,6 +148,7 @@ fn parse_simple_ebnf(ebnf: &str) -> crate::Result<GrammarDef> {
                         } else {
                             let id = terminals.len() as u32;
                             terminal_map.insert(literal.clone(), id);
+                            terminal_names.insert(id, String::from_utf8_lossy(&literal).into_owned());
                             terminals.push(Terminal::Literal {
                                 id,
                                 bytes: literal.clone(),
@@ -165,6 +167,8 @@ fn parse_simple_ebnf(ebnf: &str) -> crate::Result<GrammarDef> {
         rules,
         start: nt_map[&start_name],
         terminals,
+        nonterminal_names: nt_map.into_iter().map(|(name, id)| (id, name)).collect(),
+        terminal_names,
         ignore_terminal: None,
     })
 }
