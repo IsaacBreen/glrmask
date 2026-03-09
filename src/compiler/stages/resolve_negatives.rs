@@ -30,6 +30,23 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
     let mut in_queue = vec![HashSet::<QueryKey>::new(); n];
     let mut new_eps_from: HashMap<u32, HashMap<u32, Weight>> = HashMap::new();
 
+    let merge_into = |entry: &mut Weight, add: Weight| {
+        if add.is_empty() {
+            return false;
+        }
+        if entry.is_empty() {
+            *entry = add;
+            return true;
+        }
+        let updated = entry.union(&add);
+        if updated != *entry {
+            *entry = updated;
+            true
+        } else {
+            false
+        }
+    };
+
     for a in 0..n {
         for (&label, targets) in &nwa.states[a].transitions {
             if !is_negative_label(label) {
@@ -46,9 +63,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                     .or_default()
                     .entry(query_key)
                     .or_insert_with(Weight::empty);
-                let updated = entry.union(w_ab);
-                if updated != *entry {
-                    *entry = updated;
+                if merge_into(entry, w_ab.clone()) {
                     if in_queue[*b as usize].insert(query_key) {
                         worklist.push_back((*b, a as u32, c));
                     }
@@ -75,9 +90,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                     .or_default()
                     .entry(query_key)
                     .or_insert_with(Weight::empty);
-                let updated = entry.union(&prop_w);
-                if updated != *entry {
-                    *entry = updated;
+                if merge_into(entry, prop_w) {
                     if in_queue[target as usize].insert(query_key) {
                         worklist.push_back((target, a, c));
                     }
@@ -101,7 +114,11 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                 .or_default()
                 .entry(target)
                 .or_insert_with(Weight::empty);
-            let updated_eps = eps_entry.union(&new_eps_w);
+            let updated_eps = if eps_entry.is_empty() {
+                new_eps_w
+            } else {
+                eps_entry.union(&new_eps_w)
+            };
             if updated_eps == *eps_entry {
                 return;
             }
@@ -119,9 +136,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                         .or_default()
                         .entry(query_key)
                         .or_insert_with(Weight::empty);
-                    let updated = entry.union(&prop_w);
-                    if updated != *entry {
-                        *entry = updated;
+                    if merge_into(entry, prop_w) {
                         if in_queue[target as usize].insert(query_key) {
                             worklist.push_back((target, a_prime, c_prime));
                         }
@@ -176,9 +191,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                 .or_default()
                 .entry(query_key)
                 .or_insert_with(Weight::empty);
-            let updated = entry.union(&prop_w);
-            if updated != *entry {
-                *entry = updated;
+            if merge_into(entry, prop_w) {
                 if in_queue[*t as usize].insert(query_key) {
                     worklist.push_back((*t, a, c));
                 }
