@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use range_set_blaze::RangeSetBlaze;
 
@@ -90,20 +90,10 @@ impl<'a> PossibleMatchesComputer<'a> {
             }
 
             if let Some(end_state) = exec.end_state {
-                let accessible: BTreeSet<_> = self
-                    .tokenizer
-                    .tokens_accessible_from_state(end_state)
-                    .into_iter()
-                    .collect();
-                let matches_here: BTreeSet<_> =
-                    exec.matches.iter().map(|matched| matched.id).collect();
-                let possible_new_matches = &accessible - &matches_here;
-                if !possible_new_matches.is_empty() {
-                    merge_possible_match_maps(
-                        &mut result,
-                        self.possible_matches_for_node(child, end_state),
-                    );
-                }
+                merge_possible_match_maps(
+                    &mut result,
+                    self.possible_matches_for_node(child, end_state),
+                );
             }
         }
 
