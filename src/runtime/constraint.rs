@@ -9,6 +9,7 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
+use crate::compiler::possible_matches::build_possible_matches_from_token_bytes;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalID;
 use crate::ds::leveled_gss::LeveledGSS;
@@ -19,7 +20,7 @@ pub(crate) type TokenizerStateID = u32;
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 pub struct Constraint {
     pub(crate) parser_dwa: DWA,
@@ -30,13 +31,42 @@ pub struct Constraint {
 
     #[serde(with = "crate::runtime::serde::serde_btmap_rsb")]
     pub(crate) possible_matches: PossibleMatchesByState,
+    #[serde(skip, default)]
+    pub(crate) possible_matches_lazy: std::sync::OnceLock<PossibleMatchesByState>,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
     pub(crate) eos_token_id: Option<u32>,
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
 }
 
+impl Clone for Constraint {
+    fn clone(&self) -> Self {
+        Self {
+            parser_dwa: self.parser_dwa.clone(),
+            table: self.table.clone(),
+            tokenizer: self.tokenizer.clone(),
+            ignore_terminal: self.ignore_terminal,
+            possible_matches: self.possible_matches.clone(),
+            possible_matches_lazy: std::sync::OnceLock::new(),
+            state_to_internal_tsid: self.state_to_internal_tsid.clone(),
+            internal_tsid_to_states: self.internal_tsid_to_states.clone(),
+            eos_token_id: self.eos_token_id,
+            token_bytes: self.token_bytes.clone(),
+        }
+    }
+}
+
 impl Constraint {
+    fn all_possible_matches(&self) -> &PossibleMatchesByState {
+        if !self.possible_matches.is_empty() {
+            &self.possible_matches
+        } else {
+            self.possible_matches_lazy.get_or_init(|| {
+                build_possible_matches_from_token_bytes(&self.tokenizer, &self.token_bytes)
+            })
+        }
+    }
+
     pub fn start(&self) -> ConstraintState<'_> {
         
         let initial_parser_state = 0u32;
@@ -65,7 +95,7 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        self.possible_matches
+        self.all_possible_matches()
             .get(&tokenizer_state)
             .cloned()
             .unwrap_or_default()

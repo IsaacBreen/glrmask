@@ -405,6 +405,14 @@ fn collapse_always_allowed(
     changed
 }
 
+fn should_collapse_always_allowed(vocab: &Vocab) -> bool {
+    // This collapse is a compile-time optimization only. On very large LLM
+    // vocabularies it can become pathologically expensive because it performs
+    // repeated `Weight` set algebra over large token-ID domains. Keep it for
+    // small/medium vocabs where it helps, and skip it for huge vocabularies.
+    vocab.entries.len() <= 8_192
+}
+
 fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
     let ever_allowed_by_label = compute_ever_allowed_follows(grammar);
     let terminals_count = grammar.num_terminals as usize;
@@ -728,6 +736,19 @@ fn continuation_state(
     state
 }
 
+fn terminal_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+}
+
+fn log_terminal_profile(enabled: bool, phase: &str, started_at: std::time::Instant) {
+    if enabled {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa] {phase}_ms={:.3}",
+            started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 pub(crate) fn build_terminal_dwa(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -735,11 +756,16 @@ pub(crate) fn build_terminal_dwa(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
+    let profile_enabled = terminal_profile_enabled();
+    let total_started_at = std::time::Instant::now();
+
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
     let start_state = nwa.add_state();
     nwa.start_states.push(start_state);
+
+    let phase_started_at = std::time::Instant::now();
     let vocab_tree = VocabPrefixTree::build(
         &vocab
             .entries
@@ -748,7 +774,9 @@ pub(crate) fn build_terminal_dwa(
             .collect::<Vec<_>>(),
     );
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
+    log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
 
+    let phase_started_at = std::time::Instant::now();
     for internal_tsid in 0..id_map.num_tsids() {
         let root = nwa.add_state();
         nwa.add_epsilon(
@@ -774,14 +802,46 @@ pub(crate) fn build_terminal_dwa(
         builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
         builder.flush_transition_buffer();
     }
+    log_terminal_profile(profile_enabled, "build_nwa_from_trie", phase_started_at);
 
-    let always_allowed_by_label = compute_always_allowed_follows(grammar);
-    let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    if should_collapse_always_allowed(vocab) {
+        let phase_started_at = std::time::Instant::now();
+        let always_allowed_by_label = compute_always_allowed_follows(grammar);
+        let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+        log_terminal_profile(profile_enabled, "collapse_always_allowed", phase_started_at);
+    } else if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa] collapse_always_allowed_skipped=1 vocab_entries={} threshold=8192",
+            vocab.entries.len(),
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     let _ = prune_disallowed_follows(&mut nwa, grammar);
-    let dwa = minimize(
-        &determinize(&nwa)
-            .expect("terminal NWA determinization failed despite acyclic token trie construction"),
-    );
+    log_terminal_profile(profile_enabled, "prune_disallowed_follows", phase_started_at);
+
+    let nwa_state_count = nwa.states.len();
+
+    let phase_started_at = std::time::Instant::now();
+    let determinized = determinize(&nwa)
+        .expect("terminal NWA determinization failed despite acyclic token trie construction");
+    log_terminal_profile(profile_enabled, "determinize", phase_started_at);
+
+    let phase_started_at = std::time::Instant::now();
+    let dwa = minimize(&determinized);
+    log_terminal_profile(profile_enabled, "minimize", phase_started_at);
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa] total_ms={:.3} vocab_entries={} internal_tsids={} nwa_states={} dwa_states={}",
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+            vocab.entries.len(),
+            id_map.num_tsids(),
+            nwa_state_count,
+            dwa.num_states(),
+        );
+    }
+
     dwa
 }
 

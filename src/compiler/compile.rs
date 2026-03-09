@@ -247,10 +247,30 @@ fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) 
     (normalized, tokenizer)
 }
 
-pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
+fn compile_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+}
 
+fn log_compile_profile(enabled: bool, phase: &str, started_at: std::time::Instant) {
+    if enabled {
+        eprintln!(
+            "[glrmask/profile][compile] {phase}_ms={:.3}",
+            started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
+pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
+    let profile_enabled = compile_profile_enabled();
+    let compile_started_at = std::time::Instant::now();
+
+    let phase_started_at = std::time::Instant::now();
+    let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
+    log_compile_profile(profile_enabled, "prepare_grammar", phase_started_at);
+
+    let phase_started_at = std::time::Instant::now();
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
+    log_compile_profile(profile_enabled, "analyze_grammar", phase_started_at);
 
     // Debug check: verify grammar preconditions before expensive pipeline stages.
     // Violations here indicate the grammar (or its normalization) has shapes that
@@ -260,13 +280,24 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         panic!("[glrmask] grammar precondition violations:\n{}", msg);
     }
 
+    let phase_started_at = std::time::Instant::now();
     let table = GLRTable::build(&glr_grammar);
+    log_compile_profile(profile_enabled, "build_glr_table", phase_started_at);
+
+    let phase_started_at = std::time::Instant::now();
     let id_map = InternalIdMap::build(&tokenizer, vocab);
+    log_compile_profile(profile_enabled, "build_internal_id_map", phase_started_at);
 
-    let possible_matches_by_state = build_possible_matches_by_state(&normalized, &tokenizer, vocab);
+    if profile_enabled {
+        eprintln!("[glrmask/profile][compile] possible_matches_strategy=lazy");
+    }
 
+    let phase_started_at = std::time::Instant::now();
     let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> =
         vocab.entries.iter().cloned().collect();
+    log_compile_profile(profile_enabled, "collect_token_bytes", phase_started_at);
+
+    let phase_started_at = std::time::Instant::now();
     let terminal_dwa = build_terminal_dwa(
         &glr_grammar,
         &tokenizer,
@@ -274,19 +305,38 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         &id_map,
         normalized.ignore_terminal,
     );
+    log_compile_profile(profile_enabled, "build_terminal_dwa", phase_started_at);
+
+    let phase_started_at = std::time::Instant::now();
     let parser_dwa = build_parser_dwa_from_terminal_dwa(
         &table,
         &glr_grammar,
         &tokenizer,
         &terminal_dwa,
     );
+    log_compile_profile(profile_enabled, "build_parser_dwa", phase_started_at);
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] total_ms={:.3} rules={} terminals={} vocab_entries={} tokenizer_states={} internal_tsids={} terminal_dwa_states={} parser_dwa_states={}",
+            compile_started_at.elapsed().as_secs_f64() * 1000.0,
+            normalized.rules.len(),
+            normalized.terminals.len(),
+            vocab.entries.len(),
+            tokenizer.num_states(),
+            id_map.num_tsids(),
+            terminal_dwa.num_states(),
+            parser_dwa.num_states(),
+        );
+    }
 
     Constraint {
         parser_dwa,
         table,
         tokenizer,
         ignore_terminal: normalized.ignore_terminal,
-        possible_matches: possible_matches_by_state.clone(),
+        possible_matches: std::collections::BTreeMap::new(),
+        possible_matches_lazy: std::sync::OnceLock::new(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
         eos_token_id: vocab.eos_token_id,
@@ -334,6 +384,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         tokenizer: tokenizer.clone(),
         ignore_terminal: normalized.ignore_terminal,
         possible_matches: possible_matches_by_state.clone(),
+        possible_matches_lazy: std::sync::OnceLock::new(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
         eos_token_id: vocab.eos_token_id,

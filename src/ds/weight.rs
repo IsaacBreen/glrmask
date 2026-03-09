@@ -83,10 +83,10 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
                      current_end: &mut u32,
                      current_tokens: &mut RangeSetBlaze<u32>| {
         if let Some(start) = *current_start {
-            map.extend_simple(std::iter::once((start..=*current_end, current_tokens.clone())));
+            let tokens = std::mem::replace(current_tokens, RangeSetBlaze::new());
+            map.extend_simple(std::iter::once((start..=*current_end, tokens)));
         }
         *current_start = None;
-        *current_tokens = RangeSetBlaze::new();
     };
 
     for (&tsid, tokens) in expanded {
@@ -107,6 +107,130 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
     }
 
     flush(&mut map, &mut current_start, &mut current_end, &mut current_tokens);
+    Weight(map)
+}
+
+#[derive(Clone)]
+struct WeightRangeEntry {
+    start: u32,
+    end: u32,
+    tokens: RangeSetBlaze<u32>,
+}
+
+fn compact_entries(weight: &Weight) -> Vec<WeightRangeEntry> {
+    weight
+        .0
+        .range_values()
+        .map(|(range, tokens)| WeightRangeEntry {
+            start: *range.start(),
+            end: *range.end(),
+            tokens: tokens.clone(),
+        })
+        .collect()
+}
+
+fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> Vec<u64> {
+    let mut boundaries = Vec::with_capacity((left.len() + right.len()) * 2);
+    for entry in left.iter().chain(right.iter()) {
+        boundaries.push(u64::from(entry.start));
+        boundaries.push(u64::from(entry.end) + 1);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
+}
+
+fn active_tokens<'a>(
+    entries: &'a [WeightRangeEntry],
+    index: &mut usize,
+    start: u32,
+) -> Option<&'a RangeSetBlaze<u32>> {
+    while *index < entries.len() && entries[*index].end < start {
+        *index += 1;
+    }
+    entries.get(*index).and_then(|entry| {
+        (entry.start <= start && start <= entry.end).then_some(&entry.tokens)
+    })
+}
+
+fn push_compact_range(
+    map: &mut RangeMapBlaze<u32, RangeSetBlaze<u32>>,
+    pending_start: &mut Option<u32>,
+    pending_end: &mut u32,
+    pending_tokens: &mut RangeSetBlaze<u32>,
+    start: u32,
+    end: u32,
+    tokens: RangeSetBlaze<u32>,
+) {
+    match *pending_start {
+        Some(existing_start)
+            if pending_end.checked_add(1) == Some(start) && *pending_tokens == tokens =>
+        {
+            let _ = existing_start;
+            *pending_end = end;
+        }
+        _ => {
+            flush_compact_range(map, pending_start, pending_end, pending_tokens);
+            *pending_start = Some(start);
+            *pending_end = end;
+            *pending_tokens = tokens;
+        }
+    }
+}
+
+fn flush_compact_range(
+    map: &mut RangeMapBlaze<u32, RangeSetBlaze<u32>>,
+    pending_start: &mut Option<u32>,
+    pending_end: &mut u32,
+    pending_tokens: &mut RangeSetBlaze<u32>,
+) {
+    if let Some(start) = *pending_start {
+        let tokens = std::mem::replace(pending_tokens, RangeSetBlaze::new());
+        map.extend_simple(std::iter::once((start..=*pending_end, tokens)));
+        *pending_start = None;
+    }
+}
+
+fn combine_compact_entries<F>(left: &Weight, right: &Weight, mut combine: F) -> Weight
+where
+    F: FnMut(Option<&RangeSetBlaze<u32>>, Option<&RangeSetBlaze<u32>>) -> RangeSetBlaze<u32>,
+{
+    let left_entries = compact_entries(left);
+    let right_entries = compact_entries(right);
+    let boundaries = combined_boundaries(&left_entries, &right_entries);
+    if boundaries.len() < 2 {
+        return Weight::empty();
+    }
+
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    let mut map = RangeMapBlaze::new();
+    let mut pending_start = None;
+    let mut pending_end = 0u32;
+    let mut pending_tokens = RangeSetBlaze::new();
+
+    for window in boundaries.windows(2) {
+        let start = window[0] as u32;
+        let end = (window[1] - 1) as u32;
+        let left_tokens = active_tokens(&left_entries, &mut left_index, start);
+        let right_tokens = active_tokens(&right_entries, &mut right_index, start);
+        let tokens = combine(left_tokens, right_tokens);
+        if tokens.is_empty() {
+            flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
+        } else {
+            push_compact_range(
+                &mut map,
+                &mut pending_start,
+                &mut pending_end,
+                &mut pending_tokens,
+                start,
+                end,
+                tokens,
+            );
+        }
+    }
+
+    flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
     Weight(map)
 }
 
@@ -211,14 +335,11 @@ impl Weight {
         if other.is_empty() {
             return self.clone();
         }
-        let mut expanded = self.expanded_entries();
-        for (tsid, tokens) in other.expanded_entries() {
-            expanded
-                .entry(tsid)
-                .and_modify(|existing| *existing = existing.clone() | tokens.clone())
-                .or_insert(tokens);
-        }
-        compress_expanded(&expanded)
+        combine_compact_entries(self, other, |left, right| match (left, right) {
+            (Some(left_tokens), Some(right_tokens)) => left_tokens.clone() | right_tokens.clone(),
+            (Some(tokens), None) | (None, Some(tokens)) => tokens.clone(),
+            (None, None) => RangeSetBlaze::new(),
+        })
     }
 
     pub fn intersection(&self, other: &Self) -> Self {
@@ -231,18 +352,10 @@ impl Weight {
         if other.is_full() {
             return self.clone();
         }
-        let left = self.expanded_entries();
-        let right = other.expanded_entries();
-        let mut out = BTreeMap::new();
-        for (tsid, left_tokens) in left {
-            if let Some(right_tokens) = right.get(&tsid) {
-                let tokens = left_tokens & right_tokens.clone();
-                if !tokens.is_empty() {
-                    out.insert(tsid, tokens);
-                }
-            }
-        }
-        compress_expanded(&out)
+        combine_compact_entries(self, other, |left, right| match (left, right) {
+            (Some(left_tokens), Some(right_tokens)) => left_tokens.clone() & right_tokens.clone(),
+            _ => RangeSetBlaze::new(),
+        })
     }
 
     pub fn difference(&self, other: &Self) -> Self {
@@ -259,18 +372,11 @@ impl Weight {
             // which returns empty() as a no-op sentinel instead.
             return Self::all();
         }
-        let mut out = BTreeMap::new();
-        let right = other.expanded_entries();
-        for (tsid, left_tokens) in self.expanded_entries() {
-            let tokens = match right.get(&tsid) {
-                Some(right_tokens) => left_tokens - right_tokens.clone(),
-                None => left_tokens,
-            };
-            if !tokens.is_empty() {
-                out.insert(tsid, tokens);
-            }
-        }
-        compress_expanded(&out)
+        combine_compact_entries(self, other, |left, right| match (left, right) {
+            (Some(left_tokens), Some(right_tokens)) => left_tokens.clone() - right_tokens.clone(),
+            (Some(left_tokens), None) => left_tokens.clone(),
+            _ => RangeSetBlaze::new(),
+        })
     }
 
     pub fn complement(&self) -> Self {
@@ -551,6 +657,58 @@ mod tests {
         let b = Weight::empty();
         let d = a.difference(&b);
         assert!(d.is_full());
+    }
+
+    #[test]
+    fn test_weight_union_handles_misaligned_ranges() {
+        let a = Weight::from_compact_ranges(vec![(0..=2, vec![1..=2]), (5..=5, vec![7..=7])]);
+        let b = Weight::from_compact_ranges(vec![(1..=5, vec![2..=3])]);
+
+        let union = a.union(&b);
+
+        assert_eq!(union.tokens_for_tsid(0), rangeset_from_ranges([1..=2]));
+        assert_eq!(union.tokens_for_tsid(1), rangeset_from_ranges([1..=3]));
+        assert_eq!(union.tokens_for_tsid(3), rangeset_from_ranges([2..=3]));
+        assert_eq!(union.tokens_for_tsid(5), rangeset_from_ranges([2..=3, 7..=7]));
+    }
+
+    #[test]
+    fn test_weight_intersection_handles_misaligned_ranges() {
+        let a = Weight::from_compact_ranges(vec![(0..=2, vec![1..=2]), (4..=5, vec![5..=5])]);
+        let b = Weight::from_compact_ranges(vec![(1..=3, vec![2..=3]), (5..=6, vec![5..=6])]);
+
+        let intersection = a.intersection(&b);
+
+        assert_eq!(intersection.tokens_for_tsid(0), RangeSetBlaze::new());
+        assert_eq!(intersection.tokens_for_tsid(1), rangeset_from_ranges([2..=2]));
+        assert_eq!(intersection.tokens_for_tsid(2), rangeset_from_ranges([2..=2]));
+        assert_eq!(intersection.tokens_for_tsid(5), rangeset_from_ranges([5..=5]));
+        assert_eq!(intersection.num_ranges(), 2);
+    }
+
+    #[test]
+    fn test_weight_difference_handles_misaligned_ranges() {
+        let a = Weight::from_compact_ranges(vec![(0..=2, vec![1..=2]), (4..=5, vec![5..=5])]);
+        let b = Weight::from_compact_ranges(vec![(1..=3, vec![2..=3]), (5..=6, vec![5..=6])]);
+
+        let difference = a.difference(&b);
+
+        assert_eq!(difference.tokens_for_tsid(0), rangeset_from_ranges([1..=2]));
+        assert_eq!(difference.tokens_for_tsid(1), rangeset_from_ranges([1..=1]));
+        assert_eq!(difference.tokens_for_tsid(2), rangeset_from_ranges([1..=1]));
+        assert_eq!(difference.tokens_for_tsid(4), rangeset_from_ranges([5..=5]));
+        assert_eq!(difference.tokens_for_tsid(5), RangeSetBlaze::new());
+    }
+
+    #[test]
+    fn test_weight_union_coalesces_adjacent_equal_segments() {
+        let a = Weight::from_compact_ranges(vec![(0..=10, vec![1..=1])]);
+        let b = Weight::from_compact_ranges(vec![(3..=5, vec![1..=1])]);
+
+        let union = a.union(&b);
+
+        assert_eq!(union, a);
+        assert_eq!(union.num_ranges(), 1);
     }
 
     #[test]

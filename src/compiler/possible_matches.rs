@@ -4,6 +4,7 @@
 #![allow(unused_imports)]
 
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use range_set_blaze::RangeSetBlaze;
 
@@ -13,6 +14,7 @@ use crate::compiler::grammar::model::{GrammarDef, TerminalID};
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
 pub(crate) type PossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
+type PossibleMatchMap = BTreeMap<TerminalID, RangeSetBlaze<u32>>;
 
 fn token_range(token_id: u32) -> RangeSetBlaze<u32> {
     RangeSetBlaze::from_iter([token_id..=token_id])
@@ -27,19 +29,19 @@ fn reachable_u32(node: &VocabPrefixTreeNode) -> RangeSetBlaze<u32> {
 }
 
 fn merge_possible_match_maps(
-    into: &mut BTreeMap<TerminalID, RangeSetBlaze<u32>>,
-    other: BTreeMap<TerminalID, RangeSetBlaze<u32>>,
+    into: &mut PossibleMatchMap,
+    other: &PossibleMatchMap,
 ) {
     for (terminal, token_ids) in other {
-        into.entry(terminal)
+        into.entry(*terminal)
             .and_modify(|existing| *existing = existing.clone() | token_ids.clone())
-            .or_insert(token_ids);
+            .or_insert_with(|| token_ids.clone());
     }
 }
 
 pub(crate) struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
-    cache: HashMap<(usize, u32), BTreeMap<TerminalID, RangeSetBlaze<u32>>>,
+    cache: HashMap<(usize, u32), Rc<PossibleMatchMap>>,
 }
 
 impl<'a> PossibleMatchesComputer<'a> {
@@ -54,13 +56,13 @@ impl<'a> PossibleMatchesComputer<'a> {
         &mut self,
         node: &VocabPrefixTreeNode,
         tokenizer_state: u32,
-    ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
+    ) -> Rc<PossibleMatchMap> {
         let cache_key = (node as *const VocabPrefixTreeNode as usize, tokenizer_state);
         if let Some(cached) = self.cache.get(&cache_key) {
-            return cached.clone();
+            return Rc::clone(cached);
         }
 
-        let mut result = BTreeMap::new();
+        let mut result = PossibleMatchMap::new();
 
         // This intentionally includes the token ending exactly at `node`.
         // sep1's `possible_matches(node, state)` does the same before recursing
@@ -90,14 +92,13 @@ impl<'a> PossibleMatchesComputer<'a> {
             }
 
             if let Some(end_state) = exec.end_state {
-                merge_possible_match_maps(
-                    &mut result,
-                    self.possible_matches_for_node(child, end_state),
-                );
+                let child_matches = self.possible_matches_for_node(child, end_state);
+                merge_possible_match_maps(&mut result, child_matches.as_ref());
             }
         }
 
-        self.cache.insert(cache_key, result.clone());
+        let result = Rc::new(result);
+        self.cache.insert(cache_key, Rc::clone(&result));
         result
     }
 }
@@ -108,9 +109,22 @@ pub(crate) fn build_possible_matches_by_state(
     vocab: &Vocab,
 ) -> PossibleMatchesByState {
     let _ = grammar;
-    let trie = VocabPrefixTree::build(
+    build_possible_matches_from_token_bytes(
+        tokenizer,
         &vocab
             .entries
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<u32, Vec<u8>>>(),
+    )
+}
+
+pub(crate) fn build_possible_matches_from_token_bytes(
+    tokenizer: &Tokenizer,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+) -> PossibleMatchesByState {
+    let trie = VocabPrefixTree::build(
+        &token_bytes
             .iter()
             .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
             .collect::<Vec<_>>(),
@@ -121,7 +135,10 @@ pub(crate) fn build_possible_matches_by_state(
     for tokenizer_state in 0..tokenizer.num_states() {
         possible_matches_by_state.insert(
             tokenizer_state,
-            computer.possible_matches_for_node(&trie.root, tokenizer_state),
+            computer
+                .possible_matches_for_node(&trie.root, tokenizer_state)
+                .as_ref()
+                .clone(),
         );
     }
     possible_matches_by_state
