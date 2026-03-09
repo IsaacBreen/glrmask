@@ -182,13 +182,13 @@ fn concatenate_nwas(left: &NWA, right: &NWA) -> Option<NWA> {
     Some(arena)
 }
 
-fn union_optional_nwa(acc: &mut Option<NWA>, next: NWA) {
+fn union_optional_nwa(acc: &mut Option<NWA>, next: &NWA) {
     match acc {
         Some(existing) => {
-            let body = existing.append_with_body(&next);
+            let body = existing.append_with_body(next);
             existing.start_states.extend(body.start_states);
         }
-        None => *acc = Some(next),
+        None => *acc = Some(next.clone()),
     }
 }
 
@@ -196,6 +196,7 @@ fn compose_state(
     state_id: u32,
     states: &[StateSummary],
     memo: &mut BTreeMap<u32, Option<Arc<NWA>>>,
+    concat_memo: &mut HashMap<(usize, u32), Option<Arc<NWA>>>,
 ) -> Option<Arc<NWA>> {
     if let Some(cached) = memo.get(&state_id) {
         return cached.clone();
@@ -208,13 +209,21 @@ fn compose_state(
     let mut composed: Option<NWA> = state.final_weight.as_ref().and_then(accepting_nwa);
 
     for branch in &state.branches {
-        let Some(continuation) = compose_state(branch.target, states, memo) else {
+        let Some(continuation) = compose_state(branch.target, states, memo, concat_memo) else {
             continue;
         };
-        let Some(branch_with_continuation) = concatenate_nwas(branch.bundle.as_ref(), continuation.as_ref()) else {
+        let concat_key = (branch.bundle_id, branch.target);
+        let branch_with_continuation = if let Some(cached) = concat_memo.get(&concat_key) {
+            cached.clone()
+        } else {
+            let built = concatenate_nwas(branch.bundle.as_ref(), continuation.as_ref()).map(Arc::new);
+            concat_memo.insert(concat_key, built.clone());
+            built
+        };
+        let Some(branch_with_continuation) = branch_with_continuation else {
             continue;
         };
-        union_optional_nwa(&mut composed, branch_with_continuation);
+        union_optional_nwa(&mut composed, branch_with_continuation.as_ref());
     }
 
     let composed = composed.map(Arc::new);
@@ -273,7 +282,13 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
 
     let phase_started_at = std::time::Instant::now();
     let mut memo = BTreeMap::new();
-    let Some(parser_nwa) = compose_state(terminal_dwa.start_state, &states, &mut memo)
+    let mut concat_memo = HashMap::new();
+    let Some(parser_nwa) = compose_state(
+        terminal_dwa.start_state,
+        &states,
+        &mut memo,
+        &mut concat_memo,
+    )
     else {
         return DWA::new(0, 0);
     };
