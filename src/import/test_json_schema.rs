@@ -64,6 +64,18 @@ fn ebnf_constraint(ebnf: &str) -> Constraint {
         .unwrap_or_else(|e| panic!("EBNF should compile: {}", e))
 }
 
+fn contains_literal(expr: &GrammarExpr, target: &[u8]) -> bool {
+    match expr {
+        GrammarExpr::Literal(bytes) => bytes == target,
+        GrammarExpr::Sequence(parts) => parts.iter().any(|part| contains_literal(part, target)),
+        GrammarExpr::Choice(options) => options.iter().any(|option| contains_literal(option, target)),
+        GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_literal(inner, target),
+        _ => false,
+    }
+}
+
 // ── EBNF constraint tests ───────────────────────────────────────────────────
 
 /// Ported from `test_ebnf_ws_nullable`.
@@ -71,7 +83,6 @@ fn ebnf_constraint(ebnf: &str) -> Constraint {
 /// Whitespace rule is nullable via `(…)*`; after committing `{`, the `}`
 /// should be immediately valid.
 #[test]
-#[ignore = "trips debug precondition assertion: nullable nonterminal from WS* rule"]
 fn test_ebnf_ws_nullable() {
     let c = ebnf_constraint(
         "root ::= '{' WS '}'\nWS ::= ( ' ' | '\\t' | '\\n' | '\\r' )*",
@@ -93,7 +104,6 @@ fn test_ebnf_ws_nullable() {
 ///
 /// After `{`, both `"` (starting a member) and `}` (empty object) should be valid.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks for complex object grammars
 fn test_ebnf_object_member_after_brace() {
     let ebnf = "\
 root ::= '{' WS member_opt WS '}'
@@ -120,7 +130,7 @@ WS ::= ( ' ' | '\\t' | '\\n' | '\\r' )*";
 
 /// Ported from `test_schema_simple_object`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks for JSON object schemas
+#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_simple_object() {
     let schema = r#"{
         "type": "object",
@@ -138,7 +148,7 @@ fn test_schema_simple_object() {
 
 /// Ported from `test_schema_additional_properties_true`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks for JSON object schemas
+#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_additional_properties_true() {
     let schema = r#"{
         "type": "object",
@@ -161,7 +171,7 @@ fn test_schema_additional_properties_true() {
 
 /// Ported from `test_schema_additional_properties_schema`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks for JSON object schemas
+#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_additional_properties_schema() {
     let schema = r#"{
         "type": "object",
@@ -183,7 +193,7 @@ fn test_schema_additional_properties_schema() {
 
 /// Ported from `test_schema_dependencies`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks for JSON object schemas
+#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_dependencies() {
     let schema = r#"{
         "type": "object",
@@ -209,7 +219,7 @@ fn test_schema_dependencies() {
 
 /// Ported from `test_schema_nested_objects`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks for JSON object schemas
+#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_nested_objects() {
     let schema = r#"{
         "type": "object",
@@ -234,7 +244,7 @@ fn test_schema_nested_objects() {
 
 /// Ported from `test_schema_array`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks with byte-level vocabs
+#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or array continuation"]
 fn test_schema_array() {
     let schema = r#"{
         "type": "array",
@@ -245,7 +255,6 @@ fn test_schema_array() {
 
 /// Ported from `test_schema_anyof`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks with byte-level vocabs
 fn test_schema_anyof() {
     let schema = r#"{
         "anyOf": [
@@ -259,7 +268,6 @@ fn test_schema_anyof() {
 
 /// Ported from `test_schema_enum`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks with byte-level vocabs
 fn test_schema_enum() {
     let schema = r#"{
         "enum": ["red", "green", "blue"]
@@ -269,7 +277,6 @@ fn test_schema_enum() {
 
 /// Ported from `test_schema_const`.
 #[test]
-#[ignore] // byte-level vocab: constraint pipeline doesn't produce correct masks with byte-level vocabs
 fn test_schema_const() {
     let schema = r#"{
         "const": "fixed_value"
@@ -281,7 +288,6 @@ fn test_schema_const() {
 ///
 /// Uses a minimal custom vocabulary (only the bytes needed for `"x"`).
 #[test]
-#[ignore] // constraint pipeline doesn't produce correct masks with minimal byte-level vocabs for JSON schemas
 fn test_schema_const2() {
     let schema = r#"{
         "const": "x"
@@ -414,4 +420,131 @@ fn test_conversion_ref() {
     let named = schema_to_named_grammar(&parsed)
         .expect("schema with $ref should convert to named grammar");
     assert!(!named.rules.is_empty());
+}
+
+#[test]
+fn test_conversion_merges_property_key_and_colon() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"}
+        },
+        "required": ["name"],
+        "additionalProperties": true
+    }"#;
+    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
+    let named = schema_to_named_grammar(&parsed)
+        .expect("object schema should convert to named grammar");
+
+    assert!(
+        named.rules.iter().any(|(name, _)| name == "JSON_KEY_COLON"),
+        "CFA-style lowering should include a shared JSON_KEY_COLON rule"
+    );
+    assert!(
+        named.rules.iter().any(|(_, expr)| contains_literal(expr, b"\"name\":")),
+        "Known object properties should use merged key+colon literals"
+    );
+}
+
+#[test]
+fn test_conversion_supports_definitions_ref() {
+    let schema = r##"{
+        "definitions": {
+            "Point": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"}
+                },
+                "required": ["x", "y"]
+            }
+        },
+        "$ref": "#/definitions/Point"
+    }"##;
+    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
+    let named = schema_to_named_grammar(&parsed)
+        .expect("schema using definitions refs should convert to named grammar");
+
+    assert!(
+        named.rules.iter().any(|(_, expr)| contains_literal(expr, b"\"x\":")),
+        "Resolved definitions ref should contribute merged literal for x"
+    );
+    assert!(
+        named.rules.iter().any(|(_, expr)| contains_literal(expr, b"\"y\":")),
+        "Resolved definitions ref should contribute merged literal for y"
+    );
+}
+
+#[test]
+fn test_conversion_allof_merges_object_properties() {
+    let schema = r#"{
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"}
+                },
+                "required": ["a"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "b": {"type": "integer"}
+                },
+                "required": ["b"],
+                "additionalProperties": false
+            }
+        ]
+    }"#;
+    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
+    let named = schema_to_named_grammar(&parsed)
+        .expect("allOf object schema should convert to named grammar");
+
+    assert!(
+        named.rules.iter().any(|(_, expr)| contains_literal(expr, b"\"a\":")),
+        "allOf merge should preserve property a"
+    );
+    assert!(
+        named.rules.iter().any(|(_, expr)| contains_literal(expr, b"\"b\":")),
+        "allOf merge should preserve property b"
+    );
+}
+
+#[test]
+fn test_prefix_items_default_to_required_like_cfa() {
+    let schema = r#"{
+        "type": "array",
+        "prefixItems": [
+            {"const": 1},
+            {"const": 2}
+        ]
+    }"#;
+    let vocab = Vocab::new(
+        vec![
+            (0, b"[]".to_vec()),
+            (1, b"[1]".to_vec()),
+            (2, b"[1,2]".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_json_schema(schema, &vocab)
+        .expect("prefixItems schema should compile");
+    let mut state = c.start();
+    let mask = state.mask();
+
+    assert!(
+        !token_allowed(&mask, 0),
+        "CFA-style prefixItems lowering should not allow omitting all prefix items"
+    );
+    assert!(
+        !token_allowed(&mask, 1),
+        "CFA-style prefixItems lowering should not allow truncating required prefix items"
+    );
+    assert!(
+        token_allowed(&mask, 2),
+        "CFA-style prefixItems lowering should allow the full tuple payload"
+    );
+
+    state.commit_token(2);
+    assert!(state.is_finished(), "[1,2] should finish successfully");
 }
