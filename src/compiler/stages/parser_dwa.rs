@@ -25,21 +25,15 @@ use crate::ds::weight::Weight;
 type BundleEntry = BTreeMap<TerminalID, Weight>;
 
 #[derive(Debug, Clone)]
-struct BundleEdge {
+struct TerminalBranch {
     target_state: u32,
-    bundle_id: usize,
+    bundle: NWA,
 }
 
 #[derive(Debug, Clone)]
-struct TerminalDagState {
+struct TerminalStateSummary {
     final_weight: Option<Weight>,
-    edges: Vec<BundleEdge>,
-}
-
-#[derive(Debug, Clone)]
-struct TerminalDag {
-    start_state: u32,
-    states: Vec<TerminalDagState>,
+    branches: Vec<TerminalBranch>,
 }
 
 fn append_dwa(into: &mut DWA, other: &DWA) -> u32 {
@@ -200,39 +194,35 @@ fn group_terminal_edges_by_target(
     groups
 }
 
-fn decompose_terminal_dwa(
+fn summarize_terminal_state(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
-) -> (Vec<BundleEntry>, TerminalDag) {
-    let mut bundle_entries = Vec::<BundleEntry>::new();
-    let mut states = terminal_dwa
-        .states
-        .iter()
-        .map(|state| TerminalDagState {
-            final_weight: state.final_weight.clone(),
-            edges: Vec::new(),
+    state_id: u32,
+    templates: &BTreeMap<TerminalID, UnweightedDfa>,
+) -> TerminalStateSummary {
+    let final_weight = terminal_dwa.states[state_id as usize].final_weight.clone();
+    let branches = group_terminal_edges_by_target(terminal_dwa, grammar, state_id)
+        .into_iter()
+        .map(|(target_state, bundle)| TerminalBranch {
+            target_state,
+            bundle: build_bundle_nwa(&bundle, templates),
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    for state_id in 0..terminal_dwa.states.len() as u32 {
-        let grouped_edges = group_terminal_edges_by_target(terminal_dwa, grammar, state_id);
-        for (target_state, bundle_entry) in grouped_edges {
-            let bundle_id = bundle_entries.len();
-            bundle_entries.push(bundle_entry);
-            states[state_id as usize].edges.push(BundleEdge {
-                target_state,
-                bundle_id,
-            });
-        }
+    TerminalStateSummary {
+        final_weight,
+        branches,
     }
+}
 
-    (
-        bundle_entries,
-        TerminalDag {
-            start_state: terminal_dwa.start_state,
-            states,
-        },
-    )
+fn summarize_terminal_dwa(
+    terminal_dwa: &DWA,
+    grammar: &AnalyzedGrammar,
+    templates: &BTreeMap<TerminalID, UnweightedDfa>,
+) -> Vec<TerminalStateSummary> {
+    (0..terminal_dwa.states.len() as u32)
+        .map(|state_id| summarize_terminal_state(terminal_dwa, grammar, state_id, templates))
+        .collect()
 }
 
 fn concatenate_nwas(left: &NWA, right: &NWA) -> Option<NWA> {
@@ -254,30 +244,26 @@ fn union_optional_nwa(acc: &mut Option<NWA>, next: NWA) {
     }
 }
 
-fn compose_dag_state(
+fn compose_state(
     state_id: u32,
-    dag: &TerminalDag,
-    bundle_nwas: &[NWA],
+    terminal_states: &[TerminalStateSummary],
     memo: &mut BTreeMap<u32, Option<NWA>>,
 ) -> Option<NWA> {
     if let Some(cached) = memo.get(&state_id) {
         return cached.clone();
     }
 
-    let Some(state) = dag.states.get(state_id as usize) else {
+    let Some(state) = terminal_states.get(state_id as usize) else {
         return None;
     };
 
     let mut composed: Option<NWA> = state.final_weight.as_ref().and_then(accepting_nwa);
 
-    for edge in &state.edges {
-        let Some(continuation) = compose_dag_state(edge.target_state, dag, bundle_nwas, memo) else {
+    for branch in &state.branches {
+        let Some(continuation) = compose_state(branch.target_state, terminal_states, memo) else {
             continue;
         };
-        let Some(branch_bundle) = bundle_nwas.get(edge.bundle_id) else {
-            continue;
-        };
-        let Some(branch_with_continuation) = concatenate_nwas(branch_bundle, &continuation) else {
+        let Some(branch_with_continuation) = concatenate_nwas(&branch.bundle, &continuation) else {
             continue;
         };
         union_optional_nwa(&mut composed, branch_with_continuation);
@@ -331,14 +317,10 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
 ) -> DWA {
     let characterizations = characterize_terminals(table, grammar);
     let templates = Templates::from_characterizations(&characterizations);
-    let (bundle_entries, dag) = decompose_terminal_dwa(terminal_dwa, grammar);
-    let bundle_nwas = bundle_entries
-        .iter()
-        .map(|bundle| build_bundle_nwa(bundle, &templates.by_terminal))
-        .collect::<Vec<_>>();
+    let terminal_states = summarize_terminal_dwa(terminal_dwa, grammar, &templates.by_terminal);
 
     let mut memo = BTreeMap::new();
-    let Some(mut parser_nwa) = compose_dag_state(dag.start_state, &dag, &bundle_nwas, &mut memo)
+    let Some(mut parser_nwa) = compose_state(terminal_dwa.start_state, &terminal_states, &mut memo)
     else {
         return DWA::new(0, 0);
     };
