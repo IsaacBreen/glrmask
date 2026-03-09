@@ -326,6 +326,136 @@ struct SourceAssoc {
     nodes: Vec<u32>,
 }
 
+struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
+    tokenizer: &'tok Tokenizer,
+    possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
+    nwa: &'nwa mut NWA,
+    leaf_state: u32,
+}
+
+impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
+    fn add_transition_from_sources(
+        &mut self,
+        sources: &[u32],
+        label: TerminalID,
+        target: u32,
+        weight: &Weight,
+    ) {
+        for &source in sources {
+            add_weighted_transition(self.nwa, source, label as i32, target, weight.clone());
+        }
+    }
+
+    fn build_from_trie(
+        &mut self,
+        node: &VocabPrefixTreeNode,
+        assoc_by_state: &BTreeMap<u32, SourceAssoc>,
+    ) {
+        for (segment_bytes, child_node) in node.iter_children() {
+            let child_token_id = child_node.token_id() as u32;
+
+            let mut next_level_assoc = BTreeMap::<u32, SourceAssoc>::new();
+            let mut pending = BTreeMap::<usize, BTreeMap<u32, SourceAssoc>>::new();
+            pending.insert(0, assoc_by_state.clone());
+
+            while let Some((pos, states_at_pos)) = pending.pop_first() {
+                if pos == segment_bytes.len() {
+                    for (tokenizer_state, assoc) in states_at_pos {
+                        merge_assoc(&mut next_level_assoc, tokenizer_state, assoc.tsid, &assoc.nodes);
+                    }
+                    continue;
+                }
+
+                for (tokenizer_state, source_assoc) in states_at_pos {
+                    let source_nodes = source_assoc.nodes;
+                    let tsid = source_assoc.tsid;
+                    let child_token_weight = token_weight(tsid, child_token_id);
+                    let exec = self
+                        .tokenizer
+                        .execute_from_state(&segment_bytes[pos..], tokenizer_state);
+                    let exec_end_state = exec.end_state;
+                    let mut possible_matches_at_end = None;
+
+                    if let Some(end_state) = exec_end_state {
+                        if child_node.has_token() {
+                            for terminal_id in self.tokenizer.tokens_accessible_from_state(end_state) {
+                                self.add_transition_from_sources(
+                                    &source_nodes,
+                                    terminal_id,
+                                    self.leaf_state,
+                                    &child_token_weight,
+                                );
+                            }
+                        }
+
+                        merge_assoc(&mut next_level_assoc, end_state, tsid, &source_nodes);
+                    }
+
+                    for matched in exec.matches {
+                        let next_pos = pos + matched.width;
+
+                        if next_pos == segment_bytes.len() && child_node.has_token() {
+                            self.add_transition_from_sources(
+                                &source_nodes,
+                                matched.id,
+                                self.leaf_state,
+                                &child_token_weight,
+                            );
+                        }
+
+                        let mut continuation_tokens = if next_pos == segment_bytes.len()
+                            && child_node.has_token()
+                        {
+                            let mut remaining = child_node.reachable_token_ids().clone();
+                            remaining.remove(child_token_id as usize);
+                            if let Some(end_state) = exec_end_state {
+                                let matches_at_end = possible_matches_at_end.get_or_insert_with(|| {
+                                    self.possible_matches
+                                        .possible_matches_for_node(child_node, end_state)
+                                });
+                                if let Some(pm) = matches_at_end.get(&matched.id) {
+                                    subtract_possible_matches(&mut remaining, pm);
+                                }
+                            }
+                            remaining
+                        } else {
+                            child_node.reachable_token_ids().clone()
+                        };
+
+                        if continuation_tokens.is_empty() {
+                            continue;
+                        }
+
+                        let continuation_weight = token_set_weight(tsid, &continuation_tokens);
+                        if continuation_weight.is_empty() {
+                            continue;
+                        }
+
+                        let continuation_assoc = pending.entry(next_pos).or_default();
+                        let destination = continuation_state(
+                            continuation_assoc,
+                            self.tokenizer.initial_state(),
+                            tsid,
+                            self.nwa,
+                        );
+
+                        self.add_transition_from_sources(
+                            &source_nodes,
+                            matched.id,
+                            destination,
+                            &continuation_weight,
+                        );
+                    }
+                }
+            }
+
+            if !next_level_assoc.is_empty() {
+                self.build_from_trie(child_node, &next_level_assoc);
+            }
+        }
+    }
+}
+
 fn subtract_possible_matches(
     continuation_tokens: &mut RangeSetBlaze<usize>,
     possible_matches: &RangeSetBlaze<u32>,
@@ -383,151 +513,6 @@ fn continuation_state(
     state
 }
 
-fn add_transition_from_sources(
-    nwa: &mut NWA,
-    grammar: &AnalyzedGrammar,
-    sources: &[u32],
-    label: TerminalID,
-    target: u32,
-    weight: &Weight,
-) {
-    if label >= grammar.num_terminals || weight.is_empty() {
-        return;
-    }
-
-    for &source in sources {
-        add_weighted_transition(nwa, source, label as i32, target, weight.clone());
-    }
-}
-
-fn build_terminal_nwa_from_trie(
-    tokenizer: &Tokenizer,
-    node: &VocabPrefixTreeNode,
-    possible_matches: &mut PossibleMatchesComputer<'_>,
-    assoc_by_state: &BTreeMap<u32, SourceAssoc>,
-    nwa: &mut NWA,
-    leaf_state: u32,
-    grammar: &AnalyzedGrammar,
-) {
-    for (segment_bytes, child_node) in node.iter_children() {
-        let child_token_id = child_node.token_id() as u32;
-
-        let mut next_level_assoc = BTreeMap::<u32, SourceAssoc>::new();
-        let mut pending = BTreeMap::<usize, BTreeMap<u32, SourceAssoc>>::new();
-        pending.insert(0, assoc_by_state.clone());
-
-        while let Some((pos, states_at_pos)) = pending.pop_first() {
-            if pos == segment_bytes.len() {
-                for (tokenizer_state, assoc) in states_at_pos {
-                    merge_assoc(&mut next_level_assoc, tokenizer_state, assoc.tsid, &assoc.nodes);
-                }
-                continue;
-            }
-
-            for (tokenizer_state, source_assoc) in states_at_pos {
-                let source_nodes = source_assoc.nodes;
-                let tsid = source_assoc.tsid;
-                let child_token_weight = token_weight(tsid, child_token_id);
-                let exec = tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state);
-                let exec_end_state = exec.end_state;
-                let mut possible_matches_at_end = None;
-
-                if let Some(end_state) = exec_end_state {
-                    if child_node.has_token() {
-                        for terminal_id in tokenizer.tokens_accessible_from_state(end_state) {
-                            add_transition_from_sources(
-                                nwa,
-                                grammar,
-                                &source_nodes,
-                                terminal_id,
-                                leaf_state,
-                                &child_token_weight,
-                            );
-                        }
-                    }
-
-                    merge_assoc(&mut next_level_assoc, end_state, tsid, &source_nodes);
-                }
-
-                for matched in exec.matches {
-                    if matched.id >= grammar.num_terminals {
-                        continue;
-                    }
-
-                    let next_pos = pos + matched.width;
-
-                    if next_pos == segment_bytes.len() && child_node.has_token() {
-                        add_transition_from_sources(
-                            nwa,
-                            grammar,
-                            &source_nodes,
-                            matched.id,
-                            leaf_state,
-                            &child_token_weight,
-                        );
-                    }
-
-                    let mut continuation_tokens = if next_pos == segment_bytes.len()
-                        && child_node.has_token()
-                    {
-                        let mut remaining = child_node.reachable_token_ids().clone();
-                        remaining.remove(child_token_id as usize);
-                        if let Some(end_state) = exec_end_state {
-                            let matches_at_end = possible_matches_at_end.get_or_insert_with(|| {
-                                possible_matches.possible_matches_for_node(child_node, end_state)
-                            });
-                            if let Some(pm) = matches_at_end.get(&matched.id) {
-                                subtract_possible_matches(&mut remaining, pm);
-                            }
-                        }
-                        remaining
-                    } else {
-                        child_node.reachable_token_ids().clone()
-                    };
-
-                    if continuation_tokens.is_empty() {
-                        continue;
-                    }
-
-                    let continuation_weight = token_set_weight(tsid, &continuation_tokens);
-                    if continuation_weight.is_empty() {
-                        continue;
-                    }
-
-                    let continuation_assoc = pending.entry(next_pos).or_default();
-                    let destination = continuation_state(
-                        continuation_assoc,
-                        tokenizer.initial_state(),
-                        tsid,
-                        nwa,
-                    );
-
-                    add_transition_from_sources(
-                        nwa,
-                        grammar,
-                        &source_nodes,
-                        matched.id,
-                        destination,
-                        &continuation_weight,
-                    );
-                }
-            }
-        }
-
-        if !next_level_assoc.is_empty() {
-            build_terminal_nwa_from_trie(
-                tokenizer,
-                child_node,
-                possible_matches,
-                &next_level_assoc,
-                nwa,
-                leaf_state,
-                grammar,
-            );
-        }
-    }
-}
-
 pub(crate) fn build_terminal_dwa(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -561,15 +546,13 @@ pub(crate) fn build_terminal_dwa(
             merge_assoc(&mut assoc_by_state, *original_state, internal_tsid, &[root]);
         }
 
-        build_terminal_nwa_from_trie(
+        let mut builder = TerminalNwaBuilder {
             tokenizer,
-            &vocab_tree.root,
-            &mut possible_matches,
-            &assoc_by_state,
-            &mut nwa,
+            possible_matches: &mut possible_matches,
+            nwa: &mut nwa,
             leaf_state,
-            grammar,
-        );
+        };
+        builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
     }
 
     let _ = prune_disallowed_follows(&mut nwa, grammar);
