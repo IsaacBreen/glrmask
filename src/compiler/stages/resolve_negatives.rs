@@ -405,15 +405,35 @@ fn apply_finality_fixpoint_worklist(
     }
 }
 
+fn apply_finality_fixpoint_acyclic(
+    nwa: &NWA,
+    preds: &[Vec<PredEdge>],
+    future_final: &mut [Option<Weight>],
+    topo_order: &[usize],
+) {
+    for &state_id in topo_order.iter().rev() {
+        let Some(f_s) = future_final[state_id].clone() else {
+            continue;
+        };
+        if f_s.is_empty() {
+            continue;
+        }
+
+        for edge in preds[state_id].iter().copied() {
+            let (pred_state, edge_weight) = finality_edge_weight(nwa, edge);
+            let add = f_s.intersection(edge_weight);
+            merge_final_weight(&mut future_final[pred_state], add);
+        }
+    }
+}
+
 pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     let n = nwa.states.len();
     if n == 0 {
         return;
     }
     let graph_profile_enabled = std::env::var_os("GLRMASK_PROFILE_FINALITY_GRAPH").is_some();
-    if graph_profile_enabled {
-        let _ = build_finality_topo_order(nwa, true);
-    }
+    let topo_order = build_finality_topo_order(nwa, graph_profile_enabled);
     let preds = build_finality_predecessors(nwa);
 
     let mut future_final = vec![None::<Weight>; n];
@@ -426,7 +446,11 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
         }
     }
 
-    apply_finality_fixpoint_worklist(nwa, &preds, &mut future_final);
+    if let Some(topo_order) = topo_order.as_deref() {
+        apply_finality_fixpoint_acyclic(nwa, &preds, &mut future_final, topo_order);
+    } else {
+        apply_finality_fixpoint_worklist(nwa, &preds, &mut future_final);
+    }
 
     for (state_id, final_weight) in future_final.into_iter().enumerate() {
         nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
