@@ -195,8 +195,8 @@ fn union_optional_nwa(acc: &mut Option<NWA>, next: NWA) {
 fn compose_state(
     state_id: u32,
     states: &[StateSummary],
-    memo: &mut BTreeMap<u32, Option<NWA>>,
-) -> Option<NWA> {
+    memo: &mut BTreeMap<u32, Option<Arc<NWA>>>,
+) -> Option<Arc<NWA>> {
     if let Some(cached) = memo.get(&state_id) {
         return cached.clone();
     }
@@ -211,12 +211,13 @@ fn compose_state(
         let Some(continuation) = compose_state(branch.target, states, memo) else {
             continue;
         };
-        let Some(branch_with_continuation) = concatenate_nwas(branch.bundle.as_ref(), &continuation) else {
+        let Some(branch_with_continuation) = concatenate_nwas(branch.bundle.as_ref(), continuation.as_ref()) else {
             continue;
         };
         union_optional_nwa(&mut composed, branch_with_continuation);
     }
 
+    let composed = composed.map(Arc::new);
     memo.insert(state_id, composed.clone());
     composed
 }
@@ -272,10 +273,11 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
 
     let phase_started_at = std::time::Instant::now();
     let mut memo = BTreeMap::new();
-    let Some(mut parser_nwa) = compose_state(terminal_dwa.start_state, &states, &mut memo)
+    let Some(parser_nwa) = compose_state(terminal_dwa.start_state, &states, &mut memo)
     else {
         return DWA::new(0, 0);
     };
+    let mut parser_nwa = parser_nwa.as_ref().clone();
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] compose_state_ms={:.3} memo_entries={} nwa_states={}",
