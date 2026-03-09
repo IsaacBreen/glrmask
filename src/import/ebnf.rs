@@ -5,6 +5,7 @@
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
+use crate::import::ebnf_factoring::factor_named_grammar;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -340,7 +341,8 @@ impl Parser {
 
 pub fn parse_ebnf(input: &str) -> Result<GrammarDef, GlrMaskError> {
     let named = parse_ebnf_to_named(input)?;
-    lower(&named)
+    let factored = factor_named_grammar(named);
+    lower(&factored)
 }
 
 #[allow(dead_code)]
@@ -455,5 +457,21 @@ mod tests {
         let start_rules: Vec<_> = g.rules.iter().filter(|r| r.lhs == 0).collect();
         assert_eq!(start_rules.len(), 1);
         assert_eq!(start_rules[0].rhs.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_ebnf_applies_choice_factoring_to_internal_helpers() {
+        let g = parse_ebnf(
+            r#"
+            start ::= _pair
+            _pair ::= "a" ":" _pair | "b" ":" _pair
+            "#,
+        )
+        .unwrap();
+
+        assert!(
+            g.num_nonterminals() >= 3,
+            "choice factoring should introduce at least one helper nonterminal for recursive internal choices"
+        );
     }
 }

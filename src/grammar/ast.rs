@@ -10,7 +10,7 @@ use crate::grammar::flat::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GrammarExpr {
     Ref(String),
     Sequence(Vec<GrammarExpr>),
