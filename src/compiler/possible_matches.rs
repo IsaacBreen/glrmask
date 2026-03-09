@@ -76,17 +76,6 @@ impl<'a> PossibleMatchesComputer<'a> {
                     })
                     .or_insert_with(|| token_range.clone());
             }
-
-            let matched = self.tokenizer.all_matched_terminals(tokenizer_state);
-            for terminal in self.tokenizer.tokens_accessible_from_state(tokenizer_state) {
-                if matched.contains(&terminal) {
-                    continue;
-                }
-                result
-                    .entry(terminal)
-                    .and_modify(|existing| *existing = existing.clone() | token_range.clone())
-                    .or_insert_with(|| token_range.clone());
-            }
         }
 
         for (segment_bytes, child) in node.iter_children() {
