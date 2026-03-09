@@ -133,29 +133,90 @@ pub(crate) fn expand_nullable_terminals(
     rules.extend(extra_rules);
 }
 
-pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    // Step 1: Build tokenizer (NFA→DFA – may produce start-state finalizers
-    //         for nullable terminals).
-    let mut tokenizer = build_tokenizer(grammar);
+fn remap_terminal_id(terminal: &Terminal, new_id: TerminalID) -> Terminal {
+    match terminal {
+        Terminal::Literal { bytes, .. } => Terminal::Literal {
+            id: new_id,
+            bytes: bytes.clone(),
+        },
+        Terminal::Pattern { pattern, .. } => Terminal::Pattern {
+            id: new_id,
+            pattern: pattern.clone(),
+        },
+        Terminal::Expr { expr, .. } => Terminal::Expr {
+            id: new_id,
+            expr: expr.clone(),
+        },
+    }
+}
 
-    // Step 2: Drain nullable terminals from the tokenizer.
-    let nullable_terminals = tokenizer.drain_nullable_terminals();
+/// Remove terminals that are no longer referenced by any normalized rule and
+/// compact the remaining terminal IDs to a dense 0..N-1 range.
+pub(crate) fn compact_unused_terminals(
+    rules: &mut Vec<Rule>,
+    terminals: &[Terminal],
+) -> Vec<Terminal> {
+    let mut used = std::collections::BTreeSet::<TerminalID>::new();
+    for rule in rules.iter() {
+        for symbol in &rule.rhs {
+            if let Symbol::Terminal(terminal_id) = symbol {
+                used.insert(*terminal_id);
+            }
+        }
+    }
 
-    // Owned working copies of the grammar data.
+    let mut remap = std::collections::BTreeMap::<TerminalID, TerminalID>::new();
+    let mut compacted = Vec::with_capacity(used.len());
+
+    for old_id in used {
+        let new_id = compacted.len() as TerminalID;
+        let terminal = terminals.get(old_id as usize).unwrap_or_else(|| {
+            panic!("terminal id {} referenced by a rule but missing from grammar.terminals", old_id)
+        });
+        remap.insert(old_id, new_id);
+        compacted.push(remap_terminal_id(terminal, new_id));
+    }
+
+    for rule in rules.iter_mut() {
+        for symbol in rule.rhs.iter_mut() {
+            if let Symbol::Terminal(terminal_id) = symbol {
+                *terminal_id = *remap
+                    .get(terminal_id)
+                    .expect("used terminal must have been assigned a compacted id");
+            }
+        }
+    }
+
+    compacted
+}
+
+fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) {
+    // Probe nullability against the original terminal set first; nullable
+    // terminals are expanded into optional grammar structure before we compact
+    // away any terminals that normalization proves unreachable.
+    let mut nullable_probe = build_tokenizer(grammar);
+    let nullable_terminals = nullable_probe.drain_nullable_terminals();
+
     let mut rules = grammar.rules.clone();
     let start = grammar.start;
-    let terminals = grammar.terminals.clone();
     let mut next_nt = grammar.num_nonterminals();
 
-    // Step 3: Expand grammar rules to inline the optionality of nullable
-    //         terminals (in place).
     expand_nullable_terminals(&mut rules, &mut next_nt, &nullable_terminals);
-
-    // Step 4: Normalize grammar (ε-elimination, right-recursion removal, etc.)
     normalize_grammar(&mut rules, start);
 
-    // Build the final GrammarDef for downstream consumers.
+    let terminals = compact_unused_terminals(&mut rules, &grammar.terminals);
     let normalized = GrammarDef { rules, start, terminals };
+
+    // Build the real tokenizer only from the compacted live terminal set so
+    // dead terminals never make it into downstream lexer/parser stages.
+    let mut tokenizer = build_tokenizer(&normalized);
+    let _ = tokenizer.drain_nullable_terminals();
+
+    (normalized, tokenizer)
+}
+
+pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
+    let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
@@ -200,26 +261,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 }
 
 pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
-    // Step 1: Build tokenizer.
-    let mut tokenizer = build_tokenizer(grammar);
-
-    // Step 2: Drain nullable terminals.
-    let nullable_terminals = tokenizer.drain_nullable_terminals();
-
-    // Owned working copies of the grammar data.
-    let mut rules = grammar.rules.clone();
-    let start = grammar.start;
-    let terminals = grammar.terminals.clone();
-    let mut next_nt = grammar.num_nonterminals();
-
-    // Step 3: Expand grammar rules for nullable terminal optionality (in place).
-    expand_nullable_terminals(&mut rules, &mut next_nt, &nullable_terminals);
-
-    // Step 4: Normalize grammar (ε-elimination, right-recursion removal, etc.)
-    normalize_grammar(&mut rules, start);
-
-    // Build the final GrammarDef for downstream consumers.
-    let normalized = GrammarDef { rules, start, terminals };
+    let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
@@ -786,5 +828,115 @@ mod tests {
         let mut state = constraint.start();
         let mask = state.mask();
         assert!(mask_has_token(&mask, 1), "'b' should be allowed initially (opt_a is nullable)");
+    }
+
+    #[test]
+    fn test_compact_unused_terminals_remaps_rules_and_terminal_ids() {
+        let terminals = vec![
+            Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            },
+            Terminal::Literal {
+                id: 1,
+                bytes: b"dead".to_vec(),
+            },
+            Terminal::Literal {
+                id: 2,
+                bytes: b"b".to_vec(),
+            },
+        ];
+        let mut rules = vec![Rule {
+            lhs: 0,
+            rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+        }];
+
+        let compacted = compact_unused_terminals(&mut rules, &terminals);
+
+        assert_eq!(
+            rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+            }],
+            "used terminals should be renumbered densely when a dead terminal is removed from the middle"
+        );
+        assert_eq!(compacted.len(), 2);
+        assert_eq!(compacted[0].id(), 0);
+        assert_eq!(compacted[1].id(), 1);
+        assert_eq!(compacted[0].name(), "a");
+        assert_eq!(compacted[1].name(), "b");
+    }
+
+    #[test]
+    fn test_compile_drops_unused_terminals_before_final_tokenizer_build() {
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Pattern {
+                    id: 1,
+                    pattern: "x*".to_string(),
+                },
+                Terminal::Literal {
+                    id: 2,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+        };
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"x".to_vec()),
+            ],
+            None,
+        );
+
+        let (constraint, debug) = compile_with_debug(&gdef, &vocab);
+
+        assert_eq!(
+            constraint.tokenizer.num_terminals,
+            2,
+            "the final tokenizer should be built only from the live compacted terminals"
+        );
+        assert_eq!(debug.normalized_grammar_def.terminals.len(), 2);
+        assert_eq!(
+            debug
+                .normalized_grammar_def
+                .terminals
+                .iter()
+                .map(|terminal| terminal.name())
+                .collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string()],
+            "the dead middle terminal should be absent from the normalized grammar"
+        );
+        assert_eq!(
+            debug.normalized_grammar_def.rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+            }],
+            "rules should be remapped to the compacted terminal IDs"
+        );
+
+        let mut state = constraint.start();
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 0), "token 'a' should still be allowed initially");
+        assert!(!mask_has_token(&mask, 1), "token 'b' should not be allowed initially");
+        assert!(!mask_has_token(&mask, 2), "dead terminal token 'x' should not leak into the mask");
+
+        state.commit_token(0);
+        let mask = state.mask();
+        assert!(!mask_has_token(&mask, 0), "token 'a' should not be allowed after committing 'a'");
+        assert!(mask_has_token(&mask, 1), "token 'b' should remain the live continuation after remapping");
+        assert!(!mask_has_token(&mask, 2), "dead terminal token 'x' should remain absent after remapping");
     }
 }
