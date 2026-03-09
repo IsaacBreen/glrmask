@@ -228,6 +228,11 @@ impl Constraint {
     }
 
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        if std::env::var("GLRMASK_COMPILE_DEBUG").is_ok() {
+            let (constraint, debug) = from_lark_with_debug(lark, vocab)?;
+            eprintln!("{}", debug);
+            return Ok(constraint);
+        }
         from_lark(lark, vocab)
     }
 
@@ -239,6 +244,11 @@ impl Constraint {
     }
 
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        if std::env::var("GLRMASK_COMPILE_DEBUG").is_ok() {
+            let (constraint, debug) = from_json_schema_with_debug(schema, vocab)?;
+            eprintln!("{}", debug);
+            return Ok(constraint);
+        }
         from_json_schema(schema, vocab)
     }
 
