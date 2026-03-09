@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use range_set_blaze::RangeSetBlaze;
 
@@ -19,6 +19,14 @@ use crate::compiler::grammar::model::Symbol;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::ds::weight::Weight;
+
+type SuffixKey = (u32, u32, usize);
+
+#[derive(Default)]
+struct TokenSuffixMemo {
+    built: HashSet<SuffixKey>,
+    states: HashMap<SuffixKey, u32>,
+}
 
 fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
     let mut ever_allowed = vec![BTreeSet::new(); grammar.num_terminals as usize];
@@ -158,6 +166,56 @@ fn prune_unreachable_states(nwa: &mut NWA) -> bool {
     true
 }
 
+fn topological_order(nwa: &NWA) -> Vec<usize> {
+    let mut in_degree = vec![0u32; nwa.states.len()];
+    for state in &nwa.states {
+        for (dst, _) in &state.epsilons {
+            in_degree[*dst as usize] += 1;
+        }
+        for targets in state.transitions.values() {
+            for (dst, _) in targets {
+                in_degree[*dst as usize] += 1;
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (state_id, degree) in in_degree.iter().enumerate() {
+        if *degree == 0 {
+            queue.push_back(state_id);
+        }
+    }
+
+    let mut order = Vec::with_capacity(nwa.states.len());
+    while let Some(state_id) = queue.pop_front() {
+        order.push(state_id);
+        let state = &nwa.states[state_id];
+        for (dst, _) in &state.epsilons {
+            in_degree[*dst as usize] -= 1;
+            if in_degree[*dst as usize] == 0 {
+                queue.push_back(*dst as usize);
+            }
+        }
+        for targets in state.transitions.values() {
+            for (dst, _) in targets {
+                in_degree[*dst as usize] -= 1;
+                if in_degree[*dst as usize] == 0 {
+                    queue.push_back(*dst as usize);
+                }
+            }
+        }
+    }
+
+    order
+}
+
+fn intersect_or_insert(entry: &mut Option<HashSet<TerminalID>>, next: &HashSet<TerminalID>) {
+    match entry {
+        None => *entry = Some(next.clone()),
+        Some(existing) => existing.retain(|terminal| next.contains(terminal)),
+    }
+}
+
 fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
     let ever_allowed_by_label = compute_ever_allowed_follows(grammar);
     let terminals_count = grammar.num_terminals as usize;
@@ -177,48 +235,9 @@ fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
         })
         .collect();
 
-    let num_states = nwa.states.len();
-    let mut in_degree = vec![0u32; num_states];
-    for state in nwa.states.iter() {
-        for (dst, _) in &state.epsilons {
-            in_degree[*dst as usize] += 1;
-        }
-        for targets in state.transitions.values() {
-            for (dst, _) in targets {
-                in_degree[*dst as usize] += 1;
-            }
-        }
-    }
-    let mut topo_queue: VecDeque<usize> = VecDeque::new();
-    for id in 0..num_states {
-        if in_degree[id] == 0 {
-            topo_queue.push_back(id);
-        }
-    }
-    let mut topo_order: Vec<usize> = Vec::with_capacity(num_states);
-    {
-        let mut deg = in_degree.clone();
-        while let Some(sid) = topo_queue.pop_front() {
-            topo_order.push(sid);
-            let state = &nwa.states[sid];
-            for (dst, _) in &state.epsilons {
-                deg[*dst as usize] -= 1;
-                if deg[*dst as usize] == 0 {
-                    topo_queue.push_back(*dst as usize);
-                }
-            }
-            for targets in state.transitions.values() {
-                for (dst, _) in targets {
-                    deg[*dst as usize] -= 1;
-                    if deg[*dst as usize] == 0 {
-                        topo_queue.push_back(*dst as usize);
-                    }
-                }
-            }
-        }
-    }
+    let topo_order = topological_order(nwa);
 
-    let mut disallowed_intersected: Vec<Option<HashSet<TerminalID>>> = vec![None; num_states];
+    let mut disallowed_intersected: Vec<Option<HashSet<TerminalID>>> = vec![None; nwa.states.len()];
     for &start in &nwa.start_states {
         disallowed_intersected[start as usize] = Some(HashSet::new());
     }
@@ -232,14 +251,7 @@ fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
         let epsilon_targets: Vec<u32> =
             nwa.states[sid].epsilons.iter().map(|(dst, _)| *dst).collect();
         for dst in epsilon_targets {
-            let dst = dst as usize;
-            let entry = &mut disallowed_intersected[dst];
-            match entry {
-                None => *entry = Some(src_disallowed.clone()),
-                Some(existing) => {
-                    existing.retain(|t| src_disallowed.contains(t));
-                }
-            }
+            intersect_or_insert(&mut disallowed_intersected[dst as usize], &src_disallowed);
         }
 
         let labeled_targets: Vec<(i32, Vec<u32>)> = nwa.states[sid]
@@ -254,14 +266,7 @@ fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
                 continue;
             };
             for dst in targets {
-                let dst = dst as usize;
-                let entry = &mut disallowed_intersected[dst];
-                match entry {
-                    None => *entry = Some(label_dis.clone()),
-                    Some(existing) => {
-                        existing.retain(|t| label_dis.contains(t));
-                    }
-                }
+                intersect_or_insert(&mut disallowed_intersected[dst as usize], label_dis);
             }
         }
     }
@@ -302,8 +307,7 @@ fn add_weighted_transition(nwa: &mut NWA, from: u32, label: i32, to: u32, weight
 fn build_token_suffix_paths(
     tokenizer: &Tokenizer,
     nwa: &mut NWA,
-    built_suffix_nodes: &mut HashSet<(u32, u32, usize)>,
-    suffix_nodes: &mut HashMap<(u32, u32, usize), u32>,
+    suffix_memo: &mut TokenSuffixMemo,
     source_node: u32,
     current_state: u32,
     origin_state: u32,
@@ -330,13 +334,12 @@ fn build_token_suffix_paths(
             leaf_state
         } else {
             let key = (origin_state, token_id, next_offset);
-            let continuation_state = *suffix_nodes.entry(key).or_insert_with(|| nwa.add_state());
-            if built_suffix_nodes.insert(key) {
+            let continuation_state = *suffix_memo.states.entry(key).or_insert_with(|| nwa.add_state());
+            if suffix_memo.built.insert(key) {
                 build_token_suffix_paths(
                     tokenizer,
                     nwa,
-                    built_suffix_nodes,
-                    suffix_nodes,
+                    suffix_memo,
                     continuation_state,
                     tokenizer.initial_state(),
                     origin_state,
@@ -370,8 +373,7 @@ pub(crate) fn build_terminal_nwa(
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
-    let mut suffix_nodes = HashMap::<(u32, u32, usize), u32>::new();
-    let mut built_suffix_nodes = HashSet::<(u32, u32, usize)>::new();
+    let mut suffix_memo = TokenSuffixMemo::default();
 
     for internal_tsid in 0..id_map.num_tsids() {
         let root = nwa.add_state();
@@ -382,8 +384,7 @@ pub(crate) fn build_terminal_nwa(
                 build_token_suffix_paths(
                     tokenizer,
                     &mut nwa,
-                    &mut built_suffix_nodes,
-                    &mut suffix_nodes,
+                    &mut suffix_memo,
                     root,
                     *original_state,
                     *original_state,

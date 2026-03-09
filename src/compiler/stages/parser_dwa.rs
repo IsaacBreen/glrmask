@@ -31,16 +31,15 @@ struct BundleEdge {
 }
 
 #[derive(Debug, Clone)]
-struct TerminalDag {
-    start_state: u32,
-    final_weights: Vec<Option<Weight>>,
-    outgoing_edges: Vec<Vec<BundleEdge>>,
+struct TerminalDagState {
+    final_weight: Option<Weight>,
+    edges: Vec<BundleEdge>,
 }
 
 #[derive(Debug, Clone)]
-struct TerminalDagDecomposition {
-    dag: TerminalDag,
-    bundle_entries: Vec<BundleEntry>,
+struct TerminalDag {
+    start_state: u32,
+    states: Vec<TerminalDagState>,
 }
 
 fn append_dwa(into: &mut DWA, other: &DWA) -> u32 {
@@ -87,6 +86,25 @@ fn append_nwa(into: &mut NWA, other: &NWA) {
         .extend(other.start_states.iter().map(|state| offset + *state));
 }
 
+fn dwa_to_nwa(dwa: &DWA) -> NWA {
+    let mut nwa = NWA::new(0, 0);
+    for _ in &dwa.states {
+        nwa.add_state();
+    }
+
+    nwa.start_states.push(dwa.start_state);
+    for (state_id, state) in dwa.states.iter().enumerate() {
+        if let Some(final_weight) = state.final_weight.clone() {
+            nwa.set_final_weight(state_id as u32, final_weight);
+        }
+        for (&label, (target, weight)) in &state.transitions {
+            nwa.add_transition(state_id as u32, label, *target, weight.clone());
+        }
+    }
+
+    nwa
+}
+
 fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
     if final_weight.is_empty() {
         return None;
@@ -118,7 +136,7 @@ fn template_dfa_to_nwa(template: &UnweightedDfa) -> NWA {
     nwa
 }
 
-fn build_bundle_nwa(
+fn build_raw_bundle_nwa(
     bundle: &BundleEntry,
     templates: &BTreeMap<TerminalID, UnweightedDfa>,
 ) -> NWA {
@@ -144,14 +162,16 @@ fn build_bundle_nwa(
     combined
 }
 
-fn build_bundle_nwas(
-    bundle_entries: &[BundleEntry],
+fn build_bundle_nwa(
+    bundle: &BundleEntry,
     templates: &BTreeMap<TerminalID, UnweightedDfa>,
-) -> Vec<NWA> {
-    bundle_entries
-        .iter()
-        .map(|bundle| build_bundle_nwa(bundle, templates))
-        .collect()
+) -> NWA {
+    let raw_bundle = build_raw_bundle_nwa(bundle, templates);
+    let bundle_dwa = minimize(
+        &determinize(&raw_bundle)
+            .expect("bundle NWA determinization failed despite acyclic template union"),
+    );
+    dwa_to_nwa(&bundle_dwa)
 }
 
 fn group_terminal_edges_by_target(
@@ -183,34 +203,36 @@ fn group_terminal_edges_by_target(
 fn decompose_terminal_dwa(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
-) -> TerminalDagDecomposition {
+) -> (Vec<BundleEntry>, TerminalDag) {
     let mut bundle_entries = Vec::<BundleEntry>::new();
-    let mut outgoing_edges = vec![Vec::<BundleEdge>::new(); terminal_dwa.states.len()];
+    let mut states = terminal_dwa
+        .states
+        .iter()
+        .map(|state| TerminalDagState {
+            final_weight: state.final_weight.clone(),
+            edges: Vec::new(),
+        })
+        .collect::<Vec<_>>();
 
     for state_id in 0..terminal_dwa.states.len() as u32 {
         let grouped_edges = group_terminal_edges_by_target(terminal_dwa, grammar, state_id);
         for (target_state, bundle_entry) in grouped_edges {
             let bundle_id = bundle_entries.len();
             bundle_entries.push(bundle_entry);
-            outgoing_edges[state_id as usize].push(BundleEdge {
+            states[state_id as usize].edges.push(BundleEdge {
                 target_state,
                 bundle_id,
             });
         }
     }
 
-    TerminalDagDecomposition {
-        dag: TerminalDag {
-            start_state: terminal_dwa.start_state,
-            final_weights: terminal_dwa
-                .states
-                .iter()
-                .map(|state| state.final_weight.clone())
-                .collect(),
-            outgoing_edges,
-        },
+    (
         bundle_entries,
-    }
+        TerminalDag {
+            start_state: terminal_dwa.start_state,
+            states,
+        },
+    )
 }
 
 fn concatenate_nwas(left: &NWA, right: &NWA) -> Option<NWA> {
@@ -232,7 +254,7 @@ fn union_optional_nwa(acc: &mut Option<NWA>, next: NWA) {
     }
 }
 
-fn compose_terminal_dag_state(
+fn compose_dag_state(
     state_id: u32,
     dag: &TerminalDag,
     bundle_nwas: &[NWA],
@@ -242,20 +264,14 @@ fn compose_terminal_dag_state(
         return cached.clone();
     }
 
-    let mut composed: Option<NWA> = dag
-        .final_weights
-        .get(state_id as usize)
-        .and_then(|weight| weight.as_ref())
-        .and_then(accepting_nwa);
-
-    let Some(edges) = dag.outgoing_edges.get(state_id as usize) else {
-        memo.insert(state_id, composed.clone());
-        return composed;
+    let Some(state) = dag.states.get(state_id as usize) else {
+        return None;
     };
 
-    for edge in edges {
-        let Some(continuation) = compose_terminal_dag_state(edge.target_state, dag, bundle_nwas, memo)
-        else {
+    let mut composed: Option<NWA> = state.final_weight.as_ref().and_then(accepting_nwa);
+
+    for edge in &state.edges {
+        let Some(continuation) = compose_dag_state(edge.target_state, dag, bundle_nwas, memo) else {
             continue;
         };
         let Some(branch_bundle) = bundle_nwas.get(edge.bundle_id) else {
@@ -315,23 +331,22 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
 ) -> DWA {
     let characterizations = characterize_terminals(table, grammar);
     let templates = Templates::from_characterizations(&characterizations);
-    let decomposition = decompose_terminal_dwa(terminal_dwa, grammar);
-    let bundle_nwas = build_bundle_nwas(&decomposition.bundle_entries, &templates.by_terminal);
+    let (bundle_entries, dag) = decompose_terminal_dwa(terminal_dwa, grammar);
+    let bundle_nwas = bundle_entries
+        .iter()
+        .map(|bundle| build_bundle_nwa(bundle, &templates.by_terminal))
+        .collect::<Vec<_>>();
 
     let mut memo = BTreeMap::new();
-    let Some(mut parser_nwa) = compose_terminal_dag_state(
-        decomposition.dag.start_state,
-        &decomposition.dag,
-        &bundle_nwas,
-        &mut memo,
-    ) else {
+    let Some(mut parser_nwa) = compose_dag_state(dag.start_state, &dag, &bundle_nwas, &mut memo)
+    else {
         return DWA::new(0, 0);
     };
 
     resolve_negative_codes_in_nwa(&mut parser_nwa);
     parser_nwa.subtract_final_weights_from_outgoing();
 
-    let mut core_dwa = minimize(
+    let core_dwa = minimize(
         &determinize(&parser_nwa)
             .expect("parser NWA determinization failed despite acyclic terminal/template composition"),
     );
