@@ -2199,3 +2199,389 @@ letter ::= "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l"
     assert!(token_allowed(&mask, 4), "'a' should be valid at start");
     assert!(!token_allowed(&mask, 0), "' ' should NOT be valid (not a letter)");
 }
+
+fn nullable_string_inline_alternation_lark() -> &'static str {
+    r###"
+PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/
+PATTERN_6: /[\x22\x2F\x5C\x62\x66\x6E\x72\x74]/
+STRING_CHAR: PATTERN_0
+ESCAPE_SHORT_CHAR: PATTERN_6
+ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR
+STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+JSON_STRING: "\"" STRING_CONTENT "\""
+JSON_NULL: "null"
+
+obj_ord_0_2_nc: "\"id\"" ":" JSON_STRING
+obj_ord_0_2_c: "," "\"id\"" ":" JSON_STRING
+obj_ord_0_1_nc: "\"couponCode\"" ":" (JSON_STRING | JSON_NULL) obj_ord_0_2_c | obj_ord_0_2_nc
+obj_ord_0_0_nc: "\"affiliation\"" ":" (JSON_STRING | JSON_NULL) obj_ord_0_1_c | obj_ord_0_1_nc
+obj_ord_0_1_c: "," "\"couponCode\"" ":" (JSON_STRING | JSON_NULL) obj_ord_0_2_c | obj_ord_0_2_c
+obj_ord_0_0_c: "," "\"affiliation\"" ":" (JSON_STRING | JSON_NULL) obj_ord_0_1_c | obj_ord_0_1_c
+
+start: "{" obj_ord_0_0_nc "}"
+"###
+}
+
+fn nullable_string_helper_rule_lark() -> &'static str {
+    r###"
+PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/
+PATTERN_6: /[\x22\x2F\x5C\x62\x66\x6E\x72\x74]/
+STRING_CHAR: PATTERN_0
+ESCAPE_SHORT_CHAR: PATTERN_6
+ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR
+STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+JSON_STRING: "\"" STRING_CONTENT "\""
+JSON_NULL: "null"
+
+str_or_null: JSON_STRING | JSON_NULL
+
+obj_ord_0_2_nc: "\"id\"" ":" JSON_STRING
+obj_ord_0_2_c: "," "\"id\"" ":" JSON_STRING
+obj_ord_0_1_nc: "\"couponCode\"" ":" str_or_null obj_ord_0_2_c | obj_ord_0_2_nc
+obj_ord_0_0_nc: "\"affiliation\"" ":" str_or_null obj_ord_0_1_c | obj_ord_0_1_nc
+obj_ord_0_1_c: "," "\"couponCode\"" ":" str_or_null obj_ord_0_2_c | obj_ord_0_2_c
+obj_ord_0_0_c: "," "\"affiliation\"" ":" str_or_null obj_ord_0_1_c | obj_ord_0_1_c
+
+start: "{" obj_ord_0_0_nc "}"
+"###
+}
+
+fn nullable_string_no_alternation_lark() -> &'static str {
+    r###"
+PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/
+PATTERN_6: /[\x22\x2F\x5C\x62\x66\x6E\x72\x74]/
+STRING_CHAR: PATTERN_0
+ESCAPE_SHORT_CHAR: PATTERN_6
+ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR
+STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+JSON_STRING: "\"" STRING_CONTENT "\""
+
+obj_ord_0_2_nc: "\"id\"" ":" JSON_STRING
+obj_ord_0_2_c: "," "\"id\"" ":" JSON_STRING
+obj_ord_0_1_nc: "\"couponCode\"" ":" JSON_STRING obj_ord_0_2_c | obj_ord_0_2_nc
+obj_ord_0_0_nc: "\"affiliation\"" ":" JSON_STRING obj_ord_0_1_c | obj_ord_0_1_nc
+obj_ord_0_1_c: "," "\"couponCode\"" ":" JSON_STRING obj_ord_0_2_c | obj_ord_0_2_c
+obj_ord_0_0_c: "," "\"affiliation\"" ":" JSON_STRING obj_ord_0_1_c | obj_ord_0_1_c
+
+start: "{" obj_ord_0_0_nc "}"
+"###
+}
+
+/// Ported from sep1 `test_char_class_excludes_control_bytes`.
+#[test]
+fn test_ported_char_class_excludes_control_bytes() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, vec![0x00]),
+            (1u32, vec![0x20]),
+        ],
+        None,
+    );
+    let c = Constraint::from_ebnf(
+        r#"
+        root ::= STRING_CHAR
+        STRING_CHAR ::= [\x20-\x21\x23-\x5B\x5D-\xFF]
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mask = c.start().mask();
+    assert!(!token_allowed(&mask, 0), "control byte 0x00 should not match the char class");
+    assert!(token_allowed(&mask, 1), "space byte 0x20 should match the char class");
+}
+
+/// Ported from sep1 `test_nullable_string_property_allows_quote_comma_quote_boundary_token`.
+#[test]
+fn test_ported_nullable_string_property_allows_quote_comma_quote_boundary_token() {
+    let vocab = Vocab::new(vec![(0u32, b"\",\"".to_vec())], None);
+    let c = Constraint::from_lark(nullable_string_inline_alternation_lark(), &vocab).unwrap();
+
+    let prefix = b"{\"affiliation\":\"Example Store\",\"couponCode\":\"SUMMER";
+    let mut s = c.start();
+    s.commit_bytes(prefix);
+
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 0),
+        "joint token '\",\"' must be allowed across the nullable (JSON_STRING|JSON_NULL) boundary"
+    );
+}
+
+/// Ported from sep1 `test_nullable_string_helper_rule_variant`.
+#[test]
+fn test_ported_nullable_string_helper_rule_variant() {
+    let vocab = Vocab::new(vec![(0u32, b"\",\"".to_vec())], None);
+    let c = Constraint::from_lark(nullable_string_helper_rule_lark(), &vocab).unwrap();
+
+    let prefix = b"{\"affiliation\":\"Example Store\",\"couponCode\":\"SUMMER";
+    let mut s = c.start();
+    s.commit_bytes(prefix);
+
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 0),
+        "joint token '\",\"' must remain allowed when the nullable alternation is factored through a helper rule"
+    );
+}
+
+/// Ported from sep1 `test_nullable_string_no_alternation_works`.
+#[test]
+fn test_ported_nullable_string_no_alternation_works() {
+    let vocab = Vocab::new(vec![(0u32, b"\",\"".to_vec())], None);
+    let c = Constraint::from_lark(nullable_string_no_alternation_lark(), &vocab).unwrap();
+
+    let prefix = b"{\"affiliation\":\"Example Store\",\"couponCode\":\"SUMMER";
+    let mut s = c.start();
+    s.commit_bytes(prefix);
+
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 0),
+        "joint token '\",\"' should also be allowed in the simpler non-alternation baseline"
+    );
+}
+
+/// Ported from sep1 `test_github_easy_o63377_false_positive_a`.
+#[test]
+fn test_ported_github_easy_o63377_false_positive_a() {
+    let vocab = Vocab::new(vec![(0u32, b"b".to_vec())], None);
+    let c = Constraint::from_lark(
+        r#"
+        A: "a" ("b"?)
+        B: "ac"
+        C: "a"+
+        start: A B C
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"aa");
+
+    let mask = s.mask();
+    assert!(
+        !token_allowed(&mask, 0),
+        "token 'b' must be rejected at prefix 'aa' for the o63377 false-positive repro"
+    );
+}
+
+/// Ported from sep1 `test_mask_commit_consistency_minimal_repro_should_fail_loudly`.
+#[test]
+fn test_ported_mask_commit_consistency_minimal_repro() {
+    let lark = r#"
+PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/
+PATTERN_1: /[\xC2-\xDF]/
+PATTERN_2: /[\x80-\xBF]/
+PATTERN_3: /[\xE0-\xEF]/
+PATTERN_4: /[\xF0-\xF4]/
+PATTERN_5: /[\x30-\x39\x41-\x46\x61-\x66]/
+PATTERN_6: /[\x22\x2F\x5C\x62\x66\x6E\x72\x74]/
+PATTERN_7: /[\x30-\x39]/
+PATTERN_8: /[\x31-\x39]/
+PATTERN_9: /[\x45\x65]/
+PATTERN_10: /[\x2B\x2D]/
+STRING_CHAR: PATTERN_0 | PATTERN_1 PATTERN_2 | PATTERN_3 PATTERN_2 PATTERN_2 | PATTERN_4 PATTERN_2 PATTERN_2 PATTERN_2
+HEX: PATTERN_5
+ESCAPE_SHORT_CHAR: PATTERN_6
+ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" HEX HEX HEX HEX
+STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
+JSON_STRING: "\"" STRING_CONTENT "\""
+DIGIT: PATTERN_7
+NONZERO_DIGIT: PATTERN_8
+INT_PART: "0" | NONZERO_DIGIT DIGIT*
+FRAC_PART: "." DIGIT+
+EXP_MARK: PATTERN_9
+EXP_SIGN: PATTERN_10
+EXP_PART: EXP_MARK EXP_SIGN? DIGIT+
+JSON_INTEGER: "-"? INT_PART
+JSON_NUMBER: "-"? INT_PART FRAC_PART? EXP_PART?
+JSON_BOOL: "true" | "false"
+JSON_NULL: "null"
+json_kv: JSON_STRING ":" json_value
+json_object: "{" "}" | "{" json_kv ("," json_kv)* "}"
+json_array: "[" "]" | "[" json_value ("," json_value)* "]"
+json_value: json_object | json_array | JSON_STRING | JSON_NUMBER | JSON_INTEGER | JSON_BOOL | JSON_NULL
+obj_required_0_1: "\"a\"" ":" json_object
+obj_required_0_2: "\"\"" ":" JSON_STRING
+obj_required_0_0: "\"\"" ":" JSON_STRING "," obj_required_0_1 | "\"a\"" ":" json_object "," obj_required_0_2
+start: "{" obj_required_0_0 "}"
+"#;
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"{\"".to_vec()),
+            (1u32, b"\":\"".to_vec()),
+            (2u32, b"\",\"".to_vec()),
+            (3u32, b"a\"".to_vec()),
+            (4u32, b":{\"".to_vec()),
+            (5u32, b"\":{}}}".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+
+    for token in [0u32, 1, 2, 3, 4, 1] {
+        s.commit_token(token);
+    }
+
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "disputed token '\",\"' should remain allowed after the nested-object prefix regression sequence"
+    );
+}
+
+/// Ported from sep1 `test_mask_commit_consistency_minimal_repro_should_fail_loudly_minimized_copy`.
+#[test]
+fn test_ported_mask_commit_consistency_minimal_repro_minimized_copy() {
+    let vocab = Vocab::new(
+        vec![(0u32, b"ay".to_vec()), (1u32, b"xa".to_vec())],
+        None,
+    );
+    let _ = Constraint::from_lark("start: \"aa\"", &vocab)
+        .expect("minimal copy should compile without panicking");
+}
+
+/// Ported from sep1 `test_python_reported_bug_def_rep_space_f`.
+#[test]
+fn test_ported_python_reported_bug_def_rep_space_f() {
+    let vocab = Vocab::new(
+        vec![(0u32, b" ".to_vec()), (1u32, b" f".to_vec())],
+        None,
+    );
+    let c = Constraint::from_ebnf(
+        r#"
+        start ::= SPACE* F
+        SPACE ::= ' '
+        F ::= 'f'
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mask = c.start().mask();
+    assert!(token_allowed(&mask, 0), "space token should be allowed at the start of SPACE* F");
+    assert!(token_allowed(&mask, 1), "span token ' f' should be allowed at the start of SPACE* F");
+}
+
+/// Ported from sep1 `test_sentence_grammar_from_prompt_minimized`.
+#[test]
+fn test_ported_sentence_grammar_from_prompt_minimized() {
+    let vocab = Vocab::new(vec![(0u32, b"b".to_vec())], None);
+    let c = Constraint::from_ebnf(
+        r#"
+        start ::= A B
+        A ::= 'a' 'b'
+        B ::= 'b' 'c'
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mask = c.start().mask();
+    assert!(iter_allowed(&mask).is_empty(), "token 'b' alone must not be allowed at the start of 'ab' 'bc'");
+}
+
+/// Ported from sep1 `test_sentence_grammar_from_prompt`.
+#[test]
+fn test_ported_sentence_grammar_from_prompt() {
+    let vocab = make_vocab(&[
+        "a",
+        "the",
+        "apple",
+        "banana",
+        "person",
+        " ",
+        "eats",
+        "likes",
+        "is",
+        "tasty",
+        "red",
+        "happy",
+        ".",
+        "and",
+        "e",
+        "eth",
+    ]);
+    let c = Constraint::from_ebnf(
+        r#"
+        start ::= A SPACE B
+        A ::= 'a' | 'the' | 'apple' | 'banana' | 'person'
+        SPACE ::= ' '
+        B ::= 'eats' | 'likes' | 'is' | 'tasty' | 'red' | 'happy' | '.' | 'and'
+        "#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert_eq!(
+        iter_allowed(&mask),
+        vec![0, 1, 2, 3, 4],
+        "initial mask should allow exactly the A-side sentence starters"
+    );
+
+    s.commit_token(2); // "apple"
+    let mask = s.mask();
+    assert_eq!(
+        iter_allowed(&mask),
+        vec![5],
+        "after 'apple' only the separating space should be allowed"
+    );
+
+    s.commit_token(5); // " "
+    let mask = s.mask();
+    assert_eq!(
+        iter_allowed(&mask),
+        vec![0, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        "after 'apple ' the mask should allow full B tokens plus the partial-prefix tokens 'a' and 'e'"
+    );
+    assert!(
+        !token_allowed(&mask, 15),
+        "'eth' should not be allowed because it is not a valid prefix of any B alternative"
+    );
+
+    s.commit_token(6); // "eats"
+    assert!(s.is_finished(), "'apple eats' should finish the simple sentence grammar");
+    assert!(
+        iter_allowed(&s.mask()).is_empty(),
+        "without an explicit EOS token, the finished sentence grammar should expose an empty continuation mask"
+    );
+}
+
+/// Ported from sep1 `test_minimal_python_example_with_compiled_grammar`.
+#[test]
+fn test_ported_minimal_python_example_with_compiled_grammar() {
+    let vocab = Vocab::new(
+        (0u32..=9)
+            .map(|i| (i, vec![b'0' + i as u8]))
+            .chain(std::iter::once((10u32, b"+".to_vec())))
+            .collect(),
+        None,
+    );
+    let c = Constraint::from_lark(
+        r#"
+        start: NUMBER PLUS NUMBER PLUS NUMBER
+        NUMBER: /[0-9]+/
+        PLUS: "+"
+        "#,
+        &vocab,
+    )
+    .unwrap();
+    let mut s = c.start();
+
+    for token in [1u32, 2, 3, 10, 4, 5, 6, 10] {
+        let mask = s.mask();
+        assert!(token_allowed(&mask, token as usize), "token {token} should be allowed before commit");
+        s.commit_token(token);
+    }
+
+    let mask = s.mask();
+    for digit in 0..=9 {
+        assert!(token_allowed(&mask, digit), "digit token {digit} should be allowed after the second plus");
+    }
+    assert!(!token_allowed(&mask, 10), "plus should not be allowed immediately after the second plus");
+}

@@ -334,6 +334,49 @@ mod tests {
         assert!(gdef.rules.len() >= 2);
     }
 
+    /// Adapted from sep1 `test_nullability_handling_in_from_exprs`.
+    #[test]
+    fn test_lower_nullability_uses_epsilon_rules_not_empty_terminals() {
+        let g = NamedGrammar {
+            rules: vec![(
+                "start".into(),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"x".to_vec()))),
+                    GrammarExpr::Sequence(vec![]),
+                    GrammarExpr::Literal(b"z".to_vec()),
+                ]),
+            )],
+            start: "start".into(),
+        };
+        let gdef = lower(&g).unwrap();
+
+        assert_eq!(gdef.terminals.len(), 2, "only the concrete x/z literals should become terminals");
+        assert!(gdef.terminals.iter().any(|terminal| matches!(terminal, Terminal::Literal { bytes, .. } if bytes == b"x")));
+        assert!(gdef.terminals.iter().any(|terminal| matches!(terminal, Terminal::Literal { bytes, .. } if bytes == b"z")));
+        assert!(
+            !gdef
+                .terminals
+                .iter()
+                .any(|terminal| matches!(terminal, Terminal::Literal { bytes, .. } if bytes.is_empty())),
+            "nullable pieces should lower through epsilon productions, not through empty terminals"
+        );
+
+        assert!(
+            gdef.rules.iter().any(|rule| rule.lhs != gdef.start && rule.rhs.is_empty()),
+            "lowering nullable pieces should introduce helper epsilon productions"
+        );
+        assert!(
+            gdef.rules.iter().any(|rule| {
+                rule.lhs == gdef.start
+                    && rule.rhs.len() == 3
+                    && matches!(rule.rhs[0], Symbol::Nonterminal(_))
+                    && matches!(rule.rhs[1], Symbol::Nonterminal(_))
+                    && matches!(rule.rhs[2], Symbol::Terminal(_))
+            }),
+            "the start rule should sequence the optional helper, the explicit epsilon helper, and the trailing literal"
+        );
+    }
+
     #[test]
     fn test_lower_repeat() {
         let g = NamedGrammar {

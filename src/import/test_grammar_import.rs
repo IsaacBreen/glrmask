@@ -21,6 +21,7 @@
 use crate::import::ast::{GrammarExpr, NamedGrammar};
 use crate::import::ebnf::parse_ebnf_to_named;
 use crate::import::lark::parse_lark_to_named;
+use crate::grammar::ast::lower;
 
 // ── EBNF tests ───────────────────────────────────────────────────────────────
 
@@ -212,4 +213,87 @@ STR_CHAR: /[^"\\\x00-\x1F]/
         }
         other => panic!("Expected RawRegex, got {:?}", other),
     }
+}
+
+/// Ported from `test_duplicate_terminals_are_merged`.
+#[test]
+fn test_lark_duplicate_terminals_are_merged() {
+    let lark = r#"
+start: A B C D E F G H
+A: "x"
+B: "x"
+C: "x"
+D: "x"
+E: "x"
+F: "x"
+G: "x"
+H: "x"
+"#;
+    let named = parse_lark_to_named(lark).expect("Lark should parse");
+    let lowered = lower(&named).expect("lowering should succeed");
+
+    assert_eq!(
+        lowered.terminals.len(),
+        1,
+        "identical terminals should be deduplicated into one lowered terminal"
+    );
+}
+
+/// Ported from `test_lark_terminal_chain_differs_from_ebnf_terminal_chain_when_utf8_enabled`.
+#[test]
+fn test_lark_json_string_chain_differs_from_ebnf_char_class_chain() {
+    let lark = r#"
+start: obj
+obj: "{" pair ("," pair)* "}"
+pair: JSON_STRING ":" JSON_STRING
+JSON_STRING: "\"" STR_CHAR* "\""
+STR_CHAR: /[^"\\\x00-\x1F]/
+"#;
+
+    let ebnf = r#"
+start ::= obj
+obj ::= "{" pair ("," pair)* "}"
+pair ::= JSON_STRING ":" JSON_STRING
+JSON_STRING ::= '"' STR_CHAR* '"'
+STR_CHAR ::= [^"\\\x00-\x1F]
+"#;
+
+    let lark_named = parse_lark_to_named(lark).expect("Lark grammar should parse");
+    let ebnf_named = parse_ebnf_to_named(ebnf).expect("EBNF grammar should parse");
+
+    assert_eq!(
+        lark_named
+            .rules
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["start", "obj", "pair"],
+        "Lark normalization should inline terminal rules into the parser-rule skeleton"
+    );
+    assert!(
+        ebnf_named.rules.iter().any(|(name, _)| name == "JSON_STRING")
+            && ebnf_named.rules.iter().any(|(name, _)| name == "STR_CHAR"),
+        "EBNF import should keep the explicit terminal-chain helper rules visible in the named grammar"
+    );
+    assert!(
+        lark_named.rules.len() < ebnf_named.rules.len(),
+        "Lark terminal inlining should produce fewer named rules than the EBNF path"
+    );
+    assert_ne!(
+        lark_named.rules,
+        ebnf_named.rules,
+        "Lark regex terminals and EBNF char classes should remain distinct in the normalized AST"
+    );
+
+    let lark_lowered = lower(&lark_named).expect("Lark lowering should succeed");
+    let ebnf_lowered = lower(&ebnf_named).expect("EBNF lowering should succeed");
+    assert_ne!(
+        lark_lowered.rules,
+        ebnf_lowered.rules,
+        "the importer-path difference should remain observable after lowering"
+    );
+    assert!(
+        lark_lowered.rules.len() > ebnf_lowered.rules.len(),
+        "Lark terminal inlining should introduce a larger lowered rule graph than the EBNF helper-rule form"
+    );
 }

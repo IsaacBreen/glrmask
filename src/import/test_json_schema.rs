@@ -318,6 +318,89 @@ fn test_schema_const2() {
     }
 }
 
+/// Ported from `test_json_schema_mask_generation`.
+#[test]
+#[ignore = "current JSON Schema key-prefix continuation still rejects sparse multibyte whitespace+quote vocab after '{\\n  \"' prefix"]
+fn test_json_schema_allows_name_after_brace_newline_space_quote_prefix() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "additionalProperties": true
+    }"#;
+    let vocab = Vocab::new(
+        vec![
+            (90u32, b"{".to_vec()),
+            (198u32, b"\n".to_vec()),
+            (220u32, b" ".to_vec()),
+            (366u32, b" \"".to_vec()),
+            (3672u32, b"name".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_json_schema(schema, &vocab)
+        .expect("schema should compile with sparse multibyte vocab");
+    let mut s = c.start();
+
+    s.commit_token(90u32);
+    s.commit_token(198u32);
+    s.commit_token(220u32);
+    s.commit_token(366u32);
+
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 3672),
+        "token 'name' should be allowed after the object prefix '{{\\n  \"'"
+    );
+}
+
+/// Ported from `test_newsletter_schema_disallows_quote_colon_minus`.
+#[test]
+fn test_json_schema_name_prefix_disallows_quote_colon_minus_token() {
+    let schema = r#"{
+        "type": "object",
+        "title": "Newsletter Subscription",
+        "properties": {
+            "name": {"type": "string", "minLength": 8, "maxLength": 80},
+            "email": {"type": "string", "maxLength": 120},
+            "lists": {"type": "string", "enum": ["Daily New", "Promotion"]}
+        },
+        "additionalProperties": false,
+        "required": ["name", "email", "lists"],
+        "x-guidance": {
+            "item_separator": ", ",
+            "key_separator": ": ",
+            "whitespace_flexible": false,
+            "whitespace_pattern": null,
+            "coerce_one_of": false,
+            "lenient": false
+        }
+    }"#;
+    let vocab = Vocab::new(
+        vec![
+            (1u32, b"{".to_vec()),
+            (2u32, b"\"".to_vec()),
+            (3u32, b"name".to_vec()),
+            (4u32, b"\":-".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_json_schema(schema, &vocab)
+        .expect("newsletter schema should compile");
+    let mut s = c.start();
+
+    s.commit_token(1u32);
+    s.commit_token(2u32);
+    s.commit_token(3u32);
+
+    let mask = s.mask();
+    assert!(
+        !token_allowed(&mask, 4),
+        "token '\":-' must not be allowed after the key prefix '\"name'"
+    );
+}
+
 // ── JSON schema conversion tests ────────────────────────────────────────────
 
 /// Ported from `test_conversion_simple_object`.
