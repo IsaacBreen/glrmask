@@ -58,15 +58,8 @@ impl<'a> ConstraintState<'a> {
                 continue;
             }
 
-            let tsid_label = self.constraint.table.num_terminals as i32 + tokenizer_state as i32;
-            let Some((target_state, seed_weight)) = parser_dwa.states[parser_dwa.start_state as usize]
-                .transitions
-                .get(&tsid_label)
-            else {
-                continue;
-            };
-
-            let seeded = self.seed_by_weight(tokenizer_state, gss, seed_weight);
+            let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
+            let seeded = self.seed_weight(internal_tsid, gss);
             if seeded.is_empty() {
                 continue;
             }
@@ -74,7 +67,7 @@ impl<'a> ConstraintState<'a> {
             queue
                 .entry(seeded.max_depth())
                 .or_default()
-                .entry(*target_state)
+                .entry(parser_dwa.start_state)
                 .and_modify(|existing| *existing = existing.merge(&seeded))
                 .or_insert(seeded);
         }
@@ -142,22 +135,38 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    fn seed_by_weight(
+    fn seed_weight(
         &self,
-        tokenizer_state: u32,
+        internal_tsid: u32,
         gss: &crate::compiler::glr::parser::ParserGSS,
-        weight: &crate::ds::weight::Weight,
     ) -> WeightedParserGSS {
-        let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
-        let tokens = self.tokens_for_weight(tokenizer_state, weight);
-        if tokens.is_empty() {
-            return WeightedParserGSS::empty();
-        }
         gss.apply_and_prune(|terminals_disallowed| {
-            let allowed = self.filter_weight_tokens(
-                tokens.clone(),
-                terminals_disallowed,
-            );
+            let mut allowed = self.all_llm_tokens();
+            if terminals_disallowed.is_empty()
+                || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
+            {
+                if allowed.is_empty() {
+                    return None;
+                }
+                return Some(AllowedWeight(
+                    crate::ds::weight::Weight::from_token_set_for_tsid(internal_tsid, allowed),
+                ));
+            }
+
+            for (&tsid, disallowed_in_state) in terminals_disallowed {
+                if disallowed_in_state.is_empty() {
+                    continue;
+                }
+
+                if let Some(state_matches) = self.constraint.possible_matches.get(&tsid) {
+                    for (terminal_id, llm_tokens) in state_matches {
+                        if disallowed_in_state.contains(terminal_id) {
+                            allowed = allowed - llm_tokens.clone();
+                        }
+                    }
+                }
+            }
+
             if allowed.is_empty() {
                 None
             } else {
@@ -188,15 +197,7 @@ impl<'a> ConstraintState<'a> {
         weight: &crate::ds::weight::Weight,
     ) -> RangeSetBlaze<u32> {
         let mut all = RangeSetBlaze::new();
-        for (internal_tsid, original_states) in self.constraint.internal_tsid_to_states.iter().enumerate() {
-            if weight.is_full() {
-                let token_ids = self.all_tokens_for_internal_tsid(internal_tsid as u32);
-                if !token_ids.is_empty() {
-                    all = all | token_ids;
-                }
-                continue;
-            }
-
+        for (internal_tsid, _) in self.constraint.internal_tsid_to_states.iter().enumerate() {
             let token_ids = weight.tokens_for_tsid(internal_tsid as u32);
             if !token_ids.is_empty() {
                 all = all | token_ids;
@@ -205,69 +206,11 @@ impl<'a> ConstraintState<'a> {
         all
     }
 
-    fn tokens_for_weight(
-        &self,
-        tokenizer_state: u32,
-        weight: &crate::ds::weight::Weight,
-    ) -> RangeSetBlaze<u32> {
-        let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
-        if weight.is_full() {
-            self.all_tokens_for_internal_tsid(internal_tsid)
-        } else {
-            weight.tokens_for_tsid(internal_tsid)
-        }
-    }
-
-    fn all_tokens_for_internal_tsid(&self, internal_tsid: u32) -> RangeSetBlaze<u32> {
-        let mut all = RangeSetBlaze::new();
-        for token_ids in self
-            .constraint
-            .possible_matches_for_internal_tsid(internal_tsid)
-            .values()
-        {
-            all = all | token_ids.clone();
-        }
-        all
-    }
-
-    fn filter_weight_tokens(
-        &self,
-        tokens: RangeSetBlaze<u32>,
-        terminals_disallowed: &crate::compiler::glr::parser::TerminalsDisallowed,
-    ) -> RangeSetBlaze<u32> {
-        if terminals_disallowed.is_empty()
-            || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
-        {
-            return tokens;
-        }
-
-        let mut allowed = RangeSetBlaze::new();
-        'token: for token_id in tokens.iter() {
-            let Some(bytes) = self.constraint.token_bytes.get(&token_id) else {
-                continue;
-            };
-
-            for (&tsid, disallowed) in terminals_disallowed {
-                if disallowed.is_empty() {
-                    continue;
-                }
-
-                let exec = self.constraint.tokenizer.execute_from_state(bytes, tsid);
-                let has_allowed_exact_match = exec
-                    .matches
-                    .iter()
-                    .any(|matched| !disallowed.contains(&matched.id));
-                let has_only_disallowed_exact_matches = !exec.matches.is_empty() && !has_allowed_exact_match;
-
-                if has_only_disallowed_exact_matches {
-                    continue 'token;
-                }
-            }
-
-            allowed |= RangeSetBlaze::from_iter([token_id..=token_id]);
-        }
-
-        allowed
+    fn all_llm_tokens(&self) -> RangeSetBlaze<u32> {
+        let Some(max_llm_token) = self.constraint.token_bytes.keys().next_back().copied() else {
+            return RangeSetBlaze::new();
+        };
+        RangeSetBlaze::from_iter([0..=max_llm_token])
     }
 }
 
