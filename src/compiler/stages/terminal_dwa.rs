@@ -44,6 +44,32 @@ fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID
         .collect()
 }
 
+fn compute_always_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
+    let mut always_allowed = vec![None::<BTreeSet<TerminalID>>; grammar.num_terminals as usize];
+
+    for rule in &grammar.rules {
+        for (index, symbol) in rule.rhs.iter().enumerate() {
+            let Symbol::Terminal(terminal) = symbol else {
+                continue;
+            };
+            if *terminal >= grammar.num_terminals {
+                continue;
+            }
+
+            let follows = occurrence_follow_set(grammar, rule.lhs, &rule.rhs, index);
+            match &mut always_allowed[*terminal as usize] {
+                None => always_allowed[*terminal as usize] = Some(follows),
+                Some(existing) => existing.retain(|follow| follows.contains(follow)),
+            }
+        }
+    }
+
+    always_allowed
+        .into_iter()
+        .map(|set| set.unwrap_or_default().into_iter().collect())
+        .collect()
+}
+
 fn occurrence_follow_set(
     grammar: &AnalyzedGrammar,
     lhs: u32,
@@ -208,6 +234,175 @@ fn intersect_or_insert(entry: &mut Option<HashSet<TerminalID>>, next: &HashSet<T
         None => *entry = Some(next.clone()),
         Some(existing) => existing.retain(|terminal| next.contains(terminal)),
     }
+}
+
+fn collapse_always_allowed(
+    nwa: &mut NWA,
+    always_allowed_by_label: &[Vec<TerminalID>],
+    terminals_count: usize,
+) -> bool {
+    if always_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states.is_empty() {
+        return false;
+    }
+
+    let topo_order = topological_order(nwa);
+    if topo_order.is_empty() {
+        return false;
+    }
+
+    let mut incoming: Vec<HashSet<TerminalID>> = vec![HashSet::new(); nwa.states.len()];
+    let mut domain: Vec<Weight> = vec![Weight::empty(); nwa.states.len()];
+    let mut queue = VecDeque::new();
+    let mut in_queue = vec![false; nwa.states.len()];
+
+    for &start in &nwa.start_states {
+        domain[start as usize] = Weight::all();
+        queue.push_back(start);
+        in_queue[start as usize] = true;
+    }
+
+    while let Some(state_id) = queue.pop_front() {
+        in_queue[state_id as usize] = false;
+        let state_domain = domain[state_id as usize].clone();
+        if state_domain.is_empty() {
+            continue;
+        }
+
+        let state = &nwa.states[state_id as usize];
+        let incoming_labels = incoming[state_id as usize].clone();
+
+        for (dst, _) in &state.epsilons {
+            let next_domain = domain[*dst as usize].union(&state_domain);
+            let domain_changed = !next_domain.is_subset(&domain[*dst as usize]);
+            if domain_changed {
+                domain[*dst as usize] = next_domain;
+            }
+
+            let labels_before = incoming[*dst as usize].len();
+            incoming[*dst as usize].extend(incoming_labels.iter().copied());
+            let labels_changed = incoming[*dst as usize].len() != labels_before;
+
+            if (domain_changed || labels_changed) && !in_queue[*dst as usize] {
+                in_queue[*dst as usize] = true;
+                queue.push_back(*dst);
+            }
+        }
+
+        for (&label, targets) in &state.transitions {
+            if label < 0 || (label as usize) >= terminals_count {
+                continue;
+            }
+
+            for (dst, weight) in targets {
+                let contrib = state_domain.intersection(weight);
+                let next_domain = domain[*dst as usize].union(&contrib);
+                let domain_changed = !next_domain.is_subset(&domain[*dst as usize]);
+                if domain_changed {
+                    domain[*dst as usize] = next_domain;
+                }
+
+                let labels_changed = incoming[*dst as usize].insert(label as TerminalID);
+                if (domain_changed || labels_changed) && !in_queue[*dst as usize] {
+                    in_queue[*dst as usize] = true;
+                    queue.push_back(*dst);
+                }
+            }
+        }
+    }
+
+    let mut allowed_by_state: Vec<HashSet<TerminalID>> = vec![HashSet::new(); nwa.states.len()];
+    for state_id in 0..nwa.states.len() {
+        let Some(&first_label) = incoming[state_id].iter().next() else {
+            continue;
+        };
+        let Some(first_follows) = always_allowed_by_label.get(first_label as usize) else {
+            continue;
+        };
+
+        let mut allowed: HashSet<TerminalID> = first_follows.iter().copied().collect();
+        for &label in incoming[state_id].iter().skip(1) {
+            let Some(follows) = always_allowed_by_label.get(label as usize) else {
+                continue;
+            };
+            allowed.retain(|terminal| follows.contains(terminal));
+            if allowed.is_empty() {
+                break;
+            }
+        }
+        allowed_by_state[state_id] = allowed;
+    }
+
+    let mut final_weights: Vec<Option<Weight>> =
+        nwa.states.iter().map(|state| state.final_weight.clone()).collect();
+    let mut changed = false;
+
+    for &state_id in topo_order.iter().rev() {
+        let allowed = &allowed_by_state[state_id];
+        if allowed.len() != 1 {
+            continue;
+        }
+        let only_allowed = *allowed.iter().next().expect("singleton set checked above");
+
+        let domain_state = &domain[state_id];
+        if domain_state.is_empty() {
+            continue;
+        }
+
+        let state = &mut nwa.states[state_id];
+        let mut state_final_weight = final_weights[state_id].clone();
+        let mut labels_to_remove = Vec::new();
+
+        for (&label, targets) in state.transitions.iter_mut() {
+            if label < 0 || (label as usize) >= terminals_count {
+                continue;
+            }
+            if label as TerminalID != only_allowed {
+                continue;
+            }
+
+            let mut new_targets = Vec::new();
+            for (dst, weight) in targets.iter() {
+                let Some(dst_final_weight) = final_weights[*dst as usize].as_ref() else {
+                    new_targets.push((*dst, weight.clone()));
+                    continue;
+                };
+
+                let reach = domain_state.intersection(weight);
+                if !reach.is_empty() && reach.is_subset(dst_final_weight) {
+                    let contrib = dst_final_weight.intersection(weight);
+                    if !contrib.is_empty() {
+                        state_final_weight = Some(match state_final_weight.take() {
+                            Some(existing) => existing.union(&contrib),
+                            None => contrib,
+                        });
+                    }
+                    changed = true;
+                    continue;
+                }
+
+                new_targets.push((*dst, weight.clone()));
+            }
+
+            if new_targets.is_empty() {
+                labels_to_remove.push(label);
+            } else {
+                *targets = new_targets;
+            }
+        }
+
+        for label in labels_to_remove {
+            state.transitions.remove(&label);
+        }
+
+        state.final_weight = state_final_weight.clone();
+        final_weights[state_id] = state_final_weight;
+    }
+
+    if prune_unreachable_states(nwa) {
+        changed = true;
+    }
+
+    changed
 }
 
 fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
@@ -580,6 +775,8 @@ pub(crate) fn build_terminal_dwa(
         builder.flush_transition_buffer();
     }
 
+    let always_allowed_by_label = compute_always_allowed_follows(grammar);
+    let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
     let _ = prune_disallowed_follows(&mut nwa, grammar);
     let dwa = minimize(
         &determinize(&nwa)
@@ -595,6 +792,33 @@ mod tests {
     use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
     use crate::compiler::grammar::model::tests::simple_ab_grammar;
 
+    fn build_literal_terminal_dwa(rules: Vec<Rule>, literals: &[&[u8]], vocab_entries: Vec<(u32, &[u8])>) -> DWA {
+        let grammar = GrammarDef {
+            rules,
+            start: 0,
+            terminals: literals
+                .iter()
+                .enumerate()
+                .map(|(id, bytes)| Terminal::Literal {
+                    id: id as u32,
+                    bytes: bytes.to_vec(),
+                })
+                .collect(),
+            ignore_terminal: None,
+        };
+        let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
+        let vocab = Vocab::new(
+            vocab_entries
+                .into_iter()
+                .map(|(id, bytes)| (id, bytes.to_vec()))
+                .collect(),
+            None,
+        );
+        let id_map = InternalIdMap::build(&tokenizer, &vocab);
+        build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None)
+    }
+
     #[test]
     fn test_terminal_dwa_accepts_single_and_multi_terminal_paths() {
         let grammar = simple_ab_grammar();
@@ -608,13 +832,18 @@ mod tests {
 
         let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
 
+        let a_weight = terminal_dwa.eval_word(&[0]);
         assert!(
-            !terminal_dwa.eval_word(&[0]).is_empty(),
-            "terminal DWA should accept the single-terminal path 'a'"
+            a_weight.token_union().contains(0),
+            "terminal DWA should still accept the explicit single-terminal token 'a'"
         );
         assert!(
-            !terminal_dwa.eval_word(&[0, 1]).is_empty(),
-            "terminal DWA should accept the multi-terminal path 'ab'"
+            a_weight.token_union().contains(1),
+            "always-allowed collapse should make the multi-terminal token 'ab' available on the 'a' terminal word"
+        );
+        assert!(
+            terminal_dwa.eval_word(&[0, 1]).is_empty(),
+            "after collapse, the explicit multi-terminal word 'ab' should no longer be required"
         );
     }
 
@@ -678,5 +907,45 @@ mod tests {
             a_weight.token_union().contains(2),
             "tokens with ignored prefixes should also be accepted on the same terminal word"
         );
+    }
+
+    #[test]
+    fn test_terminal_dwa_collapses_always_allowed_chain_to_first_terminal() {
+        let terminal_dwa = build_literal_terminal_dwa(
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2)],
+            }],
+            &[b"a", b"b", b"c"],
+            vec![(0, b"a"), (1, b"ab"), (2, b"abc")],
+        );
+
+        let first_weight = terminal_dwa.eval_word(&[0]);
+        assert!(first_weight.token_union().contains(0), "single-terminal token should still be accepted");
+        assert!(first_weight.token_union().contains(1), "always-allowed suffix 'b' should collapse into the 'a' state");
+        assert!(first_weight.token_union().contains(2), "always-allowed chain 'b' then 'c' should collapse all the way into the 'a' state");
+    }
+
+    #[test]
+    fn test_terminal_dwa_does_not_collapse_non_always_follow() {
+        let terminal_dwa = build_literal_terminal_dwa(
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Terminal(3)],
+                },
+            ],
+            &[b"a", b"b", b"c", b"d"],
+            vec![(0, b"a"), (1, b"ab"), (2, b"abc"), (3, b"ad")],
+        );
+
+        let first_weight = terminal_dwa.eval_word(&[0]);
+        assert!(first_weight.token_union().contains(0), "the explicit 'a' token should still be accepted");
+        assert!(!first_weight.token_union().contains(1), "'b' is only ever allowed after 'a', not always allowed, so 'ab' must not collapse");
+        assert!(!first_weight.token_union().contains(2), "the 'abc' chain must not collapse when the first follow is not always allowed");
     }
 }
