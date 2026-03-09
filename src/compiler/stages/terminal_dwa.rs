@@ -387,12 +387,12 @@ fn build_token_suffix_paths(
     }
 }
 
-pub(crate) fn build_terminal_nwa(
+pub(crate) fn build_terminal_dwa(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-) -> NWA {
+) -> DWA {
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
@@ -423,18 +423,8 @@ pub(crate) fn build_terminal_nwa(
     }
 
     let _ = prune_disallowed_follows(&mut nwa, grammar);
-    nwa
-}
-
-pub(crate) fn build_terminal_dwa(
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-) -> DWA {
-    let terminal_nwa = build_terminal_nwa(grammar, tokenizer, vocab, id_map);
     minimize(
-        &determinize(&terminal_nwa)
+        &determinize(&nwa)
             .expect("terminal NWA determinization failed despite acyclic token trie construction"),
     )
 }
