@@ -46,54 +46,54 @@ impl Tokenizer {
     pub fn drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
         let nullable = self.matched_terminals(self.start_state());
         for &tid in &nullable {
-            self.dfa.clear_finalizer(self.start_state(), tid as u32);
+            self.dfa.clear_finalizer(self.start_state(), tid);
         }
         nullable
     }
 
-    pub fn step(&self, _state: u32, _byte: u8) -> Option<u32> {
-        self.dfa.step(_state, _byte)
+    pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        self.dfa.step(state, byte)
     }
 
-    pub fn run(&self, _input: &[u8]) -> u32 {
-        _input
+    pub fn run(&self, input: &[u8]) -> u32 {
+        input
             .iter()
             .try_fold(self.start_state(), |state, &byte| self.step(state, byte))
             .unwrap_or(self.start_state())
     }
 
-    pub fn matched_terminals(&self, _state: u32) -> BTreeSet<TerminalID> {
+    pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         self.dfa
-            .finalizers(_state)
+            .finalizers(state)
             .iter()
             .map(|terminal| terminal as TerminalID)
             .collect()
     }
 
-    pub fn matched_non_greedy_terminals(&self, _state: u32) -> BTreeSet<TerminalID> {
+    pub fn matched_non_greedy_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         self.dfa
-            .non_greedy_finalizers(_state)
+            .non_greedy_finalizers(state)
             .iter()
             .map(|terminal| terminal as TerminalID)
             .collect()
     }
 
-    pub fn all_matched_terminals(&self, _state: u32) -> BTreeSet<TerminalID> {
-        let mut terminals = self.matched_terminals(_state);
-        terminals.extend(self.matched_non_greedy_terminals(_state));
+    pub fn all_matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
+        let mut terminals = self.matched_terminals(state);
+        terminals.extend(self.matched_non_greedy_terminals(state));
         terminals
     }
 
-    pub fn possible_future_terminals(&self, _state: u32) -> BTreeSet<TerminalID> {
+    pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         self.dfa
-            .possible_future_group_ids(_state)
+            .possible_future_group_ids(state)
             .iter()
             .map(|terminal| terminal as TerminalID)
             .collect()
     }
 
-    pub fn terminal_matches(&self, _state: u32, _terminal: TerminalID) -> bool {
-        self.all_matched_terminals(_state).contains(&_terminal)
+    pub fn terminal_matches(&self, state: u32, terminal: TerminalID) -> bool {
+        self.all_matched_terminals(state).contains(&terminal)
     }
 
     pub fn num_states(&self) -> u32 {
@@ -133,9 +133,9 @@ impl Tokenizer {
         }
     }
 
-    pub fn execute(&self, _input: &[u8], _start: u32) -> (u32, BTreeSet<TerminalID>) {
-        let mut state = _start;
-        for &byte in _input {
+    pub fn execute(&self, input: &[u8], start: u32) -> (u32, BTreeSet<TerminalID>) {
+        let mut state = start;
+        for &byte in input {
             let Some(next) = self.step(state, byte) else {
                 return (state, BTreeSet::new());
             };
@@ -144,9 +144,9 @@ impl Tokenizer {
         (state, self.all_matched_terminals(state))
     }
 
-    pub fn execute_all_matches(&self, _input: &[u8], _start: u32) -> TokenizerResult {
-        let exec = self.execute_from_state(_input, _start);
-        let end_state = exec.end_state.unwrap_or(_start);
+    pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
+        let exec = self.execute_from_state(input, start);
+        let end_state = exec.end_state.unwrap_or(start);
         let mut grouped = std::collections::BTreeMap::<usize, BTreeSet<TerminalID>>::new();
         for matched in exec.matches {
             grouped.entry(matched.width).or_default().insert(matched.id);
@@ -169,12 +169,12 @@ impl Tokenizer {
         self.possible_future_terminals(state)
     }
 
-    pub fn execute_all_matches_cb<F>(&self, _input: &[u8], _start: u32, _cb: F) -> u32
+    pub fn execute_all_matches_cb<F>(&self, input: &[u8], start: u32, cb: F) -> u32
     where
         F: FnMut(usize, &BTreeSet<u32>),
     {
-        let result = self.execute_all_matches(_input, _start);
-        let mut cb = _cb;
+        let result = self.execute_all_matches(input, start);
+        let mut cb = cb;
         for (offset, matches) in &result.matches {
             let mapped: BTreeSet<u32> = matches.iter().copied().collect();
             cb(*offset, &mapped);
@@ -184,16 +184,16 @@ impl Tokenizer {
 
     pub fn execute_all_matches_cb_filtered<F>(
         &self,
-        _input: &[u8],
-        _start: u32,
-        _state_has_used: &[bool],
-        _cb: F,
+        input: &[u8],
+        start: u32,
+        state_has_used: &[bool],
+        cb: F,
     ) -> u32
     where
         F: FnMut(usize, &BTreeSet<u32>),
     {
-        let _ = _state_has_used;
-        self.execute_all_matches_cb(_input, _start, _cb)
+        let _ = state_has_used;
+        self.execute_all_matches_cb(input, start, cb)
     }
 }
 

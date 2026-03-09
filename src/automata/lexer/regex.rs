@@ -3,21 +3,18 @@
 //! This module is concerned only with turning a regex pattern string into an
 //! `Expr` AST. Tokenizer construction and expression analysis live under the
 //! compiler module (`compiler::compile`).
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
 #![allow(unused_imports)]
 
 use crate::automata::regex::Expr;
 use crate::ds::u8set::U8Set;
 
-pub fn parse_regex(_pattern: &str, utf8: bool) -> Expr {
-    let bytes = _pattern.as_bytes();
+pub fn parse_regex(pattern: &str, utf8: bool) -> Expr {
+    let bytes = pattern.as_bytes();
     let (expr, pos) = parse_alternation(bytes, 0, utf8);
     if pos == bytes.len() {
         expr
     } else {
-        Expr::U8Seq(unescape_literal(_pattern.as_bytes()))
+        Expr::U8Seq(unescape_literal(pattern.as_bytes()))
     }
 }
 
@@ -41,25 +38,25 @@ pub(crate) fn unescape_literal(input: &[u8]) -> Vec<u8> {
     out
 }
 
-fn parse_alternation(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
-    let (mut left, mut pos) = parse_sequence(_input, _pos, utf8);
+fn parse_alternation(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
+    let (mut left, mut pos) = parse_sequence(input, pos, utf8);
     let mut alts = vec![left];
-    while pos < _input.len() && _input[pos] == b'|' {
-        let (right, next) = parse_sequence(_input, pos + 1, utf8);
+    while pos < input.len() && input[pos] == b'|' {
+        let (right, next) = parse_sequence(input, pos + 1, utf8);
         alts.push(right);
         pos = next;
     }
     (if alts.len() == 1 { alts.pop().unwrap() } else { Expr::Choice(alts) }, pos)
 }
 
-fn parse_sequence(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
+fn parse_sequence(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
     let mut parts = Vec::new();
-    let mut pos = _pos;
-    while pos < _input.len() {
-        match _input[pos] {
+    let mut pos = pos;
+    while pos < input.len() {
+        match input[pos] {
             b'|' | b')' => break,
             _ => {
-                let (expr, next) = parse_quantified(_input, pos, utf8);
+                let (expr, next) = parse_quantified(input, pos, utf8);
                 parts.push(expr);
                 pos = next;
             }
@@ -72,12 +69,12 @@ fn parse_sequence(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
     }
 }
 
-fn parse_quantified(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
-    let (mut expr, mut pos) = parse_atom(_input, _pos, utf8);
-    if pos >= _input.len() {
+fn parse_quantified(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
+    let (mut expr, mut pos) = parse_atom(input, pos, utf8);
+    if pos >= input.len() {
         return (expr, pos);
     }
-    match _input[pos] {
+    match input[pos] {
         b'*' => {
             expr = Expr::Repeat { expr: Box::new(expr), min: 0, max: None };
             pos += 1;
@@ -91,7 +88,7 @@ fn parse_quantified(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
             pos += 1;
         }
         b'{' => {
-            let (min, max, next) = parse_repetition_bounds(_input, pos + 1);
+            let (min, max, next) = parse_repetition_bounds(input, pos + 1);
             expr = Expr::Repeat { expr: Box::new(expr), min, max };
             pos = next;
         }
@@ -100,82 +97,82 @@ fn parse_quantified(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
     (expr, pos)
 }
 
-fn parse_repetition_bounds(_input: &[u8], _pos: usize) -> (usize, Option<usize>, usize) {
-    let (min, mut pos) = parse_usize(_input, _pos);
-    if pos < _input.len() && _input[pos] == b'}' {
+fn parse_repetition_bounds(input: &[u8], pos: usize) -> (usize, Option<usize>, usize) {
+    let (min, mut pos) = parse_usize(input, pos);
+    if pos < input.len() && input[pos] == b'}' {
         return (min, Some(min), pos + 1);
     }
     let mut max = None;
-    if pos < _input.len() && _input[pos] == b',' {
+    if pos < input.len() && input[pos] == b',' {
         pos += 1;
-        if pos < _input.len() && _input[pos] != b'}' {
-            let (parsed_max, next) = parse_usize(_input, pos);
+        if pos < input.len() && input[pos] != b'}' {
+            let (parsed_max, next) = parse_usize(input, pos);
             max = Some(parsed_max);
             pos = next;
         }
     }
-    while pos < _input.len() && _input[pos] != b'}' {
+    while pos < input.len() && input[pos] != b'}' {
         pos += 1;
     }
     (min, max, pos.saturating_add(1))
 }
 
-fn parse_usize(_input: &[u8], _pos: usize) -> (usize, usize) {
+fn parse_usize(input: &[u8], pos: usize) -> (usize, usize) {
     let mut value = 0usize;
-    let mut pos = _pos;
-    while pos < _input.len() && _input[pos].is_ascii_digit() {
-        value = value * 10 + (_input[pos] - b'0') as usize;
+    let mut pos = pos;
+    while pos < input.len() && input[pos].is_ascii_digit() {
+        value = value * 10 + (input[pos] - b'0') as usize;
         pos += 1;
     }
     (value, pos)
 }
 
-fn parse_atom(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
-    if _pos >= _input.len() {
-        return (Expr::Epsilon, _pos);
+fn parse_atom(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
+    if pos >= input.len() {
+        return (Expr::Epsilon, pos);
     }
-    match _input[_pos] {
+    match input[pos] {
         b'(' => {
-            let (expr, mut pos) = parse_alternation(_input, _pos + 1, utf8);
-            if pos < _input.len() && _input[pos] == b')' {
+            let (expr, mut pos) = parse_alternation(input, pos + 1, utf8);
+            if pos < input.len() && input[pos] == b')' {
                 pos += 1;
             }
             (expr, pos)
         }
-        b'[' => parse_char_class(_input, _pos, utf8),
-        b'\\' => parse_escape(_input, _pos),
-        b'.' => (Expr::U8Class(U8Set::all()), _pos + 1),
-        byte => (Expr::U8Seq(vec![byte]), _pos + 1),
+        b'[' => parse_char_class(input, pos, utf8),
+        b'\\' => parse_escape(input, pos),
+        b'.' => (Expr::U8Class(U8Set::all()), pos + 1),
+        byte => (Expr::U8Seq(vec![byte]), pos + 1),
     }
 }
 
-fn parse_char_class(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
-    let mut pos = _pos + 1;
+fn parse_char_class(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
+    let mut pos = pos + 1;
     let mut negate = false;
-    if pos < _input.len() && _input[pos] == b'^' {
+    if pos < input.len() && input[pos] == b'^' {
         negate = true;
         pos += 1;
     }
     let mut set = U8Set::empty();
-    while pos < _input.len() && _input[pos] != b']' {
-        let start = if _input[pos] == b'\\' {
-            let byte = parse_escape_byte(_input, pos);
-            pos += escape_len(_input, pos);
+    while pos < input.len() && input[pos] != b']' {
+        let start = if input[pos] == b'\\' {
+            let byte = parse_escape_byte(input, pos);
+            pos += escape_len(input, pos);
             byte
         } else {
-            let byte = _input[pos];
+            let byte = input[pos];
             pos += 1;
             byte
         };
 
-        if pos + 1 < _input.len() && _input[pos] == b'-' && _input[pos + 1] != b']' {
+        if pos + 1 < input.len() && input[pos] == b'-' && input[pos + 1] != b']' {
             pos += 1;
-            let end = if _input[pos] == b'\\' {
-                let byte = parse_escape_byte(_input, pos);
-                pos += escape_len(_input, pos);
+            let end = if input[pos] == b'\\' {
+                let byte = parse_escape_byte(input, pos);
+                pos += escape_len(input, pos);
                 byte
             } else {
-                let byte = _input[pos];
+                let byte = input[pos];
                 pos += 1;
                 byte
             };
@@ -186,7 +183,7 @@ fn parse_char_class(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
             set.insert(start);
         }
     }
-    if pos < _input.len() && _input[pos] == b']' {
+    if pos < input.len() && input[pos] == b']' {
         pos += 1;
     }
     if negate && utf8 {
@@ -256,50 +253,50 @@ fn utf8_aware_negated_ascii_class(excluded: U8Set) -> Expr {
     Expr::Choice(choices)
 }
 
-fn parse_escape(_input: &[u8], _pos: usize) -> (Expr, usize) {
-    if _pos + 1 >= _input.len() {
-        return (Expr::U8Seq(vec![b'\\']), _pos + 1);
+fn parse_escape(input: &[u8], pos: usize) -> (Expr, usize) {
+    if pos + 1 >= input.len() {
+        return (Expr::U8Seq(vec![b'\\']), pos + 1);
     }
-    let escaped = _input[_pos + 1];
+    let escaped = input[pos + 1];
     match escaped {
-        b'd' => (Expr::U8Class(U8Set::from_range(b'0', b'9')), _pos + 2),
-        b's' => (Expr::U8Class(U8Set::from_bytes(b" \t\r\n")), _pos + 2),
+        b'd' => (Expr::U8Class(U8Set::from_range(b'0', b'9')), pos + 2),
+        b's' => (Expr::U8Class(U8Set::from_bytes(b" \t\r\n")), pos + 2),
         b'w' => (
             Expr::U8Class(U8Set::from_predicate(|byte| byte.is_ascii_alphanumeric() || byte == b'_')),
-            _pos + 2,
+            pos + 2,
         ),
-        _ => (Expr::U8Seq(vec![parse_escape_byte(_input, _pos)]), _pos + escape_len(_input, _pos)),
+        _ => (Expr::U8Seq(vec![parse_escape_byte(input, pos)]), pos + escape_len(input, pos)),
     }
 }
 
-fn parse_escape_byte(_input: &[u8], _pos: usize) -> u8 {
-    if _pos + 1 >= _input.len() {
+fn parse_escape_byte(input: &[u8], pos: usize) -> u8 {
+    if pos + 1 >= input.len() {
         return b'\\';
     }
-    match _input[_pos + 1] {
+    match input[pos + 1] {
         b'n' => b'\n',
         b'r' => b'\r',
         b't' => b'\t',
-        b'x' if _pos + 3 < _input.len() => {
-            (hex_digit(_input[_pos + 2]) << 4) | hex_digit(_input[_pos + 3])
+        b'x' if pos + 3 < input.len() => {
+            (hex_digit(input[pos + 2]) << 4) | hex_digit(input[pos + 3])
         }
         other => other,
     }
 }
 
-fn escape_len(_input: &[u8], _pos: usize) -> usize {
-    if _pos + 1 < _input.len() && _input[_pos + 1] == b'x' && _pos + 3 < _input.len() {
+fn escape_len(input: &[u8], pos: usize) -> usize {
+    if pos + 1 < input.len() && input[pos + 1] == b'x' && pos + 3 < input.len() {
         4
     } else {
         2
     }
 }
 
-fn hex_digit(_b: u8) -> u8 {
-    match _b {
-        b'0'..=b'9' => _b - b'0',
-        b'a'..=b'f' => 10 + (_b - b'a'),
-        b'A'..=b'F' => 10 + (_b - b'A'),
+fn hex_digit(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => 10 + (b - b'a'),
+        b'A'..=b'F' => 10 + (b - b'A'),
         _ => 0,
     }
 }

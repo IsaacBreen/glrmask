@@ -33,9 +33,9 @@ pub struct DFA {
 }
 
 impl DFA {
-    pub fn new(_num_states: usize) -> Self {
+    pub fn new(num_states: usize) -> Self {
         Self {
-            states: vec![DFAState::default(); _num_states],
+            states: vec![DFAState::default(); num_states],
             group_id_to_u8set: Vec::new(),
         }
     }
@@ -133,15 +133,15 @@ impl DFA {
         }
     }
 
-    pub fn step(&self, _state: u32, _byte: u8) -> Option<u32> {
+    pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
         self.states
-            .get(_state as usize)
-            .and_then(|state| state.transitions.get(_byte).copied())
+            .get(state as usize)
+            .and_then(|state| state.transitions.get(byte).copied())
     }
 
-    pub fn get_u8set(&self, _state: u32) -> U8Set {
+    pub fn get_u8set(&self, state: u32) -> U8Set {
         let mut out = U8Set::empty();
-        if let Some(state) = self.states.get(_state as usize) {
+        if let Some(state) = self.states.get(state as usize) {
             for (byte, _) in state.transitions.iter() {
                 out.insert(byte);
             }
@@ -153,20 +153,20 @@ impl DFA {
         self.step(state, byte).unwrap_or(DEAD)
     }
 
-    pub fn group_id_to_u8set(&self, _group_id: GroupId) -> &U8Set {
-        &self.group_id_to_u8set[_group_id as usize]
+    pub fn group_id_to_u8set(&self, group_id: GroupId) -> &U8Set {
+        &self.group_id_to_u8set[group_id as usize]
     }
 
-    pub fn finalizers(&self, _state: u32) -> &BitSet {
-        &self.states[_state as usize].finalizers
+    pub fn finalizers(&self, state: u32) -> &BitSet {
+        &self.states[state as usize].finalizers
     }
 
-    pub fn non_greedy_finalizers(&self, _state: u32) -> &BitSet {
-        &self.states[_state as usize].non_greedy_finalizers
+    pub fn non_greedy_finalizers(&self, state: u32) -> &BitSet {
+        &self.states[state as usize].non_greedy_finalizers
     }
 
-    pub(crate) fn possible_future_group_ids(&self, _state: u32) -> &BitSet {
-        &self.states[_state as usize].possible_future_group_ids
+    pub(crate) fn possible_future_group_ids(&self, state: u32) -> &BitSet {
+        &self.states[state as usize].possible_future_group_ids
     }
 
     pub fn states(&self) -> &[DFAState] {
