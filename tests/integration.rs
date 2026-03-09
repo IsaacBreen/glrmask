@@ -158,6 +158,63 @@ fn test_lark_singleton_char_class_initial_mask() {
     assert!(token_allowed(&mask, 0), "'1' should be allowed for /[1]/");
 }
 
+#[test]
+fn test_lark_single_quotes_and_literal_range() {
+    let vocab = make_vocab(&["5", "a"]);
+    let c = Constraint::from_lark(
+        "?start: DIGIT\nDIGIT.2: '0'..'9'",
+        &vocab,
+    )
+    .unwrap();
+    let s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'5' should be allowed for '0'..'9'");
+    assert!(!token_allowed(&mask, 1), "'a' should not be allowed for '0'..'9'");
+}
+
+#[test]
+fn test_lark_alias_syntax_is_ignored_semantically() {
+    let vocab = make_vocab(&["a", "b"]);
+    let c = Constraint::from_lark(
+        "start: 'a' -> left | \"b\" -> right",
+        &vocab,
+    )
+    .unwrap();
+    let s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' should be allowed");
+    assert!(token_allowed(&mask, 1), "'b' should be allowed");
+}
+
+#[test]
+fn test_lark_terminal_convention_inlines_uppercase_rules() {
+    let vocab = make_vocab(&["a", "b", "c"]);
+    let c = Constraint::from_lark(
+        "start: WORD\nWORD: LETTER+\nLETTER: 'a' | 'b'",
+        &vocab,
+    )
+    .unwrap();
+    let s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'a' should be allowed via uppercase terminal expansion");
+    assert!(token_allowed(&mask, 1), "'b' should be allowed via uppercase terminal expansion");
+    assert!(!token_allowed(&mask, 2), "'c' should not be allowed");
+}
+
+#[test]
+fn test_lark_terminal_convention_rejects_parser_refs_inside_terminals() {
+    let vocab = make_vocab(&["a"]);
+    let err = Constraint::from_lark("start: WORD\nitem: 'a'\nWORD: item", &vocab)
+        .expect_err("invalid terminal/parser mixing should be rejected");
+    assert!(
+        err.to_string().contains("terminal rule cannot reference parser rule item"),
+        "unexpected error: {err}"
+    );
+}
+
 // ====================================================================
 // JSON Schema integration tests
 // ====================================================================

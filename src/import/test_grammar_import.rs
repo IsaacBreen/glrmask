@@ -88,6 +88,73 @@ c ::= 'c'??";
 
 // ── Lark tests ───────────────────────────────────────────────────────────────
 
+/// Ported from `test_lark_repeat_bounded` (adapted to glrmask's desugared AST).
+#[test]
+fn test_lark_repeat_bounded_desugars_to_optional_tail() {
+    let lark = r#"
+start: STR_CHAR~3..5
+STR_CHAR: "a"
+"#;
+    let named = parse_lark_to_named(lark).expect("Lark should parse bounded repeats");
+
+    assert_eq!(named.rules[0].0, "start");
+    assert_eq!(
+        named.rules[0].1,
+        GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"a".to_vec()),
+            GrammarExpr::Literal(b"a".to_vec()),
+            GrammarExpr::Literal(b"a".to_vec()),
+            GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(b"a".to_vec()),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
+            ]))),
+        ])
+    );
+}
+
+/// Regression: common Lark syntax features should parse together.
+#[test]
+fn test_lark_parser_supports_single_quotes_ranges_aliases_and_priority() {
+    let lark = "?start: DIGIT -> picked\nDIGIT.2: '0'..'9'";
+    let named = parse_lark_to_named(lark).expect("Lark syntax subset should parse");
+
+    assert_eq!(named.rules.len(), 1);
+    assert_eq!(named.rules[0].0, "start");
+    assert_eq!(
+        named.rules[0].1,
+        GrammarExpr::CharClass {
+            def: "0-9".into(),
+            negate: false,
+        }
+    );
+}
+
+#[test]
+fn test_lark_terminal_rules_follow_capitalization_convention() {
+    let lark = "start: WORD\nWORD: LETTER+\nLETTER: 'a' | 'b'";
+    let named = parse_lark_to_named(lark).expect("Lark terminal rules should inline into parser rules");
+
+    assert_eq!(named.rules.len(), 1);
+    assert_eq!(named.rules[0].0, "start");
+    assert_eq!(
+        named.rules[0].1,
+        GrammarExpr::RepeatOne(Box::new(GrammarExpr::Choice(vec![
+            GrammarExpr::Literal(b"a".to_vec()),
+            GrammarExpr::Literal(b"b".to_vec()),
+        ])))
+    );
+}
+
+#[test]
+fn test_lark_terminal_rule_rejects_parser_rule_reference() {
+    let err = parse_lark_to_named("start: WORD\nitem: 'a'\nWORD: item")
+        .expect_err("uppercase terminal rules should not reference lowercase parser rules");
+    assert!(
+        err.to_string().contains("terminal rule cannot reference parser rule item"),
+        "unexpected error: {err}"
+    );
+}
+
 /// Ported from `test_lark_parser_simple`.
 ///
 /// Parses a simple Lark grammar and checks rule count and names at the AST level.
@@ -107,14 +174,13 @@ NUMBER: /[0-9]+/
 
     assert_eq!(
         named.rules.len(),
-        4,
-        "Expected 4 rules, got {}",
+        3,
+        "Expected 3 parser rules after terminal inlining, got {}",
         named.rules.len()
     );
     assert_eq!(named.rules[0].0, "start");
     assert_eq!(named.rules[1].0, "expr");
     assert_eq!(named.rules[2].0, "term");
-    assert_eq!(named.rules[3].0, "NUMBER");
 }
 
 /// Ported from `test_lark_regex_charclass_not_nested`.
@@ -129,15 +195,9 @@ STR_CHAR: /[^"\\\x00-\x1F]/
 "#;
     let named = parse_lark_to_named(lark).expect("Lark should parse");
 
-    let str_char_expr = named
-        .rules
-        .iter()
-        .find(|(name, _)| name == "STR_CHAR")
-        .map(|(_, expr)| expr)
-        .expect("STR_CHAR rule should exist");
+    let str_char_expr = &named.rules[0].1;
 
-    // glrmask keeps the full regex pattern as RawRegex rather than
-    // extracting into CharClass during Lark import.
+    // After terminal-rule normalization, the start rule inlines the regex.
     match str_char_expr {
         GrammarExpr::RawRegex(pattern) => {
             assert!(
