@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::determinize::determinize;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::grammar::model::TerminalID;
@@ -19,10 +20,9 @@ impl Templates {
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
     ) -> NWA {
-        let mut nwa = NWA::new(0, 0);
-        nwa.states.clear();
-        nwa.start_states.clear();
-        let mut appended = 0usize;
+        let mut raw_bundle = NWA::new(0, 0);
+        let start = raw_bundle.add_state();
+        raw_bundle.start_states.push(start);
 
         for (&terminal, weight) in terminal_weights {
             if weight.is_empty() {
@@ -31,41 +31,19 @@ impl Templates {
             let Some(template) = self.by_terminal.get(&terminal) else {
                 continue;
             };
-            append_template(&mut nwa, template, weight);
-            appended += 1;
-        }
-
-        if appended <= 1 {
-            return nwa;
+            append_template(&mut raw_bundle, start, template, weight);
         }
 
         let bundle_dwa = minimize(
-            &determinize(&nwa).expect(
+            &determinize(&raw_bundle).expect(
                 "template bundle determinization failed during multi-template bundle assembly",
             ),
         );
-
-        let mut rebuilt = NWA::new(0, 0);
-        rebuilt.states.clear();
-        rebuilt.start_states.push(bundle_dwa.start_state);
-        for _ in &bundle_dwa.states {
-            rebuilt.add_state();
-        }
-        for (state_id, state) in bundle_dwa.states.iter().enumerate() {
-            let from = state_id as u32;
-            if let Some(final_weight) = state.final_weight.clone() {
-                rebuilt.set_final_weight(from, final_weight);
-            }
-            for (&label, (target, weight)) in &state.transitions {
-                rebuilt.add_transition(from, label, *target, weight.clone());
-            }
-        }
-
-        rebuilt
+        dwa_to_nwa(&bundle_dwa)
     }
 }
 
-fn append_template(nwa: &mut NWA, dfa: &UnweightedDfa, final_weight: &Weight) {
+fn append_template(nwa: &mut NWA, bundle_start: u32, dfa: &UnweightedDfa, entry_weight: &Weight) {
     if dfa.states.is_empty() {
         return;
     }
@@ -75,15 +53,34 @@ fn append_template(nwa: &mut NWA, dfa: &UnweightedDfa, final_weight: &Weight) {
         nwa.add_state();
     }
 
-    nwa.start_states.push(offset + dfa.start_state);
+    nwa.add_epsilon(bundle_start, offset + dfa.start_state, entry_weight.clone());
 
     for (state_id, state) in dfa.states.iter().enumerate() {
         let from = offset + state_id as u32;
         if state.is_accepting {
-            nwa.set_final_weight(from, final_weight.clone());
+            nwa.set_final_weight(from, Weight::all());
         }
         for (&label, &target) in &state.transitions {
             nwa.add_transition(from, label, offset + target, Weight::all());
         }
     }
+}
+
+fn dwa_to_nwa(dwa: &DWA) -> NWA {
+    let mut nwa = NWA::new(0, 0);
+    for _ in &dwa.states {
+        nwa.add_state();
+    }
+
+    nwa.start_states.push(dwa.start_state);
+    for (state_id, state) in dwa.states.iter().enumerate() {
+        if let Some(final_weight) = state.final_weight.clone() {
+            nwa.set_final_weight(state_id as u32, final_weight);
+        }
+        for (&label, (target, weight)) in &state.transitions {
+            nwa.add_transition(state_id as u32, label, *target, weight.clone());
+        }
+    }
+
+    nwa
 }

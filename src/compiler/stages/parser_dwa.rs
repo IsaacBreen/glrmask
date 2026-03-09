@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
@@ -22,18 +21,18 @@ use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::terminal_dwa::build_terminal_dwa;
 use crate::ds::weight::Weight;
 
-type BundleEntry = BTreeMap<TerminalID, Weight>;
+type Bundle = BTreeMap<TerminalID, Weight>;
 
 #[derive(Debug, Clone)]
-struct TerminalBranch {
-    target_state: u32,
+struct Branch {
+    target: u32,
     bundle: NWA,
 }
 
 #[derive(Debug, Clone)]
-struct TerminalStateSummary {
+struct StateSummary {
     final_weight: Option<Weight>,
-    branches: Vec<TerminalBranch>,
+    branches: Vec<Branch>,
 }
 
 fn append_dwa(into: &mut DWA, other: &DWA) -> u32 {
@@ -55,50 +54,6 @@ fn append_dwa(into: &mut DWA, other: &DWA) -> u32 {
     offset + other.start_state
 }
 
-fn append_nwa(into: &mut NWA, other: &NWA) {
-    let offset = into.states.len() as u32;
-    for _ in &other.states {
-        into.add_state();
-    }
-
-    for (state_id, state) in other.states.iter().enumerate() {
-        let dst_state = offset + state_id as u32;
-        if let Some(final_weight) = state.final_weight.clone() {
-            into.set_final_weight(dst_state, final_weight);
-        }
-        for (&label, targets) in &state.transitions {
-            for (target, weight) in targets {
-                into.add_transition(dst_state, label, offset + *target, weight.clone());
-            }
-        }
-        for (target, weight) in &state.epsilons {
-            into.add_epsilon(dst_state, offset + *target, weight.clone());
-        }
-    }
-
-    into.start_states
-        .extend(other.start_states.iter().map(|state| offset + *state));
-}
-
-fn dwa_to_nwa(dwa: &DWA) -> NWA {
-    let mut nwa = NWA::new(0, 0);
-    for _ in &dwa.states {
-        nwa.add_state();
-    }
-
-    nwa.start_states.push(dwa.start_state);
-    for (state_id, state) in dwa.states.iter().enumerate() {
-        if let Some(final_weight) = state.final_weight.clone() {
-            nwa.set_final_weight(state_id as u32, final_weight);
-        }
-        for (&label, (target, weight)) in &state.transitions {
-            nwa.add_transition(state_id as u32, label, *target, weight.clone());
-        }
-    }
-
-    nwa
-}
-
 fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
     if final_weight.is_empty() {
         return None;
@@ -111,73 +66,16 @@ fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
     Some(nwa)
 }
 
-fn template_dfa_to_nwa(template: &UnweightedDfa) -> NWA {
-    let mut nwa = NWA::new(0, 0);
-    for _ in &template.states {
-        nwa.add_state();
-    }
-
-    nwa.start_states.push(template.start_state);
-    for (state_id, state) in template.states.iter().enumerate() {
-        if state.is_accepting {
-            nwa.set_final_weight(state_id as u32, Weight::all());
-        }
-        for (&label, target) in &state.transitions {
-            nwa.add_transition(state_id as u32, label, *target, Weight::all());
-        }
-    }
-
-    nwa
-}
-
-fn build_raw_bundle_nwa(
-    bundle: &BundleEntry,
-    templates: &BTreeMap<TerminalID, UnweightedDfa>,
-) -> NWA {
-    let mut combined = NWA::new(0, 0);
-    let combined_start = combined.add_state();
-    combined.start_states.push(combined_start);
-
-    for (&terminal, weight) in bundle {
-        if weight.is_empty() {
-            continue;
-        }
-
-        let template = templates
-            .get(&terminal)
-            .expect("missing template for terminal bundle entry");
-        let template_nwa = template_dfa_to_nwa(template);
-        let body = combined.append_with_body(&template_nwa);
-        for &body_start in &body.start_states {
-            combined.add_epsilon(combined_start, body_start, weight.clone());
-        }
-    }
-
-    combined
-}
-
-fn build_bundle_nwa(
-    bundle: &BundleEntry,
-    templates: &BTreeMap<TerminalID, UnweightedDfa>,
-) -> NWA {
-    let raw_bundle = build_raw_bundle_nwa(bundle, templates);
-    let bundle_dwa = minimize(
-        &determinize(&raw_bundle)
-            .expect("bundle NWA determinization failed despite acyclic template union"),
-    );
-    dwa_to_nwa(&bundle_dwa)
-}
-
 fn group_terminal_edges_by_target(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
     state_id: u32,
-) -> BTreeMap<u32, BundleEntry> {
+) -> BTreeMap<u32, Bundle> {
     let Some(state) = terminal_dwa.states.get(state_id as usize) else {
         return BTreeMap::new();
     };
 
-    let mut groups = BTreeMap::<u32, BundleEntry>::new();
+    let mut groups = BTreeMap::<u32, Bundle>::new();
     for (&label, (target, weight)) in &state.transitions {
         if label < 0 || label as u32 >= grammar.num_terminals {
             continue;
@@ -194,34 +92,25 @@ fn group_terminal_edges_by_target(
     groups
 }
 
-fn summarize_terminal_state(
+fn build_state_summaries(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
-    state_id: u32,
-    templates: &BTreeMap<TerminalID, UnweightedDfa>,
-) -> TerminalStateSummary {
-    let final_weight = terminal_dwa.states[state_id as usize].final_weight.clone();
-    let branches = group_terminal_edges_by_target(terminal_dwa, grammar, state_id)
-        .into_iter()
-        .map(|(target_state, bundle)| TerminalBranch {
-            target_state,
-            bundle: build_bundle_nwa(&bundle, templates),
+    templates: &Templates,
+) -> Vec<StateSummary> {
+    terminal_dwa
+        .states
+        .iter()
+        .enumerate()
+        .map(|(state_id, state)| StateSummary {
+            final_weight: state.final_weight.clone(),
+            branches: group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32)
+                .into_iter()
+                .map(|(target, bundle)| Branch {
+                    target,
+                    bundle: templates.build_bundle(&bundle),
+                })
+                .collect(),
         })
-        .collect();
-
-    TerminalStateSummary {
-        final_weight,
-        branches,
-    }
-}
-
-fn summarize_terminal_dwa(
-    terminal_dwa: &DWA,
-    grammar: &AnalyzedGrammar,
-    templates: &BTreeMap<TerminalID, UnweightedDfa>,
-) -> Vec<TerminalStateSummary> {
-    (0..terminal_dwa.states.len() as u32)
-        .map(|state_id| summarize_terminal_state(terminal_dwa, grammar, state_id, templates))
         .collect()
 }
 
@@ -239,28 +128,31 @@ fn concatenate_nwas(left: &NWA, right: &NWA) -> Option<NWA> {
 
 fn union_optional_nwa(acc: &mut Option<NWA>, next: NWA) {
     match acc {
-        Some(existing) => append_nwa(existing, &next),
+        Some(existing) => {
+            let body = existing.append_with_body(&next);
+            existing.start_states.extend(body.start_states);
+        }
         None => *acc = Some(next),
     }
 }
 
 fn compose_state(
     state_id: u32,
-    terminal_states: &[TerminalStateSummary],
+    states: &[StateSummary],
     memo: &mut BTreeMap<u32, Option<NWA>>,
 ) -> Option<NWA> {
     if let Some(cached) = memo.get(&state_id) {
         return cached.clone();
     }
 
-    let Some(state) = terminal_states.get(state_id as usize) else {
+    let Some(state) = states.get(state_id as usize) else {
         return None;
     };
 
     let mut composed: Option<NWA> = state.final_weight.as_ref().and_then(accepting_nwa);
 
     for branch in &state.branches {
-        let Some(continuation) = compose_state(branch.target_state, terminal_states, memo) else {
+        let Some(continuation) = compose_state(branch.target, states, memo) else {
             continue;
         };
         let Some(branch_with_continuation) = concatenate_nwas(&branch.bundle, &continuation) else {
@@ -317,10 +209,10 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
 ) -> DWA {
     let characterizations = characterize_terminals(table, grammar);
     let templates = Templates::from_characterizations(&characterizations);
-    let terminal_states = summarize_terminal_dwa(terminal_dwa, grammar, &templates.by_terminal);
+    let states = build_state_summaries(terminal_dwa, grammar, &templates);
 
     let mut memo = BTreeMap::new();
-    let Some(mut parser_nwa) = compose_state(terminal_dwa.start_state, &terminal_states, &mut memo)
+    let Some(mut parser_nwa) = compose_state(terminal_dwa.start_state, &states, &mut memo)
     else {
         return DWA::new(0, 0);
     };
