@@ -346,6 +346,7 @@ fn literal_range_expr(start: &str, end: &str) -> Result<GrammarExpr, GlrMaskErro
             escape_char_class_byte(end_byte)
         ),
         negate: false,
+        utf8: true,
     })
 }
 
@@ -482,9 +483,10 @@ fn expand_lark_expr(
             visiting,
         )?)),
         GrammarExpr::Literal(bytes) => GrammarExpr::Literal(bytes.clone()),
-        GrammarExpr::CharClass { def, negate } => GrammarExpr::CharClass {
+        GrammarExpr::CharClass { def, negate, utf8 } => GrammarExpr::CharClass {
             def: def.clone(),
             negate: *negate,
+            utf8: *utf8,
         },
         GrammarExpr::RawRegex(pattern) => GrammarExpr::RawRegex(pattern.clone()),
         GrammarExpr::AnyByte => GrammarExpr::AnyByte,

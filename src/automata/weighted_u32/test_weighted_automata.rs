@@ -1935,3 +1935,18 @@ fn test_diamond_structure() {
         minimized.states.len()
     );
 }
+
+#[test]
+fn test_json_roundtrip_complex() {
+    let mut d = DWA::new(0, 0);
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    d.add_transition(d.start_state, 'y' as Label, s1, weight_from_iter(vec![1, 2, 3]));
+    d.add_transition(d.start_state, 'x' as Label, s2, weight_from_item(99));
+    d.set_final_weight(s2, weight_from_iter(vec![5, 7]));
+
+    let s = serde_json::to_string(&d).expect("Failed to serialize DWA");
+    let d2: DWA = serde_json::from_str(&s).expect("Failed to deserialize DWA");
+    
+    assert_dwa_equivalent(&d, &d2, 10);
+}

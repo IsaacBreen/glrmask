@@ -459,7 +459,8 @@ fn fmt_nwa_states(
 
 impl std::fmt::Display for NWA {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "NWA: {} states, start={:?}", self.states.len(), self.start_states)?;
+        let starts = self.start_states.iter().map(|s| format!("State {s}")).collect::<Vec<_>>().join(", ");
+        writeln!(f, "NWA: {} states, start={starts}", self.states.len())?;
         fmt_nwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
     }
 }
@@ -472,7 +473,8 @@ pub struct NWADisplayWithSymbols<'a> {
 impl std::fmt::Display for NWADisplayWithSymbols<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let nwa = self.nwa;
-        writeln!(f, "NWA: {} states, start={:?}", nwa.states.len(), nwa.start_states)?;
+        let starts = nwa.start_states.iter().map(|s| format!("State {s}")).collect::<Vec<_>>().join(", ");
+        writeln!(f, "NWA: {} states, start={starts}", nwa.states.len())?;
         let syms = self.symbols;
         fmt_nwa_states(nwa, f,
             &|label| match syms.get(&label) {
@@ -495,7 +497,8 @@ impl std::fmt::Display for NWADisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let nwa = self.nwa;
         let syms = self.symbols;
-        writeln!(f, "NWA: {} states, start={:?}", nwa.states.len(), nwa.start_states)?;
+        let starts = nwa.start_states.iter().map(|s| format!("State {s}")).collect::<Vec<_>>().join(", ");
+        writeln!(f, "NWA: {} states, start={starts}", nwa.states.len())?;
         fmt_nwa_states(
             nwa,
             f,

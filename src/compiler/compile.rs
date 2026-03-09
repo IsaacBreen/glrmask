@@ -35,7 +35,7 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
         .iter()
         .map(|terminal| match terminal {
             Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
-            Terminal::Pattern { pattern, .. } => parse_regex(pattern),
+            Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
             Terminal::Expr { expr, .. } => expr.clone(),
         })
         .collect();
@@ -139,9 +139,10 @@ fn remap_terminal_id(terminal: &Terminal, new_id: TerminalID) -> Terminal {
             id: new_id,
             bytes: bytes.clone(),
         },
-        Terminal::Pattern { pattern, .. } => Terminal::Pattern {
+        Terminal::Pattern { pattern, utf8, .. } => Terminal::Pattern {
             id: new_id,
             pattern: pattern.clone(),
+            utf8: *utf8,
         },
         Terminal::Expr { expr, .. } => Terminal::Expr {
             id: new_id,
@@ -827,6 +828,7 @@ mod tests {
                 Terminal::Pattern {
                     id: 0,
                     pattern: "a*".to_string(),
+                    utf8: true,
                 },
                 Terminal::Literal {
                     id: 1,
@@ -905,6 +907,7 @@ mod tests {
             Terminal::Pattern {
                 id: 2,
                 pattern: " +".to_string(),
+                utf8: true,
             },
             Terminal::Literal {
                 id: 3,
@@ -949,6 +952,7 @@ mod tests {
                 Terminal::Pattern {
                     id: 1,
                     pattern: "x*".to_string(),
+                    utf8: true,
                 },
                 Terminal::Literal {
                     id: 2,
@@ -1026,6 +1030,7 @@ mod tests {
                 Terminal::Pattern {
                     id: 2,
                     pattern: " +".to_string(),
+                    utf8: true,
                 },
                 Terminal::Literal {
                     id: 3,

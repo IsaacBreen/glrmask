@@ -126,6 +126,7 @@ fn test_lark_parser_supports_single_quotes_ranges_aliases_and_priority() {
         GrammarExpr::CharClass {
             def: "0-9".into(),
             negate: false,
+            utf8: true,
         }
     );
 }

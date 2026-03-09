@@ -208,13 +208,13 @@ pub struct DWADisplayWithAllMaps<'a> {
 
 impl std::fmt::Display for DWADisplayWithAllMaps<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = (self.tsid_names, self.token_names);
+        let _ = self.tsid_names;
         let dwa = self.dwa;
         let syms = self.symbols;
         writeln!(f, "DWA: {} states, start=State {}", dwa.states.len(), dwa.start_state)?;
         fmt_dwa_states(dwa, f,
             &|label| syms.get(&label).cloned().unwrap_or_else(|| label.to_string()),
-            &|weight| format!("{weight}"),
+            &|weight| format!("{}", weight.display_with_names(self.tsid_names, self.token_names)),
         )
     }
 }

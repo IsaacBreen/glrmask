@@ -37,7 +37,7 @@ pub enum Terminal {
     /// An exact byte sequence (e.g., a keyword or punctuation).
     Literal { id: TerminalID, bytes: Vec<u8> },
     /// A regex pattern string (e.g., `[a-z]+` or `\\d`).
-    Pattern { id: TerminalID, pattern: String },
+    Pattern { id: TerminalID, pattern: String, utf8: bool },
     /// A pre-parsed regex expression.
     Expr { id: TerminalID, expr: Expr },
 }
@@ -61,32 +61,6 @@ impl Terminal {
         }
     }
 
-    /// Return the regex pattern string for the terminal.
-    /// For literals, this escapes the bytes into a regex-safe pattern.
-    /// For `Expr` variants, returns the debug representation (callers should
-    /// prefer working with the `Expr` directly when possible).
-    pub fn pattern(&self) -> String {
-        match self {
-            Terminal::Literal { bytes, .. } => {
-                bytes.iter().map(|&b| escape_byte_for_regex(b)).collect()
-            }
-            Terminal::Pattern { pattern, .. } => pattern.clone(),
-            Terminal::Expr { expr, .. } => format!("{:?}", expr),
-        }
-    }
-}
-
-/// Escape a single byte into its regex-pattern representation.
-fn escape_byte_for_regex(b: u8) -> String {
-    match b {
-        b'\n' => "\\n".into(),
-        b'\r' => "\\r".into(),
-        b'\t' => "\\t".into(),
-        b'\\' => "\\\\".into(),
-        b'"' => "\\\"".into(),
-        byte if byte.is_ascii_graphic() || byte == b' ' => (byte as char).to_string(),
-        byte => format!("\\x{byte:02x}"),
-    }
 }
 
 impl GrammarDef {
@@ -108,13 +82,6 @@ impl GrammarDef {
             .unwrap_or(0)
     }
 
-    pub fn terminal_pattern(&self, terminal: TerminalID) -> String {
-        self.terminals
-            .iter()
-            .find(|t| t.id() == terminal)
-            .map(|t| t.pattern())
-            .unwrap_or_default()
-    }
 }
 
 #[cfg(test)]

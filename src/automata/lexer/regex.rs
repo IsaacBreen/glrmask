@@ -11,9 +11,9 @@
 use crate::automata::regex::Expr;
 use crate::ds::u8set::U8Set;
 
-pub fn parse_regex(_pattern: &str) -> Expr {
+pub fn parse_regex(_pattern: &str, utf8: bool) -> Expr {
     let bytes = _pattern.as_bytes();
-    let (expr, pos) = parse_alternation(bytes, 0);
+    let (expr, pos) = parse_alternation(bytes, 0, utf8);
     if pos == bytes.len() {
         expr
     } else {
@@ -41,25 +41,25 @@ pub(crate) fn unescape_literal(input: &[u8]) -> Vec<u8> {
     out
 }
 
-fn parse_alternation(_input: &[u8], _pos: usize) -> (Expr, usize) {
-    let (mut left, mut pos) = parse_sequence(_input, _pos);
+fn parse_alternation(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
+    let (mut left, mut pos) = parse_sequence(_input, _pos, utf8);
     let mut alts = vec![left];
     while pos < _input.len() && _input[pos] == b'|' {
-        let (right, next) = parse_sequence(_input, pos + 1);
+        let (right, next) = parse_sequence(_input, pos + 1, utf8);
         alts.push(right);
         pos = next;
     }
     (if alts.len() == 1 { alts.pop().unwrap() } else { Expr::Choice(alts) }, pos)
 }
 
-fn parse_sequence(_input: &[u8], _pos: usize) -> (Expr, usize) {
+fn parse_sequence(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
     let mut parts = Vec::new();
     let mut pos = _pos;
     while pos < _input.len() {
         match _input[pos] {
             b'|' | b')' => break,
             _ => {
-                let (expr, next) = parse_quantified(_input, pos);
+                let (expr, next) = parse_quantified(_input, pos, utf8);
                 parts.push(expr);
                 pos = next;
             }
@@ -72,8 +72,8 @@ fn parse_sequence(_input: &[u8], _pos: usize) -> (Expr, usize) {
     }
 }
 
-fn parse_quantified(_input: &[u8], _pos: usize) -> (Expr, usize) {
-    let (mut expr, mut pos) = parse_atom(_input, _pos);
+fn parse_quantified(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
+    let (mut expr, mut pos) = parse_atom(_input, _pos, utf8);
     if pos >= _input.len() {
         return (expr, pos);
     }
@@ -130,26 +130,26 @@ fn parse_usize(_input: &[u8], _pos: usize) -> (usize, usize) {
     (value, pos)
 }
 
-fn parse_atom(_input: &[u8], _pos: usize) -> (Expr, usize) {
+fn parse_atom(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
     if _pos >= _input.len() {
         return (Expr::Epsilon, _pos);
     }
     match _input[_pos] {
         b'(' => {
-            let (expr, mut pos) = parse_alternation(_input, _pos + 1);
+            let (expr, mut pos) = parse_alternation(_input, _pos + 1, utf8);
             if pos < _input.len() && _input[pos] == b')' {
                 pos += 1;
             }
             (expr, pos)
         }
-        b'[' => parse_char_class(_input, _pos),
+        b'[' => parse_char_class(_input, _pos, utf8),
         b'\\' => parse_escape(_input, _pos),
         b'.' => (Expr::U8Class(U8Set::all()), _pos + 1),
         byte => (Expr::U8Seq(vec![byte]), _pos + 1),
     }
 }
 
-fn parse_char_class(_input: &[u8], _pos: usize) -> (Expr, usize) {
+fn parse_char_class(_input: &[u8], _pos: usize, utf8: bool) -> (Expr, usize) {
     let mut pos = _pos + 1;
     let mut negate = false;
     if pos < _input.len() && _input[pos] == b'^' {
@@ -189,7 +189,7 @@ fn parse_char_class(_input: &[u8], _pos: usize) -> (Expr, usize) {
     if pos < _input.len() && _input[pos] == b']' {
         pos += 1;
     }
-    if negate {
+    if negate && utf8 {
         let excluded_is_ascii = set.iter().all(|byte| byte <= 0x7F);
         if excluded_is_ascii {
             return (utf8_aware_negated_ascii_class(set), pos);

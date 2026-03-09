@@ -33,13 +33,7 @@ impl std::fmt::Display for CompileDebug {
         writeln!(f, "Start: NT{}", self.grammar_def.start)?;
         writeln!(f, "Terminals:")?;
         for t in &self.grammar_def.terminals {
-            writeln!(
-                f,
-                "  T{}: name={:?} pattern={:?}",
-                t.id(),
-                t.name(),
-                self.grammar_def.terminal_pattern(t.id())
-            )?;
+            writeln!(f, "  T{}: name={:?} def={:?}", t.id(), t.name(), t)?;
         }
         writeln!(f, "Rules:")?;
         for (i, r) in self.grammar_def.rules.iter().enumerate() {
@@ -159,14 +153,9 @@ impl std::fmt::Display for CompileDebug {
             .map(|t| (t.id() as i32, format!("'{}'", t.name())))
             .collect();
 
-        let tsid_names: BTreeMap<u32, String> = self
-            .id_map
-            .tokenizer_states
-            .internal_to_originals
-            .iter()
-            .enumerate()
-            .map(|(tsid, dfa_states)| (tsid as u32, format!("tsid{tsid}/{dfa_states:?}")))
-            .collect();
+        // We pass an empty map here to coerce weight formatting to emit opaque TSIDs 
+        // on the LHS (e.g. `0` instead of `tsid0/[0]`) while keeping meaningful LLM tokens on the RHS.
+        let tsid_names: BTreeMap<u32, String> = BTreeMap::new();
         let token_names: BTreeMap<u32, String> = self
             .vocab_entries
             .iter()

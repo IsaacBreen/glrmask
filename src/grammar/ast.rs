@@ -19,7 +19,7 @@ pub enum GrammarExpr {
     Repeat(Box<GrammarExpr>),
     RepeatOne(Box<GrammarExpr>),
     Literal(Vec<u8>),
-    CharClass { def: String, negate: bool },
+    CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
     AnyByte,
 }
@@ -66,17 +66,18 @@ impl Lowerer {
         (name, id)
     }
 
-    fn terminal_id(&mut self, name: &str, pattern: &str) -> TerminalID {
-        if let Some(&id) = self.terminal_map.get(pattern) {
+    fn terminal_id(&mut self, name: &str, pattern: &str, utf8: bool) -> TerminalID {
+        let key = format!("{}:{}", pattern, utf8);
+        if let Some(&id) = self.terminal_map.get(&key) {
             return id;
         }
         let id = self.terminals.len() as TerminalID;
-        self.terminal_map.insert(pattern.to_string(), id);
+        self.terminal_map.insert(key, id);
         // Decide variant: if the pattern is the same as the escaped literal of
         // the name bytes, store as Literal; otherwise store as Pattern.
         let name_bytes = name.as_bytes();
         let escaped: String = name_bytes.iter().map(|&b| regex_escape_byte(b)).collect();
-        if escaped == pattern {
+        if escaped == pattern && !utf8 {
             self.terminals.push(Terminal::Literal {
                 id,
                 bytes: name_bytes.to_vec(),
@@ -85,6 +86,7 @@ impl Lowerer {
             self.terminals.push(Terminal::Pattern {
                 id,
                 pattern: pattern.to_string(),
+                utf8,
             });
         }
         id
@@ -140,21 +142,22 @@ impl Lowerer {
             GrammarExpr::Ref(name) => Symbol::Nonterminal(self.nt_id(name)),
             GrammarExpr::Literal(bytes) => {
                 let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
-                Symbol::Terminal(self.terminal_id(&String::from_utf8_lossy(bytes), &pattern))
+                Symbol::Terminal(self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false))
             }
-            GrammarExpr::CharClass { def, negate } => {
+            GrammarExpr::CharClass { def, negate, utf8 } => {
                 let pattern = if *negate {
                     format!("[^{def}]")
                 } else {
                     format!("[{def}]")
                 };
-                Symbol::Terminal(self.terminal_id(&pattern, &pattern))
+                Symbol::Terminal(self.terminal_id(&pattern, &pattern, *utf8))
             }
             GrammarExpr::RawRegex(pattern) => {
-                Symbol::Terminal(self.terminal_id(pattern, pattern))
+                // assume utf8 true for raw regex from lark/ebnf
+                Symbol::Terminal(self.terminal_id(pattern, pattern, true))
             }
             GrammarExpr::AnyByte => {
-                Symbol::Terminal(self.terminal_id(".", "."))
+                Symbol::Terminal(self.terminal_id(".", ".", false))
             }
             GrammarExpr::Sequence(_)
             | GrammarExpr::Choice(_)
@@ -192,7 +195,7 @@ fn compile_to_regex(
         GrammarExpr::Repeat(inner) => format!("(?:{})*", compile_to_regex(inner, terminal_patterns)?),
         GrammarExpr::RepeatOne(inner) => format!("(?:{})+", compile_to_regex(inner, terminal_patterns)?),
         GrammarExpr::Literal(bytes) => bytes.iter().map(|&b| regex_escape_byte(b)).collect(),
-        GrammarExpr::CharClass { def, negate } => {
+        GrammarExpr::CharClass { def, negate, .. } => {
             if *negate { format!("[^{def}]") } else { format!("[{def}]") }
         }
         GrammarExpr::RawRegex(pattern) => pattern.clone(),

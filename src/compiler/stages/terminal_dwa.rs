@@ -863,6 +863,7 @@ mod tests {
                 Terminal::Pattern {
                     id: 1,
                     pattern: " +".to_string(),
+                    utf8: true,
                 },
                 Terminal::Literal {
                     id: 2,

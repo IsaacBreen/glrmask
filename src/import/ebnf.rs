@@ -323,7 +323,7 @@ impl Parser {
         match self.advance() {
             Some(Token::Ident(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(literal)) => Ok(GrammarExpr::Literal(literal.into_bytes())),
-            Some(Token::CharClass { def, negate }) => Ok(GrammarExpr::CharClass { def, negate }),
+            Some(Token::CharClass { def, negate }) => Ok(GrammarExpr::CharClass { def, negate, utf8: true }),
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
             Some(Token::LParen) => {
                 let expr = self.parse_alternatives()?;
