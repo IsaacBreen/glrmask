@@ -7,9 +7,10 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
-pub struct Weight(pub RangeMapBlaze<u32, RangeSetBlaze<u32>>);
+pub struct Weight(pub RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WeightSerdeEntry {
@@ -25,6 +26,10 @@ struct WeightSerde {
 
 fn sentinel_token_set() -> RangeSetBlaze<u32> {
     std::iter::once(WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL).collect()
+}
+
+fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> Arc<RangeSetBlaze<u32>> {
+    Arc::new(tokens)
 }
 
 fn rangeset_from_ranges<I>(ranges: I) -> RangeSetBlaze<u32>
@@ -78,13 +83,13 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
     let mut current_end = 0u32;
     let mut current_tokens = RangeSetBlaze::new();
 
-    let mut flush = |map: &mut RangeMapBlaze<u32, RangeSetBlaze<u32>>,
+    let mut flush = |map: &mut RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>>,
                      current_start: &mut Option<u32>,
                      current_end: &mut u32,
                      current_tokens: &mut RangeSetBlaze<u32>| {
         if let Some(start) = *current_start {
             let tokens = std::mem::replace(current_tokens, RangeSetBlaze::new());
-            map.extend_simple(std::iter::once((start..=*current_end, tokens)));
+            map.extend_simple(std::iter::once((start..=*current_end, shared_rangeset(tokens))));
         }
         *current_start = None;
     };
@@ -114,7 +119,7 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
 struct WeightRangeEntry {
     start: u32,
     end: u32,
-    tokens: RangeSetBlaze<u32>,
+    tokens: Arc<RangeSetBlaze<u32>>,
 }
 
 fn compact_entries(weight: &Weight) -> Vec<WeightRangeEntry> {
@@ -124,7 +129,7 @@ fn compact_entries(weight: &Weight) -> Vec<WeightRangeEntry> {
         .map(|(range, tokens)| WeightRangeEntry {
             start: *range.start(),
             end: *range.end(),
-            tokens: tokens.clone(),
+            tokens: Arc::clone(tokens),
         })
         .collect()
 }
@@ -144,7 +149,7 @@ fn active_tokens<'a>(
     entries: &'a [WeightRangeEntry],
     index: &mut usize,
     start: u32,
-) -> Option<&'a RangeSetBlaze<u32>> {
+) -> Option<&'a Arc<RangeSetBlaze<u32>>> {
     while *index < entries.len() && entries[*index].end < start {
         *index += 1;
     }
@@ -154,13 +159,13 @@ fn active_tokens<'a>(
 }
 
 fn push_compact_range(
-    map: &mut RangeMapBlaze<u32, RangeSetBlaze<u32>>,
+    map: &mut RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>>,
     pending_start: &mut Option<u32>,
     pending_end: &mut u32,
-    pending_tokens: &mut RangeSetBlaze<u32>,
+    pending_tokens: &mut Arc<RangeSetBlaze<u32>>,
     start: u32,
     end: u32,
-    tokens: RangeSetBlaze<u32>,
+    tokens: Arc<RangeSetBlaze<u32>>,
 ) {
     match *pending_start {
         Some(existing_start)
@@ -179,13 +184,13 @@ fn push_compact_range(
 }
 
 fn flush_compact_range(
-    map: &mut RangeMapBlaze<u32, RangeSetBlaze<u32>>,
+    map: &mut RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>>,
     pending_start: &mut Option<u32>,
     pending_end: &mut u32,
-    pending_tokens: &mut RangeSetBlaze<u32>,
+    pending_tokens: &mut Arc<RangeSetBlaze<u32>>,
 ) {
     if let Some(start) = *pending_start {
-        let tokens = std::mem::replace(pending_tokens, RangeSetBlaze::new());
+        let tokens = std::mem::replace(pending_tokens, shared_rangeset(RangeSetBlaze::new()));
         map.extend_simple(std::iter::once((start..=*pending_end, tokens)));
         *pending_start = None;
     }
@@ -193,7 +198,10 @@ fn flush_compact_range(
 
 fn combine_compact_entries<F>(left: &Weight, right: &Weight, mut combine: F) -> Weight
 where
-    F: FnMut(Option<&RangeSetBlaze<u32>>, Option<&RangeSetBlaze<u32>>) -> RangeSetBlaze<u32>,
+    F: FnMut(
+        Option<&Arc<RangeSetBlaze<u32>>>,
+        Option<&Arc<RangeSetBlaze<u32>>>,
+    ) -> Option<Arc<RangeSetBlaze<u32>>>,
 {
     let left_entries = compact_entries(left);
     let right_entries = compact_entries(right);
@@ -207,27 +215,26 @@ where
     let mut map = RangeMapBlaze::new();
     let mut pending_start = None;
     let mut pending_end = 0u32;
-    let mut pending_tokens = RangeSetBlaze::new();
+    let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
 
     for window in boundaries.windows(2) {
         let start = window[0] as u32;
         let end = (window[1] - 1) as u32;
         let left_tokens = active_tokens(&left_entries, &mut left_index, start);
         let right_tokens = active_tokens(&right_entries, &mut right_index, start);
-        let tokens = combine(left_tokens, right_tokens);
-        if tokens.is_empty() {
+        let Some(tokens) = combine(left_tokens, right_tokens) else {
             flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-        } else {
-            push_compact_range(
-                &mut map,
-                &mut pending_start,
-                &mut pending_end,
-                &mut pending_tokens,
-                start,
-                end,
-                tokens,
-            );
-        }
+            continue;
+        };
+        push_compact_range(
+            &mut map,
+            &mut pending_start,
+            &mut pending_end,
+            &mut pending_tokens,
+            start,
+            end,
+            tokens,
+        );
     }
 
     flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
@@ -238,7 +245,7 @@ fn range_map_entries(weight: &Weight) -> Vec<(std::ops::RangeInclusive<u32>, Ran
     weight
         .0
         .range_values()
-        .map(|(range, tokens)| (range, tokens.clone()))
+    .map(|(range, tokens)| (range, tokens.as_ref().clone()))
         .collect()
 }
 
@@ -249,7 +256,10 @@ impl Weight {
 
     pub fn all() -> Self {
         let mut map = RangeMapBlaze::new();
-        map.extend_simple(std::iter::once((WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL, sentinel_token_set())));
+        map.extend_simple(std::iter::once((
+            WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL,
+            shared_rangeset(sentinel_token_set()),
+        )));
         Self(map)
     }
 
@@ -298,7 +308,7 @@ impl Weight {
         }
         let mut out = RangeSetBlaze::new();
         for (_, tokens) in self.0.range_values() {
-            out = out | tokens.clone();
+            out = out | tokens.as_ref().clone();
         }
         out
     }
@@ -322,7 +332,7 @@ impl Weight {
     pub fn estimated_size_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.num_ranges()
-                * (std::mem::size_of::<u32>() + std::mem::size_of::<RangeSetBlaze<u32>>())
+                * (std::mem::size_of::<u32>() + std::mem::size_of::<Arc<RangeSetBlaze<u32>>>())
     }
 
     pub fn union(&self, other: &Self) -> Self {
@@ -336,9 +346,15 @@ impl Weight {
             return self.clone();
         }
         combine_compact_entries(self, other, |left, right| match (left, right) {
-            (Some(left_tokens), Some(right_tokens)) => left_tokens.clone() | right_tokens.clone(),
-            (Some(tokens), None) | (None, Some(tokens)) => tokens.clone(),
-            (None, None) => RangeSetBlaze::new(),
+            (Some(left_tokens), Some(right_tokens)) => {
+                if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
+                    Some(Arc::clone(left_tokens))
+                } else {
+                    Some(shared_rangeset(left_tokens.as_ref().clone() | right_tokens.as_ref().clone()))
+                }
+            }
+            (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
+            (None, None) => None,
         })
     }
 
@@ -353,8 +369,15 @@ impl Weight {
             return self.clone();
         }
         combine_compact_entries(self, other, |left, right| match (left, right) {
-            (Some(left_tokens), Some(right_tokens)) => left_tokens.clone() & right_tokens.clone(),
-            _ => RangeSetBlaze::new(),
+            (Some(left_tokens), Some(right_tokens)) => {
+                if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
+                    Some(Arc::clone(left_tokens))
+                } else {
+                    let tokens = left_tokens.as_ref().clone() & right_tokens.as_ref().clone();
+                    (!tokens.is_empty()).then(|| shared_rangeset(tokens))
+                }
+            }
+            _ => None,
         })
     }
 
@@ -373,9 +396,16 @@ impl Weight {
             return Self::all();
         }
         combine_compact_entries(self, other, |left, right| match (left, right) {
-            (Some(left_tokens), Some(right_tokens)) => left_tokens.clone() - right_tokens.clone(),
-            (Some(left_tokens), None) => left_tokens.clone(),
-            _ => RangeSetBlaze::new(),
+            (Some(left_tokens), Some(right_tokens)) => {
+                if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
+                    None
+                } else {
+                    let tokens = left_tokens.as_ref().clone() - right_tokens.as_ref().clone();
+                    (!tokens.is_empty()).then(|| shared_rangeset(tokens))
+                }
+            }
+            (Some(left_tokens), None) => Some(Arc::clone(left_tokens)),
+            _ => None,
         })
     }
 
@@ -413,7 +443,10 @@ impl Weight {
         if self.is_full() {
             return sentinel_token_set();
         }
-        self.0.get(tsid).cloned().unwrap_or_else(RangeSetBlaze::new)
+        self.0
+            .get(tsid)
+            .map(|tokens| tokens.as_ref().clone())
+            .unwrap_or_else(RangeSetBlaze::new)
     }
 
     pub fn is_disjoint(&self, other: &Self) -> bool {
@@ -431,7 +464,7 @@ impl Weight {
         let mut out = BTreeMap::new();
         for (range, tokens) in self.0.range_values() {
             for tsid in range {
-                out.insert(tsid, tokens.clone());
+                out.insert(tsid, tokens.as_ref().clone());
             }
         }
         out
@@ -451,7 +484,7 @@ impl Weight {
                 .range_values()
                 .map(|(range, tokens)| WeightSerdeEntry {
                     tsid: [*range.start(), *range.end()],
-                    tokens: rangeset_to_vec(tokens),
+                    tokens: rangeset_to_vec(tokens.as_ref()),
                 })
                 .collect(),
         }
@@ -497,7 +530,7 @@ impl std::fmt::Display for Weight {
                 } else {
                     format!("{}..={}", range.start(), range.end())
                 };
-                format!("{tsid}→{}", rangeset_to_string(tokens))
+                format!("{tsid}→{}", rangeset_to_string(tokens.as_ref()))
             })
             .collect();
         write!(f, "{}", parts.join("; "))
@@ -557,7 +590,10 @@ impl std::fmt::Display for WeightDisplayWithNames<'_> {
                 } else {
                     format!("{}..={}", range.start(), range.end())
                 };
-                format!("{tsid}→{}", rangeset_to_string_with_names(tokens, self.token_names))
+                format!(
+                    "{tsid}→{}",
+                    rangeset_to_string_with_names(tokens.as_ref(), self.token_names)
+                )
             })
             .collect();
         write!(f, "{}", parts.join("; "))
