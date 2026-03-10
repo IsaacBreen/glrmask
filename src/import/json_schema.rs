@@ -392,6 +392,7 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     Ok(NamedGrammar {
         rules: ctx.rules,
         start: "start".into(),
+        terminals: HashSet::new(),
     })
 }
 

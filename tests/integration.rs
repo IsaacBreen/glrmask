@@ -210,7 +210,7 @@ fn test_lark_terminal_convention_rejects_parser_refs_inside_terminals() {
     let err = Constraint::from_lark("start: WORD\nitem: 'a'\nWORD: item", &vocab)
         .expect_err("invalid terminal/parser mixing should be rejected");
     assert!(
-        err.to_string().contains("terminal rule cannot reference parser rule item"),
+        err.to_string().contains("references nonterminal item"),
         "unexpected error: {err}"
     );
 }

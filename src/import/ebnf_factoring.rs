@@ -22,6 +22,7 @@ pub(crate) fn factor_named_grammar(grammar: NamedGrammar) -> NamedGrammar {
     NamedGrammar {
         rules: factor_grammar_rules(grammar.rules),
         start: grammar.start,
+        terminals: grammar.terminals,
     }
 }
 

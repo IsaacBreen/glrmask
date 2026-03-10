@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use std::sync::Arc;
 
@@ -36,6 +36,9 @@ pub enum GrammarExpr {
 pub struct NamedGrammar {
     pub rules: Vec<(String, GrammarExpr)>,
     pub start: String,
+    /// Rule names that are terminal definitions (as opposed to nonterminals).
+    /// Set explicitly by the importer — not derived from naming conventions.
+    pub terminals: HashSet<String>,
 }
 
 struct Lowerer {
@@ -336,6 +339,7 @@ mod tests {
                 ]),
             )],
             start: "start".into(),
+            terminals: HashSet::new(),
         };
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0);
@@ -354,6 +358,7 @@ mod tests {
                 ]),
             )],
             start: "start".into(),
+            terminals: HashSet::new(),
         };
         let gdef = lower(&g).unwrap();
         
@@ -369,6 +374,7 @@ mod tests {
                 GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
             )],
             start: "start".into(),
+            terminals: HashSet::new(),
         };
         let gdef = lower(&g).unwrap();
         
@@ -388,6 +394,7 @@ mod tests {
                 ]),
             )],
             start: "start".into(),
+            terminals: HashSet::new(),
         };
         let gdef = lower(&g).unwrap();
 
@@ -426,6 +433,7 @@ mod tests {
                 GrammarExpr::RepeatOne(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
             )],
             start: "start".into(),
+            terminals: HashSet::new(),
         };
         let gdef = lower(&g).unwrap();
         
@@ -452,6 +460,7 @@ mod tests {
                 ),
             ],
             start: "start".into(),
+            terminals: HashSet::new(),
         };
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0); 
@@ -475,6 +484,7 @@ mod tests {
                 ),
             ],
             start: "start".into(),
+            terminals: HashSet::new(),
         };
 
         let gdef = lower(&g).unwrap();

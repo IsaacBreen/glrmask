@@ -3,6 +3,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use std::collections::HashSet;
+
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ebnf_factoring::factor_named_grammar;
@@ -261,7 +263,7 @@ impl Parser {
             .first()
             .map(|(name, _)| name.clone())
             .ok_or_else(|| GlrMaskError::GrammarParse("empty grammar".into()))?;
-        Ok(NamedGrammar { rules, start })
+        Ok(NamedGrammar { rules, start, terminals: HashSet::new() })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {

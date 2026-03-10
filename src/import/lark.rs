@@ -510,18 +510,56 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
     use crate::grammar::ast::compile_to_regex;
 
     let rule_map: HashMap<String, GrammarExpr> = grammar.rules.iter().cloned().collect();
-    let terminal_names: HashSet<String> = grammar
-        .rules
-        .iter()
-        .map(|(name, _)| name.clone())
-        .filter(|name| is_lark_terminal_name(name))
-        .collect();
+    let terminal_names: &HashSet<String> = &grammar.terminals;
     let parser_names: HashSet<String> = grammar
         .rules
         .iter()
         .map(|(name, _)| name.clone())
         .filter(|name| !terminal_names.contains(name))
         .collect();
+
+    // Validate invariant: inside terminal definitions, every Ref must
+    // resolve to another terminal (not a nonterminal, and not missing).
+    fn validate_terminal_refs(
+        expr: &GrammarExpr,
+        rule_name: &str,
+        terminal_names: &HashSet<String>,
+        rule_map: &HashMap<String, GrammarExpr>,
+    ) -> Result<(), GlrMaskError> {
+        match expr {
+            GrammarExpr::Ref(target) => {
+                if !rule_map.contains_key(target) {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "terminal rule {rule_name} references undefined rule {target}"
+                    )));
+                }
+                if !terminal_names.contains(target) {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "terminal rule {rule_name} references nonterminal {target}"
+                    )));
+                }
+                Ok(())
+            }
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                for p in parts {
+                    validate_terminal_refs(p, rule_name, terminal_names, rule_map)?;
+                }
+                Ok(())
+            }
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner) => {
+                validate_terminal_refs(inner, rule_name, terminal_names, rule_map)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    for (name, expr) in &grammar.rules {
+        if terminal_names.contains(name) {
+            validate_terminal_refs(expr, name, terminal_names, &rule_map)?;
+        }
+    }
 
     let mut memo = HashMap::new();
     let mut visiting = HashSet::new();
@@ -650,13 +688,13 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         }
         // Build (or retrieve cached) shared Expr tree.
         compile_terminal_to_shared_expr(
-            name, &rule_map, &terminal_names, &mut expr_cache, &mut expr_visiting,
+            name, &rule_map, terminal_names, &mut expr_cache, &mut expr_visiting,
         )?;
         // Also compute regex string for deduplication.
         let expanded = expand_lark_terminal_rule(
             name,
             &rule_map,
-            &terminal_names,
+            terminal_names,
             &parser_names,
             &mut memo,
             &mut visiting,
@@ -677,7 +715,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
             expr,
             false,
             &rule_map,
-            &terminal_names,
+            terminal_names,
             &parser_names,
             &mut memo,
             &mut visiting,
@@ -689,14 +727,14 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         let start_expr = expand_lark_terminal_rule(
             &grammar.start,
             &rule_map,
-            &terminal_names,
+            terminal_names,
             &parser_names,
             &mut memo,
             &mut visiting,
         )?;
         let regex = compile_to_regex(&start_expr, &empty_patterns)?;
         let arc = compile_terminal_to_shared_expr(
-            &grammar.start, &rule_map, &terminal_names, &mut expr_cache, &mut expr_visiting,
+            &grammar.start, &rule_map, terminal_names, &mut expr_cache, &mut expr_visiting,
         )?;
         let ct = GrammarExpr::CompiledTerminal { pattern: regex, expr: arc };
         if let Some(existing) = rules.iter_mut().find(|(name, _)| name == &output_start) {
@@ -709,6 +747,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
     Ok(NamedGrammar {
         rules,
         start: output_start,
+        terminals: grammar.terminals,
     })
 }
 
@@ -795,7 +834,12 @@ impl Parser {
         } else {
             rules[0].0.clone()
         };
-        Ok(NamedGrammar { rules, start })
+        let terminals: HashSet<String> = rules
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| is_lark_terminal_name(name))
+            .collect();
+        Ok(NamedGrammar { rules, start, terminals })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
@@ -1110,7 +1154,7 @@ mod tests {
         let err = parse_lark_to_named("start: WORD\nitem: 'a'\nWORD: item")
             .expect_err("terminal rule referencing parser rule should fail");
         assert!(
-            err.to_string().contains("terminal rule cannot reference parser rule item"),
+            err.to_string().contains("references nonterminal item"),
             "unexpected error: {err}"
         );
     }

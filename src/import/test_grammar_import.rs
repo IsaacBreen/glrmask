@@ -151,6 +151,12 @@ fn test_lark_terminal_rules_follow_capitalization_convention() {
     }
     assert_eq!(named.rules[2].0, "start");
     assert_eq!(named.rules[2].1, GrammarExpr::Ref("WORD".into()));
+
+    // The terminals field explicitly lists terminal rule names.
+    assert!(named.terminals.contains("WORD"));
+    assert!(named.terminals.contains("LETTER"));
+    assert!(!named.terminals.contains("start"));
+    assert_eq!(named.terminals.len(), 2);
 }
 
 #[test]
@@ -158,7 +164,17 @@ fn test_lark_terminal_rule_rejects_parser_rule_reference() {
     let err = parse_lark_to_named("start: WORD\nitem: 'a'\nWORD: item")
         .expect_err("uppercase terminal rules should not reference lowercase parser rules");
     assert!(
-        err.to_string().contains("terminal rule cannot reference parser rule item"),
+        err.to_string().contains("references nonterminal item"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_lark_terminal_rule_rejects_undefined_reference() {
+    let err = parse_lark_to_named("start: WORD\nWORD: MISSING")
+        .expect_err("terminal referencing undefined rule should fail");
+    assert!(
+        err.to_string().contains("references undefined rule MISSING"),
         "unexpected error: {err}"
     );
 }
