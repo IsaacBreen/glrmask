@@ -696,6 +696,20 @@ impl Weight {
         Some((entry.start, entry.end, entry.tokens))
     }
 
+    pub(crate) fn intersect_single_parts(
+        &self,
+        start: u32,
+        end: u32,
+        tokens: &Arc<RangeSetBlaze<u32>>,
+    ) -> Self {
+        let single = WeightRangeEntry {
+            start,
+            end,
+            tokens: Arc::clone(tokens),
+        };
+        intersect_single_entry_with_weight(&single, self)
+    }
+
     pub(crate) fn for_each_intersection_tokens_with_single<F>(
         &self,
         start: u32,
