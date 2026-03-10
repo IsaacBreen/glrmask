@@ -66,7 +66,53 @@ impl Constraint {
     }
 
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        bincode::deserialize(bytes)
-            .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))
+        let mut constraint: Self = bincode::deserialize(bytes)
+            .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+        if constraint.possible_matches.is_empty() {
+            constraint.rebuild_possible_matches();
+        }
+        Ok(constraint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::runtime::Constraint;
+    use crate::Vocab;
+
+    #[test]
+    fn test_save_load_preserves_internal_possible_matches() {
+        let vocab = Vocab::new(
+            vec![
+                (10, b"a".to_vec()),
+                (20, b"a".to_vec()),
+                (30, b"b".to_vec()),
+            ],
+            None,
+        );
+        let constraint = Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
+        let saved = constraint.save();
+        let loaded = Constraint::load(&saved).unwrap();
+
+        let tokenizer_state = loaded.tokenizer.initial_state();
+        let internal_token = loaded.internal_token_for_original(10);
+
+        let internal_matches: std::collections::BTreeSet<u32> = loaded
+            .possible_matches_for_state_internal(tokenizer_state)
+            .values()
+            .flat_map(|token_ids| token_ids.iter())
+            .collect();
+        assert_eq!(internal_matches, std::collections::BTreeSet::from([internal_token]));
+
+        let mask = loaded.start().mask();
+        let word_10 = 10usize / 32;
+        let bit_10 = 10usize % 32;
+        let word_20 = 20usize / 32;
+        let bit_20 = 20usize % 32;
+        let word_30 = 30usize / 32;
+        let bit_30 = 30usize % 32;
+        assert_ne!(mask[word_10] & (1u32 << bit_10), 0);
+        assert_ne!(mask[word_20] & (1u32 << bit_20), 0);
+        assert_eq!(mask[word_30] & (1u32 << bit_30), 0);
     }
 }

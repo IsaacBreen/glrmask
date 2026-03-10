@@ -31,8 +31,6 @@ pub struct Constraint {
 
     #[serde(with = "crate::runtime::serde::serde_btmap_rsb")]
     pub(crate) possible_matches: PossibleMatchesByState,
-    #[serde(skip, default)]
-    pub(crate) possible_matches_lazy: std::sync::OnceLock<PossibleMatchesByState>,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
     #[serde(default)]
@@ -41,6 +39,8 @@ pub struct Constraint {
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
     pub(crate) eos_token_id: Option<u32>,
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
+    #[serde(default)]
+    pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
 }
 
 impl Clone for Constraint {
@@ -51,26 +51,33 @@ impl Clone for Constraint {
             tokenizer: self.tokenizer.clone(),
             ignore_terminal: self.ignore_terminal,
             possible_matches: self.possible_matches.clone(),
-            possible_matches_lazy: std::sync::OnceLock::new(),
             state_to_internal_tsid: self.state_to_internal_tsid.clone(),
             internal_tsid_to_states: self.internal_tsid_to_states.clone(),
             original_token_to_internal: self.original_token_to_internal.clone(),
             internal_token_to_tokens: self.internal_token_to_tokens.clone(),
             eos_token_id: self.eos_token_id,
             token_bytes: self.token_bytes.clone(),
+            internal_token_bytes: self.internal_token_bytes.clone(),
         }
     }
 }
 
 impl Constraint {
+    fn possible_matches_use_internal_tokens(&self) -> bool {
+        !self.internal_token_bytes.is_empty()
+    }
+
     fn all_possible_matches(&self) -> &PossibleMatchesByState {
-        if !self.possible_matches.is_empty() {
-            &self.possible_matches
+        &self.possible_matches
+    }
+
+    pub(crate) fn rebuild_possible_matches(&mut self) {
+        let token_bytes = if self.possible_matches_use_internal_tokens() {
+            &self.internal_token_bytes
         } else {
-            self.possible_matches_lazy.get_or_init(|| {
-                build_possible_matches_from_token_bytes(&self.tokenizer, &self.token_bytes)
-            })
-        }
+            &self.token_bytes
+        };
+        self.possible_matches = build_possible_matches_from_token_bytes(&self.tokenizer, token_bytes);
     }
 
     pub fn start(&self) -> ConstraintState<'_> {
@@ -101,10 +108,20 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        self.all_possible_matches()
+        let possible_matches = self.all_possible_matches()
             .get(&tokenizer_state)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.possible_matches_use_internal_tokens() {
+            possible_matches
+                .into_iter()
+                .map(|(terminal, internal_tokens)| {
+                    (terminal, self.expand_internal_token_set(&internal_tokens))
+                })
+                .collect()
+        } else {
+            possible_matches
+        }
     }
 
     pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: u32) -> u32 {
@@ -171,10 +188,19 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        self.possible_matches_for_state(tokenizer_state)
-            .into_iter()
-            .map(|(terminal, token_ids)| (terminal, self.internalize_token_set(&token_ids)))
-            .collect()
+        let possible_matches = self
+            .all_possible_matches()
+            .get(&tokenizer_state)
+            .cloned()
+            .unwrap_or_default();
+        if self.possible_matches_use_internal_tokens() {
+            possible_matches
+        } else {
+            possible_matches
+                .into_iter()
+                .map(|(terminal, token_ids)| (terminal, self.internalize_token_set(&token_ids)))
+                .collect()
+        }
     }
 
     pub(crate) fn possible_matches_for_internal_tsid(

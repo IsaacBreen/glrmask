@@ -8,9 +8,8 @@ use std::rc::Rc;
 
 use range_set_blaze::RangeSetBlaze;
 
-use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::grammar::model::{GrammarDef, TerminalID};
+use crate::compiler::grammar::model::TerminalID;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
 pub(crate) type PossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
@@ -104,15 +103,10 @@ impl<'a> PossibleMatchesComputer<'a> {
 }
 
 pub(crate) fn build_possible_matches_by_state(
-    grammar: &GrammarDef,
     tokenizer: &Tokenizer,
-    vocab: &Vocab,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
 ) -> PossibleMatchesByState {
-    let _ = grammar;
-    build_possible_matches_from_token_bytes(
-        tokenizer,
-        &vocab.entries,
-    )
+    build_possible_matches_from_token_bytes(tokenizer, token_bytes)
 }
 
 pub(crate) fn build_possible_matches_from_token_bytes(

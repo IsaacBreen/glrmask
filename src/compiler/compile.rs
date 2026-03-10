@@ -3,6 +3,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use std::collections::BTreeMap;
+
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::regex::parse_regex;
@@ -81,6 +83,20 @@ fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
         index += 1;
     }
     out
+}
+
+fn build_internal_token_bytes(vocab: &Vocab, id_map: &InternalIdMap) -> BTreeMap<u32, Vec<u8>> {
+    id_map
+        .vocab_tokens
+        .internal_to_originals
+        .iter()
+        .enumerate()
+        .filter_map(|(internal_token_id, original_ids)| {
+            let representative = *original_ids.first()?;
+            let bytes = vocab.entries.get(&representative)?.clone();
+            Some((internal_token_id as u32, bytes))
+        })
+        .collect()
 }
 
 // ── Nullable terminal expansion ─────────────────────────────────────────────
@@ -431,14 +447,15 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let build_internal_id_map_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "build_internal_id_map", phase_started_at);
 
-    if profile_enabled {
-        eprintln!("[glrmask/profile][compile] possible_matches_strategy=lazy");
-    }
-
     let phase_started_at = std::time::Instant::now();
     let token_bytes = vocab.entries.clone();
+    let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     let collect_token_bytes_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "collect_token_bytes", phase_started_at);
+
+    let phase_started_at = std::time::Instant::now();
+    let possible_matches = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
+    log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
 
     let (terminal_dwa, terminal_build) = build_terminal_dwa_with_report(
         &glr_grammar,
@@ -503,14 +520,14 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         table,
         tokenizer,
         ignore_terminal: normalized.ignore_terminal,
-        possible_matches: std::collections::BTreeMap::new(),
-        possible_matches_lazy: std::sync::OnceLock::new(),
+        possible_matches,
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
         original_token_to_internal: id_map.vocab_tokens.original_to_internal.clone(),
         internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals.clone(),
         eos_token_id: vocab.eos_token_id,
         token_bytes,
+        internal_token_bytes,
     }
 }
 
@@ -527,7 +544,8 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     let table = GLRTable::build(&glr_grammar);
     let id_map = InternalIdMap::build(&tokenizer, vocab);
 
-    let possible_matches_by_state = build_possible_matches_by_state(&normalized, &tokenizer, vocab);
+    let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
+    let possible_matches_by_state = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
 
     let characterizations = characterize_terminals(&table, &glr_grammar);
     let templates = Templates::from_characterizations(&characterizations);
@@ -553,13 +571,13 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         tokenizer: tokenizer.clone(),
         ignore_terminal: normalized.ignore_terminal,
         possible_matches: possible_matches_by_state.clone(),
-        possible_matches_lazy: std::sync::OnceLock::new(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
         original_token_to_internal: id_map.vocab_tokens.original_to_internal.clone(),
         internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals.clone(),
         eos_token_id: vocab.eos_token_id,
         token_bytes: token_bytes.clone(),
+        internal_token_bytes,
     };
 
     let debug = CompileDebug::from_parts(
@@ -698,6 +716,49 @@ mod tests {
         assert!(mask_has_token(&mask, 10));
         assert!(mask_has_token(&mask, 20));
         assert!(!mask_has_token(&mask, 30));
+    }
+
+    #[test]
+    fn test_compile_duplicate_token_bytes_collapse_in_internal_possible_matches() {
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            }],
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vec![
+                (10, b"a".to_vec()),
+                (20, b"a".to_vec()),
+                (30, b"b".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let tokenizer_state = constraint.tokenizer.initial_state();
+        let internal_token = constraint.internal_token_for_original(10);
+        assert_eq!(internal_token, constraint.internal_token_for_original(20));
+
+        let internal_matches: std::collections::BTreeSet<u32> = constraint
+            .possible_matches_for_state_internal(tokenizer_state)
+            .values()
+            .flat_map(|token_ids| token_ids.iter())
+            .collect();
+        assert_eq!(internal_matches, std::collections::BTreeSet::from([internal_token]));
+
+        let original_matches: std::collections::BTreeSet<u32> = constraint
+            .possible_matches_for_state(tokenizer_state)
+            .values()
+            .flat_map(|token_ids| token_ids.iter())
+            .collect();
+        assert_eq!(original_matches, std::collections::BTreeSet::from([10, 20]));
     }
 
     #[test]
