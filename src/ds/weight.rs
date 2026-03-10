@@ -330,6 +330,53 @@ fn range_map_entries(weight: &Weight) -> Vec<(std::ops::RangeInclusive<u32>, Ran
         .collect()
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WeightBuilder {
+    is_full: bool,
+    expanded: BTreeMap<u32, RangeSetBlaze<u32>>,
+}
+
+impl WeightBuilder {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn union_weight(&mut self, weight: &Weight) {
+        if self.is_full || weight.is_empty() {
+            return;
+        }
+        if weight.is_full() {
+            self.is_full = true;
+            self.expanded.clear();
+            return;
+        }
+
+        for (range, tokens) in weight.0.range_values() {
+            let tokens = tokens.as_ref().clone();
+            for tsid in range {
+                self.expanded
+                    .entry(tsid)
+                    .and_modify(|existing| *existing |= tokens.clone())
+                    .or_insert_with(|| tokens.clone());
+            }
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.is_full && self.expanded.is_empty()
+    }
+
+    pub(crate) fn build(self) -> Weight {
+        if self.is_full {
+            Weight::all()
+        } else if self.expanded.is_empty() {
+            Weight::empty()
+        } else {
+            compress_expanded(&self.expanded)
+        }
+    }
+}
+
 impl Weight {
     pub fn empty() -> Self {
         Self(RangeMapBlaze::new())
