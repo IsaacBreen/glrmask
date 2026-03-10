@@ -496,6 +496,19 @@ impl WeightBuilder {
 }
 
 impl Weight {
+    pub(crate) fn compact_entries(&self) -> Option<Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)>> {
+        if self.is_full() {
+            return None;
+        }
+
+        Some(
+            self.0
+                .range_values()
+                .map(|(range, tokens)| (*range.start(), *range.end(), Arc::clone(tokens)))
+                .collect(),
+        )
+    }
+
     pub fn empty() -> Self {
         Self(RangeMapBlaze::new())
     }

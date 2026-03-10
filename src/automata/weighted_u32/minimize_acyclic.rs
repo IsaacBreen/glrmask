@@ -14,6 +14,8 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::Weight;
@@ -350,6 +352,70 @@ fn build_incompatibility_graph(
     adj
 }
 
+fn overlapping_candidate_pairs(
+    candidates: &[usize],
+    needed: &[Weight],
+) -> Option<HashSet<(usize, usize)>> {
+    if candidates.len() < 100 {
+        return None;
+    }
+
+    let mut segments: Vec<(u32, u32, usize, Arc<range_set_blaze::RangeSetBlaze<u32>>)> = Vec::new();
+    for (idx, &candidate) in candidates.iter().enumerate() {
+        let compact_entries = needed[candidate].compact_entries()?;
+        for (start, end, tokens) in compact_entries {
+            segments.push((start, end, idx, tokens));
+        }
+    }
+
+    segments.sort_unstable_by_key(|(start, end, idx, _)| (*start, *end, *idx));
+
+    let mut overlap_pairs = HashSet::new();
+    let mut active: Vec<(u32, usize, Arc<range_set_blaze::RangeSetBlaze<u32>>)> = Vec::new();
+
+    for (start, end, idx, tokens) in segments {
+        active.retain(|(active_end, _, _)| *active_end >= start);
+
+        for (_, active_idx, active_tokens) in &active {
+            if *active_idx == idx {
+                continue;
+            }
+            if Arc::ptr_eq(active_tokens, &tokens) || !active_tokens.is_disjoint(tokens.as_ref()) {
+                let pair = if *active_idx < idx {
+                    (*active_idx, idx)
+                } else {
+                    (idx, *active_idx)
+                };
+                overlap_pairs.insert(pair);
+            }
+        }
+
+        active.push((end, idx, tokens));
+    }
+
+    Some(overlap_pairs)
+}
+
+fn build_incompatibility_graph_sparse(
+    dwa: &DWA,
+    candidates: &[usize],
+    needed: &[Weight],
+    old_to_new: &[u32],
+) -> Option<Vec<Vec<usize>>> {
+    let overlap_pairs = overlapping_candidate_pairs(candidates, needed)?;
+    let nc = candidates.len();
+    let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
+
+    for (i, j) in overlap_pairs {
+        if !are_compatible(candidates[i], candidates[j], dwa, needed, old_to_new) {
+            adj[i].push(j);
+            adj[j].push(i);
+        }
+    }
+
+    Some(adj)
+}
+
 /// Greedy graph coloring — O(V + E), good heuristic.
 fn greedy_coloring(adj: &[Vec<usize>]) -> Vec<usize> {
     let n = adj.len();
@@ -631,7 +697,8 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         }
 
         // Build incompatibility graph and color it
-        let adj = build_incompatibility_graph(&pushed, candidates, &needed, &old_to_new);
+        let adj = build_incompatibility_graph_sparse(&pushed, candidates, &needed, &old_to_new)
+            .unwrap_or_else(|| build_incompatibility_graph(&pushed, candidates, &needed, &old_to_new));
         let coloring = greedy_coloring(&adj);
 
         let base_new_id = new_states.len() as u32;
