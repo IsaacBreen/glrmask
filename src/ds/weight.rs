@@ -322,6 +322,46 @@ where
     Weight(map)
 }
 
+fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight) -> Weight {
+    let mut map = RangeMapBlaze::new();
+    let mut pending_start = None;
+    let mut pending_end = 0u32;
+    let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
+
+    for (range, other_tokens) in other.0.range_values() {
+        let start = single.start.max(*range.start());
+        let end = single.end.min(*range.end());
+        if start > end {
+            continue;
+        }
+
+        let tokens = if Arc::ptr_eq(&single.tokens, other_tokens)
+            || single.tokens.as_ref() == other_tokens.as_ref()
+        {
+            Arc::clone(&single.tokens)
+        } else {
+            let overlap = single.tokens.as_ref().clone() & other_tokens.as_ref().clone();
+            if overlap.is_empty() {
+                continue;
+            }
+            shared_rangeset(overlap)
+        };
+
+        push_compact_range(
+            &mut map,
+            &mut pending_start,
+            &mut pending_end,
+            &mut pending_tokens,
+            start,
+            end,
+            tokens,
+        );
+    }
+
+    flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
+    Weight(map)
+}
+
 fn range_map_entries(weight: &Weight) -> Vec<(std::ops::RangeInclusive<u32>, RangeSetBlaze<u32>)> {
     weight
         .0
@@ -549,6 +589,12 @@ impl Weight {
                 }
                 _ => None,
             });
+        }
+        if let Some(single) = single_compact_entry(self) {
+            return intersect_single_entry_with_weight(&single, other);
+        }
+        if let Some(single) = single_compact_entry(other) {
+            return intersect_single_entry_with_weight(&single, self);
         }
         combine_compact_entries(self, other, |left, right| match (left, right) {
             (Some(left_tokens), Some(right_tokens)) => {
