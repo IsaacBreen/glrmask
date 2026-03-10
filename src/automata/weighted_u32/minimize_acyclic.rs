@@ -387,6 +387,50 @@ fn greedy_coloring(adj: &[Vec<usize>]) -> Vec<usize> {
     colors
 }
 
+fn try_all_compatible_height_0_coloring(
+    candidates: &[usize],
+    dwa: &DWA,
+    needed: &[Weight],
+) -> Option<Vec<usize>> {
+    if candidates.len() <= 100 {
+        return None;
+    }
+    if !candidates
+        .iter()
+        .all(|&id| dwa.states[id].transitions.is_empty())
+    {
+        return None;
+    }
+
+    let mut witness_domain = Weight::empty();
+    let mut witness_final = Weight::empty();
+
+    for &candidate in candidates {
+        let needed_at_candidate = &needed[candidate];
+        let final_on_needed = dwa.states[candidate]
+            .final_weight
+            .as_ref()
+            .map(|weight| weight.intersection(needed_at_candidate))
+            .unwrap_or_else(Weight::empty);
+
+        if !witness_domain.is_empty() {
+            let overlap = witness_domain.intersection(needed_at_candidate);
+            if !overlap.is_empty() {
+                let witness_on_overlap = witness_final.intersection(&overlap);
+                let candidate_on_overlap = final_on_needed.intersection(&overlap);
+                if witness_on_overlap != candidate_on_overlap {
+                    return None;
+                }
+            }
+        }
+
+        witness_final = witness_final.union(&final_on_needed);
+        witness_domain = witness_domain.union(needed_at_candidate);
+    }
+
+    Some(vec![0; candidates.len()])
+}
+
 // ---------------------------------------------------------------------------
 // Phase 4: Merge + Reconstruct
 // ---------------------------------------------------------------------------
@@ -557,6 +601,32 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
         if candidates.is_empty() {
+            continue;
+        }
+
+        if let Some(coloring) = try_all_compatible_height_0_coloring(candidates, &pushed, &needed) {
+
+            let base_new_id = new_states.len() as u32;
+            let num_colors = 1usize;
+
+            for &candidate in candidates {
+                old_to_new[candidate] = base_new_id;
+            }
+
+            new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+
+            let (completed, builders) = new_states.split_at_mut(base_new_id as usize);
+            for &candidate in candidates {
+                merge_state_into_builder(
+                    candidate,
+                    0,
+                    &pushed,
+                    &needed,
+                    &old_to_new,
+                    completed,
+                    builders,
+                );
+            }
             continue;
         }
 
