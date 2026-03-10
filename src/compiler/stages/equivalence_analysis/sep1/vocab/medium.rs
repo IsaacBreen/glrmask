@@ -11,7 +11,7 @@
 //! uses self-loop detection for bulk assignment. Non-bulk tokens are
 //! processed in parallel with rayon.
 
-use super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
+use super::super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;

@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
 
-use super::state_equivalence_analysis_fast::{self as state_equivalence_analysis, StateEquivalenceResult};
-use super::vocab_equivalence_analysis_fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
+use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};
+use super::vocab::fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -198,8 +198,8 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             vocab_is_refinement(a, b) || vocab_is_refinement(b, a)
         }
 
-        // Cross-validate: fast version vs simple version
-        let simple_vocab_classes = super::vocab_equivalence_analysis_fast_simple::find_vocab_equivalence_classes_with_follow(
+        // Cross-validate: fast version vs trellis (slow) version
+        let trellis_vocab_classes = super::vocab::slow::find_vocab_equivalence_classes_with_follow(
             regex,
             tokens,
             &reduced_states,
@@ -207,16 +207,16 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             ever_allowed_by_group,
             group_to_class,
         );
-        if !vocab_is_comparable(&vocab_classes, &simple_vocab_classes) {
+        if !vocab_is_comparable(&vocab_classes, &trellis_vocab_classes) {
             panic!(
-                "Vocab equivalence mismatch (fast vs simple not comparable)!\nFast ({} classes): {:?}\nSimple ({} classes): {:?}",
+                "Vocab equivalence mismatch (fast vs trellis/slow not comparable)!\nFast ({} classes): {:?}\nTrellis ({} classes): {:?}",
                 vocab_classes.len(), vocab_classes,
-                simple_vocab_classes.len(), simple_vocab_classes
+                trellis_vocab_classes.len(), trellis_vocab_classes
             );
         }
 
-        // Cross-validate: flat version
-        let flat_vocab_classes = super::vocab_equivalence_analysis_flat::find_vocab_equivalence_classes_with_follow(
+        // Cross-validate: flat (medium) version
+        let flat_vocab_classes = super::vocab::medium::find_vocab_equivalence_classes_with_follow(
             regex,
             tokens,
             &reduced_states,
@@ -226,7 +226,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         );
         if !vocab_is_comparable(&vocab_classes, &flat_vocab_classes) {
             panic!(
-                "Vocab equivalence mismatch (simple vs flat not comparable)!\nSimple ({} classes): {:?}\nFlat ({} classes): {:?}",
+                "Vocab equivalence mismatch (fast vs flat/medium not comparable)!\nFast ({} classes): {:?}\nFlat ({} classes): {:?}",
                 vocab_classes.len(), vocab_classes,
                 flat_vocab_classes.len(), flat_vocab_classes
             );

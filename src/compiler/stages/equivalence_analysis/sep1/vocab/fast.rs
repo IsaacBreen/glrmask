@@ -13,7 +13,7 @@
 
 // Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
 
-use super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
+use super::super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;

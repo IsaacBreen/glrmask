@@ -20,7 +20,7 @@
 
 use std::collections::BTreeSet;
 use rayon::prelude::*;
-use super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
+use super::super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;

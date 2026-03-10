@@ -13,8 +13,6 @@
 
 pub mod compat;
 
-pub mod state_equivalence_analysis_fast;
-pub mod vocab_equivalence_analysis_fast;
-pub mod vocab_equivalence_analysis_fast_simple;
-pub mod vocab_equivalence_analysis_flat;
+pub mod state;
+pub mod vocab;
 pub mod combined_equivalence_analysis;
