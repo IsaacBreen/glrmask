@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
@@ -409,7 +409,13 @@ fn expand_lark_expr(
     Ok(match expr {
         GrammarExpr::Ref(name) => {
             if terminal_names.contains(name) {
-                expand_lark_terminal_rule(name, rule_map, terminal_names, parser_names, memo, visiting)?
+                if in_terminal_rule {
+                    // Inside a terminal definition, expand referenced terminal
+                    expand_lark_terminal_rule(name, rule_map, terminal_names, parser_names, memo, visiting)?
+                } else {
+                    // In a parser rule, keep the reference (resolved in lower())
+                    GrammarExpr::Ref(name.clone())
+                }
             } else if parser_names.contains(name) {
                 if in_terminal_rule {
                     return Err(GlrMaskError::GrammarParse(format!(
@@ -494,6 +500,8 @@ fn expand_lark_expr(
 }
 
 fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskError> {
+    use crate::grammar::ast::compile_to_regex;
+
     let rule_map: HashMap<String, GrammarExpr> = grammar.rules.iter().cloned().collect();
     let terminal_names: HashSet<String> = grammar
         .rules
@@ -519,6 +527,30 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         grammar.start.clone()
     };
 
+    let empty_patterns = BTreeMap::new();
+
+    // Step 1: Compile each Lark terminal rule to a single regex pattern.
+    // This preserves composite terminal definitions as meaningful terminal-
+    // level units instead of decomposing them into grammar structure.
+    for (name, _) in &grammar.rules {
+        if !terminal_names.contains(name) {
+            continue;
+        }
+        let expanded = expand_lark_terminal_rule(
+            name,
+            &rule_map,
+            &terminal_names,
+            &parser_names,
+            &mut memo,
+            &mut visiting,
+        )?;
+        let regex = compile_to_regex(&expanded, &empty_patterns)?;
+        rules.push((name.clone(), GrammarExpr::RawRegex(regex)));
+    }
+
+    // Step 2: Process parser rules.  Terminal references stay as Ref nodes
+    // (expand_lark_expr no longer inlines them) so lower() resolves them
+    // to the nonterminal wrappers created above.
     for (name, expr) in &grammar.rules {
         if terminal_names.contains(name) {
             continue;
@@ -544,10 +576,11 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
             &mut memo,
             &mut visiting,
         )?;
+        let regex = compile_to_regex(&start_expr, &empty_patterns)?;
         if let Some(existing) = rules.iter_mut().find(|(name, _)| name == &output_start) {
-            existing.1 = start_expr;
+            existing.1 = GrammarExpr::RawRegex(regex);
         } else {
-            rules.insert(0, (output_start.clone(), start_expr));
+            rules.insert(0, (output_start.clone(), GrammarExpr::RawRegex(regex)));
         }
     }
 
@@ -932,17 +965,17 @@ mod tests {
     }
 
     #[test]
-    fn test_lark_terminal_rules_are_inlined_by_convention() {
+    fn test_lark_terminal_rules_are_preserved_as_composite_units() {
         let named = parse_lark_to_named("start: WORD\nWORD: LETTER+\nLETTER: 'a' | 'b'").unwrap();
-        assert_eq!(named.rules.len(), 1);
-        assert_eq!(named.rules[0].0, "start");
-        assert_eq!(
-            named.rules[0].1,
-            GrammarExpr::RepeatOne(Box::new(GrammarExpr::Choice(vec![
-                GrammarExpr::Literal(b"a".to_vec()),
-                GrammarExpr::Literal(b"b".to_vec()),
-            ])))
-        );
+        // Terminal rules are now compiled to single regex patterns and kept as
+        // named rules; parser rules reference them as Ref nodes.
+        assert_eq!(named.rules.len(), 3);
+        assert_eq!(named.rules[0].0, "WORD");
+        assert_eq!(named.rules[0].1, GrammarExpr::RawRegex("((a|b))+".into()));
+        assert_eq!(named.rules[1].0, "LETTER");
+        assert_eq!(named.rules[1].1, GrammarExpr::RawRegex("(a|b)".into()));
+        assert_eq!(named.rules[2].0, "start");
+        assert_eq!(named.rules[2].1, GrammarExpr::Ref("WORD".into()));
     }
 
     #[test]

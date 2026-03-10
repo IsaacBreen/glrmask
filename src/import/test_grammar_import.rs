@@ -98,16 +98,19 @@ STR_CHAR: "a"
 "#;
     let named = parse_lark_to_named(lark).expect("Lark should parse bounded repeats");
 
-    assert_eq!(named.rules[0].0, "start");
+    // Terminal rule is compiled to regex, parser rule keeps Ref nodes.
+    assert_eq!(named.rules[0].0, "STR_CHAR");
+    assert_eq!(named.rules[0].1, GrammarExpr::RawRegex("a".into()));
+    assert_eq!(named.rules[1].0, "start");
     assert_eq!(
-        named.rules[0].1,
+        named.rules[1].1,
         GrammarExpr::Sequence(vec![
-            GrammarExpr::Literal(b"a".to_vec()),
-            GrammarExpr::Literal(b"a".to_vec()),
-            GrammarExpr::Literal(b"a".to_vec()),
+            GrammarExpr::Ref("STR_CHAR".into()),
+            GrammarExpr::Ref("STR_CHAR".into()),
+            GrammarExpr::Ref("STR_CHAR".into()),
             GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
-                GrammarExpr::Literal(b"a".to_vec()),
-                GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
+                GrammarExpr::Ref("STR_CHAR".into()),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Ref("STR_CHAR".into()))),
             ]))),
         ])
     );
@@ -119,32 +122,26 @@ fn test_lark_parser_supports_single_quotes_ranges_aliases_and_priority() {
     let lark = "?start: DIGIT -> picked\nDIGIT.2: '0'..'9'";
     let named = parse_lark_to_named(lark).expect("Lark syntax subset should parse");
 
-    assert_eq!(named.rules.len(), 1);
-    assert_eq!(named.rules[0].0, "start");
-    assert_eq!(
-        named.rules[0].1,
-        GrammarExpr::CharClass {
-            def: "0-9".into(),
-            negate: false,
-            utf8: true,
-        }
-    );
+    // Terminal rule preserved as compiled regex; parser rule keeps Ref.
+    assert_eq!(named.rules.len(), 2);
+    assert_eq!(named.rules[0].0, "DIGIT");
+    assert_eq!(named.rules[0].1, GrammarExpr::RawRegex("[0-9]".into()));
+    assert_eq!(named.rules[1].0, "start");
+    assert_eq!(named.rules[1].1, GrammarExpr::Ref("DIGIT".into()));
 }
 
 #[test]
 fn test_lark_terminal_rules_follow_capitalization_convention() {
     let lark = "start: WORD\nWORD: LETTER+\nLETTER: 'a' | 'b'";
-    let named = parse_lark_to_named(lark).expect("Lark terminal rules should inline into parser rules");
+    let named = parse_lark_to_named(lark).expect("Lark terminal rules should be compiled to regex");
 
-    assert_eq!(named.rules.len(), 1);
-    assert_eq!(named.rules[0].0, "start");
-    assert_eq!(
-        named.rules[0].1,
-        GrammarExpr::RepeatOne(Box::new(GrammarExpr::Choice(vec![
-            GrammarExpr::Literal(b"a".to_vec()),
-            GrammarExpr::Literal(b"b".to_vec()),
-        ])))
-    );
+    // Terminal rules are compiled to single regex patterns; parser rules keep Ref nodes.
+    assert_eq!(named.rules.len(), 3);
+    assert_eq!(named.rules[0].0, "WORD");
+    assert_eq!(named.rules[1].0, "LETTER");
+    assert_eq!(named.rules[1].1, GrammarExpr::RawRegex("(a|b)".into()));
+    assert_eq!(named.rules[2].0, "start");
+    assert_eq!(named.rules[2].1, GrammarExpr::Ref("WORD".into()));
 }
 
 #[test]
@@ -174,15 +171,17 @@ NUMBER: /[0-9]+/
 "#;
     let named = parse_lark_to_named(lark).expect("Lark should parse");
 
+    // Terminal rule preserved; parser rules reference it via Ref.
     assert_eq!(
         named.rules.len(),
-        3,
-        "Expected 3 parser rules after terminal inlining, got {}",
+        4,
+        "Expected 4 rules (1 terminal + 3 parser), got {}",
         named.rules.len()
     );
-    assert_eq!(named.rules[0].0, "start");
-    assert_eq!(named.rules[1].0, "expr");
-    assert_eq!(named.rules[2].0, "term");
+    assert_eq!(named.rules[0].0, "NUMBER");
+    assert_eq!(named.rules[1].0, "start");
+    assert_eq!(named.rules[2].0, "expr");
+    assert_eq!(named.rules[3].0, "term");
 }
 
 /// Ported from `test_lark_regex_charclass_not_nested`.
@@ -262,39 +261,34 @@ STR_CHAR ::= [^"\\\x00-\x1F]
     let lark_named = parse_lark_to_named(lark).expect("Lark grammar should parse");
     let ebnf_named = parse_ebnf_to_named(ebnf).expect("EBNF grammar should parse");
 
-    assert_eq!(
-        lark_named
-            .rules
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["start", "obj", "pair"],
-        "Lark normalization should inline terminal rules into the parser-rule skeleton"
+    // Lark terminal rules are compiled to single regex patterns and kept as
+    // named rules.  EBNF keeps the helper-rule chain as structured nonterminals.
+    assert!(
+        lark_named.rules.iter().any(|(name, _)| name == "JSON_STRING"),
+        "Lark should keep JSON_STRING as a named rule (compiled to regex)"
     );
     assert!(
         ebnf_named.rules.iter().any(|(name, _)| name == "JSON_STRING")
             && ebnf_named.rules.iter().any(|(name, _)| name == "STR_CHAR"),
         "EBNF import should keep the explicit terminal-chain helper rules visible in the named grammar"
     );
+
+    // Lark terminal rules compile to RawRegex; EBNF preserves structure.
+    let lark_json_string = &lark_named.rules.iter().find(|(n, _)| n == "JSON_STRING").unwrap().1;
     assert!(
-        lark_named.rules.len() < ebnf_named.rules.len(),
-        "Lark terminal inlining should produce fewer named rules than the EBNF path"
-    );
-    assert_ne!(
-        lark_named.rules,
-        ebnf_named.rules,
-        "Lark regex terminals and EBNF char classes should remain distinct in the normalized AST"
+        matches!(lark_json_string, GrammarExpr::RawRegex(_)),
+        "Lark JSON_STRING should be a single compiled regex, got {:?}",
+        lark_json_string
     );
 
     let lark_lowered = lower(&lark_named).expect("Lark lowering should succeed");
     let ebnf_lowered = lower(&ebnf_named).expect("EBNF lowering should succeed");
-    assert_ne!(
-        lark_lowered.rules,
-        ebnf_lowered.rules,
-        "the importer-path difference should remain observable after lowering"
-    );
+
+    // Lark's compiled regex produces no more terminals than EBNF's decomposed structure.
     assert!(
-        lark_lowered.rules.len() > ebnf_lowered.rules.len(),
-        "Lark terminal inlining should introduce a larger lowered rule graph than the EBNF helper-rule form"
+        lark_lowered.terminals.len() <= ebnf_lowered.terminals.len(),
+        "Lark composite terminals should produce no more lowered terminals ({}) than EBNF decomposed form ({})",
+        lark_lowered.terminals.len(),
+        ebnf_lowered.terminals.len()
     );
 }

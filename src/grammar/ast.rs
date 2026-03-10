@@ -175,7 +175,7 @@ fn is_terminal_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')
 }
 
-fn compile_to_regex(
+pub(crate) fn compile_to_regex(
     expr: &GrammarExpr,
     terminal_patterns: &BTreeMap<String, String>,
 ) -> Result<String, GlrMaskError> {
@@ -189,14 +189,17 @@ fn compile_to_regex(
             .map(|part| compile_to_regex(part, terminal_patterns))
             .collect::<Result<Vec<_>, _>>()?
             .join(""),
-        GrammarExpr::Choice(options) => options
-            .iter()
-            .map(|option| compile_to_regex(option, terminal_patterns))
-            .collect::<Result<Vec<_>, _>>()?
-            .join("|"),
-        GrammarExpr::Optional(inner) => format!("(?:{})?", compile_to_regex(inner, terminal_patterns)?),
-        GrammarExpr::Repeat(inner) => format!("(?:{})*", compile_to_regex(inner, terminal_patterns)?),
-        GrammarExpr::RepeatOne(inner) => format!("(?:{})+", compile_to_regex(inner, terminal_patterns)?),
+        GrammarExpr::Choice(options) => {
+            let inner: String = options
+                .iter()
+                .map(|option| compile_to_regex(option, terminal_patterns))
+                .collect::<Result<Vec<_>, _>>()?
+                .join("|");
+            if options.len() > 1 { format!("({inner})") } else { inner }
+        }
+        GrammarExpr::Optional(inner) => format!("({})?", compile_to_regex(inner, terminal_patterns)?),
+        GrammarExpr::Repeat(inner) => format!("({})*", compile_to_regex(inner, terminal_patterns)?),
+        GrammarExpr::RepeatOne(inner) => format!("({})+", compile_to_regex(inner, terminal_patterns)?),
         GrammarExpr::Literal(bytes) => bytes.iter().map(|&b| regex_escape_byte(b)).collect(),
         GrammarExpr::CharClass { def, negate, .. } => {
             if *negate { format!("[^{def}]") } else { format!("[{def}]") }
