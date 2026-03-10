@@ -701,6 +701,12 @@ impl PartialEq for Weight {
 
 impl Eq for Weight {}
 
+impl super::leveled_gss::Merge for Weight {
+    fn merge(&self, other: &Self) -> Self {
+        self.union(other)
+    }
+}
+
 impl std::hash::Hash for Weight {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.is_full().hash(state);

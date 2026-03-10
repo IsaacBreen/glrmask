@@ -5,33 +5,10 @@
 
 use crate::runtime::state::ConstraintState;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
+use crate::ds::weight::Weight;
 use range_set_blaze::RangeSetBlaze;
 
-#[derive(Clone, Debug)]
-struct AllowedWeight(crate::ds::weight::Weight);
-
-impl PartialEq for AllowedWeight {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-
-impl Eq for AllowedWeight {}
-
-impl std::hash::Hash for AllowedWeight {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-
-impl Merge for AllowedWeight {
-    fn merge(&self, other: &Self) -> Self {
-        Self(self.0.union(&other.0))
-    }
-}
-
-type WeightedParserGSS = LeveledGSS<u32, AllowedWeight>;
+type WeightedParserGSS = LeveledGSS<u32, Weight>;
 
 impl<'a> ConstraintState<'a> {
     pub fn mask(&self) -> Vec<u32> {
@@ -79,9 +56,9 @@ impl<'a> ConstraintState<'a> {
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let allowed = if final_weight.is_full() {
-                            reduced_acc.0.clone()
+                            reduced_acc.clone()
                         } else {
-                            reduced_acc.0.intersection(final_weight)
+                            reduced_acc.intersection(final_weight)
                         };
                         for token_id in self.collapse_weight_tokens(&allowed).iter() {
                             let word = token_id as usize / 32;
@@ -148,9 +125,9 @@ impl<'a> ConstraintState<'a> {
                 if allowed.is_empty() {
                     return None;
                 }
-                return Some(AllowedWeight(
-                    crate::ds::weight::Weight::from_token_set_for_tsid(internal_tsid, allowed),
-                ));
+                return Some(
+                    Weight::from_token_set_for_tsid(internal_tsid, allowed),
+                );
             }
 
             for (&tsid, disallowed_in_state) in terminals_disallowed {
@@ -171,9 +148,9 @@ impl<'a> ConstraintState<'a> {
             if allowed.is_empty() {
                 None
             } else {
-                Some(AllowedWeight(
-                    crate::ds::weight::Weight::from_token_set_for_tsid(internal_tsid, allowed),
-                ))
+                Some(
+                    Weight::from_token_set_for_tsid(internal_tsid, allowed),
+                )
             }
         })
     }
@@ -181,21 +158,21 @@ impl<'a> ConstraintState<'a> {
     fn intersect_weight(
         &self,
         gss: &WeightedParserGSS,
-        weight: &crate::ds::weight::Weight,
+        weight: &Weight,
     ) -> WeightedParserGSS {
         gss.apply_and_prune(|allowed| {
-            let next = allowed.0.intersection(weight);
+            let next = allowed.intersection(weight);
             if next.is_empty() {
                 None
             } else {
-                Some(AllowedWeight(next))
+                Some(next)
             }
         })
     }
 
     fn collapse_weight_tokens(
         &self,
-        weight: &crate::ds::weight::Weight,
+        weight: &Weight,
     ) -> RangeSetBlaze<u32> {
         let mut all = RangeSetBlaze::new();
         for (internal_tsid, _) in self.constraint.internal_tsid_to_states.iter().enumerate() {
