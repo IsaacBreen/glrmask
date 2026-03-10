@@ -5,7 +5,6 @@
 
 pub use crate::grammar::ast as ast;
 pub mod ebnf;
-mod ebnf_factoring;
 pub mod json_schema;
 pub mod lark;
 

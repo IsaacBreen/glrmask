@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
-use crate::import::ebnf_factoring::factor_named_grammar;
+use crate::grammar::factoring::factor_named_grammar;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
 
 #[derive(Debug, Clone, PartialEq)]

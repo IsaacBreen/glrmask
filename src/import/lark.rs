@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
-use crate::import::ebnf_factoring::factor_named_grammar;
+use crate::grammar::factoring::factor_named_grammar;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
