@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::regex::parse_regex;
+use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
@@ -24,9 +25,6 @@ pub enum GrammarExpr {
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
     AnyByte,
-    /// A terminal whose body has been compiled to a regex pattern string.
-    /// The pattern is parsed to an `Expr` tree during lowering.
-    CompiledTerminal { pattern: String },
 }
 
 #[derive(Debug, Clone)]
@@ -170,20 +168,6 @@ impl Lowerer {
             GrammarExpr::AnyByte => {
                 Symbol::Terminal(self.terminal_id(".", ".", false))
             }
-            GrammarExpr::CompiledTerminal { pattern } => {
-                // Use the regex string as dedup key; parse to Expr during lowering.
-                let key = format!("{}:{}", pattern, true);
-                if let Some(&id) = self.terminal_map.get(&key) {
-                    Symbol::Terminal(id)
-                } else {
-                    let id = self.terminals.len() as TerminalID;
-                    self.terminal_map.insert(key, id);
-                    self.terminal_names.insert(id, pattern.clone());
-                    let expr = parse_regex(pattern, true);
-                    self.terminals.push(Terminal::Expr { id, expr });
-                    Symbol::Terminal(id)
-                }
-            }
             GrammarExpr::Sequence(_)
             | GrammarExpr::Choice(_)
             | GrammarExpr::Optional(_)
@@ -191,40 +175,76 @@ impl Lowerer {
             | GrammarExpr::RepeatOne(_) => self.lower_expr(expr),
         })
     }
+
+    /// Lower an entire terminal rule body to a single Terminal::Expr.
+    /// The GrammarExpr must be fully expanded (no Ref nodes).
+    fn lower_terminal_rule(&mut self, name: &str, body: &GrammarExpr) -> Result<TerminalID, GlrMaskError> {
+        let expr = grammar_expr_to_expr(body)?;
+        // Dedup by the Expr tree itself
+        for (i, t) in self.terminals.iter().enumerate() {
+            if let Terminal::Expr { expr: existing, .. } = t {
+                if *existing == expr {
+                    return Ok(i as TerminalID);
+                }
+            }
+        }
+        let id = self.terminals.len() as TerminalID;
+        self.terminal_names.insert(id, name.to_string());
+        self.terminals.push(Terminal::Expr { id, expr });
+        Ok(id)
+    }
 }
 
-pub(crate) fn compile_to_regex(
-    expr: &GrammarExpr,
-    terminal_patterns: &BTreeMap<String, String>,
-) -> Result<String, GlrMaskError> {
-    Ok(match expr {
-        GrammarExpr::Ref(name) => terminal_patterns
-            .get(name)
-            .cloned()
-            .ok_or_else(|| GlrMaskError::GrammarParse(format!("unknown terminal '{name}'")))?,
-        GrammarExpr::Sequence(parts) => parts
-            .iter()
-            .map(|part| compile_to_regex(part, terminal_patterns))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(""),
+/// Convert a fully-expanded GrammarExpr (no Ref nodes) to an Expr tree.
+fn grammar_expr_to_expr(ge: &GrammarExpr) -> Result<Expr, GlrMaskError> {
+    Ok(match ge {
+        GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes.clone()),
+        GrammarExpr::CharClass { def, negate, utf8 } => {
+            let pattern = if *negate {
+                format!("[^{def}]")
+            } else {
+                format!("[{def}]")
+            };
+            parse_regex(&pattern, *utf8)
+        }
+        GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true),
+        GrammarExpr::AnyByte => Expr::U8Class(U8Set::from_range(0, 255)),
+        GrammarExpr::Sequence(parts) => {
+            let exprs: Vec<Expr> = parts.iter().map(grammar_expr_to_expr).collect::<Result<_, _>>()?;
+            if exprs.len() == 1 {
+                exprs.into_iter().next().unwrap()
+            } else {
+                Expr::Seq(exprs)
+            }
+        }
         GrammarExpr::Choice(options) => {
-            let inner: String = options
-                .iter()
-                .map(|option| compile_to_regex(option, terminal_patterns))
-                .collect::<Result<Vec<_>, _>>()?
-                .join("|");
-            if options.len() > 1 { format!("({inner})") } else { inner }
+            let exprs: Vec<Expr> = options.iter().map(grammar_expr_to_expr).collect::<Result<_, _>>()?;
+            if exprs.len() == 1 {
+                exprs.into_iter().next().unwrap()
+            } else {
+                Expr::Choice(exprs)
+            }
         }
-        GrammarExpr::Optional(inner) => format!("({})?", compile_to_regex(inner, terminal_patterns)?),
-        GrammarExpr::Repeat(inner) => format!("({})*", compile_to_regex(inner, terminal_patterns)?),
-        GrammarExpr::RepeatOne(inner) => format!("({})+", compile_to_regex(inner, terminal_patterns)?),
-        GrammarExpr::Literal(bytes) => bytes.iter().map(|&b| regex_escape_byte(b)).collect(),
-        GrammarExpr::CharClass { def, negate, .. } => {
-            if *negate { format!("[^{def}]") } else { format!("[{def}]") }
+        GrammarExpr::Optional(inner) => Expr::Repeat {
+            expr: Box::new(grammar_expr_to_expr(inner)?),
+            min: 0,
+            max: Some(1),
+        },
+        GrammarExpr::Repeat(inner) => Expr::Repeat {
+            expr: Box::new(grammar_expr_to_expr(inner)?),
+            min: 0,
+            max: None,
+        },
+        GrammarExpr::RepeatOne(inner) => Expr::Repeat {
+            expr: Box::new(grammar_expr_to_expr(inner)?),
+            min: 1,
+            max: None,
+        },
+        GrammarExpr::Ref(name) => {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "unexpected Ref({name}) in terminal body — should have been expanded"
+            )));
         }
-        GrammarExpr::RawRegex(pattern) => pattern.clone(),
-        GrammarExpr::AnyByte => ".".into(),
-        GrammarExpr::CompiledTerminal { pattern, .. } => pattern.clone(),
     })
 }
 
@@ -237,6 +257,15 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
 
     for (name, expr) in &grammar.rules {
         let lhs = lowerer.nt_id(name);
+
+        // Terminal rules: convert the entire body to a single Terminal::Expr.
+        // The body should be fully expanded (no Ref nodes).
+        if grammar.terminals.contains(name) {
+            let tid = lowerer.lower_terminal_rule(name, expr)?;
+            lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Terminal(tid)] });
+            continue;
+        }
+
         match expr {
             GrammarExpr::Sequence(parts) => {
                 let rhs = parts.iter().map(|part| lowerer.lower_expr_terminalish(part)).collect::<Result<Vec<_>, _>>()?;

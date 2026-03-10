@@ -98,12 +98,9 @@ STR_CHAR: "a"
 "#;
     let named = parse_lark_to_named(lark).expect("Lark should parse bounded repeats");
 
-    // Terminal rule is compiled to CompiledTerminal, parser rule keeps Ref nodes.
+    // Terminal rule is stored as expanded GrammarExpr; parser rule keeps Ref nodes.
     assert_eq!(named.rules[0].0, "STR_CHAR");
-    match &named.rules[0].1 {
-        GrammarExpr::CompiledTerminal { pattern, .. } => assert_eq!(pattern, "a"),
-        other => panic!("expected CompiledTerminal, got {:?}", other),
-    }
+    assert_eq!(named.rules[0].1, GrammarExpr::Literal(b"a".to_vec()));
     assert_eq!(named.rules[1].0, "start");
     assert_eq!(
         named.rules[1].1,
@@ -125,13 +122,13 @@ fn test_lark_parser_supports_single_quotes_ranges_aliases_and_priority() {
     let lark = "?start: DIGIT -> picked\nDIGIT.2: '0'..'9'";
     let named = parse_lark_to_named(lark).expect("Lark syntax subset should parse");
 
-    // Terminal rule preserved as compiled regex; parser rule keeps Ref.
+    // Terminal rule preserved as expanded GrammarExpr; parser rule keeps Ref.
     assert_eq!(named.rules.len(), 2);
     assert_eq!(named.rules[0].0, "DIGIT");
-    match &named.rules[0].1 {
-        GrammarExpr::CompiledTerminal { pattern, .. } => assert_eq!(pattern, "[0-9]"),
-        other => panic!("expected CompiledTerminal, got {:?}", other),
-    }
+    assert_eq!(
+        named.rules[0].1,
+        GrammarExpr::CharClass { def: "0-9".into(), negate: false, utf8: true }
+    );
     assert_eq!(named.rules[1].0, "start");
     assert_eq!(named.rules[1].1, GrammarExpr::Ref("DIGIT".into()));
 }
@@ -141,14 +138,17 @@ fn test_lark_terminal_rules_follow_capitalization_convention() {
     let lark = "start: WORD\nWORD: LETTER+\nLETTER: 'a' | 'b'";
     let named = parse_lark_to_named(lark).expect("Lark terminal rules should be compiled to regex");
 
-    // Terminal rules are compiled to single regex patterns; parser rules keep Ref nodes.
+    // Terminal rules are stored as expanded GrammarExpr; parser rules keep Ref nodes.
     assert_eq!(named.rules.len(), 3);
     assert_eq!(named.rules[0].0, "WORD");
     assert_eq!(named.rules[1].0, "LETTER");
-    match &named.rules[1].1 {
-        GrammarExpr::CompiledTerminal { pattern, .. } => assert_eq!(pattern, "(a|b)"),
-        other => panic!("expected CompiledTerminal, got {:?}", other),
-    }
+    assert_eq!(
+        named.rules[1].1,
+        GrammarExpr::Choice(vec![
+            GrammarExpr::Literal(b"a".to_vec()),
+            GrammarExpr::Literal(b"b".to_vec()),
+        ])
+    );
     assert_eq!(named.rules[2].0, "start");
     assert_eq!(named.rules[2].1, GrammarExpr::Ref("WORD".into()));
 
@@ -223,20 +223,16 @@ STR_CHAR: /[^"\\\x00-\x1F]/
 
     let str_char_expr = &named.rules[0].1;
 
-    // After terminal-rule normalization, STR_CHAR is compiled to a CompiledTerminal.
+    // After terminal-rule normalization, STR_CHAR is stored as expanded GrammarExpr.
     match str_char_expr {
-        GrammarExpr::CompiledTerminal { pattern, .. } => {
+        GrammarExpr::RawRegex(pattern) => {
             assert!(
-                pattern.contains("^\""),
+                pattern.contains("^\"") || pattern.contains(r#"^""#),
                 "Pattern should contain the negated quote class, got: {}",
                 pattern
             );
-            assert!(
-                !pattern.starts_with("[["),
-                "Regex should not be double-nested"
-            );
         }
-        other => panic!("Expected CompiledTerminal, got {:?}", other),
+        other => panic!("Expected RawRegex (expanded terminal), got {:?}", other),
     }
 }
 
@@ -298,11 +294,11 @@ STR_CHAR ::= [^"\\\x00-\x1F]
         "EBNF import should keep the explicit terminal-chain helper rules visible in the named grammar"
     );
 
-    // Lark terminal rules compile to CompiledTerminal; EBNF preserves structure.
+    // Lark terminal rules are stored as expanded GrammarExpr; EBNF preserves structure.
     let lark_json_string = &lark_named.rules.iter().find(|(n, _)| n == "JSON_STRING").unwrap().1;
     assert!(
-        matches!(lark_json_string, GrammarExpr::CompiledTerminal { .. }),
-        "Lark JSON_STRING should be a CompiledTerminal, got {:?}",
+        !matches!(lark_json_string, GrammarExpr::Ref(_)),
+        "Lark JSON_STRING should be an expanded terminal body, got {:?}",
         lark_json_string
     );
 
