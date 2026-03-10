@@ -553,16 +553,38 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     tokenizer: &'tok Tokenizer,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut NWA,
+    internal_tsid: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
     representative_initial_state: u32,
     representative_state_by_original: &'tok [u32],
     original_token_to_internal: &'tok [u32],
+    leaf_token_ids_buffer: BTreeMap<(u32, i32), Vec<u32>>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
+    fn add_leaf_token_from_sources(
+        &mut self,
+        sources: &[u32],
+        label: TerminalID,
+        internal_token_id: u32,
+    ) {
+        if self.ignore_terminal == Some(label) {
+            let weight = token_weight(self.internal_tsid, internal_token_id);
+            self.add_match_from_sources(sources, label, self.leaf_state, &weight);
+            return;
+        }
+
+        for &source in sources {
+            self.leaf_token_ids_buffer
+                .entry((source, label as i32))
+                .or_default()
+                .push(internal_token_id);
+        }
+    }
+
     fn add_match_from_sources(
         &mut self,
         sources: &[u32],
@@ -586,6 +608,19 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn flush_transition_buffer(&mut self) {
+        for ((from, label), mut token_ids) in std::mem::take(&mut self.leaf_token_ids_buffer) {
+            token_ids.sort_unstable();
+            token_ids.dedup();
+            let weight = Weight::from_token_set_for_tsid(
+                self.internal_tsid,
+                RangeSetBlaze::from_iter(token_ids.into_iter().map(|token_id| token_id..=token_id)),
+            );
+            self.transition_buffer
+                .entry((from, label, self.leaf_state))
+                .and_modify(|existing| *existing = existing.union(&weight))
+                .or_insert(weight);
+        }
+
         for ((from, target), weight) in std::mem::take(&mut self.epsilon_buffer) {
             let state = self
                 .nwa
@@ -648,11 +683,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if let Some(end_state) = exec_end_state {
                         if child_node.has_token() {
                             for terminal_id in self.tokenizer.tokens_accessible_from_state(end_state) {
-                                self.add_match_from_sources(
+                                self.add_leaf_token_from_sources(
                                     &source_nodes,
                                     terminal_id,
-                                    self.leaf_state,
-                                    &child_token_weight,
+                                    internal_child_token_id,
                                 );
                             }
                         }
@@ -664,11 +698,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let next_pos = pos + matched.width;
 
                         if next_pos == segment_bytes.len() && child_node.has_token() {
-                            self.add_match_from_sources(
+                            self.add_leaf_token_from_sources(
                                 &source_nodes,
                                 matched.id,
-                                self.leaf_state,
-                                &child_token_weight,
+                                internal_child_token_id,
                             );
                         }
 
@@ -891,11 +924,13 @@ pub(crate) fn build_terminal_dwa_with_report(
             tokenizer,
             possible_matches: &mut possible_matches,
             nwa: &mut nwa,
+            internal_tsid,
             leaf_state,
             ignore_terminal,
             representative_initial_state,
             representative_state_by_original: &representative_state_by_original,
             original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
+            leaf_token_ids_buffer: BTreeMap::new(),
             transition_buffer: BTreeMap::new(),
             epsilon_buffer: BTreeMap::new(),
         };
