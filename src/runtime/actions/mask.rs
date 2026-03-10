@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use crate::runtime::state::ConstraintState;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
@@ -102,11 +97,11 @@ impl<'a> ConstraintState<'a> {
             let word = eos_token_id as usize / 32;
             let bit = eos_token_id as usize % 32;
             if let Some(slot) = buf.get_mut(word) {
-                *slot &= !(1u32 << bit); // defensively remove EOS
+                *slot &= !(1u32 << bit);
             }
             if self.is_complete() {
                 if let Some(slot) = buf.get_mut(word) {
-                    *slot |= 1u32 << bit; // add back only when complete
+                    *slot |= 1u32 << bit;
                 }
             }
         }
@@ -178,7 +173,8 @@ impl<'a> ConstraintState<'a> {
         for (internal_tsid, _) in self.constraint.internal_tsid_to_states.iter().enumerate() {
             let internal_token_ids = weight.tokens_for_tsid(internal_tsid as u32);
             if !internal_token_ids.is_empty() {
-                all = all | self.constraint.expand_internal_token_set(&internal_token_ids);
+                let expanded = self.constraint.expand_internal_token_set(&internal_token_ids);
+                all = all | expanded;
             }
         }
         all

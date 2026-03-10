@@ -173,15 +173,36 @@ impl Constraint {
             return internal_tokens.clone();
         }
 
-        let mut original_tokens = RangeSetBlaze::new();
+        // Collect all original token IDs, sort, build ranges.
+        let total_estimate: usize = internal_tokens.iter()
+            .filter_map(|t| self.internal_token_to_tokens.get(t as usize))
+            .map(|v| v.len())
+            .sum();
+        let mut all_ids = Vec::with_capacity(total_estimate);
         for internal_token in internal_tokens.iter() {
-            if let Some(original_ids) = self.internal_token_to_tokens.get(internal_token as usize) {
-                for &original_id in original_ids {
-                    original_tokens.insert(original_id);
-                }
+            if let Some(originals) = self.internal_token_to_tokens.get(internal_token as usize) {
+                all_ids.extend_from_slice(originals);
             }
         }
-        original_tokens
+        all_ids.sort_unstable();
+        all_ids.dedup();
+        if all_ids.is_empty() {
+            return RangeSetBlaze::new();
+        }
+        let mut ranges = Vec::new();
+        let mut start = all_ids[0];
+        let mut end = all_ids[0];
+        for &id in &all_ids[1..] {
+            if id == end + 1 {
+                end = id;
+            } else {
+                ranges.push(start..=end);
+                start = id;
+                end = id;
+            }
+        }
+        ranges.push(start..=end);
+        RangeSetBlaze::from_iter(ranges)
     }
 
     pub(crate) fn possible_matches_for_state_internal(
