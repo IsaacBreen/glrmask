@@ -49,12 +49,7 @@ impl Templates {
             append_template(&mut raw_bundle, start, template, weight);
         }
 
-        let bundle_dwa = minimize(
-            &determinize(&raw_bundle).expect(
-                "template bundle determinization failed during multi-template bundle assembly",
-            ),
-        );
-        dwa_to_nwa(&bundle_dwa)
+        raw_bundle
     }
 }
 
