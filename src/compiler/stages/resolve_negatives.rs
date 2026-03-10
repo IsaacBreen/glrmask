@@ -6,11 +6,30 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use rustc_hash::{FxHashMap, FxHashSet};
+
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::ds::weight::Weight;
 
 type QueryKey = (u32, i32);
+
+fn merge_weight(entry: &mut Weight, add: Weight) -> bool {
+    if add.is_empty() {
+        return false;
+    }
+    if entry.is_empty() {
+        *entry = add;
+        return true;
+    }
+    let updated = entry.union(&add);
+    if updated != *entry {
+        *entry = updated;
+        true
+    } else {
+        false
+    }
+}
 
 #[derive(Default)]
 struct CancellationProfile {
@@ -336,6 +355,180 @@ pub(crate) fn apply_cancellations(nwa: &mut NWA) {
     }
 }
 
+pub(crate) fn compute_cancellations_range(
+    nwa: &NWA,
+    range: std::ops::Range<u32>,
+) -> Vec<(u32, u32, Weight)> {
+    let n = nwa.states.len() as u32;
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut queries: FxHashMap<u32, FxHashMap<QueryKey, Weight>> = FxHashMap::default();
+    let mut worklist: VecDeque<(u32, u32, i32)> = VecDeque::new();
+    let mut in_queue: FxHashSet<(u32, u32, i32)> = FxHashSet::default();
+    let mut new_eps_from: FxHashMap<u32, FxHashMap<u32, Weight>> = FxHashMap::default();
+
+    let enqueue = |worklist: &mut VecDeque<(u32, u32, i32)>,
+                   in_queue: &mut FxHashSet<(u32, u32, i32)>,
+                   s: u32,
+                   a: u32,
+                   c: i32| {
+        let key = (s, a, c);
+        if in_queue.insert(key) {
+            worklist.push_back(key);
+        }
+    };
+
+    for a in range.clone() {
+        if a >= n {
+            continue;
+        }
+        for (&label, targets) in &nwa.states[a as usize].transitions {
+            if !is_negative_label(label) {
+                continue;
+            }
+            let c = negative_to_positive_label(label);
+            for (b, w_ab) in targets {
+                if *b >= n || w_ab.is_empty() {
+                    continue;
+                }
+                let query_key = (a, c);
+                let query_weight = queries
+                    .entry(*b)
+                    .or_default()
+                    .entry(query_key)
+                    .or_insert_with(Weight::empty);
+                if !w_ab.is_subset(query_weight) {
+                    *query_weight = query_weight.union(w_ab);
+                    enqueue(&mut worklist, &mut in_queue, *b, a, c);
+                }
+            }
+        }
+    }
+
+    while let Some((s, a, c)) = worklist.pop_front() {
+        in_queue.remove(&(s, a, c));
+        let Some(w_as) = queries.get(&s).and_then(|m| m.get(&(a, c))).cloned() else {
+            continue;
+        };
+
+        if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+            let propagations: Vec<(u32, Weight)> = epsilons_from_s
+                .iter()
+                .filter_map(|(&target, eps_w)| {
+                    let prop_w = w_as.intersection(eps_w);
+                    (!prop_w.is_empty()).then_some((target, prop_w))
+                })
+                .collect();
+            for (target, prop_w) in propagations {
+                let query_key = (a, c);
+                let query_weight = queries
+                    .entry(target)
+                    .or_default()
+                    .entry(query_key)
+                    .or_insert_with(Weight::empty);
+                if !prop_w.is_subset(query_weight) {
+                    *query_weight = query_weight.union(&prop_w);
+                    enqueue(&mut worklist, &mut in_queue, target, a, c);
+                }
+            }
+        }
+
+        let check_cancellations = |target: u32,
+                                   w_st: &Weight,
+                                   queries: &mut FxHashMap<u32, FxHashMap<QueryKey, Weight>>,
+                                   worklist: &mut VecDeque<(u32, u32, i32)>,
+                                   in_queue: &mut FxHashSet<(u32, u32, i32)>,
+                                   new_eps_from: &mut FxHashMap<u32, FxHashMap<u32, Weight>>| {
+            let new_eps_w = w_as.intersection(w_st);
+            if new_eps_w.is_empty() {
+                return;
+            }
+
+            let eps_weight = new_eps_from
+                .entry(a)
+                .or_default()
+                .entry(target)
+                .or_insert_with(Weight::empty);
+            if !merge_weight(eps_weight, new_eps_w) {
+                return;
+            }
+
+            if let Some(queries_at_a) = queries.get(&a).cloned() {
+                for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
+                    let prop_w = w_a_prime_a.intersection(eps_weight);
+                    if prop_w.is_empty() {
+                        continue;
+                    }
+                    let query_key = (a_prime, c_prime);
+                    let query_weight = queries
+                        .entry(target)
+                        .or_default()
+                        .entry(query_key)
+                        .or_insert_with(Weight::empty);
+                    if !prop_w.is_subset(query_weight) {
+                        *query_weight = query_weight.union(&prop_w);
+                        enqueue(worklist, in_queue, target, a_prime, c_prime);
+                    }
+                }
+            }
+        };
+
+        if let Some(pos_targets) = nwa.states[s as usize].transitions.get(&c) {
+            for (t, w_st) in pos_targets {
+                if *t < n {
+                    check_cancellations(*t, w_st, &mut queries, &mut worklist, &mut in_queue, &mut new_eps_from);
+                }
+            }
+        }
+
+        if let Some(default_targets) = nwa.states[s as usize].transitions.get(&DEFAULT_LABEL) {
+            for (target, weight) in default_targets {
+                if *target < n {
+                    check_cancellations(*target, weight, &mut queries, &mut worklist, &mut in_queue, &mut new_eps_from);
+                }
+            }
+        }
+
+        for (t, w_st) in &nwa.states[s as usize].epsilons {
+            if *t >= n {
+                continue;
+            }
+            let prop_w = w_as.intersection(w_st);
+            if prop_w.is_empty() {
+                continue;
+            }
+            let query_key = (a, c);
+            let query_weight = queries
+                .entry(*t)
+                .or_default()
+                .entry(query_key)
+                .or_insert_with(Weight::empty);
+            if !prop_w.is_subset(query_weight) {
+                *query_weight = query_weight.union(&prop_w);
+                enqueue(&mut worklist, &mut in_queue, *t, a, c);
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for (from, targets) in new_eps_from {
+        for (to, w) in targets {
+            if !w.is_empty() {
+                result.push((from, to, w));
+            }
+        }
+    }
+    result
+}
+
+pub(crate) fn apply_cancellations_range(nwa: &mut NWA, range: std::ops::Range<u32>) {
+    for (from, to, weight) in compute_cancellations_range(nwa, range) {
+        nwa.add_epsilon(from, to, weight);
+    }
+}
+
 fn merge_final_weight(entry: &mut Option<Weight>, add: Weight) -> bool {
     if add.is_empty() {
         return false;
@@ -634,7 +827,7 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
 
     let phase_started_at = std::time::Instant::now();
-    apply_cancellations(nwa);
+    apply_cancellations_range(nwa, 0..nwa.states.len() as u32);
     let apply_cancellations_time = phase_started_at.elapsed();
 
     let phase_started_at = std::time::Instant::now();
@@ -1049,6 +1242,46 @@ mod tests {
             assert_eq!(
                 actual, expected,
                 "delta propagation diverged from reference for config {}",
+                config
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_cancellations_range_matches_reference_on_small_family() {
+        let neg1 = encode_negative_label(1);
+        let pos1 = encode_positive_label(1);
+
+        for config in 0..(3usize.pow(7)) {
+            let mut code = config;
+            let mut next_kind = || {
+                let kind = (code % 3) as u8;
+                code /= 3;
+                kind
+            };
+
+            let mut nwa = NWA::new(0, 0);
+            for _ in 0..4 {
+                nwa.add_state();
+            }
+
+            add_weighted_transition(&mut nwa, 0, neg1, 0, next_kind());
+            add_weighted_transition(&mut nwa, 0, neg1, 2, next_kind());
+            add_weighted_epsilon(&mut nwa, 0, 1, next_kind());
+            add_weighted_transition(&mut nwa, 1, pos1, 2, next_kind());
+            add_weighted_transition(&mut nwa, 2, pos1, 1, next_kind());
+            add_weighted_epsilon(&mut nwa, 2, 0, next_kind());
+            add_weighted_transition(&mut nwa, 3, neg1, 0, next_kind());
+
+            let actual = normalize_cancellations(compute_cancellations_range(
+                &nwa,
+                0..nwa.states.len() as u32,
+            ));
+            let expected = normalize_cancellations(compute_cancellations_reference(&nwa));
+
+            assert_eq!(
+                actual, expected,
+                "range delta propagation diverged from reference for config {}",
                 config
             );
         }
