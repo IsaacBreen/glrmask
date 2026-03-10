@@ -5,6 +5,7 @@
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -122,7 +123,7 @@ struct WeightRangeEntry {
     tokens: Arc<RangeSetBlaze<u32>>,
 }
 
-fn compact_entries(weight: &Weight) -> Vec<WeightRangeEntry> {
+fn compact_entries(weight: &Weight) -> SmallVec<[WeightRangeEntry; 16]> {
     weight
         .0
         .range_values()
@@ -215,8 +216,8 @@ where
     Weight(map)
 }
 
-fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> Vec<u64> {
-    let mut boundaries = Vec::with_capacity((left.len() + right.len()) * 2);
+fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> SmallVec<[u64; 32]> {
+    let mut boundaries = SmallVec::<[u64; 32]>::with_capacity((left.len() + right.len()) * 2);
     for entry in left.iter().chain(right.iter()) {
         boundaries.push(u64::from(entry.start));
         boundaries.push(u64::from(entry.end) + 1);
@@ -322,12 +323,71 @@ where
     Weight(map)
 }
 
+fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
+    let mut left_iter = left.0.range_values();
+    let mut right_iter = right.0.range_values();
+    let mut left_entry = left_iter.next();
+    let mut right_entry = right_iter.next();
+
+    let mut map = RangeMapBlaze::new();
+    let mut pending_start = None;
+    let mut pending_end = 0u32;
+    let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
+
+    while let (Some((left_range, left_tokens)), Some((right_range, right_tokens))) = (left_entry, right_entry) {
+        let start = (*left_range.start()).max(*right_range.start());
+        let end = (*left_range.end()).min(*right_range.end());
+
+        if start <= end {
+            let tokens = if Arc::ptr_eq(left_tokens, right_tokens)
+                || left_tokens.as_ref() == right_tokens.as_ref()
+            {
+                Some(Arc::clone(left_tokens))
+            } else {
+                let overlap = left_tokens.as_ref().clone() & right_tokens.as_ref().clone();
+                (!overlap.is_empty()).then(|| shared_rangeset(overlap))
+            };
+
+            if let Some(tokens) = tokens {
+                push_compact_range(
+                    &mut map,
+                    &mut pending_start,
+                    &mut pending_end,
+                    &mut pending_tokens,
+                    start,
+                    end,
+                    tokens,
+                );
+            }
+        }
+
+        let left_end = *left_range.end();
+        let right_end = *right_range.end();
+        if left_end <= right_end {
+            left_entry = left_iter.next();
+        } else {
+            left_entry = Some((left_range, left_tokens));
+        }
+        if right_end <= left_end {
+            right_entry = right_iter.next();
+        } else {
+            right_entry = Some((right_range, right_tokens));
+        }
+    }
+
+    flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
+    Weight(map)
+}
+
 fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight) -> Weight {
     let mut map = RangeMapBlaze::new();
     let mut pending_start = None;
     let mut pending_end = 0u32;
     let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
-    let mut overlap_cache: Vec<(*const RangeSetBlaze<u32>, Option<Arc<RangeSetBlaze<u32>>>)> = Vec::new();
+    let mut overlap_cache: SmallVec<[(
+        *const RangeSetBlaze<u32>,
+        Option<Arc<RangeSetBlaze<u32>>>,
+    ); 8]> = SmallVec::new();
 
     for (range, other_tokens) in other.0.range_values() {
         let start = single.start.max(*range.start());
@@ -608,17 +668,7 @@ impl Weight {
         if let Some(single) = single_compact_entry(other) {
             return intersect_single_entry_with_weight(&single, self);
         }
-        combine_compact_entries(self, other, |left, right| match (left, right) {
-            (Some(left_tokens), Some(right_tokens)) => {
-                if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
-                    Some(Arc::clone(left_tokens))
-                } else {
-                    let tokens = left_tokens.as_ref().clone() & right_tokens.as_ref().clone();
-                    (!tokens.is_empty()).then(|| shared_rangeset(tokens))
-                }
-            }
-            _ => None,
-        })
+        intersect_weights(self, other)
     }
 
     pub fn difference(&self, other: &Self) -> Self {
@@ -719,7 +769,10 @@ impl Weight {
     ) where
         F: FnMut(&RangeSetBlaze<u32>),
     {
-        let mut overlap_cache: Vec<(*const RangeSetBlaze<u32>, Option<Arc<RangeSetBlaze<u32>>>)> = Vec::new();
+        let mut overlap_cache: SmallVec<[(
+            *const RangeSetBlaze<u32>,
+            Option<Arc<RangeSetBlaze<u32>>>,
+        ); 8]> = SmallVec::new();
 
         for (range, other_tokens) in self.0.range_values() {
             if end < *range.start() || *range.end() < start {
