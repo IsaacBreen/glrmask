@@ -1,10 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_mut)]
-#![allow(clippy::all)]
-#![allow(unreachable_code)]
-#![allow(unused_assignments)]
 //! Flat vocab equivalence analysis: classify tokens by first-byte DFA behavior.
 //!
 //! Instead of building a trie, groups tokens by their first byte(s) and
@@ -697,7 +690,7 @@ pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
     strings: &[S],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
-    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, None, None, None)
+    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states)
 }
 
 /// Flat vocab equivalence analysis with recursive byte-level classification.
@@ -711,11 +704,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     strings: &[S],
     initial_states: &[usize],
-    _suffix_group_mask: Option<&[bool]>,
-    _ever_allowed_by_group: Option<&[Vec<bool>]>,
-    _group_to_class: Option<&[usize]>,
 ) -> VocabEquivalenceResult {
-    let t0 = std::time::Instant::now();
     let dfa = build_dfa(regex);
     let ni = initial_states.len();
     let ng = dfa.num_groups;
@@ -741,13 +730,11 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         d0_states[si] = if dfa.is_dead_end[s] { NONE } else { s as u32 };
     }
 
-    let t1 = std::time::Instant::now();
 
     // Phase 1: Pre-sort tokens lexicographically
     let mut sorted_indices: Vec<usize> = (0..nt).collect();
     sorted_indices.sort_unstable_by(|&a, &b| strings[a].as_ref().cmp(strings[b].as_ref()));
 
-    let t1b = std::time::Instant::now();
 
     // Handle empty tokens (leaves at depth 0) — they come first in sorted order
     let mut empty_end = 0;
@@ -822,7 +809,6 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         non_bulk_tokens.extend(non_bulk);
     }
 
-    let t2 = std::time::Instant::now();
 
     // Phase 2: Process non-bulk tokens in parallel
     let non_bulk_hashes: Vec<(usize, u64)> = non_bulk_tokens
@@ -840,7 +826,6 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         hashes[ti] = h;
     }
 
-    let t3 = std::time::Instant::now();
 
     // Group by hash
     let mut groups: HashMap<u64, Vec<usize>> = HashMap::with_capacity(nt / 4);
@@ -848,18 +833,6 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         groups.entry(h).or_default().push(ti);
     }
 
-    let t4 = std::time::Instant::now();
-    // sep1_debug!(
-        // 2,
-        // "Vocab equiv FLAT: dfa={:?}, sort={:?}, walk={:?} (non_bulk={}), par_compute={:?}, group={:?}, total={:?}",
-        // t1 - t0,
-        // t1b - t1,
-        // t2 - t1b,
-        // non_bulk_tokens.len(),
-        // t3 - t2,
-        // t4 - t3,
-        // t4 - t0
-    // );
 
     groups.into_values().collect()
 }

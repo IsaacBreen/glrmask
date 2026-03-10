@@ -1,7 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -38,9 +34,6 @@ fn analyze_equivalences_sep1(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalId
         &sep1_tok,
         &token_bytes,
         &initial_states,
-        None, // suffix_group_mask
-        None, // ever_allowed_by_group
-        None, // group_to_class
     );
 
     // Convert state equivalence classes to ManyToOneIdMap

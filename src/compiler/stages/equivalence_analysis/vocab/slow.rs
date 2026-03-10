@@ -1,10 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_mut)]
-#![allow(clippy::all)]
-#![allow(unreachable_code)]
-#![allow(unused_assignments)]
 //! Simplified fast vocab equivalence analysis.
 //!
 //! Partitions tokens by DFA behavior using a byte-level trie and per-token hashing.
@@ -710,18 +703,14 @@ pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
     strings: &[S],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
-    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, None, None, None)
+    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states)
 }
 
-/// Find vocab equivalence classes. The last three parameters are accepted for
-/// API compatibility but unused.
+/// Find vocab equivalence classes.
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     strings: &[S],
     initial_states: &[usize],
-    _suffix_group_mask: Option<&[bool]>,
-    _ever_allowed_by_group: Option<&[Vec<bool>]>,
-    _group_to_class: Option<&[usize]>,
 ) -> VocabEquivalenceResult {
     let dfa = build_dfa(regex);
     let nt = strings.len();
@@ -732,9 +721,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     }
 
     let ng = dfa.num_groups;
-    let t0 = std::time::Instant::now();
     let trie = VocabTrie::build(strings);
-    let t1 = std::time::Instant::now();
     let max_depth: usize = 256;
 
     let mut hashes = vec![HASH_SEED3; nt];
@@ -754,21 +741,16 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         states[si] = if dfa.is_dead_end[s] { NONE } else { s as u32 };
     }
 
-    let t2 = std::time::Instant::now();
     walk_trie(
         &trie, 0, &dfa, &mut states, &mut mp, 0, ni, ng, max_depth, strings, &mut scratch,
         &mut hashes,
     );
-    let t3 = std::time::Instant::now();
 
     // Group tokens by hash → equivalence classes
     let mut groups: HashMap<u64, Vec<usize>> = HashMap::with_capacity(nt / 4);
     for (ti, &h) in hashes.iter().enumerate() {
         groups.entry(h).or_default().push(ti);
     }
-    let t4 = std::time::Instant::now();
-    // sep1_debug!(2, "Vocab equiv simple: dfa={:?}, trie={:?}, walk={:?}, group={:?}, total={:?}",
-        // t0 - t0, t1 - t0, t3 - t2, t4 - t3, t4 - t0);
     groups.into_values().collect()
 }
 

@@ -1,10 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_mut)]
-#![allow(clippy::all)]
-#![allow(unreachable_code)]
-#![allow(unused_assignments)]
 //! Fast vocab equivalence analysis: partition tokens by DFA behavior signatures.
 //!
 //! For each token, computes a signature encoding its DFA behavior across all
@@ -211,10 +204,6 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
             trans_by_class[base + s] = transitions[s][repr];
         }
     }
-
-    // sep1_debug!(2, "  DFA byte classes: {} classes from 256 bytes ({} states, table={:.1}KB)",
-        // num_classes, num_dfa_states,
-        // (num_classes * num_dfa_states * 4) as f64 / 1024.0);
 
     Dfa {
         start_state: dfa.start_state,
@@ -544,22 +533,17 @@ pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
     strings: &[S],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
-    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, None, None, None)
+    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states)
 }
 
-/// Find vocab equivalence classes. The last three parameters are accepted for
+/// Find vocab equivalence classes.
 /// API compatibility but unused internally.
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     strings: &[S],
     initial_states: &[usize],
-    _suffix_group_mask: Option<&[bool]>,
-    _ever_allowed_by_group: Option<&[Vec<bool>]>,
-    _group_to_class: Option<&[usize]>,
 ) -> VocabEquivalenceResult {
-    let t0 = std::time::Instant::now();
     let dfa = build_dfa(regex);
-    let t1 = std::time::Instant::now();
     let num_tokens = strings.len();
     let num_states = initial_states.len();
 
@@ -582,8 +566,6 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         let batch_end = (batch_start + batch_size).min(num_states);
         let batch = &initial_states[batch_start..batch_end];
 
-        let t_par0 = std::time::Instant::now();
-
         let active_sigs: Vec<(usize, u64)> = active_indices
             .par_iter()
             .map_init(
@@ -594,8 +576,6 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
                 },
             )
             .collect();
-
-        let t_par1 = std::time::Instant::now();
 
         // Refine partition: group tokens by (old_class, signature)
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
@@ -626,16 +606,11 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             }
         }
         active_indices = new_active;
-        // sep1_debug!(2, "  batch {}: par_iter={:?}, refine={:?}",
-            // batch_start, t_par1 - t_par0, std::time::Instant::now() - t_par1);
     }
 
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::with_capacity(next_class_id);
     for (ti, &cid) in partition.iter().enumerate() {
         groups.entry(cid).or_default().push(ti);
     }
-    let t2 = std::time::Instant::now();
-    // sep1_debug!(2, "Vocab equiv FAST: dfa={:?}, par_compute={:?}, total={:?}",
-        // t1 - t0, t2 - t1, t2 - t0);
     groups.into_values().collect()
 }

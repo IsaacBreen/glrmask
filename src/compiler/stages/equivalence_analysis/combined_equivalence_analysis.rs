@@ -1,10 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_mut)]
-#![allow(clippy::all)]
-#![allow(unreachable_code)]
-#![allow(unused_assignments)]
 //! Combined Equivalence Analysis
 //!
 //! This module orchestrates both state equivalence analysis and vocab equivalence
@@ -73,9 +66,6 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     tokens: &[S],
     initial_states: &[usize],
-    suffix_group_mask: Option<&[bool]>,
-    ever_allowed_by_group: Option<&[Vec<bool>]>,
-    group_to_class: Option<&[usize]>,
 ) -> CombinedEquivalenceResult {
     // State equivalence reduction: groups initial states with identical tokenizer
     // behavior. The cost is O(V×S) token walks (same as vocab analysis), so it's
@@ -87,10 +77,6 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(5000);
 
-    let start = std::time::Instant::now();
-    let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
-    let state_start = std::time::Instant::now();
-    
     // Step 1: State equivalence analysis (if beneficial)
     let (reduced_states, state_classes) = if initial_states.len() > state_reduction_threshold {
         // Convert to owned tokens for state equivalence (cold path)
@@ -112,14 +98,6 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         // Convert to StateEquivalenceResult format
         let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
         
-        // sep1_debug!(
-            // 3,
-            // "Combined equiv: state reduction {} -> {} states in {:?}",
-            // initial_states.len(),
-            // reduced.len(),
-            // start.elapsed(),
-        // );
-        
         (reduced, state_classes)
     } else {
         // No reduction needed - use all states as their own representatives
@@ -132,46 +110,12 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         (initial_states.to_vec(), state_classes)
     };
 
-    let state_time = state_start.elapsed();
-    if profile_equivalence {
-        // sep1_timing!(
-            // "TIMING: equivalence.state {:?} ({} -> {} states)",
-            // state_time,
-            // initial_states.len(),
-            // reduced_states.len(),
-        // );
-    }
-    
     // Step 2: Vocab equivalence analysis on reduced states
-    let vocab_start = std::time::Instant::now();
-    
     let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
         regex,
         tokens,
         &reduced_states,
-        suffix_group_mask,
-        ever_allowed_by_group,
-        group_to_class,
     );
-
-    if profile_equivalence {
-        let vocab_time = vocab_start.elapsed();
-        // sep1_timing!(
-            // "TIMING: equivalence.vocab {:?} ({} tokens -> {} classes)",
-            // vocab_time,
-            // tokens.len(),
-            // vocab_classes.len(),
-        // );
-        // sep1_timing!("TIMING: equivalence.total {:?}", start.elapsed());
-    }
-    
-    // sep1_debug!(
-        // 3,
-        // "Combined equiv: vocab analysis {} tokens -> {} classes in {:?}",
-        // tokens.len(),
-        // vocab_classes.len(),
-        // vocab_start.elapsed(),
-    // );
 
     #[cfg(test)]
     {
@@ -203,9 +147,6 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             regex,
             tokens,
             &reduced_states,
-            suffix_group_mask,
-            ever_allowed_by_group,
-            group_to_class,
         );
         if !vocab_is_comparable(&vocab_classes, &trellis_vocab_classes) {
             panic!(
@@ -220,9 +161,6 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             regex,
             tokens,
             &reduced_states,
-            suffix_group_mask,
-            ever_allowed_by_group,
-            group_to_class,
         );
         if !vocab_is_comparable(&vocab_classes, &flat_vocab_classes) {
             panic!(
@@ -249,5 +187,5 @@ pub fn find_vocab_equivalence_classes_with_state_reduction<S: AsRef<[u8]> + Sync
     tokens: &[S],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
-    compute_combined_equivalence(regex, tokens, initial_states, None, None, None).vocab_classes
+    compute_combined_equivalence(regex, tokens, initial_states).vocab_classes
 }

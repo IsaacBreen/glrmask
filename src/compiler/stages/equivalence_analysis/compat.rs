@@ -16,7 +16,6 @@
 //! This module provides flat, pre-extracted views of the DFA data so the sep1
 //! code can be adapted with minimal changes.
 
-#![allow(dead_code)]
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 

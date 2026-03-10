@@ -1,10 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_mut)]
-#![allow(clippy::all)]
-#![allow(unreachable_code)]
-#![allow(unused_assignments)]
 //! State Equivalence Analysis
 //!
 //! Determines which tokenizer states behave identically for all tokens in a vocabulary.
@@ -138,7 +131,6 @@ pub fn find_state_equivalence_classes_kstep(
         return Vec::new();
     }
 
-    let instant = std::time::Instant::now();
     let dfa = regex.dfa();
 
     // Precompute transition lists (sparse) for each state.
@@ -154,10 +146,10 @@ pub fn find_state_equivalence_classes_kstep(
         .collect();
 
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
-    let mut class_for_state: Vec<usize> = Vec::new();
     let mut class_reps: Vec<usize> = Vec::new();
     let mut use_trans_class_cache = false;
 
+    let mut class_for_state: Vec<usize>;
     {
         let mut trans_pattern_to_class: HashMap<Vec<(u8, usize)>, usize> = HashMap::new();
         class_for_state = vec![0usize; transitions.len()];
@@ -275,16 +267,6 @@ pub fn find_state_equivalence_classes_kstep(
         mapping[i] = rep;
     }
 
-    let num_representatives: usize = mapping.iter().collect::<std::collections::HashSet<_>>().len();
-    // sep1_debug!(
-        // 3,
-        // "State equiv k-hash: depth {} reduced {} states to {} in {:?}.",
-        // k,
-        // states.len(),
-        // num_representatives,
-        // instant.elapsed()
-    // );
-
     mapping
 }
 
@@ -321,14 +303,6 @@ pub fn find_state_equivalence_classes(
         rep_set.insert(rep);
     }
     let reduced_states: Vec<usize> = rep_set.into_iter().collect();
-
-    // sep1_debug!(
-        // 4,
-        // "State equiv prefilter: {} -> {} reps (k={})",
-        // states.len(),
-        // reduced_states.len(),
-        // k
-    // );
 
     if reduced_states.len() == states.len() {
         return find_state_equivalence_classes_token_based(regex, tokens, states);
@@ -434,7 +408,6 @@ fn find_state_equivalence_classes_token_based(
             flat.into_iter().collect()
         }
 
-        let start = std::time::Instant::now();
         let signatures: Vec<StateSignature> = states
             .par_iter()
             .map(|&state| {
@@ -452,19 +425,11 @@ fn find_state_equivalence_classes_token_based(
             mapping.push(rep);
         }
 
-        // sep1_debug!(
-            // 3,
-            // "State equiv token refinement (flat-trellis exact): {} states -> {} groups in {:?}",
-            // states.len(),
-            // mapping.iter().copied().collect::<BTreeSet<_>>().len(),
-            // start.elapsed(),
-        // );
         return mapping;
     }
 
     use std::collections::HashMap;
 
-    let instant = std::time::Instant::now();
     let dfa = regex.dfa();
 
     // Note: Token sampling (STATE_EQUIV_MAX_TOKENS) was tested but causes correctness issues.
@@ -501,16 +466,6 @@ fn find_state_equivalence_classes_token_based(
         }
     }
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
-
-    // Count states with finalizers for optimization insight
-    let states_with_finalizers = dfa_finalizers.iter().filter(|f| !f.is_empty()).count();
-    // sep1_debug!(
-        // 5,
-        // "DFA stats: {} states, {} with finalizers ({:.1}%)",
-        // dfa.states.len(),
-        // states_with_finalizers,
-        // 100.0 * states_with_finalizers as f64 / dfa.states.len() as f64
-    // );
 
     // =========================================================================
     // PHASE 1: Token testing with early exit for singletons
@@ -613,8 +568,7 @@ fn find_state_equivalence_classes_token_based(
     let mut active_hashes: Vec<u128> = vec![0u128; states.len()];
     let mut prev_groups = 1usize;
     let mut stable_batches = 0usize;
-    let mut tokens_tested = 0usize;
-    let mut early_stop_triggered = false;
+    let mut tokens_tested;
 
     let mut batch_start = 0usize;
     while batch_start < total_tokens {
@@ -678,8 +632,8 @@ fn find_state_equivalence_classes_token_based(
                 }
 
                 let (state_stack, dead_depth_stack, depth_marks, positions, changes) = scratch;
-                let mut matches_len: usize = 0;
-                let mut matches_hash_sum: u128 = 0;
+                let mut matches_len: usize;
+                let mut matches_hash_sum: u128;
 
                 for (range_start, range_end) in live_ranges {
                     if range_start >= range_end {
@@ -884,7 +838,6 @@ fn find_state_equivalence_classes_token_based(
                 stable_batches = 0;
             }
             if stable_batches >= 2 {
-                early_stop_triggered = true;
                 break;
             }
         }
@@ -899,29 +852,6 @@ fn find_state_equivalence_classes_token_based(
         group_sizes[gid] += 1;
     }
 
-    let phase1_time = instant.elapsed();
-    let singleton_groups = group_sizes.iter().filter(|&&n| n == 1).count();
-    let ambiguous_states: usize = group_sizes.iter().filter(|&&n| n > 1).sum();
-
-    // sep1_debug!(
-        // 4,
-        // "State equiv phase 1: {} groups ({} singletons, {} ambiguous) in {:?} ({} tokens)",
-        // num_groups,
-        // singleton_groups,
-        // ambiguous_states,
-        // phase1_time,
-        // tokens_tested
-    // );
-
-    if early_stop_triggered {
-        // sep1_debug!(
-            // 4,
-            // "State equiv early stop enabled: processed {} of {} tokens",
-            // tokens_tested,
-            // total_tokens
-        // );
-    }
-
     let mut rep_for_group: Vec<usize> = vec![usize::MAX; num_groups];
     for (idx, &gid) in group_ids.iter().enumerate() {
         if rep_for_group[gid] == usize::MAX {
@@ -933,16 +863,6 @@ fn find_state_equivalence_classes_token_based(
     for (idx, &gid) in group_ids.iter().enumerate() {
         mapping[idx] = rep_for_group[gid];
     }
-
-    let num_representatives = rep_for_group.iter().filter(|&&v| v != usize::MAX).count();
-
-    // sep1_debug!(
-        // 3,
-        // "State equivalence analysis took {:.2?}. Reduced {} states to {}.",
-        // instant.elapsed(),
-        // states.len(),
-        // num_representatives
-    // );
 
     mapping
 }
