@@ -540,8 +540,11 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         token_bytes,
         internal_token_bytes,
         internal_token_buf_masks: Vec::new(),
+        internal_token_dense_words: 0,
+        weight_token_dense_masks: rustc_hash::FxHashMap::default(),
     };
     constraint.build_buf_masks();
+    constraint.build_dense_token_masks();
     constraint
 }
 
@@ -593,8 +596,11 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         token_bytes: token_bytes.clone(),
         internal_token_bytes,
         internal_token_buf_masks: Vec::new(),
+        internal_token_dense_words: 0,
+        weight_token_dense_masks: rustc_hash::FxHashMap::default(),
     };
     constraint.build_buf_masks();
+    constraint.build_dense_token_masks();
 
     let debug = CompileDebug::from_parts(
         grammar.clone(),

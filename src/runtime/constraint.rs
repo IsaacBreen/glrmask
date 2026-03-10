@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;
+use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
@@ -47,6 +48,10 @@ pub struct Constraint {
     /// for all original tokens that map to internal token `i`.
     #[serde(skip)]
     pub(crate) internal_token_buf_masks: Vec<Vec<(u16, u32)>>,
+    #[serde(skip)]
+    pub(crate) internal_token_dense_words: usize,
+    #[serde(skip)]
+    pub(crate) weight_token_dense_masks: FxHashMap<usize, Box<[u64]>>,
 }
 
 impl Clone for Constraint {
@@ -65,6 +70,8 @@ impl Clone for Constraint {
             token_bytes: self.token_bytes.clone(),
             internal_token_bytes: self.internal_token_bytes.clone(),
             internal_token_buf_masks: self.internal_token_buf_masks.clone(),
+            internal_token_dense_words: self.internal_token_dense_words,
+            weight_token_dense_masks: self.weight_token_dense_masks.clone(),
         }
     }
 }
@@ -102,6 +109,86 @@ impl Constraint {
             }
             word_map.into_iter().collect()
         }).collect();
+    }
+
+    pub(crate) fn build_dense_token_masks(&mut self) {
+        self.internal_token_dense_words = self.internal_token_to_tokens.len().div_ceil(64);
+        if self.internal_token_dense_words == 0 {
+            self.weight_token_dense_masks.clear();
+            return;
+        }
+
+        let mut dense_masks = FxHashMap::default();
+        for state in &self.parser_dwa.states {
+            if let Some(final_weight) = &state.final_weight {
+                self.collect_weight_dense_masks(final_weight, &mut dense_masks);
+            }
+            for (_, weight) in state.transitions.values() {
+                self.collect_weight_dense_masks(weight, &mut dense_masks);
+            }
+        }
+        self.weight_token_dense_masks = dense_masks;
+    }
+
+    fn collect_weight_dense_masks(
+        &self,
+        weight: &crate::ds::weight::Weight,
+        dense_masks: &mut FxHashMap<usize, Box<[u64]>>,
+    ) {
+        for token_set in weight.unique_token_sets() {
+            let key = token_set as *const RangeSetBlaze<u32> as usize;
+            dense_masks
+                .entry(key)
+                .or_insert_with(|| self.dense_words_from_internal_set(token_set));
+        }
+    }
+
+    fn dense_words_from_internal_set(&self, internal_tokens: &RangeSetBlaze<u32>) -> Box<[u64]> {
+        let mut words = vec![0u64; self.internal_token_dense_words];
+        for internal_token in internal_tokens.iter() {
+            let index = internal_token as usize / 64;
+            let bit = internal_token as usize % 64;
+            if let Some(word) = words.get_mut(index) {
+                *word |= 1u64 << bit;
+            }
+        }
+        words.into_boxed_slice()
+    }
+
+    fn or_dense_intersection_to_buf(
+        &self,
+        left_words: &[u64],
+        right_words: &[u64],
+        buf: &mut [u32],
+    ) {
+        for (word_index, (&left_word, &right_word)) in left_words.iter().zip(right_words.iter()).enumerate() {
+            let mut overlap = left_word & right_word;
+            while overlap != 0 {
+                let bit = overlap.trailing_zeros() as usize;
+                let internal_token = word_index * 64 + bit;
+                if let Some(masks) = self.internal_token_buf_masks.get(internal_token) {
+                    for &(buf_word, mask) in masks {
+                        if let Some(slot) = buf.get_mut(buf_word as usize) {
+                            *slot |= mask;
+                        }
+                    }
+                }
+                overlap &= overlap - 1;
+            }
+        }
+    }
+
+    fn or_single_weight_intersection_to_buf_sparse(
+        &self,
+        start: u32,
+        end: u32,
+        single_tokens: &RangeSetBlaze<u32>,
+        other: &crate::ds::weight::Weight,
+        buf: &mut [u32],
+    ) {
+        other.for_each_intersection_tokens_with_single(start, end, single_tokens, |tokens| {
+            self.or_internal_token_set_to_buf(tokens, buf);
+        });
     }
 
     /// OR all tokens from `weight` directly into `buf` using precomputed bitmasks.
@@ -176,9 +263,40 @@ impl Constraint {
         other: &crate::ds::weight::Weight,
         buf: &mut [u32],
     ) {
-        other.for_each_intersection_tokens_with_single(start, end, single_tokens, |tokens| {
-            self.or_internal_token_set_to_buf(tokens, buf);
-        });
+        if self.internal_token_dense_words == 0
+            || self.weight_token_dense_masks.is_empty()
+            || self.internal_token_buf_masks.is_empty()
+        {
+            self.or_single_weight_intersection_to_buf_sparse(start, end, single_tokens, other, buf);
+            return;
+        }
+
+        let single_dense = self.dense_words_from_internal_set(single_tokens);
+        let mut seen_dense_keys = Vec::<usize>::new();
+
+        for (range, other_tokens) in other.0.range_values() {
+            if end < *range.start() || *range.end() < start {
+                continue;
+            }
+
+            let key = std::sync::Arc::as_ptr(other_tokens) as usize;
+            if seen_dense_keys.contains(&key) {
+                continue;
+            }
+            seen_dense_keys.push(key);
+
+            if single_tokens == other_tokens.as_ref() {
+                self.or_internal_token_set_to_buf(single_tokens, buf);
+                continue;
+            }
+
+            let Some(other_dense) = self.weight_token_dense_masks.get(&key) else {
+                self.or_single_weight_intersection_to_buf_sparse(start, end, single_tokens, other, buf);
+                return;
+            };
+
+            self.or_dense_intersection_to_buf(single_dense.as_ref(), other_dense.as_ref(), buf);
+        }
     }
 
     pub fn start(&self) -> ConstraintState<'_> {

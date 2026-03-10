@@ -236,6 +236,9 @@ impl<'a> ConstraintState<'a> {
                         let t1 = std::time::Instant::now();
                         if final_weight.is_full() {
                             reduced_acc.or_to_buf(self, buf);
+                        } else if let RuntimeWeight::Single { start, end, tokens } = &reduced_acc {
+                            self.constraint
+                                .or_single_weight_intersection_to_buf(*start, *end, tokens, final_weight, buf);
                         } else {
                             reduced_acc.or_intersection_to_buf(self, final_weight, buf);
                         }
