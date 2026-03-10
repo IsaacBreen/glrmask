@@ -598,6 +598,8 @@ fn merge_state_into_builder(
         let needed_at_target = &completed[target_new as usize].needed;
         let w_effective = if needed_at_target.is_full() {
             w_orig.clone()
+        } else if let Some((start, end, tokens)) = w_orig.single_compact_entry_parts() {
+            needed_at_target.intersect_single_parts(start, end, &tokens)
         } else {
             w_orig.intersection(needed_at_target)
         };
