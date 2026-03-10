@@ -70,7 +70,12 @@ fn analyze_equivalences_sep1(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalId
 
     for class in &result.vocab_classes {
         let internal_id = vocab_internal_to_originals.len() as u32;
-        let originals: Vec<u32> = class.iter().map(|&idx| token_ids[idx]).collect();
+        let mut originals: Vec<u32> = class.iter().map(|&idx| token_ids[idx]).collect();
+        // Sort so the shortest token (by byte length) comes first.
+        // This makes it the representative, which downstream code picks via .first().
+        originals.sort_by_key(|&tid| {
+            vocab.entries.get(&tid).map_or(usize::MAX, |b| b.len())
+        });
         for &tid in &originals {
             vocab_original_to_internal[tid as usize] = internal_id;
         }
