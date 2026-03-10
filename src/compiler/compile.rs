@@ -445,7 +445,18 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let phase_started_at = std::time::Instant::now();
     let id_map = InternalIdMap::build(&tokenizer, vocab);
     let build_internal_id_map_time = phase_started_at.elapsed();
-    log_compile_profile(profile_enabled, "build_internal_id_map", phase_started_at);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] build_internal_id_map_ms={:.3} states={}→{}_tsids ({:.1}x) vocab={}→{}_classes ({:.1}x)",
+            ms(build_internal_id_map_time),
+            tokenizer.num_states(),
+            id_map.num_tsids(),
+            tokenizer.num_states() as f64 / id_map.num_tsids().max(1) as f64,
+            vocab.entries.len(),
+            id_map.num_internal_tokens(),
+            vocab.entries.len() as f64 / id_map.num_internal_tokens().max(1) as f64,
+        );
+    }
 
     let phase_started_at = std::time::Instant::now();
     let token_bytes = vocab.entries.clone();

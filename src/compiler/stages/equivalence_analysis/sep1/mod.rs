@@ -14,11 +14,7 @@
 pub mod compat;
 
 pub mod state_equivalence_analysis_fast;
-// pub mod state_equivalence_analysis_reference;  // Needs trellis
 pub mod vocab_equivalence_analysis_fast;
 pub mod vocab_equivalence_analysis_fast_simple;
 pub mod vocab_equivalence_analysis_flat;
-// pub mod vocab_equivalence_analysis_fast_reference;  // Needs sep1 Regex type
-// pub mod vocab_equivalence_analysis_reference;  // Needs Regex.execute_from_state_nonzero
-// pub mod trellis_equivalence_analysis;          // Needs TokenTrellisWithCompletion
 pub mod combined_equivalence_analysis;

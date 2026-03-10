@@ -24,7 +24,6 @@ use super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
 
 use super::state_equivalence_analysis_fast::{self as state_equivalence_analysis, StateEquivalenceResult};
 use super::vocab_equivalence_analysis_fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
-// use super::trellis_equivalence_analysis; // not available in glrmask port
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -173,58 +172,6 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         // vocab_classes.len(),
         // vocab_start.elapsed(),
     // );
-    
-    // sep1_debug!(
-        // 2,
-        // "Combined equivalence analysis complete: {} vocab classes, {} representative states (total {:?})",
-        // vocab_classes.len(),
-        // reduced_states.len(),
-        // start.elapsed(),
-    // );
-
-    // Diagnostic: run trellis-based vocab equiv with follow pruning for comparison
-    // NOTE: Disabled in glrmask port - trellis_equivalence_analysis module not available
-    // if std::env::var("TRELLIS_FOLLOW_COMPARE").is_ok() { ... }
-
-    if false {
-        let mut singletons = 0usize;
-        let mut multi_classes = 0usize;
-        let mut multi_states = 0usize;
-        let mut max_class_size = 0usize;
-        let mut size_hist: BTreeMap<usize, usize> = BTreeMap::new();
-
-        for class in &state_classes {
-            let size = class.len();
-            *size_hist.entry(size).or_insert(0) += 1;
-            if size == 1 {
-                singletons += 1;
-            } else {
-                multi_classes += 1;
-                multi_states += size;
-            }
-            if size > max_class_size {
-                max_class_size = size;
-            }
-        }
-
-        let total_classes = state_classes.len();
-        // sep1_debug!(
-            // 4,
-            // "State equiv classes: total={}, singletons={}, multi_classes={}, multi_states={}, max_class_size={}",
-            // total_classes,
-            // singletons,
-            // multi_classes,
-            // multi_states,
-            // max_class_size
-        // );
-
-        let mut buckets: Vec<(usize, usize)> = size_hist
-            .into_iter()
-            .filter(|(size, _)| *size <= 10)
-            .collect();
-        buckets.sort_by_key(|(size, _)| *size);
-        // sep1_debug!(4, "State equiv size histogram (<=10): {:?}", buckets);
-    }
 
     #[cfg(test)]
     {
