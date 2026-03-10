@@ -339,13 +339,19 @@ fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
         let end = (*left_range.end()).min(*right_range.end());
 
         if start <= end {
+            let left_tokens_ref = left_tokens.as_ref();
+            let right_tokens_ref = right_tokens.as_ref();
             let tokens = if Arc::ptr_eq(left_tokens, right_tokens)
-                || left_tokens.as_ref() == right_tokens.as_ref()
+                || left_tokens_ref == right_tokens_ref
             {
                 Some(Arc::clone(left_tokens))
             } else {
-                let overlap = left_tokens.as_ref().clone() & right_tokens.as_ref().clone();
-                (!overlap.is_empty()).then(|| shared_rangeset(overlap))
+                let overlap = left_tokens_ref & right_tokens_ref;
+                if overlap.is_empty() {
+                    None
+                } else {
+                    Some(shared_rangeset(overlap))
+                }
             };
 
             if let Some(tokens) = tokens {
@@ -408,7 +414,7 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
                 };
                 Arc::clone(cached_tokens)
             } else {
-                let overlap = single.tokens.as_ref().clone() & other_tokens.as_ref().clone();
+                let overlap = single.tokens.as_ref() & other_tokens.as_ref();
                 if overlap.is_empty() {
                     overlap_cache.push((cache_key, None));
                     continue;
@@ -655,7 +661,7 @@ impl Weight {
                     if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
                         Some(Arc::clone(left_tokens))
                     } else {
-                        let tokens = left_tokens.as_ref().clone() & right_tokens.as_ref().clone();
+                        let tokens = left_tokens.as_ref() & right_tokens.as_ref();
                         (!tokens.is_empty()).then(|| shared_rangeset(tokens))
                     }
                 }
@@ -792,7 +798,7 @@ impl Weight {
                 continue;
             }
 
-            let overlap = single_tokens.clone() & other_tokens.as_ref().clone();
+            let overlap = single_tokens & other_tokens.as_ref();
             if overlap.is_empty() {
                 overlap_cache.push((cache_key, None));
                 continue;
