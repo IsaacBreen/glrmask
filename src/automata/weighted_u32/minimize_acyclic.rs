@@ -503,7 +503,9 @@ fn try_all_compatible_height_0_coloring(
 
 struct MergedStateBuilder {
     final_weight: Weight,
+    final_weight_builder: WeightBuilder,
     needed: Weight,
+    needed_builder: WeightBuilder,
     transitions: BTreeMap<Label, (u32, WeightBuilder)>,
 }
 
@@ -511,13 +513,23 @@ impl Default for MergedStateBuilder {
     fn default() -> Self {
         Self {
             final_weight: Weight::empty(),
+            final_weight_builder: WeightBuilder::new(),
             needed: Weight::empty(),
+            needed_builder: WeightBuilder::new(),
             transitions: BTreeMap::new(),
         }
     }
 }
 
 impl MergedStateBuilder {
+    fn add_final_weight(&mut self, weight: &Weight) {
+        self.final_weight_builder.union_weight(weight);
+    }
+
+    fn add_needed(&mut self, weight: &Weight) {
+        self.needed_builder.union_weight(weight);
+    }
+
     fn add_transition(&mut self, label: Label, target: u32, weight: Weight) {
         match self.transitions.entry(label) {
             std::collections::btree_map::Entry::Vacant(e) => {
@@ -530,6 +542,11 @@ impl MergedStateBuilder {
                 existing_weight.union_weight(&weight);
             }
         }
+    }
+
+    fn finalize_for_reuse(&mut self) {
+        self.final_weight = std::mem::take(&mut self.final_weight_builder).build();
+        self.needed = std::mem::take(&mut self.needed_builder).build();
     }
 }
 
@@ -547,11 +564,11 @@ fn merge_state_into_builder(
 
     // Union final weights
     if let Some(fw) = &old_state.final_weight {
-        builder.final_weight = builder.final_weight.union(fw);
+        builder.add_final_weight(fw);
     }
 
     // Union needed sets
-    builder.needed = builder.needed.union(&needed[old_id]);
+    builder.add_needed(&needed[old_id]);
 
     // Merge transitions
     let n = dwa.states.len();
@@ -690,6 +707,9 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                     builders,
                 );
             }
+            for builder in builders.iter_mut() {
+                builder.finalize_for_reuse();
+            }
             continue;
         }
 
@@ -721,6 +741,9 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                 completed,
                 builders,
             );
+        }
+        for builder in builders.iter_mut() {
+            builder.finalize_for_reuse();
         }
     }
 
