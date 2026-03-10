@@ -193,10 +193,6 @@ impl Lowerer {
     }
 }
 
-fn is_terminal_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')
-}
-
 pub(crate) fn compile_to_regex(
     expr: &GrammarExpr,
     terminal_patterns: &BTreeMap<String, String>,

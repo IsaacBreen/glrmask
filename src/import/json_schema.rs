@@ -389,10 +389,22 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     ctx.materialize_registered_refs()?;
     let start_expr = ctx.convert_schema(schema)?;
     ctx.insert_rule("start", start_expr);
+    let terminals: HashSet<String> = ctx
+        .rules
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        })
+        .map(|s| s.to_string())
+        .collect();
     Ok(NamedGrammar {
         rules: ctx.rules,
         start: "start".into(),
-        terminals: HashSet::new(),
+        terminals,
     })
 }
 

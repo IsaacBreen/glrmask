@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
+use crate::import::ebnf_factoring::factor_named_grammar;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -913,7 +914,8 @@ impl Parser {
 
 pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     let named = parse_lark_to_named(input)?;
-    lower(&named)
+    let factored = factor_named_grammar(named);
+    lower(&factored)
 }
 
 #[allow(dead_code)]
