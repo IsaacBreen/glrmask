@@ -7,6 +7,7 @@ pub mod combined;
 pub mod state_analysis;
 pub mod vocab_analysis;
 pub mod vocab_trellis;
+pub mod sep1;
 
 #[derive(Debug, Clone)]
 pub struct ManyToOneIdMap {

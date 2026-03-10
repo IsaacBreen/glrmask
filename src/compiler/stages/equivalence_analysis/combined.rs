@@ -143,4 +143,82 @@ mod tests {
                  Actual:   {:?}",
                 expected_sorted, actual_sorted);
         }
+
+        /// Diagnostic test: measures equivalence analysis effectiveness.
+        /// Run with: cargo test --lib measure_equivalence_effectiveness -- --nocapture
+        #[test]
+        fn measure_equivalence_effectiveness() {
+            use crate::import::json_schema::json_schema_to_grammar;
+            use crate::compiler::stages::equivalence_analysis::vocab_analysis::analyze_vocab_equivalences;
+            use crate::compiler::stages::equivalence_analysis::state_analysis::analyze_state_equivalences;
+            use crate::compiler::stages::equivalence_analysis::vocab_trellis::analyze_vocab_equivalences_trellis;
+
+            let schema = r#"{
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }"#;
+            let grammar = json_schema_to_grammar(schema).expect("Schema should convert");
+            let tok = build_tokenizer(&grammar);
+
+            // Build a realistic-ish vocab with 16 entries
+            let vocab_strs = vec![
+                "{", "}", "\"", ":", ",", "n", "a", "m", "e", "s", "t", "r", "i", "g", "{\"", "\":"
+            ];
+            let vocab_entries: Vec<(u32, Vec<u8>)> = vocab_strs.iter().enumerate()
+                .map(|(i, s)| (i as u32, s.as_bytes().to_vec())).collect();
+            let vocab = Vocab::new(vocab_entries, None);
+
+            // State equivalence
+            let state_map = analyze_state_equivalences(&tok);
+            let num_original_states = tok.num_states();
+            let num_state_classes = state_map.num_internal_ids();
+
+            // Byte-identity baseline
+            let byte_identity_map = analyze_vocab_equivalences(&vocab);
+            let num_byte_identity_classes = byte_identity_map.num_internal_ids();
+
+            // Trellis-based
+            let representative_states: Vec<u32> = state_map.internal_to_originals
+                .iter()
+                .filter_map(|o| o.first().copied())
+                .collect();
+            let trellis_map = analyze_vocab_equivalences_trellis(&tok, &vocab, &representative_states);
+            let num_trellis_classes = trellis_map.num_internal_ids();
+
+            // Full combined analysis (what pipeline uses)
+            let full_map = analyze_equivalences(&tok, &vocab);
+            let num_combined_state_classes = full_map.num_tsids();
+            let num_combined_vocab_classes = full_map.num_internal_tokens();
+
+            println!("\n=== Equivalence Analysis Effectiveness ===");
+            println!("Grammar: JSON schema (object with 'name' string property)");
+            println!("Vocab: {} entries", vocab_strs.len());
+            println!();
+            println!("STATE EQUIVALENCE:");
+            println!("  Original DFA states:     {}", num_original_states);
+            println!("  State equiv classes:     {}", num_state_classes);
+            println!("  Compression ratio:       {:.1}x", num_original_states as f64 / num_state_classes as f64);
+            println!();
+            println!("VOCAB EQUIVALENCE:");
+            println!("  Original vocab entries:  {}", vocab_strs.len());
+            println!("  Byte-identity classes:   {} (baseline)", num_byte_identity_classes);
+            println!("  Trellis classes:         {} (new)", num_trellis_classes);
+            println!("  Improvement over baseline: {} fewer classes ({:.1}% reduction)",
+                num_byte_identity_classes - num_trellis_classes,
+                (1.0 - num_trellis_classes as f64 / num_byte_identity_classes as f64) * 100.0);
+            println!();
+            println!("COMBINED (pipeline view):");
+            println!("  State classes (TSIDs):   {}", num_combined_state_classes);
+            println!("  Vocab classes:           {}", num_combined_vocab_classes);
+
+            // Show classes
+            println!();
+            println!("Trellis vocab classes:");
+            for (i, class) in trellis_map.internal_to_originals.iter().enumerate() {
+                let content: Vec<&str> = class.iter().map(|&idx| vocab_strs[idx as usize]).collect();
+                println!("  Class {}: {:?}", i, content);
+            }
+        }
 }
