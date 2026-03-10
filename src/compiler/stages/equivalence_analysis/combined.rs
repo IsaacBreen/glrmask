@@ -6,20 +6,82 @@
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::equivalence_analysis::state_analysis::analyze_state_equivalences;
-use crate::compiler::stages::equivalence_analysis::vocab_trellis::analyze_vocab_equivalences_trellis;
+use crate::compiler::stages::equivalence_analysis::sep1::compat::Sep1Tokenizer;
+use crate::compiler::stages::equivalence_analysis::sep1::combined_equivalence_analysis;
 
 pub(crate) fn analyze_equivalences(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
-    let state_map = analyze_state_equivalences(tokenizer);
+    analyze_equivalences_sep1(tokenizer, vocab)
+}
 
-    // Collect representative states for trellis-based vocab analysis.
-    let representative_states: Vec<u32> = state_map
-        .internal_to_originals
-        .iter()
-        .filter_map(|originals| originals.first().copied())
-        .collect();
+/// Sep1-derived combined equivalence analysis.
+///
+/// Uses the ported sep1 pipeline: state equivalence (k-step hashing + token-based
+/// refinement) followed by vocab equivalence (parallel batched with byte-class
+/// compression). Cross-validates against simple and flat implementations in tests.
+fn analyze_equivalences_sep1(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
+    let sep1_tok = Sep1Tokenizer::new(tokenizer);
 
-    let vocab_map = analyze_vocab_equivalences_trellis(tokenizer, vocab, &representative_states);
+    // Extract vocab tokens as byte slices, ordered by token ID.
+    // Vocab entries is a BTreeMap<u32, Vec<u8>>, so we need to handle sparse IDs.
+    let max_token_id = vocab.max_token_id();
+    let mut token_bytes: Vec<Vec<u8>> = Vec::with_capacity(vocab.len());
+    let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
+    for (&tid, bytes) in &vocab.entries {
+        token_ids.push(tid);
+        token_bytes.push(bytes.clone());
+    }
+
+    // All DFA states as initial states
+    let initial_states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+
+    let result = combined_equivalence_analysis::compute_combined_equivalence(
+        &sep1_tok,
+        &token_bytes,
+        &initial_states,
+        None, // suffix_group_mask
+        None, // ever_allowed_by_group
+        None, // group_to_class
+    );
+
+    // Convert state equivalence classes to ManyToOneIdMap
+    let num_dfa_states = tokenizer.num_states() as usize;
+    let mut state_original_to_internal = vec![u32::MAX; num_dfa_states];
+    let mut state_internal_to_originals: Vec<Vec<u32>> = Vec::new();
+
+    for class in &result.state_classes {
+        let internal_id = state_internal_to_originals.len() as u32;
+        let originals: Vec<u32> = class.iter().map(|&s| s as u32).collect();
+        for &s in &originals {
+            state_original_to_internal[s as usize] = internal_id;
+        }
+        state_internal_to_originals.push(originals);
+    }
+
+    let state_map = ManyToOneIdMap {
+        original_to_internal: state_original_to_internal,
+        internal_to_originals: state_internal_to_originals,
+    };
+
+    // Convert vocab equivalence classes to ManyToOneIdMap
+    // The sep1 result uses indices into our token_bytes array, but we need
+    // to map back to original token IDs.
+    let mut vocab_original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
+    let mut vocab_internal_to_originals: Vec<Vec<u32>> = Vec::new();
+
+    for class in &result.vocab_classes {
+        let internal_id = vocab_internal_to_originals.len() as u32;
+        let originals: Vec<u32> = class.iter().map(|&idx| token_ids[idx]).collect();
+        for &tid in &originals {
+            vocab_original_to_internal[tid as usize] = internal_id;
+        }
+        vocab_internal_to_originals.push(originals);
+    }
+
+    let vocab_map = ManyToOneIdMap {
+        original_to_internal: vocab_original_to_internal,
+        internal_to_originals: vocab_internal_to_originals,
+    };
+
     InternalIdMap {
         tokenizer_states: state_map,
         vocab_tokens: vocab_map,
@@ -149,9 +211,6 @@ mod tests {
         #[test]
         fn measure_equivalence_effectiveness() {
             use crate::import::json_schema::json_schema_to_grammar;
-            use crate::compiler::stages::equivalence_analysis::vocab_analysis::analyze_vocab_equivalences;
-            use crate::compiler::stages::equivalence_analysis::state_analysis::analyze_state_equivalences;
-            use crate::compiler::stages::equivalence_analysis::vocab_trellis::analyze_vocab_equivalences_trellis;
 
             let schema = r#"{
                 "type": "object",
@@ -170,53 +229,29 @@ mod tests {
                 .map(|(i, s)| (i as u32, s.as_bytes().to_vec())).collect();
             let vocab = Vocab::new(vocab_entries, None);
 
-            // State equivalence
-            let state_map = analyze_state_equivalences(&tok);
-            let num_original_states = tok.num_states();
-            let num_state_classes = state_map.num_internal_ids();
-
-            // Byte-identity baseline
-            let byte_identity_map = analyze_vocab_equivalences(&vocab);
-            let num_byte_identity_classes = byte_identity_map.num_internal_ids();
-
-            // Trellis-based
-            let representative_states: Vec<u32> = state_map.internal_to_originals
-                .iter()
-                .filter_map(|o| o.first().copied())
-                .collect();
-            let trellis_map = analyze_vocab_equivalences_trellis(&tok, &vocab, &representative_states);
-            let num_trellis_classes = trellis_map.num_internal_ids();
-
-            // Full combined analysis (what pipeline uses)
+            // Full combined analysis (sep1 pipeline)
             let full_map = analyze_equivalences(&tok, &vocab);
+            let num_original_states = tok.num_states();
             let num_combined_state_classes = full_map.num_tsids();
             let num_combined_vocab_classes = full_map.num_internal_tokens();
 
-            println!("\n=== Equivalence Analysis Effectiveness ===");
+            println!("\n=== Equivalence Analysis Effectiveness (sep1 pipeline) ===");
             println!("Grammar: JSON schema (object with 'name' string property)");
             println!("Vocab: {} entries", vocab_strs.len());
             println!();
             println!("STATE EQUIVALENCE:");
             println!("  Original DFA states:     {}", num_original_states);
-            println!("  State equiv classes:     {}", num_state_classes);
-            println!("  Compression ratio:       {:.1}x", num_original_states as f64 / num_state_classes as f64);
+            println!("  State equiv classes:     {}", num_combined_state_classes);
+            println!("  Compression ratio:       {:.1}x", num_original_states as f64 / num_combined_state_classes as f64);
             println!();
             println!("VOCAB EQUIVALENCE:");
             println!("  Original vocab entries:  {}", vocab_strs.len());
-            println!("  Byte-identity classes:   {} (baseline)", num_byte_identity_classes);
-            println!("  Trellis classes:         {} (new)", num_trellis_classes);
-            println!("  Improvement over baseline: {} fewer classes ({:.1}% reduction)",
-                num_byte_identity_classes - num_trellis_classes,
-                (1.0 - num_trellis_classes as f64 / num_byte_identity_classes as f64) * 100.0);
-            println!();
-            println!("COMBINED (pipeline view):");
-            println!("  State classes (TSIDs):   {}", num_combined_state_classes);
             println!("  Vocab classes:           {}", num_combined_vocab_classes);
 
             // Show classes
             println!();
-            println!("Trellis vocab classes:");
-            for (i, class) in trellis_map.internal_to_originals.iter().enumerate() {
+            println!("Vocab classes:");
+            for (i, class) in full_map.vocab_tokens.internal_to_originals.iter().enumerate() {
                 let content: Vec<&str> = class.iter().map(|&idx| vocab_strs[idx as usize]).collect();
                 println!("  Class {}: {:?}", i, content);
             }
