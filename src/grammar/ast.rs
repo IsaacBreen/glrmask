@@ -34,6 +34,9 @@ pub struct NamedGrammar {
     /// Rule names that are terminal definitions (as opposed to nonterminals).
     /// Set explicitly by the importer — not derived from naming conventions.
     pub terminals: HashSet<String>,
+    /// Name of the terminal rule whose body should be used as the ignore pattern.
+    /// Set by Lark's `%ignore` directive.
+    pub ignore: Option<String>,
 }
 
 struct Lowerer {
@@ -315,13 +318,25 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         .map(|(name, id)| (*id, name.clone()))
         .collect();
 
+    let ignore_terminal = if let Some(ref ignore_name) = grammar.ignore {
+        // Find the terminal created for the ignore rule.
+        // The ignore rule is in grammar.terminals, so it was lowered above
+        // as NT → Terminal. The terminal has the ignore name in terminal_names.
+        let tid = lowerer.terminal_names.iter()
+            .find(|(_, name)| *name == ignore_name)
+            .map(|(&id, _)| id);
+        tid
+    } else {
+        None
+    };
+
     Ok(GrammarDef {
         rules: lowerer.rules,
         start,
         terminals: lowerer.terminals,
         nonterminal_names,
         terminal_names: lowerer.terminal_names,
-        ignore_terminal: None,
+        ignore_terminal,
     })
 }
 
@@ -361,7 +376,7 @@ mod tests {
                 ]),
             )],
             start: "start".into(),
-            terminals: HashSet::new(),
+            terminals: HashSet::new(), ignore: None,
         };
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0);
@@ -380,7 +395,7 @@ mod tests {
                 ]),
             )],
             start: "start".into(),
-            terminals: HashSet::new(),
+            terminals: HashSet::new(), ignore: None,
         };
         let gdef = lower(&g).unwrap();
         
@@ -396,7 +411,7 @@ mod tests {
                 GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
             )],
             start: "start".into(),
-            terminals: HashSet::new(),
+            terminals: HashSet::new(), ignore: None,
         };
         let gdef = lower(&g).unwrap();
         
@@ -416,7 +431,7 @@ mod tests {
                 ]),
             )],
             start: "start".into(),
-            terminals: HashSet::new(),
+            terminals: HashSet::new(), ignore: None,
         };
         let gdef = lower(&g).unwrap();
 
@@ -455,7 +470,7 @@ mod tests {
                 GrammarExpr::RepeatOne(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
             )],
             start: "start".into(),
-            terminals: HashSet::new(),
+            terminals: HashSet::new(), ignore: None,
         };
         let gdef = lower(&g).unwrap();
         
@@ -482,7 +497,7 @@ mod tests {
                 ),
             ],
             start: "start".into(),
-            terminals: HashSet::new(),
+            terminals: HashSet::new(), ignore: None,
         };
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0); 
@@ -506,7 +521,7 @@ mod tests {
                 ),
             ],
             start: "start".into(),
-            terminals: HashSet::new(),
+            terminals: HashSet::new(), ignore: None,
         };
 
         let gdef = lower(&g).unwrap();

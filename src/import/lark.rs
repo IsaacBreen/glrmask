@@ -32,6 +32,7 @@ enum Token {
     Comma,
     Arrow, 
     Bang,
+    PercentIgnore,
 }
 
 struct Lexer<'a> {
@@ -176,7 +177,15 @@ impl<'a> Lexer<'a> {
                 Some(b'#') => self.skip_comment(),
                 Some(b'%') => {
                     self.pos += 1;
-                    self.skip_comment();
+                    // Check for %ignore directive
+                    let rest = &self.input[self.pos..];
+                    if rest.starts_with(b"ignore") && rest.get(6).map_or(true, |b| !b.is_ascii_alphanumeric() && *b != b'_') {
+                        self.pos += 6;
+                        tokens.push(Token::PercentIgnore);
+                    } else {
+                        // Skip other %directives (e.g. %import)
+                        self.skip_comment();
+                    }
                 }
                 Some(b'\n') => {
                     self.pos += 1;
@@ -620,6 +629,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         rules,
         start: output_start,
         terminals: grammar.terminals,
+        ignore: grammar.ignore,
     })
 }
 
@@ -664,9 +674,19 @@ impl Parser {
 
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
         let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
+        let mut ignore_exprs: Vec<GrammarExpr> = Vec::new();
 
         self.skip_newlines();
         while self.pos < self.tokens.len() {
+            // Handle %ignore directives
+            if self.peek() == Some(&Token::PercentIgnore) {
+                self.pos += 1;
+                let expr = self.parse_atom()?;
+                ignore_exprs.push(expr);
+                self.skip_newlines();
+                continue;
+            }
+
             while matches!(self.peek(), Some(Token::Question) | Some(Token::Bang)) {
                 self.pos += 1;
             }
@@ -706,12 +726,28 @@ impl Parser {
         } else {
             rules[0].0.clone()
         };
-        let terminals: HashSet<String> = rules
+        let mut terminals: HashSet<String> = rules
             .iter()
             .map(|(name, _)| name.clone())
             .filter(|name| is_lark_terminal_name(name))
             .collect();
-        Ok(NamedGrammar { rules, start, terminals })
+
+        // Synthesize an __IGNORE terminal if %ignore directives were found
+        let ignore = if ignore_exprs.is_empty() {
+            None
+        } else {
+            let ignore_body = if ignore_exprs.len() == 1 {
+                ignore_exprs.into_iter().next().unwrap()
+            } else {
+                GrammarExpr::Choice(ignore_exprs)
+            };
+            let name = "__IGNORE".to_string();
+            rules.push((name.clone(), ignore_body));
+            terminals.insert(name.clone());
+            Some(name)
+        };
+
+        Ok(NamedGrammar { rules, start, terminals, ignore })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {

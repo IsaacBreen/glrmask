@@ -263,7 +263,7 @@ impl Parser {
             .first()
             .map(|(name, _)| name.clone())
             .ok_or_else(|| GlrMaskError::GrammarParse("empty grammar".into()))?;
-        Ok(NamedGrammar { rules, start, terminals: HashSet::new() })
+        Ok(NamedGrammar { rules, start, terminals: HashSet::new(), ignore: None })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {

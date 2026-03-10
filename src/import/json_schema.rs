@@ -405,6 +405,7 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         rules: ctx.rules,
         start: "start".into(),
         terminals,
+        ignore: None,
     })
 }
 
