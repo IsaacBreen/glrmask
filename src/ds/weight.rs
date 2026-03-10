@@ -327,6 +327,7 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
     let mut pending_start = None;
     let mut pending_end = 0u32;
     let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
+    let mut overlap_cache: Vec<(*const RangeSetBlaze<u32>, Option<Arc<RangeSetBlaze<u32>>>)> = Vec::new();
 
     for (range, other_tokens) in other.0.range_values() {
         let start = single.start.max(*range.start());
@@ -340,11 +341,22 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
         {
             Arc::clone(&single.tokens)
         } else {
-            let overlap = single.tokens.as_ref().clone() & other_tokens.as_ref().clone();
-            if overlap.is_empty() {
-                continue;
+            let cache_key = Arc::as_ptr(other_tokens);
+            if let Some((_, cached)) = overlap_cache.iter().find(|(ptr, _)| *ptr == cache_key) {
+                let Some(cached_tokens) = cached else {
+                    continue;
+                };
+                Arc::clone(cached_tokens)
+            } else {
+                let overlap = single.tokens.as_ref().clone() & other_tokens.as_ref().clone();
+                if overlap.is_empty() {
+                    overlap_cache.push((cache_key, None));
+                    continue;
+                }
+                let overlap_tokens = shared_rangeset(overlap);
+                overlap_cache.push((cache_key, Some(Arc::clone(&overlap_tokens))));
+                overlap_tokens
             }
-            shared_rangeset(overlap)
         };
 
         push_compact_range(
@@ -675,6 +687,54 @@ impl Weight {
             .get(tsid)
             .map(|tokens| tokens.as_ref().clone())
             .unwrap_or_else(RangeSetBlaze::new)
+    }
+
+    pub(crate) fn single_compact_entry_parts(
+        &self,
+    ) -> Option<(u32, u32, Arc<RangeSetBlaze<u32>>)> {
+        let entry = single_compact_entry(self)?;
+        Some((entry.start, entry.end, entry.tokens))
+    }
+
+    pub(crate) fn for_each_intersection_tokens_with_single<F>(
+        &self,
+        start: u32,
+        end: u32,
+        single_tokens: &RangeSetBlaze<u32>,
+        mut f: F,
+    ) where
+        F: FnMut(&RangeSetBlaze<u32>),
+    {
+        let mut overlap_cache: Vec<(*const RangeSetBlaze<u32>, Option<Arc<RangeSetBlaze<u32>>>)> = Vec::new();
+
+        for (range, other_tokens) in self.0.range_values() {
+            if end < *range.start() || *range.end() < start {
+                continue;
+            }
+
+            if single_tokens == other_tokens.as_ref() {
+                f(single_tokens);
+                continue;
+            }
+
+            let cache_key = Arc::as_ptr(other_tokens);
+            if let Some((_, cached)) = overlap_cache.iter().find(|(ptr, _)| *ptr == cache_key) {
+                if let Some(cached_tokens) = cached {
+                    f(cached_tokens.as_ref());
+                }
+                continue;
+            }
+
+            let overlap = single_tokens.clone() & other_tokens.as_ref().clone();
+            if overlap.is_empty() {
+                overlap_cache.push((cache_key, None));
+                continue;
+            }
+
+            let overlap_tokens = shared_rangeset(overlap);
+            f(overlap_tokens.as_ref());
+            overlap_cache.push((cache_key, Some(overlap_tokens)));
+        }
     }
 
     /// Iterate over the unique (Arc-deduplicated) token sets in this weight.

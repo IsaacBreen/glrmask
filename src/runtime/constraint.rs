@@ -142,6 +142,45 @@ impl Constraint {
         }
     }
 
+    pub(crate) fn or_internal_token_set_to_buf(
+        &self,
+        internal_tokens: &RangeSetBlaze<u32>,
+        buf: &mut [u32],
+    ) {
+        if !self.internal_token_buf_masks.is_empty() {
+            for internal_token in internal_tokens.iter() {
+                if let Some(masks) = self.internal_token_buf_masks.get(internal_token as usize) {
+                    for &(word_idx, mask) in masks {
+                        if let Some(slot) = buf.get_mut(word_idx as usize) {
+                            *slot |= mask;
+                        }
+                    }
+                }
+            }
+        } else {
+            for token_id in internal_tokens.iter() {
+                let word = token_id as usize / 32;
+                let bit = token_id as usize % 32;
+                if let Some(slot) = buf.get_mut(word) {
+                    *slot |= 1u32 << bit;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn or_single_weight_intersection_to_buf(
+        &self,
+        start: u32,
+        end: u32,
+        single_tokens: &RangeSetBlaze<u32>,
+        other: &crate::ds::weight::Weight,
+        buf: &mut [u32],
+    ) {
+        other.for_each_intersection_tokens_with_single(start, end, single_tokens, |tokens| {
+            self.or_internal_token_set_to_buf(tokens, buf);
+        });
+    }
+
     pub fn start(&self) -> ConstraintState<'_> {
         
         let initial_parser_state = 0u32;
