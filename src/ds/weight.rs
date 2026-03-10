@@ -459,6 +459,10 @@ impl WeightBuilder {
         Self::default()
     }
 
+    pub(crate) fn is_full(&self) -> bool {
+        self.is_full
+    }
+
     pub(crate) fn union_weight(&mut self, weight: &Weight) {
         if self.is_full || weight.is_empty() {
             return;

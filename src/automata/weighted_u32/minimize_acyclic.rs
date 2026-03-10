@@ -48,22 +48,26 @@ pub fn push_weights(dwa: &mut DWA) -> bool {
     let mut reachable: Vec<Weight> = vec![Weight::empty(); n];
     for &u in topo.iter().rev() {
         let st = &dwa.states[u];
-        let mut acc = st.final_weight.clone().unwrap_or_else(Weight::empty);
+        let mut acc = WeightBuilder::new();
+        if let Some(final_weight) = &st.final_weight {
+            acc.union_weight(final_weight);
+        }
         for (_, (target, w)) in &st.transitions {
             let t = *target as usize;
             if t >= n {
                 continue;
             }
             if reachable[t].is_full() {
-                acc = acc.union(w);
+                acc.union_weight(w);
             } else if !reachable[t].is_empty() {
-                acc = acc.union(&w.intersection(&reachable[t]));
+                let tmp = w.intersection(&reachable[t]);
+                acc.union_weight(&tmp);
             }
             if acc.is_full() {
                 break;
             }
         }
-        reachable[u] = acc;
+        reachable[u] = acc.build();
     }
 
     // 3. Intersect each transition weight with reachable[target]
@@ -155,16 +159,26 @@ fn compute_needed_sets(dwa: &DWA, topo: &[usize]) -> Vec<Weight> {
     let mut needed = vec![Weight::empty(); n];
     for &u in topo.iter().rev() {
         let st = &dwa.states[u];
-        let mut acc = st.final_weight.clone().unwrap_or_else(Weight::empty);
+        let mut acc = WeightBuilder::new();
+        if let Some(final_weight) = &st.final_weight {
+            acc.union_weight(final_weight);
+        }
         for (_, (target, w)) in &st.transitions {
             let t = *target as usize;
             if t >= n {
                 continue;
             }
-            let tmp = w.intersection(&needed[t]);
-            acc = acc.union(&tmp);
+            if needed[t].is_full() {
+                acc.union_weight(w);
+            } else if !needed[t].is_empty() {
+                let tmp = w.intersection(&needed[t]);
+                acc.union_weight(&tmp);
+            }
+            if acc.is_full() {
+                break;
+            }
         }
-        needed[u] = acc;
+        needed[u] = acc.build();
     }
     needed
 }
