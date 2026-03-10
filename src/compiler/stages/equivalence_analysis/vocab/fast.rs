@@ -36,7 +36,6 @@ const STATE_NONE: usize = usize::MAX;
 #[derive(Clone, Copy)]
 struct Finalizer {
     gid: usize,
-    non_greedy: bool,
 }
 
 /// Flat DFA with byte-class-compressed transposed transition tables.
@@ -129,16 +128,8 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
                 .iter().copied()
                 .chain(s.possible_future_group_ids.iter().copied())
         })
-        .chain(dfa.non_greedy_finalizers.iter().copied())
         .max()
         .map_or(0, |m| m + 1);
-
-    let mut non_greedy_flags = vec![false; num_groups];
-    for &gid in &dfa.non_greedy_finalizers {
-        if gid < num_groups {
-            non_greedy_flags[gid] = true;
-        }
-    }
 
     let mut transitions = Vec::with_capacity(dfa.states.len());
     let mut finalizers = Vec::with_capacity(dfa.states.len());
@@ -158,7 +149,6 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
                 .iter()
                 .map(|&gid| Finalizer {
                     gid,
-                    non_greedy: non_greedy_flags.get(gid).copied().unwrap_or(false),
                 })
                 .collect(),
         );
@@ -317,9 +307,7 @@ fn run_batch(
                     for f in &dfa.finalizers[ns] {
                         if f.gid < num_groups {
                             let ix = base + f.gid;
-                            if !f.non_greedy || scratch.match_positions[ix] == NONE {
-                                scratch.match_positions[ix] = position;
-                            }
+                            scratch.match_positions[ix] = position;
                             scratch.dirty_groups[i].push(f.gid);
                         }
                     }
@@ -362,7 +350,7 @@ fn run_batch(
                         let base = i * num_groups;
                         let s = scratch.current_states[i];
                         for f in &dfa.finalizers[s] {
-                            if f.gid < num_groups && !f.non_greedy {
+                            if f.gid < num_groups {
                                 scratch.match_positions[base + f.gid] = token_len;
                                 scratch.dirty_groups[i].push(f.gid);
                             }
@@ -422,9 +410,7 @@ fn run_suffix(
         let position = (idx + 1) as u32;
         for f in &dfa.finalizers[current] {
             if f.gid < num_groups {
-                if !f.non_greedy || match_positions[f.gid] == NONE {
-                    match_positions[f.gid] = position;
-                }
+                match_positions[f.gid] = position;
             }
         }
         if dfa.is_dead_end[current] {

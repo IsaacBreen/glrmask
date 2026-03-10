@@ -3,15 +3,14 @@
 //!
 //! The sep1 code expects:
 //! - `Tokenizer` with `.dfa()` returning a DFA struct that has public
-//!   `.states`, `.start_state`, `.non_greedy_finalizers`
+//!   `.states`, `.start_state`
 //! - `DFAState` with public `.transitions: CharTransitions<usize>`,
 //!   `.finalizers: DenseStateSet`, `.possible_future_group_ids: BTreeSet<GroupID>`
 //! - State indices as `usize`
 //!
 //! glrmask uses:
 //! - `Tokenizer` with public `.dfa` field
-//! - `DFAState` with `BitSet` finalizers, private `possible_future_group_ids`,
-//!   per-state `non_greedy_finalizers`
+//! - `DFAState` with `BitSet` finalizers, private `possible_future_group_ids`
 //! - State indices as `u32`
 //!
 //! This module provides flat, pre-extracted views of the DFA data so the sep1
@@ -20,7 +19,6 @@
 #![allow(dead_code)]
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use std::collections::BTreeSet;
 
 pub type GroupID = usize;
 
@@ -33,8 +31,6 @@ pub struct FlatDfaState {
     pub finalizers: Vec<usize>,
     /// Sorted list of group IDs reachable from this state.
     pub possible_future_group_ids: Vec<usize>,
-    /// Whether this group ID has a non-greedy finalizer at this state.
-    pub non_greedy_finalizers: Vec<usize>,
 }
 
 /// Pre-extracted DFA in sep1-compatible format.
@@ -43,8 +39,6 @@ pub struct FlatDfaState {
 pub struct FlatDfa {
     pub states: Vec<FlatDfaState>,
     pub start_state: usize,
-    /// Global non-greedy finalizers: union of all per-state non_greedy_finalizers.
-    pub non_greedy_finalizers: BTreeSet<usize>,
 }
 
 impl FlatDfa {
@@ -53,8 +47,6 @@ impl FlatDfa {
         let dfa = &tokenizer.dfa;
         let dfa_states = dfa.states();
         let start_state = tokenizer.start_state() as usize;
-        let mut global_non_greedy: BTreeSet<usize> = BTreeSet::new();
-
         let states: Vec<FlatDfaState> = dfa_states
             .iter()
             .enumerate()
@@ -67,18 +59,11 @@ impl FlatDfa {
                 let finalizers: Vec<usize> = state.finalizers.iter().collect();
                 let possible_future_group_ids: Vec<usize> =
                     dfa.possible_future_group_ids(i as u32).iter().collect();
-                let non_greedy_finalizers: Vec<usize> =
-                    state.non_greedy_finalizers.iter().collect();
-
-                for &gid in &non_greedy_finalizers {
-                    global_non_greedy.insert(gid);
-                }
 
                 FlatDfaState {
                     transitions: table,
                     finalizers,
                     possible_future_group_ids,
-                    non_greedy_finalizers,
                 }
             })
             .collect();
@@ -86,7 +71,6 @@ impl FlatDfa {
         FlatDfa {
             states,
             start_state,
-            non_greedy_finalizers: global_non_greedy,
         }
     }
 

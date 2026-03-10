@@ -17,7 +17,6 @@ pub struct NFAState {
     pub transitions: Vec<(U8Set, u32)>,
     pub epsilon_transitions: Vec<u32>,
     pub finalizers: BTreeSet<GroupId>,
-    pub non_greedy_finalizers: BTreeSet<GroupId>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +31,6 @@ impl NFA {
             transitions: Vec::new(),
             epsilon_transitions: Vec::new(),
             finalizers: BTreeSet::new(),
-            non_greedy_finalizers: BTreeSet::new(),
         });
         Self { states }
     }
@@ -47,7 +45,6 @@ impl NFA {
             transitions: Vec::new(),
             epsilon_transitions: Vec::new(),
             finalizers: BTreeSet::new(),
-            non_greedy_finalizers: BTreeSet::new(),
         });
         id
     }
@@ -71,12 +68,6 @@ impl NFA {
     pub fn add_finalizer(&mut self, state: u32, group_id: GroupId) {
         if let Some(entry) = self.states.get_mut(state as usize) {
             entry.finalizers.insert(group_id);
-        }
-    }
-
-    pub fn add_non_greedy_finalizer(&mut self, state: u32, group_id: GroupId) {
-        if let Some(entry) = self.states.get_mut(state as usize) {
-            entry.non_greedy_finalizers.insert(group_id);
         }
     }
 

@@ -34,7 +34,6 @@ const STATE_NONE: usize = usize::MAX;
 #[derive(Clone, Copy)]
 struct Finalizer {
     gid: usize,
-    non_greedy: bool,
 }
 
 /// Flat DFA with 256-byte transition tables and self-loop bitsets.
@@ -100,16 +99,8 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
                 .iter().copied()
                 .chain(s.possible_future_group_ids.iter().copied())
         })
-        .chain(dfa.non_greedy_finalizers.iter().copied())
         .max()
         .map_or(0, |m| m + 1);
-
-    let mut non_greedy_flags = vec![false; num_groups];
-    for &gid in &dfa.non_greedy_finalizers {
-        if gid < num_groups {
-            non_greedy_flags[gid] = true;
-        }
-    }
 
     let mut transitions = Vec::with_capacity(dfa.states.len());
     let mut finalizers = Vec::with_capacity(dfa.states.len());
@@ -128,7 +119,6 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
                 .iter()
                 .map(|&gid| Finalizer {
                     gid,
-                    non_greedy: non_greedy_flags.get(gid).copied().unwrap_or(false),
                 })
                 .collect(),
         );
@@ -163,9 +153,7 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
         for f in fins as &[Finalizer] {
             if (f.gid as u32) < 32 {
                 finalizer_bits[s] |= 1u32 << f.gid;
-                if !f.non_greedy {
-                    greedy_bits[s] |= 1u32 << f.gid;
-                }
+                greedy_bits[s] |= 1u32 << f.gid;
             }
         }
     }
@@ -260,7 +248,7 @@ fn try_bulk_assign_no_selfloop(
                 cs != NONE
                     && dfa.finalizers[cs as usize]
                         .iter()
-                        .any(|f| f.gid == gid && !f.non_greedy)
+                        .any(|f| f.gid == gid)
             } else {
                 true
             }
@@ -350,9 +338,7 @@ fn advance_states(
                     for f in &dfa.finalizers[ns_u] {
                         let gid = f.gid;
                         if gid < ng {
-                            if !f.non_greedy || child_mp[mp_base + gid] == NONE {
-                                child_mp[mp_base + gid] = depth;
-                            }
+                            child_mp[mp_base + gid] = depth;
                         }
                     }
                 }
@@ -437,9 +423,7 @@ fn run_batch(
                     for f in &dfa.finalizers[ns] {
                         if f.gid < num_groups {
                             let ix = base + f.gid;
-                            if !f.non_greedy || scratch.match_positions[ix] == NONE {
-                                scratch.match_positions[ix] = position;
-                            }
+                            scratch.match_positions[ix] = position;
                         }
                     }
                     if dfa.is_dead_end[ns] {
@@ -478,7 +462,7 @@ fn run_batch(
                         let base = i * num_groups;
                         let s = scratch.current_states[i];
                         for f in &dfa.finalizers[s] {
-                            if f.gid < num_groups && !f.non_greedy {
+                            if f.gid < num_groups {
                                 scratch.match_positions[base + f.gid] = token_len;
                             }
                         }
@@ -534,9 +518,7 @@ fn run_suffix(
         let position = (idx + 1) as u32;
         for f in &dfa.finalizers[current] {
             if f.gid < ng {
-                if !f.non_greedy || match_positions[f.gid] == NONE {
-                    match_positions[f.gid] = position;
-                }
+                match_positions[f.gid] = position;
             }
         }
         if dfa.is_dead_end[current] {

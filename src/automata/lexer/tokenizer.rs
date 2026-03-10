@@ -70,18 +70,8 @@ impl Tokenizer {
             .collect()
     }
 
-    pub fn matched_non_greedy_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
-        self.dfa
-            .non_greedy_finalizers(state)
-            .iter()
-            .map(|terminal| terminal as TerminalID)
-            .collect()
-    }
-
     pub fn all_matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
-        let mut terminals = self.matched_terminals(state);
-        terminals.extend(self.matched_non_greedy_terminals(state));
-        terminals
+        self.matched_terminals(state)
     }
 
     pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalID> {

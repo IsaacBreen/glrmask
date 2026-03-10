@@ -13,7 +13,7 @@ impl NFA {
         let group_count = self
             .states
             .iter()
-            .flat_map(|state| state.finalizers.iter().chain(state.non_greedy_finalizers.iter()))
+            .flat_map(|state| state.finalizers.iter())
             .max()
             .map(|group| *group as usize + 1)
             .unwrap_or(0);
@@ -25,7 +25,6 @@ impl NFA {
             for state_id in (0..self.states.len()).rev() {
                 let mut next_groups = reachable_groups[state_id].clone();
                 next_groups.extend(self.states[state_id].finalizers.iter().copied());
-                next_groups.extend(self.states[state_id].non_greedy_finalizers.iter().copied());
                 for &next in &self.states[state_id].epsilon_transitions {
                     next_groups.extend(reachable_groups[next as usize].iter().copied());
                 }
@@ -57,7 +56,6 @@ impl NFA {
             let subset: BTreeSet<u32> = subset_key.iter().copied().collect();
 
             let mut finalizers = BitSet::new(group_count);
-            let mut non_greedy = BitSet::new(group_count);
             let mut future = BitSet::new(group_count);
             let mut transitions = BTreeMap::<u8, BTreeSet<u32>>::new();
 
@@ -65,9 +63,6 @@ impl NFA {
                 let nfa_state = &self.states[nfa_state_id as usize];
                 for &group in &nfa_state.finalizers {
                     finalizers.set(group as usize);
-                }
-                for &group in &nfa_state.non_greedy_finalizers {
-                    non_greedy.set(group as usize);
                 }
                 for &group in &reachable_groups[nfa_state_id as usize] {
                     future.set(group as usize);
@@ -79,7 +74,7 @@ impl NFA {
                 }
             }
 
-            dfa.overwrite_state_metadata(dfa_state, finalizers, non_greedy, future);
+            dfa.overwrite_state_metadata(dfa_state, finalizers, future);
 
             for (byte, targets) in transitions {
                 let closure = self.epsilon_closure(&targets);

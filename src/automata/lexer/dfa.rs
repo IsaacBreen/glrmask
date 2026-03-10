@@ -22,7 +22,6 @@ pub const DEAD: u32 = u32::MAX;
 pub struct DFAState {
     pub transitions: CharTransitions<u32>,
     pub finalizers: BitSet,
-    pub non_greedy_finalizers: BitSet,
     possible_future_group_ids: BitSet,
 }
 
@@ -50,7 +49,6 @@ impl DFA {
         self.states.push(DFAState {
             transitions: CharTransitions::default(),
             finalizers: BitSet::new(groups),
-            non_greedy_finalizers: BitSet::new(groups),
             possible_future_group_ids: BitSet::new(groups),
         });
         id
@@ -67,12 +65,6 @@ impl DFA {
                     finalizers.set(bit);
                 }
                 state.finalizers = finalizers;
-
-                let mut non_greedy = BitSet::new(num_groups);
-                for bit in state.non_greedy_finalizers.iter() {
-                    non_greedy.set(bit);
-                }
-                state.non_greedy_finalizers = non_greedy;
 
                 let mut future = BitSet::new(num_groups);
                 for bit in state.possible_future_group_ids.iter() {
@@ -101,12 +93,6 @@ impl DFA {
         }
     }
 
-    pub fn mark_non_greedy_finalizer(&mut self, state: u32, group_id: GroupId) {
-        if let Some(entry) = self.states.get_mut(state as usize) {
-            entry.non_greedy_finalizers.set(group_id as usize);
-        }
-    }
-
     pub fn mark_possible_future_group(&mut self, state: u32, group_id: GroupId) {
         if let Some(entry) = self.states.get_mut(state as usize) {
             entry.possible_future_group_ids.set(group_id as usize);
@@ -117,12 +103,10 @@ impl DFA {
         &mut self,
         state: u32,
         finalizers: BitSet,
-        non_greedy_finalizers: BitSet,
         possible_future_group_ids: BitSet,
     ) {
         if let Some(entry) = self.states.get_mut(state as usize) {
             entry.finalizers = finalizers;
-            entry.non_greedy_finalizers = non_greedy_finalizers;
             entry.possible_future_group_ids = possible_future_group_ids;
         }
     }
@@ -159,10 +143,6 @@ impl DFA {
 
     pub fn finalizers(&self, state: u32) -> &BitSet {
         &self.states[state as usize].finalizers
-    }
-
-    pub fn non_greedy_finalizers(&self, state: u32) -> &BitSet {
-        &self.states[state as usize].non_greedy_finalizers
     }
 
     pub(crate) fn possible_future_group_ids(&self, state: u32) -> &BitSet {

@@ -65,7 +65,6 @@ fn hash_group_list(iter: impl ExactSizeIterator<Item = usize>) -> u64 {
 #[derive(Clone, Copy)]
 struct Finalizer {
     gid: usize,
-    non_greedy: bool,
 }
 
 struct Dfa {
@@ -105,16 +104,8 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
                 .iter().copied()
                 .chain(s.possible_future_group_ids.iter().copied())
         })
-        .chain(dfa.non_greedy_finalizers.iter().copied())
         .max()
         .map_or(0, |m| m + 1);
-
-    let mut non_greedy_flags = vec![false; num_groups];
-    for &gid in &dfa.non_greedy_finalizers {
-        if gid < num_groups {
-            non_greedy_flags[gid] = true;
-        }
-    }
 
     let mut transitions = Vec::with_capacity(dfa.states.len());
     let mut finalizers = Vec::with_capacity(dfa.states.len());
@@ -134,7 +125,6 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
                 .iter()
                 .map(|&gid| Finalizer {
                     gid,
-                    non_greedy: non_greedy_flags.get(gid).copied().unwrap_or(false),
                 })
                 .collect(),
         );
@@ -365,9 +355,7 @@ fn run_suffix(
         let pos = (i + 1) as u32;
         for f in &dfa.finalizers[cur] {
             if f.gid < ng {
-                if !f.non_greedy || mp[f.gid] == NONE {
-                    mp[f.gid] = pos;
-                }
+                mp[f.gid] = pos;
             }
         }
         if dfa.is_dead_end[cur] {
@@ -619,9 +607,7 @@ fn walk_trie<S: AsRef<[u8]>>(
                     // Apply finalizers at new state
                     for f in &dfa.finalizers[ns_u] {
                         if f.gid < ng {
-                            if !f.non_greedy || mp[child_mp + f.gid] == NONE {
-                                mp[child_mp + f.gid] = cd as u32;
-                            }
+                            mp[child_mp + f.gid] = cd as u32;
                         }
                     }
                     states[cd * ni + si] = if dfa.is_dead_end[ns_u] { NONE } else { ns };
@@ -664,7 +650,7 @@ fn walk_trie<S: AsRef<[u8]>>(
                             cs != NONE
                                 && dfa.finalizers[cs as usize]
                                     .iter()
-                                    .any(|f| f.gid == gid && !f.non_greedy)
+                                    .any(|f| f.gid == gid)
                         } else {
                             true
                         }

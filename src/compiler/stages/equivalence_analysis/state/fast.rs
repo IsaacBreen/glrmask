@@ -501,12 +501,6 @@ fn find_state_equivalence_classes_token_based(
         }
     }
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
-    let mut non_greedy_flags = vec![false; num_groups];
-    for &gid in &dfa.non_greedy_finalizers {
-        if gid < num_groups {
-            non_greedy_flags[gid] = true;
-        }
-    }
 
     // Count states with finalizers for optimization insight
     let states_with_finalizers = dfa_finalizers.iter().filter(|f| !f.is_empty()).count();
@@ -774,35 +768,24 @@ fn find_state_equivalence_classes_token_based(
                                             continue;
                                         }
                                         let pos_i32 = position as i32;
-                                        if non_greedy_flags[gid] {
-                                            if positions[gid] < 0 {
-                                                positions[gid] = pos_i32;
+                                        let prev = positions[gid];
+                                        if prev != pos_i32 {
+                                            if prev < 0 {
                                                 matches_len += 1;
                                                 matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
                                                     (gid as u128) | ((position as u128) << 32),
                                                 ));
                                                 changes.push((gid, -1));
+                                            } else {
+                                                matches_hash_sum = matches_hash_sum.wrapping_sub(mix_u128(
+                                                    (gid as u128) | ((prev as u128) << 32),
+                                                ));
+                                                matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
+                                                    (gid as u128) | ((position as u128) << 32),
+                                                ));
+                                                changes.push((gid, prev));
                                             }
-                                        } else {
-                                            let prev = positions[gid];
-                                            if prev != pos_i32 {
-                                                if prev < 0 {
-                                                    matches_len += 1;
-                                                    matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
-                                                        (gid as u128) | ((position as u128) << 32),
-                                                    ));
-                                                    changes.push((gid, -1));
-                                                } else {
-                                                    matches_hash_sum = matches_hash_sum.wrapping_sub(mix_u128(
-                                                        (gid as u128) | ((prev as u128) << 32),
-                                                    ));
-                                                    matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
-                                                        (gid as u128) | ((position as u128) << 32),
-                                                    ));
-                                                    changes.push((gid, prev));
-                                                }
-                                                positions[gid] = pos_i32;
-                                            }
+                                            positions[gid] = pos_i32;
                                         }
                                     }
                                 }
