@@ -526,7 +526,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         );
     }
 
-    Constraint {
+    let mut constraint = Constraint {
         parser_dwa,
         table,
         tokenizer,
@@ -539,7 +539,10 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         eos_token_id: vocab.eos_token_id,
         token_bytes,
         internal_token_bytes,
-    }
+        internal_token_buf_masks: Vec::new(),
+    };
+    constraint.build_buf_masks();
+    constraint
 }
 
 pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
@@ -576,7 +579,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
 
     let vocab_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(token_id, bytes)| (*token_id, bytes.clone())).collect();
     let token_bytes = vocab.entries.clone();
-    let constraint = Constraint {
+    let mut constraint = Constraint {
         parser_dwa: parser_dwa.clone(),
         table: table.clone(),
         tokenizer: tokenizer.clone(),
@@ -589,7 +592,9 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         eos_token_id: vocab.eos_token_id,
         token_bytes: token_bytes.clone(),
         internal_token_bytes,
+        internal_token_buf_masks: Vec::new(),
     };
+    constraint.build_buf_masks();
 
     let debug = CompileDebug::from_parts(
         grammar.clone(),

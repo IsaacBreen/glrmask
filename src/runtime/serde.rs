@@ -71,6 +71,7 @@ impl Constraint {
         if constraint.possible_matches.is_empty() {
             constraint.rebuild_possible_matches();
         }
+        constraint.build_buf_masks();
         Ok(constraint)
     }
 }

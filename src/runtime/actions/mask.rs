@@ -1,7 +1,6 @@
 use crate::runtime::state::ConstraintState;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
-use range_set_blaze::RangeSetBlaze;
 
 type WeightedParserGSS = LeveledGSS<u32, Weight>;
 
@@ -55,13 +54,7 @@ impl<'a> ConstraintState<'a> {
                         } else {
                             reduced_acc.intersection(final_weight)
                         };
-                        for token_id in self.collapse_weight_tokens(&allowed).iter() {
-                            let word = token_id as usize / 32;
-                            let bit = token_id as usize % 32;
-                            if let Some(slot) = buf.get_mut(word) {
-                                *slot |= 1u32 << bit;
-                            }
-                        }
+                        self.constraint.or_weight_to_buf(&allowed, buf);
                     }
                 }
 
@@ -164,20 +157,4 @@ impl<'a> ConstraintState<'a> {
             }
         })
     }
-
-    fn collapse_weight_tokens(
-        &self,
-        weight: &Weight,
-    ) -> RangeSetBlaze<u32> {
-        let mut all = RangeSetBlaze::new();
-        for (internal_tsid, _) in self.constraint.internal_tsid_to_states.iter().enumerate() {
-            let internal_token_ids = weight.tokens_for_tsid(internal_tsid as u32);
-            if !internal_token_ids.is_empty() {
-                let expanded = self.constraint.expand_internal_token_set(&internal_token_ids);
-                all = all | expanded;
-            }
-        }
-        all
-    }
 }
-

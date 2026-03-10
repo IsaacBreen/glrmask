@@ -631,6 +631,24 @@ impl Weight {
             .unwrap_or_else(RangeSetBlaze::new)
     }
 
+    /// Iterate over the unique (Arc-deduplicated) token sets in this weight.
+    /// Each token set may cover one or more TSID ranges.
+    pub fn unique_token_sets(&self) -> Vec<&RangeSetBlaze<u32>> {
+        if self.is_full() || self.is_empty() {
+            return Vec::new();
+        }
+        let mut seen: Vec<*const RangeSetBlaze<u32>> = Vec::new();
+        let mut result = Vec::new();
+        for (_range, tokens) in self.0.range_values() {
+            let ptr = Arc::as_ptr(tokens);
+            if !seen.contains(&ptr) {
+                seen.push(ptr);
+                result.push(tokens.as_ref());
+            }
+        }
+        result
+    }
+
     pub fn is_disjoint(&self, other: &Self) -> bool {
         self.intersection(other).is_empty()
     }

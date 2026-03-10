@@ -41,6 +41,12 @@ pub struct Constraint {
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
     #[serde(default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
+
+    /// Precomputed bitmask fragments for each internal token.
+    /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
+    /// for all original tokens that map to internal token `i`.
+    #[serde(skip)]
+    pub(crate) internal_token_buf_masks: Vec<Vec<(u16, u32)>>,
 }
 
 impl Clone for Constraint {
@@ -58,6 +64,7 @@ impl Clone for Constraint {
             eos_token_id: self.eos_token_id,
             token_bytes: self.token_bytes.clone(),
             internal_token_bytes: self.internal_token_bytes.clone(),
+            internal_token_buf_masks: self.internal_token_buf_masks.clone(),
         }
     }
 }
@@ -78,6 +85,61 @@ impl Constraint {
             &self.token_bytes
         };
         self.possible_matches = build_possible_matches_from_token_bytes(&self.tokenizer, token_bytes);
+    }
+
+    /// Build precomputed bitmask fragments for each internal token.
+    pub(crate) fn build_buf_masks(&mut self) {
+        if self.internal_token_to_tokens.is_empty() {
+            self.internal_token_buf_masks = Vec::new();
+            return;
+        }
+        self.internal_token_buf_masks = self.internal_token_to_tokens.iter().map(|originals| {
+            let mut word_map = BTreeMap::<u16, u32>::new();
+            for &original in originals {
+                let word = (original / 32) as u16;
+                let bit = original % 32;
+                *word_map.entry(word).or_default() |= 1u32 << bit;
+            }
+            word_map.into_iter().collect()
+        }).collect();
+    }
+
+    /// OR all tokens from `weight` directly into `buf` using precomputed bitmasks.
+    pub(crate) fn or_weight_to_buf(&self, weight: &crate::ds::weight::Weight, buf: &mut [u32]) {
+        if weight.is_full() {
+            // All tokens allowed — set all bits.
+            for slot in buf.iter_mut() {
+                *slot = u32::MAX;
+            }
+            return;
+        }
+        if !self.internal_token_buf_masks.is_empty() {
+            // Fast path: use precomputed bitmask fragments.
+            // Iterate unique token sets in the weight to avoid processing
+            // the same internal token multiple times from different TSIDs.
+            for token_set in weight.unique_token_sets() {
+                for internal_token in token_set.iter() {
+                    if let Some(masks) = self.internal_token_buf_masks.get(internal_token as usize) {
+                        for &(word_idx, mask) in masks {
+                            if let Some(slot) = buf.get_mut(word_idx as usize) {
+                                *slot |= mask;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fallback: no equivalence classes, set bits directly.
+            for token_set in weight.unique_token_sets() {
+                for token_id in token_set.iter() {
+                    let word = token_id as usize / 32;
+                    let bit = token_id as usize % 32;
+                    if let Some(slot) = buf.get_mut(word) {
+                        *slot |= 1u32 << bit;
+                    }
+                }
+            }
+        }
     }
 
     pub fn start(&self) -> ConstraintState<'_> {
