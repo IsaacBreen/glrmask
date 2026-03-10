@@ -73,6 +73,21 @@ impl DWA {
         }
     }
 
+    /// Clip all weights in the DWA so token sets contain only `0..=max_token`.
+    pub fn clip_weights(&mut self, max_token: u32) {
+        for state in &mut self.states {
+            if let Some(fw) = &mut state.final_weight {
+                fw.clip_tokens(max_token);
+                if fw.is_empty() {
+                    state.final_weight = None;
+                }
+            }
+            for (_, (_, w)) in &mut state.transitions {
+                w.clip_tokens(max_token);
+            }
+        }
+    }
+
     pub fn labels(&self) -> Vec<Label> {
         self.states
             .iter()

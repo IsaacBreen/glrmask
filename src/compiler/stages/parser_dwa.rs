@@ -440,9 +440,10 @@ pub(crate) fn build_parser_dwa_with_report(
 ) -> (DWA, ParserDwaBuildReport) {
     let (terminal_dwa, terminal_build) =
         build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal);
-    let (parser_dwa, mut report) =
+    let (mut parser_dwa, mut report) =
         build_parser_dwa_from_terminal_dwa_with_report(table, grammar, tokenizer, &terminal_dwa);
     report.terminal_build = Some(terminal_build);
+    parser_dwa.clip_weights(id_map.max_internal_token_id());
     (parser_dwa, report)
 }
 

@@ -639,6 +639,23 @@ impl Weight {
         self.difference(other).is_empty()
     }
 
+    /// Clip all token sets to `0..=max_token`, removing any entries that become empty.
+    /// Does nothing to the ALL sentinel.
+    pub fn clip_tokens(&mut self, max_token: u32) {
+        if self.is_full() || self.is_empty() {
+            return;
+        }
+        let clip: RangeSetBlaze<u32> = std::iter::once(0..=max_token).collect();
+        let mut new_map = RangeMapBlaze::new();
+        for (tsid_range, tokens) in self.0.range_values() {
+            let clipped = tokens.as_ref() & &clip;
+            if !clipped.is_empty() {
+                new_map.extend_simple(std::iter::once((tsid_range, Arc::new(clipped))));
+            }
+        }
+        self.0 = new_map;
+    }
+
     fn expanded_entries(&self) -> BTreeMap<u32, RangeSetBlaze<u32>> {
         if self.is_full() {
             return BTreeMap::new();
