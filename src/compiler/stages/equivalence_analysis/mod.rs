@@ -4,7 +4,10 @@
 #![allow(unused_imports)]
 
 pub mod combined;
-pub mod sep1;
+pub mod compat;
+pub mod state;
+pub mod vocab;
+pub mod combined_equivalence_analysis;
 
 #[derive(Debug, Clone)]
 pub struct ManyToOneIdMap {

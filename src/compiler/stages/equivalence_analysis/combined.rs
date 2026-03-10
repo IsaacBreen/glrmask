@@ -6,8 +6,8 @@
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::equivalence_analysis::sep1::compat::Sep1Tokenizer;
-use crate::compiler::stages::equivalence_analysis::sep1::combined_equivalence_analysis;
+use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis;
 
 pub(crate) fn analyze_equivalences(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
     analyze_equivalences_sep1(tokenizer, vocab)
