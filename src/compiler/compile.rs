@@ -18,9 +18,13 @@ use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
 use crate::compiler::parser_dwa::build_parser_dwa_from_terminal_dwa;
 use crate::compiler::possible_matches::build_possible_matches_by_state;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::parser_dwa::{
+    ParserDwaBuildReport,
+    build_parser_dwa_from_terminal_dwa_with_report,
+};
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::terminal_dwa::build_terminal_dwa;
+use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
 use crate::runtime::Constraint;
 
 // ── Tokenizer construction ──────────────────────────────────────────────────
@@ -251,6 +255,10 @@ fn compile_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
 }
 
+fn compile_summary_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+}
+
 fn log_compile_profile(enabled: bool, phase: &str, started_at: std::time::Instant) {
     if enabled {
         eprintln!(
@@ -260,16 +268,149 @@ fn log_compile_profile(enabled: bool, phase: &str, started_at: std::time::Instan
     }
 }
 
+fn reduction_ratio(original: usize, reduced: usize) -> f64 {
+    if reduced == 0 {
+        0.0
+    } else {
+        original as f64 / reduced as f64
+    }
+}
+
+fn ms(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn log_compile_summary(
+    normalized: &GrammarDef,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    prepare_grammar_time: std::time::Duration,
+    analyze_grammar_time: std::time::Duration,
+    build_glr_table_time: std::time::Duration,
+    build_internal_id_map_time: std::time::Duration,
+    collect_token_bytes_time: std::time::Duration,
+    terminal_build: &TerminalDwaBuildReport,
+    parser_build: &ParserDwaBuildReport,
+    total_time: std::time::Duration,
+) {
+    eprintln!(
+        "[glrmask/profile][summary] compile_ms={:.3} prepare_ms={:.3} analyze_ms={:.3} glr_table_ms={:.3} id_map_ms={:.3} token_bytes_ms={:.3} terminal_ms={:.3} parser_ms={:.3}",
+        ms(total_time),
+        ms(prepare_grammar_time),
+        ms(analyze_grammar_time),
+        ms(build_glr_table_time),
+        ms(build_internal_id_map_time),
+        ms(collect_token_bytes_time),
+        ms(terminal_build.total_time),
+        ms(parser_build.total_time),
+    );
+    eprintln!(
+        "[glrmask/profile][summary] state_eq orig={} classes={} ratio={:.2}x | vocab_eq orig={} classes={} ratio={:.2}x",
+        tokenizer.num_states(),
+        id_map.tokenizer_states.num_internal_ids(),
+        reduction_ratio(tokenizer.num_states() as usize, id_map.tokenizer_states.num_internal_ids() as usize),
+        vocab.entries.len(),
+        id_map.vocab_tokens.num_internal_ids(),
+        reduction_ratio(vocab.entries.len(), id_map.vocab_tokens.num_internal_ids() as usize),
+    );
+    eprintln!(
+        "[glrmask/profile][summary] terminal_nwa states={} start={} final={} eps={} labeled={} total={}",
+        terminal_build.terminal_nwa.states,
+        terminal_build.terminal_nwa.start_states,
+        terminal_build.terminal_nwa.final_states,
+        terminal_build.terminal_nwa.epsilon_edges,
+        terminal_build.terminal_nwa.labeled_edges,
+        terminal_build.terminal_nwa.transitions,
+    );
+    eprintln!(
+        "[glrmask/profile][summary] terminal_dwa det states={} final={} trans={} det_ms={:.3} | min states={} final={} trans={} min_ms={:.3} collapse={} prune_ms={:.3}",
+        terminal_build.terminal_dwa.states,
+        terminal_build.terminal_dwa.final_states,
+        terminal_build.terminal_dwa.transitions,
+        ms(terminal_build.determinize_time),
+        terminal_build.terminal_minimized_dwa.states,
+        terminal_build.terminal_minimized_dwa.final_states,
+        terminal_build.terminal_minimized_dwa.transitions,
+        ms(terminal_build.minimize_time),
+        if terminal_build.collapse_always_allowed_applied { "applied" } else { "skipped" },
+        ms(terminal_build.prune_disallowed_follows_time),
+    );
+    eprintln!(
+        "[glrmask/profile][summary] templates characterize_ms={:.3} terminals={} shifts={} reduces={} escapes={} rereduces={} | build_ms={:.3} templates={} total_states={} total_trans={} max_states={} max_trans={}",
+        ms(parser_build.characterize_terminals_time),
+        parser_build.characterizations.terminals,
+        parser_build.characterizations.shifts,
+        parser_build.characterizations.reduces,
+        parser_build.characterizations.nt_escapes,
+        parser_build.characterizations.nt_rereduces,
+        ms(parser_build.build_templates_time),
+        parser_build.templates.templates,
+        parser_build.templates.total_states,
+        parser_build.templates.total_transitions,
+        parser_build.templates.max_states,
+        parser_build.templates.max_transitions,
+    );
+    eprintln!(
+        "[glrmask/profile][summary] bundles states={} total={} unique={} unique_targets={} cache_hits={} group_ms={:.3} build_ms={:.3}",
+        terminal_build.terminal_minimized_dwa.states,
+        parser_build.bundles.total_bundles,
+        parser_build.bundles.unique_bundles,
+        parser_build.bundles.unique_bundle_targets,
+        parser_build.bundles.bundle_cache_hits,
+        ms(parser_build.bundles.group_targets_time),
+        ms(parser_build.bundles.build_bundle_time),
+    );
+    eprintln!(
+        "[glrmask/profile][summary] parser_nwa compose_ms={:.3} pre states={} start={} final={} eps={} labeled={} total={} | post_resolve states={} final={} eps={} labeled={} total={} neg={}→{} default={}→{} resolve_ms={:.3}",
+        ms(parser_build.compose_state_time),
+        parser_build.parser_nwa_before_resolve.states,
+        parser_build.parser_nwa_before_resolve.start_states,
+        parser_build.parser_nwa_before_resolve.final_states,
+        parser_build.parser_nwa_before_resolve.epsilon_edges,
+        parser_build.parser_nwa_before_resolve.labeled_edges,
+        parser_build.parser_nwa_before_resolve.transitions,
+        parser_build.parser_nwa_after_resolve.states,
+        parser_build.parser_nwa_after_resolve.final_states,
+        parser_build.parser_nwa_after_resolve.epsilon_edges,
+        parser_build.parser_nwa_after_resolve.labeled_edges,
+        parser_build.parser_nwa_after_resolve.transitions,
+        parser_build.negative_edges_before_resolve,
+        parser_build.negative_edges_after_resolve,
+        parser_build.default_edges_before_resolve,
+        parser_build.default_edges_after_resolve,
+        ms(parser_build.resolve_negative_codes_time),
+    );
+    eprintln!(
+        "[glrmask/profile][summary] parser_dwa pre_min states={} final={} trans={} | post_min states={} final={} trans={} detmin_ms={:.3} subtract_final_ms={:.3} rules={} terminals={} tokenizer_states={} vocab_entries={}",
+        parser_build.parser_dwa_pre_minimize.states,
+        parser_build.parser_dwa_pre_minimize.final_states,
+        parser_build.parser_dwa_pre_minimize.transitions,
+        parser_build.parser_dwa_minimized.states,
+        parser_build.parser_dwa_minimized.final_states,
+        parser_build.parser_dwa_minimized.transitions,
+        ms(parser_build.determinize_minimize_time),
+        ms(parser_build.subtract_final_weights_time),
+        normalized.rules.len(),
+        normalized.terminals.len(),
+        tokenizer.num_states(),
+        vocab.entries.len(),
+    );
+}
+
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let profile_enabled = compile_profile_enabled();
+    let summary_enabled = compile_summary_enabled();
     let compile_started_at = std::time::Instant::now();
 
     let phase_started_at = std::time::Instant::now();
     let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
+    let prepare_grammar_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "prepare_grammar", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
+    let analyze_grammar_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "analyze_grammar", phase_started_at);
 
     // Debug check: verify grammar preconditions before expensive pipeline stages.
@@ -282,10 +423,12 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     let phase_started_at = std::time::Instant::now();
     let table = GLRTable::build(&glr_grammar);
+    let build_glr_table_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "build_glr_table", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     let id_map = InternalIdMap::build(&tokenizer, vocab);
+    let build_internal_id_map_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "build_internal_id_map", phase_started_at);
 
     if profile_enabled {
@@ -295,26 +438,35 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let phase_started_at = std::time::Instant::now();
     let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> =
         vocab.entries.iter().cloned().collect();
+    let collect_token_bytes_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "collect_token_bytes", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
-    let terminal_dwa = build_terminal_dwa(
+    let (terminal_dwa, terminal_build) = build_terminal_dwa_with_report(
         &glr_grammar,
         &tokenizer,
         vocab,
         &id_map,
         normalized.ignore_terminal,
     );
-    log_compile_profile(profile_enabled, "build_terminal_dwa", phase_started_at);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] build_terminal_dwa_ms={:.3}",
+            ms(terminal_build.total_time),
+        );
+    }
 
-    let phase_started_at = std::time::Instant::now();
-    let parser_dwa = build_parser_dwa_from_terminal_dwa(
+    let (parser_dwa, parser_build) = build_parser_dwa_from_terminal_dwa_with_report(
         &table,
         &glr_grammar,
         &tokenizer,
         &terminal_dwa,
     );
-    log_compile_profile(profile_enabled, "build_parser_dwa", phase_started_at);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] build_parser_dwa_ms={:.3}",
+            ms(parser_build.total_time),
+        );
+    }
 
     if profile_enabled {
         eprintln!(
@@ -327,6 +479,23 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
             id_map.num_tsids(),
             terminal_dwa.num_states(),
             parser_dwa.num_states(),
+        );
+    }
+
+    if summary_enabled {
+        log_compile_summary(
+            &normalized,
+            &tokenizer,
+            vocab,
+            &id_map,
+            prepare_grammar_time,
+            analyze_grammar_time,
+            build_glr_table_time,
+            build_internal_id_map_time,
+            collect_token_bytes_time,
+            &terminal_build,
+            &parser_build,
+            compile_started_at.elapsed(),
         );
     }
 

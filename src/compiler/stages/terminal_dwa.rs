@@ -19,8 +19,31 @@ use crate::compiler::grammar::model::Symbol;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::profile_stats::{
+    WeightedDwaStats,
+    WeightedNwaStats,
+    collect_weighted_dwa_stats,
+    collect_weighted_nwa_stats,
+};
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TerminalDwaBuildReport {
+    pub build_vocab_trie_time: std::time::Duration,
+    pub build_nwa_from_trie_time: std::time::Duration,
+    pub collapse_always_allowed_time: std::time::Duration,
+    pub collapse_always_allowed_applied: bool,
+    pub prune_disallowed_follows_time: std::time::Duration,
+    pub determinize_time: std::time::Duration,
+    pub minimize_time: std::time::Duration,
+    pub total_time: std::time::Duration,
+    pub vocab_entries: usize,
+    pub internal_tsids: usize,
+    pub terminal_nwa: WeightedNwaStats,
+    pub terminal_dwa: WeightedDwaStats,
+    pub terminal_minimized_dwa: WeightedDwaStats,
+}
 
 fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
     let mut ever_allowed = vec![BTreeSet::new(); grammar.num_terminals as usize];
@@ -756,8 +779,23 @@ pub(crate) fn build_terminal_dwa(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
+    build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal).0
+}
+
+pub(crate) fn build_terminal_dwa_with_report(
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
+) -> (DWA, TerminalDwaBuildReport) {
     let profile_enabled = terminal_profile_enabled();
     let total_started_at = std::time::Instant::now();
+    let mut report = TerminalDwaBuildReport {
+        vocab_entries: vocab.entries.len(),
+        internal_tsids: id_map.num_tsids() as usize,
+        ..TerminalDwaBuildReport::default()
+    };
 
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
     let leaf_state = nwa.add_state();
@@ -774,6 +812,7 @@ pub(crate) fn build_terminal_dwa(
             .collect::<Vec<_>>(),
     );
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
+    report.build_vocab_trie_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
@@ -802,12 +841,15 @@ pub(crate) fn build_terminal_dwa(
         builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
         builder.flush_transition_buffer();
     }
+    report.build_nwa_from_trie_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "build_nwa_from_trie", phase_started_at);
 
     if should_collapse_always_allowed(vocab) {
         let phase_started_at = std::time::Instant::now();
         let always_allowed_by_label = compute_always_allowed_follows(grammar);
         let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+        report.collapse_always_allowed_applied = true;
+        report.collapse_always_allowed_time = phase_started_at.elapsed();
         log_terminal_profile(profile_enabled, "collapse_always_allowed", phase_started_at);
     } else if profile_enabled {
         eprintln!(
@@ -818,18 +860,24 @@ pub(crate) fn build_terminal_dwa(
 
     let phase_started_at = std::time::Instant::now();
     let _ = prune_disallowed_follows(&mut nwa, grammar);
+    report.prune_disallowed_follows_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "prune_disallowed_follows", phase_started_at);
 
-    let nwa_state_count = nwa.states.len();
+    report.terminal_nwa = collect_weighted_nwa_stats(&nwa);
 
     let phase_started_at = std::time::Instant::now();
     let determinized = determinize(&nwa)
         .expect("terminal NWA determinization failed despite acyclic token trie construction");
+    report.determinize_time = phase_started_at.elapsed();
+    report.terminal_dwa = collect_weighted_dwa_stats(&determinized);
     log_terminal_profile(profile_enabled, "determinize", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     let dwa = minimize(&determinized);
+    report.minimize_time = phase_started_at.elapsed();
+    report.terminal_minimized_dwa = collect_weighted_dwa_stats(&dwa);
     log_terminal_profile(profile_enabled, "minimize", phase_started_at);
+    report.total_time = total_started_at.elapsed();
 
     if profile_enabled {
         eprintln!(
@@ -837,12 +885,12 @@ pub(crate) fn build_terminal_dwa(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
             vocab.entries.len(),
             id_map.num_tsids(),
-            nwa_state_count,
+            report.terminal_nwa.states,
             dwa.num_states(),
         );
     }
 
-    dwa
+    (dwa, report)
 }
 
 #[cfg(test)]

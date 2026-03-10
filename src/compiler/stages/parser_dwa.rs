@@ -17,9 +17,17 @@ use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::profile_stats::{
+    UnweightedDfaStats,
+    WeightedDwaStats,
+    WeightedNwaStats,
+    collect_unweighted_dfa_stats,
+    collect_weighted_dwa_stats,
+    collect_weighted_nwa_stats,
+};
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
-use crate::compiler::terminal_dwa::build_terminal_dwa;
+use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
 use crate::ds::weight::Weight;
 
 type Bundle = BTreeMap<TerminalID, Weight>;
@@ -52,6 +60,105 @@ struct ComposeStateProfile {
     concat_right_states: usize,
     max_concat_left_states: usize,
     max_concat_right_states: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CharacterizationStats {
+    pub terminals: usize,
+    pub shifts: usize,
+    pub reduces: usize,
+    pub nt_escapes: usize,
+    pub nt_rereduces: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TemplateStats {
+    pub templates: usize,
+    pub total_states: usize,
+    pub total_transitions: usize,
+    pub max_states: usize,
+    pub max_transitions: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BundleStats {
+    pub total_bundles: usize,
+    pub unique_bundles: usize,
+    pub unique_bundle_targets: usize,
+    pub bundle_cache_hits: usize,
+    pub group_targets_time: std::time::Duration,
+    pub build_bundle_time: std::time::Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ParserDwaBuildReport {
+    pub characterize_terminals_time: std::time::Duration,
+    pub build_templates_time: std::time::Duration,
+    pub build_state_summaries_time: std::time::Duration,
+    pub compose_state_time: std::time::Duration,
+    pub resolve_negative_codes_time: std::time::Duration,
+    pub subtract_final_weights_time: std::time::Duration,
+    pub determinize_minimize_time: std::time::Duration,
+    pub total_time: std::time::Duration,
+    pub characterizations: CharacterizationStats,
+    pub templates: TemplateStats,
+    pub bundles: BundleStats,
+    pub terminal_build: Option<TerminalDwaBuildReport>,
+    pub parser_nwa_before_resolve: WeightedNwaStats,
+    pub parser_nwa_after_resolve: WeightedNwaStats,
+    pub parser_nwa_after_subtract: WeightedNwaStats,
+    pub parser_dwa_pre_minimize: WeightedDwaStats,
+    pub parser_dwa_minimized: WeightedDwaStats,
+    pub negative_edges_before_resolve: usize,
+    pub negative_edges_after_resolve: usize,
+    pub default_edges_before_resolve: usize,
+    pub default_edges_after_resolve: usize,
+}
+
+fn collect_characterization_stats(
+    characterizations: &std::collections::BTreeMap<TerminalID, crate::compiler::stages::templates::characterize::TerminalCharacterization>,
+) -> CharacterizationStats {
+    let mut stats = CharacterizationStats {
+        terminals: characterizations.len(),
+        ..CharacterizationStats::default()
+    };
+    for characterization in characterizations.values() {
+        stats.shifts += characterization.shifts.len();
+        stats.reduces += characterization.reduces.len();
+        stats.nt_escapes += characterization.nt_escapes.len();
+        stats.nt_rereduces += characterization.nt_rereduces.len();
+    }
+    stats
+}
+
+fn collect_template_stats(templates: &Templates) -> TemplateStats {
+    let mut stats = TemplateStats {
+        templates: templates.by_terminal.len(),
+        ..TemplateStats::default()
+    };
+    for template in templates.by_terminal.values() {
+        let shape = collect_unweighted_dfa_stats(template);
+        stats.total_states += shape.states;
+        stats.total_transitions += shape.transitions;
+        stats.max_states = stats.max_states.max(shape.states);
+        stats.max_transitions = stats.max_transitions.max(shape.transitions);
+    }
+    stats
+}
+
+fn count_special_edges(nwa: &NWA) -> (usize, usize) {
+    let mut negative_edges = 0usize;
+    let mut default_edges = 0usize;
+    for state in &nwa.states {
+        for (&label, targets) in &state.transitions {
+            if label == crate::compiler::glr::labels::DEFAULT_LABEL {
+                default_edges += targets.len();
+            } else if crate::compiler::glr::labels::is_negative_label(label) {
+                negative_edges += targets.len();
+            }
+        }
+    }
+    (negative_edges, default_edges)
 }
 
 fn append_dwa(into: &mut DWA, other: &DWA) -> u32 {
@@ -115,7 +222,7 @@ fn build_state_summaries(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
     templates: &Templates,
-) -> Vec<StateSummary> {
+) -> (Vec<StateSummary>, BundleStats) {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
     let mut group_targets_time = std::time::Duration::ZERO;
     let mut build_bundle_time = std::time::Duration::ZERO;
@@ -153,9 +260,7 @@ fn build_state_summaries(
                         bundle_cache.insert(bundle_key, (bundle_id, Arc::clone(&built_bundle)));
                         (bundle_id, built_bundle)
                     };
-                    if profile_enabled {
-                        unique_bundle_targets.insert((target, bundle_id));
-                    }
+                    unique_bundle_targets.insert((target, bundle_id));
                     build_bundle_time += phase_started_at.elapsed();
                     Branch {
                         target,
@@ -184,7 +289,17 @@ fn build_state_summaries(
         );
     }
 
-    summaries
+    (
+        summaries,
+        BundleStats {
+            total_bundles: bundle_count,
+            unique_bundles: bundle_cache.len(),
+            unique_bundle_targets: unique_bundle_targets.len(),
+            bundle_cache_hits,
+            group_targets_time,
+            build_bundle_time,
+        },
+    )
 }
 
 fn concatenate_nwas(left: &NWA, right: &NWA) -> Option<NWA> {
@@ -312,8 +427,23 @@ pub fn build_parser_dwa(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
-    let terminal_dwa = build_terminal_dwa(grammar, tokenizer, vocab, id_map, ignore_terminal);
-    build_parser_dwa_from_terminal_dwa(table, grammar, tokenizer, &terminal_dwa)
+    build_parser_dwa_with_report(table, grammar, tokenizer, vocab, id_map, ignore_terminal).0
+}
+
+pub(crate) fn build_parser_dwa_with_report(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
+) -> (DWA, ParserDwaBuildReport) {
+    let (terminal_dwa, terminal_build) =
+        build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal);
+    let (parser_dwa, mut report) =
+        build_parser_dwa_from_terminal_dwa_with_report(table, grammar, tokenizer, &terminal_dwa);
+    report.terminal_build = Some(terminal_build);
+    (parser_dwa, report)
 }
 
 pub(crate) fn build_parser_dwa_from_terminal_dwa(
@@ -322,11 +452,23 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
     tokenizer: &Tokenizer,
     terminal_dwa: &DWA,
 ) -> DWA {
+    build_parser_dwa_from_terminal_dwa_with_report(table, grammar, tokenizer, terminal_dwa).0
+}
+
+pub(crate) fn build_parser_dwa_from_terminal_dwa_with_report(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    terminal_dwa: &DWA,
+) -> (DWA, ParserDwaBuildReport) {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
     let total_started_at = std::time::Instant::now();
+    let mut report = ParserDwaBuildReport::default();
 
     let phase_started_at = std::time::Instant::now();
     let characterizations = characterize_terminals(table, grammar);
+    report.characterize_terminals_time = phase_started_at.elapsed();
+    report.characterizations = collect_characterization_stats(&characterizations);
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] characterize_terminals_ms={:.3}",
@@ -336,6 +478,8 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
 
     let phase_started_at = std::time::Instant::now();
     let templates = Templates::from_characterizations(&characterizations);
+    report.build_templates_time = phase_started_at.elapsed();
+    report.templates = collect_template_stats(&templates);
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] build_templates_ms={:.3}",
@@ -344,7 +488,9 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
     }
 
     let phase_started_at = std::time::Instant::now();
-    let states = build_state_summaries(terminal_dwa, grammar, &templates);
+    let (states, bundle_stats) = build_state_summaries(terminal_dwa, grammar, &templates);
+    report.build_state_summaries_time = phase_started_at.elapsed();
+    report.bundles = bundle_stats;
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] build_state_summaries_ms={:.3} states={}",
@@ -368,10 +514,15 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
         compose_profile.as_mut(),
     )
     else {
-        return DWA::new(0, 0);
+        return (DWA::new(0, 0), report);
     };
     arena.start_states = parser_body.start_states.clone();
     let mut parser_nwa = arena;
+    report.compose_state_time = phase_started_at.elapsed();
+    report.parser_nwa_before_resolve = collect_weighted_nwa_stats(&parser_nwa);
+    let (negative_edges_before_resolve, default_edges_before_resolve) = count_special_edges(&parser_nwa);
+    report.negative_edges_before_resolve = negative_edges_before_resolve;
+    report.default_edges_before_resolve = default_edges_before_resolve;
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] compose_state_ms={:.3} memo_entries={} nwa_states={}",
@@ -412,6 +563,11 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
 
     let phase_started_at = std::time::Instant::now();
     resolve_negative_codes_in_nwa(&mut parser_nwa);
+    report.resolve_negative_codes_time = phase_started_at.elapsed();
+    report.parser_nwa_after_resolve = collect_weighted_nwa_stats(&parser_nwa);
+    let (negative_edges_after_resolve, default_edges_after_resolve) = count_special_edges(&parser_nwa);
+    report.negative_edges_after_resolve = negative_edges_after_resolve;
+    report.default_edges_after_resolve = default_edges_after_resolve;
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] resolve_negative_codes_ms={:.3}",
@@ -421,6 +577,8 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
 
     let phase_started_at = std::time::Instant::now();
     parser_nwa.subtract_final_weights_from_outgoing();
+    report.subtract_final_weights_time = phase_started_at.elapsed();
+    report.parser_nwa_after_subtract = collect_weighted_nwa_stats(&parser_nwa);
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] subtract_final_weights_ms={:.3}",
@@ -429,10 +587,13 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
     }
 
     let phase_started_at = std::time::Instant::now();
-    let core_dwa = minimize(
-        &determinize(&parser_nwa)
-            .expect("parser NWA determinization failed despite acyclic terminal/template composition"),
-    );
+    let parser_dwa_pre_minimize = determinize(&parser_nwa)
+        .expect("parser NWA determinization failed despite acyclic terminal/template composition");
+    report.parser_dwa_pre_minimize = collect_weighted_dwa_stats(&parser_dwa_pre_minimize);
+    let core_dwa = minimize(&parser_dwa_pre_minimize);
+    report.determinize_minimize_time = phase_started_at.elapsed();
+    report.parser_dwa_minimized = collect_weighted_dwa_stats(&core_dwa);
+    report.total_time = total_started_at.elapsed();
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} dwa_states={}",
@@ -445,7 +606,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa(
         );
     }
 
-    core_dwa
+    (core_dwa, report)
 }
 
 #[cfg(test)]
