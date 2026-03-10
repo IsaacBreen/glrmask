@@ -496,10 +496,17 @@ fn expand_lark_expr(
         },
         GrammarExpr::RawRegex(pattern) => GrammarExpr::RawRegex(pattern.clone()),
         GrammarExpr::AnyByte => GrammarExpr::AnyByte,
+        GrammarExpr::CompiledTerminal { pattern, expr } => GrammarExpr::CompiledTerminal {
+            pattern: pattern.clone(),
+            expr: expr.clone(),
+        },
     })
 }
 
 fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskError> {
+    use std::sync::Arc;
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::regex::parse_regex;
     use crate::grammar::ast::compile_to_regex;
 
     let rule_map: HashMap<String, GrammarExpr> = grammar.rules.iter().cloned().collect();
@@ -529,13 +536,123 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
 
     let empty_patterns = BTreeMap::new();
 
-    // Step 1: Compile each Lark terminal rule to a single regex pattern.
-    // This preserves composite terminal definitions as meaningful terminal-
-    // level units instead of decomposing them into grammar structure.
+    // Build shared Expr trees for all terminal rules.  When terminal A
+    // references terminal B, B's Expr is wrapped in Expr::Shared(Arc)
+    // so the tree is structurally shared, not duplicated.
+    let mut expr_cache: HashMap<String, Arc<Expr>> = HashMap::new();
+    let mut expr_visiting: HashSet<String> = HashSet::new();
+
+    /// Compile a terminal rule's GrammarExpr into an Expr tree, caching
+    /// each terminal as Arc<Expr> so that cross-references use Shared.
+    fn compile_terminal_to_shared_expr(
+        name: &str,
+        rule_map: &HashMap<String, GrammarExpr>,
+        terminal_names: &HashSet<String>,
+        cache: &mut HashMap<String, Arc<Expr>>,
+        visiting: &mut HashSet<String>,
+    ) -> Result<Arc<Expr>, GlrMaskError> {
+        if let Some(cached) = cache.get(name) {
+            return Ok(cached.clone());
+        }
+        if !visiting.insert(name.to_string()) {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "cyclic Lark terminal definition involving {name}"
+            )));
+        }
+        let body = rule_map.get(name).ok_or_else(|| {
+            GlrMaskError::GrammarParse(format!("unknown Lark terminal rule {name}"))
+        })?;
+        let compiled = grammar_expr_to_expr(body, terminal_names, rule_map, cache, visiting)?;
+        visiting.remove(name);
+        let arc = Arc::new(compiled);
+        cache.insert(name.to_string(), arc.clone());
+        Ok(arc)
+    }
+
+    /// Convert a GrammarExpr to Expr, resolving terminal Refs via Shared(Arc).
+    fn grammar_expr_to_expr(
+        expr: &GrammarExpr,
+        terminal_names: &HashSet<String>,
+        rule_map: &HashMap<String, GrammarExpr>,
+        cache: &mut HashMap<String, Arc<Expr>>,
+        visiting: &mut HashSet<String>,
+    ) -> Result<Expr, GlrMaskError> {
+        Ok(match expr {
+            GrammarExpr::Ref(name) => {
+                if terminal_names.contains(name) {
+                    let arc = compile_terminal_to_shared_expr(
+                        name, rule_map, terminal_names, cache, visiting,
+                    )?;
+                    Expr::Shared(arc)
+                } else {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "Lark terminal rule cannot reference parser rule {name}"
+                    )));
+                }
+            }
+            GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes.clone()),
+            GrammarExpr::CharClass { def, negate, utf8 } => {
+                let pattern = if *negate {
+                    format!("[^{def}]")
+                } else {
+                    format!("[{def}]")
+                };
+                parse_regex(&pattern, *utf8)
+            }
+            GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true),
+            GrammarExpr::Sequence(parts) => Expr::Seq(
+                parts
+                    .iter()
+                    .map(|p| grammar_expr_to_expr(p, terminal_names, rule_map, cache, visiting))
+                    .collect::<Result<_, _>>()?,
+            ),
+            GrammarExpr::Choice(options) => Expr::Choice(
+                options
+                    .iter()
+                    .map(|o| grammar_expr_to_expr(o, terminal_names, rule_map, cache, visiting))
+                    .collect::<Result<_, _>>()?,
+            ),
+            GrammarExpr::Repeat(inner) => Expr::Repeat {
+                expr: Box::new(grammar_expr_to_expr(
+                    inner, terminal_names, rule_map, cache, visiting,
+                )?),
+                min: 0,
+                max: None,
+            },
+            GrammarExpr::RepeatOne(inner) => Expr::Repeat {
+                expr: Box::new(grammar_expr_to_expr(
+                    inner, terminal_names, rule_map, cache, visiting,
+                )?),
+                min: 1,
+                max: None,
+            },
+            GrammarExpr::Optional(inner) => Expr::Repeat {
+                expr: Box::new(grammar_expr_to_expr(
+                    inner, terminal_names, rule_map, cache, visiting,
+                )?),
+                min: 0,
+                max: Some(1),
+            },
+            GrammarExpr::AnyByte => Expr::U8Class(crate::ds::u8set::U8Set::all()),
+            GrammarExpr::CompiledTerminal { .. } => {
+                return Err(GlrMaskError::GrammarParse(
+                    "unexpected CompiledTerminal in grammar_expr_to_expr".into(),
+                ));
+            }
+        })
+    }
+
+    // Step 1: Compile each Lark terminal rule to a CompiledTerminal with
+    // both the regex pattern (for deduplication) and a shared Expr tree.
     for (name, _) in &grammar.rules {
         if !terminal_names.contains(name) {
             continue;
         }
+        // Build (or retrieve cached) shared Expr tree.
+        compile_terminal_to_shared_expr(
+            name, &rule_map, &terminal_names, &mut expr_cache, &mut expr_visiting,
+        )?;
+        // Also compute regex string for deduplication.
         let expanded = expand_lark_terminal_rule(
             name,
             &rule_map,
@@ -545,7 +662,8 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
             &mut visiting,
         )?;
         let regex = compile_to_regex(&expanded, &empty_patterns)?;
-        rules.push((name.clone(), GrammarExpr::RawRegex(regex)));
+        let arc = expr_cache.get(name).unwrap().clone();
+        rules.push((name.clone(), GrammarExpr::CompiledTerminal { pattern: regex, expr: arc }));
     }
 
     // Step 2: Process parser rules.  Terminal references stay as Ref nodes
@@ -577,10 +695,14 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
             &mut visiting,
         )?;
         let regex = compile_to_regex(&start_expr, &empty_patterns)?;
+        let arc = compile_terminal_to_shared_expr(
+            &grammar.start, &rule_map, &terminal_names, &mut expr_cache, &mut expr_visiting,
+        )?;
+        let ct = GrammarExpr::CompiledTerminal { pattern: regex, expr: arc };
         if let Some(existing) = rules.iter_mut().find(|(name, _)| name == &output_start) {
-            existing.1 = GrammarExpr::RawRegex(regex);
+            existing.1 = ct;
         } else {
-            rules.insert(0, (output_start.clone(), GrammarExpr::RawRegex(regex)));
+            rules.insert(0, (output_start.clone(), ct));
         }
     }
 
@@ -967,13 +1089,18 @@ mod tests {
     #[test]
     fn test_lark_terminal_rules_are_preserved_as_composite_units() {
         let named = parse_lark_to_named("start: WORD\nWORD: LETTER+\nLETTER: 'a' | 'b'").unwrap();
-        // Terminal rules are now compiled to single regex patterns and kept as
-        // named rules; parser rules reference them as Ref nodes.
+        // Terminal rules are compiled to CompiledTerminal with shared Expr trees.
         assert_eq!(named.rules.len(), 3);
         assert_eq!(named.rules[0].0, "WORD");
-        assert_eq!(named.rules[0].1, GrammarExpr::RawRegex("((a|b))+".into()));
+        match &named.rules[0].1 {
+            GrammarExpr::CompiledTerminal { pattern, .. } => assert_eq!(pattern, "((a|b))+"),
+            other => panic!("expected CompiledTerminal, got {:?}", other),
+        }
         assert_eq!(named.rules[1].0, "LETTER");
-        assert_eq!(named.rules[1].1, GrammarExpr::RawRegex("(a|b)".into()));
+        match &named.rules[1].1 {
+            GrammarExpr::CompiledTerminal { pattern, .. } => assert_eq!(pattern, "(a|b)"),
+            other => panic!("expected CompiledTerminal, got {:?}", other),
+        }
         assert_eq!(named.rules[2].0, "start");
         assert_eq!(named.rules[2].1, GrammarExpr::Ref("WORD".into()));
     }

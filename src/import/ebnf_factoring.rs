@@ -6,7 +6,8 @@ use crate::grammar::ast::{GrammarExpr, NamedGrammar};
 
 fn contains_regex_features(expr: &GrammarExpr) -> bool {
     match expr {
-        GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte => true,
+        GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte
+        | GrammarExpr::CompiledTerminal { .. } => true,
         GrammarExpr::Literal(_) | GrammarExpr::Ref(_) => false,
         GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
             exprs.iter().any(contains_regex_features)
@@ -195,7 +196,8 @@ impl ChoiceFactorer {
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
-            | GrammarExpr::AnyByte => {}
+            | GrammarExpr::AnyByte
+            | GrammarExpr::CompiledTerminal { .. } => {}
         }
     }
 
@@ -313,7 +315,8 @@ impl ChoiceFactorer {
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
-            | GrammarExpr::AnyByte => {}
+            | GrammarExpr::AnyByte
+            | GrammarExpr::CompiledTerminal { .. } => {}
         }
     }
 

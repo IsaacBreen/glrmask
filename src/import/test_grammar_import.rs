@@ -98,9 +98,12 @@ STR_CHAR: "a"
 "#;
     let named = parse_lark_to_named(lark).expect("Lark should parse bounded repeats");
 
-    // Terminal rule is compiled to regex, parser rule keeps Ref nodes.
+    // Terminal rule is compiled to CompiledTerminal, parser rule keeps Ref nodes.
     assert_eq!(named.rules[0].0, "STR_CHAR");
-    assert_eq!(named.rules[0].1, GrammarExpr::RawRegex("a".into()));
+    match &named.rules[0].1 {
+        GrammarExpr::CompiledTerminal { pattern, .. } => assert_eq!(pattern, "a"),
+        other => panic!("expected CompiledTerminal, got {:?}", other),
+    }
     assert_eq!(named.rules[1].0, "start");
     assert_eq!(
         named.rules[1].1,
@@ -125,7 +128,10 @@ fn test_lark_parser_supports_single_quotes_ranges_aliases_and_priority() {
     // Terminal rule preserved as compiled regex; parser rule keeps Ref.
     assert_eq!(named.rules.len(), 2);
     assert_eq!(named.rules[0].0, "DIGIT");
-    assert_eq!(named.rules[0].1, GrammarExpr::RawRegex("[0-9]".into()));
+    match &named.rules[0].1 {
+        GrammarExpr::CompiledTerminal { pattern, .. } => assert_eq!(pattern, "[0-9]"),
+        other => panic!("expected CompiledTerminal, got {:?}", other),
+    }
     assert_eq!(named.rules[1].0, "start");
     assert_eq!(named.rules[1].1, GrammarExpr::Ref("DIGIT".into()));
 }
@@ -139,7 +145,10 @@ fn test_lark_terminal_rules_follow_capitalization_convention() {
     assert_eq!(named.rules.len(), 3);
     assert_eq!(named.rules[0].0, "WORD");
     assert_eq!(named.rules[1].0, "LETTER");
-    assert_eq!(named.rules[1].1, GrammarExpr::RawRegex("(a|b)".into()));
+    match &named.rules[1].1 {
+        GrammarExpr::CompiledTerminal { pattern, .. } => assert_eq!(pattern, "(a|b)"),
+        other => panic!("expected CompiledTerminal, got {:?}", other),
+    }
     assert_eq!(named.rules[2].0, "start");
     assert_eq!(named.rules[2].1, GrammarExpr::Ref("WORD".into()));
 }
@@ -198,9 +207,9 @@ STR_CHAR: /[^"\\\x00-\x1F]/
 
     let str_char_expr = &named.rules[0].1;
 
-    // After terminal-rule normalization, the start rule inlines the regex.
+    // After terminal-rule normalization, STR_CHAR is compiled to a CompiledTerminal.
     match str_char_expr {
-        GrammarExpr::RawRegex(pattern) => {
+        GrammarExpr::CompiledTerminal { pattern, .. } => {
             assert!(
                 pattern.contains("^\""),
                 "Pattern should contain the negated quote class, got: {}",
@@ -211,7 +220,7 @@ STR_CHAR: /[^"\\\x00-\x1F]/
                 "Regex should not be double-nested"
             );
         }
-        other => panic!("Expected RawRegex, got {:?}", other),
+        other => panic!("Expected CompiledTerminal, got {:?}", other),
     }
 }
 
@@ -273,11 +282,11 @@ STR_CHAR ::= [^"\\\x00-\x1F]
         "EBNF import should keep the explicit terminal-chain helper rules visible in the named grammar"
     );
 
-    // Lark terminal rules compile to RawRegex; EBNF preserves structure.
+    // Lark terminal rules compile to CompiledTerminal; EBNF preserves structure.
     let lark_json_string = &lark_named.rules.iter().find(|(n, _)| n == "JSON_STRING").unwrap().1;
     assert!(
-        matches!(lark_json_string, GrammarExpr::RawRegex(_)),
-        "Lark JSON_STRING should be a single compiled regex, got {:?}",
+        matches!(lark_json_string, GrammarExpr::CompiledTerminal { .. }),
+        "Lark JSON_STRING should be a CompiledTerminal, got {:?}",
         lark_json_string
     );
 

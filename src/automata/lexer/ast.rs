@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ds::u8set::U8Set;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Expr {
     U8Seq(Vec<u8>),
     U8Class(U8Set),
