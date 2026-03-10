@@ -5,10 +5,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use std::sync::Arc;
-
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
+use crate::automata::lexer::regex::parse_regex;
 use crate::grammar::flat::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
@@ -25,11 +24,9 @@ pub enum GrammarExpr {
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
     AnyByte,
-    /// Pre-compiled terminal expression with structural sharing via `Arc`.
-    /// The pattern string is used for deduplication; the Expr tree is used
-    /// directly by the tokenizer, sharing sub-expressions between terminals
-    /// that reference the same inner definitions.
-    CompiledTerminal { pattern: String, expr: Arc<Expr> },
+    /// A terminal whose body has been compiled to a regex pattern string.
+    /// The pattern is parsed to an `Expr` tree during lowering.
+    CompiledTerminal { pattern: String },
 }
 
 #[derive(Debug, Clone)]
@@ -173,9 +170,8 @@ impl Lowerer {
             GrammarExpr::AnyByte => {
                 Symbol::Terminal(self.terminal_id(".", ".", false))
             }
-            GrammarExpr::CompiledTerminal { pattern, expr } => {
-                // Use the regex string as dedup key, but store the pre-compiled
-                // Expr (which may contain Shared sub-trees for structural sharing).
+            GrammarExpr::CompiledTerminal { pattern } => {
+                // Use the regex string as dedup key; parse to Expr during lowering.
                 let key = format!("{}:{}", pattern, true);
                 if let Some(&id) = self.terminal_map.get(&key) {
                     Symbol::Terminal(id)
@@ -183,7 +179,8 @@ impl Lowerer {
                     let id = self.terminals.len() as TerminalID;
                     self.terminal_map.insert(key, id);
                     self.terminal_names.insert(id, pattern.clone());
-                    self.terminals.push(Terminal::Expr { id, expr: (**expr).clone() });
+                    let expr = parse_regex(pattern, true);
+                    self.terminals.push(Terminal::Expr { id, expr });
                     Symbol::Terminal(id)
                 }
             }
