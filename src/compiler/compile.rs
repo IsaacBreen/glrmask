@@ -436,8 +436,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     }
 
     let phase_started_at = std::time::Instant::now();
-    let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> =
-        vocab.entries.iter().cloned().collect();
+    let token_bytes = vocab.entries.clone();
     let collect_token_bytes_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "collect_token_bytes", phase_started_at);
 
@@ -508,6 +507,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         possible_matches_lazy: std::sync::OnceLock::new(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
+        original_token_to_internal: id_map.vocab_tokens.original_to_internal.clone(),
+        internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals.clone(),
         eos_token_id: vocab.eos_token_id,
         token_bytes,
     }
@@ -544,9 +545,8 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         &terminal_dwa,
     );
 
-    let vocab_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().cloned().collect();
-    let token_bytes: std::collections::BTreeMap<u32, Vec<u8>> =
-        vocab.entries.iter().cloned().collect();
+    let vocab_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(token_id, bytes)| (*token_id, bytes.clone())).collect();
+    let token_bytes = vocab.entries.clone();
     let constraint = Constraint {
         parser_dwa: parser_dwa.clone(),
         table: table.clone(),
@@ -556,6 +556,8 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         possible_matches_lazy: std::sync::OnceLock::new(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
         internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
+        original_token_to_internal: id_map.vocab_tokens.original_to_internal.clone(),
+        internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals.clone(),
         eos_token_id: vocab.eos_token_id,
         token_bytes: token_bytes.clone(),
     };
@@ -590,6 +592,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
 mod tests {
     use super::*;
     use crate::compiler::grammar::model::tests::*;
+    use crate::compiler::grammar::model::{Rule, Symbol, Terminal};
 
     fn mask_has_token(mask: &[u32], token: u32) -> bool {
         let word = token as usize / 32;
@@ -666,6 +669,35 @@ mod tests {
         let constraint = compile(&gdef, &vocab);
         assert!(constraint.parser_dwa.num_states() > 0);
         assert!(constraint.table.num_states > 0);
+    }
+
+    #[test]
+    fn test_compile_duplicate_token_bytes_expand_back_to_all_original_tokens() {
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            }],
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vec![
+                (10, b"a".to_vec()),
+                (20, b"a".to_vec()),
+                (30, b"b".to_vec()),
+            ],
+            None,
+        );
+
+        let mask = compile(&gdef, &vocab).start().mask();
+        assert!(mask_has_token(&mask, 10));
+        assert!(mask_has_token(&mask, 20));
+        assert!(!mask_has_token(&mask, 30));
     }
 
     #[test]

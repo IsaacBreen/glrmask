@@ -244,9 +244,12 @@ mod tests {
 
     fn build_tokenize_test_constraint(vocab: &Vocab) -> Constraint {
         let mut entries = vocab.entries.clone();
-        let dummy_id = entries.iter().map(|(token_id, _)| *token_id).max().unwrap_or(0) + 1;
-        entries.push((dummy_id, b"<dummy>".to_vec()));
-        let augmented = Vocab::new(entries, None);
+        let dummy_id = entries.keys().next_back().copied().unwrap_or(0) + 1;
+        entries.insert(dummy_id, b"<dummy>".to_vec());
+        let augmented = Vocab {
+            entries,
+            eos_token_id: None,
+        };
         Constraint::from_ebnf(r#"start ::= "<dummy>""#, &augmented).unwrap()
     }
 

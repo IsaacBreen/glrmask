@@ -519,10 +519,19 @@ fn token_weight(internal_tsid: u32, token_id: u32) -> Weight {
     )
 }
 
-fn token_set_weight(internal_tsid: u32, token_ids: &RangeSetBlaze<usize>) -> Weight {
+fn token_set_weight(
+    internal_tsid: u32,
+    token_ids: &RangeSetBlaze<usize>,
+    original_token_to_internal: &[u32],
+) -> Weight {
     let mut mapped = RangeSetBlaze::new();
     for token_id in token_ids.iter() {
-        mapped.insert(token_id as u32);
+        if let Some(&internal_token_id) = original_token_to_internal.get(token_id) {
+            debug_assert_ne!(internal_token_id, u32::MAX);
+            if internal_token_id != u32::MAX {
+                mapped.insert(internal_token_id);
+            }
+        }
     }
     Weight::from_token_set_for_tsid(internal_tsid, mapped)
 }
@@ -546,6 +555,9 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     nwa: &'nwa mut NWA,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
+    representative_initial_state: u32,
+    representative_state_by_original: &'tok [u32],
+    original_token_to_internal: &'tok [u32],
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
 }
@@ -599,6 +611,12 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ) {
         for (segment_bytes, child_node) in node.iter_children() {
             let child_token_id = child_node.token_id() as u32;
+            let internal_child_token_id = self
+                .original_token_to_internal
+                .get(child_token_id as usize)
+                .copied()
+                .filter(|internal_token_id| *internal_token_id != u32::MAX)
+                .expect("representative vocab token must map to an internal token id");
 
             let mut next_level_assoc = BTreeMap::<u32, SourceAssoc>::new();
             let mut pending = BTreeMap::<usize, BTreeMap<u32, SourceAssoc>>::new();
@@ -615,11 +633,16 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 for (tokenizer_state, source_assoc) in states_at_pos {
                     let source_nodes = source_assoc.nodes;
                     let tsid = source_assoc.tsid;
-                    let child_token_weight = token_weight(tsid, child_token_id);
+                    let child_token_weight = token_weight(tsid, internal_child_token_id);
                     let exec = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state);
-                    let exec_end_state = exec.end_state;
+                    let exec_end_state = exec.end_state.map(|end_state| {
+                        self.representative_state_by_original
+                            .get(end_state as usize)
+                            .copied()
+                            .unwrap_or(end_state)
+                    });
                     let mut possible_matches_at_end = None;
 
                     if let Some(end_state) = exec_end_state {
@@ -672,7 +695,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             continue;
                         }
 
-                        let continuation_weight = token_set_weight(tsid, &continuation_tokens);
+                        let continuation_weight = token_set_weight(
+                            tsid,
+                            &continuation_tokens,
+                            self.original_token_to_internal,
+                        );
                         if continuation_weight.is_empty() {
                             continue;
                         }
@@ -680,7 +707,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let continuation_assoc = pending.entry(next_pos).or_default();
                         let destination = continuation_state(
                             continuation_assoc,
-                            self.tokenizer.initial_state(),
+                            self.representative_initial_state,
                             tsid,
                             self.nwa,
                         );
@@ -772,6 +799,30 @@ fn log_terminal_profile(enabled: bool, phase: &str, started_at: std::time::Insta
     }
 }
 
+fn representative_original_ids(map: &crate::compiler::stages::equivalence_analysis::ManyToOneIdMap) -> Vec<u32> {
+    map.original_to_internal
+        .iter()
+        .enumerate()
+        .map(|(original_id, _)| {
+            map.representative_original_id_for_original(original_id as u32)
+                .unwrap_or(original_id as u32)
+        })
+        .collect()
+}
+
+fn representative_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
+    id_map
+        .vocab_tokens
+        .internal_to_originals
+        .iter()
+        .filter_map(|original_ids| {
+            let representative = *original_ids.first()?;
+            let bytes = vocab.entries.get(&representative)?.clone();
+            Some((representative, bytes))
+        })
+        .collect()
+}
+
 pub(crate) fn build_terminal_dwa(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -804,13 +855,18 @@ pub(crate) fn build_terminal_dwa_with_report(
     nwa.start_states.push(start_state);
 
     let phase_started_at = std::time::Instant::now();
+    let representative_vocab = representative_vocab_entries(vocab, id_map);
     let vocab_tree = VocabPrefixTree::build(
-        &vocab
-            .entries
+        &representative_vocab
             .iter()
             .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
             .collect::<Vec<_>>(),
     );
+    let representative_state_by_original = representative_original_ids(&id_map.tokenizer_states);
+    let representative_initial_state = representative_state_by_original
+        .get(tokenizer.initial_state() as usize)
+        .copied()
+        .unwrap_or_else(|| tokenizer.initial_state());
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
     report.build_vocab_trie_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
@@ -825,9 +881,11 @@ pub(crate) fn build_terminal_dwa_with_report(
         );
 
         let mut assoc_by_state = BTreeMap::<u32, SourceAssoc>::new();
-        for original_state in &id_map.tokenizer_states.internal_to_originals[internal_tsid as usize] {
-            merge_assoc(&mut assoc_by_state, *original_state, internal_tsid, &[root]);
-        }
+        let representative_state = id_map
+            .tokenizer_states
+            .representative_original_id_for_internal(internal_tsid)
+            .expect("internal tokenizer state class must have a representative original state");
+        merge_assoc(&mut assoc_by_state, representative_state, internal_tsid, &[root]);
 
         let mut builder = TerminalNwaBuilder {
             tokenizer,
@@ -835,6 +893,9 @@ pub(crate) fn build_terminal_dwa_with_report(
             nwa: &mut nwa,
             leaf_state,
             ignore_terminal,
+            representative_initial_state,
+            representative_state_by_original: &representative_state_by_original,
+            original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
             transition_buffer: BTreeMap::new(),
             epsilon_buffer: BTreeMap::new(),
         };
@@ -899,8 +960,25 @@ mod tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
     use crate::compiler::grammar::model::tests::simple_ab_grammar;
+    use std::collections::BTreeSet;
 
-    fn build_literal_terminal_dwa(rules: Vec<Rule>, literals: &[&[u8]], vocab_entries: Vec<(u32, &[u8])>) -> DWA {
+    fn expand_original_tokens(weight: &Weight, id_map: &InternalIdMap) -> BTreeSet<u32> {
+        let mut original_tokens = BTreeSet::new();
+        for internal_token_id in weight.token_union().iter() {
+            if let Some(original_ids) = id_map.vocab_tokens.internal_to_originals.get(internal_token_id as usize) {
+                original_tokens.extend(original_ids.iter().copied());
+            } else {
+                original_tokens.insert(internal_token_id);
+            }
+        }
+        original_tokens
+    }
+
+    fn build_literal_terminal_dwa(
+        rules: Vec<Rule>,
+        literals: &[&[u8]],
+        vocab_entries: Vec<(u32, &[u8])>,
+    ) -> (DWA, InternalIdMap) {
         let grammar = GrammarDef {
             rules,
             start: 0,
@@ -924,7 +1002,7 @@ mod tests {
             None,
         );
         let id_map = InternalIdMap::build(&tokenizer, &vocab);
-        build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None)
+        (build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None), id_map)
     }
 
     #[test]
@@ -941,12 +1019,13 @@ mod tests {
         let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
 
         let a_weight = terminal_dwa.eval_word(&[0]);
+        let original_tokens = expand_original_tokens(&a_weight, &id_map);
         assert!(
-            a_weight.token_union().contains(0),
+            original_tokens.contains(&0),
             "terminal DWA should still accept the explicit single-terminal token 'a'"
         );
         assert!(
-            a_weight.token_union().contains(1),
+            original_tokens.contains(&1),
             "always-allowed collapse should make the multi-terminal token 'ab' available on the 'a' terminal word"
         );
         assert!(
@@ -1003,25 +1082,27 @@ mod tests {
         );
 
         let empty_weight = terminal_dwa.eval_word(&[]);
+        let empty_original_tokens = expand_original_tokens(&empty_weight, &id_map);
         assert!(
-            empty_weight.token_union().contains(0),
+            empty_original_tokens.contains(&0),
             "ignore-only tokens should appear in the terminal DWA start-state final weight"
         );
 
         let a_weight = terminal_dwa.eval_word(&[0]);
+        let original_tokens = expand_original_tokens(&a_weight, &id_map);
         assert!(
-            a_weight.token_union().contains(1),
+            original_tokens.contains(&1),
             "plain non-ignore terminal tokens should still be accepted"
         );
         assert!(
-            a_weight.token_union().contains(2),
+            original_tokens.contains(&2),
             "tokens with ignored prefixes should also be accepted on the same terminal word"
         );
     }
 
     #[test]
     fn test_terminal_dwa_collapses_always_allowed_chain_to_first_terminal() {
-        let terminal_dwa = build_literal_terminal_dwa(
+        let (terminal_dwa, id_map) = build_literal_terminal_dwa(
             vec![Rule {
                 lhs: 0,
                 rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2)],
@@ -1031,14 +1112,15 @@ mod tests {
         );
 
         let first_weight = terminal_dwa.eval_word(&[0]);
-        assert!(first_weight.token_union().contains(0), "single-terminal token should still be accepted");
-        assert!(first_weight.token_union().contains(1), "always-allowed suffix 'b' should collapse into the 'a' state");
-        assert!(first_weight.token_union().contains(2), "always-allowed chain 'b' then 'c' should collapse all the way into the 'a' state");
+        let original_tokens = expand_original_tokens(&first_weight, &id_map);
+        assert!(original_tokens.contains(&0), "single-terminal token should still be accepted");
+        assert!(original_tokens.contains(&1), "always-allowed suffix 'b' should collapse into the 'a' state");
+        assert!(original_tokens.contains(&2), "always-allowed chain 'b' then 'c' should collapse all the way into the 'a' state");
     }
 
     #[test]
     fn test_terminal_dwa_does_not_collapse_non_always_follow() {
-        let terminal_dwa = build_literal_terminal_dwa(
+        let (terminal_dwa, id_map) = build_literal_terminal_dwa(
             vec![
                 Rule {
                     lhs: 0,
@@ -1054,8 +1136,9 @@ mod tests {
         );
 
         let first_weight = terminal_dwa.eval_word(&[0]);
-        assert!(first_weight.token_union().contains(0), "the explicit 'a' token should still be accepted");
-        assert!(!first_weight.token_union().contains(1), "'b' is only ever allowed after 'a', not always allowed, so 'ab' must not collapse");
-        assert!(!first_weight.token_union().contains(2), "the 'abc' chain must not collapse when the first follow is not always allowed");
+        let original_tokens = expand_original_tokens(&first_weight, &id_map);
+        assert!(original_tokens.contains(&0), "the explicit 'a' token should still be accepted");
+        assert!(!original_tokens.contains(&1), "'b' is only ever allowed after 'a', not always allowed, so 'ab' must not collapse");
+        assert!(!original_tokens.contains(&2), "the 'abc' chain must not collapse when the first follow is not always allowed");
     }
 }

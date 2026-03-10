@@ -35,6 +35,10 @@ pub struct Constraint {
     pub(crate) possible_matches_lazy: std::sync::OnceLock<PossibleMatchesByState>,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    #[serde(default)]
+    pub(crate) original_token_to_internal: Vec<u32>,
+    #[serde(default)]
+    pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
     pub(crate) eos_token_id: Option<u32>,
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
 }
@@ -50,6 +54,8 @@ impl Clone for Constraint {
             possible_matches_lazy: std::sync::OnceLock::new(),
             state_to_internal_tsid: self.state_to_internal_tsid.clone(),
             internal_tsid_to_states: self.internal_tsid_to_states.clone(),
+            original_token_to_internal: self.original_token_to_internal.clone(),
+            internal_token_to_tokens: self.internal_token_to_tokens.clone(),
             eos_token_id: self.eos_token_id,
             token_bytes: self.token_bytes.clone(),
         }
@@ -108,6 +114,69 @@ impl Constraint {
             .unwrap_or(tokenizer_state)
     }
 
+    pub(crate) fn internal_token_for_original(&self, token_id: u32) -> u32 {
+        self.original_token_to_internal
+            .get(token_id as usize)
+            .copied()
+            .filter(|internal_id| *internal_id != u32::MAX)
+            .unwrap_or(token_id)
+    }
+
+    pub(crate) fn internal_token_universe(&self) -> RangeSetBlaze<u32> {
+        if self.internal_token_to_tokens.is_empty() {
+            let Some(max_token_id) = self.token_bytes.keys().next_back().copied() else {
+                return RangeSetBlaze::new();
+            };
+            return RangeSetBlaze::from_iter([0..=max_token_id]);
+        }
+
+        RangeSetBlaze::from_iter([0..=self.internal_token_to_tokens.len().saturating_sub(1) as u32])
+    }
+
+    pub(crate) fn internalize_token_set(
+        &self,
+        original_tokens: &RangeSetBlaze<u32>,
+    ) -> RangeSetBlaze<u32> {
+        if self.original_token_to_internal.is_empty() {
+            return original_tokens.clone();
+        }
+
+        let mut internal_tokens = RangeSetBlaze::new();
+        for token_id in original_tokens.iter() {
+            internal_tokens.insert(self.internal_token_for_original(token_id));
+        }
+        internal_tokens
+    }
+
+    pub(crate) fn expand_internal_token_set(
+        &self,
+        internal_tokens: &RangeSetBlaze<u32>,
+    ) -> RangeSetBlaze<u32> {
+        if self.internal_token_to_tokens.is_empty() {
+            return internal_tokens.clone();
+        }
+
+        let mut original_tokens = RangeSetBlaze::new();
+        for internal_token in internal_tokens.iter() {
+            if let Some(original_ids) = self.internal_token_to_tokens.get(internal_token as usize) {
+                for &original_id in original_ids {
+                    original_tokens.insert(original_id);
+                }
+            }
+        }
+        original_tokens
+    }
+
+    pub(crate) fn possible_matches_for_state_internal(
+        &self,
+        tokenizer_state: u32,
+    ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
+        self.possible_matches_for_state(tokenizer_state)
+            .into_iter()
+            .map(|(terminal, token_ids)| (terminal, self.internalize_token_set(&token_ids)))
+            .collect()
+    }
+
     pub(crate) fn possible_matches_for_internal_tsid(
         &self,
         internal_tsid: u32,
@@ -118,7 +187,7 @@ impl Constraint {
         };
 
         for &tokenizer_state in original_states {
-            for (terminal, token_ids) in self.possible_matches_for_state(tokenizer_state) {
+            for (terminal, token_ids) in self.possible_matches_for_state_internal(tokenizer_state) {
                 merged
                     .entry(terminal)
                     .and_modify(|existing: &mut RangeSetBlaze<u32>| {

@@ -111,11 +111,7 @@ pub(crate) fn build_possible_matches_by_state(
     let _ = grammar;
     build_possible_matches_from_token_bytes(
         tokenizer,
-        &vocab
-            .entries
-            .iter()
-            .cloned()
-            .collect::<BTreeMap<u32, Vec<u8>>>(),
+        &vocab.entries,
     )
 }
 

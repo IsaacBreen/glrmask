@@ -18,6 +18,25 @@ impl ManyToOneIdMap {
         self.internal_to_originals.len() as u32
     }
 
+    pub fn internal_id_for_original(&self, original_id: u32) -> Option<u32> {
+        self.original_to_internal
+            .get(original_id as usize)
+            .copied()
+            .filter(|internal_id| *internal_id != u32::MAX)
+    }
+
+    pub fn representative_original_id_for_internal(&self, internal_id: u32) -> Option<u32> {
+        self.internal_to_originals
+            .get(internal_id as usize)
+            .and_then(|original_ids| original_ids.first())
+            .copied()
+    }
+
+    pub fn representative_original_id_for_original(&self, original_id: u32) -> Option<u32> {
+        self.internal_id_for_original(original_id)
+            .and_then(|internal_id| self.representative_original_id_for_internal(internal_id))
+    }
+
     pub fn max_original_id(&self) -> u32 {
         self.original_to_internal
             .len()
@@ -40,6 +59,14 @@ impl InternalIdMap {
 
     pub fn num_tsids(&self) -> u32 {
         self.tokenizer_states.num_internal_ids()
+    }
+
+    pub fn num_internal_tokens(&self) -> u32 {
+        self.vocab_tokens.num_internal_ids()
+    }
+
+    pub fn max_internal_token_id(&self) -> u32 {
+        self.num_internal_tokens().saturating_sub(1)
     }
 
     pub fn max_token_id(&self) -> u32 {

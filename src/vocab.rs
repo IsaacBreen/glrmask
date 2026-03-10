@@ -3,9 +3,11 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use std::collections::BTreeMap;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Vocab {
-    pub entries: Vec<(u32, Vec<u8>)>,
+    pub entries: BTreeMap<u32, Vec<u8>>,
     pub eos_token_id: Option<u32>,
 }
 
@@ -13,8 +15,7 @@ impl Vocab {
     const EOS_BYTES: &[u8] = b"<|endoftext|>";
 
     pub fn new(entries: Vec<(u32, Vec<u8>)>, eos_token_id: Option<u32>) -> Self {
-        let mut entries = entries;
-        entries.sort_by_key(|(token_id, _)| *token_id);
+        let entries: BTreeMap<u32, Vec<u8>> = entries.into_iter().collect();
 
         let eos_token_id = eos_token_id.or_else(|| {
             entries

@@ -141,7 +141,7 @@ impl<'a> ConstraintState<'a> {
         gss: &crate::compiler::glr::parser::ParserGSS,
     ) -> WeightedParserGSS {
         gss.apply_and_prune(|terminals_disallowed| {
-            let mut allowed = self.all_llm_tokens();
+            let mut allowed = self.constraint.internal_token_universe();
             if terminals_disallowed.is_empty()
                 || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
             {
@@ -158,10 +158,11 @@ impl<'a> ConstraintState<'a> {
                     continue;
                 }
 
-                if let Some(state_matches) = self.constraint.possible_matches.get(&tsid) {
+                let state_matches = self.constraint.possible_matches_for_state_internal(tsid);
+                if !state_matches.is_empty() {
                     for (terminal_id, llm_tokens) in state_matches {
-                        if disallowed_in_state.contains(terminal_id) {
-                            allowed = allowed - llm_tokens.clone();
+                        if disallowed_in_state.contains(&terminal_id) {
+                            allowed = allowed - llm_tokens;
                         }
                     }
                 }
@@ -198,19 +199,12 @@ impl<'a> ConstraintState<'a> {
     ) -> RangeSetBlaze<u32> {
         let mut all = RangeSetBlaze::new();
         for (internal_tsid, _) in self.constraint.internal_tsid_to_states.iter().enumerate() {
-            let token_ids = weight.tokens_for_tsid(internal_tsid as u32);
-            if !token_ids.is_empty() {
-                all = all | token_ids;
+            let internal_token_ids = weight.tokens_for_tsid(internal_tsid as u32);
+            if !internal_token_ids.is_empty() {
+                all = all | self.constraint.expand_internal_token_set(&internal_token_ids);
             }
         }
         all
-    }
-
-    fn all_llm_tokens(&self) -> RangeSetBlaze<u32> {
-        let Some(max_llm_token) = self.constraint.token_bytes.keys().next_back().copied() else {
-            return RangeSetBlaze::new();
-        };
-        RangeSetBlaze::from_iter([0..=max_llm_token])
     }
 }
 
