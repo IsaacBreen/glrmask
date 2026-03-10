@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::dwa::{DWA, DWAState};
-use crate::ds::weight::Weight;
+use crate::ds::weight::{Weight, WeightBuilder};
 
 type Label = i32;
 
@@ -504,7 +504,7 @@ fn try_all_compatible_height_0_coloring(
 struct MergedStateBuilder {
     final_weight: Weight,
     needed: Weight,
-    transitions: BTreeMap<Label, (u32, Weight)>,
+    transitions: BTreeMap<Label, (u32, WeightBuilder)>,
 }
 
 impl Default for MergedStateBuilder {
@@ -521,16 +521,13 @@ impl MergedStateBuilder {
     fn add_transition(&mut self, label: Label, target: u32, weight: Weight) {
         match self.transitions.entry(label) {
             std::collections::btree_map::Entry::Vacant(e) => {
-                e.insert((target, weight));
+                let mut weight_builder = WeightBuilder::new();
+                weight_builder.union_weight(&weight);
+                e.insert((target, weight_builder));
             }
             std::collections::btree_map::Entry::Occupied(mut e) => {
-                let (existing_target, existing_weight) = e.get_mut();
-                if *existing_target == target {
-                    *existing_weight = existing_weight.union(&weight);
-                } else {
-                    // Different targets for same label — union weights.
-                    *existing_weight = existing_weight.union(&weight);
-                }
+                let (_existing_target, existing_weight) = e.get_mut();
+                existing_weight.union_weight(&weight);
             }
         }
     }
@@ -587,7 +584,8 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
             if !b.final_weight.is_empty() {
                 state.final_weight = Some(b.final_weight);
             }
-            for (lbl, (target, weight)) in b.transitions {
+            for (lbl, (target, weight_builder)) in b.transitions {
+                let weight = weight_builder.build();
                 if !weight.is_empty() {
                     state.transitions.insert(lbl, (target, weight));
                 }
@@ -671,7 +669,6 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         }
 
         if let Some(coloring) = try_all_compatible_height_0_coloring(candidates, &pushed, &needed) {
-
             let base_new_id = new_states.len() as u32;
             let num_colors = 1usize;
 
