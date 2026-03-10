@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
-use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -255,15 +255,15 @@ impl Parser {
             };
             self.expect(&Token::Separator)?;
             let expr = self.parse_alternatives()?;
-            rules.push((name, expr));
+            rules.push(NamedRule { name, expr, is_terminal: false });
             self.skip_newlines();
         }
 
         let start = rules
             .first()
-            .map(|(name, _)| name.clone())
+            .map(|r| r.name.clone())
             .ok_or_else(|| GlrMaskError::GrammarParse("empty grammar".into()))?;
-        Ok(NamedGrammar { rules, start, terminals: HashSet::new(), ignore: None })
+        Ok(NamedGrammar { rules, start, ignore: None })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {

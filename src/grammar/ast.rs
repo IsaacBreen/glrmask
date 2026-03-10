@@ -27,16 +27,31 @@ pub enum GrammarExpr {
     AnyByte,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedRule {
+    pub name: String,
+    pub expr: GrammarExpr,
+    pub is_terminal: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct NamedGrammar {
-    pub rules: Vec<(String, GrammarExpr)>,
+    pub rules: Vec<NamedRule>,
     pub start: String,
-    /// Rule names that are terminal definitions (as opposed to nonterminals).
-    /// Set explicitly by the importer — not derived from naming conventions.
-    pub terminals: HashSet<String>,
     /// Name of the terminal rule whose body should be used as the ignore pattern.
     /// Set by Lark's `%ignore` directive.
     pub ignore: Option<String>,
+}
+
+impl NamedGrammar {
+    /// Returns the set of rule names marked as terminals.
+    pub fn terminal_names_set(&self) -> HashSet<String> {
+        self.rules
+            .iter()
+            .filter(|r| r.is_terminal)
+            .map(|r| r.name.clone())
+            .collect()
+    }
 }
 
 struct Lowerer {
@@ -254,22 +269,22 @@ fn grammar_expr_to_expr(ge: &GrammarExpr) -> Result<Expr, GlrMaskError> {
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut lowerer = Lowerer::new();
 
-    for (name, _) in &grammar.rules {
-        lowerer.nt_id(name);
+    for rule in &grammar.rules {
+        lowerer.nt_id(&rule.name);
     }
 
-    for (name, expr) in &grammar.rules {
-        let lhs = lowerer.nt_id(name);
+    for rule in &grammar.rules {
+        let lhs = lowerer.nt_id(&rule.name);
 
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // The body should be fully expanded (no Ref nodes).
-        if grammar.terminals.contains(name) {
-            let tid = lowerer.lower_terminal_rule(name, expr)?;
+        if rule.is_terminal {
+            let tid = lowerer.lower_terminal_rule(&rule.name, &rule.expr)?;
             lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Terminal(tid)] });
             continue;
         }
 
-        match expr {
+        match &rule.expr {
             GrammarExpr::Sequence(parts) => {
                 let rhs = parts.iter().map(|part| lowerer.lower_expr_terminalish(part)).collect::<Result<Vec<_>, _>>()?;
                 lowerer.rules.push(Rule { lhs, rhs });
@@ -304,7 +319,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                 lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), symbol] });
             }
             _ => {
-                let symbol = lowerer.lower_expr_terminalish(expr)?;
+                let symbol = lowerer.lower_expr_terminalish(&rule.expr)?;
                 lowerer.rules.push(Rule { lhs, rhs: vec![symbol] });
             }
         }
@@ -320,7 +335,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
 
     let ignore_terminal = if let Some(ref ignore_name) = grammar.ignore {
         // Find the terminal created for the ignore rule.
-        // The ignore rule is in grammar.terminals, so it was lowered above
+        // The ignore rule has is_terminal=true, so it was lowered above
         // as NT → Terminal. The terminal has the ignore name in terminal_names.
         let tid = lowerer.terminal_names.iter()
             .find(|(_, name)| *name == ignore_name)
@@ -365,18 +380,22 @@ fn regex_escape_byte(b: u8) -> String {
 mod tests {
     use super::*;
 
+    fn nt(name: &str, expr: GrammarExpr) -> NamedRule {
+        NamedRule { name: name.into(), expr, is_terminal: false }
+    }
+
     #[test]
     fn test_lower_simple_sequence() {
         let g = NamedGrammar {
-            rules: vec![(
-                "start".into(),
+            rules: vec![nt(
+                "start",
                 GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b"a".to_vec()),
                     GrammarExpr::Literal(b"b".to_vec()),
                 ]),
             )],
             start: "start".into(),
-            terminals: HashSet::new(), ignore: None,
+            ignore: None,
         };
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0);
@@ -387,15 +406,15 @@ mod tests {
     #[test]
     fn test_lower_choice() {
         let g = NamedGrammar {
-            rules: vec![(
-                "start".into(),
+            rules: vec![nt(
+                "start",
                 GrammarExpr::Choice(vec![
                     GrammarExpr::Literal(b"a".to_vec()),
                     GrammarExpr::Literal(b"b".to_vec()),
                 ]),
             )],
             start: "start".into(),
-            terminals: HashSet::new(), ignore: None,
+            ignore: None,
         };
         let gdef = lower(&g).unwrap();
         
@@ -406,12 +425,12 @@ mod tests {
     #[test]
     fn test_lower_optional() {
         let g = NamedGrammar {
-            rules: vec![(
-                "start".into(),
+            rules: vec![nt(
+                "start",
                 GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
             )],
             start: "start".into(),
-            terminals: HashSet::new(), ignore: None,
+            ignore: None,
         };
         let gdef = lower(&g).unwrap();
         
@@ -422,8 +441,8 @@ mod tests {
     #[test]
     fn test_lower_nullability_uses_epsilon_rules_not_empty_terminals() {
         let g = NamedGrammar {
-            rules: vec![(
-                "start".into(),
+            rules: vec![nt(
+                "start",
                 GrammarExpr::Sequence(vec![
                     GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"x".to_vec()))),
                     GrammarExpr::Sequence(vec![]),
@@ -431,7 +450,7 @@ mod tests {
                 ]),
             )],
             start: "start".into(),
-            terminals: HashSet::new(), ignore: None,
+            ignore: None,
         };
         let gdef = lower(&g).unwrap();
 
@@ -465,12 +484,12 @@ mod tests {
     #[test]
     fn test_lower_repeat() {
         let g = NamedGrammar {
-            rules: vec![(
-                "start".into(),
+            rules: vec![nt(
+                "start",
                 GrammarExpr::RepeatOne(Box::new(GrammarExpr::Literal(b"a".to_vec()))),
             )],
             start: "start".into(),
-            terminals: HashSet::new(), ignore: None,
+            ignore: None,
         };
         let gdef = lower(&g).unwrap();
         
@@ -481,15 +500,15 @@ mod tests {
     fn test_lower_multi_rule() {
         let g = NamedGrammar {
             rules: vec![
-                (
-                    "start".into(),
+                nt(
+                    "start",
                     GrammarExpr::Sequence(vec![
                         GrammarExpr::Ref("item".into()),
                         GrammarExpr::Literal(b".".to_vec()),
                     ]),
                 ),
-                (
-                    "item".into(),
+                nt(
+                    "item",
                     GrammarExpr::Choice(vec![
                         GrammarExpr::Literal(b"a".to_vec()),
                         GrammarExpr::Literal(b"b".to_vec()),
@@ -497,7 +516,7 @@ mod tests {
                 ),
             ],
             start: "start".into(),
-            terminals: HashSet::new(), ignore: None,
+            ignore: None,
         };
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0); 
@@ -508,20 +527,20 @@ mod tests {
     fn test_lower_retains_useful_names_but_not_helper_nonterminals() {
         let g = NamedGrammar {
             rules: vec![
-                (
-                    "start".into(),
+                nt(
+                    "start",
                     GrammarExpr::Sequence(vec![
                         GrammarExpr::Ref("named_nt".into()),
                         GrammarExpr::Literal(b"term1".to_vec()),
                     ]),
                 ),
-                (
-                    "named_nt".into(),
+                nt(
+                    "named_nt",
                     GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"term2".to_vec()))),
                 ),
             ],
             start: "start".into(),
-            terminals: HashSet::new(), ignore: None,
+            ignore: None,
         };
 
         let gdef = lower(&g).unwrap();

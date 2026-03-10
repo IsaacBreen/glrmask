@@ -18,7 +18,7 @@
 //!     - test_lark_ignore_directive: NamedGrammar has no ignore_symbol_name field
 //!     - test_lark_repeat_bounded: GrammarExpr has no RepeatBounded variant (desugared)
 
-use crate::import::ast::{GrammarExpr, NamedGrammar};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
 use crate::import::ebnf::parse_ebnf_to_named;
 use crate::import::lark::parse_lark_to_named;
 use crate::grammar::ast::lower;
@@ -38,29 +38,20 @@ b ::= c*
 c ::= 'c'?";
     let named = parse_ebnf_to_named(ebnf).expect("EBNF should parse");
 
-    let expected_rules: Vec<(String, GrammarExpr)> = vec![
-        (
-            "s".to_string(),
-            GrammarExpr::Sequence(vec![
-                GrammarExpr::Ref("a".into()),
-                GrammarExpr::Ref("b".into()),
-            ]),
-        ),
-        (
-            "a".to_string(),
-            GrammarExpr::Choice(vec![
-                GrammarExpr::Literal(b"a".to_vec()),
-                GrammarExpr::Sequence(vec![]),
-            ]),
-        ),
-        (
-            "b".to_string(),
-            GrammarExpr::Repeat(Box::new(GrammarExpr::Ref("c".into()))),
-        ),
-        (
-            "c".to_string(),
-            GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"c".to_vec()))),
-        ),
+    let nt = |name: &str, expr: GrammarExpr| -> NamedRule {
+        NamedRule { name: name.to_string(), expr, is_terminal: false }
+    };
+    let expected_rules: Vec<NamedRule> = vec![
+        nt("s", GrammarExpr::Sequence(vec![
+            GrammarExpr::Ref("a".into()),
+            GrammarExpr::Ref("b".into()),
+        ])),
+        nt("a", GrammarExpr::Choice(vec![
+            GrammarExpr::Literal(b"a".to_vec()),
+            GrammarExpr::Sequence(vec![]),
+        ])),
+        nt("b", GrammarExpr::Repeat(Box::new(GrammarExpr::Ref("c".into())))),
+        nt("c", GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"c".to_vec())))),
     ];
 
     assert_eq!(
@@ -99,11 +90,11 @@ STR_CHAR: "a"
     let named = parse_lark_to_named(lark).expect("Lark should parse bounded repeats");
 
     // Terminal rule is stored as expanded GrammarExpr; parser rule keeps Ref nodes.
-    assert_eq!(named.rules[0].0, "STR_CHAR");
-    assert_eq!(named.rules[0].1, GrammarExpr::Literal(b"a".to_vec()));
-    assert_eq!(named.rules[1].0, "start");
+    assert_eq!(named.rules[0].name, "STR_CHAR");
+    assert_eq!(named.rules[0].expr, GrammarExpr::Literal(b"a".to_vec()));
+    assert_eq!(named.rules[1].name, "start");
     assert_eq!(
-        named.rules[1].1,
+        named.rules[1].expr,
         GrammarExpr::Sequence(vec![
             GrammarExpr::Ref("STR_CHAR".into()),
             GrammarExpr::Ref("STR_CHAR".into()),
@@ -124,13 +115,13 @@ fn test_lark_parser_supports_single_quotes_ranges_aliases_and_priority() {
 
     // Terminal rule preserved as expanded GrammarExpr; parser rule keeps Ref.
     assert_eq!(named.rules.len(), 2);
-    assert_eq!(named.rules[0].0, "DIGIT");
+    assert_eq!(named.rules[0].name, "DIGIT");
     assert_eq!(
-        named.rules[0].1,
+        named.rules[0].expr,
         GrammarExpr::CharClass { def: "0-9".into(), negate: false, utf8: true }
     );
-    assert_eq!(named.rules[1].0, "start");
-    assert_eq!(named.rules[1].1, GrammarExpr::Ref("DIGIT".into()));
+    assert_eq!(named.rules[1].name, "start");
+    assert_eq!(named.rules[1].expr, GrammarExpr::Ref("DIGIT".into()));
 }
 
 #[test]
@@ -140,23 +131,24 @@ fn test_lark_terminal_rules_follow_capitalization_convention() {
 
     // Terminal rules are stored as expanded GrammarExpr; parser rules keep Ref nodes.
     assert_eq!(named.rules.len(), 3);
-    assert_eq!(named.rules[0].0, "WORD");
-    assert_eq!(named.rules[1].0, "LETTER");
+    assert_eq!(named.rules[0].name, "WORD");
+    assert_eq!(named.rules[1].name, "LETTER");
     assert_eq!(
-        named.rules[1].1,
+        named.rules[1].expr,
         GrammarExpr::Choice(vec![
             GrammarExpr::Literal(b"a".to_vec()),
             GrammarExpr::Literal(b"b".to_vec()),
         ])
     );
-    assert_eq!(named.rules[2].0, "start");
-    assert_eq!(named.rules[2].1, GrammarExpr::Ref("WORD".into()));
+    assert_eq!(named.rules[2].name, "start");
+    assert_eq!(named.rules[2].expr, GrammarExpr::Ref("WORD".into()));
 
-    // The terminals field explicitly lists terminal rule names.
-    assert!(named.terminals.contains("WORD"));
-    assert!(named.terminals.contains("LETTER"));
-    assert!(!named.terminals.contains("start"));
-    assert_eq!(named.terminals.len(), 2);
+    // The is_terminal flag marks terminal rule names.
+    let term_set = named.terminal_names_set();
+    assert!(term_set.contains("WORD"));
+    assert!(term_set.contains("LETTER"));
+    assert!(!term_set.contains("start"));
+    assert_eq!(term_set.len(), 2);
 }
 
 #[test]
@@ -203,10 +195,10 @@ NUMBER: /[0-9]+/
         "Expected 4 rules (1 terminal + 3 parser), got {}",
         named.rules.len()
     );
-    assert_eq!(named.rules[0].0, "NUMBER");
-    assert_eq!(named.rules[1].0, "start");
-    assert_eq!(named.rules[2].0, "expr");
-    assert_eq!(named.rules[3].0, "term");
+    assert_eq!(named.rules[0].name, "NUMBER");
+    assert_eq!(named.rules[1].name, "start");
+    assert_eq!(named.rules[2].name, "expr");
+    assert_eq!(named.rules[3].name, "term");
 }
 
 /// Ported from `test_lark_regex_charclass_not_nested`.
@@ -221,7 +213,7 @@ STR_CHAR: /[^"\\\x00-\x1F]/
 "#;
     let named = parse_lark_to_named(lark).expect("Lark should parse");
 
-    let str_char_expr = &named.rules[0].1;
+    let str_char_expr = &named.rules[0].expr;
 
     // After terminal-rule normalization, STR_CHAR is stored as expanded GrammarExpr.
     match str_char_expr {
@@ -285,17 +277,17 @@ STR_CHAR ::= [^"\\\x00-\x1F]
     // Lark terminal rules are compiled to single regex patterns and kept as
     // named rules.  EBNF keeps the helper-rule chain as structured nonterminals.
     assert!(
-        lark_named.rules.iter().any(|(name, _)| name == "JSON_STRING"),
+        lark_named.rules.iter().any(|r| r.name == "JSON_STRING"),
         "Lark should keep JSON_STRING as a named rule (compiled to regex)"
     );
     assert!(
-        ebnf_named.rules.iter().any(|(name, _)| name == "JSON_STRING")
-            && ebnf_named.rules.iter().any(|(name, _)| name == "STR_CHAR"),
+        ebnf_named.rules.iter().any(|r| r.name == "JSON_STRING")
+            && ebnf_named.rules.iter().any(|r| r.name == "STR_CHAR"),
         "EBNF import should keep the explicit terminal-chain helper rules visible in the named grammar"
     );
 
     // Lark terminal rules are stored as expanded GrammarExpr; EBNF preserves structure.
-    let lark_json_string = &lark_named.rules.iter().find(|(n, _)| n == "JSON_STRING").unwrap().1;
+    let lark_json_string = &lark_named.rules.iter().find(|r| r.name == "JSON_STRING").unwrap().expr;
     assert!(
         !matches!(lark_json_string, GrammarExpr::Ref(_)),
         "Lark JSON_STRING should be an expanded terminal body, got {:?}",

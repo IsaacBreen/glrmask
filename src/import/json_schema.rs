@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
-use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
 
 const JSON_VALUE_RULE: &str = "json_value";
 const JSON_OBJECT_RULE: &str = "json_object";
@@ -389,7 +389,7 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     ctx.materialize_registered_refs()?;
     let start_expr = ctx.convert_schema(schema)?;
     ctx.insert_rule("start", start_expr);
-    let terminals: HashSet<String> = ctx
+    let terminal_names: HashSet<String> = ctx
         .rules
         .iter()
         .map(|(name, _)| name.as_str())
@@ -401,10 +401,13 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         })
         .map(|s| s.to_string())
         .collect();
+    let rules = ctx.rules.into_iter().map(|(name, expr)| {
+        let is_terminal = terminal_names.contains(&name);
+        NamedRule { name, expr, is_terminal }
+    }).collect();
     Ok(NamedGrammar {
-        rules: ctx.rules,
+        rules,
         start: "start".into(),
-        terminals,
         ignore: None,
     })
 }

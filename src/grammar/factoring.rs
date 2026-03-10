@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::ast::{GrammarExpr, NamedGrammar};
+use super::ast::{GrammarExpr, NamedGrammar, NamedRule};
 
 fn contains_regex_features(expr: &GrammarExpr) -> bool {
     match expr {
@@ -25,40 +25,46 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
 }
 
 pub fn factor_named_grammar(grammar: NamedGrammar) -> NamedGrammar {
-    let rules = ChoiceFactorer::new(grammar.rules, &grammar.terminals).factor_all();
+    let terminal_names = grammar.terminal_names_set();
+    let rules = ChoiceFactorer::new(grammar.rules, &terminal_names).factor_all();
     NamedGrammar {
         rules,
         start: grammar.start,
-        terminals: grammar.terminals,
         ignore: grammar.ignore,
     }
 }
 
 pub fn factor_grammar_rules(
-    rules: Vec<(String, GrammarExpr)>,
+    rules: Vec<NamedRule>,
     terminals: &HashSet<String>,
-) -> Vec<(String, GrammarExpr)> {
+) -> Vec<NamedRule> {
     ChoiceFactorer::new(rules, terminals).factor_all()
 }
 
 struct ChoiceFactorer {
     rules: HashMap<String, GrammarExpr>,
-    rule_order: Vec<String>,
+    rule_order: Vec<(String, bool)>, // (name, is_terminal)
     terminals: HashSet<String>,
     recursive_rules: HashSet<String>,
-    new_rules: Vec<(String, GrammarExpr)>,
+    new_rules: Vec<NamedRule>,
     helper_counter: usize,
     factor_cache: HashMap<Vec<GrammarExpr>, String>,
 }
 
 impl ChoiceFactorer {
-    fn new(rules: Vec<(String, GrammarExpr)>, terminals: &HashSet<String>) -> Self {
-        let rule_order = rules.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
-        let rules = rules.into_iter().collect::<HashMap<_, _>>();
-        let recursive_rules = Self::find_recursive_rules(&rules);
+    fn new(rules: Vec<NamedRule>, terminals: &HashSet<String>) -> Self {
+        let rule_order: Vec<(String, bool)> = rules
+            .iter()
+            .map(|r| (r.name.clone(), r.is_terminal))
+            .collect();
+        let rule_map: HashMap<String, GrammarExpr> = rules
+            .into_iter()
+            .map(|r| (r.name, r.expr))
+            .collect();
+        let recursive_rules = Self::find_recursive_rules(&rule_map);
 
         Self {
-            rules,
+            rules: rule_map,
             rule_order,
             terminals: terminals.clone(),
             recursive_rules,
@@ -68,8 +74,8 @@ impl ChoiceFactorer {
         }
     }
 
-    fn factor_all(mut self) -> Vec<(String, GrammarExpr)> {
-        for name in self.rule_order.clone() {
+    fn factor_all(mut self) -> Vec<NamedRule> {
+        for (name, is_terminal) in self.rule_order.clone() {
             let expr = self
                 .rules
                 .get(&name)
@@ -89,7 +95,11 @@ impl ChoiceFactorer {
                 expr
             };
 
-            self.new_rules.push((name, factored_expr));
+            self.new_rules.push(NamedRule {
+                name,
+                expr: factored_expr,
+                is_terminal,
+            });
         }
 
         self.new_rules
@@ -278,7 +288,7 @@ impl ChoiceFactorer {
         let mut collision_index = 1;
 
         while self.rules.contains_key(&helper_name)
-            || self.new_rules.iter().any(|(name, _)| name == &helper_name)
+            || self.new_rules.iter().any(|r| r.name == helper_name)
         {
             helper_name = format!("{}_{}", base, collision_index);
             collision_index += 1;
@@ -290,7 +300,11 @@ impl ChoiceFactorer {
             GrammarExpr::Choice(alternatives.clone())
         };
 
-        self.new_rules.push((helper_name.clone(), helper_expr));
+        self.new_rules.push(NamedRule {
+            name: helper_name.clone(),
+            expr: helper_expr,
+            is_terminal: false,
+        });
         self.factor_cache.insert(alternatives, helper_name.clone());
         self.helper_counter += 1;
         helper_name
@@ -368,34 +382,39 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    fn nt(name: &str, expr: GrammarExpr) -> NamedRule {
+        NamedRule { name: name.to_string(), expr, is_terminal: false }
+    }
+
+    fn term(name: &str, expr: GrammarExpr) -> NamedRule {
+        NamedRule { name: name.to_string(), expr, is_terminal: true }
+    }
+
     #[test]
     fn test_factor_nonterminal_choice_into_helper() {
         let factored = factor_grammar_rules(
             vec![
-                ("start".to_string(), GrammarExpr::Ref("_value".to_string())),
-                (
-                    "_value".to_string(),
-                    GrammarExpr::Choice(vec![lit(b"a"), lit(b"b")]),
-                ),
+                nt("start", GrammarExpr::Ref("_value".to_string())),
+                nt("_value", GrammarExpr::Choice(vec![lit(b"a"), lit(b"b")])),
             ],
             &terminals(&[]),
         );
 
         let value_rule = factored
             .iter()
-            .find(|(name, _)| name == "_value")
+            .find(|r| r.name == "_value")
             .expect("factored _value rule should exist");
-        let helper_name = match &value_rule.1 {
+        let helper_name = match &value_rule.expr {
             GrammarExpr::Ref(name) => name.clone(),
             other => panic!("expected _value to be replaced by helper ref, got {:?}", other),
         };
 
         let helper_rule = factored
             .iter()
-            .find(|(name, _)| name == &helper_name)
+            .find(|r| r.name == helper_name)
             .expect("helper rule should be created for safe alternatives");
         assert!(matches!(
-            &helper_rule.1,
+            &helper_rule.expr,
             GrammarExpr::Choice(options) if options == &vec![lit(b"a"), lit(b"b")]
         ));
     }
@@ -404,23 +423,20 @@ mod tests {
     fn test_factor_recursive_key_tail_choice_into_key_helper() {
         let factored = factor_grammar_rules(
             vec![
-                ("start".to_string(), GrammarExpr::Ref("_pair".to_string())),
-                (
-                    "_pair".to_string(),
-                    GrammarExpr::Choice(vec![
-                        GrammarExpr::Sequence(vec![lit(b"a"), lit(b":"), GrammarExpr::Ref("_pair".to_string())]),
-                        GrammarExpr::Sequence(vec![lit(b"b"), lit(b":"), GrammarExpr::Ref("_pair".to_string())]),
-                    ]),
-                ),
+                nt("start", GrammarExpr::Ref("_pair".to_string())),
+                nt("_pair", GrammarExpr::Choice(vec![
+                    GrammarExpr::Sequence(vec![lit(b"a"), lit(b":"), GrammarExpr::Ref("_pair".to_string())]),
+                    GrammarExpr::Sequence(vec![lit(b"b"), lit(b":"), GrammarExpr::Ref("_pair".to_string())]),
+                ])),
             ],
             &terminals(&[]),
         );
 
         let pair_rule = factored
             .iter()
-            .find(|(name, _)| name == "_pair")
+            .find(|r| r.name == "_pair")
             .expect("factored recursive rule should exist");
-        let helper_name = match &pair_rule.1 {
+        let helper_name = match &pair_rule.expr {
             GrammarExpr::Sequence(parts)
                 if parts.len() == 3
                     && parts[1] == lit(b":")
@@ -436,10 +452,10 @@ mod tests {
 
         let helper_rule = factored
             .iter()
-            .find(|(name, _)| name == &helper_name)
+            .find(|r| r.name == helper_name)
             .expect("key helper rule should be created");
         assert!(matches!(
-            &helper_rule.1,
+            &helper_rule.expr,
             GrammarExpr::Choice(options) if options == &vec![lit(b"a"), lit(b"b")]
         ));
     }
@@ -447,23 +463,21 @@ mod tests {
     #[test]
     fn test_skip_terminal_rules() {
         // Terminal rules should not be factored regardless of name conventions
-        let original = vec![(
-            "_value".to_string(),
-            GrammarExpr::Choice(vec![lit(b"a"), lit(b"b")]),
-        )];
+        let original = vec![
+            term("_value", GrammarExpr::Choice(vec![lit(b"a"), lit(b"b")])),
+        ];
         let factored = factor_grammar_rules(original.clone(), &terminals(&["_value"]));
         assert_eq!(factored, original);
     }
 
     #[test]
     fn test_skip_rules_with_regex_features() {
-        let original = vec![(
-            "word".to_string(),
-            GrammarExpr::Choice(vec![
+        let original = vec![
+            nt("word", GrammarExpr::Choice(vec![
                 GrammarExpr::CharClass { def: "a-z".to_string(), negate: false, utf8: false },
                 lit(b"x"),
-            ]),
-        )];
+            ])),
+        ];
         let factored = factor_grammar_rules(original.clone(), &terminals(&[]));
         assert_eq!(factored, original);
     }

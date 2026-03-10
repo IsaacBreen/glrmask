@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
-use crate::import::ast::{GrammarExpr, NamedGrammar, lower};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
 use crate::grammar::factoring::factor_named_grammar;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -510,12 +510,12 @@ fn expand_lark_expr(
 }
 
 fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskError> {
-    let rule_map: HashMap<String, GrammarExpr> = grammar.rules.iter().cloned().collect();
-    let terminal_names: &HashSet<String> = &grammar.terminals;
+    let rule_map: HashMap<String, GrammarExpr> = grammar.rules.iter().map(|r| (r.name.clone(), r.expr.clone())).collect();
+    let terminal_names: HashSet<String> = grammar.terminal_names_set();
     let parser_names: HashSet<String> = grammar
         .rules
         .iter()
-        .map(|(name, _)| name.clone())
+        .map(|r| r.name.clone())
         .filter(|name| !terminal_names.contains(name))
         .collect();
 
@@ -556,9 +556,9 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         }
     }
 
-    for (name, expr) in &grammar.rules {
-        if terminal_names.contains(name) {
-            validate_terminal_refs(expr, name, terminal_names, &rule_map)?;
+    for rule in &grammar.rules {
+        if terminal_names.contains(&rule.name) {
+            validate_terminal_refs(&rule.expr, &rule.name, &terminal_names, &rule_map)?;
         }
     }
 
@@ -576,59 +576,58 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
     // Step 1: Expand each Lark terminal rule (inlining sub-terminal refs).
     // The expanded GrammarExpr is stored directly — lowering converts it
     // to an Expr tree without a string intermediate.
-    for (name, _) in &grammar.rules {
-        if !terminal_names.contains(name) {
+    for rule in &grammar.rules {
+        if !terminal_names.contains(&rule.name) {
             continue;
         }
         let expanded = expand_lark_terminal_rule(
-            name,
+            &rule.name,
             &rule_map,
-            terminal_names,
+            &terminal_names,
             &parser_names,
             &mut memo,
             &mut visiting,
         )?;
-        rules.push((name.clone(), expanded));
+        rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: true });
     }
 
     // Step 2: Process parser rules.  Terminal references stay as Ref nodes
     // so lower() resolves them to the nonterminal wrappers created above.
-    for (name, expr) in &grammar.rules {
-        if terminal_names.contains(name) {
+    for rule in &grammar.rules {
+        if terminal_names.contains(&rule.name) {
             continue;
         }
         let expanded = expand_lark_expr(
-            expr,
+            &rule.expr,
             false,
             &rule_map,
-            terminal_names,
+            &terminal_names,
             &parser_names,
             &mut memo,
             &mut visiting,
         )?;
-        rules.push((name.clone(), expanded));
+        rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: false });
     }
 
     if start_is_terminal {
         let start_expr = expand_lark_terminal_rule(
             &grammar.start,
             &rule_map,
-            terminal_names,
+            &terminal_names,
             &parser_names,
             &mut memo,
             &mut visiting,
         )?;
-        if let Some(existing) = rules.iter_mut().find(|(name, _)| name == &output_start) {
-            existing.1 = start_expr;
+        if let Some(existing) = rules.iter_mut().find(|r| r.name == output_start) {
+            existing.expr = start_expr;
         } else {
-            rules.insert(0, (output_start.clone(), start_expr));
+            rules.insert(0, NamedRule { name: output_start.clone(), expr: start_expr, is_terminal: true });
         }
     }
 
     Ok(NamedGrammar {
         rules,
         start: output_start,
-        terminals: grammar.terminals,
         ignore: grammar.ignore,
     })
 }
@@ -673,7 +672,7 @@ impl Parser {
     }
 
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
-        let mut rules: Vec<(String, GrammarExpr)> = Vec::new();
+        let mut rules: Vec<NamedRule> = Vec::new();
         let mut ignore_exprs: Vec<GrammarExpr> = Vec::new();
 
         self.skip_newlines();
@@ -713,7 +712,11 @@ impl Parser {
 
             let expr = self.parse_alternatives()?;
 
-            rules.push((name, expr));
+            rules.push(NamedRule {
+                name,
+                expr,
+                is_terminal: false, // set correctly below
+            });
             self.skip_newlines();
         }
 
@@ -721,16 +724,16 @@ impl Parser {
             return Err(GlrMaskError::GrammarParse("empty grammar".into()));
         }
 
-        let start = if rules.iter().any(|(name, _)| name == "start") {
+        let start = if rules.iter().any(|r| r.name == "start") {
             "start".to_string()
         } else {
-            rules[0].0.clone()
+            rules[0].name.clone()
         };
-        let mut terminals: HashSet<String> = rules
-            .iter()
-            .map(|(name, _)| name.clone())
-            .filter(|name| is_lark_terminal_name(name))
-            .collect();
+
+        // Mark terminal rules based on Lark naming convention
+        for rule in &mut rules {
+            rule.is_terminal = is_lark_terminal_name(&rule.name);
+        }
 
         // Synthesize an __IGNORE terminal if %ignore directives were found
         let ignore = if ignore_exprs.is_empty() {
@@ -742,12 +745,11 @@ impl Parser {
                 GrammarExpr::Choice(ignore_exprs)
             };
             let name = "__IGNORE".to_string();
-            rules.push((name.clone(), ignore_body));
-            terminals.insert(name.clone());
+            rules.push(NamedRule { name: name.clone(), expr: ignore_body, is_terminal: true });
             Some(name)
         };
 
-        Ok(NamedGrammar { rules, start, terminals, ignore })
+        Ok(NamedGrammar { rules, start, ignore })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
@@ -1045,26 +1047,26 @@ mod tests {
         // Terminal rules are stored as expanded GrammarExpr trees (no Ref nodes).
         // lower() converts them directly to Expr using grammar.terminals.
         assert_eq!(named.rules.len(), 3);
-        assert_eq!(named.rules[0].0, "WORD");
+        assert_eq!(named.rules[0].name, "WORD");
         // WORD = RepeatOne(Choice([Literal("a"), Literal("b")]))
         assert_eq!(
-            named.rules[0].1,
+            named.rules[0].expr,
             GrammarExpr::RepeatOne(Box::new(GrammarExpr::Choice(vec![
                 GrammarExpr::Literal(b"a".to_vec()),
                 GrammarExpr::Literal(b"b".to_vec()),
             ])))
         );
-        assert_eq!(named.rules[1].0, "LETTER");
+        assert_eq!(named.rules[1].name, "LETTER");
         // LETTER = Choice([Literal("a"), Literal("b")])
         assert_eq!(
-            named.rules[1].1,
+            named.rules[1].expr,
             GrammarExpr::Choice(vec![
                 GrammarExpr::Literal(b"a".to_vec()),
                 GrammarExpr::Literal(b"b".to_vec()),
             ])
         );
-        assert_eq!(named.rules[2].0, "start");
-        assert_eq!(named.rules[2].1, GrammarExpr::Ref("WORD".into()));
+        assert_eq!(named.rules[2].name, "start");
+        assert_eq!(named.rules[2].expr, GrammarExpr::Ref("WORD".into()));
     }
 
     #[test]
