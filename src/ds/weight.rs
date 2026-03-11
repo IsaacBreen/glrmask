@@ -653,38 +653,42 @@ impl Weight {
     }
 
     pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
-        let mut expanded: BTreeMap<u32, RangeSetBlaze<u32>> = BTreeMap::new();
+        let mut iter = weights.into_iter();
 
-        for weight in weights {
+        // Fast path: collect first non-empty weight
+        let first = loop {
+            match iter.next() {
+                None => return Self::empty(),
+                Some(w) if w.is_full() => return Self::all(),
+                Some(w) if w.is_empty() => continue,
+                Some(w) => break w,
+            }
+        };
+
+        // Find second non-empty weight
+        let second = loop {
+            match iter.next() {
+                None => return first.clone(), // Only one non-empty weight
+                Some(w) if w.is_full() => return Self::all(),
+                Some(w) if w.is_empty() => continue,
+                Some(w) => break w,
+            }
+        };
+
+        // Two weights: use compact union
+        let mut acc = first.union(second);
+
+        // Three or more: chain unions
+        for weight in iter {
             if weight.is_full() {
                 return Self::all();
             }
             if weight.is_empty() {
                 continue;
             }
-
-            for (range, tokens_arc) in weight.0.range_values() {
-                for tsid in range {
-                    match expanded.entry(tsid) {
-                        std::collections::btree_map::Entry::Occupied(mut e) => {
-                            let existing = e.get_mut();
-                            if existing != tokens_arc.as_ref() {
-                                *existing |= tokens_arc.as_ref();
-                            }
-                        }
-                        std::collections::btree_map::Entry::Vacant(e) => {
-                            e.insert(tokens_arc.as_ref().clone());
-                        }
-                    }
-                }
-            }
+            acc = acc.union(weight);
         }
-
-        if expanded.is_empty() {
-            Self::empty()
-        } else {
-            compress_expanded(&expanded)
-        }
+        acc
     }
 
     pub fn intersection(&self, other: &Self) -> Self {
