@@ -26,6 +26,7 @@ pub enum Action {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
     pub action: Vec<BTreeMap<TerminalID, Action>>,
+    pub default_action: Vec<Option<Action>>,
     pub goto: Vec<BTreeMap<NonterminalID, u32>>,
     pub num_states: u32,
     pub num_terminals: u32,
@@ -36,19 +37,60 @@ pub struct GLRTable {
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         let (item_sets, transitions) = build_lr0_item_sets(grammar);
-        build_slr1_table(grammar, &item_sets, &transitions)
+        let mut table = build_slr1_table(grammar, &item_sets, &transitions);
+        table.compact_default_reduces();
+        table
     }
 
     pub fn action(&self, state: u32, terminal: TerminalID) -> Option<&Action> {
         self.action
             .get(state as usize)
             .and_then(|by_terminal| by_terminal.get(&terminal))
+            .or_else(|| {
+                self.default_action
+                    .get(state as usize)
+                    .and_then(|a| a.as_ref())
+            })
     }
 
     pub fn goto_target(&self, state: u32, nt: NonterminalID) -> Option<u32> {
         self.goto
             .get(state as usize)
             .and_then(|by_nt| by_nt.get(&nt).copied())
+    }
+
+    /// For each state, if one `Reduce(rule_id)` covers all terminal entries
+    /// (or is the most common reduce among only-reduce entries), extract it
+    /// as the default and remove those entries from the action map.
+    fn compact_default_reduces(&mut self) {
+        for state in 0..self.num_states as usize {
+            // Count how many times each Reduce(rule_id) appears
+            let mut reduce_counts: FxHashMap<u32, usize> = FxHashMap::default();
+            let mut non_reduce_count = 0usize;
+            for action in self.action[state].values() {
+                match action {
+                    Action::Reduce(r) => {
+                        *reduce_counts.entry(*r).or_default() += 1;
+                    }
+                    _ => {
+                        non_reduce_count += 1;
+                    }
+                }
+            }
+
+            // Find the most common reduce
+            if let Some((&best_rule, &best_count)) =
+                reduce_counts.iter().max_by_key(|(_, count)| **count)
+            {
+                // Only worthwhile if it removes at least 2 entries
+                if best_count >= 2 {
+                    self.default_action[state] = Some(Action::Reduce(best_rule));
+                    self.action[state].retain(|_, action| {
+                        !matches!(action, Action::Reduce(r) if *r == best_rule)
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -244,6 +286,7 @@ fn build_slr1_table(
 
     GLRTable {
         action,
+        default_action: vec![None; item_sets.len()],
         goto,
         num_states: item_sets.len() as u32,
         num_terminals: grammar.num_terminals,
