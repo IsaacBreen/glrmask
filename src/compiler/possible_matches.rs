@@ -41,6 +41,7 @@ fn merge_possible_match_maps(
 pub(crate) struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
     cache: HashMap<(usize, u32), Rc<PossibleMatchMap>>,
+    reachable_cache: HashMap<usize, Rc<RangeSetBlaze<u32>>>,
 }
 
 impl<'a> PossibleMatchesComputer<'a> {
@@ -48,7 +49,19 @@ impl<'a> PossibleMatchesComputer<'a> {
         Self {
             tokenizer,
             cache: HashMap::new(),
+            reachable_cache: HashMap::new(),
         }
+    }
+
+    fn reachable_for_node(&mut self, node: &VocabPrefixTreeNode) -> Rc<RangeSetBlaze<u32>> {
+        let cache_key = node as *const VocabPrefixTreeNode as usize;
+        if let Some(cached) = self.reachable_cache.get(&cache_key) {
+            return Rc::clone(cached);
+        }
+
+        let reachable = Rc::new(reachable_u32(node));
+        self.reachable_cache.insert(cache_key, Rc::clone(&reachable));
+        reachable
     }
 
     pub(crate) fn possible_matches_for_node(
@@ -81,13 +94,13 @@ impl<'a> PossibleMatchesComputer<'a> {
 
         for (segment_bytes, child) in node.iter_children() {
             let exec = self.tokenizer.execute_from_state(segment_bytes, tokenizer_state);
-            let reachable = reachable_u32(child);
+            let reachable = self.reachable_for_node(child);
 
             for matched in &exec.matches {
                 result
                     .entry(matched.id)
-                    .and_modify(|existing| *existing = existing.clone() | reachable.clone())
-                    .or_insert_with(|| reachable.clone());
+                    .and_modify(|existing| *existing = existing.clone() | reachable.as_ref().clone())
+                    .or_insert_with(|| reachable.as_ref().clone());
             }
 
             if let Some(end_state) = exec.end_state {
@@ -123,13 +136,12 @@ pub(crate) fn build_possible_matches_from_token_bytes(
     let mut computer = PossibleMatchesComputer::new(tokenizer);
     let mut possible_matches_by_state = BTreeMap::new();
     for tokenizer_state in 0..tokenizer.num_states() {
+        let matches_for_state = computer.possible_matches_for_node(&trie.root, tokenizer_state);
         possible_matches_by_state.insert(
             tokenizer_state,
-            computer
-                .possible_matches_for_node(&trie.root, tokenizer_state)
-                .as_ref()
-                .clone(),
+            matches_for_state.as_ref().clone(),
         );
     }
+
     possible_matches_by_state
 }
