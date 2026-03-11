@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use crate::automata::regex::Expr;
+use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::compile::build_tokenizer;
 use crate::compiler::glr::analysis::{merge_identical_nonterminals, normalize_grammar};
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
@@ -93,6 +94,22 @@ fn remap_terminal_id(terminal: &Terminal, new_id: TerminalID) -> Terminal {
             expr: expr.clone(),
         },
     }
+}
+
+fn terminal_is_nullable(terminal: &Terminal) -> bool {
+    match terminal {
+        Terminal::Literal { bytes, .. } => bytes.is_empty(),
+        Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8).is_nullable(),
+        Terminal::Expr { expr, .. } => expr.is_nullable(),
+    }
+}
+
+fn nullable_terminals_for_grammar(grammar: &GrammarDef) -> std::collections::BTreeSet<TerminalID> {
+    grammar
+        .terminals
+        .iter()
+        .filter_map(|terminal| terminal_is_nullable(terminal).then_some(terminal.id()))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -593,8 +610,7 @@ pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, 
     // Probe nullability against the original terminal set first; nullable
     // terminals are expanded into optional grammar structure before we compact
     // away any terminals that normalization proves unreachable.
-    let mut nullable_probe = build_tokenizer(grammar);
-    let nullable_terminals = nullable_probe.drain_nullable_terminals();
+    let nullable_terminals = nullable_terminals_for_grammar(grammar);
 
     let mut normalized = grammar.clone();
 

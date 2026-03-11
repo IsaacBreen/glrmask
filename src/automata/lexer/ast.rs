@@ -71,6 +71,20 @@ pub fn eps() -> Expr {
     Expr::Epsilon
 }
 
+impl Expr {
+    pub fn is_nullable(&self) -> bool {
+        match self {
+            Expr::U8Seq(bytes) => bytes.is_empty(),
+            Expr::U8Class(_) => false,
+            Expr::Seq(parts) => parts.iter().all(Expr::is_nullable),
+            Expr::Choice(options) => options.iter().any(Expr::is_nullable),
+            Expr::Repeat { expr, min, .. } => *min == 0 || expr.is_nullable(),
+            Expr::Shared(expr) => expr.is_nullable(),
+            Expr::Epsilon => true,
+        }
+    }
+}
+
 impl From<&str> for Expr {
     fn from(s: &str) -> Self {
         Expr::U8Seq(s.as_bytes().to_vec())
