@@ -593,6 +593,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     representative_state_by_original: &'tok [u32],
     original_token_to_internal: &'tok [u32],
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
+    reachable_weight_cache: HashMap<usize, Weight>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
 }
@@ -609,6 +610,21 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             labels.resize_with(label_idx + 1, Vec::new);
         }
         labels[label_idx].push(internal_token_id);
+    }
+
+    fn cached_reachable_weight(&mut self, token_ids: &RangeSetBlaze<usize>) -> Weight {
+        let cache_key = token_ids as *const RangeSetBlaze<usize> as usize;
+        if let Some(weight) = self.reachable_weight_cache.get(&cache_key) {
+            return weight.clone();
+        }
+
+        let weight = token_set_weight_all_tsids(
+            self.num_tsids,
+            token_ids,
+            self.original_token_to_internal,
+        );
+        self.reachable_weight_cache.insert(cache_key, weight.clone());
+        weight
     }
 
     fn add_leaf_token_from_sources(
@@ -757,7 +773,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             );
                         }
 
-                        let mut continuation_tokens = if next_pos == segment_bytes.len()
+                        let continuation_weight = if next_pos == segment_bytes.len()
                             && child_node.has_token()
                         {
                             let mut remaining = child_node.reachable_token_ids().clone();
@@ -771,20 +787,17 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                                     subtract_possible_matches(&mut remaining, pm);
                                 }
                             }
-                            remaining
+                            if remaining.is_empty() {
+                                continue;
+                            }
+                            token_set_weight_all_tsids(
+                                self.num_tsids,
+                                &remaining,
+                                self.original_token_to_internal,
+                            )
                         } else {
-                            child_node.reachable_token_ids().clone()
+                            self.cached_reachable_weight(child_node.reachable_token_ids())
                         };
-
-                        if continuation_tokens.is_empty() {
-                            continue;
-                        }
-
-                        let continuation_weight = token_set_weight_all_tsids(
-                            self.num_tsids,
-                            &continuation_tokens,
-                            self.original_token_to_internal,
-                        );
                         if continuation_weight.is_empty() {
                             continue;
                         }
@@ -971,6 +984,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         representative_state_by_original: &representative_state_by_original,
         original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
         leaf_token_ids_buffer: Vec::new(),
+        reachable_weight_cache: HashMap::new(),
         transition_buffer: BTreeMap::new(),
         epsilon_buffer: BTreeMap::new(),
     };
