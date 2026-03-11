@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -186,9 +186,34 @@ fn remap_terminal_id(terminal: &Terminal, new_id: TerminalID) -> Terminal {
     }
 }
 
-/// Remove terminals that are no longer referenced by any normalized rule and
-/// compact the remaining terminal IDs to a dense 0..N-1 range.  Mutates the
-/// grammar in place (rules, terminals, terminal_names, ignore_terminal).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TerminalIdentity {
+    Literal { bytes: Vec<u8>, is_ignore: bool },
+    Pattern { pattern: String, utf8: bool, is_ignore: bool },
+    Expr { expr: Expr, is_ignore: bool },
+}
+
+fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
+    match terminal {
+        Terminal::Literal { bytes, .. } => TerminalIdentity::Literal {
+            bytes: bytes.clone(),
+            is_ignore,
+        },
+        Terminal::Pattern { pattern, utf8, .. } => TerminalIdentity::Pattern {
+            pattern: pattern.clone(),
+            utf8: *utf8,
+            is_ignore,
+        },
+        Terminal::Expr { expr, .. } => TerminalIdentity::Expr {
+            expr: expr.clone(),
+            is_ignore,
+        },
+    }
+}
+
+/// Remove terminals that are no longer referenced by any normalized rule,
+/// merge identical terminals, and compact the remaining terminal IDs to a
+/// dense 0..N-1 range.  Mutates the grammar in place.
 pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     let mut used = std::collections::BTreeSet::<TerminalID>::new();
     for rule in grammar.rules.iter() {
@@ -204,12 +229,20 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
 
     let mut remap = std::collections::BTreeMap::<TerminalID, TerminalID>::new();
     let mut compacted = Vec::with_capacity(used.len());
+    let mut canonical_ids = HashMap::<TerminalIdentity, TerminalID>::new();
 
     for old_id in used {
-        let new_id = compacted.len() as TerminalID;
         let terminal = grammar.terminals.get(old_id as usize).unwrap_or_else(|| {
             panic!("terminal id {} referenced by a rule but missing from grammar.terminals", old_id)
         });
+        let is_ignore = grammar.ignore_terminal == Some(old_id);
+        let identity = terminal_identity(terminal, is_ignore);
+        if let Some(&existing_id) = canonical_ids.get(&identity) {
+            remap.insert(old_id, existing_id);
+            continue;
+        }
+        let new_id = compacted.len() as TerminalID;
+        canonical_ids.insert(identity, new_id);
         remap.insert(old_id, new_id);
         compacted.push(remap_terminal_id(terminal, new_id));
     }
@@ -1696,6 +1729,35 @@ mod tests {
         assert_eq!(grammar.terminals[1].name(), " +");
         assert_eq!(grammar.terminals[2].name(), "b");
         assert_eq!(grammar.ignore_terminal, Some(1));
+    }
+
+    #[test]
+    fn test_compact_unused_terminals_merges_identical_terminals() {
+        // Terminals 0 and 2 are identical ("a"), terminal 1 is different ("b").
+        // After compacting, terminals 0 and 2 should map to the same new ID.
+        let mut grammar = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(2)] },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"a".to_vec() },
+                Terminal::Literal { id: 1, bytes: b"b".to_vec() },
+                Terminal::Literal { id: 2, bytes: b"a".to_vec() },
+            ],
+            nonterminal_names: BTreeMap::new(),
+            terminal_names: BTreeMap::new(),
+            ignore_terminal: None,
+        };
+        compact_unused_terminals(&mut grammar);
+        assert_eq!(grammar.terminals.len(), 2, "identical terminals should be merged");
+        assert_eq!(grammar.terminals[0].name(), "a");
+        assert_eq!(grammar.terminals[1].name(), "b");
+        // Rule 1: T0 → merged "a" (id 0), T1 → "b" (id 1)
+        assert_eq!(grammar.rules[0].rhs, vec![Symbol::Terminal(0), Symbol::Terminal(1)]);
+        // Rule 2: T2 → merged "a" (id 0)
+        assert_eq!(grammar.rules[1].rhs, vec![Symbol::Terminal(0)]);
     }
 
     #[test]
