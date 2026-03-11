@@ -35,10 +35,10 @@ impl Templates {
                 }
             }
 
-            // Determinize + minimize single-entry bundle too.
+            // Determinize to remove epsilon. Skip minimize — a single minimized
+            // DFA with one weight is already minimal after determinize.
             let bundle_dwa = determinize(&bundle_nwa).expect("single bundle determinize failed");
-            let minimized = minimize_fast(&bundle_dwa);
-            return dwa_to_nwa(&minimized);
+            return dwa_to_nwa(&bundle_dwa);
         }
 
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
