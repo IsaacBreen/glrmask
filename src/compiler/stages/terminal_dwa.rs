@@ -18,6 +18,11 @@ use crate::compiler::glr::analysis::EOF;
 use crate::compiler::grammar::model::Symbol;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
+
+/// NWA state identifier (index into `NWA.states`).
+type NwaState = u32;
+/// Tokenizer state identifier.
+type TokenizerState = u32;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::profile_stats::{
     WeightedDwaStats,
@@ -576,11 +581,6 @@ fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     )
 }
 
-#[derive(Clone)]
-struct SourceAssoc {
-    nodes: Vec<u32>,
-}
-
 struct MappingRun {
     start: u32,
     end: u32,   // inclusive
@@ -807,7 +807,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn build_from_trie(
         &mut self,
         node: &VocabPrefixTreeNode,
-        assoc_by_state: &BTreeMap<u32, SourceAssoc>,
+        assoc_by_state: &BTreeMap<TokenizerState, Vec<NwaState>>,
     ) {
         self.profile_trie_calls += 1;
         for (segment_bytes, child_node) in node.iter_children() {
@@ -819,8 +819,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 .filter(|internal_token_id| *internal_token_id != u32::MAX)
                 .expect("representative vocab token must map to an internal token id");
 
-            let mut next_level_assoc = BTreeMap::<u32, SourceAssoc>::new();
-            let mut pending = BTreeMap::<usize, BTreeMap<u32, SourceAssoc>>::new();
+            let mut next_level_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
+            let mut pending = BTreeMap::<usize, BTreeMap<TokenizerState, Vec<NwaState>>>::new();
             let clone_started = std::time::Instant::now();
             pending.insert(0, assoc_by_state.clone());
             self.profile_assoc_clone_ms += clone_started.elapsed();
@@ -829,15 +829,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             while let Some((pos, states_at_pos)) = pending.pop_first() {
                 if pos == segment_bytes.len() {
                     let t = std::time::Instant::now();
-                    for (tokenizer_state, assoc) in states_at_pos {
-                        merge_assoc(&mut next_level_assoc, tokenizer_state, &assoc.nodes);
+                    for (tokenizer_state, nwa_states) in states_at_pos {
+                        merge_assoc(&mut next_level_assoc, tokenizer_state, &nwa_states);
                     }
                     self.profile_merge_ms += t.elapsed();
                     continue;
                 }
 
-                for (tokenizer_state, source_assoc) in states_at_pos {
-                    let source_nodes = source_assoc.nodes;
+                for (tokenizer_state, source_nodes) in states_at_pos {
                     let exec_started = std::time::Instant::now();
                     let exec = self
                         .tokenizer
@@ -960,25 +959,25 @@ fn subtract_possible_matches(
     }
 }
 
-fn merge_assoc(into: &mut BTreeMap<u32, SourceAssoc>, state: u32, nodes: &[u32]) {
+fn merge_assoc(into: &mut BTreeMap<TokenizerState, Vec<NwaState>>, state: TokenizerState, nodes: &[NwaState]) {
     match into.entry(state) {
         std::collections::btree_map::Entry::Occupied(mut entry) => {
-            entry.get_mut().nodes.extend(nodes.iter().copied());
+            entry.get_mut().extend(nodes.iter().copied());
         }
         std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(SourceAssoc { nodes: nodes.to_vec() });
+            entry.insert(nodes.to_vec());
         }
     }
 }
 
 fn continuation_state(
-    pending: &mut BTreeMap<u32, SourceAssoc>,
-    tokenizer_state: u32,
+    pending: &mut BTreeMap<TokenizerState, Vec<NwaState>>,
+    tokenizer_state: TokenizerState,
     nwa: &mut NWA,
-) -> u32 {
+) -> NwaState {
     if let Some(existing) = pending
         .get(&tokenizer_state)
-        .and_then(|assoc| assoc.nodes.first())
+        .and_then(|nwa_states| nwa_states.first())
         .copied()
     {
         return existing;
@@ -987,10 +986,10 @@ fn continuation_state(
     let state = nwa.add_state();
     match pending.entry(tokenizer_state) {
         std::collections::btree_map::Entry::Occupied(mut entry) => {
-            entry.get_mut().nodes.push(state);
+            entry.get_mut().push(state);
         }
         std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(SourceAssoc { nodes: vec![state] });
+            entry.insert(vec![state]);
         }
     }
     state
@@ -1082,7 +1081,7 @@ pub(crate) fn build_terminal_dwa_with_report(
     log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
-    let mut assoc_by_state = BTreeMap::<u32, SourceAssoc>::new();
+    let mut assoc_by_state = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
     for internal_tsid in 0..id_map.num_tsids() {
         let root = nwa.add_state();
         nwa.add_epsilon(
