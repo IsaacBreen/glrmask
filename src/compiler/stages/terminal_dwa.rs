@@ -519,6 +519,16 @@ fn token_weight(internal_tsid: u32, token_id: u32) -> Weight {
     )
 }
 
+fn token_weight_all_tsids(num_tsids: u32, token_id: u32) -> Weight {
+    if num_tsids == 0 {
+        return Weight::empty();
+    }
+    Weight::from_compact_ranges(std::iter::once((
+        0..=num_tsids - 1,
+        std::iter::once(token_id..=token_id),
+    )))
+}
+
 fn token_set_weight(
     internal_tsid: u32,
     token_ids: &RangeSetBlaze<usize>,
@@ -536,6 +546,30 @@ fn token_set_weight(
     Weight::from_token_set_for_tsid(internal_tsid, mapped)
 }
 
+fn token_set_weight_all_tsids(
+    num_tsids: u32,
+    token_ids: &RangeSetBlaze<usize>,
+    original_token_to_internal: &[u32],
+) -> Weight {
+    if num_tsids == 0 {
+        return Weight::empty();
+    }
+    let mut mapped = RangeSetBlaze::new();
+    for token_id in token_ids.iter() {
+        if let Some(&internal_token_id) = original_token_to_internal.get(token_id) {
+            debug_assert_ne!(internal_token_id, u32::MAX);
+            if internal_token_id != u32::MAX {
+                mapped.insert(internal_token_id);
+            }
+        }
+    }
+    if mapped.is_empty() {
+        return Weight::empty();
+    }
+    let token_ranges: Vec<_> = mapped.ranges().collect();
+    Weight::from_compact_ranges(std::iter::once((0..=num_tsids - 1, token_ranges)))
+}
+
 fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     Weight::from_token_set_for_tsid(
         internal_tsid,
@@ -545,7 +579,6 @@ fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
 
 #[derive(Clone)]
 struct SourceAssoc {
-    tsid: u32,
     nodes: Vec<u32>,
 }
 
@@ -553,7 +586,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     tokenizer: &'tok Tokenizer,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut NWA,
-    internal_tsid: u32,
+    num_tsids: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
     representative_initial_state: u32,
@@ -572,7 +605,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         internal_token_id: u32,
     ) {
         if self.ignore_terminal == Some(label) {
-            let weight = token_weight(self.internal_tsid, internal_token_id);
+            let weight = token_weight_all_tsids(self.num_tsids, internal_token_id);
             self.add_match_from_sources(sources, label, self.leaf_state, &weight);
             return;
         }
@@ -611,10 +644,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         for ((from, label), mut token_ids) in std::mem::take(&mut self.leaf_token_ids_buffer) {
             token_ids.sort_unstable();
             token_ids.dedup();
-            let weight = Weight::from_token_set_for_tsid(
-                self.internal_tsid,
-                RangeSetBlaze::from_iter(token_ids.into_iter().map(|token_id| token_id..=token_id)),
-            );
+            let mapped = RangeSetBlaze::from_iter(token_ids.into_iter().map(|token_id| token_id..=token_id));
+            let token_ranges: Vec<_> = mapped.ranges().collect();
+            let weight = Weight::from_compact_ranges(std::iter::once((0..=self.num_tsids - 1, token_ranges)));
             self.transition_buffer
                 .entry((from, label, self.leaf_state))
                 .and_modify(|existing| *existing = existing.union(&weight))
@@ -660,15 +692,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             while let Some((pos, states_at_pos)) = pending.pop_first() {
                 if pos == segment_bytes.len() {
                     for (tokenizer_state, assoc) in states_at_pos {
-                        merge_assoc(&mut next_level_assoc, tokenizer_state, assoc.tsid, &assoc.nodes);
+                        merge_assoc(&mut next_level_assoc, tokenizer_state, &assoc.nodes);
                     }
                     continue;
                 }
 
                 for (tokenizer_state, source_assoc) in states_at_pos {
                     let source_nodes = source_assoc.nodes;
-                    let tsid = source_assoc.tsid;
-                    let child_token_weight = token_weight(tsid, internal_child_token_id);
                     let exec = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state);
@@ -691,7 +721,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             }
                         }
 
-                        merge_assoc(&mut next_level_assoc, end_state, tsid, &source_nodes);
+                        merge_assoc(&mut next_level_assoc, end_state, &source_nodes);
                     }
 
                     for matched in exec.matches {
@@ -728,8 +758,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             continue;
                         }
 
-                        let continuation_weight = token_set_weight(
-                            tsid,
+                        let continuation_weight = token_set_weight_all_tsids(
+                            self.num_tsids,
                             &continuation_tokens,
                             self.original_token_to_internal,
                         );
@@ -741,7 +771,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let destination = continuation_state(
                             continuation_assoc,
                             self.representative_initial_state,
-                            tsid,
                             self.nwa,
                         );
 
@@ -771,17 +800,13 @@ fn subtract_possible_matches(
     }
 }
 
-fn merge_assoc(into: &mut BTreeMap<u32, SourceAssoc>, state: u32, tsid: u32, nodes: &[u32]) {
+fn merge_assoc(into: &mut BTreeMap<u32, SourceAssoc>, state: u32, nodes: &[u32]) {
     match into.entry(state) {
         std::collections::btree_map::Entry::Occupied(mut entry) => {
-            debug_assert_eq!(entry.get().tsid, tsid);
             entry.get_mut().nodes.extend(nodes.iter().copied());
         }
         std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(SourceAssoc {
-                tsid,
-                nodes: nodes.to_vec(),
-            });
+            entry.insert(SourceAssoc { nodes: nodes.to_vec() });
         }
     }
 }
@@ -789,15 +814,11 @@ fn merge_assoc(into: &mut BTreeMap<u32, SourceAssoc>, state: u32, tsid: u32, nod
 fn continuation_state(
     pending: &mut BTreeMap<u32, SourceAssoc>,
     tokenizer_state: u32,
-    tsid: u32,
     nwa: &mut NWA,
 ) -> u32 {
     if let Some(existing) = pending
         .get(&tokenizer_state)
-        .and_then(|assoc| {
-            debug_assert_eq!(assoc.tsid, tsid);
-            assoc.nodes.first()
-        })
+        .and_then(|assoc| assoc.nodes.first())
         .copied()
     {
         return existing;
@@ -806,14 +827,10 @@ fn continuation_state(
     let state = nwa.add_state();
     match pending.entry(tokenizer_state) {
         std::collections::btree_map::Entry::Occupied(mut entry) => {
-            debug_assert_eq!(entry.get().tsid, tsid);
             entry.get_mut().nodes.push(state);
         }
         std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(SourceAssoc {
-                tsid,
-                nodes: vec![state],
-            });
+            entry.insert(SourceAssoc { nodes: vec![state] });
         }
     }
     state
@@ -905,6 +922,7 @@ pub(crate) fn build_terminal_dwa_with_report(
     log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
+    let mut assoc_by_state = BTreeMap::<u32, SourceAssoc>::new();
     for internal_tsid in 0..id_map.num_tsids() {
         let root = nwa.add_state();
         nwa.add_epsilon(
@@ -913,30 +931,29 @@ pub(crate) fn build_terminal_dwa_with_report(
             all_token_weight(internal_tsid, id_map.max_token_id()),
         );
 
-        let mut assoc_by_state = BTreeMap::<u32, SourceAssoc>::new();
         let representative_state = id_map
             .tokenizer_states
             .representative_original_id_for_internal(internal_tsid)
             .expect("internal tokenizer state class must have a representative original state");
-        merge_assoc(&mut assoc_by_state, representative_state, internal_tsid, &[root]);
-
-        let mut builder = TerminalNwaBuilder {
-            tokenizer,
-            possible_matches: &mut possible_matches,
-            nwa: &mut nwa,
-            internal_tsid,
-            leaf_state,
-            ignore_terminal,
-            representative_initial_state,
-            representative_state_by_original: &representative_state_by_original,
-            original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
-            leaf_token_ids_buffer: BTreeMap::new(),
-            transition_buffer: BTreeMap::new(),
-            epsilon_buffer: BTreeMap::new(),
-        };
-        builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
-        builder.flush_transition_buffer();
+        merge_assoc(&mut assoc_by_state, representative_state, &[root]);
     }
+
+    let mut builder = TerminalNwaBuilder {
+        tokenizer,
+        possible_matches: &mut possible_matches,
+        nwa: &mut nwa,
+        num_tsids: id_map.num_tsids(),
+        leaf_state,
+        ignore_terminal,
+        representative_initial_state,
+        representative_state_by_original: &representative_state_by_original,
+        original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
+        leaf_token_ids_buffer: BTreeMap::new(),
+        transition_buffer: BTreeMap::new(),
+        epsilon_buffer: BTreeMap::new(),
+    };
+    builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
+    builder.flush_transition_buffer();
     report.build_nwa_from_trie_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "build_nwa_from_trie", phase_started_at);
 
