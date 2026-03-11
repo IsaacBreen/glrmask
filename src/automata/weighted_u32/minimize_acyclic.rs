@@ -201,6 +201,46 @@ fn compute_heights(dwa: &DWA, topo: &[usize]) -> Vec<usize> {
     heights
 }
 
+#[derive(Clone)]
+struct ProductiveTransition {
+    label: Label,
+    target: u32,
+    weight: Weight,
+}
+
+fn compute_productive_transitions(dwa: &DWA, needed: &[Weight]) -> Vec<Vec<ProductiveTransition>> {
+    let n = dwa.states.len();
+    let mut result = Vec::with_capacity(n);
+
+    for state in &dwa.states {
+        let mut transitions = Vec::with_capacity(state.transitions.len());
+        for (&label, (target, weight)) in &state.transitions {
+            let t = *target as usize;
+            if t >= n {
+                continue;
+            }
+            let productive = if needed[t].is_full() {
+                weight.clone()
+            } else if let Some((start, end, tokens)) = weight.single_compact_entry_parts() {
+                needed[t].intersect_single_parts(start, end, &tokens)
+            } else {
+                weight.intersection(&needed[t])
+            };
+            if productive.is_empty() {
+                continue;
+            }
+            transitions.push(ProductiveTransition {
+                label,
+                target: *target,
+                weight: productive,
+            });
+        }
+        result.push(transitions);
+    }
+
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3: Incompatibility graph + graph coloring
 // ---------------------------------------------------------------------------
@@ -219,6 +259,7 @@ fn are_compatible(
     dwa: &DWA,
     needed: &[Weight],
     old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
 ) -> bool {
     let needed_u = &needed[u];
     let needed_v = &needed[v];
@@ -251,38 +292,48 @@ fn are_compatible(
 
     // Check transitions
     let n = dwa.states.len();
-    let trans_u = &dwa.states[u].transitions;
-    let trans_v = &dwa.states[v].transitions;
-    let mut iter_u = trans_u.iter().peekable();
-    let mut iter_v = trans_v.iter().peekable();
+    let trans_u = &productive_transitions[u];
+    let trans_v = &productive_transitions[v];
+    let mut idx_u = 0usize;
+    let mut idx_v = 0usize;
 
-    while iter_u.peek().is_some() || iter_v.peek().is_some() {
-        let (entry_u, entry_v) = match (iter_u.peek(), iter_v.peek()) {
-            (Some(&(lu, _)), Some(&(lv, _))) => {
-                if lu == lv {
-                    (iter_u.next(), iter_v.next())
-                } else if lu < lv {
-                    (iter_u.next(), None)
+    while idx_u < trans_u.len() || idx_v < trans_v.len() {
+        let (entry_u, entry_v) = match (trans_u.get(idx_u), trans_v.get(idx_v)) {
+            (Some(u_entry), Some(v_entry)) => {
+                if u_entry.label == v_entry.label {
+                    idx_u += 1;
+                    idx_v += 1;
+                    (Some(u_entry), Some(v_entry))
+                } else if u_entry.label < v_entry.label {
+                    idx_u += 1;
+                    (Some(u_entry), None)
                 } else {
-                    (None, iter_v.next())
+                    idx_v += 1;
+                    (None, Some(v_entry))
                 }
             }
-            (Some(_), None) => (iter_u.next(), None),
-            (None, Some(_)) => (None, iter_v.next()),
+            (Some(u_entry), None) => {
+                idx_u += 1;
+                (Some(u_entry), None)
+            }
+            (None, Some(v_entry)) => {
+                idx_v += 1;
+                (None, Some(v_entry))
+            }
             (None, None) => break,
         };
 
         let (target_u, w_u_full) = match entry_u {
-            Some((_, (t, w))) => {
-                let t = *t as usize;
-                if t < n { (Some(t), Some(w)) } else { (None, None) }
+            Some(entry) => {
+                let t = entry.target as usize;
+                if t < n { (Some(t), Some(&entry.weight)) } else { (None, None) }
             }
             None => (None, None),
         };
         let (target_v, w_v_full) = match entry_v {
-            Some((_, (t, w))) => {
-                let t = *t as usize;
-                if t < n { (Some(t), Some(w)) } else { (None, None) }
+            Some(entry) => {
+                let t = entry.target as usize;
+                if t < n { (Some(t), Some(&entry.weight)) } else { (None, None) }
             }
             None => (None, None),
         };
@@ -350,13 +401,21 @@ fn build_incompatibility_graph(
     candidates: &[usize],
     needed: &[Weight],
     old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
 ) -> Vec<Vec<usize>> {
     let nc = candidates.len();
     let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
 
     for i in 0..nc {
         for j in (i + 1)..nc {
-            if !are_compatible(candidates[i], candidates[j], dwa, needed, old_to_new) {
+            if !are_compatible(
+                candidates[i],
+                candidates[j],
+                dwa,
+                needed,
+                old_to_new,
+                productive_transitions,
+            ) {
                 adj[i].push(j);
                 adj[j].push(i);
             }
@@ -415,13 +474,21 @@ fn build_incompatibility_graph_sparse(
     candidates: &[usize],
     needed: &[Weight],
     old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
 ) -> Option<Vec<Vec<usize>>> {
     let overlap_pairs = overlapping_candidate_pairs(candidates, needed)?;
     let nc = candidates.len();
     let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
 
     for (i, j) in overlap_pairs {
-        if !are_compatible(candidates[i], candidates[j], dwa, needed, old_to_new) {
+        if !are_compatible(
+            candidates[i],
+            candidates[j],
+            dwa,
+            needed,
+            old_to_new,
+            productive_transitions,
+        ) {
             adj[i].push(j);
             adj[j].push(i);
         }
@@ -655,6 +722,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     };
 
     let needed = compute_needed_sets(&pushed, &topo);
+    let productive_transitions = compute_productive_transitions(&pushed, &needed);
     let heights = compute_heights(&pushed, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
@@ -730,8 +798,22 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         }
 
         // Build incompatibility graph and color it
-        let adj = build_incompatibility_graph_sparse(&pushed, candidates, &needed, &old_to_new)
-            .unwrap_or_else(|| build_incompatibility_graph(&pushed, candidates, &needed, &old_to_new));
+        let adj = build_incompatibility_graph_sparse(
+            &pushed,
+            candidates,
+            &needed,
+            &old_to_new,
+            &productive_transitions,
+        )
+        .unwrap_or_else(|| {
+            build_incompatibility_graph(
+                &pushed,
+                candidates,
+                &needed,
+                &old_to_new,
+                &productive_transitions,
+            )
+        });
         let coloring = greedy_coloring(&adj);
 
         let base_new_id = new_states.len() as u32;
