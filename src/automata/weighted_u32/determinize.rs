@@ -5,7 +5,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
+use rustc_hash::FxHashMap;
 
 use super::dwa::DWA;
 use super::nwa::NWA;
@@ -97,7 +98,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         return Ok(dwa);
     }
 
-    let mut subset_map: HashMap<Vec<(u32, Weight)>, u32> = HashMap::new();
+    let mut subset_map: FxHashMap<Vec<(u32, Weight)>, u32> = FxHashMap::default();
     let mut worklist = VecDeque::new();
     let start_key = canonicalize(&start_subset);
     subset_map.insert(start_key.clone(), start_id);
