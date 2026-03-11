@@ -38,6 +38,12 @@ fn intersect_with_single_weight_hint(
     left_single: Option<&(u32, u32, Arc<RangeSetBlaze<u32>>)>,
     right: &Weight,
 ) -> Weight {
+    if left.is_full() {
+        return right.clone();
+    }
+    if right.is_full() {
+        return left.clone();
+    }
     if let Some((start, end, tokens)) = left_single {
         right.intersect_single_parts(*start, *end, tokens)
     } else {
