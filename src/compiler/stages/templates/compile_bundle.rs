@@ -24,21 +24,35 @@ impl Templates {
         terminal_weights: &BTreeMap<TerminalID, Weight>,
     ) -> NWA {
         if terminal_weights.len() == 1 {
-            let mut bundle_nwa = NWA::new(0, 0);
-            let start = bundle_nwa.add_state();
-            bundle_nwa.start_states.push(start);
-
             let (&terminal, weight) = terminal_weights.iter().next().expect("single-entry bundle");
-            if !weight.is_empty() {
-                if let Some(template) = self.by_terminal.get(&terminal) {
-                    append_template(&mut bundle_nwa, start, template, weight);
-                }
+            if weight.is_empty() {
+                let mut nwa = NWA::new(0, 0);
+                let s = nwa.add_state();
+                nwa.start_states.push(s);
+                return nwa;
             }
-
-            // Determinize to remove epsilon. Skip minimize — a single minimized
-            // DFA with one weight is already minimal after determinize.
-            let bundle_dwa = determinize(&bundle_nwa).expect("single bundle determinize failed");
-            return dwa_to_nwa(&bundle_dwa);
+            if let Some(template) = self.by_terminal.get(&terminal) {
+                // The template DFA is already deterministic and minimal.
+                // Construct weighted NWA directly — skip NWA→determinize→DWA→NWA.
+                let mut nwa = NWA::new(0, 0);
+                for _ in &template.states {
+                    nwa.add_state();
+                }
+                nwa.start_states.push(template.start_state);
+                for (state_id, state) in template.states.iter().enumerate() {
+                    if state.is_accepting {
+                        nwa.set_final_weight(state_id as u32, weight.clone());
+                    }
+                    for (&label, &target) in &state.transitions {
+                        nwa.add_transition(state_id as u32, label, target, weight.clone());
+                    }
+                }
+                return nwa;
+            }
+            let mut nwa = NWA::new(0, 0);
+            let s = nwa.add_state();
+            nwa.start_states.push(s);
+            return nwa;
         }
 
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
@@ -98,12 +112,14 @@ impl Templates {
         let min_ms = min_started.elapsed().as_secs_f64() * 1000.0;
         let min_states = minimized.states.len();
 
+        let conv_started = std::time::Instant::now();
         let result = dwa_to_nwa(&minimized);
+        let conv_ms = conv_started.elapsed().as_secs_f64() * 1000.0;
 
         if profile_enabled {
             eprintln!(
-                "[glrmask/profile][bundle_detmin] entries={} groups={} nwa_states={} dwa_states={} min_states={} unweighted_ms={:.1} det_ms={:.1} min_ms={:.1}",
-                terminal_weights.len(), num_groups, nwa_states, dwa_states, min_states, unweighted_ms, det_ms, min_ms,
+                "[glrmask/profile][bundle_detmin] entries={} groups={} nwa_states={} dwa_states={} min_states={} unweighted_ms={:.1} det_ms={:.1} min_ms={:.1} conv_ms={:.1}",
+                terminal_weights.len(), num_groups, nwa_states, dwa_states, min_states, unweighted_ms, det_ms, min_ms, conv_ms,
             );
         }
 
