@@ -915,8 +915,6 @@ fn try_all_compatible_height_0_coloring(
 struct MergedStateBuilder {
     final_weight: Weight,
     final_weight_builder: WeightBuilder,
-    needed: Weight,
-    needed_builder: WeightBuilder,
     transitions: rustc_hash::FxHashMap<Label, (u32, WeightBuilder)>,
 }
 
@@ -925,8 +923,6 @@ impl Default for MergedStateBuilder {
         Self {
             final_weight: Weight::empty(),
             final_weight_builder: WeightBuilder::new(),
-            needed: Weight::empty(),
-            needed_builder: WeightBuilder::new(),
             transitions: rustc_hash::FxHashMap::default(),
         }
     }
@@ -935,10 +931,6 @@ impl Default for MergedStateBuilder {
 impl MergedStateBuilder {
     fn add_final_weight(&mut self, weight: &Weight) {
         self.final_weight_builder.union_weight(weight);
-    }
-
-    fn add_needed(&mut self, weight: &Weight) {
-        self.needed_builder.union_weight(weight);
     }
 
     fn add_transition(&mut self, label: Label, target: u32, weight: Weight) {
@@ -959,7 +951,6 @@ impl MergedStateBuilder {
 
     fn finalize_for_reuse(&mut self) {
         self.final_weight = std::mem::take(&mut self.final_weight_builder).build();
-        self.needed = std::mem::take(&mut self.needed_builder).build();
     }
 }
 
@@ -967,7 +958,6 @@ fn merge_state_into_builder(
     old_id: usize,
     color: usize,
     dwa: &DWA,
-    needed: &[Weight],
     old_to_new: &[u32],
     builders: &mut [MergedStateBuilder],
     profile: &mut MinimizeAcyclicProfile,
@@ -981,9 +971,6 @@ fn merge_state_into_builder(
     if let Some(fw) = &old_state.final_weight {
         builder.add_final_weight(fw);
     }
-
-    // Union needed sets
-    builder.add_needed(&needed[old_id]);
     profile.merge_final_needed_ms += phase_started_at.elapsed();
 
     // Merge transitions
@@ -1139,7 +1126,6 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                     candidate,
                     0,
                     &pushed,
-                    &needed,
                     &old_to_new,
                     builders,
                     &mut profile,
@@ -1196,7 +1182,6 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                 candidates[idx],
                 color,
                 &pushed,
-                &needed,
                 &old_to_new,
                 builders,
                 &mut profile,
