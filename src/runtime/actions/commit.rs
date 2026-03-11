@@ -95,7 +95,8 @@ impl<'a> ConstraintState<'a> {
         let mut processing_queue: BTreeMap<usize, BTreeMap<u32, LeveledGSS<u32, BTreeMap<u32, BTreeSet<u32>>>>> =
             BTreeMap::new();
 
-        processing_queue.insert(0, self.state.clone());
+        // Take ownership instead of cloning — self.state will be fully replaced below.
+        processing_queue.insert(0, std::mem::take(&mut self.state));
 
         while let Some((offset, states_to_process)) = processing_queue.pop_first() {
             for (tokenizer_state, gss_at_offset) in states_to_process {
@@ -182,9 +183,6 @@ impl<'a> ConstraintState<'a> {
         }
         new_overall_state.retain(|_, parser_state| !parser_state.is_empty());
         self.state = new_overall_state;
-        if self.state.is_empty() {
-            self.state.clear();
-        }
     }
 
     pub fn commit_tokens(&mut self, tokens: &[u32]) {

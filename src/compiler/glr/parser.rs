@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::analysis::EOF;
