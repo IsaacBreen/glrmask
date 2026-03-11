@@ -554,6 +554,17 @@ impl Weight {
         out
     }
 
+    /// Create a weight where all tsids in the range share the same token set.
+    /// Avoids the expensive expand/compress cycle of `from_compact_ranges`.
+    pub fn from_uniform(tsid_range: std::ops::RangeInclusive<u32>, tokens: RangeSetBlaze<u32>) -> Self {
+        if tokens.is_empty() {
+            return Self::empty();
+        }
+        let mut map = RangeMapBlaze::new();
+        map.extend_simple(std::iter::once((tsid_range, shared_rangeset(tokens))));
+        Self(map)
+    }
+
     pub fn insert(
         &mut self,
         tsid_range: std::ops::RangeInclusive<u32>,

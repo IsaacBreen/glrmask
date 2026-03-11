@@ -523,10 +523,10 @@ fn token_weight_all_tsids(num_tsids: u32, token_id: u32) -> Weight {
     if num_tsids == 0 {
         return Weight::empty();
     }
-    Weight::from_compact_ranges(std::iter::once((
+    Weight::from_uniform(
         0..=num_tsids - 1,
-        std::iter::once(token_id..=token_id),
-    )))
+        RangeSetBlaze::from_iter([token_id..=token_id]),
+    )
 }
 
 fn token_set_weight(
@@ -566,8 +566,7 @@ fn token_set_weight_all_tsids(
     if mapped.is_empty() {
         return Weight::empty();
     }
-    let token_ranges: Vec<_> = mapped.ranges().collect();
-    Weight::from_compact_ranges(std::iter::once((0..=num_tsids - 1, token_ranges)))
+    Weight::from_uniform(0..=num_tsids - 1, mapped)
 }
 
 fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
@@ -582,6 +581,12 @@ struct SourceAssoc {
     nodes: Vec<u32>,
 }
 
+struct MappingRun {
+    start: u32,
+    end: u32,   // inclusive
+    class: u32,
+}
+
 struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     tokenizer: &'tok Tokenizer,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
@@ -592,12 +597,28 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     representative_initial_state: u32,
     representative_state_by_original: &'tok [u32],
     original_token_to_internal: &'tok [u32],
+    mapping_runs: Vec<MappingRun>,
+    n_internal_classes: usize,
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
     leaf_weight_cache: HashMap<Vec<u32>, Weight>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
+    profile_enabled: bool,
+    profile_trie_calls: usize,
+    profile_assoc_clones: usize,
+    profile_tokenizer_execs: usize,
+    profile_exec_ms: std::time::Duration,
+    profile_weight_ms: std::time::Duration,
+    profile_weight_compute_ms: std::time::Duration,
+    profile_weight_compute_calls: usize,
+    profile_match_ms: std::time::Duration,
+    profile_assoc_clone_ms: std::time::Duration,
+    profile_leaf_ms: std::time::Duration,
+    profile_merge_ms: std::time::Duration,
+    profile_pending_ms: std::time::Duration,
+    profile_flush_ms: std::time::Duration,
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
@@ -620,13 +641,57 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return weight.clone();
         }
 
-        let weight = token_set_weight_all_tsids(
-            self.num_tsids,
-            token_ids,
-            self.original_token_to_internal,
-        );
+        let t = std::time::Instant::now();
+        let weight = self.token_set_weight_fast(token_ids);
+        self.profile_weight_compute_ms += t.elapsed();
+        self.profile_weight_compute_calls += 1;
         self.reachable_weight_cache.insert(cache_key, weight.clone());
         weight
+    }
+
+    /// Fast version: uses precomputed mapping_runs (run-length encoding of
+    /// original_to_internal) to find overlapping classes via binary search
+    /// instead of iterating individual tokens.
+    /// Cost: O(token_ranges × log(mapping_runs)) instead of O(total_tokens).
+    fn token_set_weight_fast(&self, token_ids: &RangeSetBlaze<usize>) -> Weight {
+        if self.num_tsids == 0 || token_ids.is_empty() {
+            return Weight::empty();
+        }
+        let n_classes = self.n_internal_classes;
+        let mut seen = vec![false; n_classes];
+        let runs = &self.mapping_runs;
+        for range in token_ids.ranges() {
+            let start = *range.start() as u32;
+            let end = *range.end() as u32;
+            // Binary search for the first run that could overlap [start, end]
+            let first = runs.partition_point(|r| r.end < start);
+            for run in &runs[first..] {
+                if run.start > end {
+                    break;
+                }
+                seen[run.class as usize] = true;
+            }
+        }
+        // Build RangeSetBlaze from contiguous runs in seen[]
+        let mut ranges: Vec<std::ops::RangeInclusive<u32>> = Vec::new();
+        let mut run_start: Option<u32> = None;
+        for (i, &s) in seen.iter().enumerate() {
+            if s {
+                if run_start.is_none() {
+                    run_start = Some(i as u32);
+                }
+            } else if let Some(start) = run_start.take() {
+                ranges.push(start..=(i as u32 - 1));
+            }
+        }
+        if let Some(start) = run_start {
+            ranges.push(start..=(n_classes as u32 - 1));
+        }
+        if ranges.is_empty() {
+            return Weight::empty();
+        }
+        let tokens: RangeSetBlaze<u32> = ranges.into_iter().collect();
+        Weight::from_uniform(0..=self.num_tsids - 1, tokens)
     }
 
     fn cached_leaf_weight(&mut self, token_ids: Vec<u32>) -> Weight {
@@ -634,12 +699,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return weight.clone();
         }
 
-        let mapped = RangeSetBlaze::from_iter(token_ids.iter().copied().map(|token_id| token_id..=token_id));
-        let token_ranges: Vec<_> = mapped.ranges().collect();
-        let weight = Weight::from_compact_ranges(std::iter::once((
-            0..=self.num_tsids - 1,
-            token_ranges,
-        )));
+        let tokens = RangeSetBlaze::from_iter(token_ids.iter().copied().map(|id| id..=id));
+        let weight = Weight::from_uniform(0..=self.num_tsids - 1, tokens);
         self.leaf_weight_cache.insert(token_ids, weight.clone());
         weight
     }
@@ -684,6 +745,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn flush_transition_buffer(&mut self) {
+        let t0 = std::time::Instant::now();
+        let mut leaf_entries = 0usize;
+        let mut leaf_cache_misses = 0usize;
         for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
             .into_iter()
             .enumerate()
@@ -692,8 +756,12 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if token_ids.is_empty() {
                     continue;
                 }
+                leaf_entries += 1;
                 token_ids.sort_unstable();
                 token_ids.dedup();
+                if !self.leaf_weight_cache.contains_key(&token_ids) {
+                    leaf_cache_misses += 1;
+                }
                 let weight = self.cached_leaf_weight(token_ids);
                 self.transition_buffer
                     .entry((from as u32, label_idx as i32, self.leaf_state))
@@ -701,7 +769,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     .or_insert(weight);
             }
         }
+        let leaf_ms = t0.elapsed();
 
+        let t1 = std::time::Instant::now();
         for ((from, target), weight) in std::mem::take(&mut self.epsilon_buffer) {
             let state = self
                 .nwa
@@ -710,6 +780,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 .expect("buffered epsilon source state must exist");
             state.epsilons.push((target, weight));
         }
+        let eps_ms = t1.elapsed();
+        let t2 = std::time::Instant::now();
         for ((from, label, target), weight) in std::mem::take(&mut self.transition_buffer) {
             let state = self
                 .nwa
@@ -718,6 +790,18 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 .expect("buffered transition source state must exist");
             state.transitions.entry(label).or_default().push((target, weight));
         }
+        let trans_ms = t2.elapsed();
+        if self.profile_enabled {
+            eprintln!(
+                "[glrmask/profile][terminal_dwa] flush leaf_ms={:.3} eps_ms={:.3} trans_ms={:.3} leaf_entries={} leaf_cache_misses={} transition_buffer_size={}",
+                leaf_ms.as_secs_f64() * 1000.0,
+                eps_ms.as_secs_f64() * 1000.0,
+                trans_ms.as_secs_f64() * 1000.0,
+                leaf_entries,
+                leaf_cache_misses,
+                0, // already drained
+            );
+        }
     }
 
     fn build_from_trie(
@@ -725,6 +809,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         assoc_by_state: &BTreeMap<u32, SourceAssoc>,
     ) {
+        self.profile_trie_calls += 1;
         for (segment_bytes, child_node) in node.iter_children() {
             let child_token_id = child_node.token_id() as u32;
             let internal_child_token_id = self
@@ -736,21 +821,29 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
             let mut next_level_assoc = BTreeMap::<u32, SourceAssoc>::new();
             let mut pending = BTreeMap::<usize, BTreeMap<u32, SourceAssoc>>::new();
+            let clone_started = std::time::Instant::now();
             pending.insert(0, assoc_by_state.clone());
+            self.profile_assoc_clone_ms += clone_started.elapsed();
+            self.profile_assoc_clones += 1;
 
             while let Some((pos, states_at_pos)) = pending.pop_first() {
                 if pos == segment_bytes.len() {
+                    let t = std::time::Instant::now();
                     for (tokenizer_state, assoc) in states_at_pos {
                         merge_assoc(&mut next_level_assoc, tokenizer_state, &assoc.nodes);
                     }
+                    self.profile_merge_ms += t.elapsed();
                     continue;
                 }
 
                 for (tokenizer_state, source_assoc) in states_at_pos {
                     let source_nodes = source_assoc.nodes;
+                    let exec_started = std::time::Instant::now();
                     let exec = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state);
+                    self.profile_exec_ms += exec_started.elapsed();
+                    self.profile_tokenizer_execs += 1;
                     let exec_end_state = exec.end_state.map(|end_state| {
                         self.representative_state_by_original
                             .get(end_state as usize)
@@ -760,6 +853,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     let mut possible_matches_at_end = None;
 
                     if let Some(end_state) = exec_end_state {
+                        let t = std::time::Instant::now();
                         if child_node.has_token() {
                             for terminal_id in self.tokenizer.tokens_accessible_from_state(end_state) {
                                 self.add_leaf_token_from_sources(
@@ -769,8 +863,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                                 );
                             }
                         }
+                        self.profile_leaf_ms += t.elapsed();
 
+                        let t = std::time::Instant::now();
                         merge_assoc(&mut next_level_assoc, end_state, &source_nodes);
+                        self.profile_merge_ms += t.elapsed();
                     }
 
                     for matched in exec.matches {
@@ -784,6 +881,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             );
                         }
 
+                        let weight_started = std::time::Instant::now();
                         let continuation_weight = if next_pos == segment_bytes.len()
                             && child_node.has_token()
                         {
@@ -807,36 +905,41 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                                     }
                                 }
                                 if remaining.is_empty() {
+                                    self.profile_weight_ms += weight_started.elapsed();
                                     continue;
                                 }
-                                let weight = token_set_weight_all_tsids(
-                                    self.num_tsids,
-                                    &remaining,
-                                    self.original_token_to_internal,
-                                );
+                                let t = std::time::Instant::now();
+                                let weight = self.token_set_weight_fast(&remaining);
+                                self.profile_weight_compute_ms += t.elapsed();
+                                self.profile_weight_compute_calls += 1;
                                 self.pruned_weight_cache.insert(cache_key, weight.clone());
                                 weight
                             }
                         } else {
                             self.cached_reachable_weight(child_node.reachable_token_ids())
                         };
+                        self.profile_weight_ms += weight_started.elapsed();
                         if continuation_weight.is_empty() {
                             continue;
                         }
 
+                        let t = std::time::Instant::now();
                         let continuation_assoc = pending.entry(next_pos).or_default();
                         let destination = continuation_state(
                             continuation_assoc,
                             self.representative_initial_state,
                             self.nwa,
                         );
+                        self.profile_pending_ms += t.elapsed();
 
+                        let match_started = std::time::Instant::now();
                         self.add_match_from_sources(
                             &source_nodes,
                             matched.id,
                             destination,
                             &continuation_weight,
                         );
+                        self.profile_match_ms += match_started.elapsed();
                     }
                 }
             }
@@ -995,6 +1098,29 @@ pub(crate) fn build_terminal_dwa_with_report(
         merge_assoc(&mut assoc_by_state, representative_state, &[root]);
     }
 
+    // Precompute run-length encoding of original_to_internal mapping.
+    // Each run is a contiguous range of original tokens mapping to the same internal class.
+    // Used by token_set_weight_fast for O(log(runs)) lookups instead of O(total_tokens).
+    let n_internal_classes = id_map.vocab_tokens.internal_to_originals.len();
+    let mapping = &id_map.vocab_tokens.original_to_internal;
+    let mut mapping_runs: Vec<MappingRun> = Vec::new();
+    {
+        let mut i = 0usize;
+        while i < mapping.len() {
+            let cls = mapping[i];
+            if cls == u32::MAX {
+                i += 1;
+                continue;
+            }
+            let start = i as u32;
+            while i + 1 < mapping.len() && mapping[i + 1] == cls {
+                i += 1;
+            }
+            mapping_runs.push(MappingRun { start, end: i as u32, class: cls });
+            i += 1;
+        }
+    }
+
     let mut builder = TerminalNwaBuilder {
         tokenizer,
         possible_matches: &mut possible_matches,
@@ -1005,17 +1131,54 @@ pub(crate) fn build_terminal_dwa_with_report(
         representative_initial_state,
         representative_state_by_original: &representative_state_by_original,
         original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
+        mapping_runs,
+        n_internal_classes,
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),
         leaf_weight_cache: HashMap::new(),
         transition_buffer: BTreeMap::new(),
         epsilon_buffer: BTreeMap::new(),
+        profile_enabled,
+        profile_trie_calls: 0,
+        profile_assoc_clones: 0,
+        profile_tokenizer_execs: 0,
+        profile_exec_ms: std::time::Duration::ZERO,
+        profile_weight_ms: std::time::Duration::ZERO,
+        profile_weight_compute_ms: std::time::Duration::ZERO,
+        profile_weight_compute_calls: 0,
+        profile_match_ms: std::time::Duration::ZERO,
+        profile_assoc_clone_ms: std::time::Duration::ZERO,
+        profile_leaf_ms: std::time::Duration::ZERO,
+        profile_merge_ms: std::time::Duration::ZERO,
+        profile_pending_ms: std::time::Duration::ZERO,
+        profile_flush_ms: std::time::Duration::ZERO,
     };
     builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
+    let flush_t = std::time::Instant::now();
     builder.flush_transition_buffer();
+    builder.profile_flush_ms = flush_t.elapsed();
     report.build_nwa_from_trie_time = phase_started_at.elapsed();
-    log_terminal_profile(profile_enabled, "build_nwa_from_trie", phase_started_at);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa] build_nwa_from_trie_ms={:.3} trie_calls={} assoc_clones={} tokenizer_execs={} exec_ms={:.3} weight_ms={:.3} weight_compute_ms={:.3} weight_compute_calls={} match_ms={:.3} assoc_clone_ms={:.3} leaf_ms={:.3} merge_ms={:.3} pending_ms={:.3} flush_ms={:.3} mapping_runs={}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0,
+            builder.profile_trie_calls,
+            builder.profile_assoc_clones,
+            builder.profile_tokenizer_execs,
+            builder.profile_exec_ms.as_secs_f64() * 1000.0,
+            builder.profile_weight_ms.as_secs_f64() * 1000.0,
+            builder.profile_weight_compute_ms.as_secs_f64() * 1000.0,
+            builder.profile_weight_compute_calls,
+            builder.profile_match_ms.as_secs_f64() * 1000.0,
+            builder.profile_assoc_clone_ms.as_secs_f64() * 1000.0,
+            builder.profile_leaf_ms.as_secs_f64() * 1000.0,
+            builder.profile_merge_ms.as_secs_f64() * 1000.0,
+            builder.profile_pending_ms.as_secs_f64() * 1000.0,
+            builder.profile_flush_ms.as_secs_f64() * 1000.0,
+            builder.mapping_runs.len(),
+        );
+    }
 
     if should_collapse_always_allowed(vocab) {
         let phase_started_at = std::time::Instant::now();
