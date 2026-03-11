@@ -10,7 +10,6 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
-use crate::compiler::possible_matches::build_possible_matches_from_token_bytes;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalID;
 use crate::ds::leveled_gss::LeveledGSS;
@@ -77,22 +76,6 @@ impl Clone for Constraint {
 }
 
 impl Constraint {
-    fn possible_matches_use_internal_tokens(&self) -> bool {
-        !self.internal_token_bytes.is_empty()
-    }
-
-    fn all_possible_matches(&self) -> &PossibleMatchesByState {
-        &self.possible_matches
-    }
-
-    pub(crate) fn rebuild_possible_matches(&mut self) {
-        let token_bytes = if self.possible_matches_use_internal_tokens() {
-            &self.internal_token_bytes
-        } else {
-            &self.token_bytes
-        };
-        self.possible_matches = build_possible_matches_from_token_bytes(&self.tokenizer, token_bytes);
-    }
 
     /// Build precomputed bitmask fragments for each internal token.
     pub(crate) fn build_buf_masks(&mut self) {
@@ -327,20 +310,16 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        let possible_matches = self.all_possible_matches()
+        let possible_matches = self.possible_matches
             .get(&tokenizer_state)
             .cloned()
             .unwrap_or_default();
-        if self.possible_matches_use_internal_tokens() {
-            possible_matches
-                .into_iter()
-                .map(|(terminal, internal_tokens)| {
-                    (terminal, self.expand_internal_token_set(&internal_tokens))
-                })
-                .collect()
-        } else {
-            possible_matches
-        }
+        possible_matches
+            .into_iter()
+            .map(|(terminal, internal_tokens)| {
+                (terminal, self.expand_internal_token_set(&internal_tokens))
+            })
+            .collect()
     }
 
     pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: u32) -> u32 {
@@ -428,19 +407,10 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        let possible_matches = self
-            .all_possible_matches()
+        self.possible_matches
             .get(&tokenizer_state)
             .cloned()
-            .unwrap_or_default();
-        if self.possible_matches_use_internal_tokens() {
-            possible_matches
-        } else {
-            possible_matches
-                .into_iter()
-                .map(|(terminal, token_ids)| (terminal, self.internalize_token_set(&token_ids)))
-                .collect()
-        }
+            .unwrap_or_default()
     }
 
     pub(crate) fn possible_matches_for_internal_tsid(
