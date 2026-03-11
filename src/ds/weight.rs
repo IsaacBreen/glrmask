@@ -29,6 +29,16 @@ fn sentinel_token_set() -> RangeSetBlaze<u32> {
     std::iter::once(WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL).collect()
 }
 
+fn is_sentinel_token_set(tokens: &RangeSetBlaze<u32>) -> bool {
+    let mut ranges = tokens.ranges();
+    let Some(range) = ranges.next() else {
+        return false;
+    };
+    ranges.next().is_none()
+        && *range.start() == WEIGHT_ALL_SENTINEL
+        && *range.end() == WEIGHT_ALL_SENTINEL
+}
+
 fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> Arc<RangeSetBlaze<u32>> {
     Arc::new(tokens)
 }
@@ -575,11 +585,14 @@ impl Weight {
     }
 
     pub fn is_full(&self) -> bool {
-        let entries = range_map_entries(self);
-        entries.len() == 1
-            && entries[0].0.start() == &WEIGHT_ALL_SENTINEL
-            && entries[0].0.end() == &WEIGHT_ALL_SENTINEL
-            && entries[0].1 == sentinel_token_set()
+        let mut entries = self.0.range_values();
+        let Some((range, tokens)) = entries.next() else {
+            return false;
+        };
+        entries.next().is_none()
+            && *range.start() == WEIGHT_ALL_SENTINEL
+            && *range.end() == WEIGHT_ALL_SENTINEL
+            && is_sentinel_token_set(tokens.as_ref())
     }
 
     pub fn is_empty(&self) -> bool {
