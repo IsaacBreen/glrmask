@@ -214,21 +214,11 @@ impl std::fmt::Display for CompileDebug {
         )?;
         for state in 0..self.glr_table.num_states {
             let actions = &self.glr_table.action[state as usize];
-            let default_action = &self.glr_table.default_action[state as usize];
             let gotos = &self.glr_table.goto[state as usize];
-            if actions.is_empty() && default_action.is_none() && gotos.is_empty() {
+            if actions.is_empty() && gotos.is_empty() {
                 continue;
             }
             writeln!(f, "  State {state}:")?;
-            if let Some(crate::compiler::glr::table::Action::Reduce(r)) = default_action {
-                let rule = &self.glr_table.rules[*r as usize];
-                writeln!(
-                    f,
-                    "    default: reduce r{r} ({} ← {} symbols)",
-                    self.nonterminal_str(&self.normalized_grammar_def, rule.lhs),
-                    rule.rhs.len()
-                )?;
-            }
             for (tid, act) in actions {
                 let tname = if *tid == EOF {
                     "$".to_string()
