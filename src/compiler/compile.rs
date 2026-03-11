@@ -5,18 +5,15 @@
 
 use std::collections::BTreeMap;
 
-use crate::Vocab;
-use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::compile::build_regex;
+use crate::automata::lexer::regex::parse_regex;
+use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 use crate::compiler::glr::analysis::{
-    AnalyzedGrammar,
-    merge_identical_nonterminals,
-    normalize_grammar,
+    merge_identical_nonterminals, normalize_grammar, AnalyzedGrammar,
 };
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
@@ -25,13 +22,15 @@ use crate::compiler::parser_dwa::build_parser_dwa_from_terminal_dwa;
 use crate::compiler::possible_matches::build_possible_matches_by_state;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::parser_dwa::{
-    ParserDwaBuildReport,
-    build_parser_dwa_from_terminal_dwa_with_report,
+    build_parser_dwa_from_terminal_dwa_with_report, ParserDwaBuildReport,
 };
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
+use crate::compiler::terminal_dwa::{
+    build_terminal_dwa, build_terminal_dwa_with_report, TerminalDwaBuildReport,
+};
 use crate::runtime::Constraint;
+use crate::Vocab;
 
 // ── Tokenizer construction ──────────────────────────────────────────────────
 
@@ -175,17 +174,49 @@ fn remap_terminal_id(terminal: &Terminal, new_id: TerminalID) -> Terminal {
     }
 }
 
-/// Remove terminals that are no longer referenced by any normalized rule and
-/// compact the remaining terminal IDs to a dense 0..N-1 range.
-pub(crate) fn compact_unused_terminals(
+#[derive(Debug, Clone)]
+pub(crate) struct LiveTerminalRemap {
+    terminals: Vec<Terminal>,
+    ignore_terminal: Option<TerminalID>,
+    remap: std::collections::BTreeMap<TerminalID, TerminalID>,
+}
+
+fn expr_accepts_empty(expr: &Expr) -> bool {
+    match expr {
+        Expr::U8Seq(bytes) => bytes.is_empty(),
+        Expr::U8Class(_) => false,
+        Expr::Seq(parts) => parts.iter().all(expr_accepts_empty),
+        Expr::Choice(options) => options.iter().any(expr_accepts_empty),
+        Expr::Repeat { min, .. } => *min == 0,
+        Expr::Shared(inner) => expr_accepts_empty(inner),
+        Expr::Epsilon => true,
+    }
+}
+
+fn nullable_terminal_ids(grammar: &GrammarDef) -> std::collections::BTreeSet<TerminalID> {
+    grammar
+        .terminals
+        .iter()
+        .filter_map(|terminal| {
+            let accepts_empty = match terminal {
+                Terminal::Literal { bytes, .. } => bytes.is_empty(),
+                Terminal::Pattern { pattern, utf8, .. } => {
+                    expr_accepts_empty(&parse_regex(pattern, *utf8))
+                }
+                Terminal::Expr { expr, .. } => expr_accepts_empty(expr),
+            };
+            accepts_empty.then_some(terminal.id())
+        })
+        .collect()
+}
+
+/// Keep the terminals still reachable from the normalized rules and remap them
+/// into a dense 0..N-1 terminal space.
+pub(crate) fn remap_live_terminals(
     rules: &mut Vec<Rule>,
     terminals: &[Terminal],
     ignore_terminal: Option<TerminalID>,
-) -> (
-    Vec<Terminal>,
-    Option<TerminalID>,
-    std::collections::BTreeMap<TerminalID, TerminalID>,
-) {
+) -> LiveTerminalRemap {
     let mut used = std::collections::BTreeSet::<TerminalID>::new();
     for rule in rules.iter() {
         for symbol in &rule.rhs {
@@ -204,7 +235,10 @@ pub(crate) fn compact_unused_terminals(
     for old_id in used {
         let new_id = compacted.len() as TerminalID;
         let terminal = terminals.get(old_id as usize).unwrap_or_else(|| {
-            panic!("terminal id {} referenced by a rule but missing from grammar.terminals", old_id)
+            panic!(
+                "terminal id {} referenced by a rule but missing from grammar.terminals",
+                old_id
+            )
         });
         remap.insert(old_id, new_id);
         compacted.push(remap_terminal_id(terminal, new_id));
@@ -222,7 +256,11 @@ pub(crate) fn compact_unused_terminals(
 
     let remapped_ignore_terminal = ignore_terminal.and_then(|old_id| remap.get(&old_id).copied());
 
-    (compacted, remapped_ignore_terminal, remap)
+    LiveTerminalRemap {
+        terminals: compacted,
+        ignore_terminal: remapped_ignore_terminal,
+        remap,
+    }
 }
 
 fn remap_terminal_names(
@@ -545,7 +583,9 @@ fn compact_bounded_repeat_ladders(
                 }
 
                 let tail_rhs = &long_rhs[short_rhs.len()..];
-                let tail = if tail_rhs == chunk_rhs.as_slice() || tail_rhs == [Symbol::Nonterminal(*chunk_nt)] {
+                let tail = if tail_rhs == chunk_rhs.as_slice()
+                    || tail_rhs == [Symbol::Nonterminal(*chunk_nt)]
+                {
                     BoundedRepeatTail::Base
                 } else if let [Symbol::Nonterminal(next)] = tail_rhs {
                     BoundedRepeatTail::Next(*next)
@@ -567,68 +607,73 @@ fn compact_bounded_repeat_ladders(
         let mut family_incoming = std::collections::BTreeMap::<NonterminalID, usize>::new();
         for info in node_infos.values() {
             if let BoundedRepeatTail::Next(next) = info.tail {
-                if node_infos
-                    .get(&next)
-                    .is_some_and(|child| child.chunk_nt == info.chunk_nt && child.chunk_rhs == info.chunk_rhs)
-                {
+                if node_infos.get(&next).is_some_and(|child| {
+                    child.chunk_nt == info.chunk_nt && child.chunk_rhs == info.chunk_rhs
+                }) {
                     *family_incoming.entry(next).or_default() += 1;
                 }
             }
         }
 
-        let candidate_family = node_infos.iter().filter_map(|(&top, info)| {
-            if family_incoming.get(&top).copied().unwrap_or(0) != 0 {
-                return None;
-            }
-            if consumer_occurrences.get(&top).copied().unwrap_or(0) == 0 {
-                return None;
-            }
-
-            let mut chain = vec![top];
-            let mut current = top;
-            let chunk_nt = info.chunk_nt;
-            let chunk_rhs = info.chunk_rhs.clone();
-
-            loop {
-                let current_info = node_infos.get(&current)?;
-                if current_info.chunk_nt != chunk_nt || current_info.chunk_rhs != chunk_rhs {
+        let candidate_family = node_infos
+            .iter()
+            .filter_map(|(&top, info)| {
+                if family_incoming.get(&top).copied().unwrap_or(0) != 0 {
+                    return None;
+                }
+                if consumer_occurrences.get(&top).copied().unwrap_or(0) == 0 {
                     return None;
                 }
 
-                match current_info.tail {
-                    BoundedRepeatTail::Base => break,
-                    BoundedRepeatTail::Next(next) => {
-                        let next_info = node_infos.get(&next)?;
-                        if next_info.chunk_nt != chunk_nt || next_info.chunk_rhs != chunk_rhs {
-                            return None;
+                let mut chain = vec![top];
+                let mut current = top;
+                let chunk_nt = info.chunk_nt;
+                let chunk_rhs = info.chunk_rhs.clone();
+
+                loop {
+                    let current_info = node_infos.get(&current)?;
+                    if current_info.chunk_nt != chunk_nt || current_info.chunk_rhs != chunk_rhs {
+                        return None;
+                    }
+
+                    match current_info.tail {
+                        BoundedRepeatTail::Base => break,
+                        BoundedRepeatTail::Next(next) => {
+                            let next_info = node_infos.get(&next)?;
+                            if next_info.chunk_nt != chunk_nt || next_info.chunk_rhs != chunk_rhs {
+                                return None;
+                            }
+                            if family_incoming.get(&next).copied().unwrap_or(0) != 1 {
+                                return None;
+                            }
+                            if consumer_occurrences.get(&next).copied().unwrap_or(0) != 1 {
+                                return None;
+                            }
+                            if chain.contains(&next) {
+                                return None;
+                            }
+                            chain.push(next);
+                            current = next;
                         }
-                        if family_incoming.get(&next).copied().unwrap_or(0) != 1 {
-                            return None;
-                        }
-                        if consumer_occurrences.get(&next).copied().unwrap_or(0) != 1 {
-                            return None;
-                        }
-                        if chain.contains(&next) {
-                            return None;
-                        }
-                        chain.push(next);
-                        current = next;
                     }
                 }
-            }
 
-            if chain.len() < MIN_FAMILY_LEN {
-                return None;
-            }
+                if chain.len() < MIN_FAMILY_LEN {
+                    return None;
+                }
 
-            Some((top, chunk_nt, chain))
-        }).max_by_key(|(_, _, chain)| chain.len());
+                Some((top, chunk_nt, chain))
+            })
+            .max_by_key(|(_, _, chain)| chain.len());
 
         let Some((top, chunk_nt, chain)) = candidate_family else {
             break;
         };
 
-        let family_set = chain.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        let family_set = chain
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
         let mut rebuilt_rules = rules
             .iter()
             .filter(|rule| !family_set.contains(&rule.lhs))
@@ -645,11 +690,9 @@ fn compact_bounded_repeat_ladders(
 }
 
 fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) {
-    // Probe nullability against the original terminal set first; nullable
-    // terminals are expanded into optional grammar structure before we compact
-    // away any terminals that normalization proves unreachable.
-    let mut nullable_probe = build_tokenizer(grammar);
-    let nullable_terminals = nullable_probe.drain_nullable_terminals();
+    // Nullable terminals depend only on terminal regex semantics, so detect
+    // them once up front before grammar normalization/remapping.
+    let nullable_terminals = nullable_terminal_ids(grammar);
 
     let mut rules = grammar.rules.clone();
     let start = grammar.start;
@@ -662,22 +705,19 @@ fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) 
     compact_bounded_repeat_ladders(&mut rules, start, &grammar.nonterminal_names);
     rules = merge_identical_nonterminals(&rules, start);
 
-    let (terminals, ignore_terminal, terminal_remap) = compact_unused_terminals(
-        &mut rules,
-        &grammar.terminals,
-        grammar.ignore_terminal,
-    );
+    let live_terminals =
+        remap_live_terminals(&mut rules, &grammar.terminals, grammar.ignore_terminal);
     let normalized = GrammarDef {
         rules,
         start,
-        terminals,
+        terminals: live_terminals.terminals,
         nonterminal_names: grammar.nonterminal_names.clone(),
-        terminal_names: remap_terminal_names(&grammar.terminal_names, &terminal_remap),
-        ignore_terminal,
+        terminal_names: remap_terminal_names(&grammar.terminal_names, &live_terminals.remap),
+        ignore_terminal: live_terminals.ignore_terminal,
     };
 
-    // Build the real tokenizer only from the compacted live terminal set so
-    // dead terminals never make it into downstream lexer/parser stages.
+    // Build the tokenizer only from the compacted live terminal set so dead
+    // terminals never make it into downstream lexer/parser stages.
     let mut tokenizer = build_tokenizer(&normalized);
     let _ = tokenizer.drain_nullable_terminals();
 
@@ -966,7 +1006,10 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     constraint
 }
 
-pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
+pub(crate) fn compile_with_debug(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+) -> (Constraint, CompileDebug) {
     let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
@@ -980,7 +1023,8 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     let id_map = InternalIdMap::build(&tokenizer, vocab);
 
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
-    let possible_matches_by_state = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
+    let possible_matches_by_state =
+        build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
 
     let characterizations = characterize_terminals(&table, &glr_grammar);
     let templates = Templates::from_characterizations(&characterizations);
@@ -991,14 +1035,14 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         &id_map,
         normalized.ignore_terminal,
     );
-    let parser_dwa = build_parser_dwa_from_terminal_dwa(
-        &table,
-        &glr_grammar,
-        &tokenizer,
-        &terminal_dwa,
-    );
+    let parser_dwa =
+        build_parser_dwa_from_terminal_dwa(&table, &glr_grammar, &tokenizer, &terminal_dwa);
 
-    let vocab_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(token_id, bytes)| (*token_id, bytes.clone())).collect();
+    let vocab_entries: Vec<(u32, Vec<u8>)> = vocab
+        .entries
+        .iter()
+        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
+        .collect();
     let token_bytes = vocab.entries.clone();
     let mut constraint = Constraint {
         parser_dwa: parser_dwa.clone(),
@@ -1060,7 +1104,7 @@ mod tests {
 
     #[test]
     fn test_compile_simple_ab() {
-        let gdef = simple_ab_grammar(); 
+        let gdef = simple_ab_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
@@ -1102,8 +1146,7 @@ mod tests {
                 .collect();
 
             assert_eq!(
-                actual,
-                expected,
+                actual, expected,
                 "possible_matches union should equal all tokenizer-reachable tokens for state {}",
                 tokenizer_state
             );
@@ -1112,7 +1155,7 @@ mod tests {
 
     #[test]
     fn test_compile_choice() {
-        let gdef = choice_grammar(); 
+        let gdef = choice_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
@@ -1121,7 +1164,7 @@ mod tests {
 
     #[test]
     fn test_compile_two_nt() {
-        let gdef = two_nt_grammar(); 
+        let gdef = two_nt_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
@@ -1191,7 +1234,10 @@ mod tests {
             .values()
             .flat_map(|token_ids| token_ids.iter())
             .collect();
-        assert_eq!(internal_matches, std::collections::BTreeSet::from([internal_token]));
+        assert_eq!(
+            internal_matches,
+            std::collections::BTreeSet::from([internal_token])
+        );
 
         let original_matches: std::collections::BTreeSet<u32> = constraint
             .possible_matches_for_state(tokenizer_state)
@@ -1203,7 +1249,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_simple_ab() {
-        
         let gdef = simple_ab_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -1211,28 +1256,34 @@ mod tests {
         let mut state = constraint.start();
 
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
-        assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
-
-        state
-            .commit_token(0);
         assert!(
-            !state.is_finished(),
-            "not yet accepting after 'a'"
+            mask_has_token(&mask, 0),
+            "token 'a' should be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 1),
+            "token 'b' should NOT be allowed initially"
         );
 
-        let mask = state.mask();
-        assert!(!mask_has_token(&mask, 0), "token 'a' should NOT be allowed after 'a'");
-        assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
+        state.commit_token(0);
+        assert!(!state.is_finished(), "not yet accepting after 'a'");
 
-        state
-            .commit_token(1);
+        let mask = state.mask();
+        assert!(
+            !mask_has_token(&mask, 0),
+            "token 'a' should NOT be allowed after 'a'"
+        );
+        assert!(
+            mask_has_token(&mask, 1),
+            "token 'b' should be allowed after 'a'"
+        );
+
+        state.commit_token(1);
         assert!(state.is_finished(), "should accept after 'ab'");
     }
 
     #[test]
     fn test_end_to_end_choice() {
-        
         let gdef = choice_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -1243,17 +1294,12 @@ mod tests {
         assert!(mask_has_token(&mask, 0), "token 'a' should be allowed");
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed");
 
-        state
-            .commit_token(0);
-        assert!(
-            state.is_finished(),
-            "parse should accept after 'a'"
-        );
+        state.commit_token(0);
+        assert!(state.is_finished(), "parse should accept after 'a'");
     }
 
     #[test]
     fn test_end_to_end_two_nt() {
-        
         let gdef = two_nt_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -1261,28 +1307,34 @@ mod tests {
         let mut state = constraint.start();
 
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
-        assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
-
-        state
-            .commit_token(0);
         assert!(
-            !state.is_finished(),
-            "not yet accepting after 'a'"
+            mask_has_token(&mask, 0),
+            "token 'a' should be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 1),
+            "token 'b' should NOT be allowed initially"
         );
 
-        let mask = state.mask();
-        assert!(!mask_has_token(&mask, 0), "token 'a' should NOT be allowed after 'a'");
-        assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
+        state.commit_token(0);
+        assert!(!state.is_finished(), "not yet accepting after 'a'");
 
-        state
-            .commit_token(1);
+        let mask = state.mask();
+        assert!(
+            !mask_has_token(&mask, 0),
+            "token 'a' should NOT be allowed after 'a'"
+        );
+        assert!(
+            mask_has_token(&mask, 1),
+            "token 'b' should be allowed after 'a'"
+        );
+
+        state.commit_token(1);
         assert!(state.is_finished(), "should accept after 'ab'");
     }
 
     #[test]
     fn test_end_to_end_nested_nt() {
-        
         let gdef = nested_nt_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -1290,25 +1342,34 @@ mod tests {
         let mut state = constraint.start();
 
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
-        assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
+        assert!(
+            mask_has_token(&mask, 0),
+            "token 'a' should be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 1),
+            "token 'b' should NOT be allowed initially"
+        );
 
-        state
-            .commit_token(0);
+        state.commit_token(0);
         assert!(!state.is_finished(), "not accepting after 'a'");
 
         let mask = state.mask();
-        assert!(!mask_has_token(&mask, 0), "token 'a' should NOT be allowed after 'a'");
-        assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
+        assert!(
+            !mask_has_token(&mask, 0),
+            "token 'a' should NOT be allowed after 'a'"
+        );
+        assert!(
+            mask_has_token(&mask, 1),
+            "token 'b' should be allowed after 'a'"
+        );
 
-        state
-            .commit_token(1);
+        state.commit_token(1);
         assert!(state.is_finished(), "should accept after 'ab'");
     }
 
     #[test]
     fn test_end_to_end_three_terminals() {
-        
         let gdef = three_terminal_grammar();
         let vocab = Vocab::new(
             vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
@@ -1319,9 +1380,18 @@ mod tests {
         let mut state = constraint.start();
 
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
-        assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
-        assert!(!mask_has_token(&mask, 2), "token 'c' should NOT be allowed initially");
+        assert!(
+            mask_has_token(&mask, 0),
+            "token 'a' should be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 1),
+            "token 'b' should NOT be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 2),
+            "token 'c' should NOT be allowed initially"
+        );
 
         state.commit_token(0);
 
@@ -1343,7 +1413,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_nested_two_rhs() {
-        
         let gdef = nested_two_rhs_grammar();
         let vocab = Vocab::new(
             vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
@@ -1354,9 +1423,18 @@ mod tests {
         let mut state = constraint.start();
 
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
-        assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
-        assert!(!mask_has_token(&mask, 2), "token 'c' should NOT be allowed initially");
+        assert!(
+            mask_has_token(&mask, 0),
+            "token 'a' should be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 1),
+            "token 'b' should NOT be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 2),
+            "token 'c' should NOT be allowed initially"
+        );
 
         state.commit_token(0);
 
@@ -1402,8 +1480,14 @@ mod tests {
         let mut state = constraint.start();
 
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
-        assert!(!mask_has_token(&mask, 1), "token 'b' should not be allowed initially");
+        assert!(
+            mask_has_token(&mask, 0),
+            "token 'a' should be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 1),
+            "token 'b' should not be allowed initially"
+        );
 
         state.commit_token(0);
         assert!(
@@ -1418,7 +1502,10 @@ mod tests {
         );
 
         state.commit_token(1);
-        assert!(state.is_finished(), "should accept after committing 'ab' byte by byte");
+        assert!(
+            state.is_finished(),
+            "should accept after committing 'ab' byte by byte"
+        );
     }
 
     // ── Nullable terminal expansion tests ───────────────────────────────────
@@ -1458,8 +1545,7 @@ mod tests {
         );
 
         // NT_fresh → ε and NT_fresh → t0
-        let fresh_rules: Vec<&Rule> =
-            rules.iter().filter(|r| r.lhs == fresh_nt).collect();
+        let fresh_rules: Vec<&Rule> = rules.iter().filter(|r| r.lhs == fresh_nt).collect();
         assert_eq!(fresh_rules.len(), 2);
         let rhs_set: std::collections::BTreeSet<Vec<Symbol>> =
             fresh_rules.iter().map(|r| r.rhs.clone()).collect();
@@ -1481,7 +1567,7 @@ mod tests {
         // 1 rewritten rule + 2*2 fresh-NT rules = 5 total.
         assert_eq!(rules.len(), 5);
 
-        let nt0 = gdef.num_nonterminals();     // fresh NT for t0
+        let nt0 = gdef.num_nonterminals(); // fresh NT for t0
         let nt1 = gdef.num_nonterminals() + 1; // fresh NT for t1
 
         // S → NT0 NT1
@@ -1519,8 +1605,7 @@ mod tests {
         assert_eq!(n1_rules[0].rhs, vec![Symbol::Nonterminal(fresh_nt)]);
 
         // Fresh NT → ε and Fresh NT → T0.
-        let fresh_rules: Vec<&Rule> =
-            rules.iter().filter(|r| r.lhs == fresh_nt).collect();
+        let fresh_rules: Vec<&Rule> = rules.iter().filter(|r| r.lhs == fresh_nt).collect();
         assert_eq!(fresh_rules.len(), 2);
     }
 
@@ -1546,7 +1631,7 @@ mod tests {
         expand_nullable_terminals(&mut rules, &mut next_nt, &nullable);
 
         let fresh_nt = gdef.num_nonterminals(); // = 1
-        // S → NT NT (same fresh NT for both positions) + 2 fresh-NT rules = 3.
+                                                // S → NT NT (same fresh NT for both positions) + 2 fresh-NT rules = 3.
         assert_eq!(rules.len(), 3);
         assert_eq!(
             rules[0].rhs,
@@ -1558,12 +1643,13 @@ mod tests {
     fn test_drain_nullable_terminals_from_tokenizer() {
         // Build a tokenizer with a nullable terminal (regex `a*` matches empty string).
         let exprs = vec![
-            crate::automata::regex::Expr::Repeat {    // nullable: matches ""
+            crate::automata::regex::Expr::Repeat {
+                // nullable: matches ""
                 expr: Box::new(Expr::U8Seq(vec![b'a'])),
                 min: 0,
                 max: None,
             },
-            Expr::U8Seq(b"b".to_vec()),                  // not nullable
+            Expr::U8Seq(b"b".to_vec()), // not nullable
         ];
         let mut tok = build_tokenizer_from_exprs(&exprs);
 
@@ -1607,11 +1693,7 @@ mod tests {
             ..Default::default()
         };
         let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-                (2, b"aa".to_vec()),
-            ],
+            vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"aa".to_vec())],
             None,
         );
         let constraint = compile(&gdef, &vocab);
@@ -1620,11 +1702,14 @@ mod tests {
         // "b" alone should be accepted (opt_a consumed nothing).
         let mut state = constraint.start();
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 1), "'b' should be allowed initially (opt_a is nullable)");
+        assert!(
+            mask_has_token(&mask, 1),
+            "'b' should be allowed initially (opt_a is nullable)"
+        );
     }
 
     #[test]
-    fn test_compact_unused_terminals_remaps_rules_and_terminal_ids() {
+    fn test_remap_live_terminals_remaps_rules_and_terminal_ids() {
         let terminals = vec![
             Terminal::Literal {
                 id: 0,
@@ -1644,7 +1729,7 @@ mod tests {
             rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
         }];
 
-        let (compacted, ignore_terminal, remap) = compact_unused_terminals(&mut rules, &terminals, None);
+        let remapped = remap_live_terminals(&mut rules, &terminals, None);
 
         assert_eq!(
             rules,
@@ -1654,18 +1739,18 @@ mod tests {
             }],
             "used terminals should be renumbered densely when a dead terminal is removed from the middle"
         );
-        assert_eq!(compacted.len(), 2);
-        assert_eq!(compacted[0].id(), 0);
-        assert_eq!(compacted[1].id(), 1);
-        assert_eq!(compacted[0].name(), "a");
-        assert_eq!(compacted[1].name(), "b");
-        assert_eq!(ignore_terminal, None);
-        assert_eq!(remap.get(&0), Some(&0));
-        assert_eq!(remap.get(&2), Some(&1));
+        assert_eq!(remapped.terminals.len(), 2);
+        assert_eq!(remapped.terminals[0].id(), 0);
+        assert_eq!(remapped.terminals[1].id(), 1);
+        assert_eq!(remapped.terminals[0].name(), "a");
+        assert_eq!(remapped.terminals[1].name(), "b");
+        assert_eq!(remapped.ignore_terminal, None);
+        assert_eq!(remapped.remap.get(&0), Some(&0));
+        assert_eq!(remapped.remap.get(&2), Some(&1));
     }
 
     #[test]
-    fn test_compact_unused_terminals_preserves_ignore_terminal_and_remaps_it() {
+    fn test_remap_live_terminals_preserves_ignore_terminal_and_remaps_it() {
         let terminals = vec![
             Terminal::Literal {
                 id: 0,
@@ -1690,7 +1775,7 @@ mod tests {
             rhs: vec![Symbol::Terminal(0), Symbol::Terminal(3)],
         }];
 
-        let (compacted, ignore_terminal, remap) = compact_unused_terminals(&mut rules, &terminals, Some(2));
+        let remapped = remap_live_terminals(&mut rules, &terminals, Some(2));
 
         assert_eq!(
             rules,
@@ -1700,13 +1785,13 @@ mod tests {
             }],
             "used terminals should still be renumbered densely when an ignore terminal is retained"
         );
-        assert_eq!(compacted.len(), 3);
-        assert_eq!(compacted[0].name(), "a");
-        assert_eq!(compacted[1].name(), " +");
-        assert_eq!(compacted[2].name(), "b");
-        assert_eq!(ignore_terminal, Some(1));
-        assert_eq!(remap.get(&2), Some(&1));
-        assert_eq!(remap.get(&3), Some(&2));
+        assert_eq!(remapped.terminals.len(), 3);
+        assert_eq!(remapped.terminals[0].name(), "a");
+        assert_eq!(remapped.terminals[1].name(), " +");
+        assert_eq!(remapped.terminals[2].name(), "b");
+        assert_eq!(remapped.ignore_terminal, Some(1));
+        assert_eq!(remapped.remap.get(&2), Some(&1));
+        assert_eq!(remapped.remap.get(&3), Some(&2));
     }
 
     #[test]
@@ -1735,19 +1820,14 @@ mod tests {
             ..Default::default()
         };
         let vocab = Vocab::new(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-                (2, b"x".to_vec()),
-            ],
+            vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"x".to_vec())],
             None,
         );
 
         let (constraint, debug) = compile_with_debug(&gdef, &vocab);
 
         assert_eq!(
-            constraint.tokenizer.num_terminals,
-            2,
+            constraint.tokenizer.num_terminals, 2,
             "the final tokenizer should be built only from the live compacted terminals"
         );
         assert_eq!(debug.normalized_grammar_def.terminals.len(), 2);
@@ -1772,15 +1852,33 @@ mod tests {
 
         let mut state = constraint.start();
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 0), "token 'a' should still be allowed initially");
-        assert!(!mask_has_token(&mask, 1), "token 'b' should not be allowed initially");
-        assert!(!mask_has_token(&mask, 2), "dead terminal token 'x' should not leak into the mask");
+        assert!(
+            mask_has_token(&mask, 0),
+            "token 'a' should still be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 1),
+            "token 'b' should not be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 2),
+            "dead terminal token 'x' should not leak into the mask"
+        );
 
         state.commit_token(0);
         let mask = state.mask();
-        assert!(!mask_has_token(&mask, 0), "token 'a' should not be allowed after committing 'a'");
-        assert!(mask_has_token(&mask, 1), "token 'b' should remain the live continuation after remapping");
-        assert!(!mask_has_token(&mask, 2), "dead terminal token 'x' should remain absent after remapping");
+        assert!(
+            !mask_has_token(&mask, 0),
+            "token 'a' should not be allowed after committing 'a'"
+        );
+        assert!(
+            mask_has_token(&mask, 1),
+            "token 'b' should remain the live continuation after remapping"
+        );
+        assert!(
+            !mask_has_token(&mask, 2),
+            "dead terminal token 'x' should remain absent after remapping"
+        );
     }
 
     #[test]
@@ -1850,24 +1948,60 @@ mod tests {
 
         let mut state = constraint.start();
         let mask = state.mask();
-        assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
-        assert!(mask_has_token(&mask, 1), "ignore-only token ' ' should be allowed initially");
-        assert!(!mask_has_token(&mask, 2), "token 'b' should not be allowed before 'a'");
-        assert!(mask_has_token(&mask, 3), "token ' a' should be allowed via ignore+terminal composition");
-        assert!(!mask_has_token(&mask, 4), "token ' b' should not be allowed before 'a'");
+        assert!(
+            mask_has_token(&mask, 0),
+            "token 'a' should be allowed initially"
+        );
+        assert!(
+            mask_has_token(&mask, 1),
+            "ignore-only token ' ' should be allowed initially"
+        );
+        assert!(
+            !mask_has_token(&mask, 2),
+            "token 'b' should not be allowed before 'a'"
+        );
+        assert!(
+            mask_has_token(&mask, 3),
+            "token ' a' should be allowed via ignore+terminal composition"
+        );
+        assert!(
+            !mask_has_token(&mask, 4),
+            "token ' b' should not be allowed before 'a'"
+        );
 
         state.commit_token(3);
-        assert!(!state.is_finished(), "consuming ignored space plus 'a' should still leave trailing 'b'");
+        assert!(
+            !state.is_finished(),
+            "consuming ignored space plus 'a' should still leave trailing 'b'"
+        );
 
         let mask = state.mask();
-        assert!(!mask_has_token(&mask, 0), "token 'a' should no longer be allowed after 'a'");
-        assert!(mask_has_token(&mask, 1), "ignore-only token ' ' should still be allowed between grammar terminals");
-        assert!(mask_has_token(&mask, 2), "token 'b' should be allowed after 'a'");
-        assert!(!mask_has_token(&mask, 3), "token ' a' should not be allowed once the grammar expects 'b'");
-        assert!(mask_has_token(&mask, 4), "token ' b' should be allowed via ignore+terminal composition after 'a'");
+        assert!(
+            !mask_has_token(&mask, 0),
+            "token 'a' should no longer be allowed after 'a'"
+        );
+        assert!(
+            mask_has_token(&mask, 1),
+            "ignore-only token ' ' should still be allowed between grammar terminals"
+        );
+        assert!(
+            mask_has_token(&mask, 2),
+            "token 'b' should be allowed after 'a'"
+        );
+        assert!(
+            !mask_has_token(&mask, 3),
+            "token ' a' should not be allowed once the grammar expects 'b'"
+        );
+        assert!(
+            mask_has_token(&mask, 4),
+            "token ' b' should be allowed via ignore+terminal composition after 'a'"
+        );
 
         state.commit_token(4);
-        assert!(state.is_finished(), "consuming ignored space plus 'b' should finish the grammar");
+        assert!(
+            state.is_finished(),
+            "consuming ignored space plus 'b' should finish the grammar"
+        );
     }
 
     #[test]
@@ -1903,10 +2037,53 @@ mod tests {
 
         let (normalized, _tokenizer) = prepare_grammar_for_compile(&grammar);
 
-        assert_eq!(normalized.nonterminal_names.get(&0).map(String::as_str), Some("start"));
-        assert_eq!(normalized.terminal_names.get(&0).map(String::as_str), Some("A"));
-        assert_eq!(normalized.terminal_names.get(&1).map(String::as_str), Some("B"));
-        assert!(!normalized.terminal_names.values().any(|name| name == "DEAD"));
+        assert_eq!(
+            normalized.nonterminal_names.get(&0).map(String::as_str),
+            Some("start")
+        );
+        assert_eq!(
+            normalized.terminal_names.get(&0).map(String::as_str),
+            Some("A")
+        );
+        assert_eq!(
+            normalized.terminal_names.get(&1).map(String::as_str),
+            Some("B")
+        );
+        assert!(!normalized
+            .terminal_names
+            .values()
+            .any(|name| name == "DEAD"));
+    }
+
+    #[test]
+    fn test_nullable_terminal_ids_detects_empty_literals_and_patterns() {
+        let grammar = GrammarDef {
+            rules: vec![],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: Vec::new(),
+                },
+                Terminal::Pattern {
+                    id: 1,
+                    pattern: "a*".to_string(),
+                    utf8: true,
+                },
+                Terminal::Expr {
+                    id: 2,
+                    expr: Expr::U8Seq(b"x".to_vec()),
+                },
+            ],
+            nonterminal_names: std::collections::BTreeMap::new(),
+            terminal_names: std::collections::BTreeMap::new(),
+            ignore_terminal: None,
+        };
+
+        assert_eq!(
+            nullable_terminal_ids(&grammar),
+            std::collections::BTreeSet::from([0, 1])
+        );
     }
 
     #[test]
@@ -1918,7 +2095,11 @@ mod tests {
             },
             Rule {
                 lhs: 3,
-                rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(1), Symbol::Terminal(1)],
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Nonterminal(1),
+                    Symbol::Terminal(1),
+                ],
             },
             Rule {
                 lhs: 3,
@@ -1963,7 +2144,12 @@ mod tests {
             },
             Rule {
                 lhs: 10,
-                rhs: vec![Symbol::Terminal(3), Symbol::Nonterminal(2), Symbol::Nonterminal(8), Symbol::Terminal(4)],
+                rhs: vec![
+                    Symbol::Terminal(3),
+                    Symbol::Nonterminal(2),
+                    Symbol::Nonterminal(8),
+                    Symbol::Terminal(4),
+                ],
             },
         ];
         let names = std::collections::BTreeMap::from([
@@ -2004,7 +2190,8 @@ mod tests {
     }
 
     #[test]
-    fn test_inline_autogenerated_helper_nonterminals_keeps_multi_symbol_helper_with_multiple_occurrences() {
+    fn test_inline_autogenerated_helper_nonterminals_keeps_multi_symbol_helper_with_multiple_occurrences(
+    ) {
         let mut rules = vec![
             Rule {
                 lhs: 0,
@@ -2023,10 +2210,8 @@ mod tests {
                 rhs: vec![Symbol::Terminal(1)],
             },
         ];
-        let names = std::collections::BTreeMap::from([
-            (0, "start".to_string()),
-            (1, "root".to_string()),
-        ]);
+        let names =
+            std::collections::BTreeMap::from([(0, "start".to_string()), (1, "root".to_string())]);
 
         inline_autogenerated_helper_nonterminals(&mut rules, 0, &names);
 
@@ -2103,26 +2288,35 @@ mod tests {
             let long_rhs = if index + 1 == family.len() {
                 vec![Symbol::Nonterminal(chunk_nt), Symbol::Nonterminal(chunk_nt)]
             } else {
-                vec![Symbol::Nonterminal(chunk_nt), Symbol::Nonterminal(family[index + 1])]
+                vec![
+                    Symbol::Nonterminal(chunk_nt),
+                    Symbol::Nonterminal(family[index + 1]),
+                ]
             };
             rules.push(Rule { lhs, rhs: long_rhs });
         }
 
-        let original_family_rule_count = rules.iter().filter(|rule| family.contains(&rule.lhs)).count();
-        let names = std::collections::BTreeMap::from([
-            (0, "start".to_string()),
-            (1, "root".to_string()),
-        ]);
+        let original_family_rule_count = rules
+            .iter()
+            .filter(|rule| family.contains(&rule.lhs))
+            .count();
+        let names =
+            std::collections::BTreeMap::from([(0, "start".to_string()), (1, "root".to_string())]);
 
         compact_bounded_repeat_ladders(&mut rules, 0, &names);
 
-        let rewritten_family_rule_count = rules.iter().filter(|rule| family.contains(&rule.lhs)).count();
+        let rewritten_family_rule_count = rules
+            .iter()
+            .filter(|rule| family.contains(&rule.lhs))
+            .count();
         assert!(rewritten_family_rule_count < original_family_rule_count);
         assert_eq!(rules.iter().filter(|rule| rule.lhs == family[0]).count(), 3);
 
         let mut memo = std::collections::BTreeMap::new();
         let counts = derivable_chunk_counts(&rules, family[0], chunk_nt, &mut memo);
-        assert_eq!(counts, (1..=family.len() + 1).collect::<std::collections::BTreeSet<_>>());
+        assert_eq!(
+            counts,
+            (1..=family.len() + 1).collect::<std::collections::BTreeSet<_>>()
+        );
     }
-
 }
