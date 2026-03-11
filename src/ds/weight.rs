@@ -481,13 +481,20 @@ impl WeightBuilder {
             return;
         }
 
-        for (range, tokens) in weight.0.range_values() {
-            let tokens = tokens.as_ref().clone();
+        for (range, tokens_arc) in weight.0.range_values() {
             for tsid in range {
-                self.expanded
-                    .entry(tsid)
-                    .and_modify(|existing| *existing |= tokens.clone())
-                    .or_insert_with(|| tokens.clone());
+                match self.expanded.entry(tsid) {
+                    std::collections::btree_map::Entry::Occupied(mut e) => {
+                        let existing = e.get_mut();
+                        // Skip union if token sets are already identical
+                        if existing != tokens_arc.as_ref() {
+                            *existing |= tokens_arc.as_ref();
+                        }
+                    }
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(tokens_arc.as_ref().clone());
+                    }
+                }
             }
         }
     }
@@ -656,12 +663,19 @@ impl Weight {
                 continue;
             }
 
-            for (range, tokens) in weight.0.range_values() {
+            for (range, tokens_arc) in weight.0.range_values() {
                 for tsid in range {
-                    expanded
-                        .entry(tsid)
-                        .and_modify(|existing| *existing |= tokens.as_ref().clone())
-                        .or_insert_with(|| tokens.as_ref().clone());
+                    match expanded.entry(tsid) {
+                        std::collections::btree_map::Entry::Occupied(mut e) => {
+                            let existing = e.get_mut();
+                            if existing != tokens_arc.as_ref() {
+                                *existing |= tokens_arc.as_ref();
+                            }
+                        }
+                        std::collections::btree_map::Entry::Vacant(e) => {
+                            e.insert(tokens_arc.as_ref().clone());
+                        }
+                    }
                 }
             }
         }
