@@ -27,3 +27,18 @@ pub fn minimize(dwa: &DWA) -> DWA {
     // Use graph-coloring minimizer
     super::minimize_acyclic::minimize_acyclic(dwa)
 }
+
+/// Fast minimize that uses signature-based partition refinement instead of
+/// O(n²) pairwise graph coloring. Produces a valid (correct) DWA that may
+/// be slightly larger than the graph-coloring result (doesn't merge states
+/// with overlapping needed sets). Suitable for bundle minimization where
+/// the extra few states are acceptable.
+pub fn minimize_fast(dwa: &DWA) -> DWA {
+    if dwa.states.is_empty() {
+        return dwa.clone();
+    }
+    if !dwa.is_acyclic() {
+        return dwa.clone();
+    }
+    super::minimize_acyclic::minimize_acyclic_fast(dwa)
+}

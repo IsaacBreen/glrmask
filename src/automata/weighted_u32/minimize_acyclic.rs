@@ -1159,3 +1159,122 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     }
     minimized
 }
+
+/// Fast minimize using signature-based partition refinement + disjoint merge.
+/// Produces a valid minimization that may be slightly larger than the
+/// graph-coloring result (misses some overlap-domain merges).
+pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
+    if dwa.states.is_empty() {
+        return dwa.clone();
+    }
+    let profile_enabled = minimize_profile_enabled();
+    let started_at = std::time::Instant::now();
+    let mut profile = MinimizeAcyclicProfile::default();
+
+    let phase_started_at = std::time::Instant::now();
+    let mut pushed = dwa.clone();
+    let (_, topo_from_push, _) = push_weights(&mut pushed);
+    profile.push_weights_ms = phase_started_at.elapsed();
+
+    let phase_started_at = std::time::Instant::now();
+    let topo = match topo_from_push {
+        Some(t) => t,
+        None => return dwa.clone(),
+    };
+    let needed = compute_needed_sets(&pushed, &topo);
+    let productive_transitions = compute_productive_transitions(&pushed, &needed);
+    let heights = compute_heights(&pushed, &topo);
+    let max_height = heights.iter().max().copied().unwrap_or(0);
+    profile.topo_needed_ms = phase_started_at.elapsed();
+
+    let n = pushed.states.len();
+    let start_state = pushed.start_state as usize;
+
+    let mut reachable_from_start = vec![false; n];
+    {
+        let mut stack = vec![start_state];
+        while let Some(u) = stack.pop() {
+            if reachable_from_start[u] { continue; }
+            reachable_from_start[u] = true;
+            for (_, (target, _)) in &pushed.states[u].transitions {
+                let t = *target as usize;
+                if t < n && !reachable_from_start[t] { stack.push(t); }
+            }
+        }
+    }
+
+    let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
+    for (id, &h) in heights.iter().enumerate() {
+        if !reachable_from_start[id] { continue; }
+        if needed[id].is_empty() && id != start_state { continue; }
+        states_by_height[h].push(id);
+    }
+
+    let mut old_to_new = vec![UNMAPPED; n];
+    let mut new_states: Vec<MergedStateBuilder> = Vec::new();
+
+    for h in 0..=max_height {
+        let candidates = &states_by_height[h];
+        if candidates.is_empty() { continue; }
+        profile.height_buckets += 1;
+        profile.total_candidates += candidates.len();
+        profile.max_candidates = profile.max_candidates.max(candidates.len());
+        if candidates.len() == 1 { profile.singleton_buckets += 1; }
+
+        let phase_started_at = std::time::Instant::now();
+
+        // Use partition refinement (signature-based) + disjoint merge
+        let graph_started_at = std::time::Instant::now();
+        let coloring = partition_refine_coloring(
+            candidates,
+            &pushed,
+            &needed,
+            &old_to_new,
+            &productive_transitions,
+        );
+        profile.graph_color_ms += graph_started_at.elapsed();
+
+        let base_new_id = new_states.len() as u32;
+        let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
+
+        for (idx, &color) in coloring.iter().enumerate() {
+            old_to_new[candidates[idx]] = base_new_id + color as u32;
+        }
+
+        new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+
+        let (completed, builders) = new_states.split_at_mut(base_new_id as usize);
+        for (idx, &color) in coloring.iter().enumerate() {
+            merge_state_into_builder(
+                candidates[idx],
+                color,
+                &pushed,
+                &needed,
+                &old_to_new,
+                completed,
+                builders,
+                &mut profile,
+            );
+        }
+        let finalize_started_at = std::time::Instant::now();
+        for builder in builders.iter_mut() {
+            builder.finalize_for_reuse();
+        }
+        profile.builder_finalize_ms += finalize_started_at.elapsed();
+        profile.merge_rebuild_ms += phase_started_at.elapsed();
+    }
+
+    let reconstruct_started_at = std::time::Instant::now();
+    let minimized = reconstruct_dwa(start_state, &old_to_new, new_states);
+    profile.reconstruct_ms = reconstruct_started_at.elapsed();
+    profile.merge_rebuild_ms += reconstruct_started_at.elapsed();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][minimize_acyclic_fast] total_ms={:.3} input_states={} output_states={}",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            dwa.states.len(),
+            minimized.states.len(),
+        );
+    }
+    minimized
+}

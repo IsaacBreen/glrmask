@@ -12,7 +12,7 @@ use crate::automata::unweighted_u32::determinize::determinize as unweighted_dete
 use crate::automata::unweighted_u32::minimize::minimize as unweighted_minimize;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::minimize::{minimize, minimize_fast};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
@@ -37,7 +37,7 @@ impl Templates {
 
             // Determinize + minimize single-entry bundle too.
             let bundle_dwa = determinize(&bundle_nwa).expect("single bundle determinize failed");
-            let minimized = minimize(&bundle_dwa);
+            let minimized = minimize_fast(&bundle_dwa);
             return dwa_to_nwa(&minimized);
         }
 
@@ -94,7 +94,7 @@ impl Templates {
         let dwa_states = bundle_dwa.states.len();
 
         let min_started = std::time::Instant::now();
-        let minimized = minimize(&bundle_dwa);
+        let minimized = minimize_fast(&bundle_dwa);
         let min_ms = min_started.elapsed().as_secs_f64() * 1000.0;
         let min_states = minimized.states.len();
 
