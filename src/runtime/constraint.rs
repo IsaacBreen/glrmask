@@ -45,7 +45,7 @@ pub struct Constraint {
     /// Precomputed bitmask fragments for each internal token.
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
     /// for all original tokens that map to internal token `i`.
-    #[serde(skip)]
+    #[serde(default)]
     pub(crate) internal_token_buf_masks: Vec<Vec<(u16, u32)>>,
     #[serde(skip)]
     pub(crate) internal_token_dense_words: usize,

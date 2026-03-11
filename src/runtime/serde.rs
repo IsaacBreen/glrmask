@@ -66,9 +66,8 @@ impl Constraint {
     }
 
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        let mut constraint: Self = bincode::deserialize(bytes)
+        let constraint: Self = bincode::deserialize(bytes)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-        constraint.build_buf_masks();
         Ok(constraint)
     }
 }
