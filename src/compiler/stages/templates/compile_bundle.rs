@@ -24,18 +24,21 @@ impl Templates {
         terminal_weights: &BTreeMap<TerminalID, Weight>,
     ) -> NWA {
         if terminal_weights.len() == 1 {
-            let mut bundle = NWA::new(0, 0);
-            let start = bundle.add_state();
-            bundle.start_states.push(start);
+            let mut bundle_nwa = NWA::new(0, 0);
+            let start = bundle_nwa.add_state();
+            bundle_nwa.start_states.push(start);
 
             let (&terminal, weight) = terminal_weights.iter().next().expect("single-entry bundle");
             if !weight.is_empty() {
                 if let Some(template) = self.by_terminal.get(&terminal) {
-                    append_template(&mut bundle, start, template, weight);
+                    append_template(&mut bundle_nwa, start, template, weight);
                 }
             }
 
-            return bundle;
+            // Determinize + minimize single-entry bundle too.
+            let bundle_dwa = determinize(&bundle_nwa).expect("single bundle determinize failed");
+            let minimized = minimize(&bundle_dwa);
+            return dwa_to_nwa(&minimized);
         }
 
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
@@ -74,22 +77,37 @@ impl Templates {
         let unweighted_ms = unweighted_started.elapsed().as_secs_f64() * 1000.0;
 
         // Build the weighted NWA with one epsilon per weight group.
-        let mut bundle = NWA::new(0, 0);
-        let start = bundle.add_state();
-        bundle.start_states.push(start);
+        let mut bundle_nwa = NWA::new(0, 0);
+        let start = bundle_nwa.add_state();
+        bundle_nwa.start_states.push(start);
 
         for (weight, dfa) in &group_dfas {
-            append_template(&mut bundle, start, dfa, weight);
+            append_template(&mut bundle_nwa, start, dfa, weight);
         }
+
+        let nwa_states = bundle_nwa.states.len();
+
+        // Weighted determinize + minimize to ensure each bundle is minimal.
+        let det_started = std::time::Instant::now();
+        let bundle_dwa = determinize(&bundle_nwa).expect("bundle determinize failed");
+        let det_ms = det_started.elapsed().as_secs_f64() * 1000.0;
+        let dwa_states = bundle_dwa.states.len();
+
+        let min_started = std::time::Instant::now();
+        let minimized = minimize(&bundle_dwa);
+        let min_ms = min_started.elapsed().as_secs_f64() * 1000.0;
+        let min_states = minimized.states.len();
+
+        let result = dwa_to_nwa(&minimized);
 
         if profile_enabled {
             eprintln!(
-                "[glrmask/profile][bundle_detmin] entries={} groups={} nwa_states={} unweighted_ms={:.1}",
-                terminal_weights.len(), num_groups, bundle.states.len(), unweighted_ms,
+                "[glrmask/profile][bundle_detmin] entries={} groups={} nwa_states={} dwa_states={} min_states={} unweighted_ms={:.1} det_ms={:.1} min_ms={:.1}",
+                terminal_weights.len(), num_groups, nwa_states, dwa_states, min_states, unweighted_ms, det_ms, min_ms,
             );
         }
 
-        bundle
+        result
     }
 }
 

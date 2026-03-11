@@ -58,16 +58,16 @@ fn minimize_profile_enabled() -> bool {
 /// set of its target state.  This ensures transitions only carry tokens that
 /// can actually reach acceptance, enabling more state merges.
 ///
-/// Returns true if any weight was changed.
-pub fn push_weights(dwa: &mut DWA) -> bool {
+/// Returns (changed, topo_order, reachable_sets) so callers can reuse them.
+pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let n = dwa.states.len();
     if n == 0 {
-        return false;
+        return (false, Some(Vec::new()), Vec::new());
     }
 
     // 1. Topological order (Kahn's algorithm)
     let Some(topo) = compute_topo_order(dwa) else {
-        return false; // cyclic
+        return (false, None, Vec::new()); // cyclic
     };
 
     // 2. Backward reachable sets (reverse topo order = leaves first)
@@ -128,7 +128,7 @@ pub fn push_weights(dwa: &mut DWA) -> bool {
             changed = true;
         }
     }
-    changed
+    (changed, Some(topo), reachable)
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +387,20 @@ fn are_compatible(
 
         // If domains aren't disjoint, also check overlap weights and targets
         if !domain_disjoint {
+            // Fast path: if both full weights are equal, their overlap restrictions
+            // are also equal. Skip expensive intersection computation.
+            let weights_equal = match (w_u_full, w_v_full) {
+                (Some(wu), Some(wv)) => wu == wv,
+                (None, None) => true,
+                _ => false,
+            };
+
+            if weights_equal {
+                // Same weight → same intersection → compatible on this label.
+                // Targets already verified above (mapped_u == mapped_v or both empty weight).
+                continue;
+            }
+
             let w_u_overlap = w_u_full
                 .map(|w| w.intersection(&overlap))
                 .unwrap_or_else(Weight::empty);
@@ -565,6 +579,203 @@ fn greedy_coloring(adj: &[Vec<usize>]) -> Vec<usize> {
     colors
 }
 
+/// Partition refinement coloring: group candidates by (final_weight, transitions).
+/// Two candidates get the same color iff they have identical final weights and
+/// identical productive transitions (same labels, same mapped targets, same weights).
+///
+/// Phase 2: Merge colors whose needed-set unions are disjoint and whose target
+/// profiles don't conflict on any shared label. This recovers the "diamond"
+/// optimization that exploits disjoint token domains.
+fn partition_refine_coloring(
+    candidates: &[usize],
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+) -> Vec<usize> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let nc = candidates.len();
+
+    // --- Phase 1: Hash-based partition by exact signature ---
+    let mut hash_groups: rustc_hash::FxHashMap<u64, Vec<usize>> =
+        rustc_hash::FxHashMap::default();
+
+    for idx in 0..nc {
+        let c = candidates[idx];
+        let mut hasher = DefaultHasher::new();
+        dwa.states[c].final_weight.hash(&mut hasher);
+        for pt in &productive_transitions[c] {
+            pt.label.hash(&mut hasher);
+            let mapped = old_to_new[pt.target as usize];
+            mapped.hash(&mut hasher);
+            pt.weight.hash(&mut hasher);
+        }
+        productive_transitions[c].len().hash(&mut hasher);
+        let sig = hasher.finish();
+        hash_groups.entry(sig).or_default().push(idx);
+    }
+
+    // Assign initial colors (verify within hash groups for collisions)
+    let mut colors = vec![0usize; nc];
+    let mut next_color = 0usize;
+    // Per-color: representative candidate index, needed_union
+    let mut color_rep: Vec<usize> = Vec::new(); // candidate index of representative
+    let mut color_needed: Vec<Weight> = Vec::new();
+
+    for group in hash_groups.values() {
+        // Sub-group by actual equality
+        let mut sub_groups: Vec<Vec<usize>> = Vec::new();
+        'outer: for &idx in group {
+            let c = candidates[idx];
+            for sub in &mut sub_groups {
+                let rep = candidates[sub[0]];
+                if states_signature_equal(c, rep, dwa, old_to_new, productive_transitions) {
+                    sub.push(idx);
+                    continue 'outer;
+                }
+            }
+            sub_groups.push(vec![idx]);
+        }
+
+        for sub in &sub_groups {
+            let color = next_color;
+            next_color += 1;
+            // Compute needed_union for this color
+            let mut nu = Weight::empty();
+            for &idx in sub {
+                colors[idx] = color;
+                nu = nu.union(&needed[candidates[idx]]);
+            }
+            color_rep.push(candidates[sub[0]]);
+            color_needed.push(nu);
+        }
+    }
+
+    let num_initial_colors = next_color;
+    if num_initial_colors <= 1 {
+        return colors;
+    }
+
+    // --- Phase 2: Merge colors with disjoint needed sets + compatible targets ---
+    // For each color, the target_profile is the sorted (label, mapped_target) list.
+    // Two colors can merge if:
+    //   1. No label conflict: no shared label has different mapped targets
+    //   2. Their group's needed_union stays disjoint from each other
+
+    // Greedy grouping: iterate colors, try to place each in an existing group.
+    struct MergeGroup {
+        needed_union: Weight,
+        // For quick label-target conflict check, store the set of (label, target) from all
+        // member colors. Since disjoint-needed colors may have different target profiles,
+        // we accumulate the union.
+        target_map: rustc_hash::FxHashMap<i32, u32>, // label -> mapped_target (unique per group)
+        member_colors: Vec<usize>,
+    }
+
+    let mut groups: Vec<MergeGroup> = Vec::new();
+
+    for c in 0..num_initial_colors {
+        let rep = color_rep[c];
+        let cn = &color_needed[c];
+
+        // Build this color's target profile
+        let tp: Vec<(i32, u32)> = productive_transitions[rep]
+            .iter()
+            .map(|pt| (pt.label, old_to_new[pt.target as usize]))
+            .collect();
+
+        let mut placed = false;
+        for g in &mut groups {
+            // Check disjointness
+            if !cn.is_disjoint(&g.needed_union) {
+                continue;
+            }
+            // Check target compatibility
+            let mut compat = true;
+            for &(label, target) in &tp {
+                if let Some(&existing_target) = g.target_map.get(&label) {
+                    if existing_target != target {
+                        compat = false;
+                        break;
+                    }
+                }
+            }
+            if !compat {
+                continue;
+            }
+
+            // Merge into this group
+            g.needed_union = g.needed_union.union(cn);
+            for &(label, target) in &tp {
+                g.target_map.insert(label, target);
+            }
+            g.member_colors.push(c);
+            placed = true;
+            break;
+        }
+
+        if !placed {
+            let mut target_map = rustc_hash::FxHashMap::default();
+            for &(label, target) in &tp {
+                target_map.insert(label, target);
+            }
+            groups.push(MergeGroup {
+                needed_union: cn.clone(),
+                target_map,
+                member_colors: vec![c],
+            });
+        }
+    }
+
+    // Remap colors based on merged groups
+    let mut color_to_group = vec![0usize; num_initial_colors];
+    for (gid, g) in groups.iter().enumerate() {
+        for &c in &g.member_colors {
+            color_to_group[c] = gid;
+        }
+    }
+    for idx in 0..nc {
+        colors[idx] = color_to_group[colors[idx]];
+    }
+
+    colors
+}
+
+/// Check if two states have identical signatures (final weight + transitions).
+fn states_signature_equal(
+    u: usize,
+    v: usize,
+    dwa: &DWA,
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+) -> bool {
+    // Check final weights
+    if dwa.states[u].final_weight != dwa.states[v].final_weight {
+        return false;
+    }
+
+    // Check productive transitions
+    let trans_u = &productive_transitions[u];
+    let trans_v = &productive_transitions[v];
+    if trans_u.len() != trans_v.len() {
+        return false;
+    }
+    for (tu, tv) in trans_u.iter().zip(trans_v.iter()) {
+        if tu.label != tv.label {
+            return false;
+        }
+        if old_to_new[tu.target as usize] != old_to_new[tv.target as usize] {
+            return false;
+        }
+        if tu.weight != tv.weight {
+            return false;
+        }
+    }
+    true
+}
+
 fn try_all_compatible_height_0_coloring(
     candidates: &[usize],
     dwa: &DWA,
@@ -618,7 +829,7 @@ struct MergedStateBuilder {
     final_weight_builder: WeightBuilder,
     needed: Weight,
     needed_builder: WeightBuilder,
-    transitions: Vec<(Label, u32, WeightBuilder)>,
+    transitions: rustc_hash::FxHashMap<Label, (u32, WeightBuilder)>,
 }
 
 impl Default for MergedStateBuilder {
@@ -628,7 +839,7 @@ impl Default for MergedStateBuilder {
             final_weight_builder: WeightBuilder::new(),
             needed: Weight::empty(),
             needed_builder: WeightBuilder::new(),
-            transitions: Vec::new(),
+            transitions: rustc_hash::FxHashMap::default(),
         }
     }
 }
@@ -643,17 +854,19 @@ impl MergedStateBuilder {
     }
 
     fn add_transition(&mut self, label: Label, target: u32, weight: Weight) {
-        for (existing_label, existing_target, existing_weight) in &mut self.transitions {
-            if *existing_label == label {
+        use std::collections::hash_map::Entry;
+        match self.transitions.entry(label) {
+            Entry::Occupied(mut entry) => {
+                let (existing_target, existing_weight) = entry.get_mut();
                 debug_assert_eq!(*existing_target, target);
                 existing_weight.union_weight(&weight);
-                return;
+            }
+            Entry::Vacant(entry) => {
+                let mut weight_builder = WeightBuilder::new();
+                weight_builder.union_weight(&weight);
+                entry.insert((target, weight_builder));
             }
         }
-
-        let mut weight_builder = WeightBuilder::new();
-        weight_builder.union_weight(&weight);
-        self.transitions.push((label, target, weight_builder));
     }
 
     fn finalize_for_reuse(&mut self) {
@@ -721,7 +934,7 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
             if !b.final_weight.is_empty() {
                 state.final_weight = Some(b.final_weight);
             }
-            for (lbl, target, weight_builder) in b.transitions {
+            for (lbl, (target, weight_builder)) in b.transitions {
                 let weight = weight_builder.build();
                 if !weight.is_empty() {
                     state.transitions.insert(lbl, (target, weight));
@@ -756,14 +969,17 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     // Clone and push weights
     let phase_started_at = std::time::Instant::now();
     let mut pushed = dwa.clone();
-    push_weights(&mut pushed);
+    let (_, topo_from_push, _reachable_pre_push) = push_weights(&mut pushed);
     profile.push_weights_ms = phase_started_at.elapsed();
 
     let phase_started_at = std::time::Instant::now();
-    let Some(topo) = compute_topo_order(&pushed) else {
-        return dwa.clone(); // cyclic — fall back
+    // Reuse topo order from push_weights (graph structure unchanged by push).
+    let topo = match topo_from_push {
+        Some(t) => t,
+        None => return dwa.clone(), // cyclic — fall back
     };
 
+    // Recompute needed sets on the pushed DWA (push may have changed weights).
     let needed = compute_needed_sets(&pushed, &topo);
     let productive_transitions = compute_productive_transitions(&pushed, &needed);
     let heights = compute_heights(&pushed, &topo);
@@ -853,7 +1069,8 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
             continue;
         }
 
-        // Build incompatibility graph and color it
+        // Build incompatibility graph and color it.
+        // For large buckets, try sparse overlap filter first.
         let graph_started_at = std::time::Instant::now();
         let adj = build_incompatibility_graph_sparse(
             &pushed,

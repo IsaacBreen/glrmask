@@ -590,15 +590,21 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_report(
     let phase_started_at = std::time::Instant::now();
     let parser_dwa_pre_minimize = determinize(&parser_nwa)
         .expect("parser NWA determinization failed despite acyclic terminal/template composition");
+    let det_elapsed = phase_started_at.elapsed();
     report.parser_dwa_pre_minimize = collect_weighted_dwa_stats(&parser_dwa_pre_minimize);
+    let min_started_at = std::time::Instant::now();
     let core_dwa = minimize(&parser_dwa_pre_minimize);
+    let min_elapsed = min_started_at.elapsed();
     report.determinize_minimize_time = phase_started_at.elapsed();
     report.parser_dwa_minimized = collect_weighted_dwa_stats(&core_dwa);
     report.total_time = total_started_at.elapsed();
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} dwa_states={}",
+            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} det_ms={:.3} min_ms={:.3} pre_min_states={} dwa_states={}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
+            det_elapsed.as_secs_f64() * 1000.0,
+            min_elapsed.as_secs_f64() * 1000.0,
+            parser_dwa_pre_minimize.states.len(),
             core_dwa.states.len(),
         );
         eprintln!(
