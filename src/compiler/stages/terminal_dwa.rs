@@ -594,6 +594,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     original_token_to_internal: &'tok [u32],
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     reachable_weight_cache: HashMap<usize, Weight>,
+    leaf_weight_cache: HashMap<Vec<u32>, Weight>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
 }
@@ -624,6 +625,21 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             self.original_token_to_internal,
         );
         self.reachable_weight_cache.insert(cache_key, weight.clone());
+        weight
+    }
+
+    fn cached_leaf_weight(&mut self, token_ids: Vec<u32>) -> Weight {
+        if let Some(weight) = self.leaf_weight_cache.get(&token_ids) {
+            return weight.clone();
+        }
+
+        let mapped = RangeSetBlaze::from_iter(token_ids.iter().copied().map(|token_id| token_id..=token_id));
+        let token_ranges: Vec<_> = mapped.ranges().collect();
+        let weight = Weight::from_compact_ranges(std::iter::once((
+            0..=self.num_tsids - 1,
+            token_ranges,
+        )));
+        self.leaf_weight_cache.insert(token_ids, weight.clone());
         weight
     }
 
@@ -677,13 +693,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 }
                 token_ids.sort_unstable();
                 token_ids.dedup();
-                let mapped =
-                    RangeSetBlaze::from_iter(token_ids.into_iter().map(|token_id| token_id..=token_id));
-                let token_ranges: Vec<_> = mapped.ranges().collect();
-                let weight = Weight::from_compact_ranges(std::iter::once((
-                    0..=self.num_tsids - 1,
-                    token_ranges,
-                )));
+                let weight = self.cached_leaf_weight(token_ids);
                 self.transition_buffer
                     .entry((from as u32, label_idx as i32, self.leaf_state))
                     .and_modify(|existing| *existing = existing.union(&weight))
@@ -985,6 +995,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
+        leaf_weight_cache: HashMap::new(),
         transition_buffer: BTreeMap::new(),
         epsilon_buffer: BTreeMap::new(),
     };
