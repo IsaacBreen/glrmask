@@ -4,6 +4,14 @@ use std::collections::BTreeMap;
 use crate::compiler::debug::artifacts::CompileDebug;
 use crate::compiler::glr::analysis::EOF;
 
+const VOCAB_INLINE_LIMIT: usize = 32;
+const VOCAB_HEAD_COUNT: usize = 16;
+const VOCAB_TAIL_COUNT: usize = 4;
+const ID_SAMPLE_HEAD: usize = 8;
+const ID_SAMPLE_TAIL: usize = 2;
+const TOKEN_SAMPLE_LIMIT: usize = 3;
+const TOKEN_REPR_CHAR_LIMIT: usize = 48;
+
 impl CompileDebug {
     fn terminal_name(
         &self,
@@ -40,9 +48,118 @@ impl CompileDebug {
     }
 }
 
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return text.to_string();
+        };
+        out.push(ch);
+    }
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
+fn token_repr(bytes: &[u8]) -> String {
+    truncate_chars(
+        &format!("{:?}", String::from_utf8_lossy(bytes)),
+        TOKEN_REPR_CHAR_LIMIT,
+    )
+}
+
+fn compress_sorted_ids(ids: &[u32]) -> Vec<(u32, u32)> {
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans = Vec::new();
+    let mut start = sorted[0];
+    let mut end = sorted[0];
+    for id in sorted.into_iter().skip(1) {
+        if id == end.saturating_add(1) {
+            end = id;
+        } else {
+            spans.push((start, end));
+            start = id;
+            end = id;
+        }
+    }
+    spans.push((start, end));
+    spans
+}
+
+fn format_id_span(span: (u32, u32)) -> String {
+    if span.0 == span.1 {
+        span.0.to_string()
+    } else {
+        format!("{}..={}", span.0, span.1)
+    }
+}
+
+fn format_id_summary(ids: &[u32]) -> String {
+    if ids.is_empty() {
+        return "count=0 []".to_string();
+    }
+
+    let spans = compress_sorted_ids(ids);
+    let span_text = if spans.len() <= ID_SAMPLE_HEAD + ID_SAMPLE_TAIL {
+        spans
+            .into_iter()
+            .map(format_id_span)
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        let mut parts: Vec<String> = spans
+            .iter()
+            .take(ID_SAMPLE_HEAD)
+            .copied()
+            .map(format_id_span)
+            .collect();
+        parts.push("...".to_string());
+        parts.extend(
+            spans
+                .iter()
+                .rev()
+                .take(ID_SAMPLE_TAIL)
+                .copied()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(format_id_span),
+        );
+        parts.join(", ")
+    };
+
+    format!("count={} [{}]", ids.len(), span_text)
+}
+
+fn sample_token_reprs(token_ids: &[u32], vocab_by_id: &BTreeMap<u32, &[u8]>) -> Option<String> {
+    let samples: Vec<String> = token_ids
+        .iter()
+        .filter_map(|id| vocab_by_id.get(id).copied().map(token_repr))
+        .take(TOKEN_SAMPLE_LIMIT)
+        .collect();
+    if samples.is_empty() {
+        None
+    } else {
+        Some(samples.join(", "))
+    }
+}
+
 impl std::fmt::Display for CompileDebug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        
+        let vocab_by_id: BTreeMap<u32, &[u8]> = self
+            .vocab_entries
+            .iter()
+            .map(|(id, bytes)| (*id, bytes.as_slice()))
+            .collect();
+
         writeln!(f, "═══ GRAMMAR (original) ═══")?;
         writeln!(f, "Start: {}", self.nonterminal_str(&self.grammar_def, self.grammar_def.start))?;
         writeln!(f, "Terminals:")?;
@@ -137,19 +254,42 @@ impl std::fmt::Display for CompileDebug {
         if let Some(eos) = self.eos_token_id {
             writeln!(f, "EOS token: {eos}")?;
         }
-        for (id, bytes) in &self.vocab_entries {
-            let repr = String::from_utf8_lossy(bytes);
-            writeln!(f, "  tok{id}: {repr:?} ({} bytes)", bytes.len())?;
+        let show_all_vocab = self.vocab_entries.len() <= VOCAB_INLINE_LIMIT;
+        for (idx, (id, bytes)) in self.vocab_entries.iter().enumerate() {
+            let show_entry = show_all_vocab
+                || idx < VOCAB_HEAD_COUNT
+                || idx >= self.vocab_entries.len().saturating_sub(VOCAB_TAIL_COUNT);
+            if show_entry {
+                writeln!(
+                    f,
+                    "  tok{id}: {} ({} bytes)",
+                    token_repr(bytes),
+                    bytes.len()
+                )?;
+            } else if idx == VOCAB_HEAD_COUNT {
+                let omitted = self
+                    .vocab_entries
+                    .len()
+                    .saturating_sub(VOCAB_HEAD_COUNT + VOCAB_TAIL_COUNT);
+                writeln!(
+                    f,
+                    "  ... {omitted} token(s) omitted; showing head/tail sample ..."
+                )?;
+            }
         }
 
         writeln!(f, "\n═══ TOKENIZER STATE ID MAPPING ({}) ═══", self.id_map.tokenizer_states.num_internal_ids())?;
         for (internal, dfa_states) in self.id_map.tokenizer_states.internal_to_originals.iter().enumerate() {
-            writeln!(f, "  TSID {internal} ↔ DFA states {:?}", dfa_states)?;
+            writeln!(f, "  TSID {internal} ↔ DFA states {}", format_id_summary(dfa_states))?;
         }
 
         writeln!(f, "\n═══ VOCAB TOKEN ID MAPPING ({}) ═══", self.id_map.vocab_tokens.num_internal_ids())?;
         for (internal, token_ids) in self.id_map.vocab_tokens.internal_to_originals.iter().enumerate() {
-            writeln!(f, "  token-class {internal} ↔ original token IDs {:?}", token_ids)?;
+            write!(f, "  token-class {internal} ↔ original token IDs {}", format_id_summary(token_ids))?;
+            if let Some(samples) = sample_token_reprs(token_ids, &vocab_by_id) {
+                write!(f, " sample=[{samples}]")?;
+            }
+            writeln!(f)?;
         }
 
         writeln!(f, "\n═══ TERMINAL CHARACTERIZATIONS ═══")?;
@@ -212,10 +352,7 @@ impl std::fmt::Display for CompileDebug {
         let token_names: BTreeMap<u32, String> = self
             .vocab_entries
             .iter()
-            .map(|(id, bytes)| {
-                let repr = String::from_utf8_lossy(bytes);
-                (*id, format!("{repr:?}"))
-            })
+            .map(|(id, bytes)| (*id, token_repr(bytes)))
             .collect();
 
         writeln!(f, "\n═══ TERMINAL NWA — after build (raw) ═══")?;
