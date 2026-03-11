@@ -969,7 +969,6 @@ fn merge_state_into_builder(
     dwa: &DWA,
     needed: &[Weight],
     old_to_new: &[u32],
-    completed: &[MergedStateBuilder],
     builders: &mut [MergedStateBuilder],
     profile: &mut MinimizeAcyclicProfile,
 ) {
@@ -999,16 +998,11 @@ fn merge_state_into_builder(
         if target_new == UNMAPPED {
             continue;
         }
-        let needed_at_target = &completed[target_new as usize].needed;
-        let w_effective = if needed_at_target.is_full() {
-            w_orig.clone()
-        } else if let Some((start, end, tokens)) = w_orig.single_compact_entry_parts() {
-            needed_at_target.intersect_single_parts(start, end, &tokens)
-        } else {
-            w_orig.intersection(needed_at_target)
-        };
-        if !w_effective.is_empty() {
-            builder.add_transition(label, target_new, w_effective);
+        // After push_weights, w_orig is already restricted to reachable[target].
+        // The merged target's needed = union(reachable[s] for all s merged into target_new),
+        // which is a superset of reachable[target]. So w_orig ∩ merged_needed = w_orig.
+        if !w_orig.is_empty() {
+            builder.add_transition(label, target_new, w_orig.clone());
         }
     }
     profile.merge_transition_loop_ms += phase_started_at.elapsed();
@@ -1139,7 +1133,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
 
             new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
 
-            let (completed, builders) = new_states.split_at_mut(base_new_id as usize);
+            let builders = &mut new_states[base_new_id as usize..];
             for &candidate in candidates {
                 merge_state_into_builder(
                     candidate,
@@ -1147,7 +1141,6 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                     &pushed,
                     &needed,
                     &old_to_new,
-                    completed,
                     builders,
                     &mut profile,
                 );
@@ -1197,7 +1190,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
 
         // Merge states into builders
-        let (completed, builders) = new_states.split_at_mut(base_new_id as usize);
+        let builders = &mut new_states[base_new_id as usize..];
         for (idx, &color) in coloring.iter().enumerate() {
             merge_state_into_builder(
                 candidates[idx],
@@ -1205,7 +1198,6 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                 &pushed,
                 &needed,
                 &old_to_new,
-                completed,
                 builders,
                 &mut profile,
             );
