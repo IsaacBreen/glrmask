@@ -860,9 +860,15 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     if n == 0 {
         return;
     }
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
     let graph_profile_enabled = std::env::var_os("GLRMASK_PROFILE_FINALITY_GRAPH").is_some();
+    let t0 = std::time::Instant::now();
     let topo_order = build_finality_topo_order(nwa, graph_profile_enabled);
+    let topo_ms = t0.elapsed();
+    let t1 = std::time::Instant::now();
     let preds = build_finality_predecessors(nwa);
+    let preds_ms = t1.elapsed();
+    let total_pred_edges: usize = preds.iter().map(|v| v.len()).sum();
 
     let mut future_final = vec![None::<Weight>; n];
     for state_id in 0..n {
@@ -874,14 +880,27 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
         }
     }
 
+    let t2 = std::time::Instant::now();
     if let Some(topo_order) = topo_order.as_deref() {
         apply_finality_fixpoint_acyclic(nwa, &preds, &mut future_final, topo_order);
     } else {
         apply_finality_fixpoint_worklist(nwa, &preds, &mut future_final);
     }
+    let fixpoint_ms = t2.elapsed();
 
     for (state_id, final_weight) in future_final.into_iter().enumerate() {
         nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
+    }
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] finality_detail topo_ms={:.3} preds_ms={:.3} fixpoint_ms={:.3} total_pred_edges={} states={}",
+            topo_ms.as_secs_f64() * 1000.0,
+            preds_ms.as_secs_f64() * 1000.0,
+            fixpoint_ms.as_secs_f64() * 1000.0,
+            total_pred_edges,
+            n,
+        );
     }
 }
 
