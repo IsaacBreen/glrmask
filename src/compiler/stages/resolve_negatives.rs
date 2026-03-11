@@ -388,10 +388,10 @@ pub(crate) fn compute_cancellations_range(
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_CANCELLATIONS").is_some();
     let mut profile = profile_enabled.then(CancellationProfile::default);
 
-    let mut queries: FxHashMap<u32, FxHashMap<QueryKey, Weight>> = FxHashMap::default();
+    let mut queries: Vec<Option<FxHashMap<QueryKey, Weight>>> = vec![None; n as usize];
     let mut worklist: VecDeque<(u32, u32, i32)> = VecDeque::new();
     let mut in_queue: FxHashSet<(u32, u32, i32)> = FxHashSet::default();
-    let mut new_eps_from: FxHashMap<u32, FxHashMap<u32, Weight>> = FxHashMap::default();
+    let mut new_eps_from: Vec<Option<FxHashMap<u32, Weight>>> = vec![None; n as usize];
 
     let enqueue = |worklist: &mut VecDeque<(u32, u32, i32)>,
                    in_queue: &mut FxHashSet<(u32, u32, i32)>,
@@ -418,9 +418,8 @@ pub(crate) fn compute_cancellations_range(
                     continue;
                 }
                 let query_key = (a, c);
-                let query_weight = queries
-                    .entry(*b)
-                    .or_default()
+                let query_weight = queries[*b as usize]
+                    .get_or_insert_with(FxHashMap::default)
                     .entry(query_key)
                     .or_insert_with(Weight::empty);
                 if !w_ab.is_subset(query_weight) {
@@ -439,16 +438,16 @@ pub(crate) fn compute_cancellations_range(
             profile.worklist_pops += 1;
         }
         in_queue.remove(&(s, a, c));
-        let Some(w_as) = queries.get(&s).and_then(|m| m.get(&(a, c))).cloned() else {
+        let Some(w_as) = queries[s as usize].as_ref().and_then(|m| m.get(&(a, c))).cloned() else {
             continue;
         };
         let w_as_single = w_as.single_compact_entry_parts();
 
         let existing_eps_started_at = profile_enabled.then(std::time::Instant::now);
-        if let Some(epsilons_from_s) = new_eps_from.get(&s) {
+        if let Some(epsilons_from_s) = new_eps_from[s as usize].as_ref() {
             let propagations: Vec<(u32, Weight)> = epsilons_from_s
                 .iter()
-                .filter_map(|(&target, eps_w)| {
+                .filter_map(|(&target, eps_w): (&u32, &Weight)| {
                     if let Some(profile) = profile.as_mut() {
                         profile.existing_eps_edges += 1;
                     }
@@ -470,9 +469,8 @@ pub(crate) fn compute_cancellations_range(
             for (target, prop_w) in propagations {
                 let query_key = (a, c);
                 let existing_eps_merge_started_at = profile_enabled.then(std::time::Instant::now);
-                let query_weight = queries
-                    .entry(target)
-                    .or_default()
+                let query_weight = queries[target as usize]
+                    .get_or_insert_with(FxHashMap::default)
                     .entry(query_key)
                     .or_insert_with(Weight::empty);
                 if !prop_w.is_subset(query_weight) {
@@ -492,10 +490,10 @@ pub(crate) fn compute_cancellations_range(
 
         let mut check_cancellations = |target: u32,
                            w_st: &Weight,
-                           queries: &mut FxHashMap<u32, FxHashMap<QueryKey, Weight>>,
+                           queries: &mut Vec<Option<FxHashMap<QueryKey, Weight>>>,
                            worklist: &mut VecDeque<(u32, u32, i32)>,
                            in_queue: &mut FxHashSet<(u32, u32, i32)>,
-                           new_eps_from: &mut FxHashMap<u32, FxHashMap<u32, Weight>>| {
+                           new_eps_from: &mut Vec<Option<FxHashMap<u32, Weight>>>| {
             let check_started_at = profile_enabled.then(std::time::Instant::now);
             if let Some(profile) = profile.as_mut() {
                 profile.check_calls += 1;
@@ -508,9 +506,8 @@ pub(crate) fn compute_cancellations_range(
                 return;
             }
 
-            let eps_weight = new_eps_from
-                .entry(a)
-                .or_default()
+            let eps_weight = new_eps_from[a as usize]
+                .get_or_insert_with(FxHashMap::default)
                 .entry(target)
                 .or_insert_with(Weight::empty);
             if !merge_weight(eps_weight, new_eps_w) {
@@ -524,7 +521,7 @@ pub(crate) fn compute_cancellations_range(
             }
 
             let queries_at_a_started_at = profile_enabled.then(std::time::Instant::now);
-            let queries_at_a = queries.get(&a).cloned();
+            let queries_at_a = queries[a as usize].clone();
             if let (Some(profile), Some(started_at)) = (profile.as_mut(), queries_at_a_started_at) {
                 profile.queries_at_a_clone_ms += started_at.elapsed();
                 if queries_at_a.is_some() {
@@ -546,9 +543,8 @@ pub(crate) fn compute_cancellations_range(
                         profile.queries_at_a_nonempty += 1;
                     }
                     let query_key = (a_prime, c_prime);
-                    let query_weight = queries
-                        .entry(target)
-                        .or_default()
+                    let query_weight = queries[target as usize]
+                        .get_or_insert_with(FxHashMap::default)
                         .entry(query_key)
                         .or_insert_with(Weight::empty);
                     if !prop_w.is_subset(query_weight) {
@@ -595,9 +591,8 @@ pub(crate) fn compute_cancellations_range(
                 continue;
             }
             let query_key = (a, c);
-            let query_weight = queries
-                .entry(*t)
-                .or_default()
+            let query_weight = queries[*t as usize]
+                .get_or_insert_with(FxHashMap::default)
                 .entry(query_key)
                 .or_insert_with(Weight::empty);
             if !prop_w.is_subset(query_weight) {
@@ -611,10 +606,11 @@ pub(crate) fn compute_cancellations_range(
     }
 
     let mut result = Vec::new();
-    for (from, targets) in new_eps_from {
+    for (from, targets_opt) in new_eps_from.into_iter().enumerate() {
+        let Some(targets) = targets_opt else { continue; };
         for (to, w) in targets {
             if !w.is_empty() {
-                result.push((from, to, w));
+                result.push((from as u32, to, w));
             }
         }
     }
