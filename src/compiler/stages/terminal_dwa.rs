@@ -592,12 +592,25 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     representative_initial_state: u32,
     representative_state_by_original: &'tok [u32],
     original_token_to_internal: &'tok [u32],
-    leaf_token_ids_buffer: BTreeMap<(u32, i32), Vec<u32>>,
+    leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
+    fn buffer_leaf_token_id(&mut self, source: u32, label: TerminalID, internal_token_id: u32) {
+        let source_idx = source as usize;
+        if source_idx >= self.leaf_token_ids_buffer.len() {
+            self.leaf_token_ids_buffer.resize_with(source_idx + 1, Vec::new);
+        }
+        let labels = &mut self.leaf_token_ids_buffer[source_idx];
+        let label_idx = label as usize;
+        if label_idx >= labels.len() {
+            labels.resize_with(label_idx + 1, Vec::new);
+        }
+        labels[label_idx].push(internal_token_id);
+    }
+
     fn add_leaf_token_from_sources(
         &mut self,
         sources: &[u32],
@@ -611,10 +624,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         for &source in sources {
-            self.leaf_token_ids_buffer
-                .entry((source, label as i32))
-                .or_default()
-                .push(internal_token_id);
+            self.buffer_leaf_token_id(source, label, internal_token_id);
         }
     }
 
@@ -641,16 +651,28 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn flush_transition_buffer(&mut self) {
-        for ((from, label), mut token_ids) in std::mem::take(&mut self.leaf_token_ids_buffer) {
-            token_ids.sort_unstable();
-            token_ids.dedup();
-            let mapped = RangeSetBlaze::from_iter(token_ids.into_iter().map(|token_id| token_id..=token_id));
-            let token_ranges: Vec<_> = mapped.ranges().collect();
-            let weight = Weight::from_compact_ranges(std::iter::once((0..=self.num_tsids - 1, token_ranges)));
-            self.transition_buffer
-                .entry((from, label, self.leaf_state))
-                .and_modify(|existing| *existing = existing.union(&weight))
-                .or_insert(weight);
+        for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
+            .into_iter()
+            .enumerate()
+        {
+            for (label_idx, mut token_ids) in labels_vec.into_iter().enumerate() {
+                if token_ids.is_empty() {
+                    continue;
+                }
+                token_ids.sort_unstable();
+                token_ids.dedup();
+                let mapped =
+                    RangeSetBlaze::from_iter(token_ids.into_iter().map(|token_id| token_id..=token_id));
+                let token_ranges: Vec<_> = mapped.ranges().collect();
+                let weight = Weight::from_compact_ranges(std::iter::once((
+                    0..=self.num_tsids - 1,
+                    token_ranges,
+                )));
+                self.transition_buffer
+                    .entry((from as u32, label_idx as i32, self.leaf_state))
+                    .and_modify(|existing| *existing = existing.union(&weight))
+                    .or_insert(weight);
+            }
         }
 
         for ((from, target), weight) in std::mem::take(&mut self.epsilon_buffer) {
@@ -948,7 +970,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         representative_initial_state,
         representative_state_by_original: &representative_state_by_original,
         original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
-        leaf_token_ids_buffer: BTreeMap::new(),
+        leaf_token_ids_buffer: Vec::new(),
         transition_buffer: BTreeMap::new(),
         epsilon_buffer: BTreeMap::new(),
     };
