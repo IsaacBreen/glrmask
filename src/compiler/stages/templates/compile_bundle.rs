@@ -4,7 +4,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use rustc_hash::FxHashMap;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
@@ -90,20 +91,10 @@ impl Templates {
         }
         let unweighted_ms = unweighted_started.elapsed().as_secs_f64() * 1000.0;
 
-        // Build the weighted NWA with one epsilon per weight group.
-        let mut bundle_nwa = NWA::new(0, 0);
-        let start = bundle_nwa.add_state();
-        bundle_nwa.start_states.push(start);
-
-        for (weight, dfa) in &group_dfas {
-            append_template(&mut bundle_nwa, start, dfa, weight);
-        }
-
-        let nwa_states = bundle_nwa.states.len();
-
-        // Weighted determinize + minimize to ensure each bundle is minimal.
+        // Specialized weighted determinize: product of unweighted group DFAs.
+        // Avoids the generic determinize's Weight intersection/clone overhead.
         let det_started = std::time::Instant::now();
-        let bundle_dwa = determinize(&bundle_nwa).expect("bundle determinize failed");
+        let bundle_dwa = determinize_bundle_groups(&group_dfas);
         let det_ms = det_started.elapsed().as_secs_f64() * 1000.0;
         let dwa_states = bundle_dwa.states.len();
 
@@ -118,13 +109,163 @@ impl Templates {
 
         if profile_enabled {
             eprintln!(
-                "[glrmask/profile][bundle_detmin] entries={} groups={} nwa_states={} dwa_states={} min_states={} unweighted_ms={:.1} det_ms={:.1} min_ms={:.1} conv_ms={:.1}",
-                terminal_weights.len(), num_groups, nwa_states, dwa_states, min_states, unweighted_ms, det_ms, min_ms, conv_ms,
+                "[glrmask/profile][bundle_detmin] entries={} groups={} dwa_states={} min_states={} unweighted_ms={:.1} det_ms={:.1} min_ms={:.1} conv_ms={:.1}",
+                terminal_weights.len(), num_groups, dwa_states, min_states, unweighted_ms, det_ms, min_ms, conv_ms,
             );
         }
 
         result
     }
+}
+
+/// Specialized weighted determinize for bundles.
+///
+/// Instead of running generic NWA determinize (which clones weights for every
+/// transition), this builds the product of unweighted group DFAs and computes
+/// weights from precomputed effective-weight tables. O(states × labels × groups)
+/// with no Weight intersection operations in the inner loop.
+fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
+    use crate::automata::weighted_u32::dwa::{DWA, DWAState};
+
+    let n = groups.len();
+    if n == 0 {
+        return DWA::new(0, 0);
+    }
+
+    const DEAD: u32 = u32::MAX;
+
+    // Precompute normalized weights.
+    // w_i_norm = w_i ∪ complement(union_all)
+    let union_all = Weight::union_all(groups.iter().map(|(w, _)| *w));
+    let complement_all = union_all.complement();
+    let norms: Vec<Weight> = groups
+        .iter()
+        .map(|(w, _)| (*w).union(&complement_all))
+        .collect();
+
+    // Cache of effective weights per alive-set.
+    // Key: sorted list of alive group indices. Value: effective weight per group.
+    let mut alive_cache: FxHashMap<Vec<usize>, Vec<Weight>> = FxHashMap::default();
+
+    let compute_effective = |alive: &[usize], norms: &[Weight]| -> Vec<Weight> {
+        let alive_union = Weight::union_all(alive.iter().map(|&i| &norms[i]));
+        let complement_alive = alive_union.complement();
+        (0..n)
+            .map(|i| {
+                if alive.contains(&i) {
+                    norms[i].union(&complement_alive)
+                } else {
+                    Weight::empty()
+                }
+            })
+            .collect()
+    };
+
+    // Product state: [group0_state, group1_state, ...] with DEAD for inactive.
+    let start_key: Vec<u32> = groups.iter().map(|(_, dfa)| dfa.start_state).collect();
+
+    let mut dwa = DWA::new(0, 0);
+    let mut state_map: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<Vec<u32>> = VecDeque::new();
+
+    state_map.insert(start_key.clone(), 0);
+    worklist.push_back(start_key.clone());
+
+    let mut is_start = true;
+
+    // Reusable buffers.
+    let mut all_labels: BTreeSet<i32> = BTreeSet::new();
+    let mut next_state: Vec<u32> = vec![DEAD; n];
+
+    while let Some(product_state) = worklist.pop_front() {
+        let dwa_state = state_map[&product_state];
+
+        // Determine alive groups and get effective weights.
+        let alive: Vec<usize> = (0..n)
+            .filter(|&i| product_state[i] != DEAD)
+            .collect();
+
+        let effective: &Vec<Weight> = if is_start {
+            // Start state: use raw group weights (before normalization).
+            // We store temporarily and won't cache this.
+            // This is only hit once so perf doesn't matter.
+            &*alive_cache.entry(vec![usize::MAX]).or_insert_with(|| {
+                groups.iter().map(|(w, _)| (*w).clone()).collect()
+            })
+        } else {
+            alive_cache
+                .entry(alive.clone())
+                .or_insert_with(|| compute_effective(&alive, &norms))
+        };
+
+        // Final weight.
+        let mut final_w = Weight::empty();
+        for &i in &alive {
+            if groups[i].1.states[product_state[i] as usize].is_accepting {
+                final_w = final_w.union(&effective[i]);
+            }
+        }
+        if !final_w.is_empty() {
+            dwa.set_final_weight(dwa_state, final_w);
+        }
+
+        // Collect all labels from alive groups.
+        all_labels.clear();
+        for &i in &alive {
+            for &label in groups[i].1.states[product_state[i] as usize]
+                .transitions
+                .keys()
+            {
+                all_labels.insert(label);
+            }
+        }
+
+        // Compute transitions.
+        for &label in &all_labels {
+            // Compute next product state.
+            for i in 0..n {
+                next_state[i] = if product_state[i] == DEAD {
+                    DEAD
+                } else if let Some(&target) = groups[i]
+                    .1
+                    .states[product_state[i] as usize]
+                    .transitions
+                    .get(&label)
+                {
+                    target
+                } else {
+                    DEAD
+                };
+            }
+
+            // Edge weight = union of effective weights for groups active in target.
+            let mut edge_w = Weight::empty();
+            for i in 0..n {
+                if next_state[i] != DEAD {
+                    edge_w = edge_w.union(&effective[i]);
+                }
+            }
+            if edge_w.is_empty() {
+                continue;
+            }
+
+            let to_dwa = if let Some(&existing) = state_map.get(&*next_state) {
+                existing
+            } else {
+                let key = next_state.clone();
+                let new_id = dwa.add_state();
+                state_map.insert(key.clone(), new_id);
+                worklist.push_back(key);
+                new_id
+            };
+
+            dwa.add_transition(dwa_state, label, to_dwa, edge_w);
+        }
+
+        is_start = false;
+    }
+
+    dwa
 }
 
 /// Union multiple unweighted DFAs into one DFA via NFA union + determinize + minimize.
