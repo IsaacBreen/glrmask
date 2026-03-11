@@ -594,6 +594,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     original_token_to_internal: &'tok [u32],
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     reachable_weight_cache: HashMap<usize, Weight>,
+    pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
     leaf_weight_cache: HashMap<Vec<u32>, Weight>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
@@ -786,25 +787,36 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let continuation_weight = if next_pos == segment_bytes.len()
                             && child_node.has_token()
                         {
-                            let mut remaining = child_node.reachable_token_ids().clone();
-                            remaining.remove(child_token_id as usize);
-                            if let Some(end_state) = exec_end_state {
-                                let matches_at_end = possible_matches_at_end.get_or_insert_with(|| {
-                                    self.possible_matches
-                                        .possible_matches_for_node(child_node, end_state)
-                                });
-                                if let Some(pm) = matches_at_end.get(&matched.id) {
-                                    subtract_possible_matches(&mut remaining, pm);
+                            let cache_key = (
+                                child_node as *const VocabPrefixTreeNode as usize,
+                                exec_end_state.unwrap_or(u32::MAX),
+                                matched.id,
+                            );
+                            if let Some(weight) = self.pruned_weight_cache.get(&cache_key) {
+                                weight.clone()
+                            } else {
+                                let mut remaining = child_node.reachable_token_ids().clone();
+                                remaining.remove(child_token_id as usize);
+                                if let Some(end_state) = exec_end_state {
+                                    let matches_at_end = possible_matches_at_end.get_or_insert_with(|| {
+                                        self.possible_matches
+                                            .possible_matches_for_node(child_node, end_state)
+                                    });
+                                    if let Some(pm) = matches_at_end.get(&matched.id) {
+                                        subtract_possible_matches(&mut remaining, pm);
+                                    }
                                 }
+                                if remaining.is_empty() {
+                                    continue;
+                                }
+                                let weight = token_set_weight_all_tsids(
+                                    self.num_tsids,
+                                    &remaining,
+                                    self.original_token_to_internal,
+                                );
+                                self.pruned_weight_cache.insert(cache_key, weight.clone());
+                                weight
                             }
-                            if remaining.is_empty() {
-                                continue;
-                            }
-                            token_set_weight_all_tsids(
-                                self.num_tsids,
-                                &remaining,
-                                self.original_token_to_internal,
-                            )
                         } else {
                             self.cached_reachable_weight(child_node.reachable_token_ids())
                         };
@@ -995,6 +1007,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
+        pruned_weight_cache: HashMap::new(),
         leaf_weight_cache: HashMap::new(),
         transition_buffer: BTreeMap::new(),
         epsilon_buffer: BTreeMap::new(),
