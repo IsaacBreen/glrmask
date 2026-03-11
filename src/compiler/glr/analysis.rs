@@ -875,6 +875,82 @@ fn dedup_rules(rules: &mut Vec<Rule>) {
     rules.retain(|r| seen.insert(r.clone()));
 }
 
+pub(crate) fn merge_identical_nonterminals(
+    rules: &[Rule],
+    start: NonterminalID,
+) -> Vec<Rule> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
+    for rule in rules {
+        rhs_by_lhs.entry(rule.lhs).or_default().insert(rule.rhs.clone());
+    }
+
+    let compute_hash = |rhs_set: &BTreeSet<Vec<Symbol>>| -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for rhs in rhs_set {
+            rhs.hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+
+    let mut hash_buckets = BTreeMap::<u64, Vec<NonterminalID>>::new();
+    for (&lhs, rhs_set) in &rhs_by_lhs {
+        hash_buckets.entry(compute_hash(rhs_set)).or_default().push(lhs);
+    }
+
+    let mut merge_map = BTreeMap::<NonterminalID, NonterminalID>::new();
+    for nts in hash_buckets.values() {
+        if nts.len() < 2 {
+            continue;
+        }
+        for i in 0..nts.len() {
+            if merge_map.contains_key(&nts[i]) {
+                continue;
+            }
+            for j in (i + 1)..nts.len() {
+                if merge_map.contains_key(&nts[j]) {
+                    continue;
+                }
+                if rhs_by_lhs.get(&nts[i]) == rhs_by_lhs.get(&nts[j]) {
+                    let (keep, remove) = if nts[j] == start {
+                        (nts[j], nts[i])
+                    } else {
+                        (nts[i], nts[j])
+                    };
+                    merge_map.insert(remove, keep);
+                }
+            }
+        }
+    }
+
+    if merge_map.is_empty() {
+        return rules.to_vec();
+    }
+
+    let apply_merge = |nt: NonterminalID| merge_map.get(&nt).copied().unwrap_or(nt);
+
+    let mut result = Vec::new();
+    let mut seen = HashSet::with_capacity(rules.len());
+    for rule in rules {
+        let lhs = apply_merge(rule.lhs);
+        let rhs: Vec<Symbol> = rule
+            .rhs
+            .iter()
+            .map(|symbol| match symbol {
+                Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
+                Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(apply_merge(*nonterminal)),
+            })
+            .collect();
+        let merged = Rule { lhs, rhs };
+        if seen.insert(merged.clone()) {
+            result.push(merged);
+        }
+    }
+    result
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Grammar Normalization Pipeline
 // ─────────────────────────────────────────────────────────────────────────────

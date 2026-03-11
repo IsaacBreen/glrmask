@@ -13,7 +13,11 @@ use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
-use crate::compiler::glr::analysis::{AnalyzedGrammar, normalize_grammar};
+use crate::compiler::glr::analysis::{
+    AnalyzedGrammar,
+    merge_identical_nonterminals,
+    normalize_grammar,
+};
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
 use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
@@ -244,6 +248,7 @@ fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) 
 
     expand_nullable_terminals(&mut rules, &mut next_nt, &nullable_terminals);
     normalize_grammar(&mut rules, start);
+    rules = merge_identical_nonterminals(&rules, start);
 
     let (terminals, ignore_terminal, terminal_remap) = compact_unused_terminals(
         &mut rules,
