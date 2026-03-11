@@ -517,61 +517,14 @@ fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
     changed
 }
 
-fn token_weight(internal_tsid: u32, token_id: u32) -> Weight {
-    Weight::from_token_set_for_tsid(
-        internal_tsid,
-        RangeSetBlaze::from_iter([token_id..=token_id]),
-    )
-}
-
-fn token_weight_all_tsids(num_tsids: u32, token_id: u32) -> Weight {
+fn token_weight_all_tsids(num_tsids: u32, internal_token_id: u32) -> Weight {
     if num_tsids == 0 {
         return Weight::empty();
     }
     Weight::from_uniform(
         0..=num_tsids - 1,
-        RangeSetBlaze::from_iter([token_id..=token_id]),
+        RangeSetBlaze::from_iter([internal_token_id..=internal_token_id]),
     )
-}
-
-fn token_set_weight(
-    internal_tsid: u32,
-    token_ids: &RangeSetBlaze<usize>,
-    original_token_to_internal: &[u32],
-) -> Weight {
-    let mut mapped = RangeSetBlaze::new();
-    for token_id in token_ids.iter() {
-        if let Some(&internal_token_id) = original_token_to_internal.get(token_id) {
-            debug_assert_ne!(internal_token_id, u32::MAX);
-            if internal_token_id != u32::MAX {
-                mapped.insert(internal_token_id);
-            }
-        }
-    }
-    Weight::from_token_set_for_tsid(internal_tsid, mapped)
-}
-
-fn token_set_weight_all_tsids(
-    num_tsids: u32,
-    token_ids: &RangeSetBlaze<usize>,
-    original_token_to_internal: &[u32],
-) -> Weight {
-    if num_tsids == 0 {
-        return Weight::empty();
-    }
-    let mut mapped = RangeSetBlaze::new();
-    for token_id in token_ids.iter() {
-        if let Some(&internal_token_id) = original_token_to_internal.get(token_id) {
-            debug_assert_ne!(internal_token_id, u32::MAX);
-            if internal_token_id != u32::MAX {
-                mapped.insert(internal_token_id);
-            }
-        }
-    }
-    if mapped.is_empty() {
-        return Weight::empty();
-    }
-    Weight::from_uniform(0..=num_tsids - 1, mapped)
 }
 
 fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
@@ -579,12 +532,6 @@ fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
         internal_tsid,
         RangeSetBlaze::from_iter([0..=max_token_id]),
     )
-}
-
-struct MappingRun {
-    start: u32,
-    end: u32,   // inclusive
-    class: u32,
 }
 
 struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
@@ -596,9 +543,6 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ignore_terminal: Option<TerminalID>,
     representative_initial_state: u32,
     representative_state_by_original: &'tok [u32],
-    original_token_to_internal: &'tok [u32],
-    mapping_runs: Vec<MappingRun>,
-    n_internal_classes: usize,
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
@@ -649,48 +593,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         weight
     }
 
-    /// Fast version: uses precomputed mapping_runs (run-length encoding of
-    /// original_to_internal) to find overlapping classes via binary search
-    /// instead of iterating individual tokens.
-    /// Cost: O(token_ranges × log(mapping_runs)) instead of O(total_tokens).
-    fn token_set_weight_fast(&self, token_ids: &RangeSetBlaze<usize>) -> Weight {
-        if self.num_tsids == 0 || token_ids.is_empty() {
+    /// Build a weight covering all tsids for the given set of internal token IDs.
+    fn token_set_weight_fast(&self, internal_token_ids: &RangeSetBlaze<usize>) -> Weight {
+        if self.num_tsids == 0 || internal_token_ids.is_empty() {
             return Weight::empty();
         }
-        let n_classes = self.n_internal_classes;
-        let mut seen = vec![false; n_classes];
-        let runs = &self.mapping_runs;
-        for range in token_ids.ranges() {
-            let start = *range.start() as u32;
-            let end = *range.end() as u32;
-            // Binary search for the first run that could overlap [start, end]
-            let first = runs.partition_point(|r| r.end < start);
-            for run in &runs[first..] {
-                if run.start > end {
-                    break;
-                }
-                seen[run.class as usize] = true;
-            }
-        }
-        // Build RangeSetBlaze from contiguous runs in seen[]
-        let mut ranges: Vec<std::ops::RangeInclusive<u32>> = Vec::new();
-        let mut run_start: Option<u32> = None;
-        for (i, &s) in seen.iter().enumerate() {
-            if s {
-                if run_start.is_none() {
-                    run_start = Some(i as u32);
-                }
-            } else if let Some(start) = run_start.take() {
-                ranges.push(start..=(i as u32 - 1));
-            }
-        }
-        if let Some(start) = run_start {
-            ranges.push(start..=(n_classes as u32 - 1));
-        }
-        if ranges.is_empty() {
-            return Weight::empty();
-        }
-        let tokens: RangeSetBlaze<u32> = ranges.into_iter().collect();
+        let tokens: RangeSetBlaze<u32> = internal_token_ids
+            .ranges()
+            .map(|r| (*r.start() as u32)..=(*r.end() as u32))
+            .collect();
         Weight::from_uniform(0..=self.num_tsids - 1, tokens)
     }
 
@@ -811,13 +722,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ) {
         self.profile_trie_calls += 1;
         for (segment_bytes, child_node) in node.iter_children() {
-            let child_token_id = child_node.token_id() as u32;
-            let internal_child_token_id = self
-                .original_token_to_internal
-                .get(child_token_id as usize)
-                .copied()
-                .filter(|internal_token_id| *internal_token_id != u32::MAX)
-                .expect("representative vocab token must map to an internal token id");
+            // Token IDs in the trie are already internal (equivalence class) IDs.
+            let internal_child_token_id = child_node.token_id() as u32;
 
             let mut next_level_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
             let mut pending = BTreeMap::<usize, BTreeMap<TokenizerState, Vec<NwaState>>>::new();
@@ -893,7 +799,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                                 weight.clone()
                             } else {
                                 let mut remaining = child_node.reachable_token_ids().clone();
-                                remaining.remove(child_token_id as usize);
+                                remaining.remove(internal_child_token_id as usize);
                                 if let Some(end_state) = exec_end_state {
                                     let matches_at_end = possible_matches_at_end.get_or_insert_with(|| {
                                         self.possible_matches
@@ -1024,10 +930,11 @@ fn representative_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u
         .vocab_tokens
         .internal_to_originals
         .iter()
-        .filter_map(|original_ids| {
+        .enumerate()
+        .filter_map(|(internal_id, original_ids)| {
             let representative = *original_ids.first()?;
             let bytes = vocab.entries.get(&representative)?.clone();
-            Some((representative, bytes))
+            Some((internal_id as u32, bytes))
         })
         .collect()
 }
@@ -1057,7 +964,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         ..TerminalDwaBuildReport::default()
     };
 
-    let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_token_id());
+    let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
     let start_state = nwa.add_state();
@@ -1087,7 +994,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         nwa.add_epsilon(
             start_state,
             root,
-            all_token_weight(internal_tsid, id_map.max_token_id()),
+            all_token_weight(internal_tsid, id_map.max_internal_token_id()),
         );
 
         let representative_state = id_map
@@ -1095,29 +1002,6 @@ pub(crate) fn build_terminal_dwa_with_report(
             .representative_original_id_for_internal(internal_tsid)
             .expect("internal tokenizer state class must have a representative original state");
         merge_assoc(&mut assoc_by_state, representative_state, &[root]);
-    }
-
-    // Precompute run-length encoding of original_to_internal mapping.
-    // Each run is a contiguous range of original tokens mapping to the same internal class.
-    // Used by token_set_weight_fast for O(log(runs)) lookups instead of O(total_tokens).
-    let n_internal_classes = id_map.vocab_tokens.internal_to_originals.len();
-    let mapping = &id_map.vocab_tokens.original_to_internal;
-    let mut mapping_runs: Vec<MappingRun> = Vec::new();
-    {
-        let mut i = 0usize;
-        while i < mapping.len() {
-            let cls = mapping[i];
-            if cls == u32::MAX {
-                i += 1;
-                continue;
-            }
-            let start = i as u32;
-            while i + 1 < mapping.len() && mapping[i + 1] == cls {
-                i += 1;
-            }
-            mapping_runs.push(MappingRun { start, end: i as u32, class: cls });
-            i += 1;
-        }
     }
 
     let mut builder = TerminalNwaBuilder {
@@ -1129,9 +1013,6 @@ pub(crate) fn build_terminal_dwa_with_report(
         ignore_terminal,
         representative_initial_state,
         representative_state_by_original: &representative_state_by_original,
-        original_token_to_internal: &id_map.vocab_tokens.original_to_internal,
-        mapping_runs,
-        n_internal_classes,
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),
@@ -1160,7 +1041,7 @@ pub(crate) fn build_terminal_dwa_with_report(
     report.build_nwa_from_trie_time = phase_started_at.elapsed();
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][terminal_dwa] build_nwa_from_trie_ms={:.3} trie_calls={} assoc_clones={} tokenizer_execs={} exec_ms={:.3} weight_ms={:.3} weight_compute_ms={:.3} weight_compute_calls={} match_ms={:.3} assoc_clone_ms={:.3} leaf_ms={:.3} merge_ms={:.3} pending_ms={:.3} flush_ms={:.3} mapping_runs={}",
+            "[glrmask/profile][terminal_dwa] build_nwa_from_trie_ms={:.3} trie_calls={} assoc_clones={} tokenizer_execs={} exec_ms={:.3} weight_ms={:.3} weight_compute_ms={:.3} weight_compute_calls={} match_ms={:.3} assoc_clone_ms={:.3} leaf_ms={:.3} merge_ms={:.3} pending_ms={:.3} flush_ms={:.3}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
             builder.profile_trie_calls,
             builder.profile_assoc_clones,
@@ -1175,7 +1056,6 @@ pub(crate) fn build_terminal_dwa_with_report(
             builder.profile_merge_ms.as_secs_f64() * 1000.0,
             builder.profile_pending_ms.as_secs_f64() * 1000.0,
             builder.profile_flush_ms.as_secs_f64() * 1000.0,
-            builder.mapping_runs.len(),
         );
     }
 
