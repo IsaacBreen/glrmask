@@ -99,33 +99,36 @@ pub fn push_weights(dwa: &mut DWA) -> bool {
     // 3. Intersect each transition weight with reachable[target]
     let mut changed = false;
     for u in 0..n {
-        let targets_weights: Vec<(Label, u32, Weight)> = dwa.states[u]
+        // Two-pass approach: first read-only pass collects changes, second pass applies them.
+        // This avoids cloning all weights upfront.
+        let changes: Vec<(Label, u32, Option<Weight>)> = dwa.states[u]
             .transitions
             .iter()
-            .map(|(&lbl, (t, w))| (lbl, *t, w.clone()))
+            .filter_map(|(&lbl, &(target, ref w))| {
+                let t = target as usize;
+                if t >= n || reachable[t].is_full() {
+                    return None;
+                }
+                let new_w = if reachable[t].is_empty() {
+                    Weight::empty()
+                } else {
+                    w.intersection(&reachable[t])
+                };
+                if new_w != *w {
+                    Some((lbl, target, if new_w.is_empty() { None } else { Some(new_w) }))
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        for (lbl, target, w) in targets_weights {
-            let t = target as usize;
-            if t >= n {
-                continue;
-            }
-            if reachable[t].is_full() {
-                continue;
-            }
-            let new_w = if reachable[t].is_empty() {
-                Weight::empty()
+        for (lbl, target, new_w_opt) in changes {
+            if let Some(new_w) = new_w_opt {
+                dwa.states[u].transitions.insert(lbl, (target, new_w));
             } else {
-                w.intersection(&reachable[t])
-            };
-            if new_w != w {
-                if new_w.is_empty() {
-                    dwa.states[u].transitions.remove(&lbl);
-                } else {
-                    dwa.states[u].transitions.insert(lbl, (target, new_w));
-                }
-                changed = true;
+                dwa.states[u].transitions.remove(&lbl);
             }
+            changed = true;
         }
     }
     changed
