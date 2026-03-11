@@ -524,13 +524,7 @@ fn resolve_direct_rr_single_nt(
     *rules = new_rules;
 }
 
-/// Inline null productions (ε-elimination).
-///
-/// For every production `A → α B β` where `B` is nullable, generate all
-/// 2^k variants (power-set of nullable positions) with nullable NTs either
-/// present or absent.  All ε-productions (empty RHS) are removed from the
-/// output.
-pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+fn inline_null_productions_exhaustive(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
     let nullable = compute_nullable(rules, num_nt);
     if nullable.is_empty() {
         return rules.to_vec();
@@ -588,6 +582,210 @@ pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> 
     }
 
     out
+}
+
+fn find_nullable_runs(
+    rhs: &[Symbol],
+    nullable: &BTreeSet<NonterminalID>,
+    threshold: usize,
+) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut run_start = None;
+
+    for (idx, symbol) in rhs.iter().enumerate() {
+        let is_nullable = matches!(symbol, Symbol::Nonterminal(nt) if nullable.contains(nt));
+        if is_nullable {
+            if run_start.is_none() {
+                run_start = Some(idx);
+            }
+        } else if let Some(start) = run_start.take() {
+            let len = idx - start;
+            if len > threshold {
+                runs.push((start, idx - 1));
+            }
+        }
+    }
+
+    if let Some(start) = run_start {
+        let len = rhs.len() - start;
+        if len > threshold {
+            runs.push((start, rhs.len() - 1));
+        }
+    }
+
+    runs
+}
+
+fn preprocess_balanced_tree_2(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+    let nullable = compute_nullable(rules, num_nt);
+    if nullable.is_empty() {
+        return rules.to_vec();
+    }
+
+    let mut by_lhs = BTreeMap::<NonterminalID, Vec<Vec<Symbol>>>::new();
+    for rule in rules {
+        by_lhs.entry(rule.lhs).or_default().push(rule.rhs.clone());
+    }
+
+    let mut next_nt = max_nt_id(rules) + 1;
+    let mut fresh_nt = || {
+        let id = next_nt;
+        next_nt += 1;
+        id
+    };
+
+    let mut nn_cache = BTreeMap::<NonterminalID, NonterminalID>::new();
+    let mut result = Vec::<Rule>::new();
+    for rule in rules {
+        let runs = find_nullable_runs(&rule.rhs, &nullable, 1);
+        if runs.is_empty() {
+            result.push(rule.clone());
+            continue;
+        }
+
+        let mut new_rhs = rule.rhs.clone();
+        for &(start, end) in runs.iter().rev() {
+            let segment: Vec<Symbol> = new_rhs.drain(start..=end).collect();
+            let root_nn = build_non_nullable_tree(
+                &segment,
+                2,
+                &mut fresh_nt,
+                &mut result,
+                &nullable,
+                &by_lhs,
+                &mut nn_cache,
+            );
+            let root_opt = fresh_nt();
+            result.push(Rule {
+                lhs: root_opt,
+                rhs: vec![Symbol::Nonterminal(root_nn)],
+            });
+            result.push(Rule {
+                lhs: root_opt,
+                rhs: vec![],
+            });
+            new_rhs.insert(start, Symbol::Nonterminal(root_opt));
+        }
+
+        result.push(Rule {
+            lhs: rule.lhs,
+            rhs: new_rhs,
+        });
+    }
+
+    dedup_rules(&mut result);
+    result
+}
+
+fn build_non_nullable_tree(
+    segment: &[Symbol],
+    k: usize,
+    fresh_nt: &mut impl FnMut() -> NonterminalID,
+    new_rules: &mut Vec<Rule>,
+    nullable: &BTreeSet<NonterminalID>,
+    by_lhs: &BTreeMap<NonterminalID, Vec<Vec<Symbol>>>,
+    nn_cache: &mut BTreeMap<NonterminalID, NonterminalID>,
+) -> NonterminalID {
+    let k = k.max(2);
+    let n = segment.len();
+    if n == 0 {
+        let nt = fresh_nt();
+        new_rules.push(Rule { lhs: nt, rhs: vec![] });
+        return nt;
+    }
+
+    let nn_segment: Vec<Symbol> = segment
+        .iter()
+        .map(|symbol| match symbol {
+            Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
+            Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(create_nn_nt(
+                *nonterminal,
+                fresh_nt,
+                new_rules,
+                nullable,
+                by_lhs,
+                nn_cache,
+            )),
+        })
+        .collect();
+
+    if n <= k {
+        let leaf_nt = fresh_nt();
+        for mask in 1u64..(1u64 << n) {
+            let rhs: Vec<Symbol> = nn_segment
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| ((mask >> idx) & 1) == 1)
+                .map(|(_, symbol)| symbol.clone())
+                .collect();
+            new_rules.push(Rule { lhs: leaf_nt, rhs });
+        }
+        return leaf_nt;
+    }
+
+    let chunk_nts: Vec<NonterminalID> = nn_segment
+        .chunks(k)
+        .map(|chunk| {
+            build_non_nullable_tree(chunk, k, fresh_nt, new_rules, nullable, by_lhs, nn_cache)
+        })
+        .collect();
+    let chunk_symbols: Vec<Symbol> = chunk_nts
+        .into_iter()
+        .map(Symbol::Nonterminal)
+        .collect();
+    build_non_nullable_tree(&chunk_symbols, k, fresh_nt, new_rules, nullable, by_lhs, nn_cache)
+}
+
+fn create_nn_nt(
+    nt: NonterminalID,
+    fresh_nt: &mut impl FnMut() -> NonterminalID,
+    new_rules: &mut Vec<Rule>,
+    nullable: &BTreeSet<NonterminalID>,
+    by_lhs: &BTreeMap<NonterminalID, Vec<Vec<Symbol>>>,
+    nn_cache: &mut BTreeMap<NonterminalID, NonterminalID>,
+) -> NonterminalID {
+    if !nullable.contains(&nt) {
+        return nt;
+    }
+    if let Some(&cached) = nn_cache.get(&nt) {
+        return cached;
+    }
+
+    let Some(alts) = by_lhs.get(&nt) else {
+        return nt;
+    };
+    let kept: Vec<Vec<Symbol>> = alts
+        .iter()
+        .filter(|alt| {
+            !alt.is_empty()
+                && alt.iter().any(|symbol| match symbol {
+                    Symbol::Terminal(_) => true,
+                    Symbol::Nonterminal(inner) => !nullable.contains(inner),
+                })
+        })
+        .cloned()
+        .collect();
+
+    if kept.is_empty() {
+        return nt;
+    }
+
+    let nn_nt = fresh_nt();
+    nn_cache.insert(nt, nn_nt);
+    for rhs in kept {
+        new_rules.push(Rule { lhs: nn_nt, rhs });
+    }
+    nn_nt
+}
+
+/// Inline null productions (ε-elimination).
+///
+/// Preprocess long nullable runs with a balanced binary tree before doing the
+/// existing exhaustive elimination, to avoid the raw power-set blowups that
+/// occur when many nullable nonterminals appear consecutively.
+pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+    let preprocessed = preprocess_balanced_tree_2(rules, num_nt);
+    inline_null_productions_exhaustive(&preprocessed, max_nt_id(&preprocessed) + 1)
 }
 
 /// Eliminate hidden left recursion.
