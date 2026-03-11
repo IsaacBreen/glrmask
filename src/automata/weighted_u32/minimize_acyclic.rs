@@ -242,20 +242,16 @@ fn compute_productive_transitions(dwa: &DWA, needed: &[Weight]) -> Vec<Vec<Produ
             if t >= n {
                 continue;
             }
-            let productive = if needed[t].is_full() {
-                weight.clone()
-            } else if let Some((start, end, tokens)) = weight.single_compact_entry_parts() {
-                needed[t].intersect_single_parts(start, end, &tokens)
-            } else {
-                weight.intersection(&needed[t])
-            };
-            if productive.is_empty() {
+            // After push_weights, all remaining transitions are already productive
+            // (w_pushed = w_orig ∩ reachable[t], and needed == reachable from push).
+            // The intersection w_pushed ∩ needed[t] = w_pushed, so just clone.
+            if needed[t].is_empty() {
                 continue;
             }
             transitions.push(ProductiveTransition {
                 label,
                 target: *target,
-                weight: productive,
+                weight: weight.clone(),
             });
         }
         result.push(transitions);
@@ -1061,7 +1057,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     // Clone and push weights
     let phase_started_at = std::time::Instant::now();
     let mut pushed = dwa.clone();
-    let (_, topo_from_push, _reachable_pre_push) = push_weights(&mut pushed);
+    let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
     profile.push_weights_ms = phase_started_at.elapsed();
 
     let phase_started_at = std::time::Instant::now();
@@ -1071,8 +1067,12 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         None => return dwa.clone(), // cyclic — fall back
     };
 
-    // Recompute needed sets on the pushed DWA (push may have changed weights).
-    let needed = compute_needed_sets(&pushed, &topo);
+    // Reuse backward-reachable token sets from push_weights as needed sets.
+    // Proof: push_weights computes reachable[u] = final(u) ∪ union(w(u,t) ∩ reachable[t]).
+    // compute_needed_sets on pushed DWA uses the same recurrence (since
+    // w_pushed = w_orig ∩ reachable[t], and A ∩ A = A in the needed recurrence).
+    // Both produce identical results, so we skip the redundant recomputation.
+    let needed = reachable_from_push;
     let productive_transitions = compute_productive_transitions(&pushed, &needed);
     let heights = compute_heights(&pushed, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
