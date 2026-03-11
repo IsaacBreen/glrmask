@@ -417,14 +417,18 @@ impl BoundedRepeatFamilyBuilder {
         } else {
             Symbol::Nonterminal(self.ensure_upto(exp - 1)?)
         };
-        let prev_pow = self.pow_symbol(exp - 1)?;
+        let current_pow = self.pow_symbol(exp)?;
         self.generated_rules.push(Rule {
             lhs: target,
             rhs: vec![prev_upto.clone()],
         });
         self.generated_rules.push(Rule {
             lhs: target,
-            rhs: vec![prev_pow, prev_upto],
+            rhs: vec![current_pow.clone(), prev_upto],
+        });
+        self.generated_rules.push(Rule {
+            lhs: target,
+            rhs: vec![current_pow],
         });
         Some(())
     }
@@ -443,10 +447,28 @@ impl BoundedRepeatFamilyBuilder {
 
         let highest_bit = usize::BITS as usize - 1 - max_count.leading_zeros() as usize;
         let largest_power = 1usize << highest_bit;
-        self.emit_upto_into(target, highest_bit)?;
         if max_count == largest_power {
+            let largest_power_symbol = self.pow_symbol(highest_bit)?;
+            self.generated_rules.push(Rule {
+                lhs: target,
+                rhs: vec![largest_power_symbol],
+            });
             return Some(());
         }
+
+        if highest_bit == 0 {
+            return None;
+        }
+
+        let lower_range_symbol = if highest_bit == 1 {
+            Symbol::Nonterminal(self.chunk_nt)
+        } else {
+            Symbol::Nonterminal(self.ensure_upto(highest_bit - 1)?)
+        };
+        self.generated_rules.push(Rule {
+            lhs: target,
+            rhs: vec![lower_range_symbol],
+        });
 
         let remainder = max_count - largest_power;
         let remainder_symbol = if remainder == 1 {
@@ -459,7 +481,11 @@ impl BoundedRepeatFamilyBuilder {
         let largest_power_symbol = self.pow_symbol(highest_bit)?;
         self.generated_rules.push(Rule {
             lhs: target,
-            rhs: vec![largest_power_symbol, remainder_symbol],
+            rhs: vec![largest_power_symbol.clone(), remainder_symbol],
+        });
+        self.generated_rules.push(Rule {
+            lhs: target,
+            rhs: vec![largest_power_symbol],
         });
         Some(())
     }
@@ -2092,9 +2118,11 @@ mod tests {
 
         let rewritten_family_rule_count = rules.iter().filter(|rule| family.contains(&rule.lhs)).count();
         assert!(rewritten_family_rule_count < original_family_rule_count);
+        assert_eq!(rules.iter().filter(|rule| rule.lhs == family[0]).count(), 3);
 
         let mut memo = std::collections::BTreeMap::new();
         let counts = derivable_chunk_counts(&rules, family[0], chunk_nt, &mut memo);
         assert_eq!(counts, (1..=family.len() + 1).collect::<std::collections::BTreeSet<_>>());
     }
+
 }
