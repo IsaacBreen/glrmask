@@ -1161,8 +1161,9 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
 }
 
 /// Fast minimize using signature-based partition refinement + disjoint merge.
+/// Skips push_weights (not needed for exact signature matching).
 /// Produces a valid minimization that may be slightly larger than the
-/// graph-coloring result (misses some overlap-domain merges).
+/// graph-coloring result (misses overlap-domain and push-weight merges).
 pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     if dwa.states.is_empty() {
         return dwa.clone();
@@ -1171,24 +1172,20 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     let started_at = std::time::Instant::now();
     let mut profile = MinimizeAcyclicProfile::default();
 
+    // Skip push_weights — partition refinement matches exact signatures,
+    // so push-weight-induced equivalences don't help.
     let phase_started_at = std::time::Instant::now();
-    let mut pushed = dwa.clone();
-    let (_, topo_from_push, _) = push_weights(&mut pushed);
-    profile.push_weights_ms = phase_started_at.elapsed();
-
-    let phase_started_at = std::time::Instant::now();
-    let topo = match topo_from_push {
-        Some(t) => t,
-        None => return dwa.clone(),
+    let Some(topo) = compute_topo_order(dwa) else {
+        return dwa.clone(); // cyclic
     };
-    let needed = compute_needed_sets(&pushed, &topo);
-    let productive_transitions = compute_productive_transitions(&pushed, &needed);
-    let heights = compute_heights(&pushed, &topo);
+    let needed = compute_needed_sets(dwa, &topo);
+    let productive_transitions = compute_productive_transitions(dwa, &needed);
+    let heights = compute_heights(dwa, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
     profile.topo_needed_ms = phase_started_at.elapsed();
 
-    let n = pushed.states.len();
-    let start_state = pushed.start_state as usize;
+    let n = dwa.states.len();
+    let start_state = dwa.start_state as usize;
 
     let mut reachable_from_start = vec![false; n];
     {
@@ -1196,7 +1193,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
         while let Some(u) = stack.pop() {
             if reachable_from_start[u] { continue; }
             reachable_from_start[u] = true;
-            for (_, (target, _)) in &pushed.states[u].transitions {
+            for (_, (target, _)) in &dwa.states[u].transitions {
                 let t = *target as usize;
                 if t < n && !reachable_from_start[t] { stack.push(t); }
             }
@@ -1223,11 +1220,10 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
 
         let phase_started_at = std::time::Instant::now();
 
-        // Use partition refinement (signature-based) + disjoint merge
         let graph_started_at = std::time::Instant::now();
         let coloring = partition_refine_coloring(
             candidates,
-            &pushed,
+            dwa,
             &needed,
             &old_to_new,
             &productive_transitions,
@@ -1248,7 +1244,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
             merge_state_into_builder(
                 candidates[idx],
                 color,
-                &pushed,
+                dwa,
                 &needed,
                 &old_to_new,
                 completed,
@@ -1270,10 +1266,14 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     profile.merge_rebuild_ms += reconstruct_started_at.elapsed();
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][minimize_acyclic_fast] total_ms={:.3} input_states={} output_states={}",
+            "[glrmask/profile][minimize_acyclic_fast] total_ms={:.3} input_states={} output_states={} push_ms={:.3} topo_ms={:.3} color_ms={:.3} merge_ms={:.3}",
             started_at.elapsed().as_secs_f64() * 1000.0,
             dwa.states.len(),
             minimized.states.len(),
+            profile.push_weights_ms.as_secs_f64() * 1000.0,
+            profile.topo_needed_ms.as_secs_f64() * 1000.0,
+            profile.graph_color_ms.as_secs_f64() * 1000.0,
+            profile.merge_rebuild_ms.as_secs_f64() * 1000.0,
         );
     }
     minimized
