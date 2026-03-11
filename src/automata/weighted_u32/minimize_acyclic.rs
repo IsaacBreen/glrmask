@@ -44,6 +44,8 @@ struct MinimizeAcyclicProfile {
     merge_transition_loop_ms: std::time::Duration,
     builder_finalize_ms: std::time::Duration,
     reconstruct_ms: std::time::Duration,
+    try_all_compatible_ms: std::time::Duration,
+    setup_extend_ms: std::time::Duration,
 }
 
 fn minimize_profile_enabled() -> bool {
@@ -867,9 +869,27 @@ fn states_raw_equal(
 fn try_all_compatible_height_0_coloring(
     candidates: &[usize],
     dwa: &DWA,
-    needed: &[Weight],
+    _needed: &[Weight],
 ) -> Option<Vec<usize>> {
-    if candidates.len() <= 100 {
+    // After push_weights, all leaf states (h=0, no transitions) are always
+    // mutually compatible.  Proof:
+    //
+    //   For leaves: needed[u] = reachable[u] = final_weight[u].
+    //   So final_on_needed = final_weight, and witness_domain = witness_final
+    //   (both grow by the same final_weight each iteration).
+    //
+    //   The compatibility check compares:
+    //     witness_final ∩ overlap  vs  candidate_final ∩ overlap
+    //   where overlap = witness_domain ∩ needed_candidate.
+    //
+    //   Since witness = witness_domain = witness_final:
+    //     W ∩ (W ∩ F) = W ∩ F = F ∩ (W ∩ F)
+    //   (by idempotency of set intersection), so both sides are always equal.
+    //
+    // Therefore we can merge all h=0 candidates into a single color without
+    // checking pairwise compatibility.
+
+    if candidates.len() <= 1 {
         return None;
     }
     if !candidates
@@ -877,32 +897,6 @@ fn try_all_compatible_height_0_coloring(
         .all(|&id| dwa.states[id].transitions.is_empty())
     {
         return None;
-    }
-
-    let mut witness_domain = Weight::empty();
-    let mut witness_final = Weight::empty();
-
-    for &candidate in candidates {
-        let needed_at_candidate = &needed[candidate];
-        let final_on_needed = dwa.states[candidate]
-            .final_weight
-            .as_ref()
-            .map(|weight| weight.intersection(needed_at_candidate))
-            .unwrap_or_else(Weight::empty);
-
-        if !witness_domain.is_empty() {
-            let overlap = witness_domain.intersection(needed_at_candidate);
-            if !overlap.is_empty() {
-                let witness_on_overlap = witness_final.intersection(&overlap);
-                let candidate_on_overlap = final_on_needed.intersection(&overlap);
-                if witness_on_overlap != candidate_on_overlap {
-                    return None;
-                }
-            }
-        }
-
-        witness_final = witness_final.union(&final_on_needed);
-        witness_domain = witness_domain.union(needed_at_candidate);
     }
 
     Some(vec![0; candidates.len()])
@@ -1139,7 +1133,9 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         }
 
         let phase_started_at = std::time::Instant::now();
+        let tac_started = std::time::Instant::now();
         if h == 0 && let Some(coloring) = try_all_compatible_height_0_coloring(candidates, &pushed, &needed) {
+            profile.try_all_compatible_ms += tac_started.elapsed();
             profile.all_compatible_buckets += 1;
             let base_new_id = new_states.len() as u32;
             let num_colors = 1usize;
@@ -1194,6 +1190,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         let coloring = greedy_coloring(&adj);
         profile.graph_color_ms += graph_started_at.elapsed();
 
+        let setup_started = std::time::Instant::now();
         let base_new_id = new_states.len() as u32;
         let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
 
@@ -1204,6 +1201,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
 
         // Extend builders
         new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+        profile.setup_extend_ms += setup_started.elapsed();
 
         // Merge states into builders
         let builders = &mut new_states[base_new_id as usize..];
@@ -1231,7 +1229,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     profile.merge_rebuild_ms += reconstruct_started_at.elapsed();
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][minimize_acyclic] total_ms={:.3} input_states={} output_states={} height_buckets={} total_candidates={} max_candidates={} singleton_buckets={} all_compatible_buckets={} dense_graph_buckets={} sparse_graph_buckets={} dense_pair_candidates={} sparse_overlap_pairs={} compatibility_checks={} push_weights_ms={:.3} topo_needed_ms={:.3} graph_color_ms={:.3} merge_rebuild_ms={:.3} merge_state_calls={} merge_final_needed_ms={:.3} merge_transition_loop_ms={:.3} builder_finalize_ms={:.3} reconstruct_ms={:.3}",
+            "[glrmask/profile][minimize_acyclic] total_ms={:.3} input_states={} output_states={} height_buckets={} total_candidates={} max_candidates={} singleton_buckets={} all_compatible_buckets={} dense_graph_buckets={} sparse_graph_buckets={} dense_pair_candidates={} sparse_overlap_pairs={} compatibility_checks={} push_weights_ms={:.3} topo_needed_ms={:.3} graph_color_ms={:.3} merge_rebuild_ms={:.3} merge_state_calls={} merge_final_needed_ms={:.3} merge_transition_loop_ms={:.3} builder_finalize_ms={:.3} reconstruct_ms={:.3} try_all_compatible_ms={:.3} setup_extend_ms={:.3}",
             started_at.elapsed().as_secs_f64() * 1000.0,
             dwa.states.len(),
             minimized.states.len(),
@@ -1254,6 +1252,8 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
             profile.merge_transition_loop_ms.as_secs_f64() * 1000.0,
             profile.builder_finalize_ms.as_secs_f64() * 1000.0,
             profile.reconstruct_ms.as_secs_f64() * 1000.0,
+            profile.try_all_compatible_ms.as_secs_f64() * 1000.0,
+            profile.setup_extend_ms.as_secs_f64() * 1000.0,
         );
     }
     minimized
