@@ -857,11 +857,86 @@ impl Weight {
     }
 
     pub fn is_disjoint(&self, other: &Self) -> bool {
-        self.intersection(other).is_empty()
+        if self.is_empty() || other.is_empty() {
+            return true;
+        }
+        if self.is_full() || other.is_full() {
+            return false;
+        }
+        let mut left_iter = self.0.range_values();
+        let mut right_iter = other.0.range_values();
+        let mut left_entry = left_iter.next();
+        let mut right_entry = right_iter.next();
+
+        while let (Some((lr, lt)), Some((rr, rt))) = (&left_entry, &right_entry) {
+            let start = (*lr.start()).max(*rr.start());
+            let end = (*lr.end()).min(*rr.end());
+            if start <= end && !lt.as_ref().is_disjoint(rt.as_ref()) {
+                return false;
+            }
+            if lr.end() <= rr.end() {
+                left_entry = left_iter.next();
+            } else {
+                right_entry = right_iter.next();
+            }
+        }
+        true
     }
 
     pub fn is_subset(&self, other: &Self) -> bool {
-        self.difference(other).is_empty()
+        if self.is_empty() || other.is_full() {
+            return true;
+        }
+        if other.is_empty() || self.is_full() {
+            return false;
+        }
+        let mut self_iter = self.0.range_values();
+        let mut other_iter = other.0.range_values();
+        let mut self_current = self_iter.next();
+        let mut other_current = other_iter.next();
+        // Track how far we've verified coverage of the current self entry
+        let mut self_verified_up_to: Option<u32> = None;
+
+        while let Some((self_range, self_tokens)) = &self_current {
+            let self_start = self_verified_up_to
+                .map(|v| v + 1)
+                .unwrap_or(*self_range.start());
+
+            if self_start > *self_range.end() {
+                self_current = self_iter.next();
+                self_verified_up_to = None;
+                continue;
+            }
+
+            let Some((other_range, other_tokens)) = &other_current else {
+                return false;
+            };
+
+            if *other_range.end() < self_start {
+                other_current = other_iter.next();
+                continue;
+            }
+
+            if *other_range.start() > self_start {
+                return false;
+            }
+
+            if !self_tokens.as_ref().is_subset(other_tokens.as_ref()) {
+                return false;
+            }
+
+            let covered_up_to = (*self_range.end()).min(*other_range.end());
+            self_verified_up_to = Some(covered_up_to);
+
+            if covered_up_to >= *self_range.end() {
+                self_current = self_iter.next();
+                self_verified_up_to = None;
+            }
+            if covered_up_to >= *other_range.end() {
+                other_current = other_iter.next();
+            }
+        }
+        true
     }
 
     /// Clip all token sets to `0..=max_token`, removing any entries that become empty.
