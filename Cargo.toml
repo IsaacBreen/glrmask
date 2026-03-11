@@ -34,4 +34,3 @@ pretty_assertions = "1"
 
 [features]
 default = ["rayon"]
-profile-mask = []
