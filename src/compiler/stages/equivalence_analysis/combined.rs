@@ -20,11 +20,11 @@ fn analyze_equivalences_sep1(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalId
     // Extract vocab tokens as byte slices, ordered by token ID.
     // Vocab entries is a BTreeMap<u32, Vec<u8>>, so we need to handle sparse IDs.
     let max_token_id = vocab.max_token_id();
-    let mut token_bytes: Vec<Vec<u8>> = Vec::with_capacity(vocab.len());
+    let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
     for (&tid, bytes) in &vocab.entries {
         token_ids.push(tid);
-        token_bytes.push(bytes.clone());
+        token_bytes.push(bytes.as_slice());
     }
 
     // All DFA states as initial states
