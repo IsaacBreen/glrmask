@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
+use range_set_blaze::{CheckSortedDisjoint, RangeMapBlaze, RangeSetBlaze, SortedDisjointMap};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
@@ -395,12 +395,10 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
         Option<Arc<RangeSetBlaze<u32>>>,
     ); 8]> = SmallVec::new();
 
-    for (range, other_tokens) in other.0.range_values() {
-        let start = single.start.max(*range.start());
-        let end = single.end.min(*range.end());
-        if start > end {
-            continue;
-        }
+    let bounds = CheckSortedDisjoint::new([single.start..=single.end]);
+    for (range, other_tokens) in other.0.range_values().map_and_set_intersection(bounds) {
+        let start = *range.start();
+        let end = *range.end();
 
         let tokens = if Arc::ptr_eq(&single.tokens, other_tokens)
             || single.tokens.as_ref() == other_tokens.as_ref()
