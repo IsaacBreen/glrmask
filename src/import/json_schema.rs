@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
 
 const JSON_VALUE_RULE: &str = "json_value";
 const JSON_OBJECT_RULE: &str = "json_object";
@@ -379,7 +379,8 @@ fn merge_allof_schemas(base: &Map<String, Value>, sub_schemas: &[Value]) -> Map<
 pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskError> {
     let schema: Value = serde_json::from_str(schema_json)
         .map_err(|err| GlrMaskError::GrammarParse(err.to_string()))?;
-    let named = schema_to_named_grammar(&schema)?;
+    let mut named = schema_to_named_grammar(&schema)?;
+    promote_large_literal_alts(&mut named, 10);
     lower(&named)
 }
 
