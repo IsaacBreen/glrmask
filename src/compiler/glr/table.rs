@@ -39,6 +39,7 @@ impl GLRTable {
         let (item_sets, transitions) = build_lr0_item_sets(grammar);
         let mut table = build_slr1_table(grammar, &item_sets, &transitions);
         table.compact_default_reduces();
+        table.merge_identical_rows();
         table
     }
 
@@ -90,6 +91,94 @@ impl GLRTable {
                     });
                 }
             }
+        }
+    }
+
+    /// Merge states with identical (action, default_action, goto) rows.
+    /// Iterates until no more merges are possible, since remapping targets
+    /// can reveal new equivalences.
+    fn merge_identical_rows(&mut self) {
+        fn remap_action(action: &mut Action, mapping: &[u32]) {
+            match action {
+                Action::Shift(target) => *target = mapping[*target as usize],
+                Action::Split { shift, .. } => {
+                    if let Some(target) = shift {
+                        *target = mapping[*target as usize];
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        loop {
+            // Build signature -> first representative state
+            let mut sig_to_rep: FxHashMap<String, u32> = FxHashMap::default();
+            let mut remap: Vec<u32> = (0..self.num_states).collect();
+            let mut changed = false;
+
+            for state in 0..self.num_states as usize {
+                let sig = format!(
+                    "{:?}|{:?}|{:?}",
+                    self.action[state], self.default_action[state], self.goto[state]
+                );
+                let rep = *sig_to_rep.entry(sig).or_insert(state as u32);
+                if rep != state as u32 {
+                    remap[state] = rep;
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+
+            // Build old_to_new: compose remap (merge) with sequential renumbering
+            let mut new_id = 0u32;
+            let mut rep_to_new: FxHashMap<u32, u32> = FxHashMap::default();
+            let mut kept: Vec<u32> = Vec::new();
+            for state in 0..self.num_states as usize {
+                if remap[state] == state as u32 {
+                    rep_to_new.insert(state as u32, new_id);
+                    kept.push(state as u32);
+                    new_id += 1;
+                }
+            }
+            let mapping: Vec<u32> = (0..self.num_states as usize)
+                .map(|s| rep_to_new[&remap[s]])
+                .collect();
+
+            // Extract representative rows and remap all state references
+            let new_action: Vec<_> = kept
+                .iter()
+                .map(|&s| {
+                    self.action[s as usize]
+                        .iter()
+                        .map(|(&tid, action)| {
+                            let mut a = action.clone();
+                            remap_action(&mut a, &mapping);
+                            (tid, a)
+                        })
+                        .collect()
+                })
+                .collect();
+            let new_default: Vec<_> = kept
+                .iter()
+                .map(|&s| self.default_action[s as usize].clone())
+                .collect();
+            let new_goto: Vec<_> = kept
+                .iter()
+                .map(|&s| {
+                    self.goto[s as usize]
+                        .iter()
+                        .map(|(&nt, &target)| (nt, mapping[target as usize]))
+                        .collect()
+                })
+                .collect();
+
+            self.action = new_action;
+            self.default_action = new_default;
+            self.goto = new_goto;
+            self.num_states = kept.len() as u32;
         }
     }
 }
