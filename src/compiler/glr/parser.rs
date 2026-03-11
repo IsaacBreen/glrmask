@@ -103,10 +103,15 @@ fn reduce_closure_for_lookahead(
         let Some(&state) = stack.last() else {
             continue;
         };
-        for action in table.actions(state, lookahead) {
-            let Action::Reduce(rule_id) = action else {
-                continue;
-            };
+        let Some(action) = table.action(state, lookahead) else {
+            continue;
+        };
+        let reduce_rule_ids: &[u32] = match action {
+            Action::Reduce(rule_id) => std::slice::from_ref(rule_id),
+            Action::Split { reduces, .. } => reduces.as_slice(),
+            Action::Shift(_) | Action::Accept => &[],
+        };
+        for rule_id in reduce_rule_ids {
             let rule = &table.rules[*rule_id as usize];
             if stack.len() < rule.rhs.len() + 1 {
                 continue;
@@ -157,10 +162,15 @@ fn reduce_closure_entries_for_lookahead(
         let Some(&state) = stack.last() else {
             continue;
         };
-        for action in table.actions(state, lookahead) {
-            let Action::Reduce(rule_id) = action else {
-                continue;
-            };
+        let Some(action) = table.action(state, lookahead) else {
+            continue;
+        };
+        let reduce_rule_ids: &[u32] = match action {
+            Action::Reduce(rule_id) => std::slice::from_ref(rule_id),
+            Action::Split { reduces, .. } => reduces.as_slice(),
+            Action::Shift(_) | Action::Accept => &[],
+        };
+        for rule_id in reduce_rule_ids {
             let rule = &table.rules[*rule_id as usize];
             if stack.len() < rule.rhs.len() + 1 {
                 continue;
@@ -201,12 +211,18 @@ pub(crate) fn advance_stack_vectors(
         let Some(&state) = stack.last() else {
             continue;
         };
-        for action in table.actions(state, token) {
-            if let Action::Shift(target) = action {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
                 let mut shifted = stack.clone();
                 shifted.push(*target);
                 next.push(shifted);
             }
+            Some(Action::Split { shift: Some(target), .. }) => {
+                let mut shifted = stack.clone();
+                shifted.push(*target);
+                next.push(shifted);
+            }
+            _ => {}
         }
     }
     dedup_stacks(next)
@@ -223,12 +239,18 @@ fn advance_stack_entries(
         let Some(&state) = stack.last() else {
             continue;
         };
-        for action in table.actions(state, token) {
-            if let Action::Shift(target) = action {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
                 let mut shifted = stack.clone();
                 shifted.push(*target);
                 next.push((shifted, acc.clone()));
             }
+            Some(Action::Split { shift: Some(target), .. }) => {
+                let mut shifted = stack.clone();
+                shifted.push(*target);
+                next.push((shifted, acc.clone()));
+            }
+            _ => {}
         }
     }
     merge_stack_entries(next)
@@ -239,10 +261,10 @@ pub(crate) fn stacks_accept(table: &GLRTable, stacks: &[Vec<u32>]) -> bool {
         .into_iter()
         .any(|stack| {
             stack.last().is_some_and(|state| {
-                table
-                    .actions(*state, EOF)
-                    .iter()
-                    .any(|action| matches!(action, Action::Accept))
+                matches!(
+                    table.action(*state, EOF),
+                    Some(Action::Accept) | Some(Action::Split { accept: true, .. })
+                )
             })
         })
 }

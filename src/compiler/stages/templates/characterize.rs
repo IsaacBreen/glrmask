@@ -103,20 +103,33 @@ fn characterize_terminal(
     let mut nt_rereduces = BTreeSet::new();
 
     for state in 0..table.num_states {
-        for action in table.actions(state, terminal) {
-            match action {
-                Action::Shift(shift_state) => {
+        let Some(action) = table.action(state, terminal) else {
+            continue;
+        };
+        match action {
+            Action::Shift(shift_state) => {
+                shifts.insert((state, *shift_state));
+            }
+            Action::Reduce(rule_id) => {
+                let rule = &table.rules[*rule_id as usize];
+                let len = rule.rhs.len();
+                if len > 0 {
+                    reduces.insert((state, len - 1, rule.lhs));
+                }
+            }
+            Action::Split { shift, reduces: split_reduces, .. } => {
+                if let Some(shift_state) = shift {
                     shifts.insert((state, *shift_state));
                 }
-                Action::Reduce(rule_id) => {
+                for rule_id in split_reduces {
                     let rule = &table.rules[*rule_id as usize];
                     let len = rule.rhs.len();
                     if len > 0 {
                         reduces.insert((state, len - 1, rule.lhs));
                     }
                 }
-                Action::Accept => {}
             }
+            Action::Accept => {}
         }
     }
 
@@ -171,12 +184,31 @@ fn explore_from_goto(
     worklist.push_back(start_state);
 
     while let Some(current_state) = worklist.pop_front() {
-        for action in table.actions(current_state, terminal) {
-            match action {
-                Action::Shift(shift_state) => {
+        let Some(action) = table.action(current_state, terminal) else {
+            continue;
+        };
+        match action {
+            Action::Shift(shift_state) => {
+                nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+            }
+            Action::Reduce(rule_id) => {
+                let rule = &table.rules[*rule_id as usize];
+                handle_reduce(
+                    table,
+                    stack_nt,
+                    revealed_state,
+                    rule.rhs.len(),
+                    rule.lhs,
+                    &mut visited,
+                    &mut worklist,
+                    nt_rereduces,
+                );
+            }
+            Action::Split { shift, reduces: split_reduces, .. } => {
+                if let Some(shift_state) = shift {
                     nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
                 }
-                Action::Reduce(rule_id) => {
+                for rule_id in split_reduces {
                     let rule = &table.rules[*rule_id as usize];
                     handle_reduce(
                         table,
@@ -189,8 +221,8 @@ fn explore_from_goto(
                         nt_rereduces,
                     );
                 }
-                Action::Accept => {}
             }
+            Action::Accept => {}
         }
     }
 }
