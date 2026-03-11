@@ -1,8 +1,15 @@
-
 use std::collections::BTreeMap;
 
 use crate::compiler::debug::artifacts::CompileDebug;
 use crate::compiler::glr::analysis::EOF;
+
+const VOCAB_INLINE_LIMIT: usize = 32;
+const VOCAB_HEAD_COUNT: usize = 16;
+const VOCAB_TAIL_COUNT: usize = 4;
+const ID_SAMPLE_HEAD: usize = 8;
+const ID_SAMPLE_TAIL: usize = 2;
+const TOKEN_SAMPLE_LIMIT: usize = 3;
+const TOKEN_REPR_CHAR_LIMIT: usize = 48;
 
 impl CompileDebug {
     fn terminal_name(
@@ -31,7 +38,11 @@ impl CompileDebug {
     ) -> String {
         match sym {
             crate::compiler::grammar::model::Symbol::Terminal(terminal) => {
-                format!("T{}('{}')", terminal, self.terminal_name(grammar, *terminal))
+                format!(
+                    "T{}('{}')",
+                    terminal,
+                    self.terminal_name(grammar, *terminal)
+                )
             }
             crate::compiler::grammar::model::Symbol::Nonterminal(nonterminal) => {
                 self.nonterminal_str(grammar, *nonterminal)
@@ -40,11 +51,124 @@ impl CompileDebug {
     }
 }
 
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return text.to_string();
+        };
+        out.push(ch);
+    }
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
+fn token_repr(bytes: &[u8]) -> String {
+    truncate_chars(
+        &format!("{:?}", String::from_utf8_lossy(bytes)),
+        TOKEN_REPR_CHAR_LIMIT,
+    )
+}
+
+fn compress_sorted_ids(ids: &[u32]) -> Vec<(u32, u32)> {
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans = Vec::new();
+    let mut start = sorted[0];
+    let mut end = sorted[0];
+    for id in sorted.into_iter().skip(1) {
+        if id == end.saturating_add(1) {
+            end = id;
+        } else {
+            spans.push((start, end));
+            start = id;
+            end = id;
+        }
+    }
+    spans.push((start, end));
+    spans
+}
+
+fn format_id_span(span: (u32, u32)) -> String {
+    if span.0 == span.1 {
+        span.0.to_string()
+    } else {
+        format!("{}..={}", span.0, span.1)
+    }
+}
+
+fn format_id_summary(ids: &[u32]) -> String {
+    if ids.is_empty() {
+        return "count=0 []".to_string();
+    }
+
+    let spans = compress_sorted_ids(ids);
+    let span_text = if spans.len() <= ID_SAMPLE_HEAD + ID_SAMPLE_TAIL {
+        spans
+            .into_iter()
+            .map(format_id_span)
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        let mut parts: Vec<String> = spans
+            .iter()
+            .take(ID_SAMPLE_HEAD)
+            .copied()
+            .map(format_id_span)
+            .collect();
+        parts.push("...".to_string());
+        parts.extend(
+            spans
+                .iter()
+                .rev()
+                .take(ID_SAMPLE_TAIL)
+                .copied()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(format_id_span),
+        );
+        parts.join(", ")
+    };
+
+    format!("count={} [{}]", ids.len(), span_text)
+}
+
+fn sample_token_reprs(token_ids: &[u32], vocab_by_id: &BTreeMap<u32, &[u8]>) -> Option<String> {
+    let samples: Vec<String> = token_ids
+        .iter()
+        .filter_map(|id| vocab_by_id.get(id).copied().map(token_repr))
+        .take(TOKEN_SAMPLE_LIMIT)
+        .collect();
+    if samples.is_empty() {
+        None
+    } else {
+        Some(samples.join(", "))
+    }
+}
+
 impl std::fmt::Display for CompileDebug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        
+        let vocab_by_id: BTreeMap<u32, &[u8]> = self
+            .vocab_entries
+            .iter()
+            .map(|(id, bytes)| (*id, bytes.as_slice()))
+            .collect();
+
         writeln!(f, "═══ GRAMMAR (original) ═══")?;
-        writeln!(f, "Start: {}", self.nonterminal_str(&self.grammar_def, self.grammar_def.start))?;
+        writeln!(
+            f,
+            "Start: {}",
+            self.nonterminal_str(&self.grammar_def, self.grammar_def.start)
+        )?;
         writeln!(f, "Terminals:")?;
         for t in &self.grammar_def.terminals {
             writeln!(f, "  T{}: name={:?} def={:?}", t.id(), t.name(), t)?;
@@ -56,14 +180,23 @@ impl std::fmt::Display for CompileDebug {
                 .iter()
                 .map(|s| self.symbol_str(&self.grammar_def, s))
                 .collect();
-            writeln!(f, "  [{}] {} → {}", i, self.nonterminal_str(&self.grammar_def, r.lhs), rhs.join(" "))?;
+            writeln!(
+                f,
+                "  [{}] {} → {}",
+                i,
+                self.nonterminal_str(&self.grammar_def, r.lhs),
+                rhs.join(" ")
+            )?;
         }
 
         writeln!(f, "\n═══ GRAMMAR (normalized for mask) ═══")?;
         writeln!(
             f,
             "Start: {}",
-            self.nonterminal_str(&self.normalized_grammar_def, self.normalized_grammar_def.start)
+            self.nonterminal_str(
+                &self.normalized_grammar_def,
+                self.normalized_grammar_def.start
+            )
         )?;
         if self.normalized_grammar_def.terminals.len() != self.grammar_def.terminals.len() {
             writeln!(
@@ -92,8 +225,7 @@ impl std::fmt::Display for CompileDebug {
         writeln!(
             f,
             "\n═══ GLR PARSE TABLE ({} states, {} rules) ═══",
-            self.glr_table.num_states,
-            self.glr_table.num_rules
+            self.glr_table.num_states, self.glr_table.num_rules
         )?;
         for state in 0..self.glr_table.num_states {
             let actions = &self.glr_table.action[state as usize];
@@ -133,23 +265,78 @@ impl std::fmt::Display for CompileDebug {
             }
         }
 
-        writeln!(f, "\n═══ VOCABULARY ({} tokens) ═══", self.vocab_entries.len())?;
+        writeln!(
+            f,
+            "\n═══ VOCABULARY ({} tokens) ═══",
+            self.vocab_entries.len()
+        )?;
         if let Some(eos) = self.eos_token_id {
             writeln!(f, "EOS token: {eos}")?;
         }
-        for (id, bytes) in &self.vocab_entries {
-            let repr = String::from_utf8_lossy(bytes);
-            writeln!(f, "  tok{id}: {repr:?} ({} bytes)", bytes.len())?;
+        let show_all_vocab = self.vocab_entries.len() <= VOCAB_INLINE_LIMIT;
+        for (idx, (id, bytes)) in self.vocab_entries.iter().enumerate() {
+            let show_entry = show_all_vocab
+                || idx < VOCAB_HEAD_COUNT
+                || idx >= self.vocab_entries.len().saturating_sub(VOCAB_TAIL_COUNT);
+            if show_entry {
+                writeln!(
+                    f,
+                    "  tok{id}: {} ({} bytes)",
+                    token_repr(bytes),
+                    bytes.len()
+                )?;
+            } else if idx == VOCAB_HEAD_COUNT {
+                let omitted = self
+                    .vocab_entries
+                    .len()
+                    .saturating_sub(VOCAB_HEAD_COUNT + VOCAB_TAIL_COUNT);
+                writeln!(
+                    f,
+                    "  ... {omitted} token(s) omitted; showing head/tail sample ..."
+                )?;
+            }
         }
 
-        writeln!(f, "\n═══ TOKENIZER STATE ID MAPPING ({}) ═══", self.id_map.tokenizer_states.num_internal_ids())?;
-        for (internal, dfa_states) in self.id_map.tokenizer_states.internal_to_originals.iter().enumerate() {
-            writeln!(f, "  TSID {internal} ↔ DFA states {:?}", dfa_states)?;
+        writeln!(
+            f,
+            "\n═══ TOKENIZER STATE ID MAPPING ({}) ═══",
+            self.id_map.tokenizer_states.num_internal_ids()
+        )?;
+        for (internal, dfa_states) in self
+            .id_map
+            .tokenizer_states
+            .internal_to_originals
+            .iter()
+            .enumerate()
+        {
+            writeln!(
+                f,
+                "  TSID {internal} ↔ DFA states {}",
+                format_id_summary(dfa_states)
+            )?;
         }
 
-        writeln!(f, "\n═══ VOCAB TOKEN ID MAPPING ({}) ═══", self.id_map.vocab_tokens.num_internal_ids())?;
-        for (internal, token_ids) in self.id_map.vocab_tokens.internal_to_originals.iter().enumerate() {
-            writeln!(f, "  token-class {internal} ↔ original token IDs {:?}", token_ids)?;
+        writeln!(
+            f,
+            "\n═══ VOCAB TOKEN ID MAPPING ({}) ═══",
+            self.id_map.vocab_tokens.num_internal_ids()
+        )?;
+        for (internal, token_ids) in self
+            .id_map
+            .vocab_tokens
+            .internal_to_originals
+            .iter()
+            .enumerate()
+        {
+            write!(
+                f,
+                "  token-class {internal} ↔ original token IDs {}",
+                format_id_summary(token_ids)
+            )?;
+            if let Some(samples) = sample_token_reprs(token_ids, &vocab_by_id) {
+                write!(f, " sample=[{samples}]")?;
+            }
+            writeln!(f)?;
         }
 
         writeln!(f, "\n═══ TERMINAL CHARACTERIZATIONS ═══")?;
@@ -201,30 +388,32 @@ impl std::fmt::Display for CompileDebug {
             .map(|t| {
                 (
                     t.id() as i32,
-                    format!("'{}'", self.normalized_grammar_def.terminal_display_name(t.id())),
+                    format!(
+                        "'{}'",
+                        self.normalized_grammar_def.terminal_display_name(t.id())
+                    ),
                 )
             })
             .collect();
 
-        // We pass an empty map here to coerce weight formatting to emit opaque TSIDs 
+        // We pass an empty map here to coerce weight formatting to emit opaque TSIDs
         // on the LHS (e.g. `0` instead of `tsid0/[0]`) while keeping meaningful LLM tokens on the RHS.
         let tsid_names: BTreeMap<u32, String> = BTreeMap::new();
         let token_names: BTreeMap<u32, String> = self
             .vocab_entries
             .iter()
-            .map(|(id, bytes)| {
-                let repr = String::from_utf8_lossy(bytes);
-                (*id, format!("{repr:?}"))
-            })
+            .map(|(id, bytes)| (*id, token_repr(bytes)))
             .collect();
 
         writeln!(f, "\n═══ TERMINAL NWA — after build (raw) ═══")?;
         write!(
             f,
             "{}",
-            self.terminal_debug
-                .nwa_after_build
-                .display_with_all_maps(&terminal_symbols, &tsid_names, &token_names)
+            self.terminal_debug.nwa_after_build.display_with_all_maps(
+                &terminal_symbols,
+                &tsid_names,
+                &token_names
+            )
         )?;
 
         writeln!(f, "\n═══ TERMINAL NWA — after collapse_always_allowed ═══")?;
@@ -257,5 +446,27 @@ impl std::fmt::Display for CompileDebug {
         write!(f, "{}", self.parser_dwa)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_id_summary, token_repr};
+
+    #[test]
+    fn format_id_summary_compresses_and_summarizes_large_inputs() {
+        let ids: Vec<u32> = (0..20).chain(50..61).chain(100..121).collect();
+        let summary = format_id_summary(&ids);
+        assert!(summary.starts_with("count=52 ["));
+        assert!(summary.contains("0..=19"));
+        assert!(summary.contains("50..=60"));
+        assert!(summary.contains("100..=120"));
+    }
+
+    #[test]
+    fn token_repr_truncates_long_tokens() {
+        let repr = token_repr(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ");
+        assert!(repr.ends_with("..."));
+        assert!(repr.starts_with("\"abc"));
     }
 }
