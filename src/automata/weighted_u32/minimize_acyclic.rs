@@ -912,10 +912,42 @@ fn try_all_compatible_height_0_coloring(
 // Phase 4: Merge + Reconstruct
 // ---------------------------------------------------------------------------
 
+/// Stores a transition weight that may come from a single source (no merging
+/// needed) or multiple sources (accumulated in a WeightBuilder).
+enum TransitionWeight {
+    /// From exactly one source state — stored as-is, no expansion.
+    Single(Weight),
+    /// From merging multiple source states — accumulated via WeightBuilder.
+    Merged(WeightBuilder),
+}
+
+impl TransitionWeight {
+    fn add(&mut self, weight: Weight) {
+        match self {
+            TransitionWeight::Single(existing) => {
+                let mut builder = WeightBuilder::new();
+                builder.union_weight(existing);
+                builder.union_weight(&weight);
+                *self = TransitionWeight::Merged(builder);
+            }
+            TransitionWeight::Merged(builder) => {
+                builder.union_weight(&weight);
+            }
+        }
+    }
+
+    fn build(self) -> Weight {
+        match self {
+            TransitionWeight::Single(w) => w,
+            TransitionWeight::Merged(builder) => builder.build(),
+        }
+    }
+}
+
 struct MergedStateBuilder {
     final_weight: Weight,
     final_weight_builder: WeightBuilder,
-    transitions: rustc_hash::FxHashMap<Label, (u32, WeightBuilder)>,
+    transitions: rustc_hash::FxHashMap<Label, (u32, TransitionWeight)>,
 }
 
 impl Default for MergedStateBuilder {
@@ -937,14 +969,12 @@ impl MergedStateBuilder {
         use std::collections::hash_map::Entry;
         match self.transitions.entry(label) {
             Entry::Occupied(mut entry) => {
-                let (existing_target, existing_weight) = entry.get_mut();
+                let (existing_target, existing_tw) = entry.get_mut();
                 debug_assert_eq!(*existing_target, target);
-                existing_weight.union_weight(&weight);
+                existing_tw.add(weight);
             }
             Entry::Vacant(entry) => {
-                let mut weight_builder = WeightBuilder::new();
-                weight_builder.union_weight(&weight);
-                entry.insert((target, weight_builder));
+                entry.insert((target, TransitionWeight::Single(weight)));
             }
         }
     }
@@ -1003,8 +1033,8 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
             if !b.final_weight.is_empty() {
                 state.final_weight = Some(b.final_weight);
             }
-            for (lbl, (target, weight_builder)) in b.transitions {
-                let weight = weight_builder.build();
+            for (lbl, (target, tw)) in b.transitions {
+                let weight = tw.build();
                 if !weight.is_empty() {
                     state.transitions.insert(lbl, (target, weight));
                 }
