@@ -920,7 +920,19 @@ impl PartialEq for Weight {
         if self.is_full() || other.is_full() {
             return self.is_full() == other.is_full();
         }
-        range_map_entries(self) == range_map_entries(other)
+        let mut a = self.0.range_values();
+        let mut b = other.0.range_values();
+        loop {
+            match (a.next(), b.next()) {
+                (None, None) => return true,
+                (Some((ra, ta)), Some((rb, tb))) => {
+                    if ra != rb || ta.as_ref() != tb.as_ref() {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
     }
 }
 
@@ -936,7 +948,10 @@ impl std::hash::Hash for Weight {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.is_full().hash(state);
         if !self.is_full() {
-            range_map_entries(self).hash(state);
+            for (range, tokens) in self.0.range_values() {
+                range.hash(state);
+                tokens.as_ref().hash(state);
+            }
         }
     }
 }
