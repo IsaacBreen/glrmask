@@ -8,19 +8,24 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::analysis::{EOF, AnalyzedGrammar};
+use super::analysis::{AnalyzedGrammar, EOF};
 use crate::compiler::grammar_def::{NonterminalID, Rule, Symbol, TerminalID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     Shift(u32),
     Reduce(u32),
+    Split {
+        shift: Option<u32>,
+        reduces: Vec<u32>,
+        accept: bool,
+    },
     Accept,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
-    pub action: Vec<BTreeMap<TerminalID, Vec<Action>>>,
+    pub action: Vec<BTreeMap<TerminalID, Action>>,
     pub goto: Vec<BTreeMap<NonterminalID, u32>>,
     pub num_states: u32,
     pub num_terminals: u32,
@@ -34,13 +39,10 @@ impl GLRTable {
         build_slr1_table(grammar, &item_sets, &transitions)
     }
 
-    pub fn actions(&self, state: u32, terminal: TerminalID) -> &[Action] {
-        static EMPTY: [Action; 0] = [];
+    pub fn action(&self, state: u32, terminal: TerminalID) -> Option<&Action> {
         self.action
             .get(state as usize)
             .and_then(|by_terminal| by_terminal.get(&terminal))
-            .map(Vec::as_slice)
-            .unwrap_or(&EMPTY)
     }
 
     pub fn goto_target(&self, state: u32, nt: NonterminalID) -> Option<u32> {
@@ -73,7 +75,6 @@ fn closure(items: &BTreeSet<Item>, rules: &[Rule]) -> BTreeSet<Item> {
 
     while let Some(item) = queue.pop_front() {
         if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-            
             for (i, r) in rules.iter().enumerate() {
                 if r.lhs == *nt {
                     let new_item = Item::new(i as u32, 0);
@@ -97,12 +98,14 @@ fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<It
     closure(&kernel, rules)
 }
 
-fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
+fn build_lr0_item_sets(
+    grammar: &AnalyzedGrammar,
+) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
     let rules = &grammar.rules;
 
     let initial = {
         let mut s = BTreeSet::new();
-        s.insert(Item::new(0, 0)); 
+        s.insert(Item::new(0, 0));
         closure(&s, rules)
     };
 
@@ -115,7 +118,6 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
     queue.push_back(0);
 
     while let Some(sid) = queue.pop_front() {
-        
         let symbols: BTreeSet<Symbol> = item_sets[sid as usize]
             .iter()
             .filter_map(|item| item.next_symbol(rules).cloned())
@@ -151,17 +153,58 @@ fn build_slr1_table(
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GLRTable {
-    let mut action = vec![BTreeMap::<TerminalID, Vec<Action>>::new(); item_sets.len()];
+    #[derive(Default)]
+    struct PendingAction {
+        shift: Option<u32>,
+        reduces: Vec<u32>,
+        accept: bool,
+    }
+
+    impl PendingAction {
+        fn push_shift(&mut self, target: u32) {
+            match self.shift {
+                Some(existing) => debug_assert_eq!(existing, target),
+                None => self.shift = Some(target),
+            }
+        }
+
+        fn push_reduce(&mut self, rule_id: u32) {
+            self.reduces.push(rule_id);
+        }
+
+        fn push_accept(&mut self) {
+            self.accept = true;
+        }
+
+        fn finish(mut self) -> Action {
+            self.reduces.sort_unstable();
+            self.reduces.dedup();
+            match (self.shift, self.reduces.len(), self.accept) {
+                (Some(target), 0, false) => Action::Shift(target),
+                (None, 1, false) => Action::Reduce(self.reduces[0]),
+                (None, 0, true) => Action::Accept,
+                (shift, _, accept) => Action::Split {
+                    shift,
+                    reduces: self.reduces,
+                    accept,
+                },
+            }
+        }
+    }
+
+    let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
+        .take(item_sets.len())
+        .collect::<Vec<_>>();
     let mut goto = vec![BTreeMap::<NonterminalID, u32>::new(); item_sets.len()];
 
     for (state_id, items) in item_sets.iter().enumerate() {
         for (symbol, &target) in &transitions[state_id] {
             match symbol {
                 Symbol::Terminal(terminal) => {
-                    action[state_id]
+                    pending[state_id]
                         .entry(*terminal)
                         .or_default()
-                        .push(Action::Shift(target));
+                        .push_shift(target);
                 }
                 Symbol::Nonterminal(nonterminal) => {
                     goto[state_id].insert(*nonterminal, target);
@@ -176,18 +219,28 @@ fn build_slr1_table(
             }
 
             if item.rule == 0 {
-                action[state_id].entry(EOF).or_default().push(Action::Accept);
+                pending[state_id].entry(EOF).or_default().push_accept();
                 continue;
             }
 
             for &lookahead in &grammar.follow[rule.lhs as usize] {
-                action[state_id]
+                pending[state_id]
                     .entry(lookahead)
                     .or_default()
-                    .push(Action::Reduce(item.rule));
+                    .push_reduce(item.rule);
             }
         }
     }
+
+    let action = pending
+        .into_iter()
+        .map(|by_terminal| {
+            by_terminal
+                .into_iter()
+                .map(|(terminal, pending)| (terminal, pending.finish()))
+                .collect()
+        })
+        .collect();
 
     GLRTable {
         action,
@@ -207,38 +260,35 @@ mod tests {
 
     #[test]
     fn test_table_simple_ab() {
-        
         let gdef = simple_ab_grammar();
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
         assert!(table.num_states >= 3);
 
-        let a0 = table.actions(0, 0);
-        assert!(a0.iter().any(|a| matches!(a, Action::Shift(_))));
+        let a0 = table.action(0, 0);
+        assert!(matches!(a0, Some(Action::Shift(_))));
 
-        let shift_state = match &a0[0] {
-            Action::Shift(s) => *s,
+        let shift_state = match a0 {
+            Some(Action::Shift(s)) => *s,
             _ => panic!("expected shift"),
         };
-        let a1 = table.actions(shift_state, 1);
-        assert!(a1.iter().any(|a| matches!(a, Action::Shift(_))));
+        let a1 = table.action(shift_state, 1);
+        assert!(matches!(a1, Some(Action::Shift(_))));
     }
 
     #[test]
     fn test_table_choice() {
-        
         let gdef = choice_grammar();
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
-        assert!(!table.actions(0, 0).is_empty()); 
-        assert!(!table.actions(0, 1).is_empty()); 
+        assert!(table.action(0, 0).is_some());
+        assert!(table.action(0, 1).is_some());
     }
 
     #[test]
     fn test_table_accept() {
-        
         let gdef = GrammarDef {
             rules: vec![Rule {
                 lhs: 0,
@@ -254,31 +304,28 @@ mod tests {
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
-        let a0 = table.actions(0, 0);
-        let s1 = match &a0[0] {
-            Action::Shift(s) => *s,
+        let a0 = table.action(0, 0);
+        let s1 = match a0 {
+            Some(Action::Shift(s)) => *s,
             _ => panic!(),
         };
-        let a1 = table.actions(s1, EOF);
-        assert!(a1.iter().any(|a| matches!(a, Action::Reduce(_))));
+        let a1 = table.action(s1, EOF);
+        assert!(matches!(a1, Some(Action::Reduce(_))));
     }
 
     #[test]
     fn test_table_two_nt() {
-        
         let gdef = two_nt_grammar();
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
-        assert!(!table.actions(0, 0).is_empty());
+        assert!(table.action(0, 0).is_some());
     }
 
     #[test]
     fn test_table_ambiguous() {
-        
         let gdef = GrammarDef {
             rules: vec![
-                
                 Rule {
                     lhs: 0,
                     rhs: vec![
@@ -311,10 +358,14 @@ mod tests {
         assert!(table.num_states > 0);
 
         let has_conflict = (0..table.num_states).any(|s| {
-            let acts = table.actions(s, 1); 
-            let has_shift = acts.iter().any(|a| matches!(a, Action::Shift(_)));
-            let has_reduce = acts.iter().any(|a| matches!(a, Action::Reduce(_)));
-            has_shift && has_reduce
+            matches!(
+                table.action(s, 1),
+                Some(Action::Split {
+                    shift: Some(_),
+                    reduces,
+                    ..
+                }) if !reduces.is_empty()
+            )
         });
         assert!(
             has_conflict,

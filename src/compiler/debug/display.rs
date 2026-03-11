@@ -234,27 +234,47 @@ impl std::fmt::Display for CompileDebug {
                 continue;
             }
             writeln!(f, "  State {state}:")?;
-            for (tid, acts) in actions {
+            for (tid, action) in actions {
                 let tname = if *tid == EOF {
                     "$".to_string()
                 } else {
                     self.terminal_name(&self.normalized_grammar_def, *tid)
                 };
-                for a in acts {
-                    let astr = match a {
-                        crate::compiler::glr::table::Action::Shift(s) => format!("shift {s}"),
-                        crate::compiler::glr::table::Action::Reduce(r) => {
-                            let rule = &self.glr_table.rules[*r as usize];
-                            format!(
-                                "reduce r{r} ({} ← {} symbols)",
+                let astr = match action {
+                    crate::compiler::glr::table::Action::Shift(s) => format!("shift {s}"),
+                    crate::compiler::glr::table::Action::Reduce(r) => {
+                        let rule = &self.glr_table.rules[*r as usize];
+                        format!(
+                            "reduce r{r} ({} ← {} symbols)",
+                            self.nonterminal_str(&self.normalized_grammar_def, rule.lhs),
+                            rule.rhs.len()
+                        )
+                    }
+                    crate::compiler::glr::table::Action::Split {
+                        shift,
+                        reduces,
+                        accept,
+                    } => {
+                        let mut parts = Vec::new();
+                        if let Some(state) = shift {
+                            parts.push(format!("shift {state}"));
+                        }
+                        for rule_id in reduces {
+                            let rule = &self.glr_table.rules[*rule_id as usize];
+                            parts.push(format!(
+                                "reduce r{rule_id} ({} ← {} symbols)",
                                 self.nonterminal_str(&self.normalized_grammar_def, rule.lhs),
                                 rule.rhs.len()
-                            )
+                            ));
                         }
-                        crate::compiler::glr::table::Action::Accept => "accept".to_string(),
-                    };
-                    writeln!(f, "    on '{tname}': {astr}")?;
-                }
+                        if *accept {
+                            parts.push("accept".to_string());
+                        }
+                        parts.join(" / ")
+                    }
+                    crate::compiler::glr::table::Action::Accept => "accept".to_string(),
+                };
+                writeln!(f, "    on '{tname}': {astr}")?;
             }
             for (nt, tgt) in gotos {
                 writeln!(

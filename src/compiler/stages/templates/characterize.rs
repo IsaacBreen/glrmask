@@ -51,7 +51,8 @@ impl TerminalCharacterization {
                 for &neighbor in neighbors {
                     match colors.get(&neighbor).copied().unwrap_or(0) {
                         1 => {
-                            let cycle_start = path.iter().position(|nt| *nt == neighbor).unwrap_or(0);
+                            let cycle_start =
+                                path.iter().position(|nt| *nt == neighbor).unwrap_or(0);
                             let mut cycle = path[cycle_start..].to_vec();
                             cycle.push(neighbor);
                             return Some(cycle);
@@ -103,7 +104,7 @@ fn characterize_terminal(
     let mut nt_rereduces = BTreeSet::new();
 
     for state in 0..table.num_states {
-        for action in table.actions(state, terminal) {
+        if let Some(action) = table.action(state, terminal) {
             match action {
                 Action::Shift(shift_state) => {
                     shifts.insert((state, *shift_state));
@@ -113,6 +114,22 @@ fn characterize_terminal(
                     let len = rule.rhs.len();
                     if len > 0 {
                         reduces.insert((state, len - 1, rule.lhs));
+                    }
+                }
+                Action::Split {
+                    shift,
+                    reduces: split_reduces,
+                    ..
+                } => {
+                    if let Some(shift_state) = shift {
+                        shifts.insert((state, *shift_state));
+                    }
+                    for rule_id in split_reduces {
+                        let rule = &table.rules[*rule_id as usize];
+                        let len = rule.rhs.len();
+                        if len > 0 {
+                            reduces.insert((state, len - 1, rule.lhs));
+                        }
                     }
                 }
                 Action::Accept => {}
@@ -147,8 +164,7 @@ fn characterize_terminal(
     if let Some(cycle) = characterization.find_cycle() {
         panic!(
             "terminal characterization for terminal {} contains a reduction cycle: {:?}",
-            terminal,
-            cycle
+            terminal, cycle
         );
     }
 
@@ -171,7 +187,7 @@ fn explore_from_goto(
     worklist.push_back(start_state);
 
     while let Some(current_state) = worklist.pop_front() {
-        for action in table.actions(current_state, terminal) {
+        if let Some(action) = table.action(current_state, terminal) {
             match action {
                 Action::Shift(shift_state) => {
                     nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
@@ -188,6 +204,28 @@ fn explore_from_goto(
                         &mut worklist,
                         nt_rereduces,
                     );
+                }
+                Action::Split {
+                    shift,
+                    reduces: split_reduces,
+                    ..
+                } => {
+                    if let Some(shift_state) = shift {
+                        nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+                    }
+                    for rule_id in split_reduces {
+                        let rule = &table.rules[*rule_id as usize];
+                        handle_reduce(
+                            table,
+                            stack_nt,
+                            revealed_state,
+                            rule.rhs.len(),
+                            rule.lhs,
+                            &mut visited,
+                            &mut worklist,
+                            nt_rereduces,
+                        );
+                    }
                 }
                 Action::Accept => {}
             }

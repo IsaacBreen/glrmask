@@ -103,10 +103,15 @@ fn reduce_closure_for_lookahead(
         let Some(&state) = stack.last() else {
             continue;
         };
-        for action in table.actions(state, lookahead) {
-            let Action::Reduce(rule_id) = action else {
-                continue;
-            };
+        let Some(action) = table.action(state, lookahead) else {
+            continue;
+        };
+        let reduce_rule_ids: &[u32] = match action {
+            Action::Reduce(rule_id) => std::slice::from_ref(rule_id),
+            Action::Split { reduces, .. } => reduces.as_slice(),
+            Action::Shift(_) | Action::Accept => &[],
+        };
+        for rule_id in reduce_rule_ids {
             let rule = &table.rules[*rule_id as usize];
             if stack.len() < rule.rhs.len() + 1 {
                 continue;
@@ -157,10 +162,15 @@ fn reduce_closure_entries_for_lookahead(
         let Some(&state) = stack.last() else {
             continue;
         };
-        for action in table.actions(state, lookahead) {
-            let Action::Reduce(rule_id) = action else {
-                continue;
-            };
+        let Some(action) = table.action(state, lookahead) else {
+            continue;
+        };
+        let reduce_rule_ids: &[u32] = match action {
+            Action::Reduce(rule_id) => std::slice::from_ref(rule_id),
+            Action::Split { reduces, .. } => reduces.as_slice(),
+            Action::Shift(_) | Action::Accept => &[],
+        };
+        for rule_id in reduce_rule_ids {
             let rule = &table.rules[*rule_id as usize];
             if stack.len() < rule.rhs.len() + 1 {
                 continue;
@@ -201,12 +211,21 @@ pub(crate) fn advance_stack_vectors(
         let Some(&state) = stack.last() else {
             continue;
         };
-        for action in table.actions(state, token) {
-            if let Action::Shift(target) = action {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
                 let mut shifted = stack.clone();
                 shifted.push(*target);
                 next.push(shifted);
             }
+            Some(Action::Split {
+                shift: Some(target),
+                ..
+            }) => {
+                let mut shifted = stack.clone();
+                shifted.push(*target);
+                next.push(shifted);
+            }
+            _ => {}
         }
     }
     dedup_stacks(next)
@@ -223,12 +242,21 @@ fn advance_stack_entries(
         let Some(&state) = stack.last() else {
             continue;
         };
-        for action in table.actions(state, token) {
-            if let Action::Shift(target) = action {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
                 let mut shifted = stack.clone();
                 shifted.push(*target);
                 next.push((shifted, acc.clone()));
             }
+            Some(Action::Split {
+                shift: Some(target),
+                ..
+            }) => {
+                let mut shifted = stack.clone();
+                shifted.push(*target);
+                next.push((shifted, acc.clone()));
+            }
+            _ => {}
         }
     }
     merge_stack_entries(next)
@@ -239,10 +267,10 @@ pub(crate) fn stacks_accept(table: &GLRTable, stacks: &[Vec<u32>]) -> bool {
         .into_iter()
         .any(|stack| {
             stack.last().is_some_and(|state| {
-                table
-                    .actions(*state, EOF)
-                    .iter()
-                    .any(|action| matches!(action, Action::Accept))
+                matches!(
+                    table.action(*state, EOF),
+                    Some(Action::Accept) | Some(Action::Split { accept: true, .. })
+                )
             })
         })
 }
@@ -263,12 +291,20 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
-    let stacks: Vec<Vec<u32>> = stack.to_stacks().into_iter().map(|(stack, _)| stack).collect();
+    let stacks: Vec<Vec<u32>> = stack
+        .to_stacks()
+        .into_iter()
+        .map(|(stack, _)| stack)
+        .collect();
     stacks_accept(table, &stacks)
 }
 
 pub(crate) fn valid_terminals_for_stacks(table: &GLRTable, stack: &ParserGSS) -> Vec<TerminalID> {
-    let stacks: Vec<Vec<u32>> = stack.to_stacks().into_iter().map(|(stack, _)| stack).collect();
+    let stacks: Vec<Vec<u32>> = stack
+        .to_stacks()
+        .into_iter()
+        .map(|(stack, _)| stack)
+        .collect();
     valid_terminals_for_stack_vectors(table, &stacks)
 }
 
@@ -328,36 +364,35 @@ mod tests {
 
     #[test]
     fn test_parse_simple_ab() {
-        let gdef = simple_ab_grammar(); 
+        let gdef = simple_ab_grammar();
         let parser = build_parser(&gdef);
-        assert!(accepts(&parser, &[0, 1])); 
-        assert!(!accepts(&parser, &[0])); 
-        assert!(!accepts(&parser, &[1, 0])); 
-        assert!(!accepts(&parser, &[])); 
+        assert!(accepts(&parser, &[0, 1]));
+        assert!(!accepts(&parser, &[0]));
+        assert!(!accepts(&parser, &[1, 0]));
+        assert!(!accepts(&parser, &[]));
     }
 
     #[test]
     fn test_parse_choice() {
-        let gdef = choice_grammar(); 
+        let gdef = choice_grammar();
         let parser = build_parser(&gdef);
-        assert!(accepts(&parser, &[0])); 
-        assert!(accepts(&parser, &[1])); 
-        assert!(!accepts(&parser, &[0, 1])); 
-        assert!(!accepts(&parser, &[])); 
+        assert!(accepts(&parser, &[0]));
+        assert!(accepts(&parser, &[1]));
+        assert!(!accepts(&parser, &[0, 1]));
+        assert!(!accepts(&parser, &[]));
     }
 
     #[test]
     fn test_parse_two_nt() {
-        let gdef = two_nt_grammar(); 
+        let gdef = two_nt_grammar();
         let parser = build_parser(&gdef);
-        assert!(accepts(&parser, &[0, 1])); 
-        assert!(!accepts(&parser, &[0])); 
-        assert!(!accepts(&parser, &[1])); 
+        assert!(accepts(&parser, &[0, 1]));
+        assert!(!accepts(&parser, &[0]));
+        assert!(!accepts(&parser, &[1]));
     }
 
     #[test]
     fn test_parse_ambiguous() {
-        
         let gdef = make_grammar(
             vec![
                 Rule {
@@ -386,16 +421,15 @@ mod tests {
             ],
         );
         let parser = build_parser(&gdef);
-        assert!(accepts(&parser, &[0])); 
-        assert!(accepts(&parser, &[0, 1, 0])); 
-        assert!(accepts(&parser, &[0, 1, 0, 1, 0])); 
-        assert!(!accepts(&parser, &[1])); 
-        assert!(!accepts(&parser, &[0, 1])); 
+        assert!(accepts(&parser, &[0]));
+        assert!(accepts(&parser, &[0, 1, 0]));
+        assert!(accepts(&parser, &[0, 1, 0, 1, 0]));
+        assert!(!accepts(&parser, &[1]));
+        assert!(!accepts(&parser, &[0, 1]));
     }
 
     #[test]
     fn test_parse_nullable() {
-        
         let gdef = make_grammar(
             vec![
                 Rule {
@@ -409,7 +443,7 @@ mod tests {
                 Rule {
                     lhs: 1,
                     rhs: vec![],
-                }, 
+                },
             ],
             0,
             vec![Terminal::Literal {
@@ -418,195 +452,339 @@ mod tests {
             }],
         );
         let parser = build_parser(&gdef);
-        assert!(accepts(&parser, &[])); 
-        assert!(accepts(&parser, &[0])); 
-        assert!(!accepts(&parser, &[0, 0])); 
+        assert!(accepts(&parser, &[]));
+        assert!(accepts(&parser, &[0]));
+        assert!(!accepts(&parser, &[0, 0]));
     }
 
     #[test]
     fn test_valid_terminals() {
-        let gdef = simple_ab_grammar(); 
+        let gdef = simple_ab_grammar();
         let parser = build_parser(&gdef);
         let valid = parser.valid_terminals();
-        assert!(valid.contains(&0)); 
-        assert!(!valid.contains(&1)); 
+        assert!(valid.contains(&0));
+        assert!(!valid.contains(&1));
     }
 
     fn tdef(id: u32, name: &str) -> Terminal {
-        Terminal::Literal { id, bytes: name.as_bytes().to_vec() }
+        Terminal::Literal {
+            id,
+            bytes: name.as_bytes().to_vec(),
+        }
     }
 
     #[test]
     fn test_ported_glr_left_recursive() {
-        
         let gdef = make_grammar(
             vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(0)] }, 
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },                          
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
             ],
             0,
             vec![tdef(0, "a"), tdef(1, "b")],
         );
         let parser = build_parser(&gdef);
-        
-        assert!(accepts(&parser, &[1]),       "\"b\" accepted");
-        assert!(accepts(&parser, &[1, 0]),    "\"ba\" accepted");
+
+        assert!(accepts(&parser, &[1]), "\"b\" accepted");
+        assert!(accepts(&parser, &[1, 0]), "\"ba\" accepted");
         assert!(accepts(&parser, &[1, 0, 0]), "\"baa\" accepted");
-        
-        assert!(!accepts(&parser, &[0]),    "\"a\" rejected (must start with 'b')");
+
+        assert!(
+            !accepts(&parser, &[0]),
+            "\"a\" rejected (must start with 'b')"
+        );
         assert!(!accepts(&parser, &[1, 1]), "\"bb\" rejected (two 'b's)");
     }
 
     #[test]
     fn test_ported_glr_right_recursive() {
-        
         let gdef = make_grammar(
             vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(0)] }, 
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },                          
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
             ],
             0,
             vec![tdef(0, "a"), tdef(1, "b")],
         );
         let parser = build_parser(&gdef);
-        
-        assert!(accepts(&parser, &[1]),          "\"b\" accepted");
-        assert!(accepts(&parser, &[0, 1]),       "\"ab\" accepted");
-        assert!(accepts(&parser, &[0, 0, 1]),    "\"aab\" accepted");
+
+        assert!(accepts(&parser, &[1]), "\"b\" accepted");
+        assert!(accepts(&parser, &[0, 1]), "\"ab\" accepted");
+        assert!(accepts(&parser, &[0, 0, 1]), "\"aab\" accepted");
         assert!(accepts(&parser, &[0, 0, 0, 1]), "\"aaab\" accepted");
-        
-        assert!(!accepts(&parser, &[0]),     "\"a\" rejected (must end in 'b')");
-        assert!(!accepts(&parser, &[1, 0]),  "\"ba\" rejected");
-        assert!(!accepts(&parser, &[1, 1]),  "\"bb\" rejected");
+
+        assert!(!accepts(&parser, &[0]), "\"a\" rejected (must end in 'b')");
+        assert!(!accepts(&parser, &[1, 0]), "\"ba\" rejected");
+        assert!(!accepts(&parser, &[1, 1]), "\"bb\" rejected");
     }
 
     #[test]
     fn test_ported_glr_expression_grammar() {
-        
         let gdef = make_grammar(
             vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(1), Symbol::Nonterminal(1)] }, 
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },                                               
-                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2), Symbol::Nonterminal(2)] }, 
-                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(2)] },                                               
-                Rule { lhs: 2, rhs: vec![Symbol::Terminal(3), Symbol::Nonterminal(0), Symbol::Terminal(4)] },    
-                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },                                                  
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Nonterminal(0),
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(1),
+                    ],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![
+                        Symbol::Nonterminal(1),
+                        Symbol::Terminal(2),
+                        Symbol::Nonterminal(2),
+                    ],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Nonterminal(2)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![
+                        Symbol::Terminal(3),
+                        Symbol::Nonterminal(0),
+                        Symbol::Terminal(4),
+                    ],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
             ],
             0,
-            vec![tdef(0, "i"), tdef(1, "+"), tdef(2, "*"), tdef(3, "("), tdef(4, ")")],
+            vec![
+                tdef(0, "i"),
+                tdef(1, "+"),
+                tdef(2, "*"),
+                tdef(3, "("),
+                tdef(4, ")"),
+            ],
         );
         let parser = build_parser(&gdef);
-        
-        assert!(accepts(&parser, &[0]),                   "\"i\" accepted");
-        assert!(accepts(&parser, &[0, 1, 0]),             "\"i+i\" accepted");
-        assert!(accepts(&parser, &[0, 2, 0]),             "\"i*i\" accepted");
-        assert!(accepts(&parser, &[0, 1, 0, 2, 0]),       "\"i+i*i\" accepted");
-        assert!(accepts(&parser, &[3, 0, 1, 0, 4, 2, 0]), "\"(i+i)*i\" accepted");
-        
-        assert!(!accepts(&parser, &[0, 1]),       "\"i+\" rejected (incomplete)");
-        assert!(!accepts(&parser, &[0, 1, 1, 0]), "\"i++i\" rejected (invalid)");
-        assert!(!accepts(&parser, &[]),           "\"\" rejected (empty)");
-        assert!(!accepts(&parser, &[4]),          "\")\" rejected");
-        assert!(!accepts(&parser, &[3, 0]),       "\"(i\" rejected (unclosed paren)");
+
+        assert!(accepts(&parser, &[0]), "\"i\" accepted");
+        assert!(accepts(&parser, &[0, 1, 0]), "\"i+i\" accepted");
+        assert!(accepts(&parser, &[0, 2, 0]), "\"i*i\" accepted");
+        assert!(accepts(&parser, &[0, 1, 0, 2, 0]), "\"i+i*i\" accepted");
+        assert!(
+            accepts(&parser, &[3, 0, 1, 0, 4, 2, 0]),
+            "\"(i+i)*i\" accepted"
+        );
+
+        assert!(!accepts(&parser, &[0, 1]), "\"i+\" rejected (incomplete)");
+        assert!(
+            !accepts(&parser, &[0, 1, 1, 0]),
+            "\"i++i\" rejected (invalid)"
+        );
+        assert!(!accepts(&parser, &[]), "\"\" rejected (empty)");
+        assert!(!accepts(&parser, &[4]), "\")\" rejected");
+        assert!(
+            !accepts(&parser, &[3, 0]),
+            "\"(i\" rejected (unclosed paren)"
+        );
     }
 
     #[test]
     fn test_ported_glr_reduce_reduce_conflict() {
-        
         let gdef = make_grammar(
             vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] }, 
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(2)] }, 
-                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },    
-                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },    
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(2)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
             ],
             0,
             vec![tdef(0, "x")],
         );
         let parser = build_parser(&gdef);
-        assert!(accepts(&parser, &[0]),  "\"x\" accepted despite reduce/reduce conflict");
+        assert!(
+            accepts(&parser, &[0]),
+            "\"x\" accepted despite reduce/reduce conflict"
+        );
         assert!(!accepts(&parser, &[]), "\"\" rejected");
     }
 
     #[test]
     fn test_ported_glr_epsilon_ambiguity() {
-        
         let gdef = make_grammar(
             vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)] }, 
-                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },  
-                Rule { lhs: 1, rhs: vec![] },                     
-                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },  
-                Rule { lhs: 2, rhs: vec![] },                     
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![],
+                },
             ],
             0,
             vec![tdef(0, "x")],
         );
         let parser = build_parser(&gdef);
-        assert!(accepts(&parser, &[]),       "\"\" accepted (A→ε, B→ε)");
-        assert!(accepts(&parser, &[0]),      "\"x\" accepted (A→x,B→ε or A→ε,B→x)");
-        assert!(accepts(&parser, &[0, 0]),   "\"xx\" accepted (A→x, B→x)");
+        assert!(accepts(&parser, &[]), "\"\" accepted (A→ε, B→ε)");
+        assert!(
+            accepts(&parser, &[0]),
+            "\"x\" accepted (A→x,B→ε or A→ε,B→x)"
+        );
+        assert!(accepts(&parser, &[0, 0]), "\"xx\" accepted (A→x, B→x)");
         assert!(!accepts(&parser, &[0, 0, 0]), "\"xxx\" rejected");
     }
 
     #[test]
     fn test_ported_glr_highly_ambiguous() {
-        
         let gdef = make_grammar(
             vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Nonterminal(0)] }, 
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },                             
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(0), Symbol::Nonterminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
             ],
             0,
             vec![tdef(0, "a")],
         );
         let parser = build_parser(&gdef);
-        assert!(accepts(&parser, &[0]),       "\"a\" accepted");
-        assert!(accepts(&parser, &[0, 0]),    "\"aa\" accepted");
-        assert!(accepts(&parser, &[0, 0, 0]), "\"aaa\" accepted (many parse trees)");
-        assert!(!accepts(&parser, &[]),       "\"\" rejected (S not nullable)");
+        assert!(accepts(&parser, &[0]), "\"a\" accepted");
+        assert!(accepts(&parser, &[0, 0]), "\"aa\" accepted");
+        assert!(
+            accepts(&parser, &[0, 0, 0]),
+            "\"aaa\" accepted (many parse trees)"
+        );
+        assert!(!accepts(&parser, &[]), "\"\" rejected (S not nullable)");
     }
 
     #[test]
     fn test_ported_glr_nullable_before_terminal() {
-        
         let gdef = make_grammar(
             vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(0)] }, 
-                Rule { lhs: 1, rhs: vec![Symbol::Terminal(1)] }, 
-                Rule { lhs: 1, rhs: vec![] },                    
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![],
+                },
             ],
             0,
             vec![tdef(0, "c"), tdef(1, "d")],
         );
         let parser = build_parser(&gdef);
-        
+
         assert!(accepts(&parser, &[1, 0]), "\"dc\" accepted (A → d c)");
-        assert!(accepts(&parser, &[0]),    "\"c\" accepted (A → ε c via B→ε)");
-        
-        assert!(!accepts(&parser, &[1]),   "\"d\" rejected (missing 'c')");
-        assert!(!accepts(&parser, &[]),    "\"\" rejected (A always requires 'c')");
+        assert!(accepts(&parser, &[0]), "\"c\" accepted (A → ε c via B→ε)");
+
+        assert!(!accepts(&parser, &[1]), "\"d\" rejected (missing 'c')");
+        assert!(
+            !accepts(&parser, &[]),
+            "\"\" rejected (A always requires 'c')"
+        );
     }
 
     #[test]
     fn test_ported_glr_ambiguous_dangling_else() {
-        
         let gdef = make_grammar(
             vec![
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2), Symbol::Nonterminal(0)] }, 
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2), Symbol::Nonterminal(0), Symbol::Terminal(3), Symbol::Nonterminal(0)] }, 
-                Rule { lhs: 0, rhs: vec![Symbol::Terminal(4)] }, 
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Terminal(1),
+                        Symbol::Terminal(2),
+                        Symbol::Nonterminal(0),
+                    ],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Terminal(1),
+                        Symbol::Terminal(2),
+                        Symbol::Nonterminal(0),
+                        Symbol::Terminal(3),
+                        Symbol::Nonterminal(0),
+                    ],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(4)],
+                },
             ],
             0,
-            vec![tdef(0, "if"), tdef(1, "id"), tdef(2, "then"), tdef(3, "else"), tdef(4, "other")],
+            vec![
+                tdef(0, "if"),
+                tdef(1, "id"),
+                tdef(2, "then"),
+                tdef(3, "else"),
+                tdef(4, "other"),
+            ],
         );
         let parser = build_parser(&gdef);
-        
-        assert!(accepts(&parser, &[0, 1, 2, 0, 1, 2, 4, 3, 4]),
-            "ambiguous 'if id then if id then other else other' should be accepted");
-        
-        assert!(accepts(&parser, &[4]),          "\"other\" accepted");
-        assert!(accepts(&parser, &[0, 1, 2, 4]), "\"if id then other\" accepted");
-        assert!(!accepts(&parser, &[0, 1, 2]),   "\"if id then\" rejected (incomplete)");
+
+        assert!(
+            accepts(&parser, &[0, 1, 2, 0, 1, 2, 4, 3, 4]),
+            "ambiguous 'if id then if id then other else other' should be accepted"
+        );
+
+        assert!(accepts(&parser, &[4]), "\"other\" accepted");
+        assert!(
+            accepts(&parser, &[0, 1, 2, 4]),
+            "\"if id then other\" accepted"
+        );
+        assert!(
+            !accepts(&parser, &[0, 1, 2]),
+            "\"if id then\" rejected (incomplete)"
+        );
     }
 }
