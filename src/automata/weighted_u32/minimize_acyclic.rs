@@ -16,6 +16,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
+
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::{Weight, WeightBuilder};
 
@@ -52,6 +54,45 @@ fn minimize_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_MINIMIZE_ACYCLIC").is_some()
 }
 
+fn weight_body_id(weight: &Weight) -> usize {
+    Arc::as_ptr(&weight.0) as usize
+}
+
+fn intersection_memo_key(left: &Weight, right: &Weight) -> (usize, usize) {
+    let left_id = weight_body_id(left);
+    let right_id = weight_body_id(right);
+    if left_id <= right_id {
+        (left_id, right_id)
+    } else {
+        (right_id, left_id)
+    }
+}
+
+fn memoized_intersection(
+    cache: &mut FxHashMap<(usize, usize), Weight>,
+    left: &Weight,
+    right: &Weight,
+) -> Weight {
+    if left.is_empty() || right.is_empty() {
+        return Weight::empty();
+    }
+    if left.is_full() {
+        return right.clone();
+    }
+    if right.is_full() {
+        return left.clone();
+    }
+
+    let key = intersection_memo_key(left, right);
+    if let Some(existing) = cache.get(&key) {
+        return existing.clone();
+    }
+
+    let value = left.intersection(right);
+    cache.insert(key, value.clone());
+    value
+}
+
 // ---------------------------------------------------------------------------
 // Phase 0: Weight pushing (backward reachability pruning)
 // ---------------------------------------------------------------------------
@@ -74,6 +115,7 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
 
     // 2. Backward reachable sets (reverse topo order = leaves first)
     let mut reachable: Vec<Weight> = vec![Weight::empty(); n];
+    let mut intersection_cache = FxHashMap::default();
     for &u in topo.iter().rev() {
         let st = &dwa.states[u];
         let mut acc = st.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
@@ -85,7 +127,7 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
             if reachable[t].is_full() {
                 acc = acc.union(w);
             } else if !reachable[t].is_empty() {
-                let tmp = w.intersection(&reachable[t]);
+                let tmp = memoized_intersection(&mut intersection_cache, w, &reachable[t]);
                 acc = acc.union(&tmp);
             }
             if acc.is_full() {
@@ -111,7 +153,7 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
                 let new_w = if reachable[t].is_empty() {
                     Weight::empty()
                 } else {
-                    w.intersection(&reachable[t])
+                    memoized_intersection(&mut intersection_cache, w, &reachable[t])
                 };
                 if new_w != *w {
                     Some((lbl, target, if new_w.is_empty() { None } else { Some(new_w) }))
