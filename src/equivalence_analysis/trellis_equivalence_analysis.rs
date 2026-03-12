@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::finite_automata::{Regex, TokenTrellisWithCompletion, GroupID, Trellis};
 
@@ -79,13 +78,6 @@ pub fn find_vocab_equivalence_classes_trellis_with_follow(
     initial_states: &[usize],
     ever_allowed_by_group: Option<&[BTreeSet<GroupID>]>,
 ) -> VocabEquivalenceResult {
-    let progress_every = std::env::var("TRELLIS_PROGRESS_EVERY")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0);
-    let progress_counter = progress_every.map(|_| AtomicUsize::new(0));
-    let progress_start = std::time::Instant::now();
-
     // Compute signature for each token
     let mut token_signatures: Vec<u64> = Vec::with_capacity(tokens.len());
 
@@ -106,29 +98,6 @@ pub fn find_vocab_equivalence_classes_trellis_with_follow(
         }
         
         token_signatures.push(combined_hasher.finish());
-
-        if let (Some(every), Some(counter)) = (progress_every, progress_counter.as_ref()) {
-            let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if done % every == 0 || done == tokens.len() {
-                let elapsed = progress_start.elapsed().as_secs_f64();
-                let rate = done as f64 / elapsed.max(1e-9);
-                let remaining = tokens.len().saturating_sub(done);
-                let eta = if rate > 0.0 {
-                    remaining as f64 / rate
-                } else {
-                    0.0
-                };
-                eprintln!(
-                    "TRELLIS progress: {}/{} tokens ({:.1}%) elapsed={:.1}s rate={:.1} tok/s eta={:.1}s",
-                    done,
-                    tokens.len(),
-                    100.0 * done as f64 / tokens.len().max(1) as f64,
-                    elapsed,
-                    rate,
-                    eta,
-                );
-            }
-        }
     }
     
     // Group tokens by signature
