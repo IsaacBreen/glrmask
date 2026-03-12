@@ -1026,7 +1026,11 @@ fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> 
     }
     let new_empty = l1.empty || l2.empty;
     let merged_children = merge_children(&l1.children, &l2.children, |a, b| merge_lower(a, b));
-    new_lower(merged_children, new_empty)
+    Arc::new(Lower {
+        children: merged_children,
+        empty: new_empty,
+        max_depth: l1.max_depth.max(l2.max_depth),
+    })
 }
 
 fn interface_to_upperbranch<T, A>(it: &Arc<Interface<T, A>>) -> Arc<UpperBranch<T, A>>
@@ -1073,7 +1077,11 @@ where
     }
     let new_empty = merge_optional_acc(&a.empty, &b.empty);
     let merged_children = merge_children(&a.children, &b.children, |x, y| merge_upper(x, y));
-    let new_b = new_branch(merged_children, new_empty);
+    let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
+        children: merged_children,
+        empty: new_empty,
+        max_depth: a.max_depth.max(b.max_depth),
+    })));
     try_promote(&new_b)
 }
 
