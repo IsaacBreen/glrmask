@@ -223,12 +223,12 @@ impl<'a> ConstraintState<'a> {
                 );
             }
 
-            for (&tsid, disallowed_in_state) in terminals_disallowed {
+            for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed {
                 if disallowed_in_state.is_empty() {
                     continue;
                 }
 
-                let state_matches = self.constraint.possible_matches_for_state_internal(tsid);
+                let state_matches = self.constraint.possible_matches_for_state_internal(orig_tokenizer_state);
                 if !state_matches.is_empty() {
                     for (terminal_id, llm_tokens) in state_matches {
                         if disallowed_in_state.contains(&terminal_id) {
