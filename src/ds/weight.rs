@@ -21,7 +21,9 @@ type WeightMap = RangeMapBlaze<u32, SharedTokenSet>;
 #[derive(Default)]
 struct GlobalWeightInterner {
     token_sets: FxHashMap<RangeSetBlaze<u32>, Weak<RangeSetBlaze<u32>>>,
+    weights: FxHashMap<u64, Vec<Weak<WeightMap>>>,
     token_inserts_since_cleanup: usize,
+    weight_inserts_since_cleanup: usize,
 }
 
 const INTERNER_CLEANUP_INTERVAL: usize = 1024;
@@ -50,6 +52,17 @@ impl GlobalWeightInterner {
         self.token_sets.retain(|_, weak| weak.strong_count() > 0);
         self.token_inserts_since_cleanup = 0;
     }
+
+    fn maybe_cleanup_weights(&mut self) {
+        if self.weight_inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
+            return;
+        }
+        self.weights.retain(|_, bucket| {
+            bucket.retain(|weak| weak.strong_count() > 0);
+            !bucket.is_empty()
+        });
+        self.weight_inserts_since_cleanup = 0;
+    }
 }
 
 fn intern_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
@@ -70,11 +83,72 @@ fn intern_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
     shared
 }
 
+fn weight_map_fingerprint(map: &WeightMap) -> u64 {
+    use std::hash::Hasher;
+
+    let mut hasher = rustc_hash::FxHasher::default();
+    for (range, tokens) in map.range_values() {
+        hasher.write_u32(*range.start());
+        hasher.write_u32(*range.end());
+        hasher.write_usize(Arc::as_ptr(tokens) as usize);
+    }
+    hasher.finish()
+}
+
+fn weight_map_eq(left: &WeightMap, right: &WeightMap) -> bool {
+    let mut left_iter = left.range_values();
+    let mut right_iter = right.range_values();
+    loop {
+        match (left_iter.next(), right_iter.next()) {
+            (None, None) => return true,
+            (Some((left_range, left_tokens)), Some((right_range, right_tokens))) => {
+                if left_range != right_range {
+                    return false;
+                }
+                if !Arc::ptr_eq(left_tokens, right_tokens)
+                    && left_tokens.as_ref() != right_tokens.as_ref()
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn intern_weight_map(map: WeightMap) -> Arc<WeightMap> {
+    let fingerprint = weight_map_fingerprint(&map);
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    if let Some(bucket) = interner.weights.get_mut(&fingerprint) {
+        let mut idx = 0usize;
+        while idx < bucket.len() {
+            let Some(existing) = bucket[idx].upgrade() else {
+                bucket.swap_remove(idx);
+                continue;
+            };
+            if weight_map_eq(existing.as_ref(), &map) {
+                return existing;
+            }
+            idx += 1;
+        }
+    }
+
+    interner.maybe_cleanup_weights();
+    let shared = Arc::new(map);
+    interner
+        .weights
+        .entry(fingerprint)
+        .or_default()
+        .push(Arc::downgrade(&shared));
+    interner.weight_inserts_since_cleanup += 1;
+    shared
+}
+
 fn finalize_weight_map(map: WeightMap) -> Weight {
     if map.ranges().next().is_none() {
         EMPTY_WEIGHT.clone()
     } else {
-        Weight(Arc::new(map))
+        Weight(intern_weight_map(map))
     }
 }
 
@@ -590,6 +664,10 @@ impl WeightBuilder {
 }
 
 impl Weight {
+    pub(crate) fn ptr_key(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     pub(crate) fn compact_entries(&self) -> Option<Vec<(u32, u32, SharedTokenSet)>> {
         if self.is_full() {
             return None;
@@ -1397,6 +1475,32 @@ mod tests {
         assert_eq!(a, b);
         let c = Weight::all();
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_weight_map_interning_reuses_arc_for_equal_weights() {
+        let a = Weight::from_compact_ranges(vec![
+            (0..=2, vec![10..=12, 20..=21]),
+            (5..=5, vec![7..=9]),
+        ]);
+        let b = Weight::from_compact_ranges(vec![
+            (0..=2, vec![10..=12, 20..=21]),
+            (5..=5, vec![7..=9]),
+        ]);
+        assert_eq!(a, b);
+        assert_eq!(a.ptr_key(), b.ptr_key());
+    }
+
+    #[test]
+    fn test_weight_map_interning_reuses_arc_after_union() {
+        let left = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2])]);
+        let right = Weight::from_compact_ranges(vec![(2..=3, vec![3..=4])]);
+
+        let via_union = left.union(&right);
+        let direct = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2]), (2..=3, vec![3..=4])]);
+
+        assert_eq!(via_union, direct);
+        assert_eq!(via_union.ptr_key(), direct.ptr_key());
     }
 
     #[test]

@@ -6,7 +6,6 @@
 #![allow(unused_imports)]
 
 use std::collections::{BTreeMap, VecDeque};
-use std::hash::Hasher;
 
 use rustc_hash::FxHashMap;
 
@@ -14,8 +13,6 @@ use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::ds::weight::{Weight, WeightBuilder};
 use crate::GlrMaskError;
-
-type WeightId = u32;
 
 /// Like TransitionWeight in minimize: stores either a single weight or
 /// multiple merged via WeightBuilder. Avoids the expand/compress cycle
@@ -66,56 +63,6 @@ struct DeterminizeProfile {
     subset_lookup_ms: std::time::Duration,
 }
 
-#[derive(Default)]
-struct LocalWeightInterner {
-    weights: Vec<Weight>,
-    buckets: FxHashMap<u64, Vec<WeightId>>,
-}
-
-impl LocalWeightInterner {
-    fn intern(&mut self, weight: &Weight) -> WeightId {
-        let fingerprint = weight_fingerprint(weight);
-        let bucket = self.buckets.entry(fingerprint).or_default();
-        for &weight_id in bucket.iter() {
-            if self.weights[weight_id as usize] == *weight {
-                return weight_id;
-            }
-        }
-
-        let weight_id = self.weights.len() as WeightId;
-        self.weights.push(weight.clone());
-        bucket.push(weight_id);
-        weight_id
-    }
-
-    fn intern_subset_key(&mut self, subset: &[(u32, Weight)]) -> Vec<(u32, WeightId)> {
-        subset
-            .iter()
-            .map(|(state_id, weight)| (*state_id, self.intern(weight)))
-            .collect()
-    }
-}
-
-fn weight_fingerprint(weight: &Weight) -> u64 {
-    let mut hasher = rustc_hash::FxHasher::default();
-    if weight.is_full() {
-        hasher.write_u8(1);
-        return hasher.finish();
-    }
-
-    hasher.write_u8(0);
-    for (range, tokens) in weight.0.range_values() {
-        hasher.write_u32(*range.start());
-        hasher.write_u32(*range.end());
-        for token_range in tokens.ranges() {
-            hasher.write_u32(*token_range.start());
-            hasher.write_u32(*token_range.end());
-        }
-        hasher.write_u8(0xff);
-    }
-    hasher.finish()
-}
-
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     if !nwa.is_acyclic() {
         return Err(GlrMaskError::Compilation(
@@ -158,7 +105,6 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     }
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_WEIGHTED_DETERMINIZE").is_some();
     let mut profile = profile_enabled.then(DeterminizeProfile::default);
-    let mut weight_interner = LocalWeightInterner::default();
 
     let mut dwa = DWA::new(0, 0);
     let start_id = dwa.start_state;
@@ -184,10 +130,13 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         return Ok(dwa);
     }
 
-    let mut subset_map: FxHashMap<Vec<(u32, WeightId)>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<(Vec<(u32, WeightId)>, Vec<(u32, Weight)>)> = VecDeque::new();
+    let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<(Vec<(u32, usize)>, Vec<(u32, Weight)>)> = VecDeque::new();
     let start_entries = canonicalize(&start_subset);
-    let start_key = weight_interner.intern_subset_key(&start_entries);
+    let start_key: Vec<(u32, usize)> = start_entries
+        .iter()
+        .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
+        .collect();
     subset_map.insert(start_key.clone(), start_id);
     worklist.push_back((start_key, start_entries));
 
@@ -306,7 +255,10 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             if next_key.is_empty() {
                 continue;
             }
-            let next_key_ids = weight_interner.intern_subset_key(&next_key);
+            let next_key_ids: Vec<(u32, usize)> = next_key
+                .iter()
+                .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
+                .collect();
 
             let subset_lookup_started_at = profile_enabled.then(std::time::Instant::now);
             let to_state = if let Some(existing) = subset_map.get(&next_key_ids).copied() {
