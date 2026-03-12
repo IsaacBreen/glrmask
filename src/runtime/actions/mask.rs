@@ -162,7 +162,7 @@ impl<'a> ConstraintState<'a> {
                 }
 
                 // Advance through DWA transitions for each parser state.
-                for parser_state in gss.peek() {
+                for parser_state in gss.peek_values() {
                     let mut advance = |label: i32, current: &WeightedParserGSS| {
                         let Some((target, weight)) = dwa_state.transitions.get(&label) else {
                             return;

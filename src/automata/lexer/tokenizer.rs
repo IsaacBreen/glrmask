@@ -108,9 +108,9 @@ impl Tokenizer {
                 };
             };
             state = next;
-            for terminal in self.all_matched_terminals(state) {
+            for terminal in self.dfa.finalizers(state).iter() {
                 matches.push(TokenizerMatch {
-                    id: terminal,
+                    id: terminal as TerminalID,
                     width: index + 1,
                     end_state: state,
                 });

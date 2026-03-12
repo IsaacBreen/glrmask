@@ -2831,6 +2831,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.children_keys().into_iter().collect()
     }
 
+    pub fn peek_values(&self) -> Vec<T> {
+        self.inner.children_keys()
+    }
+
     pub fn visit_accs<F>(&self, mut f: F)
     where
         F: FnMut(&A),
