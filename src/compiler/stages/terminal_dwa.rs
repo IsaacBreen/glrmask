@@ -672,7 +672,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
     }
 
-    fn is_self_loop_subtree_state(
+    fn can_skip_self_loop_subtree(
         &self,
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
@@ -682,107 +682,32 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 .self_loop_bytes
                 .get(tokenizer_state as usize)
                 .is_some_and(|self_loop_bytes| u8set_is_subset(node.subtree_bytes(), self_loop_bytes))
+            && self.tokenizer.dfa.finalizers(tokenizer_state).iter().next().is_none()
     }
 
-    fn add_self_loop_segment_effects(
+    fn emit_self_loop_leaf_only_subtree(
         &mut self,
-        segment_bytes: &[u8],
-        child_node: &VocabPrefixTreeNode,
-        self_loop_assoc: &BTreeMap<TokenizerState, Vec<NwaState>>,
-        pending: &mut BTreeMap<usize, BTreeMap<TokenizerState, Vec<NwaState>>>,
+        node: &VocabPrefixTreeNode,
+        assoc_by_state: &BTreeMap<TokenizerState, Vec<NwaState>>,
     ) {
-        let internal_child_token_id = child_node.token_id() as u32;
-        for (&tokenizer_state, source_nodes) in self_loop_assoc {
-            let accessible_terminals = self.tokenizer.tokens_accessible_from_state(tokenizer_state);
-            if child_node.has_token() {
+        for child_node in node.children().values() {
+            let internal_child_token_id = child_node.token_id() as u32;
+            for (&tokenizer_state, source_nodes) in assoc_by_state {
+                let accessible_terminals = self.tokenizer.tokens_accessible_from_state(tokenizer_state);
                 for terminal_id in accessible_terminals {
-                    self.add_leaf_token_from_sources(
+                    if child_node.has_token() {
+                        self.add_leaf_token_from_sources(
+                            source_nodes,
+                            terminal_id,
+                            internal_child_token_id,
+                        );
+                    }
+                    self.add_leaf_token_set_from_sources(
                         source_nodes,
                         terminal_id,
-                        internal_child_token_id,
+                        child_node.reachable_token_ids(),
+                        child_node.has_token().then_some(internal_child_token_id),
                     );
-                }
-            }
-
-            let matched_terminals: Vec<TerminalID> = self
-                .tokenizer
-                .matched_terminals(tokenizer_state)
-                .into_iter()
-                .collect();
-
-            if child_node.has_token() {
-                for &matched_terminal in &matched_terminals {
-                    self.add_leaf_token_from_sources(
-                        source_nodes,
-                        matched_terminal,
-                        internal_child_token_id,
-                    );
-                }
-            }
-
-            if matched_terminals.is_empty() {
-                continue;
-            }
-
-            let mut possible_matches_at_end = None;
-            for next_pos in 1..=segment_bytes.len() {
-                let continuation_assoc = pending.entry(next_pos).or_default();
-                let destination = continuation_state(
-                    continuation_assoc,
-                    self.representative_initial_state,
-                    self.nwa,
-                );
-
-                if next_pos == segment_bytes.len() && child_node.has_token() {
-                    for &matched_terminal in &matched_terminals {
-                        let cache_key = (
-                            child_node as *const VocabPrefixTreeNode as usize,
-                            tokenizer_state,
-                            matched_terminal,
-                        );
-                        let continuation_weight = if let Some(weight) = self.pruned_weight_cache.get(&cache_key) {
-                            weight.clone()
-                        } else {
-                            let mut remaining = child_node.reachable_token_ids().clone();
-                            remaining.remove(internal_child_token_id as usize);
-                            let matches_at_end = possible_matches_at_end.get_or_insert_with(|| {
-                                self.possible_matches
-                                    .possible_matches_for_node(child_node, tokenizer_state)
-                            });
-                            if let Some(pm) = matches_at_end.get(&matched_terminal) {
-                                subtract_possible_matches(&mut remaining, pm);
-                            }
-                            if remaining.is_empty() {
-                                Weight::empty()
-                            } else {
-                                let weight = self.token_set_weight_fast(&remaining);
-                                self.pruned_weight_cache.insert(cache_key, weight.clone());
-                                weight
-                            }
-                        };
-                        if continuation_weight.is_empty() {
-                            continue;
-                        }
-                        self.add_match_from_sources(
-                            source_nodes,
-                            matched_terminal,
-                            destination,
-                            &continuation_weight,
-                        );
-                    }
-                } else {
-                    let continuation_weight = self.cached_reachable_weight(child_node.reachable_token_ids());
-                    if continuation_weight.is_empty() {
-                        continue;
-                    }
-                    for &matched_terminal in &matched_terminals {
-                        self.add_match_from_sources(
-                            source_nodes,
-                            matched_terminal,
-                            destination,
-                            &continuation_weight,
-                        );
-                    }
                 }
             }
         }
@@ -877,16 +802,20 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ) {
         self.profile_trie_calls += 1;
         let mut recursive_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
-        let mut self_loop_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
+        let mut self_loop_leaf_only_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
         for (&tokenizer_state, source_nodes) in assoc_by_state {
-            if self.is_self_loop_subtree_state(node, tokenizer_state) {
-                merge_assoc(&mut self_loop_assoc, tokenizer_state, source_nodes);
+            if self.can_skip_self_loop_subtree(node, tokenizer_state) {
+                merge_assoc(&mut self_loop_leaf_only_assoc, tokenizer_state, source_nodes);
             } else {
                 merge_assoc(&mut recursive_assoc, tokenizer_state, source_nodes);
             }
         }
 
-        if recursive_assoc.is_empty() && self_loop_assoc.is_empty() {
+        if !self_loop_leaf_only_assoc.is_empty() {
+            self.emit_self_loop_leaf_only_subtree(node, &self_loop_leaf_only_assoc);
+        }
+
+        if recursive_assoc.is_empty() {
             return;
         }
 
@@ -897,22 +826,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             let mut next_level_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
             let mut pending = BTreeMap::<usize, BTreeMap<TokenizerState, Vec<NwaState>>>::new();
             let clone_started = std::time::Instant::now();
-            if !recursive_assoc.is_empty() {
-                pending.insert(0, recursive_assoc.clone());
-            }
+            pending.insert(0, recursive_assoc.clone());
             self.profile_assoc_clone_ms += clone_started.elapsed();
             self.profile_assoc_clones += 1;
-
-            if !self_loop_assoc.is_empty() {
-                let t = std::time::Instant::now();
-                self.add_self_loop_segment_effects(
-                    segment_bytes,
-                    child_node,
-                    &self_loop_assoc,
-                    &mut pending,
-                );
-                self.profile_pending_ms += t.elapsed();
-            }
 
             while let Some((pos, states_at_pos)) = pending.pop_first() {
                 if pos == segment_bytes.len() {
@@ -1029,14 +945,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         self.profile_match_ms += match_started.elapsed();
                     }
                 }
-            }
-
-            if !self_loop_assoc.is_empty() {
-                let t = std::time::Instant::now();
-                for (&tokenizer_state, source_nodes) in &self_loop_assoc {
-                    merge_assoc(&mut next_level_assoc, tokenizer_state, source_nodes);
-                }
-                self.profile_merge_ms += t.elapsed();
             }
 
             if !next_level_assoc.is_empty() {
