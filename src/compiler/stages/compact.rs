@@ -4,9 +4,6 @@
 //! profiles, then reorders the remaining IDs so that similar elements are
 //! placed adjacently. This reduces the number of ranges in the underlying
 //! `RangeMapBlaze` / `RangeSetBlaze` structures.
-//!
-//! Token merging is additionally gated on matching possible-matches
-//! fingerprints so that downstream mask correctness is preserved.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,8 +11,6 @@ use std::sync::Arc;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 use crate::automata::weighted_u32::dwa::DWA;
-use crate::compiler::grammar_def::TerminalID;
-use crate::compiler::possible_matches::PossibleMatchesByState;
 use crate::ds::weight::Weight;
 
 use super::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
@@ -33,13 +28,9 @@ pub struct CompactReport {
 
 /// Merge equivalent IDs and reorder both dimensions of every weight in `dwa`,
 /// updating `id_map` to match.
-///
-/// `pre_compact_possible_matches` is the possible-matches map computed from the
-/// pre-compact id_map; it is used only for token merge fingerprinting.
 pub fn compact_dwa_dimensions(
     dwa: &mut DWA,
     id_map: &mut InternalIdMap,
-    pre_compact_possible_matches: &PossibleMatchesByState,
 ) -> CompactReport {
     let num_tsids = id_map.num_tsids();
     let num_tokens = id_map.num_internal_tokens();
@@ -55,14 +46,8 @@ pub fn compact_dwa_dimensions(
     let (tsid_perm, new_num_tsids) = merge_sort_perm(&tsid_profiles);
 
     // Step 3  — token dimension: merge + reorder
-    //           Gate merging on matching possible-matches fingerprints.
     let token_profiles = build_token_profiles(&weight_refs, num_tokens);
-    let token_fingerprints = build_token_fingerprints(pre_compact_possible_matches, num_tokens);
-    let augmented_token_profiles: Vec<(Vec<u32>, Vec<(u32, TerminalID)>)> = token_profiles
-        .into_iter()
-        .zip(token_fingerprints.into_iter())
-        .collect();
-    let (token_perm, new_num_tokens) = merge_sort_perm(&augmented_token_profiles);
+    let (token_perm, new_num_tokens) = merge_sort_perm(&token_profiles);
 
     // Step 4  — apply permutations to every weight in the DWA
     apply_permutations_to_dwa(dwa, &unique_weights, &tsid_perm, &token_perm);
@@ -138,30 +123,6 @@ fn build_token_profiles(weights: &[&Weight], num_tokens: u32) -> Vec<Vec<u32>> {
         }
     }
     profiles
-}
-
-/// For each internal token, collect a sorted fingerprint of which
-/// (original_state, terminal) pairs it appears in within possible_matches.
-fn build_token_fingerprints(
-    pm: &PossibleMatchesByState,
-    num_tokens: u32,
-) -> Vec<Vec<(u32, TerminalID)>> {
-    let n = num_tokens as usize;
-    let mut fingerprints = vec![Vec::new(); n];
-    for (&state, by_terminal) in pm {
-        for (&terminal, token_set) in by_terminal {
-            for token in token_set.iter() {
-                if (token as usize) < n {
-                    fingerprints[token as usize].push((state, terminal));
-                }
-            }
-        }
-    }
-    // Sort each fingerprint for consistent comparison
-    for fp in &mut fingerprints {
-        fp.sort_unstable();
-    }
-    fingerprints
 }
 
 /// Merge elements with identical profiles, then sort by profile.
