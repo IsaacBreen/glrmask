@@ -6,12 +6,77 @@
 use range_set_blaze::{CheckSortedDisjoint, RangeMapBlaze, RangeSetBlaze, SortedDisjointMap};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use once_cell::sync::Lazy;
+use rustc_hash::FxHashMap;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug, Clone)]
-pub struct Weight(pub RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>>);
+pub struct Weight(pub Arc<WeightMap>);
+
+type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
+type WeightMap = RangeMapBlaze<u32, SharedTokenSet>;
+
+#[derive(Default)]
+struct GlobalWeightInterner {
+    token_sets: FxHashMap<RangeSetBlaze<u32>, Weak<RangeSetBlaze<u32>>>,
+    token_inserts_since_cleanup: usize,
+}
+
+const INTERNER_CLEANUP_INTERVAL: usize = 1024;
+
+static GLOBAL_WEIGHT_INTERNER: Lazy<Mutex<GlobalWeightInterner>> =
+    Lazy::new(|| Mutex::new(GlobalWeightInterner::default()));
+
+static EMPTY_RANGESET: Lazy<SharedTokenSet> = Lazy::new(|| Arc::new(RangeSetBlaze::new()));
+
+static EMPTY_WEIGHT: Lazy<Weight> = Lazy::new(|| Weight(Arc::new(WeightMap::new())));
+
+static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
+    let mut map = WeightMap::new();
+    map.extend_simple(std::iter::once((
+        WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL,
+        shared_rangeset(sentinel_token_set()),
+    )));
+    finalize_weight_map(map)
+});
+
+impl GlobalWeightInterner {
+    fn maybe_cleanup_token_sets(&mut self) {
+        if self.token_inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
+            return;
+        }
+        self.token_sets.retain(|_, weak| weak.strong_count() > 0);
+        self.token_inserts_since_cleanup = 0;
+    }
+}
+
+fn intern_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
+    if tokens.is_empty() {
+        return Arc::clone(&EMPTY_RANGESET);
+    }
+
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    if let Some(existing) = interner.token_sets.get(&tokens).and_then(Weak::upgrade) {
+        return existing;
+    }
+
+    interner.maybe_cleanup_token_sets();
+    let key = tokens.clone();
+    let shared = Arc::new(tokens);
+    interner.token_sets.insert(key, Arc::downgrade(&shared));
+    interner.token_inserts_since_cleanup += 1;
+    shared
+}
+
+fn finalize_weight_map(map: WeightMap) -> Weight {
+    if map.ranges().next().is_none() {
+        EMPTY_WEIGHT.clone()
+    } else {
+        Weight(Arc::new(map))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WeightSerdeEntry {
@@ -39,8 +104,8 @@ fn is_sentinel_token_set(tokens: &RangeSetBlaze<u32>) -> bool {
         && *range.end() == WEIGHT_ALL_SENTINEL
 }
 
-fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> Arc<RangeSetBlaze<u32>> {
-    Arc::new(tokens)
+fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
+    intern_rangeset(tokens)
 }
 
 fn rangeset_from_ranges<I>(ranges: I) -> RangeSetBlaze<u32>
@@ -89,12 +154,12 @@ fn rangeset_to_string_with_names(
 }
 
 fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
-    let mut map = RangeMapBlaze::new();
+    let mut map = WeightMap::new();
     let mut current_start: Option<u32> = None;
     let mut current_end = 0u32;
     let mut current_tokens = RangeSetBlaze::new();
 
-    let mut flush = |map: &mut RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>>,
+    let mut flush = |map: &mut WeightMap,
                      current_start: &mut Option<u32>,
                      current_end: &mut u32,
                      current_tokens: &mut RangeSetBlaze<u32>| {
@@ -123,14 +188,14 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
     }
 
     flush(&mut map, &mut current_start, &mut current_end, &mut current_tokens);
-    Weight(map)
+    finalize_weight_map(map)
 }
 
 #[derive(Clone)]
 struct WeightRangeEntry {
     start: u32,
     end: u32,
-    tokens: Arc<RangeSetBlaze<u32>>,
+    tokens: SharedTokenSet,
 }
 
 fn compact_entries(weight: &Weight) -> SmallVec<[WeightRangeEntry; 16]> {
@@ -182,9 +247,9 @@ fn combine_single_entries<F>(
 ) -> Weight
 where
     F: FnMut(
-        Option<&Arc<RangeSetBlaze<u32>>>,
-        Option<&Arc<RangeSetBlaze<u32>>>,
-    ) -> Option<Arc<RangeSetBlaze<u32>>>,
+        Option<&SharedTokenSet>,
+        Option<&SharedTokenSet>,
+    ) -> Option<SharedTokenSet>,
 {
     let mut boundaries = [0u64; 4];
     let mut len = 0usize;
@@ -197,7 +262,7 @@ where
         return Weight::empty();
     }
 
-    let mut map = RangeMapBlaze::new();
+    let mut map = WeightMap::new();
     let mut pending_start = None;
     let mut pending_end = 0u32;
     let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
@@ -223,7 +288,7 @@ where
     }
 
     flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-    Weight(map)
+    finalize_weight_map(map)
 }
 
 fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> SmallVec<[u64; 32]> {
@@ -241,7 +306,7 @@ fn active_tokens<'a>(
     entries: &'a [WeightRangeEntry],
     index: &mut usize,
     start: u32,
-) -> Option<&'a Arc<RangeSetBlaze<u32>>> {
+) -> Option<&'a SharedTokenSet> {
     while *index < entries.len() && entries[*index].end < start {
         *index += 1;
     }
@@ -251,13 +316,13 @@ fn active_tokens<'a>(
 }
 
 fn push_compact_range(
-    map: &mut RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>>,
+    map: &mut WeightMap,
     pending_start: &mut Option<u32>,
     pending_end: &mut u32,
-    pending_tokens: &mut Arc<RangeSetBlaze<u32>>,
+    pending_tokens: &mut SharedTokenSet,
     start: u32,
     end: u32,
-    tokens: Arc<RangeSetBlaze<u32>>,
+    tokens: SharedTokenSet,
 ) {
     match *pending_start {
         Some(existing_start)
@@ -276,10 +341,10 @@ fn push_compact_range(
 }
 
 fn flush_compact_range(
-    map: &mut RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>>,
+    map: &mut WeightMap,
     pending_start: &mut Option<u32>,
     pending_end: &mut u32,
-    pending_tokens: &mut Arc<RangeSetBlaze<u32>>,
+    pending_tokens: &mut SharedTokenSet,
 ) {
     if let Some(start) = *pending_start {
         let tokens = std::mem::replace(pending_tokens, shared_rangeset(RangeSetBlaze::new()));
@@ -291,9 +356,9 @@ fn flush_compact_range(
 fn combine_compact_entries<F>(left: &Weight, right: &Weight, mut combine: F) -> Weight
 where
     F: FnMut(
-        Option<&Arc<RangeSetBlaze<u32>>>,
-        Option<&Arc<RangeSetBlaze<u32>>>,
-    ) -> Option<Arc<RangeSetBlaze<u32>>>,
+        Option<&SharedTokenSet>,
+        Option<&SharedTokenSet>,
+    ) -> Option<SharedTokenSet>,
 {
     let left_entries = compact_entries(left);
     let right_entries = compact_entries(right);
@@ -304,7 +369,7 @@ where
 
     let mut left_index = 0usize;
     let mut right_index = 0usize;
-    let mut map = RangeMapBlaze::new();
+    let mut map = WeightMap::new();
     let mut pending_start = None;
     let mut pending_end = 0u32;
     let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
@@ -330,7 +395,7 @@ where
     }
 
     flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-    Weight(map)
+    finalize_weight_map(map)
 }
 
 fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
@@ -339,7 +404,7 @@ fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
     let mut left_entry = left_iter.next();
     let mut right_entry = right_iter.next();
 
-    let mut map = RangeMapBlaze::new();
+    let mut map = WeightMap::new();
     let mut pending_start = None;
     let mut pending_end = 0u32;
     let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
@@ -392,17 +457,17 @@ fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
     }
 
     flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-    Weight(map)
+    finalize_weight_map(map)
 }
 
 fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight) -> Weight {
-    let mut map = RangeMapBlaze::new();
+    let mut map = WeightMap::new();
     let mut pending_start = None;
     let mut pending_end = 0u32;
     let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
     let mut overlap_cache: SmallVec<[(
         *const RangeSetBlaze<u32>,
-        Option<Arc<RangeSetBlaze<u32>>>,
+        Option<SharedTokenSet>,
     ); 8]> = SmallVec::new();
 
     let bounds = CheckSortedDisjoint::new([single.start..=single.end]);
@@ -455,7 +520,7 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
     }
 
     flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-    Weight(map)
+    finalize_weight_map(map)
 }
 
 fn range_map_entries(weight: &Weight) -> Vec<(std::ops::RangeInclusive<u32>, RangeSetBlaze<u32>)> {
@@ -525,7 +590,7 @@ impl WeightBuilder {
 }
 
 impl Weight {
-    pub(crate) fn compact_entries(&self) -> Option<Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)>> {
+    pub(crate) fn compact_entries(&self) -> Option<Vec<(u32, u32, SharedTokenSet)>> {
         if self.is_full() {
             return None;
         }
@@ -539,16 +604,11 @@ impl Weight {
     }
 
     pub fn empty() -> Self {
-        Self(RangeMapBlaze::new())
+        EMPTY_WEIGHT.clone()
     }
 
     pub fn all() -> Self {
-        let mut map = RangeMapBlaze::new();
-        map.extend_simple(std::iter::once((
-            WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL,
-            shared_rangeset(sentinel_token_set()),
-        )));
-        Self(map)
+        ALL_WEIGHT.clone()
     }
 
     pub fn from_compact_ranges<I, J>(entries: I) -> Self
@@ -570,9 +630,9 @@ impl Weight {
         if tokens.is_empty() {
             return Self::empty();
         }
-        let mut map = RangeMapBlaze::new();
+        let mut map = WeightMap::new();
         map.extend_simple(std::iter::once((tsid_range, shared_rangeset(tokens))));
-        Self(map)
+        finalize_weight_map(map)
     }
 
     pub fn insert(
@@ -814,7 +874,7 @@ impl Weight {
 
     pub(crate) fn single_compact_entry_parts(
         &self,
-    ) -> Option<(u32, u32, Arc<RangeSetBlaze<u32>>)> {
+    ) -> Option<(u32, u32, SharedTokenSet)> {
         let entry = single_compact_entry(self)?;
         Some((entry.start, entry.end, entry.tokens))
     }
@@ -823,7 +883,7 @@ impl Weight {
         &self,
         start: u32,
         end: u32,
-        tokens: &Arc<RangeSetBlaze<u32>>,
+        tokens: &SharedTokenSet,
     ) -> Self {
         let single = WeightRangeEntry {
             start,
@@ -844,7 +904,7 @@ impl Weight {
     {
         let mut overlap_cache: SmallVec<[(
             *const RangeSetBlaze<u32>,
-            Option<Arc<RangeSetBlaze<u32>>>,
+            Option<SharedTokenSet>,
         ); 8]> = SmallVec::new();
 
         for (range, other_tokens) in self.0.range_values() {
@@ -985,14 +1045,14 @@ impl Weight {
             return;
         }
         let clip: RangeSetBlaze<u32> = std::iter::once(0..=max_token).collect();
-        let mut new_map = RangeMapBlaze::new();
+        let mut new_map = WeightMap::new();
         for (tsid_range, tokens) in self.0.range_values() {
             let clipped = tokens.as_ref() & &clip;
             if !clipped.is_empty() {
-                new_map.extend_simple(std::iter::once((tsid_range, Arc::new(clipped))));
+                new_map.extend_simple(std::iter::once((tsid_range, shared_rangeset(clipped))));
             }
         }
-        self.0 = new_map;
+        *self = finalize_weight_map(new_map);
     }
 
     fn expanded_entries(&self) -> BTreeMap<u32, RangeSetBlaze<u32>> {
