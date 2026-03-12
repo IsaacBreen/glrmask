@@ -776,6 +776,9 @@ impl Weight {
         if self.is_empty() || other.is_empty() {
             return Self::empty();
         }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return self.clone(); // Same weight → intersection is itself
+        }
         if self.is_full() {
             return other.clone();
         }
@@ -959,6 +962,9 @@ impl Weight {
         if self.is_empty() || other.is_empty() {
             return true;
         }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return false; // Same non-empty weight → not disjoint
+        }
         if self.is_full() || other.is_full() {
             return false;
         }
@@ -1091,6 +1097,9 @@ impl Weight {
 
 impl PartialEq for Weight {
     fn eq(&self, other: &Self) -> bool {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
+        }
         if self.is_full() || other.is_full() {
             return self.is_full() == other.is_full();
         }

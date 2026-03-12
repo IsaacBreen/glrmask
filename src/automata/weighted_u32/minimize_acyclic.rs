@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
 use super::dwa::{DWA, DWAState};
@@ -308,6 +309,153 @@ fn compute_productive_transitions(dwa: &DWA, needed: &[Weight]) -> Vec<Vec<Produ
 // Phase 3: Incompatibility graph + graph coloring
 // ---------------------------------------------------------------------------
 
+/// Check if `w_a.intersection(domain) == w_b.intersection(domain)` without
+/// allocating intermediate Weight objects.  Three-way merge scan over the
+/// tsid dimension; at each atomic sub-interval the token-level agreement is
+/// verified with a zero-allocation sweep (`token_sets_agree_on_domain`).
+fn weights_equal_on_domain(w_a: &Weight, w_b: &Weight, domain: &Weight) -> bool {
+    // Fast path: identical Arc ⇒ trivially equal on any domain.
+    if Arc::ptr_eq(&w_a.0, &w_b.0) {
+        return true;
+    }
+    if domain.is_empty() {
+        return true;
+    }
+
+    let mut a_iter = w_a.0.range_values();
+    let mut b_iter = w_b.0.range_values();
+    let mut a_entry = a_iter.next();
+    let mut b_entry = b_iter.next();
+
+    for (d_range, d_tokens) in domain.0.range_values() {
+        let d_lo = *d_range.start();
+        let d_hi = *d_range.end();
+
+        if d_tokens.is_empty() {
+            continue;
+        }
+
+        // Skip entries fully before this domain range.
+        while a_entry.as_ref().is_some_and(|(r, _)| *r.end() < d_lo) {
+            a_entry = a_iter.next();
+        }
+        while b_entry.as_ref().is_some_and(|(r, _)| *r.end() < d_lo) {
+            b_entry = b_iter.next();
+        }
+
+        let mut pos = d_lo;
+        while pos <= d_hi {
+            // Determine w_a's token set at `pos` and how far it extends.
+            let (a_tokens, a_bound): (Option<&Arc<RangeSetBlaze<u32>>>, u32) = match &a_entry {
+                Some((r, tokens)) if *r.start() <= pos => (Some(tokens), *r.end()),
+                Some((r, _)) => (None, r.start() - 1), // gap; r.start()>pos≥1
+                None => (None, d_hi),
+            };
+            let (b_tokens, b_bound): (Option<&Arc<RangeSetBlaze<u32>>>, u32) = match &b_entry {
+                Some((r, tokens)) if *r.start() <= pos => (Some(tokens), *r.end()),
+                Some((r, _)) => (None, r.start() - 1),
+                None => (None, d_hi),
+            };
+
+            let sub_end = d_hi.min(a_bound).min(b_bound);
+
+            // Check: a_tokens ∩ d_tokens  ==  b_tokens ∩ d_tokens
+            match (a_tokens, b_tokens) {
+                (None, None) => { /* both empty → agree */ }
+                (Some(at), None) => {
+                    if !at.as_ref().is_disjoint(d_tokens.as_ref()) {
+                        return false;
+                    }
+                }
+                (None, Some(bt)) => {
+                    if !bt.as_ref().is_disjoint(d_tokens.as_ref()) {
+                        return false;
+                    }
+                }
+                (Some(at), Some(bt)) => {
+                    if !Arc::ptr_eq(at, bt) && at.as_ref() != bt.as_ref() {
+                        if !token_sets_agree_on_domain(
+                            at.as_ref(),
+                            bt.as_ref(),
+                            d_tokens.as_ref(),
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            if sub_end == u32::MAX {
+                break;
+            }
+            pos = sub_end + 1;
+            while a_entry.as_ref().is_some_and(|(r, _)| *r.end() < pos) {
+                a_entry = a_iter.next();
+            }
+            while b_entry.as_ref().is_some_and(|(r, _)| *r.end() < pos) {
+                b_entry = b_iter.next();
+            }
+        }
+    }
+
+    true
+}
+
+/// Zero-allocation check: `a ∩ d == b ∩ d` for `RangeSetBlaze` values.
+/// Sweep-scans the sorted ranges of `a`, `b`, and `d` in parallel.
+fn token_sets_agree_on_domain(
+    a: &RangeSetBlaze<u32>,
+    b: &RangeSetBlaze<u32>,
+    d: &RangeSetBlaze<u32>,
+) -> bool {
+    let mut a_ranges = a.ranges().peekable();
+    let mut b_ranges = b.ranges().peekable();
+
+    for d_range in d.ranges() {
+        let d_lo = *d_range.start();
+        let d_hi = *d_range.end();
+
+        while a_ranges.peek().is_some_and(|r| *r.end() < d_lo) {
+            a_ranges.next();
+        }
+        while b_ranges.peek().is_some_and(|r| *r.end() < d_lo) {
+            b_ranges.next();
+        }
+
+        let mut pos = d_lo;
+        while pos <= d_hi {
+            let (in_a, a_end) = match a_ranges.peek() {
+                Some(r) if *r.start() <= pos => (true, *r.end()),
+                Some(r) => (false, r.start() - 1),
+                None => (false, d_hi),
+            };
+            let (in_b, b_end) = match b_ranges.peek() {
+                Some(r) if *r.start() <= pos => (true, *r.end()),
+                Some(r) => (false, r.start() - 1),
+                None => (false, d_hi),
+            };
+
+            if in_a != in_b {
+                return false;
+            }
+
+            let sub_end = d_hi.min(a_end).min(b_end);
+            if sub_end == u32::MAX {
+                break;
+            }
+            pos = sub_end + 1;
+            while a_ranges.peek().is_some_and(|r| *r.end() < pos) {
+                a_ranges.next();
+            }
+            while b_ranges.peek().is_some_and(|r| *r.end() < pos) {
+                b_ranges.next();
+            }
+        }
+    }
+
+    true
+}
+
 /// Check if two candidate states can be merged.
 ///
 /// States are compatible if:
@@ -338,18 +486,20 @@ fn are_compatible(
 
     // Check final weights on the overlapping domain (skip if disjoint)
     if !domain_disjoint {
-        let fw_u = dwa.states[u]
-            .final_weight
-            .as_ref()
-            .map(|w| w.intersection(&overlap))
-            .unwrap_or_else(Weight::empty);
-        let fw_v = dwa.states[v]
-            .final_weight
-            .as_ref()
-            .map(|w| w.intersection(&overlap))
-            .unwrap_or_else(Weight::empty);
-        if fw_u != fw_v {
-            return false;
+        let fw_u = dwa.states[u].final_weight.as_ref();
+        let fw_v = dwa.states[v].final_weight.as_ref();
+        match (fw_u, fw_v) {
+            (Some(wu), Some(wv)) => {
+                if !weights_equal_on_domain(wu, wv, &overlap) {
+                    return false;
+                }
+            }
+            (Some(fw), None) | (None, Some(fw)) => {
+                if !fw.is_disjoint(&overlap) {
+                    return false;
+                }
+            }
+            (None, None) => {}
         }
     }
 
@@ -441,29 +591,30 @@ fn are_compatible(
                 continue;
             }
 
-            let w_u_overlap = w_u_full
-                .map(|w| w.intersection(&overlap))
-                .unwrap_or_else(Weight::empty);
-            let w_v_overlap = w_v_full
-                .map(|w| w.intersection(&overlap))
-                .unwrap_or_else(Weight::empty);
+            // Fused check: compare overlap-restricted weights without allocating
+            // intermediate Weight objects.
+            let u_disjoint = w_u_full.map_or(true, |w| w.is_disjoint(&overlap));
+            let v_disjoint = w_v_full.map_or(true, |w| w.is_disjoint(&overlap));
 
-            if w_u_overlap.is_empty() && w_v_overlap.is_empty() {
+            if u_disjoint && v_disjoint {
+                // Both empty on overlap → compatible on this label.
                 continue;
             }
 
-            if w_u_overlap != w_v_overlap {
+            if u_disjoint != v_disjoint {
+                // One empty, other non-empty on overlap → incompatible.
                 return false;
             }
 
-            // On overlap, targets must match
+            // Both non-empty on overlap → check equality without allocation.
+            if !weights_equal_on_domain(w_u_full.unwrap(), w_v_full.unwrap(), &overlap) {
+                return false;
+            }
+
+            // Equal and non-empty on overlap → targets must agree.
             match (mapped_u, mapped_v) {
                 (Some(mu), Some(mv)) if mu != mv => return false,
-                (Some(_), None) | (None, Some(_)) => {
-                    if !w_u_overlap.is_empty() {
-                        return false;
-                    }
-                }
+                (Some(_), None) | (None, Some(_)) => return false,
                 _ => {}
             }
         }

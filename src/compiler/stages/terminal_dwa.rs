@@ -12,7 +12,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
-use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::analysis::EOF;
 use crate::compiler::grammar::model::Symbol;
@@ -135,6 +135,153 @@ fn occurrence_follow_set(
     }
 
     follows
+}
+
+/// Compute a structural hash of an NWAState without string allocation.
+/// Uses the same logical content as PartialEq — transitions, epsilons, final_weight —
+/// but feeds it directly into a Hasher for O(1) memory overhead.
+fn structural_hash_nwa_state(state: &NWAStateType) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+    // Hash final_weight
+    state.final_weight.is_some().hash(&mut hasher);
+    if let Some(w) = &state.final_weight {
+        hash_weight(w, &mut hasher);
+    }
+
+    // Hash transitions (BTreeMap iterates in sorted key order)
+    state.transitions.len().hash(&mut hasher);
+    for (label, targets) in &state.transitions {
+        label.hash(&mut hasher);
+        targets.len().hash(&mut hasher);
+        for (target, weight) in targets {
+            target.hash(&mut hasher);
+            hash_weight(weight, &mut hasher);
+        }
+    }
+
+    // Hash epsilons
+    state.epsilons.len().hash(&mut hasher);
+    for (target, weight) in &state.epsilons {
+        target.hash(&mut hasher);
+        hash_weight(weight, &mut hasher);
+    }
+
+    hasher.finish()
+}
+
+/// Feed Weight contents into a Hasher by iterating its range-value structure.
+fn hash_weight(weight: &Weight, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    if weight.is_full() {
+        0xFFFF_FFFFu32.hash(hasher);
+        return;
+    }
+    for (range, tokens) in weight.0.range_values() {
+        range.start().hash(hasher);
+        range.end().hash(hasher);
+        for r in tokens.ranges() {
+            r.start().hash(hasher);
+            r.end().hash(hasher);
+        }
+    }
+}
+
+/// Deduplicate exact-duplicate root states in the terminal NWA.
+///
+/// Root states are states `start_state+1 .. start_state+1+num_roots` that were
+/// created one-per-tokenizer-state-class. Many of these end up structurally
+/// identical after trie-based construction and pruning. This function:
+/// 1. Groups roots by a cheap structural hash, then confirms equality with PartialEq.
+/// 2. For each group of duplicates, picks one canonical representative.
+/// 3. Rewrites the start state's epsilon edges to point to the representative,
+///    unioning the epsilon weights of merged roots.
+/// 4. Calls `prune_unreachable_states` to compact the result.
+fn deduplicate_roots(
+    nwa: &mut NWA,
+    start_state: u32,
+    num_roots: usize,
+    profile_enabled: bool,
+) {
+    let root_start = start_state as usize + 1;
+    let root_end = root_start + num_roots;
+    if root_end > nwa.states.len() {
+        return;
+    }
+
+    // Group roots by structural hash, then confirm equality within each bucket.
+    let mut hash_buckets: HashMap<u64, Vec<u32>> = HashMap::new();
+    for root_idx in 0..num_roots {
+        let state_id = (root_start + root_idx) as u32;
+        let h = structural_hash_nwa_state(&nwa.states[state_id as usize]);
+        hash_buckets.entry(h).or_default().push(state_id);
+    }
+
+    // For each bucket, find the canonical representative via exact equality.
+    let mut remap: Vec<u32> = (0..nwa.states.len() as u32).collect();
+    let mut dedup_count = 0usize;
+
+    for (_hash, bucket) in &hash_buckets {
+        if bucket.len() < 2 {
+            continue;
+        }
+        // Within the bucket, group by exact equality.
+        // canonical_reps[i] = (representative_id, already matched)
+        let mut canonical_reps: Vec<u32> = Vec::new();
+        for &state_id in bucket {
+            let mut found = false;
+            for &rep in &canonical_reps {
+                if nwa.states[state_id as usize] == nwa.states[rep as usize] {
+                    remap[state_id as usize] = rep;
+                    dedup_count += 1;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                canonical_reps.push(state_id);
+            }
+        }
+    }
+
+    if dedup_count == 0 {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][terminal_dwa] deduplicate_roots dedup=0 roots={}",
+                num_roots,
+            );
+        }
+        return;
+    }
+
+    // Rewrite start state epsilon edges: merge weights for roots that map to the
+    // same canonical representative.
+    let start = &nwa.states[start_state as usize];
+    let mut merged_epsilons: BTreeMap<u32, Weight> = BTreeMap::new();
+    for (target, weight) in &start.epsilons {
+        let canonical = remap[*target as usize];
+        merged_epsilons
+            .entry(canonical)
+            .and_modify(|existing| *existing = existing.union(weight))
+            .or_insert_with(|| weight.clone());
+    }
+    nwa.states[start_state as usize].epsilons = merged_epsilons
+        .into_iter()
+        .map(|(target, weight)| (target, weight))
+        .collect();
+
+    // Prune now-unreachable duplicate root states.
+    prune_unreachable_states(nwa);
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa] deduplicate_roots dedup={} roots={} remaining_states={}",
+            dedup_count,
+            num_roots,
+            nwa.states.len(),
+        );
+    }
 }
 
 fn prune_unreachable_states(nwa: &mut NWA) -> bool {
@@ -1193,6 +1340,10 @@ pub(crate) fn build_terminal_dwa_with_report(
     let _ = prune_disallowed_follows(&mut nwa, grammar);
     report.prune_disallowed_follows_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "prune_disallowed_follows", phase_started_at);
+
+    let phase_started_at = std::time::Instant::now();
+    deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize, profile_enabled);
+    log_terminal_profile(profile_enabled, "deduplicate_roots", phase_started_at);
 
     report.terminal_nwa = collect_weighted_nwa_stats(&nwa);
 

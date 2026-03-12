@@ -9,7 +9,7 @@ use crate::ds::weight::Weight;
 
 pub type Label = i32;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
     pub transitions: BTreeMap<Label, Vec<(u32, Weight)>>,
