@@ -1,10 +1,3 @@
-#![allow(unused_mut, unused_variables, dead_code)]
-
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use im::{HashMap as IHashMap, OrdMap};
 use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;
@@ -1972,6 +1965,59 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 LeveledGSS { inner: new_branch(new_children, None) }
             }
         }
+    }
+
+    /// Equivalent to `self.merge(&base.push(value))` but avoids intermediate
+    /// allocations by directly inserting into self's structure via Arc::make_mut.
+    /// Falls back to the standard path for non-Interface cases.
+    pub fn absorb_push(mut self, value: T, base: &Self) -> Self {
+        if base.is_empty() {
+            return self;
+        }
+        if self.is_empty() {
+            return base.push(value);
+        }
+        // Fast path: both are Interface with equal acc
+        if let (Upper::Interface(base_iface), Upper::Interface(self_iface)) =
+            (&*base.inner, &*self.inner)
+        {
+            if self_iface.acc == base_iface.acc {
+                let child_depth = base_iface.inner.max_depth;
+                let child_node = base_iface.inner.clone();
+
+                let inner_mut = Arc::make_mut(&mut self.inner);
+                if let Upper::Interface(self_iface_arc) = inner_mut {
+                    let iface_mut = Arc::make_mut(self_iface_arc);
+                    let lower_mut = Arc::make_mut(&mut iface_mut.inner);
+
+                    match lower_mut.children.get(&value) {
+                        Some(existing_ordmap) => {
+                            let mut new_ordmap = existing_ordmap.clone();
+                            match new_ordmap.get(&child_depth) {
+                                Some(existing_child) => {
+                                    new_ordmap.insert(child_depth, merge_lower(existing_child, &child_node));
+                                }
+                                None => {
+                                    new_ordmap.insert(child_depth, child_node);
+                                }
+                            }
+                            lower_mut.children.insert(value, new_ordmap);
+                        }
+                        None => {
+                            lower_mut.children.insert(value, OrdMap::unit(child_depth, child_node));
+                        }
+                    }
+
+                    if child_depth + 1 > lower_mut.max_depth {
+                        lower_mut.max_depth = child_depth + 1;
+                    }
+
+                    return self;
+                }
+            }
+        }
+        // Fallback
+        self.merge(&base.push(value))
     }
 
     pub fn popn(&self, n: isize) -> Self {

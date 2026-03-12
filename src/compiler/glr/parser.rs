@@ -320,13 +320,9 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         if !any_reduced {
             break;
         }
-        current = ParserGSS::merge_many(
-            std::iter::once(current).chain(
-                pending_bases_by_target
-                    .into_iter()
-                    .map(|(target, base)| base.push(target)),
-            ),
-        );
+        for (target, base) in pending_bases_by_target {
+            current = current.absorb_push(target, &base);
+        }
     }
 
     // Shift phase: for each state with a shift action, push the target.
