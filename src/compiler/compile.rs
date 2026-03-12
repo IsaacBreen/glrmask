@@ -278,7 +278,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     log_compile_profile(profile_enabled, "build_glr_table", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
-    let id_map = InternalIdMap::build(&tokenizer, vocab);
+    let mut id_map = InternalIdMap::build(&tokenizer, vocab);
     let build_internal_id_map_time = phase_started_at.elapsed();
     if profile_enabled {
         eprintln!(
@@ -295,15 +295,10 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     let phase_started_at = std::time::Instant::now();
     let token_bytes = vocab.entries.clone();
-    let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     let collect_token_bytes_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "collect_token_bytes", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
-    let possible_matches = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
-    log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
-
-    let (terminal_dwa, terminal_build) = build_terminal_dwa_with_report(
+    let (mut terminal_dwa, terminal_build) = build_terminal_dwa_with_report(
         &glr_grammar,
         &tokenizer,
         vocab,
@@ -316,6 +311,30 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
             ms(terminal_build.total_time),
         );
     }
+
+    let phase_started_at = std::time::Instant::now();
+    let reorder_report = crate::compiler::stages::reorder::reorder_dwa_dimensions(
+        &mut terminal_dwa,
+        &mut id_map,
+    );
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] reorder_terminal_ms={:.3} tsids={}→{} tokens={}→{} ranges={}→{}",
+            ms(phase_started_at.elapsed()),
+            reorder_report.old_num_tsids,
+            reorder_report.new_num_tsids,
+            reorder_report.old_num_tokens,
+            reorder_report.new_num_tokens,
+            reorder_report.old_ranges,
+            reorder_report.new_ranges,
+        );
+    }
+
+    // Build internal_token_bytes and possible_matches with post-reorder id_map
+    let phase_started_at = std::time::Instant::now();
+    let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
+    let possible_matches = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
+    log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
 
     let (parser_dwa, parser_build) = build_parser_dwa_from_terminal_dwa_with_report(
         &table,
