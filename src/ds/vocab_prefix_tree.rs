@@ -17,6 +17,7 @@ pub struct VocabPrefixTreeNode {
     prefix_length: usize,
     children: BTreeMap<Vec<u8>, VocabPrefixTreeNode>,
     reachable_token_ids: RangeSetBlaze<usize>,
+    subtree_bytes: [u64; 4],
 }
 
 impl VocabPrefixTreeNode {
@@ -29,6 +30,7 @@ impl VocabPrefixTreeNode {
             prefix_length,
             children: BTreeMap::new(),
             reachable_token_ids: RangeSetBlaze::new(),
+            subtree_bytes: [0u64; 4],
         }
     }
 
@@ -58,6 +60,10 @@ impl VocabPrefixTreeNode {
 
     pub fn reachable_token_ids(&self) -> &RangeSetBlaze<usize> {
         &self.reachable_token_ids
+    }
+
+    pub fn subtree_bytes(&self) -> &[u64; 4] {
+        &self.subtree_bytes
     }
 }
 
@@ -203,6 +209,7 @@ impl VocabPrefixTree {
                 prefix_length: 0,
                 children: BTreeMap::new(),
                 reachable_token_ids: RangeSetBlaze::new(),
+                subtree_bytes: [0u64; 4],
             };
             out_node.prefix_length = out_node.prefix.len();
             let parent_prefix_len = out_node.prefix_length;
@@ -228,6 +235,7 @@ impl VocabPrefixTree {
         unsafe {
             Self::propagate_reachable_ids_dfs(root_ptr, &mut ancestor_stack);
         }
+        Self::recompute_subtree_bytes_recursive(&mut self.root);
     }
 
     unsafe fn propagate_reachable_ids_dfs(
@@ -270,6 +278,21 @@ impl VocabPrefixTree {
         for child in node.children.values_mut() {
             Self::clear_reachable_ids_recursive(child);
         }
+    }
+
+    fn recompute_subtree_bytes_recursive(node: &mut VocabPrefixTreeNode) -> [u64; 4] {
+        let mut subtree_bytes = [0u64; 4];
+        for (edge_label, child) in node.children.iter_mut() {
+            for &byte in edge_label {
+                subtree_bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
+            }
+            let child_bytes = Self::recompute_subtree_bytes_recursive(child);
+            for index in 0..4 {
+                subtree_bytes[index] |= child_bytes[index];
+            }
+        }
+        node.subtree_bytes = subtree_bytes;
+        subtree_bytes
     }
 
     pub fn find_token(&self, bytes: &[u8]) -> Option<usize> {

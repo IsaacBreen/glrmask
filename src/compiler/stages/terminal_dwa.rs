@@ -534,6 +534,29 @@ fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     )
 }
 
+#[inline]
+fn u8set_is_subset(a: &[u64; 4], b: &[u64; 4]) -> bool {
+    (a[0] & !b[0]) == 0 && (a[1] & !b[1]) == 0 && (a[2] & !b[2]) == 0 && (a[3] & !b[3]) == 0
+}
+
+fn build_self_loop_bytes(tokenizer: &Tokenizer) -> Vec<[u64; 4]> {
+    tokenizer
+        .dfa
+        .states()
+        .iter()
+        .enumerate()
+        .map(|(state_id, state)| {
+            let mut bytes = [0u64; 4];
+            for (byte, &target) in state.transitions.iter() {
+                if target == state_id as u32 {
+                    bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
+                }
+            }
+            bytes
+        })
+        .collect()
+}
+
 struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     tokenizer: &'tok Tokenizer,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
@@ -543,6 +566,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ignore_terminal: Option<TerminalID>,
     representative_initial_state: u32,
     representative_state_by_original: &'tok [u32],
+    self_loop_bytes: Vec<[u64; 4]>,
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
@@ -630,6 +654,62 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
         for &source in sources {
             self.buffer_leaf_token_id(source, label, internal_token_id);
+        }
+    }
+
+    fn add_leaf_token_set_from_sources(
+        &mut self,
+        sources: &[u32],
+        label: TerminalID,
+        token_ids: &RangeSetBlaze<usize>,
+        excluded_token_id: Option<u32>,
+    ) {
+        for internal_token_id in token_ids.iter() {
+            if Some(internal_token_id as u32) == excluded_token_id {
+                continue;
+            }
+            self.add_leaf_token_from_sources(sources, label, internal_token_id as u32);
+        }
+    }
+
+    fn can_skip_self_loop_subtree(
+        &self,
+        node: &VocabPrefixTreeNode,
+        tokenizer_state: TokenizerState,
+    ) -> bool {
+        *node.subtree_bytes() != [0u64; 4]
+            && self
+                .self_loop_bytes
+                .get(tokenizer_state as usize)
+                .is_some_and(|self_loop_bytes| u8set_is_subset(node.subtree_bytes(), self_loop_bytes))
+            && self.tokenizer.dfa.finalizers(tokenizer_state).iter().next().is_none()
+    }
+
+    fn emit_self_loop_leaf_only_subtree(
+        &mut self,
+        node: &VocabPrefixTreeNode,
+        assoc_by_state: &BTreeMap<TokenizerState, Vec<NwaState>>,
+    ) {
+        for child_node in node.children().values() {
+            let internal_child_token_id = child_node.token_id() as u32;
+            for (&tokenizer_state, source_nodes) in assoc_by_state {
+                let accessible_terminals = self.tokenizer.tokens_accessible_from_state(tokenizer_state);
+                for terminal_id in accessible_terminals {
+                    if child_node.has_token() {
+                        self.add_leaf_token_from_sources(
+                            source_nodes,
+                            terminal_id,
+                            internal_child_token_id,
+                        );
+                    }
+                    self.add_leaf_token_set_from_sources(
+                        source_nodes,
+                        terminal_id,
+                        child_node.reachable_token_ids(),
+                        child_node.has_token().then_some(internal_child_token_id),
+                    );
+                }
+            }
         }
     }
 
@@ -721,6 +801,24 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         assoc_by_state: &BTreeMap<TokenizerState, Vec<NwaState>>,
     ) {
         self.profile_trie_calls += 1;
+        let mut recursive_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
+        let mut self_loop_leaf_only_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
+        for (&tokenizer_state, source_nodes) in assoc_by_state {
+            if self.can_skip_self_loop_subtree(node, tokenizer_state) {
+                merge_assoc(&mut self_loop_leaf_only_assoc, tokenizer_state, source_nodes);
+            } else {
+                merge_assoc(&mut recursive_assoc, tokenizer_state, source_nodes);
+            }
+        }
+
+        if !self_loop_leaf_only_assoc.is_empty() {
+            self.emit_self_loop_leaf_only_subtree(node, &self_loop_leaf_only_assoc);
+        }
+
+        if recursive_assoc.is_empty() {
+            return;
+        }
+
         for (segment_bytes, child_node) in node.iter_children() {
             // Token IDs in the trie are already internal (equivalence class) IDs.
             let internal_child_token_id = child_node.token_id() as u32;
@@ -728,7 +826,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             let mut next_level_assoc = BTreeMap::<TokenizerState, Vec<NwaState>>::new();
             let mut pending = BTreeMap::<usize, BTreeMap<TokenizerState, Vec<NwaState>>>::new();
             let clone_started = std::time::Instant::now();
-            pending.insert(0, assoc_by_state.clone());
+            pending.insert(0, recursive_assoc.clone());
             self.profile_assoc_clone_ms += clone_started.elapsed();
             self.profile_assoc_clones += 1;
 
@@ -979,6 +1077,7 @@ pub(crate) fn build_terminal_dwa_with_report(
             .collect::<Vec<_>>(),
     );
     let representative_state_by_original = representative_original_ids(&id_map.tokenizer_states);
+    let self_loop_bytes = build_self_loop_bytes(tokenizer);
     let representative_initial_state = representative_state_by_original
         .get(tokenizer.initial_state() as usize)
         .copied()
@@ -1013,6 +1112,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         ignore_terminal,
         representative_initial_state,
         representative_state_by_original: &representative_state_by_original,
+        self_loop_bytes,
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),
