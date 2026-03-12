@@ -527,6 +527,17 @@ fn token_weight_all_tsids(num_tsids: u32, internal_token_id: u32) -> Weight {
     )
 }
 
+fn token_set_weight_all_tsids(num_tsids: u32, token_ids: &RangeSetBlaze<usize>) -> Weight {
+    if num_tsids == 0 || token_ids.is_empty() {
+        return Weight::empty();
+    }
+    Weight::from_uniform(0..=num_tsids - 1, RangeSetBlaze::from_iter(
+        token_ids
+            .ranges()
+            .map(|r| (*r.start() as u32)..=(*r.end() as u32)),
+    ))
+}
+
 fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     Weight::from_token_set_for_tsid(
         internal_tsid,
@@ -603,6 +614,12 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         labels[label_idx].push(internal_token_id);
     }
 
+    fn buffer_leaf_token_id_set(&mut self, source: u32, label: TerminalID, token_ids: &RangeSetBlaze<usize>) {
+        for token_id in token_ids.iter() {
+            self.buffer_leaf_token_id(source, label, token_id as u32);
+        }
+    }
+
     fn cached_reachable_weight(&mut self, token_ids: &RangeSetBlaze<usize>) -> Weight {
         let cache_key = token_ids as *const RangeSetBlaze<usize> as usize;
         if let Some(weight) = self.reachable_weight_cache.get(&cache_key) {
@@ -662,13 +679,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         sources: &[u32],
         label: TerminalID,
         token_ids: &RangeSetBlaze<usize>,
-        excluded_token_id: Option<u32>,
     ) {
-        for internal_token_id in token_ids.iter() {
-            if Some(internal_token_id as u32) == excluded_token_id {
-                continue;
-            }
-            self.add_leaf_token_from_sources(sources, label, internal_token_id as u32);
+        if self.ignore_terminal == Some(label) {
+            let weight = token_set_weight_all_tsids(self.num_tsids, token_ids);
+            self.add_match_from_sources(sources, label, self.leaf_state, &weight);
+            return;
+        }
+
+        for &source in sources {
+            self.buffer_leaf_token_id_set(source, label, token_ids);
         }
     }
 
@@ -677,12 +696,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
-        *node.subtree_bytes() != [0u64; 4]
-            && self
-                .self_loop_bytes
-                .get(tokenizer_state as usize)
-                .is_some_and(|self_loop_bytes| u8set_is_subset(node.subtree_bytes(), self_loop_bytes))
-            && self.tokenizer.dfa.finalizers(tokenizer_state).iter().next().is_none()
+        u8set_is_subset(node.subtree_bytes(), &self.self_loop_bytes[tokenizer_state as usize])
     }
 
     fn emit_self_loop_leaf_only_subtree(
@@ -695,18 +709,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             for (&tokenizer_state, source_nodes) in assoc_by_state {
                 let accessible_terminals = self.tokenizer.tokens_accessible_from_state(tokenizer_state);
                 for terminal_id in accessible_terminals {
+                    let mut reachable = child_node.reachable_token_ids().clone();
                     if child_node.has_token() {
-                        self.add_leaf_token_from_sources(
-                            source_nodes,
-                            terminal_id,
-                            internal_child_token_id,
-                        );
+                        reachable.remove(internal_child_token_id as usize);
                     }
                     self.add_leaf_token_set_from_sources(
                         source_nodes,
                         terminal_id,
-                        child_node.reachable_token_ids(),
-                        child_node.has_token().then_some(internal_child_token_id),
+                        &reachable,
                     );
                 }
             }
