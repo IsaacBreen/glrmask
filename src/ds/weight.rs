@@ -9,6 +9,7 @@ use smallvec::SmallVec;
 use once_cell::sync::Lazy;
 use rustc_hash::FxHashMap;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -142,6 +143,75 @@ fn intern_weight_map(map: WeightMap) -> Arc<WeightMap> {
         .push(Arc::downgrade(&shared));
     interner.weight_inserts_since_cleanup += 1;
     shared
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum WeightOpKind {
+    Union,
+    Intersection,
+    Difference,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct WeightOpKey {
+    kind: WeightOpKind,
+    left: usize,
+    right: usize,
+}
+
+impl WeightOpKey {
+    fn new(kind: WeightOpKind, left: usize, right: usize) -> Self {
+        match kind {
+            WeightOpKind::Union | WeightOpKind::Intersection if left > right => Self {
+                kind,
+                left: right,
+                right: left,
+            },
+            _ => Self { kind, left, right },
+        }
+    }
+}
+
+#[derive(Default)]
+struct WeightOpMemo {
+    results: FxHashMap<WeightOpKey, Weak<WeightMap>>,
+    inserts_since_cleanup: usize,
+}
+
+impl WeightOpMemo {
+    fn maybe_cleanup(&mut self) {
+        if self.inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
+            return;
+        }
+        self.results.retain(|_, weak| weak.strong_count() > 0);
+        self.inserts_since_cleanup = 0;
+    }
+}
+
+thread_local! {
+    static WEIGHT_OP_MEMO: RefCell<WeightOpMemo> = RefCell::new(WeightOpMemo::default());
+}
+
+fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
+    let key = WeightOpKey::new(kind, left.ptr_key(), right.ptr_key());
+    WEIGHT_OP_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        let existing = memo.results.get(&key).and_then(Weak::upgrade);
+        if existing.is_none() {
+            memo.results.remove(&key);
+        }
+        existing.map(Weight)
+    })
+}
+
+fn store_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight, result: &Weight) {
+    let key = WeightOpKey::new(kind, left.ptr_key(), right.ptr_key());
+    WEIGHT_OP_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        memo.maybe_cleanup();
+        memo.results.insert(key, Arc::downgrade(&result.0));
+        memo.inserts_since_cleanup += 1;
+    });
 }
 
 fn finalize_weight_map(map: WeightMap) -> Weight {
@@ -785,8 +855,14 @@ impl Weight {
         if other.is_empty() {
             return self.clone();
         }
-        if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
-            return combine_single_entries(&left, &right, |left, right| match (left, right) {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return self.clone();
+        }
+        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Union, self, other) {
+            return existing;
+        }
+        let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
+            combine_single_entries(&left, &right, |left, right| match (left, right) {
                 (Some(left_tokens), Some(right_tokens)) => {
                     if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
                         Some(Arc::clone(left_tokens))
@@ -796,19 +872,22 @@ impl Weight {
                 }
                 (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
                 (None, None) => None,
-            });
-        }
-        combine_compact_entries(self, other, |left, right| match (left, right) {
-            (Some(left_tokens), Some(right_tokens)) => {
-                if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
-                    Some(Arc::clone(left_tokens))
-                } else {
-                    Some(shared_rangeset(left_tokens.as_ref().clone() | right_tokens.as_ref().clone()))
+            })
+        } else {
+            combine_compact_entries(self, other, |left, right| match (left, right) {
+                (Some(left_tokens), Some(right_tokens)) => {
+                    if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
+                        Some(Arc::clone(left_tokens))
+                    } else {
+                        Some(shared_rangeset(left_tokens.as_ref().clone() | right_tokens.as_ref().clone()))
+                    }
                 }
-            }
-            (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
-            (None, None) => None,
-        })
+                (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
+                (None, None) => None,
+            })
+        };
+        store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
+        result
     }
 
     pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
@@ -863,8 +942,11 @@ impl Weight {
         if other.is_full() {
             return self.clone();
         }
-        if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
-            return combine_single_entries(&left, &right, |left, right| match (left, right) {
+        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Intersection, self, other) {
+            return existing;
+        }
+        let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
+            combine_single_entries(&left, &right, |left, right| match (left, right) {
                 (Some(left_tokens), Some(right_tokens)) => {
                     if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
                         Some(Arc::clone(left_tokens))
@@ -874,15 +956,16 @@ impl Weight {
                     }
                 }
                 _ => None,
-            });
-        }
-        if let Some(single) = single_compact_entry(self) {
-            return intersect_single_entry_with_weight(&single, other);
-        }
-        if let Some(single) = single_compact_entry(other) {
-            return intersect_single_entry_with_weight(&single, self);
-        }
-        intersect_weights(self, other)
+            })
+        } else if let Some(single) = single_compact_entry(self) {
+            intersect_single_entry_with_weight(&single, other)
+        } else if let Some(single) = single_compact_entry(other) {
+            intersect_single_entry_with_weight(&single, self)
+        } else {
+            intersect_weights(self, other)
+        };
+        store_memoized_weight_op(WeightOpKind::Intersection, self, other, &result);
+        result
     }
 
     pub fn difference(&self, other: &Self) -> Self {
@@ -892,6 +975,9 @@ impl Weight {
         if other.is_empty() {
             return self.clone();
         }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return Self::empty();
+        }
         if self.is_full() {
             // Cannot compute all \ other without an explicit universe.
             // Return all() as a safe over-approximation.  Callers that need
@@ -899,7 +985,10 @@ impl Weight {
             // which returns empty() as a no-op sentinel instead.
             return Self::all();
         }
-        combine_compact_entries(self, other, |left, right| match (left, right) {
+        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Difference, self, other) {
+            return existing;
+        }
+        let result = combine_compact_entries(self, other, |left, right| match (left, right) {
             (Some(left_tokens), Some(right_tokens)) => {
                 if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
                     None
@@ -910,7 +999,9 @@ impl Weight {
             }
             (Some(left_tokens), None) => Some(Arc::clone(left_tokens)),
             _ => None,
-        })
+        });
+        store_memoized_weight_op(WeightOpKind::Difference, self, other, &result);
+        result
     }
 
     pub fn complement(&self) -> Self {
