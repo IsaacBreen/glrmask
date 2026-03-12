@@ -2251,13 +2251,27 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         .get(&val)
                         .map(|kids| IHashMap::unit(val.clone(), kids.clone()))
                         .unwrap_or_else(IHashMap::new);
-                    let new_b = new_branch(filtered_children, None);
+                    let max_depth = b
+                        .children
+                        .get(&val)
+                        .and_then(|kids| kids.get_max().map(|(depth, _)| *depth + 1))
+                        .unwrap_or(0);
+                    let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
+                        children: filtered_children,
+                        empty: None,
+                        max_depth,
+                    })));
                     try_promote(&new_b)
                 }
                 Upper::Interface(i) => {
                     if let Some(kids) = i.inner.children.get(&val) {
                         let filtered_children = IHashMap::unit(val.clone(), kids.clone());
-                        let new_lower_root = new_lower(filtered_children, false);
+                        let max_depth = kids.get_max().map(|(depth, _)| *depth + 1).unwrap_or(0);
+                        let new_lower_root = Arc::new(Lower {
+                            children: filtered_children,
+                            empty: false,
+                            max_depth,
+                        });
                         new_interface(new_lower_root, i.acc.clone())
                     } else {
                         empty_upper_inner()
