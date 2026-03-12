@@ -422,14 +422,24 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
                 };
                 Arc::clone(cached_tokens)
             } else {
-                let overlap = single.tokens.as_ref() & other_tokens.as_ref();
-                if overlap.is_empty() {
-                    overlap_cache.push((cache_key, None));
-                    continue;
+                if single.tokens.as_ref().is_subset(other_tokens.as_ref()) {
+                    let subset_tokens = Arc::clone(&single.tokens);
+                    overlap_cache.push((cache_key, Some(Arc::clone(&subset_tokens))));
+                    subset_tokens
+                } else if other_tokens.as_ref().is_subset(single.tokens.as_ref()) {
+                    let subset_tokens = Arc::clone(other_tokens);
+                    overlap_cache.push((cache_key, Some(Arc::clone(&subset_tokens))));
+                    subset_tokens
+                } else {
+                    let overlap = single.tokens.as_ref() & other_tokens.as_ref();
+                    if overlap.is_empty() {
+                        overlap_cache.push((cache_key, None));
+                        continue;
+                    }
+                    let overlap_tokens = shared_rangeset(overlap);
+                    overlap_cache.push((cache_key, Some(Arc::clone(&overlap_tokens))));
+                    overlap_tokens
                 }
-                let overlap_tokens = shared_rangeset(overlap);
-                overlap_cache.push((cache_key, Some(Arc::clone(&overlap_tokens))));
-                overlap_tokens
             }
         };
 
