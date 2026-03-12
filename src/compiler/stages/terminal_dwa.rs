@@ -716,6 +716,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         tokenizer_state: TokenizerState,
     ) -> bool {
         u8set_is_subset(node.subtree_bytes(), &self.self_loop_bytes[tokenizer_state as usize])
+            && self.tokenizer.dfa.finalizers(tokenizer_state).iter().next().is_none()
     }
 
     fn emit_self_loop_leaf_only_subtree(
