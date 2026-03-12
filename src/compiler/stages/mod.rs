@@ -6,7 +6,6 @@
 pub mod equivalence_analysis;
 pub mod profile_stats;
 pub mod compact;
-pub mod reorder;
 pub mod templates;
 pub mod terminal_dwa;
 pub mod parser_dwa;
