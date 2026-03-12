@@ -12,8 +12,10 @@ use hashbrown::HashMap;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use smallvec::SmallVec;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
+
+use crate::ds::bitset::BitSet;
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
@@ -49,10 +51,12 @@ struct Dfa {
     finalizers: Vec<SmallVec<[Finalizer; 4]>>,
     is_dead_end: Vec<bool>,
     num_groups: usize,
+    possible_future_groups: Vec<SmallVec<[usize; 4]>>,
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
     /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
     self_loop_bytes: Vec<[u64; 4]>,
+    disallowed_follows: Vec<BitSet>,
 }
 
 impl Dfa {
@@ -66,11 +70,27 @@ impl Dfa {
         }
     }
 
+    #[inline]
+    fn completion_with_disallowed(&self, state: usize, disallowed: Option<&BitSet>) -> u64 {
+        let Some(disallowed) = disallowed.filter(|bits| !bits.is_zero()) else {
+            return self.completion(state);
+        };
+        if state >= self.possible_future_groups.len() {
+            return self.none_completion_hash;
+        }
+        hash_filtered_group_list(&self.possible_future_groups[state], disallowed)
+    }
+
     /// Look up transition: given a DFA state and a byte, return the next state (u32).
     #[inline]
     fn transition(&self, state: usize, byte: u8) -> u32 {
         let class = self.byte_to_class[byte as usize] as usize;
         unsafe { *self.trans_by_class.get_unchecked(class * self.num_states + state) }
+    }
+
+    #[inline]
+    fn disallowed_for(&self, gid: usize) -> &BitSet {
+        &self.disallowed_follows[gid]
     }
 }
 
@@ -86,7 +106,9 @@ struct Scratch {
     targets: Vec<usize>,
     // Suffix DAG
     dag: HashMap<usize, (u64, EdgeList)>,
+    dag_end_states: HashMap<usize, usize>,
     dag_queue: Vec<usize>,
+    dag_disallowed: HashMap<usize, BitSet>,
 }
 
 static HASH_RANDOM_STATE: Lazy<RandomState> =
@@ -108,7 +130,45 @@ fn hash_group_list(iter: impl ExactSizeIterator<Item = usize>) -> u64 {
     h.finish()
 }
 
-fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
+#[inline]
+fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
+    let mut h = new_hasher();
+    h.write_u8(1);
+    let mut count = 0usize;
+    for &gid in groups {
+        if !disallowed.contains(gid) {
+            count += 1;
+        }
+    }
+    h.write_u64(count as u64);
+    for &gid in groups {
+        if !disallowed.contains(gid) {
+            h.write_u64(gid as u64);
+        }
+    }
+    h.finish()
+}
+
+fn normalize_disallowed_follows(
+    num_groups: usize,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+) -> Vec<BitSet> {
+    let mut normalized = vec![BitSet::new(num_groups); num_groups];
+    for gid in 0..num_groups {
+        if let Some(bits) = disallowed_follows.get(&(gid as u32)) {
+            let mut out = BitSet::new(num_groups);
+            for bit in bits.iter() {
+                if bit < num_groups {
+                    out.set(bit);
+                }
+            }
+            normalized[gid] = out;
+        }
+    }
+    normalized
+}
+
+fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
     let dfa = regex.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -127,6 +187,7 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
     let mut transitions = Vec::with_capacity(dfa.states.len());
     let mut finalizers = Vec::with_capacity(dfa.states.len());
     let mut is_dead_end = Vec::with_capacity(dfa.states.len());
+    let mut possible_future_groups = Vec::with_capacity(dfa.states.len());
     let mut completion_hash = Vec::with_capacity(dfa.states.len());
 
     for state in &dfa.states {
@@ -147,9 +208,10 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
         );
 
         is_dead_end.push(state.possible_future_group_ids.is_empty());
-        completion_hash.push(hash_group_list(
-            state.possible_future_group_ids.iter().copied(),
-        ));
+        let future_groups: SmallVec<[usize; 4]> =
+            state.possible_future_group_ids.iter().copied().collect();
+        completion_hash.push(hash_group_list(future_groups.iter().copied()));
+        possible_future_groups.push(future_groups);
     }
 
     let none_completion_hash = {
@@ -214,10 +276,32 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
         finalizers,
         is_dead_end,
         num_groups,
+        possible_future_groups,
         completion_hash,
         none_completion_hash,
         self_loop_bytes,
+        disallowed_follows: normalize_disallowed_follows(num_groups, disallowed_follows),
     }
+}
+
+fn intersect_node_disallowed(
+    scratch: &mut Scratch,
+    pos: usize,
+    incoming: &BitSet,
+) {
+    if let Some(existing) = scratch.dag_disallowed.get_mut(&pos) {
+        *existing = existing.intersection(incoming);
+    } else {
+        scratch.dag_disallowed.insert(pos, incoming.clone());
+    }
+}
+
+fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
+    scratch
+        .dag_disallowed
+        .get(&pos)
+        .map(|bits| bits.contains(gid))
+        .unwrap_or(false)
 }
 
 impl Scratch {
@@ -229,7 +313,9 @@ impl Scratch {
             dirty_groups: vec![SmallVec::new(); num_states],
             targets: Vec::new(),
             dag: HashMap::new(),
+            dag_end_states: HashMap::new(),
             dag_queue: Vec::new(),
+            dag_disallowed: HashMap::new(),
         }
     }
 }
@@ -426,13 +512,26 @@ fn hash_suffixes(
     let len = slice.len();
     let mut suffix_mp = vec![NONE; dfa.num_groups];
     scratch.dag.clear();
+    scratch.dag_end_states.clear();
     scratch.dag_queue.clear();
+    scratch.dag_disallowed.clear();
 
     // BFS from target positions: run suffix DFA at each, discover new positions from edges
     for &pos in &scratch.targets {
         if pos <= len && !scratch.dag.contains_key(&pos) {
             scratch.dag_queue.push(pos);
             scratch.dag.insert(pos, (0, EdgeList::new())); // placeholder
+        }
+    }
+
+    for si in 0..scratch.dirty_groups.len() {
+        let base = si * dfa.num_groups;
+        let dirty = scratch.dirty_groups[si].clone();
+        for gid in dirty {
+            let pv = scratch.match_positions[base + gid];
+            if pv != NONE && pv > 0 {
+                intersect_node_disallowed(scratch, pv as usize, dfa.disallowed_for(gid));
+            }
         }
     }
 
@@ -448,18 +547,36 @@ fn hash_suffixes(
                 scratch.dag.insert(target, (0, EdgeList::new()));
             }
         }
-        let ch = dfa.completion(end_state.unwrap_or(STATE_NONE));
-        scratch.dag.insert(pos, (ch, edges));
+        scratch.dag_end_states.insert(pos, end_state.unwrap_or(STATE_NONE));
+        scratch.dag.insert(pos, (0, edges));
+    }
+
+    scratch.dag_queue.sort_unstable();
+    for idx in 0..scratch.dag_queue.len() {
+        let pos = scratch.dag_queue[idx];
+        let (_, edges) = scratch.dag[&pos].clone();
+        for &(gid, target) in &edges {
+            if node_disallows_gid(scratch, pos, gid) {
+                continue;
+            }
+            if target <= len {
+                intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
+            }
+        }
     }
 
     // Hash bottom-up: process deeper positions first
     scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
     for idx in 0..scratch.dag_queue.len() {
         let pos = scratch.dag_queue[idx];
-        let (ch, edges) = scratch.dag[&pos].clone();
+        let (_, edges) = scratch.dag[&pos].clone();
+        let end_state = scratch.dag_end_states.get(&pos).copied().unwrap_or(STATE_NONE);
         let mut h = new_hasher();
-        h.write_u64(ch);
+        h.write_u64(dfa.completion_with_disallowed(end_state, scratch.dag_disallowed.get(&pos)));
         for &(gid, target) in &edges {
+            if node_disallows_gid(scratch, pos, gid) {
+                continue;
+            }
             h.write_u64(gid as u64);
             h.write_u64(scratch.dag.get(&target).map_or(0, |e| e.0));
         }
@@ -533,7 +650,7 @@ pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
     strings: &[S],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
-    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states)
+    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, &BTreeMap::new())
 }
 
 /// Find vocab equivalence classes.
@@ -542,8 +659,9 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     strings: &[S],
     initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
-    let dfa = build_dfa(regex);
+    let dfa = build_dfa(regex, disallowed_follows);
     let num_tokens = strings.len();
     let num_states = initial_states.len();
 
@@ -613,4 +731,40 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         groups.entry(cid).or_default().push(ti);
     }
     groups.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::lexer::ast::{bytes, choice};
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+    use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+
+    #[test]
+    fn test_disallowed_follow_merges_ab_and_ac() {
+        let tokenizer = build_tokenizer_from_exprs(&[
+            choice(vec![bytes(b"a"), bytes(b"b")]),
+            choice(vec![bytes(b"b"), bytes(b"c")]),
+        ]);
+        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
+        let tokens = vec![b"ab".to_vec(), b"ac".to_vec()];
+        let initial_states = vec![sep1_tok.initial_state_id()];
+
+        let mut disallowed = BTreeMap::new();
+        let mut bitset = BitSet::new(2);
+        bitset.set(0);
+        disallowed.insert(0u32, bitset);
+
+        let classes = find_vocab_equivalence_classes_with_follow(
+            &sep1_tok,
+            &tokens,
+            &initial_states,
+            &disallowed,
+        );
+
+        assert!(
+            classes.iter().any(|class| class == &vec![0, 1]),
+            "expected ab and ac to be equivalent with disallowed follows, got {classes:?}"
+        );
+    }
 }

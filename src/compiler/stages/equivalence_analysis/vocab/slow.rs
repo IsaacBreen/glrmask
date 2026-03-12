@@ -18,8 +18,10 @@ use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
 use smallvec::SmallVec;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
+
+use crate::ds::bitset::BitSet;
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
@@ -66,12 +68,14 @@ struct Dfa {
     finalizers: Vec<SmallVec<[Finalizer; 4]>>,
     is_dead_end: Vec<bool>,
     num_groups: usize,
+    possible_future_groups: Vec<SmallVec<[usize; 4]>>,
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
     /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
     self_loop_bytes: Vec<[u64; 4]>,
     /// Precomputed hash for suffix DAG at end-of-token (empty suffix).
     empty_suffix_hash: u64,
+    disallowed_follows: Vec<BitSet>,
 }
 
 impl Dfa {
@@ -83,9 +87,79 @@ impl Dfa {
             self.none_completion_hash
         }
     }
+
+    #[inline]
+    fn completion_with_disallowed(&self, state: usize, disallowed: Option<&BitSet>) -> u64 {
+        let Some(disallowed) = disallowed.filter(|bits| !bits.is_zero()) else {
+            return self.completion(state);
+        };
+        if state >= self.possible_future_groups.len() {
+            return self.none_completion_hash;
+        }
+        hash_filtered_group_list(&self.possible_future_groups[state], disallowed)
+    }
+
+    #[inline]
+    fn disallowed_for(&self, gid: usize) -> &BitSet {
+        &self.disallowed_follows[gid]
+    }
+
+    #[inline]
+    fn empty_suffix_hash_for(&self, gid: usize) -> u64 {
+        let disallowed = self.disallowed_for(gid);
+        if disallowed.is_zero() {
+            return self.empty_suffix_hash;
+        }
+        let end_state = if self.is_dead_end[self.start_state] {
+            STATE_NONE
+        } else {
+            self.start_state
+        };
+        let mut h = new_hasher();
+        h.write_u64(self.completion_with_disallowed(end_state, Some(disallowed)));
+        h.finish()
+    }
 }
 
-fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
+fn normalize_disallowed_follows(
+    num_groups: usize,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+) -> Vec<BitSet> {
+    let mut normalized = vec![BitSet::new(num_groups); num_groups];
+    for gid in 0..num_groups {
+        if let Some(bits) = disallowed_follows.get(&(gid as u32)) {
+            let mut out = BitSet::new(num_groups);
+            for bit in bits.iter() {
+                if bit < num_groups {
+                    out.set(bit);
+                }
+            }
+            normalized[gid] = out;
+        }
+    }
+    normalized
+}
+
+#[inline]
+fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
+    let mut h = new_hasher();
+    h.write_u8(1);
+    let mut count = 0usize;
+    for &gid in groups {
+        if !disallowed.contains(gid) {
+            count += 1;
+        }
+    }
+    h.write_u64(count as u64);
+    for &gid in groups {
+        if !disallowed.contains(gid) {
+            h.write_u64(gid as u64);
+        }
+    }
+    h.finish()
+}
+
+fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
     let dfa = regex.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -103,6 +177,7 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
     let mut transitions = Vec::with_capacity(dfa.states.len());
     let mut finalizers = Vec::with_capacity(dfa.states.len());
     let mut is_dead_end = Vec::with_capacity(dfa.states.len());
+    let mut possible_future_groups = Vec::with_capacity(dfa.states.len());
     let mut completion_hash = Vec::with_capacity(dfa.states.len());
 
     for state in &dfa.states {
@@ -123,9 +198,10 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
         );
 
         is_dead_end.push(state.possible_future_group_ids.is_empty());
-        completion_hash.push(hash_group_list(
-            state.possible_future_group_ids.iter().copied(),
-        ));
+        let future_groups: SmallVec<[usize; 4]> =
+            state.possible_future_group_ids.iter().copied().collect();
+        completion_hash.push(hash_group_list(future_groups.iter().copied()));
+        possible_future_groups.push(future_groups);
     }
 
     let none_completion_hash = {
@@ -170,11 +246,27 @@ fn build_dfa(regex: &Sep1Tokenizer) -> Dfa {
         finalizers,
         is_dead_end,
         num_groups,
+        possible_future_groups,
         completion_hash,
         none_completion_hash,
         self_loop_bytes,
         empty_suffix_hash,
+        disallowed_follows: normalize_disallowed_follows(num_groups, disallowed_follows),
     }
+}
+
+fn intersect_node_disallowed(scratch: &mut Scratch, pos: usize, incoming: &BitSet) {
+    if scratch.dag_disallowed_generation[pos] == scratch.dag_generation {
+        scratch.dag_disallowed[pos] = scratch.dag_disallowed[pos].intersection(incoming);
+    } else {
+        scratch.dag_disallowed[pos] = incoming.clone();
+        scratch.dag_disallowed_generation[pos] = scratch.dag_generation;
+    }
+}
+
+fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
+    scratch.dag_disallowed_generation[pos] == scratch.dag_generation
+        && scratch.dag_disallowed[pos].contains(gid)
 }
 
 // ---- Vocab Trie ----
@@ -384,15 +476,17 @@ fn hash_suffixes(
             edges: EdgeList::new(),
             generation: 0,
         });
+        scratch.dag_end_states.resize(len + 2, STATE_NONE);
+        scratch
+            .dag_disallowed
+            .resize_with(len + 2, || BitSet::new(scratch.num_groups));
+        scratch.dag_disallowed_generation.resize(len + 2, 0);
     }
 
     for ti in 0..scratch.targets.len() {
         let pos = scratch.targets[ti];
         if pos <= len && !scratch.dag_contains(pos) {
-            scratch.queue.push(pos);
-            scratch.dag[pos].hash = 0;
-            scratch.dag[pos].edges.clear();
-            scratch.dag[pos].generation = scratch.dag_generation;
+            scratch.activate_dag_node(pos);
         }
     }
 
@@ -403,24 +497,50 @@ fn hash_suffixes(
         let (end, edges) = run_suffix(dfa, &slice[pos..], pos, &mut scratch.tmp_mp);
         for &(_, target) in &edges {
             if target <= len && !scratch.dag_contains(target) {
-                scratch.queue.push(target);
-                scratch.dag[target].hash = 0;
-                scratch.dag[target].edges.clear();
-                scratch.dag[target].generation = scratch.dag_generation;
+                scratch.activate_dag_node(target);
             }
         }
-        scratch.dag[pos].hash = dfa.completion(end.unwrap_or(STATE_NONE));
+        scratch.dag_end_states[pos] = end.unwrap_or(STATE_NONE);
+        scratch.dag[pos].hash = 0;
         scratch.dag[pos].edges = edges;
+    }
+
+    for ei in 0..scratch.root_edges.len() {
+        let (gid, pos) = scratch.root_edges[ei];
+        if pos <= len && scratch.dag_contains(pos) {
+            intersect_node_disallowed(scratch, pos, dfa.disallowed_for(gid));
+        }
+    }
+
+    scratch.queue.sort_unstable();
+    for idx in 0..scratch.queue.len() {
+        let pos = scratch.queue[idx];
+        for ei in 0..scratch.dag[pos].edges.len() {
+            let (gid, target) = scratch.dag[pos].edges[ei];
+            if node_disallows_gid(scratch, pos, gid) {
+                continue;
+            }
+            if target <= len && scratch.dag_contains(target) {
+                intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
+            }
+        }
     }
 
     scratch.queue.sort_unstable_by(|a, b| b.cmp(a));
     for idx in 0..scratch.queue.len() {
         let pos = scratch.queue[idx];
         let mut h = new_hasher();
-        h.write_u64(scratch.dag[pos].hash);
+        h.write_u64(dfa.completion_with_disallowed(
+            scratch.dag_end_states[pos],
+            (scratch.dag_disallowed_generation[pos] == scratch.dag_generation)
+                .then_some(&scratch.dag_disallowed[pos]),
+        ));
         // Need to iterate edges without borrowing dag mutably at the same time
         for ei in 0..scratch.dag[pos].edges.len() {
             let (gid, target) = scratch.dag[pos].edges[ei];
+            if node_disallows_gid(scratch, pos, gid) {
+                continue;
+            }
             h.write_u64(gid as u64);
             h.write_u64(scratch.dag_get_hash(target));
         }
@@ -438,10 +558,15 @@ struct DagEntry {
 
 struct Scratch {
     dag: Vec<DagEntry>,
+    dag_end_states: Vec<usize>,
     dag_generation: u32,
     queue: Vec<usize>,
     tmp_mp: Vec<u32>,
     targets: Vec<usize>,
+    root_edges: Vec<(usize, usize)>,
+    dag_disallowed: Vec<BitSet>,
+    dag_disallowed_generation: Vec<u32>,
+    num_groups: usize,
 }
 
 impl Scratch {
@@ -457,11 +582,27 @@ impl Scratch {
         }
         Scratch {
             dag,
+            dag_end_states: vec![STATE_NONE; cap],
             dag_generation: 0,
             queue: Vec::new(),
             tmp_mp: vec![NONE; ng],
             targets: Vec::new(),
+            root_edges: Vec::new(),
+            dag_disallowed: vec![BitSet::new(ng); cap],
+            dag_disallowed_generation: vec![0; cap],
+            num_groups: ng,
         }
+    }
+
+    #[inline]
+    fn activate_dag_node(&mut self, pos: usize) {
+        self.queue.push(pos);
+        self.dag[pos].hash = 0;
+        self.dag[pos].edges.clear();
+        self.dag[pos].generation = self.dag_generation;
+        self.dag_end_states[pos] = STATE_NONE;
+        self.dag_disallowed[pos].clear_all();
+        self.dag_disallowed_generation[pos] = self.dag_generation.wrapping_sub(1);
     }
 
     #[inline]
@@ -526,12 +667,14 @@ fn walk_trie<S: AsRef<[u8]>>(
 
         // Collect suffix targets across all initial states
         scratch.targets.clear();
+        scratch.root_edges.clear();
         for si in 0..ni {
             let base = (depth * ni + si) * ng;
             for gid in 0..ng {
                 let pv = mp[base + gid];
                 if pv != NONE && pv > 0 {
                     scratch.targets.push(pv as usize);
+                    scratch.root_edges.push((gid, pv as usize));
                 }
             }
         }
@@ -674,7 +817,7 @@ fn walk_trie<S: AsRef<[u8]>>(
                                     // Greedy finalizer: mp will advance to L,
                                     // suffix from L is empty.
                                     h.write_u64(gid as u64);
-                                    h.write_u64(dfa.empty_suffix_hash);
+                                    h.write_u64(dfa.empty_suffix_hash_for(gid));
                                 }
                             }
                             h.finish()
@@ -703,7 +846,7 @@ pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
     strings: &[S],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
-    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states)
+    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, &BTreeMap::new())
 }
 
 /// Find vocab equivalence classes.
@@ -711,8 +854,9 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     strings: &[S],
     initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
-    let dfa = build_dfa(regex);
+    let dfa = build_dfa(regex, disallowed_follows);
     let nt = strings.len();
     let ni = initial_states.len();
 

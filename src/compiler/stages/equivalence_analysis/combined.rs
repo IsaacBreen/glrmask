@@ -1,9 +1,12 @@
 
+use std::collections::BTreeMap;
+
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
 use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis;
+use crate::ds::bitset::BitSet;
 
 pub(crate) fn analyze_equivalences(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
     analyze_equivalences_sep1(tokenizer, vocab)
@@ -34,6 +37,7 @@ fn analyze_equivalences_sep1(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalId
         &sep1_tok,
         &token_bytes,
         &initial_states,
+        &BTreeMap::<u32, BitSet>::new(),
     );
 
     // Convert state equivalence classes to ManyToOneIdMap

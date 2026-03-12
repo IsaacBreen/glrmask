@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
+use crate::ds::bitset::BitSet;
 
 use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};
 use super::vocab::fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
@@ -66,6 +67,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     tokens: &[S],
     initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> CombinedEquivalenceResult {
     // State equivalence reduction: groups initial states with identical tokenizer
     // behavior. The cost is O(V×S) token walks (same as vocab analysis), so it's
@@ -115,6 +117,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         regex,
         tokens,
         &reduced_states,
+        disallowed_follows,
     );
 
     #[cfg(test)]
@@ -147,6 +150,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             regex,
             tokens,
             &reduced_states,
+            disallowed_follows,
         );
         if !vocab_is_comparable(&vocab_classes, &trellis_vocab_classes) {
             panic!(
@@ -161,6 +165,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             regex,
             tokens,
             &reduced_states,
+            disallowed_follows,
         );
         if !vocab_is_comparable(&vocab_classes, &flat_vocab_classes) {
             panic!(
@@ -186,6 +191,7 @@ pub fn find_vocab_equivalence_classes_with_state_reduction<S: AsRef<[u8]> + Sync
     regex: &Sep1Tokenizer,
     tokens: &[S],
     initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
-    compute_combined_equivalence(regex, tokens, initial_states).vocab_classes
+    compute_combined_equivalence(regex, tokens, initial_states, disallowed_follows).vocab_classes
 }
