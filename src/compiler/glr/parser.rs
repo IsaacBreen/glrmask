@@ -274,9 +274,69 @@ pub(crate) fn valid_terminals_for_stack_vectors(
 }
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
-    let stacks = stack.to_stacks();
-    let next = advance_stack_entries(table, &stacks, token);
-    ParserGSS::from_stacks(&next)
+    // Reduce closure: iteratively apply all reduce actions on the GSS directly.
+    let mut current = stack.clone();
+    let mut processed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    loop {
+        let frontier = current.peek();
+        let new_states: Vec<u32> = frontier
+            .iter()
+            .filter(|s| !processed.contains(s))
+            .copied()
+            .collect();
+        if new_states.is_empty() {
+            break;
+        }
+
+        let mut any_reduced = false;
+        for state in new_states {
+            processed.insert(state);
+            let reduce_rules: &[u32] = match table.action(state, token) {
+                Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
+                Some(Action::Split { reduces, .. }) => reduces.as_slice(),
+                _ => &[],
+            };
+            for &rule_id in reduce_rules {
+                let rule = &table.rules[rule_id as usize];
+                let subtree = current.isolate(Some(state));
+                let mut popped = subtree;
+                for _ in 0..rule.rhs.len() {
+                    popped = popped.pop();
+                }
+                if popped.is_empty() {
+                    continue;
+                }
+                for goto_from in popped.peek() {
+                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        let base = popped.isolate(Some(goto_from));
+                        let pushed = base.push(target);
+                        current = current.merge(&pushed);
+                        any_reduced = true;
+                    }
+                }
+            }
+        }
+        if !any_reduced {
+            break;
+        }
+    }
+
+    // Shift phase: for each state with a shift action, push the target.
+    let mut result = ParserGSS::empty();
+    for state in current.peek() {
+        let shift_target = match table.action(state, token) {
+            Some(Action::Shift(target)) => Some(*target),
+            Some(Action::Split { shift: Some(target), .. }) => Some(*target),
+            _ => None,
+        };
+        if let Some(target) = shift_target {
+            let subtree = current.isolate(Some(state));
+            let shifted = subtree.push(target);
+            result = result.merge(&shifted);
+        }
+    }
+    result
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
