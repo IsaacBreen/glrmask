@@ -1990,26 +1990,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 return cached.clone();
             }
 
-            let mut res = {
-                let all_children: Vec<_> = node
-                    .children
-                    .values()
-                    .flat_map(|kids| kids.values())
-                    .cloned()
-                    .collect();
-                if all_children.is_empty() {
-                    new_lower(IHashMap::new(), false)
-                } else {
-                    let popped_children: Vec<_> = all_children
-                        .into_iter()
-                        .map(|child| popn_lower::<T, A>(&child, k - 1, memo_lower))
-                        .collect();
+            let mut merged: Option<Arc<Lower<T>>> = None;
+            for child in node.children.values().flat_map(|kids| kids.values()) {
+                let popped_child = popn_lower::<T, A>(child, k - 1, memo_lower);
+                merged = Some(match merged {
+                    Some(acc) => merge_lower(&acc, &popped_child),
+                    None => popped_child,
+                });
+            }
 
-                    let mut it = popped_children.into_iter();
-                    let first = it.next().unwrap();
-                    it.fold(first, |acc, next| merge_lower(&acc, &next))
-                }
-            };
+            let mut res = merged.unwrap_or_else(|| new_lower(IHashMap::new(), false));
 
             if node.empty && k == 1 {
                 let terminal_node = new_lower(IHashMap::new(), true);
@@ -2036,27 +2026,32 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             let res = match &**node {
                 Upper::Branch(b) => {
-                    let mut popped = Vec::new();
+                    let mut merged: Option<Arc<Upper<T, A>>> = None;
                     for kids in b.children.values() {
                         for child in kids.values() {
-                            popped.push(popn_upper(child, k - 1, memo_upper, memo_lower));
+                            let popped_child = popn_upper(child, k - 1, memo_upper, memo_lower);
+                            merged = Some(match merged {
+                                Some(acc) => merge_upper(&acc, &popped_child),
+                                None => popped_child,
+                            });
                         }
                     }
 
                     if let Some(acc) = &b.empty {
                         if k == 1 {
                             let terminal_lower = new_lower(IHashMap::new(), true);
-                            popped.push(new_interface(terminal_lower, acc.clone()));
+                            let terminal_upper = new_interface(terminal_lower, acc.clone());
+                            merged = Some(match merged {
+                                Some(current) => merge_upper(&current, &terminal_upper),
+                                None => terminal_upper,
+                            });
                         }
                     }
 
-                    if popped.is_empty() {
-                        empty_upper_inner()
-                    } else {
-                        let mut it = popped.into_iter();
-                        let first = it.next().unwrap();
-                        let merged = it.fold(first, |acc, next| merge_upper(&acc, &next));
+                    if let Some(merged) = merged {
                         try_promote(&merged)
+                    } else {
+                        empty_upper_inner()
                     }
                 }
                 Upper::Interface(i) => {
