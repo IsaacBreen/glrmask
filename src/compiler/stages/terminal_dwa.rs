@@ -680,16 +680,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         for &source in sources {
-            let source_idx = source as usize;
-            if source_idx >= self.leaf_token_ids_buffer.len() {
-                self.leaf_token_ids_buffer.resize_with(source_idx + 1, Vec::new);
-            }
-            let labels = &mut self.leaf_token_ids_buffer[source_idx];
-            let label_idx = label as usize;
-            if label_idx >= labels.len() {
-                labels.resize_with(label_idx + 1, Vec::new);
-            }
-            labels[label_idx].push(internal_token_id);
+            self.buffer_leaf_token_id(source, label, internal_token_id);
         }
     }
 
