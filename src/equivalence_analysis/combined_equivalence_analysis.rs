@@ -188,38 +188,77 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
                 }).collect()
             });
 
-        // Two-pass approach: use fast-pass representatives only (not all tokens).
-        // Take one representative token from each fast-pass class, then run trellis on those.
-        let mut rep_indices: Vec<usize> = vocab_classes.iter().map(|class| class[0]).collect();
-        rep_indices.sort_unstable();
-        let rep_tokens: Vec<Vec<u8>> = rep_indices.iter().map(|&i| tokens[i].as_ref().to_vec()).collect();
+        let compare_all_tokens = std::env::var("TRELLIS_COMPARE_ALL_TOKENS").is_ok();
+        let (compare_tokens, compare_label): (Vec<Vec<u8>>, &str) = if compare_all_tokens {
+            (tokens.iter().map(|t| t.as_ref().to_vec()).collect(), "all tokens")
+        } else {
+            // Two-pass approach: use fast-pass representatives only (not all tokens).
+            // Take one representative token from each fast-pass class, then run trellis on those.
+            let mut rep_indices: Vec<usize> = vocab_classes.iter().map(|class| class[0]).collect();
+            rep_indices.sort_unstable();
+            (
+                rep_indices.iter().map(|&i| tokens[i].as_ref().to_vec()).collect(),
+                "fast-pass representatives",
+            )
+        };
 
         eprintln!(
-            "TRELLIS COMPARISON: Running trellis on {} representative tokens (from {} fast-pass classes) × {} states...",
-            rep_tokens.len(),
+            "TRELLIS COMPARISON: Running trellis on {} {} (from {} fast-pass classes) × {} states...",
+            compare_tokens.len(),
+            compare_label,
             vocab_classes.len(),
             reduced_states.len(),
         );
 
         let trellis_classes = trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis_with_follow(
             regex.as_regex(),
-            &rep_tokens,
+            &compare_tokens,
             &reduced_states,
             ea_btree.as_deref(),
         );
+        let trellis_full_no_prune = if std::env::var("TRELLIS_FULL_NO_PRUNE_COMPARE").is_ok() {
+            let num_groups = ea_btree.as_ref().map_or(0usize, |rows| rows.len());
+            let all_groups: std::collections::BTreeSet<crate::finite_automata::GroupID> =
+                (0..num_groups)
+                    .map(|gid| gid as crate::finite_automata::GroupID)
+                    .collect();
+            let all_true_rows: Vec<std::collections::BTreeSet<crate::finite_automata::GroupID>> =
+                (0..num_groups).map(|_| all_groups.clone()).collect();
+            Some(trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis_with_follow(
+                regex.as_regex(),
+                &compare_tokens,
+                &reduced_states,
+                Some(&all_true_rows),
+            ))
+        } else {
+            None
+        };
         let trellis_no_follow = trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis_with_follow(
             regex.as_regex(),
-            &rep_tokens,
+            &compare_tokens,
             &reduced_states,
             None,
         );
-        eprintln!(
-            "TRELLIS COMPARISON: fast={} classes, trellis_with_follow={} classes, trellis_no_follow={} classes ({:?})",
-            vocab_classes.len(),
-            trellis_classes.len(),
-            trellis_no_follow.len(),
-            trellis_start.elapsed(),
-        );
+        if let Some(ref full_no_prune) = trellis_full_no_prune {
+            eprintln!(
+                "TRELLIS COMPARISON: fast={} classes, trellis_with_follow={} classes, trellis_full_no_prune={} classes, trellis_no_follow={} classes over {} ({:?})",
+                vocab_classes.len(),
+                trellis_classes.len(),
+                full_no_prune.len(),
+                trellis_no_follow.len(),
+                compare_label,
+                trellis_start.elapsed(),
+            );
+        } else {
+            eprintln!(
+                "TRELLIS COMPARISON: fast={} classes, trellis_with_follow={} classes, trellis_no_follow={} classes over {} ({:?})",
+                vocab_classes.len(),
+                trellis_classes.len(),
+                trellis_no_follow.len(),
+                compare_label,
+                trellis_start.elapsed(),
+            );
+        }
     }
 
     if crate::r#macro::is_debug_level_enabled(4) {
