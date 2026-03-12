@@ -51,6 +51,14 @@ fn intersect_with_single_weight_hint(
     }
 }
 
+fn intersect_or_clone_right_if_subset(left: &Weight, right: &Weight) -> Weight {
+    if right.is_subset(left) {
+        right.clone()
+    } else {
+        left.intersection(right)
+    }
+}
+
 #[derive(Default)]
 struct CancellationProfile {
     seed_queries: usize,
@@ -245,7 +253,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                 }
                 let queries_at_a_scan_started_at = profile_enabled.then(std::time::Instant::now);
                 for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
-                    let prop_w = w_a_prime_a.intersection(&delta_eps);
+                    let prop_w = intersect_or_clone_right_if_subset(&w_a_prime_a, &delta_eps);
                     if prop_w.is_empty() {
                         continue;
                     }
@@ -535,7 +543,7 @@ pub(crate) fn compute_cancellations_range(
                 }
                 let queries_at_a_scan_started_at = profile_enabled.then(std::time::Instant::now);
                 for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
-                    let prop_w = w_a_prime_a.intersection(eps_weight);
+                    let prop_w = intersect_or_clone_right_if_subset(&w_a_prime_a, eps_weight);
                     if prop_w.is_empty() {
                         continue;
                     }
