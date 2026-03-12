@@ -312,25 +312,32 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         );
     }
 
+    // Build internal_token_bytes for compact step (needed for possible-matches fingerprinting)
     let phase_started_at = std::time::Instant::now();
-    let reorder_report = crate::compiler::stages::reorder::reorder_dwa_dimensions(
+    let pre_compact_token_bytes = build_internal_token_bytes(vocab, &id_map);
+    let pre_compact_possible_matches = build_possible_matches_by_state(&tokenizer, &pre_compact_token_bytes);
+    log_compile_profile(profile_enabled, "pre_compact_possible_matches", phase_started_at);
+
+    let phase_started_at = std::time::Instant::now();
+    let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
         &mut terminal_dwa,
         &mut id_map,
+        &pre_compact_possible_matches,
     );
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][compile] reorder_terminal_ms={:.3} tsids={}→{} tokens={}→{} ranges={}→{}",
+            "[glrmask/profile][compile] compact_terminal_ms={:.3} tsids={}→{} tokens={}→{} ranges={}→{}",
             ms(phase_started_at.elapsed()),
-            reorder_report.old_num_tsids,
-            reorder_report.new_num_tsids,
-            reorder_report.old_num_tokens,
-            reorder_report.new_num_tokens,
-            reorder_report.old_ranges,
-            reorder_report.new_ranges,
+            compact_report.old_num_tsids,
+            compact_report.new_num_tsids,
+            compact_report.old_num_tokens,
+            compact_report.new_num_tokens,
+            compact_report.old_ranges,
+            compact_report.new_ranges,
         );
     }
 
-    // Build internal_token_bytes and possible_matches with post-reorder id_map
+    // Build internal_token_bytes and possible_matches with post-compact id_map
     let phase_started_at = std::time::Instant::now();
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     let possible_matches = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
