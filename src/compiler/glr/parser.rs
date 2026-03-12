@@ -290,7 +290,7 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         }
 
         let mut any_reduced = false;
-        let mut pending_merges = Vec::new();
+        let mut pending_bases_by_target = BTreeMap::<u32, ParserGSS>::new();
         for state in new_states {
             processed[state as usize] = true;
             let reduce_rules: &[u32] = match table.action(state, token) {
@@ -308,7 +308,10 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
                 for goto_from in popped.peek_values() {
                     if let Some(target) = table.goto_target(goto_from, rule.lhs) {
                         let base = popped.isolate(Some(goto_from));
-                        pending_merges.push(base.push(target));
+                        pending_bases_by_target
+                            .entry(target)
+                            .and_modify(|existing| *existing = existing.merge(&base))
+                            .or_insert(base);
                         any_reduced = true;
                     }
                 }
@@ -317,7 +320,13 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         if !any_reduced {
             break;
         }
-        current = ParserGSS::merge_many(std::iter::once(current).chain(pending_merges));
+        current = ParserGSS::merge_many(
+            std::iter::once(current).chain(
+                pending_bases_by_target
+                    .into_iter()
+                    .map(|(target, base)| base.push(target)),
+            ),
+        );
     }
 
     // Shift phase: for each state with a shift action, push the target.
