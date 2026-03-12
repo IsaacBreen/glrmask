@@ -57,15 +57,10 @@ fn hash_group_list(iter: impl ExactSizeIterator<Item = usize>) -> u64 {
 
 // ---- Flat DFA ----
 
-#[derive(Clone, Copy)]
-struct Finalizer {
-    gid: usize,
-}
-
 struct Dfa {
     start_state: usize,
     transitions: Vec<[u32; 256]>,
-    finalizers: Vec<SmallVec<[Finalizer; 4]>>,
+    finalizers: Vec<SmallVec<[usize; 4]>>,
     is_dead_end: Vec<bool>,
     num_groups: usize,
     possible_future_groups: Vec<SmallVec<[usize; 4]>>,
@@ -187,15 +182,7 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
         }
         transitions.push(table);
 
-        finalizers.push(
-            state
-                .finalizers
-                .iter()
-                .map(|&gid| Finalizer {
-                    gid,
-                })
-                .collect(),
-        );
+        finalizers.push(state.finalizers.iter().copied().collect());
 
         is_dead_end.push(state.possible_future_group_ids.is_empty());
         let future_groups: SmallVec<[usize; 4]> =
@@ -421,9 +408,9 @@ fn run_suffix(
     let mut cur = dfa.start_state;
     let mut done = dfa.is_dead_end[cur];
 
-    for f in &dfa.finalizers[cur] {
-        if f.gid < ng && mp[f.gid] == NONE {
-            mp[f.gid] = 0;
+    for &gid in &dfa.finalizers[cur] {
+        if gid < ng && mp[gid] == NONE {
+            mp[gid] = 0;
         }
     }
 
@@ -438,9 +425,9 @@ fn run_suffix(
         }
         cur = ns as usize;
         let pos = (i + 1) as u32;
-        for f in &dfa.finalizers[cur] {
-            if f.gid < ng {
-                mp[f.gid] = pos;
+        for &gid in &dfa.finalizers[cur] {
+            if gid < ng {
+                mp[gid] = pos;
             }
         }
         if dfa.is_dead_end[cur] {
@@ -741,9 +728,9 @@ fn walk_trie<S: AsRef<[u8]>>(
                 } else {
                     let ns_u = ns as usize;
                     // Apply finalizers at new state
-                    for f in &dfa.finalizers[ns_u] {
-                        if f.gid < ng {
-                            mp[child_mp + f.gid] = cd as u32;
+                    for &gid in &dfa.finalizers[ns_u] {
+                        if gid < ng {
+                            mp[child_mp + gid] = cd as u32;
                         }
                     }
                     states[cd * ni + si] = if dfa.is_dead_end[ns_u] { NONE } else { ns };
@@ -786,7 +773,7 @@ fn walk_trie<S: AsRef<[u8]>>(
                             cs != NONE
                                 && dfa.finalizers[cs as usize]
                                     .iter()
-                                    .any(|f| f.gid == gid)
+                                    .any(|&state_gid| state_gid == gid)
                         } else {
                             true
                         }
@@ -877,9 +864,9 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     // Initialize depth 0: set initial DFA states and their finalizers
     for (si, &s) in initial_states.iter().enumerate() {
         let mp_base = si * ng;
-        for f in &dfa.finalizers[s] {
-            if f.gid < ng && mp[mp_base + f.gid] == NONE {
-                mp[mp_base + f.gid] = 0;
+        for &gid in &dfa.finalizers[s] {
+            if gid < ng && mp[mp_base + gid] == NONE {
+                mp[mp_base + gid] = 0;
             }
         }
         states[si] = if dfa.is_dead_end[s] { NONE } else { s as u32 };

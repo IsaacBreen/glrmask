@@ -28,11 +28,6 @@ const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
 
-#[derive(Clone, Copy)]
-struct Finalizer {
-    gid: usize,
-}
-
 /// Flat DFA with byte-class-compressed transposed transition tables.
 ///
 /// Byte equivalence classes group bytes that produce identical transitions across
@@ -48,7 +43,7 @@ struct Dfa {
     /// Transposed transition table: `trans_by_class[class * num_states + state]`.
     /// For a given byte class, all state transitions are contiguous in memory.
     trans_by_class: Vec<u32>,
-    finalizers: Vec<SmallVec<[Finalizer; 4]>>,
+    finalizers: Vec<SmallVec<[usize; 4]>>,
     is_dead_end: Vec<bool>,
     num_groups: usize,
     possible_future_groups: Vec<SmallVec<[usize; 4]>>,
@@ -197,15 +192,7 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
         }
         transitions.push(table);
 
-        finalizers.push(
-            state
-                .finalizers
-                .iter()
-                .map(|&gid| Finalizer {
-                    gid,
-                })
-                .collect(),
-        );
+        finalizers.push(state.finalizers.iter().copied().collect());
 
         is_dead_end.push(state.possible_future_group_ids.is_empty());
         let future_groups: SmallVec<[usize; 4]> =
@@ -347,10 +334,10 @@ fn run_batch(
     // Process initial finalizers
     for (i, &state) in initial_states.iter().enumerate() {
         let base = i * num_groups;
-        for f in &dfa.finalizers[state] {
-            if f.gid < num_groups && scratch.match_positions[base + f.gid] == NONE {
-                scratch.match_positions[base + f.gid] = 0;
-                scratch.dirty_groups[i].push(f.gid);
+        for &gid in &dfa.finalizers[state] {
+            if gid < num_groups && scratch.match_positions[base + gid] == NONE {
+                scratch.match_positions[base + gid] = 0;
+                scratch.dirty_groups[i].push(gid);
             }
         }
         if dfa.is_dead_end[state] {
@@ -379,11 +366,11 @@ fn run_batch(
                 if next_state != NONE {
                     let ns = next_state as usize;
                     scratch.current_states[i] = ns;
-                    for f in &dfa.finalizers[ns] {
-                        if f.gid < num_groups {
-                            let ix = base + f.gid;
+                    for &gid in &dfa.finalizers[ns] {
+                        if gid < num_groups {
+                            let ix = base + gid;
                             scratch.match_positions[ix] = position;
-                            scratch.dirty_groups[i].push(f.gid);
+                            scratch.dirty_groups[i].push(gid);
                         }
                     }
                     if dfa.is_dead_end[ns] {
@@ -424,10 +411,10 @@ fn run_batch(
                         let i = scratch.active_indices[idx];
                         let base = i * num_groups;
                         let s = scratch.current_states[i];
-                        for f in &dfa.finalizers[s] {
-                            if f.gid < num_groups {
-                                scratch.match_positions[base + f.gid] = token_len;
-                                scratch.dirty_groups[i].push(f.gid);
+                        for &gid in &dfa.finalizers[s] {
+                            if gid < num_groups {
+                                scratch.match_positions[base + gid] = token_len;
+                                scratch.dirty_groups[i].push(gid);
                             }
                         }
                     }
@@ -466,9 +453,9 @@ fn run_suffix(
     let mut current = dfa.start_state;
     let mut done = dfa.is_dead_end[current];
 
-    for f in &dfa.finalizers[current] {
-        if f.gid < num_groups && match_positions[f.gid] == NONE {
-            match_positions[f.gid] = 0;
+    for &gid in &dfa.finalizers[current] {
+        if gid < num_groups && match_positions[gid] == NONE {
+            match_positions[gid] = 0;
         }
     }
 
@@ -483,9 +470,9 @@ fn run_suffix(
         }
         current = ns as usize;
         let position = (idx + 1) as u32;
-        for f in &dfa.finalizers[current] {
-            if f.gid < num_groups {
-                match_positions[f.gid] = position;
+        for &gid in &dfa.finalizers[current] {
+            if gid < num_groups {
+                match_positions[gid] = position;
             }
         }
         if dfa.is_dead_end[current] {

@@ -26,16 +26,11 @@ const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
 
-#[derive(Clone, Copy)]
-struct Finalizer {
-    gid: usize,
-}
-
 /// Flat DFA with 256-byte transition tables and self-loop bitsets.
 struct Dfa {
     start_state: usize,
     transitions: Vec<[u32; 256]>,
-    finalizers: Vec<SmallVec<[Finalizer; 4]>>,
+    finalizers: Vec<SmallVec<[usize; 4]>>,
     is_dead_end: Vec<bool>,
     num_groups: usize,
     possible_future_groups: Vec<SmallVec<[usize; 4]>>,
@@ -181,15 +176,7 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
             table[byte_idx] = target;
         }
         transitions.push(table);
-        finalizers.push(
-            state
-                .finalizers
-                .iter()
-                .map(|&gid| Finalizer {
-                    gid,
-                })
-                .collect(),
-        );
+        finalizers.push(state.finalizers.iter().copied().collect());
         is_dead_end.push(state.possible_future_group_ids.is_empty());
         let future_groups: SmallVec<[usize; 4]> =
             state.possible_future_group_ids.iter().copied().collect();
@@ -219,10 +206,10 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
     let mut finalizer_bits: Vec<u32> = vec![0u32; transitions.len()];
     let mut greedy_bits: Vec<u32> = vec![0u32; transitions.len()];
     for (s, fins) in finalizers.iter().enumerate() {
-        for f in fins as &[Finalizer] {
-            if (f.gid as u32) < 32 {
-                finalizer_bits[s] |= 1u32 << f.gid;
-                greedy_bits[s] |= 1u32 << f.gid;
+        for &gid in fins {
+            if (gid as u32) < 32 {
+                finalizer_bits[s] |= 1u32 << gid;
+                greedy_bits[s] |= 1u32 << gid;
             }
         }
     }
@@ -339,7 +326,7 @@ fn try_bulk_assign_no_selfloop(
                 cs != NONE
                     && dfa.finalizers[cs as usize]
                         .iter()
-                        .any(|f| f.gid == gid)
+                        .any(|&state_gid| state_gid == gid)
             } else {
                 true
             }
@@ -426,8 +413,7 @@ fn advance_states(
                     }
                 } else {
                     // Full finalizer list for ng > 32
-                    for f in &dfa.finalizers[ns_u] {
-                        let gid = f.gid;
+                    for &gid in &dfa.finalizers[ns_u] {
                         if gid < ng {
                             child_mp[mp_base + gid] = depth;
                         }
@@ -487,9 +473,9 @@ fn run_batch(
 
     for (i, &state) in initial_states.iter().enumerate() {
         let base = i * num_groups;
-        for f in &dfa.finalizers[state] {
-            if f.gid < num_groups && scratch.match_positions[base + f.gid] == NONE {
-                scratch.match_positions[base + f.gid] = 0;
+        for &gid in &dfa.finalizers[state] {
+            if gid < num_groups && scratch.match_positions[base + gid] == NONE {
+                scratch.match_positions[base + gid] = 0;
             }
         }
         if dfa.is_dead_end[state] {
@@ -515,9 +501,9 @@ fn run_batch(
                 if next_state != NONE {
                     let ns = next_state as usize;
                     scratch.current_states[i] = ns;
-                    for f in &dfa.finalizers[ns] {
-                        if f.gid < num_groups {
-                            let ix = base + f.gid;
+                    for &gid in &dfa.finalizers[ns] {
+                        if gid < num_groups {
+                            let ix = base + gid;
                             scratch.match_positions[ix] = position;
                         }
                     }
@@ -556,9 +542,9 @@ fn run_batch(
                         let i = scratch.active_indices[idx];
                         let base = i * num_groups;
                         let s = scratch.current_states[i];
-                        for f in &dfa.finalizers[s] {
-                            if f.gid < num_groups {
-                                scratch.match_positions[base + f.gid] = token_len;
+                        for &gid in &dfa.finalizers[s] {
+                            if gid < num_groups {
+                                scratch.match_positions[base + gid] = token_len;
                             }
                         }
                     }
@@ -594,9 +580,9 @@ fn run_suffix(
     let mut current = dfa.start_state;
     let mut done = dfa.is_dead_end[current];
 
-    for f in &dfa.finalizers[current] {
-        if f.gid < ng && match_positions[f.gid] == NONE {
-            match_positions[f.gid] = 0;
+    for &gid in &dfa.finalizers[current] {
+        if gid < ng && match_positions[gid] == NONE {
+            match_positions[gid] = 0;
         }
     }
 
@@ -611,9 +597,9 @@ fn run_suffix(
         }
         current = ns as usize;
         let position = (idx + 1) as u32;
-        for f in &dfa.finalizers[current] {
-            if f.gid < ng {
-                match_positions[f.gid] = position;
+        for &gid in &dfa.finalizers[current] {
+            if gid < ng {
+                match_positions[gid] = position;
             }
         }
         if dfa.is_dead_end[current] {
@@ -854,9 +840,9 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     for si in 0..ni {
         let s = initial_states[si];
         let mp_base = si * ng;
-        for f in &dfa.finalizers[s] {
-            if f.gid < ng && d0_mp[mp_base + f.gid] == NONE {
-                d0_mp[mp_base + f.gid] = 0;
+        for &gid in &dfa.finalizers[s] {
+            if gid < ng && d0_mp[mp_base + gid] == NONE {
+                d0_mp[mp_base + gid] = 0;
             }
         }
         d0_states[si] = if dfa.is_dead_end[s] { NONE } else { s as u32 };
