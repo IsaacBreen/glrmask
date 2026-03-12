@@ -54,6 +54,17 @@ struct Dfa {
     none_completion_hash: u64,
     /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
     self_loop_bytes: Vec<[u64; 4]>,
+    /// Maps group ID → follow-class ID (from follow matrix).
+    /// Groups with the same follow-class have identical rows and columns in the
+    /// ever_allowed_by_group matrix. Used only for looking up which follow-class
+    /// a group belongs to, NOT for replacing group IDs in hashes.
+    group_to_follow_class: Option<Vec<usize>>,
+    /// Per-follow-class visibility: `follow_class_visible[c1][c2]` = true iff class c2
+    /// can follow class c1. Used for projected suffix hashing — when a group in class c1
+    /// matches, the suffix hash only includes groups visible to c1.
+    follow_class_visible: Option<Vec<Vec<bool>>>,
+    /// Number of follow classes (= max class ID + 1 when group_to_follow_class is set).
+    num_follow_classes: usize,
 }
 
 impl Dfa {
@@ -64,6 +75,16 @@ impl Dfa {
             self.completion_hash[state]
         } else {
             self.none_completion_hash
+        }
+    }
+
+    /// Map a group ID to its follow-class ID (if follow data is present).
+    /// Returns the raw group ID if no follow data.
+    #[inline]
+    fn follow_class_of(&self, gid: usize) -> usize {
+        match &self.group_to_follow_class {
+            Some(map) if gid < map.len() => map[gid],
+            _ => gid,
         }
     }
 
@@ -88,6 +109,9 @@ struct Scratch {
     // Suffix DAG
     dag: HashMap<usize, (u64, EdgeList)>,
     dag_queue: Vec<usize>,
+    /// Per-position per-follow-class hashes for projected suffix hashing.
+    /// Indexed by position → SmallVec of hashes (one per follow class).
+    dag_projected: HashMap<usize, SmallVec<[u64; 16]>>,
 }
 
 static HASH_RANDOM_STATE: Lazy<RandomState> =
@@ -110,6 +134,14 @@ fn hash_group_list(iter: impl ExactSizeIterator<Item = usize>) -> u64 {
 }
 
 fn build_dfa(regex: &Tokenizer) -> Dfa {
+    build_dfa_with_class_map(regex, None, None)
+}
+
+fn build_dfa_with_class_map(
+    regex: &Tokenizer,
+    group_to_class: Option<&[usize]>,
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+) -> Dfa {
     let dfa = regex.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -231,6 +263,56 @@ fn build_dfa(regex: &Tokenizer) -> Dfa {
         completion_hash,
         none_completion_hash,
         self_loop_bytes,
+        group_to_follow_class: group_to_class.map(|s| s.to_vec()),
+        follow_class_visible: Dfa::build_follow_class_visible(group_to_class, ever_allowed_by_group),
+        num_follow_classes: group_to_class.map_or(0, |g2c| g2c.iter().copied().max().map_or(0, |m| m + 1)),
+    }
+}
+
+impl Dfa {
+    /// Build per-follow-class visibility matrix from group_to_class and ever_allowed_by_group.
+    /// `follow_class_visible[c1][c2]` = true iff class c2 can follow class c1.
+    fn build_follow_class_visible(
+        group_to_class: Option<&[usize]>,
+        ever_allowed_by_group: Option<&[Vec<bool>]>,
+    ) -> Option<Vec<Vec<bool>>> {
+        let g2c = group_to_class?;
+        let eabg = ever_allowed_by_group?;
+        let num_classes = g2c.iter().copied().max().map_or(0, |m| m + 1);
+        if num_classes == 0 {
+            return None;
+        }
+        let num_groups = g2c.len();
+        // For each class, find a representative group
+        let mut class_rep: Vec<Option<usize>> = vec![None; num_classes];
+        for (gid, &cid) in g2c.iter().enumerate() {
+            if class_rep[cid].is_none() {
+                class_rep[cid] = Some(gid);
+            }
+        }
+        // Build class-level visibility: class c2 is visible from class c1
+        // iff the representative of c1 allows the representative of c2.
+        // (All groups in a class have the same follow row and column.)
+        let mut visible: Vec<Vec<bool>> = vec![vec![false; num_classes]; num_classes];
+        for c1 in 0..num_classes {
+            if let Some(rep1) = class_rep[c1] {
+                if rep1 < eabg.len() {
+                    let row = &eabg[rep1];
+                    for c2 in 0..num_classes {
+                        if let Some(rep2) = class_rep[c2] {
+                            if rep2 < row.len() && row[rep2] {
+                                visible[c1][c2] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        crate::debug!(2, "  Follow class visibility: {} classes, density {:.1}%",
+            num_classes,
+            100.0 * visible.iter().flat_map(|r| r.iter()).filter(|&&b| b).count() as f64
+                / (num_classes * num_classes) as f64);
+        Some(visible)
     }
 }
 
@@ -244,6 +326,7 @@ impl Scratch {
             targets: Vec::new(),
             dag: HashMap::new(),
             dag_queue: Vec::new(),
+            dag_projected: HashMap::new(),
         }
     }
 }
@@ -472,16 +555,56 @@ fn hash_suffixes(
 
     // Hash bottom-up: process deeper positions first
     scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
-    for idx in 0..scratch.dag_queue.len() {
-        let pos = scratch.dag_queue[idx];
-        let (ch, edges) = scratch.dag[&pos].clone();
-        let mut h = new_hasher();
-        h.write_u64(ch);
-        for &(gid, target) in &edges {
-            h.write_u64(gid as u64);
-            h.write_u64(scratch.dag.get(&target).map_or(0, |e| e.0));
+
+    if let Some(ref fcv) = dfa.follow_class_visible {
+        // Projected suffix hashing: compute per-follow-class hashes at each DAG node.
+        //
+        // hash(P, C) = combine(completion, [(gid, hash(target, follow_class_of(gid)))
+        //                                   for (gid, target) in edges(P)
+        //                                   if visible(C, follow_class_of(gid))])
+        //
+        // Raw group IDs are preserved in the hash (not mapped to classes).
+        // Only the FILTERING of edges uses follow-class visibility, and the
+        // RECURSIVE class selection uses follow_class_of(edge_gid).
+        let nc = dfa.num_follow_classes;
+        scratch.dag_projected.clear();
+
+        for idx in 0..scratch.dag_queue.len() {
+            let pos = scratch.dag_queue[idx];
+            let (ch, ref edges) = scratch.dag[&pos];
+
+            let mut class_hashes: SmallVec<[u64; 16]> = SmallVec::with_capacity(nc);
+            for c in 0..nc {
+                let vis = &fcv[c];
+                let mut h = new_hasher();
+                h.write_u64(ch);
+                for &(gid, target) in edges {
+                    let gid_class = dfa.follow_class_of(gid);
+                    if gid_class < vis.len() && vis[gid_class] {
+                        h.write_u64(gid as u64);  // RAW group ID
+                        // Recurse: project the target by the edge group's follow-class
+                        let th = scratch.dag_projected.get(&target)
+                            .map_or(0, |hashes| if gid_class < hashes.len() { hashes[gid_class] } else { 0 });
+                        h.write_u64(th);
+                    }
+                }
+                class_hashes.push(h.finish());
+            }
+            scratch.dag_projected.insert(pos, class_hashes);
         }
-        scratch.dag.get_mut(&pos).unwrap().0 = h.finish();
+    } else {
+        // No follow data: hash with raw group IDs, all edges included
+        for idx in 0..scratch.dag_queue.len() {
+            let pos = scratch.dag_queue[idx];
+            let (ch, edges) = scratch.dag[&pos].clone();
+            let mut h = new_hasher();
+            h.write_u64(ch);
+            for &(gid, target) in &edges {
+                h.write_u64(gid as u64);
+                h.write_u64(scratch.dag.get(&target).map_or(0, |e| e.0));
+            }
+            scratch.dag.get_mut(&pos).unwrap().0 = h.finish();
+        }
     }
 }
 
@@ -518,11 +641,28 @@ fn token_signature(
             if has_match {
                 let mut h = new_hasher();
                 h.write_u64(completion);
-                for &gid in dirty.iter() {
-                    let pv = scratch.match_positions[base + gid];
-                    if pv != NONE && pv > 0 {
-                        h.write_u64(gid as u64);
-                        h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0));
+                if dfa.follow_class_visible.is_some() {
+                    // Projected suffix hashing: use per-follow-class suffix hash.
+                    // For group G matching at suffix position PV, the suffix hash
+                    // is projected by follow_class_of(G)'s visibility.
+                    // Raw group IDs are used in the hash (not mapped to classes).
+                    for &gid in dirty.iter() {
+                        let pv = scratch.match_positions[base + gid];
+                        if pv != NONE && pv > 0 {
+                            let fc = dfa.follow_class_of(gid);
+                            let dh = scratch.dag_projected.get(&(pv as usize))
+                                .map_or(0, |hashes| if fc < hashes.len() { hashes[fc] } else { 0 });
+                            h.write_u64(gid as u64);  // RAW group ID
+                            h.write_u64(dh);
+                        }
+                    }
+                } else {
+                    for &gid in dirty.iter() {
+                        let pv = scratch.match_positions[base + gid];
+                        if pv != NONE && pv > 0 {
+                            h.write_u64(gid as u64);
+                            h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0));
+                        }
                     }
                 }
                 h.finish()
@@ -554,19 +694,21 @@ pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
     find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, None, None, None)
 }
 
-/// Find vocab equivalence classes. The last three parameters are accepted for
-/// API compatibility but unused internally.
+/// Find vocab equivalence classes, optionally merging groups that belong to
+/// the same grammar‐equivalence class (via `group_to_class`).
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Tokenizer,
     strings: &[S],
     initial_states: &[usize],
     _suffix_group_mask: Option<&[bool]>,
-    _ever_allowed_by_group: Option<&[Vec<bool>]>,
-    _group_to_class: Option<&[usize]>,
+    ever_allowed_by_group: Option<&[Vec<bool>]>,
+    group_to_class: Option<&[usize]>,
 ) -> VocabEquivalenceResult {
     let t0 = std::time::Instant::now();
-    let dfa = build_dfa(regex);
+    let dfa = build_dfa_with_class_map(regex, group_to_class, ever_allowed_by_group);
     let t1 = std::time::Instant::now();
+    crate::debug!(2, "  Projected suffix hashing: follow_class_visible={}, group_to_follow_class={}, num_follow_classes={}",
+        dfa.follow_class_visible.is_some(), dfa.group_to_follow_class.is_some(), dfa.num_follow_classes);
     let num_tokens = strings.len();
     let num_states = initial_states.len();
 
