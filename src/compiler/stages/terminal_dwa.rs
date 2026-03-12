@@ -719,14 +719,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             for (&tokenizer_state, source_nodes) in assoc_by_state {
                 let accessible_terminals = self.tokenizer.tokens_accessible_from_state(tokenizer_state);
                 for terminal_id in accessible_terminals {
-                    let mut reachable = child_node.reachable_token_ids().clone();
-                    if child_node.has_token() {
-                        reachable.remove(internal_child_token_id as usize);
-                    }
                     self.add_leaf_token_set_from_sources(
                         source_nodes,
                         terminal_id,
-                        &reachable,
+                        &child_node.reachable_token_ids(),
                     );
                 }
             }
