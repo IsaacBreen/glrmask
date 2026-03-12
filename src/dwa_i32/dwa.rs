@@ -145,6 +145,8 @@ pub struct DWAStats {
     pub ranges: usize,
     pub ranges_interned: usize,
     pub transition_multiplicity_hist: BTreeMap<usize, usize>,
+    /// Longest path from start to any final state.  `Some` only when the DWA is acyclic.
+    pub max_depth: Option<usize>,
 }
 
 impl Display for DWAStats {
@@ -158,7 +160,11 @@ impl Display for DWAStats {
             self.ranges,
             self.ranges_interned,
             self.transition_multiplicity_hist
-        )
+        )?;
+        if let Some(depth) = self.max_depth {
+            write!(f, ", max_depth={}", depth)?;
+        }
+        Ok(())
     }
 }
 
@@ -292,6 +298,7 @@ impl DWA {
                 *transition_multiplicity_hist.entry(*count).or_insert(0) += 1;
             }
         }
+        let max_depth = self.max_depth();
         DWAStats {
             states: self.states.len(),
             transitions: self.states.num_transitions(),
@@ -299,6 +306,7 @@ impl DWA {
             ranges: self.num_ranges(),
             ranges_interned: self.num_ranges_interned(),
             transition_multiplicity_hist,
+            max_depth,
         }
     }
 
@@ -946,6 +954,57 @@ impl DWA {
         
         color[u] = 2;
         false
+    }
+
+    /// Longest path from start to any final state. `None` if cyclic or empty.
+    pub fn max_depth(&self) -> Option<usize> {
+        let n = self.states.len();
+        if n == 0 { return None; }
+        if self.is_cyclic() { return None; }
+
+        let start = self.body.start_state;
+        if start >= n { return None; }
+
+        // Topological order via Kahn's algorithm
+        let mut in_degree = vec![0usize; n];
+        for u in 0..n {
+            for &v in self.states[u].transitions.values() {
+                if v < n { in_degree[v] += 1; }
+            }
+        }
+        let mut queue = std::collections::VecDeque::new();
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 { queue.push_back(i); }
+        }
+        let mut topo = Vec::with_capacity(n);
+        while let Some(u) = queue.pop_front() {
+            topo.push(u);
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    in_degree[v] -= 1;
+                    if in_degree[v] == 0 { queue.push_back(v); }
+                }
+            }
+        }
+
+        // DP: longest path from start
+        let mut dist = vec![-1i64; n];
+        dist[start] = 0;
+        let mut best: Option<usize> = None;
+        for &u in &topo {
+            if dist[u] < 0 { continue; }
+            let d = dist[u] as usize;
+            if self.states[u].final_weight.is_some() {
+                best = Some(best.map_or(d, |b: usize| b.max(d)));
+            }
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    let nd = dist[u] + 1;
+                    if nd > dist[v] { dist[v] = nd; }
+                }
+            }
+        }
+        best
     }
 
     pub fn optimize_for_visualization(&mut self) {
