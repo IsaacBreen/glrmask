@@ -149,51 +149,32 @@ fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
         return DFA::new();
     }
 
-    let mut dfa = DFA::new();
-    let mut tracking_states = vec![None; num_groups];
-    let mut accepting_tracking_states = vec![None; num_groups];
+    let mut nfa = NFA::new();
+    let start = nfa.start_states[0];
+    let accept = nfa.add_state();
+    nfa.set_accepting(accept);
 
-    let accept_state = dfa.add_state();
-    dfa.set_accepting(accept_state, true);
-
-    for gid in 0..num_groups {
-        if disallowed_follows[gid].is_zero() {
-            continue;
-        }
-
-        let tracking = dfa.add_state();
-        let accepting_tracking = dfa.add_state();
-        dfa.set_accepting(accepting_tracking, true);
-        tracking_states[gid] = Some(tracking);
-        accepting_tracking_states[gid] = Some(accepting_tracking);
-        dfa.add_transition(dfa.start_state, terminal_label(gid), tracking);
+    let mut previous_terminal_states = Vec::with_capacity(num_groups);
+    for _ in 0..num_groups {
+        previous_terminal_states.push(nfa.add_state());
     }
 
     for prev_gid in 0..num_groups {
-        let Some(tracking_state) = tracking_states[prev_gid] else {
+        if disallowed_follows[prev_gid].is_zero() {
             continue;
-        };
-        let accepting_tracking_state = accepting_tracking_states[prev_gid].unwrap();
+        }
 
-        for next_gid in 0..num_groups {
-            let label = terminal_label(next_gid);
-            let next_tracking = tracking_states[next_gid];
-            let target = if disallowed_follows[prev_gid].contains(next_gid) {
-                next_tracking
-                    .and_then(|_| accepting_tracking_states[next_gid])
-                    .unwrap_or(accept_state)
-            } else if let Some(next_tracking) = next_tracking {
-                next_tracking
-            } else {
-                continue;
-            };
+        let prev_state = previous_terminal_states[prev_gid];
+        nfa.add_transition(start, terminal_label(prev_gid), prev_state);
+        nfa.add_epsilon(prev_state, start);
 
-            dfa.add_transition(tracking_state, label, target);
-            dfa.add_transition(accepting_tracking_state, label, target);
+        for next_gid in disallowed_follows[prev_gid].iter() {
+            nfa.add_transition(prev_state, terminal_label(next_gid), accept);
         }
     }
 
-    dfa
+    let det_dfa = determinize(&nfa);
+    minimize(&det_dfa)
 }
 
 // ---- Trellis DAG construction ----
