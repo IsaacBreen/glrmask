@@ -82,6 +82,18 @@ fn completion_label(gid: usize) -> Label {
 }
 
 #[inline]
+fn label_gid(label: Label, num_groups: usize) -> usize {
+    assert_ne!(label, Label::MIN, "reference pruning encountered invalid label {label}");
+    let gid = if label >= 0 {
+        label as usize
+    } else {
+        (-label - 1) as usize
+    };
+    assert!(gid < num_groups, "reference pruning label {label} resolved to out-of-range gid {gid} for {num_groups} groups");
+    gid
+}
+
+#[inline]
 fn future_groups_cover_all_terminals(future_groups: &[usize], num_groups: usize) -> bool {
     future_groups.len() == num_groups && future_groups.iter().copied().eq(0..num_groups)
 }
@@ -355,6 +367,7 @@ fn build_nfa_from_trellis(
 
 fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], num_groups: usize) {
     let n = nfa.states.len();
+    assert_eq!(disallowed_follows.len(), num_groups);
 
     let mut indegree = vec![0usize; n];
     for state in &nfa.states {
@@ -391,7 +404,7 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
             }
         }
     }
-    debug_assert_eq!(topo_order.len(), n, "reference pruning expects an acyclic NFA");
+    assert_eq!(topo_order.len(), n, "reference pruning expects an acyclic NFA");
 
     let mut incoming_disallowed: Vec<Option<BitSet>> = vec![None; n];
     let empty = BitSet::new(num_groups);
@@ -407,11 +420,7 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
 
         let mut kept_transitions: Vec<(Label, Vec<u32>)> = Vec::new();
         for (&label, targets) in &nfa.states[state as usize].transitions {
-            let gid = if label >= 0 {
-                label as usize
-            } else {
-                (-(label + 1)) as usize
-            };
+            let gid = label_gid(label, num_groups);
             if !current.contains(gid) {
                 kept_transitions.push((label, targets.clone()));
             }
@@ -420,11 +429,7 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
         nfa.states[state as usize]
             .transitions
             .retain(|&label, _| {
-                let gid = if label >= 0 {
-                    label as usize
-                } else {
-                    (-(label + 1)) as usize
-                };
+                let gid = label_gid(label, num_groups);
                 !current.contains(gid)
             });
 
@@ -436,16 +441,8 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
         }
 
         for (label, targets) in kept_transitions {
-            let gid = if label >= 0 {
-                label as usize
-            } else {
-                (-(label + 1)) as usize
-            };
-            let propagated = if gid < disallowed_follows.len() {
-                disallowed_follows[gid].clone()
-            } else {
-                BitSet::new(num_groups)
-            };
+            let gid = label_gid(label, num_groups);
+            let propagated = disallowed_follows[gid].clone();
             for tgt in targets {
                 match &mut incoming_disallowed[tgt as usize] {
                     Some(existing) => *existing = existing.intersection(&propagated),
