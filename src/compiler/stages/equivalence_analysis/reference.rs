@@ -149,32 +149,35 @@ fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
         return DFA::new();
     }
 
-    let mut nfa = NFA::new();
-    let start = nfa.start_states[0];
-    let accept = nfa.add_state();
-    nfa.set_accepting(accept);
+    let mut dfa = DFA::new();
+    let start = dfa.start_state;
+    let accept = dfa.add_state();
+    dfa.set_accepting(accept, true);
 
     let mut previous_terminal_states = Vec::with_capacity(num_groups);
     for _ in 0..num_groups {
-        previous_terminal_states.push(nfa.add_state());
+        previous_terminal_states.push(dfa.add_state());
     }
 
     for prev_gid in 0..num_groups {
-        if disallowed_follows[prev_gid].is_zero() {
-            continue;
-        }
-
         let prev_state = previous_terminal_states[prev_gid];
-        nfa.add_transition(start, terminal_label(prev_gid), prev_state);
-        nfa.add_epsilon(prev_state, start);
+        dfa.add_transition(start, terminal_label(prev_gid), prev_state);
 
-        for next_gid in disallowed_follows[prev_gid].iter() {
-            nfa.add_transition(prev_state, terminal_label(next_gid), accept);
+        for next_gid in 0..num_groups {
+            let target = if disallowed_follows[prev_gid].contains(next_gid) {
+                accept
+            } else {
+                previous_terminal_states[next_gid]
+            };
+            dfa.add_transition(prev_state, terminal_label(next_gid), target);
         }
     }
 
-    let det_dfa = determinize(&nfa);
-    minimize(&det_dfa)
+    for gid in 0..num_groups {
+        dfa.add_transition(accept, terminal_label(gid), accept);
+    }
+
+    minimize(&dfa)
 }
 
 // ---- Trellis DAG construction ----
@@ -665,4 +668,75 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
         .collect();
 
     ReferenceEquivalenceResult { vocab_classes, state_classes }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::lexer::ast::bytes;
+    use crate::compiler::compile::{build_tokenizer, build_tokenizer_from_exprs, compute_disallowed_follows};
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+
+    #[test]
+    fn test_reference_simple_ab_with_disallowed_follow() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"b")]);
+        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
+        let tokens = vec![b"a".to_vec(), b"b".to_vec()];
+        let initial_states = vec![sep1_tok.initial_state_id()];
+
+        let mut disallowed = BTreeMap::new();
+        let mut after_a = BitSet::new(2);
+        after_a.set(0);
+        disallowed.insert(0u32, after_a);
+
+        let result = find_equivalence_classes(
+            &sep1_tok,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+        );
+
+        assert_eq!(result.vocab_classes, BTreeSet::from([vec![0], vec![1]]));
+        assert_eq!(
+            result.state_classes,
+            BTreeSet::from([BTreeSet::from([sep1_tok.initial_state_id()])]),
+        );
+    }
+
+    #[test]
+    fn test_reference_witness_pair_hashes_differ() {
+        let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
+        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        let disallowed_follows = compute_disallowed_follows(&analyzed);
+        let tokenizer = build_tokenizer(&grammar);
+        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
+        let dfa = sep1_tok.dfa();
+        let pre = precompute(dfa, &disallowed_follows);
+        let hash_memo = Mutex::new(HashMap::new());
+        let state = 9686usize;
+
+        let left_hash = process_token_for_state(
+            dfa,
+            &pre,
+            b"!",
+            state,
+            None,
+            &hash_memo,
+            &mut Vec::new(),
+        );
+        let right_hash = process_token_for_state(
+            dfa,
+            &pre,
+            &[b' ', 0xC2],
+            state,
+            None,
+            &hash_memo,
+            &mut Vec::new(),
+        );
+
+        assert_ne!(left_hash, right_hash);
+    }
 }

@@ -40,7 +40,7 @@ const ANSI_DWA_LEN: &str = "\x1b[38;5;220m";
 
 /// Convert ever-allowed follow sets into the `BTreeMap<u32, BitSet>` disallowed-follows
 /// format expected by the equivalence analysis.
-fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<u32, BitSet> {
+pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<u32, BitSet> {
     let ever_allowed = compute_ever_allowed_follows(grammar);
     let num_terminals = grammar.num_terminals as usize;
     let mut result = BTreeMap::new();
