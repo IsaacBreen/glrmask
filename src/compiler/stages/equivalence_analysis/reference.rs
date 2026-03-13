@@ -20,6 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ahash::{AHasher, RandomState};
@@ -549,33 +551,99 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
 
     let show_progress = env_flag_enabled(PROGRESS_ENV);
     let started = Instant::now();
-    let mut last_report = started;
 
-    let mut tmp_mp = vec![NONE; pre.num_groups];
-
-    // Compute per-(token, state) hash matrix
+    // Compute per-(token, state) hash matrix in parallel.
     // Layout: hashes[ti * ns + si] = hash for token ti at state initial_states[si]
-    let mut hashes: Vec<u64> = Vec::with_capacity(nt * ns);
+    let counter = Arc::new(AtomicUsize::new(0));
 
-    for (ti, token_ref) in strings.iter().enumerate() {
-        let token = token_ref.as_ref();
-        for &state in initial_states {
-            let sig = process_token_for_state(dfa, &pre, token, state, ignore_terminal, &mut tmp_mp);
-            hashes.push(sig);
-        }
-
-        if show_progress {
-            let now = Instant::now();
-            if now.duration_since(last_report) >= PROGRESS_INTERVAL || ti + 1 == nt {
+    let progress_thread = if show_progress {
+        let counter = counter.clone();
+        let nt = nt;
+        Some(std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(PROGRESS_INTERVAL);
+                let done = counter.load(Ordering::Relaxed);
                 eprintln!(
                     "[reference equiv] processed {}/{} tokens in {:.1}s",
-                    ti + 1,
+                    done,
                     nt,
-                    now.duration_since(started).as_secs_f64(),
+                    started.elapsed().as_secs_f64(),
                 );
-                last_report = now;
+                if done >= nt {
+                    break;
+                }
             }
-        }
+        }))
+    } else {
+        None
+    };
+
+    #[cfg(feature = "rayon")]
+    let hashes: Vec<u64> = {
+        use rayon::prelude::*;
+        let rows: Vec<Vec<u64>> = strings
+            .par_iter()
+            .map(|token_ref| {
+                let token = token_ref.as_ref();
+                let mut tmp_mp = vec![NONE; pre.num_groups];
+                let row: Vec<u64> = initial_states
+                    .iter()
+                    .map(|&state| {
+                        process_token_for_state(
+                            dfa,
+                            &pre,
+                            token,
+                            state,
+                            ignore_terminal,
+                            &mut tmp_mp,
+                        )
+                    })
+                    .collect();
+                counter.fetch_add(1, Ordering::Relaxed);
+                row
+            })
+            .collect();
+        rows.into_iter().flatten().collect()
+    };
+
+    #[cfg(not(feature = "rayon"))]
+    let hashes: Vec<u64> = {
+        let mut tmp_mp = vec![NONE; pre.num_groups];
+        strings
+            .iter()
+            .flat_map(|token_ref| {
+                let token = token_ref.as_ref();
+                let row: Vec<u64> = initial_states
+                    .iter()
+                    .map(|&state| {
+                        process_token_for_state(
+                            dfa,
+                            &pre,
+                            token,
+                            state,
+                            ignore_terminal,
+                            &mut tmp_mp,
+                        )
+                    })
+                    .collect();
+                counter.fetch_add(1, Ordering::Relaxed);
+                row
+            })
+            .collect()
+    };
+
+    if let Some(t) = progress_thread {
+        counter.store(nt, Ordering::Relaxed);
+        let _ = t.join();
+    }
+
+    if show_progress {
+        eprintln!(
+            "[reference equiv] finished {}/{} tokens in {:.1}s",
+            nt,
+            nt,
+            started.elapsed().as_secs_f64(),
+        );
     }
 
     // --- Vocab equivalence: combine per-state hashes for each token ---
