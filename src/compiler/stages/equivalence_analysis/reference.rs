@@ -495,7 +495,7 @@ fn process_token_for_state(
     tmp_mp.resize(pre.num_groups, NONE);
 
     let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
-    prune_reachable(&mut dag, token.len());
+    // prune_reachable(&mut dag, token.len());
 
     let mut nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, ignore_terminal);
     let nfa_hash = canonical_nfa_hash(&nfa);
@@ -804,7 +804,7 @@ mod tests {
 
             // Step 3: Build NFA
             let mut dag2 = build_trellis_dag(dfa, pre.num_groups, token, state, &mut tmp_mp);
-            prune_reachable(&mut dag2, token.len());
+            // prune_reachable(&mut dag2, token.len());
             let nfa = build_nfa_from_trellis(dfa, &dag2, pre.num_groups, None);
             println!("\nNFA: {} states", nfa.num_states());
 
