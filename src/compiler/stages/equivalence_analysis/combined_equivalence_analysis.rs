@@ -22,8 +22,6 @@ use super::vocab::slow::{partitions_are_comparable, partition_is_at_least_as_fin
 
 const MEDIUM_VOCAB_EQUIV_VERIFICATION_ENV: &str = "MEDIUM_VOCAB_EQUIV_VERIFICATION";
 const SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "SLOW_VOCAB_EQUIV_VERIFICATION";
-const VERY_SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "VERY_SLOW_VOCAB_EQUIV_VERIFICATION";
-const VERY_SLOW_VOCAB_EQUIV_PRIMARY_ENV: &str = "VERY_SLOW_VOCAB_EQUIV_PRIMARY";
 const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
 const REFERENCE_VOCAB_EQUIV_PRIMARY_ENV: &str = "REFERENCE_VOCAB_EQUIV_PRIMARY";
 const REFERENCE_STATE_EQUIV_PRIMARY_ENV: &str = "REFERENCE_STATE_EQUIV_PRIMARY";
@@ -184,18 +182,6 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         verify_vocab_partition("medium", &vocab_classes, &medium_vocab_classes);
     }
 
-    if env_flag_enabled(VERY_SLOW_VOCAB_EQUIV_VERIFICATION_ENV) {
-        let very_slow_vocab_classes =
-            super::vocab::very_slow::find_vocab_equivalence_classes_with_follow(
-                regex,
-                tokens,
-                &reduced_states,
-                disallowed_follows,
-            );
-        print_vocab_verification_stats("very_slow", &very_slow_vocab_classes);
-        verify_vocab_partition("very_slow", &vocab_classes, &very_slow_vocab_classes);
-    }
-
     // --- Reference analysis ---
     // Run once if any reference env var is enabled, reuse the result.
     let need_reference_verify = env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV);
@@ -224,21 +210,11 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         verify_vocab_partition_reference(&vocab_classes, &ref_result.vocab_classes);
     }
 
-    // Replace vocab classes if reference or very_slow primary is requested
+    // Replace vocab classes if reference primary is requested
     let vocab_classes = if need_reference_vocab {
         let ref_result = reference_result.as_ref().unwrap();
         print_vocab_verification_stats("reference (primary)", &ref_result.vocab_classes);
         ref_result.vocab_classes.clone()
-    } else if env_flag_enabled(VERY_SLOW_VOCAB_EQUIV_PRIMARY_ENV) {
-        let very_slow_vocab_classes =
-            super::vocab::very_slow::find_vocab_equivalence_classes_with_follow(
-                regex,
-                tokens,
-                &reduced_states,
-                disallowed_follows,
-            );
-        print_vocab_verification_stats("very_slow (primary)", &very_slow_vocab_classes);
-        very_slow_vocab_classes
     } else {
         vocab_classes
     };

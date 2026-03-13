@@ -26,7 +26,7 @@ use ahash::{AHasher, RandomState};
 use once_cell::sync::Lazy;
 use std::hash::Hasher;
 
-use super::compat::{GroupID, Sep1Tokenizer};
+use super::compat::{FlatDfa, Sep1Tokenizer};
 use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::dfa::{Label, DFA};
 use crate::automata::unweighted_u32::minimize::minimize;
@@ -83,15 +83,10 @@ fn completion_label(gid: usize) -> Label {
     -(gid as Label + 1)
 }
 
-// ---- Tokenizer DFA extraction (reused across all tokens) ----
+// ---- Precomputed data (derived from FlatDfa, reused across all tokens) ----
 
-struct TokenizerDfa {
-    start_state: usize,
-    transitions: Vec<[u32; 256]>,
-    finalizers: Vec<Vec<usize>>,
-    is_dead_end: Vec<bool>,
+struct PrecomputedData {
     num_groups: usize,
-    possible_future_groups: Vec<Vec<usize>>,
     disallowed_follows: Vec<BitSet>,
 }
 
@@ -114,12 +109,7 @@ fn normalize_disallowed_follows(
     normalized
 }
 
-fn extract_tokenizer_dfa(
-    regex: &Sep1Tokenizer,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> TokenizerDfa {
-    let dfa = regex.dfa();
-
+fn precompute(dfa: &FlatDfa, disallowed_follows: &BTreeMap<u32, BitSet>) -> PrecomputedData {
     let num_groups = dfa
         .states
         .iter()
@@ -132,29 +122,8 @@ fn extract_tokenizer_dfa(
         .max()
         .map_or(0, |m| m + 1);
 
-    let mut transitions = Vec::with_capacity(dfa.states.len());
-    let mut finalizers = Vec::with_capacity(dfa.states.len());
-    let mut is_dead_end = Vec::with_capacity(dfa.states.len());
-    let mut possible_future_groups = Vec::with_capacity(dfa.states.len());
-
-    for state in &dfa.states {
-        let mut table = [NONE; 256];
-        for (byte_idx, &target) in state.transitions.iter().enumerate() {
-            table[byte_idx] = target;
-        }
-        transitions.push(table);
-        finalizers.push(state.finalizers.clone());
-        is_dead_end.push(state.possible_future_group_ids.is_empty());
-        possible_future_groups.push(state.possible_future_group_ids.clone());
-    }
-
-    TokenizerDfa {
-        start_state: dfa.start_state,
-        transitions,
-        finalizers,
-        is_dead_end,
+    PrecomputedData {
         num_groups,
-        possible_future_groups,
         disallowed_follows: normalize_disallowed_follows(num_groups, disallowed_follows),
     }
 }
@@ -172,17 +141,17 @@ struct FlatNode {
 /// last-match position per group. Returns the end state (or STATE_NONE if
 /// the DFA reaches a dead end).
 fn walk_tokenizer_dfa(
-    dfa: &TokenizerDfa,
+    dfa: &FlatDfa,
+    ng: usize,
     slice: &[u8],
     start_state: usize,
     mp: &mut [u32],
 ) -> usize {
-    let ng = dfa.num_groups;
     mp[..ng].fill(NONE);
     let mut cur = start_state;
-    let mut done = dfa.is_dead_end[cur];
+    let mut done = dfa.states[cur].possible_future_group_ids.is_empty();
 
-    for &gid in &dfa.finalizers[cur] {
+    for &gid in &dfa.states[cur].finalizers {
         if gid < ng && mp[gid] == NONE {
             mp[gid] = 0;
         }
@@ -192,19 +161,19 @@ fn walk_tokenizer_dfa(
         if done {
             break;
         }
-        let ns = dfa.transitions[cur][byte as usize];
+        let ns = dfa.states[cur].transitions[byte as usize];
         if ns == NONE {
             done = true;
             break;
         }
         cur = ns as usize;
         let pos = (i + 1) as u32;
-        for &gid in &dfa.finalizers[cur] {
+        for &gid in &dfa.states[cur].finalizers {
             if gid < ng {
                 mp[gid] = pos;
             }
         }
-        if dfa.is_dead_end[cur] {
+        if dfa.states[cur].possible_future_group_ids.is_empty() {
             done = true;
         }
     }
@@ -222,16 +191,16 @@ fn edges_from_mp(mp: &[u32], ng: usize, base_pos: usize) -> Vec<Edge> {
 }
 
 fn build_trellis_dag(
-    dfa: &TokenizerDfa,
+    dfa: &FlatDfa,
+    ng: usize,
     token: &[u8],
     initial_state: usize,
     tmp_mp: &mut Vec<u32>,
 ) -> BTreeMap<usize, FlatNode> {
-    let ng = dfa.num_groups;
     let len = token.len();
     tmp_mp.resize(ng, NONE);
 
-    let root_end = walk_tokenizer_dfa(dfa, token, initial_state, tmp_mp);
+    let root_end = walk_tokenizer_dfa(dfa, ng, token, initial_state, tmp_mp);
     let root_edges = edges_from_mp(tmp_mp, ng, 0);
 
     let mut dag: BTreeMap<usize, FlatNode> = BTreeMap::new();
@@ -247,7 +216,7 @@ fn build_trellis_dag(
     }
 
     while let Some(pos) = queue.pop_front() {
-        let end = walk_tokenizer_dfa(dfa, &token[pos..], dfa.start_state, tmp_mp);
+        let end = walk_tokenizer_dfa(dfa, ng, &token[pos..], dfa.start_state, tmp_mp);
         let edges = edges_from_mp(tmp_mp, ng, pos);
 
         for &(_, target) in &edges {
@@ -300,7 +269,8 @@ fn prune_reachable(dag: &mut BTreeMap<usize, FlatNode>, token_len: usize) {
 type NfaStateKey = (usize, Option<usize>);
 
 fn build_nfa_from_trellis(
-    dfa: &TokenizerDfa,
+    dfa: &FlatDfa,
+    pre: &PrecomputedData,
     dag: &BTreeMap<usize, FlatNode>,
     ignore_terminal: Option<usize>,
 ) -> NFA {
@@ -341,11 +311,11 @@ fn build_nfa_from_trellis(
             None => continue,
         };
 
-        let disallowed = parent_gid.map(|pgid| &dfa.disallowed_follows[pgid]);
+        let disallowed = parent_gid.map(|pgid| &pre.disallowed_follows[pgid]);
 
         // --- Completion transitions ---
-        if node.end_state != STATE_NONE && node.end_state < dfa.possible_future_groups.len() {
-            let future_groups = &dfa.possible_future_groups[node.end_state];
+        if node.end_state != STATE_NONE && node.end_state < dfa.states.len() {
+            let future_groups = &dfa.states[node.end_state].possible_future_group_ids;
             let mut has_any = false;
             for &gid in future_groups {
                 if let Some(d) = disallowed {
@@ -421,36 +391,19 @@ fn hash_dfa_state(dfa: &DFA, state: u32, memo: &mut HashMap<u32, u64>) -> u64 {
 // ---- Per-(token, state) processing ----
 
 fn process_token_for_state(
-    dfa: &TokenizerDfa,
+    dfa: &FlatDfa,
+    pre: &PrecomputedData,
     token: &[u8],
     initial_state: usize,
     ignore_terminal: Option<usize>,
     tmp_mp: &mut Vec<u32>,
 ) -> u64 {
-    let ng = dfa.num_groups;
-    tmp_mp.resize(ng, NONE);
+    tmp_mp.resize(pre.num_groups, NONE);
 
-    // Build trellis DAG
-    let mut dag = build_trellis_dag(dfa, token, initial_state, tmp_mp);
-    let token_len = token.len();
+    let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
+    prune_reachable(&mut dag, token.len());
 
-    // Reachability pruning
-    prune_reachable(&mut dag, token_len);
-
-    // Degenerate case: root can't contribute anything
-    let root_has_content = dag.get(&0).map_or(false, |n| {
-        !n.edges.is_empty() || (n.end_state != STATE_NONE)
-    });
-    if !root_has_content {
-        let mut h = new_hasher();
-        h.write_u8(0);
-        return h.finish();
-    }
-
-    // Build NFA from trellis
-    let nfa = build_nfa_from_trellis(dfa, &dag, ignore_terminal);
-
-    // Determinize → minimize → canonical hash
+    let nfa = build_nfa_from_trellis(dfa, pre, &dag, ignore_terminal);
     let det_dfa = determinize(&nfa);
     let min_dfa = minimize(&det_dfa);
     canonical_hash(&min_dfa)
@@ -471,7 +424,8 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<usize>,
 ) -> ReferenceEquivalenceResult {
-    let dfa = extract_tokenizer_dfa(regex, disallowed_follows);
+    let dfa = regex.dfa();
+    let pre = precompute(dfa, disallowed_follows);
     let nt = strings.len();
     let ns = initial_states.len();
 
@@ -488,7 +442,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
     let started = Instant::now();
     let mut last_report = started;
 
-    let mut tmp_mp = vec![NONE; dfa.num_groups];
+    let mut tmp_mp = vec![NONE; pre.num_groups];
 
     // Compute per-(token, state) hash matrix
     // Layout: hashes[ti * ns + si] = hash for token ti at state initial_states[si]
@@ -497,7 +451,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
     for (ti, token_ref) in strings.iter().enumerate() {
         let token = token_ref.as_ref();
         for &state in initial_states {
-            let sig = process_token_for_state(&dfa, token, state, ignore_terminal, &mut tmp_mp);
+            let sig = process_token_for_state(dfa, &pre, token, state, ignore_terminal, &mut tmp_mp);
             hashes.push(sig);
         }
 
