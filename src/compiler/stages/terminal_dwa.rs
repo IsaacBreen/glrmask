@@ -50,7 +50,7 @@ pub(crate) struct TerminalDwaBuildReport {
     pub terminal_minimized_dwa: WeightedDwaStats,
 }
 
-fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
+pub(crate) fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
     let mut ever_allowed = vec![BTreeSet::new(); grammar.num_terminals as usize];
 
     for rule in &grammar.rules {
@@ -1422,7 +1422,7 @@ mod tests {
                 .collect(),
             None,
         );
-        let id_map = InternalIdMap::build(&tokenizer, &vocab);
+        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new());
         (build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None), id_map)
     }
 
@@ -1435,7 +1435,7 @@ mod tests {
             vec![(0, b"a".to_vec()), (1, b"ab".to_vec()), (2, b"b".to_vec())],
             None,
         );
-        let id_map = InternalIdMap::build(&tokenizer, &vocab);
+        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new());
 
         let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
 
@@ -1492,7 +1492,7 @@ mod tests {
             ],
             None,
         );
-        let id_map = InternalIdMap::build(&tokenizer, &vocab);
+        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new());
 
         let terminal_dwa = build_terminal_dwa(
             &glr_grammar,

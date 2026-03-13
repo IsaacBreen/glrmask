@@ -631,7 +631,7 @@ mod tests {
             entries.push((i as u32, td.name().as_bytes().to_vec()));
         }
         let vocab = Vocab::new(entries, None);
-        let id_map = InternalIdMap::build(&tok, &vocab);
+        let id_map = InternalIdMap::build(&tok, &vocab, &std::collections::BTreeMap::new());
         (vocab, tok, id_map)
     }
 

@@ -51,8 +51,12 @@ pub struct InternalIdMap {
 }
 
 impl InternalIdMap {
-    pub fn build(tokenizer: &crate::automata::lexer::tokenizer::Tokenizer, vocab: &crate::Vocab) -> Self {
-        combined::analyze_equivalences(tokenizer, vocab)
+    pub fn build(
+        tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+        vocab: &crate::Vocab,
+        disallowed_follows: &std::collections::BTreeMap<u32, crate::ds::bitset::BitSet>,
+    ) -> Self {
+        combined::analyze_equivalences(tokenizer, vocab, disallowed_follows)
     }
 
     pub fn num_tsids(&self) -> u32 {

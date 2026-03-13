@@ -27,7 +27,48 @@ use crate::compiler::stages::parser_dwa::{
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
+use crate::compiler::stages::terminal_dwa::compute_ever_allowed_follows;
+use crate::ds::bitset::BitSet;
 use crate::runtime::Constraint;
+
+/// Convert ever-allowed follow sets into the `BTreeMap<u32, BitSet>` disallowed-follows
+/// format expected by the equivalence analysis.
+///
+/// If `ignore_terminal` is provided, that terminal's disallowed-follows is left empty
+/// because the ignore terminal can appear between any two grammar terminals.
+/// Additionally, the ignore terminal is removed from all other terminals' disallowed sets
+/// since any terminal can be followed by the ignore terminal.
+fn compute_disallowed_follows(
+    grammar: &AnalyzedGrammar,
+    ignore_terminal: Option<u32>,
+) -> BTreeMap<u32, BitSet> {
+    let ever_allowed = compute_ever_allowed_follows(grammar);
+    let num_terminals = grammar.num_terminals as usize;
+    let mut result = BTreeMap::new();
+    for (tid, allowed) in ever_allowed.iter().enumerate() {
+        // Ignore terminal can be followed by anything
+        if ignore_terminal == Some(tid as u32) {
+            continue;
+        }
+        let mut disallowed = BitSet::new(num_terminals);
+        let allowed_set: std::collections::BTreeSet<u32> = allowed.iter().copied().collect();
+        for other in 0..num_terminals {
+            if !allowed_set.contains(&(other as u32)) {
+                disallowed.set(other);
+            }
+        }
+        // Ignore terminal can always follow any terminal
+        if let Some(ign) = ignore_terminal {
+            if (ign as usize) < num_terminals {
+                disallowed.clear(ign as usize);
+            }
+        }
+        if !disallowed.is_zero() {
+            result.insert(tid as u32, disallowed);
+        }
+    }
+    result
+}
 
 // ── Tokenizer construction ──────────────────────────────────────────────────
 
@@ -278,7 +319,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     log_compile_profile(profile_enabled, "build_glr_table", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
-    let mut id_map = InternalIdMap::build(&tokenizer, vocab);
+    let disallowed_follows = compute_disallowed_follows(&glr_grammar, normalized.ignore_terminal);
+    let mut id_map = InternalIdMap::build(&tokenizer, vocab, &disallowed_follows);
     let build_internal_id_map_time = phase_started_at.elapsed();
     if profile_enabled {
         eprintln!(
@@ -415,7 +457,8 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     }
 
     let table = GLRTable::build(&glr_grammar);
-    let id_map = InternalIdMap::build(&tokenizer, vocab);
+    let disallowed_follows = compute_disallowed_follows(&glr_grammar, normalized.ignore_terminal);
+    let id_map = InternalIdMap::build(&tokenizer, vocab, &disallowed_follows);
 
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     let possible_matches_by_state = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
