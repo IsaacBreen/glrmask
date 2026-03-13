@@ -145,33 +145,36 @@ fn precompute(dfa: &FlatDfa, disallowed_follows: &BTreeMap<u32, BitSet>) -> Prec
 
 fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
     let num_groups = disallowed_follows.len();
-    let mut dfa = DFA::new();
     if num_groups == 0 {
-        return dfa;
+        return DFA::new();
     }
 
-    let mut clean_states = Vec::with_capacity(num_groups);
-    let mut bad_states = Vec::with_capacity(num_groups);
+    let mut nfa = NFA::new();
+    let start = nfa.start_states[0];
+    let accept = nfa.add_state();
+    nfa.set_accepting(accept);
+
+    let mut previous_terminal_states = Vec::with_capacity(num_groups);
     for _ in 0..num_groups {
-        clean_states.push(dfa.add_state());
-        let bad = dfa.add_state();
-        dfa.set_accepting(bad, true);
-        bad_states.push(bad);
-    }
-
-    for gid in 0..num_groups {
-        dfa.add_transition(dfa.start_state, terminal_label(gid), clean_states[gid]);
+        previous_terminal_states.push(nfa.add_state());
     }
 
     for prev_gid in 0..num_groups {
+        if disallowed_follows[prev_gid].is_zero() {
+            continue;
+        }
+
+        let prev_state = previous_terminal_states[prev_gid];
+        nfa.add_transition(start, terminal_label(prev_gid), prev_state);
+        nfa.add_epsilon(prev_state, start);
+
         for next_gid in disallowed_follows[prev_gid].iter() {
-            let label = terminal_label(next_gid);
-            dfa.add_transition(clean_states[prev_gid], label, bad_states[next_gid]);
-            dfa.add_transition(bad_states[prev_gid], label, bad_states[next_gid]);
+            nfa.add_transition(prev_state, terminal_label(next_gid), accept);
         }
     }
 
-    dfa
+    let det_dfa = determinize(&nfa);
+    minimize(&det_dfa)
 }
 
 // ---- Trellis DAG construction ----
