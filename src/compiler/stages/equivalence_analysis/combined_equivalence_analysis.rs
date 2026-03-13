@@ -328,16 +328,13 @@ fn print_vocab_verification_stats(label: &str, vocab_classes: &VocabEquivalenceR
     );
 }
 
-pub(crate) fn repro_live_quote_witness_minimal_fineness_panic() {
-    let comma_or_quote = crate::automata::lexer::ast::choice(vec![
-        crate::automata::lexer::ast::bytes(b","),
-        crate::automata::lexer::ast::bytes(b"'"),
-    ]);
+pub(crate) fn repro_live_minimal_tokenizer_fineness_panic() {
+    let b_or_c = crate::automata::lexer::ast::class(crate::ds::u8set::U8Set::from_bytes(b"bc"));
     let tokenizer = crate::compiler::compile::build_tokenizer_from_exprs(&[
-        crate::automata::lexer::ast::star(comma_or_quote.clone()),
+        crate::automata::lexer::ast::star(b_or_c.clone()),
         crate::automata::lexer::ast::seq(vec![
-            crate::automata::lexer::ast::star(comma_or_quote),
-            crate::automata::lexer::ast::bytes(b","),
+            crate::automata::lexer::ast::star(b_or_c),
+            crate::automata::lexer::ast::bytes(b"b"),
         ]),
     ]);
     let regex = Sep1Tokenizer::new(&tokenizer);
@@ -349,7 +346,7 @@ pub(crate) fn repro_live_quote_witness_minimal_fineness_panic() {
     disallowed_follows.insert(0, all_groups.clone());
     disallowed_follows.insert(1, all_groups);
 
-    let tokens = vec![b",\"".to_vec(), b",\'\"".to_vec()];
+    let tokens = vec![b"ba".to_vec(), b"bca".to_vec()];
     let initial_states = [regex.initial_state_id()];
 
     let fast_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(

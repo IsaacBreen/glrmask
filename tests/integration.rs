@@ -2445,9 +2445,9 @@ fn test_ported_mask_commit_consistency_minimal_repro_minimized_copy() {
 }
 
 #[test]
-#[ignore = "expected to fail: current live minimal fineness panic repro"]
-fn test_live_quote_witness_minimal_fineness_repro_panics() {
-    glrmask::__repro_live_quote_witness_minimal_fineness_panic();
+#[ignore = "expected to fail: current live minimal tokenizer fineness repro"]
+fn test_live_minimal_tokenizer_fineness_repro_panics() {
+    glrmask::__repro_live_minimal_tokenizer_fineness_panic();
 }
 
 /// Ported from sep1 `test_python_reported_bug_def_rep_space_f`.

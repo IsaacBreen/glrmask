@@ -654,10 +654,11 @@ pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::lexer::ast::{bytes, choice, seq, star};
+    use crate::automata::lexer::ast::{bytes, class, seq, star};
     use crate::compiler::compile::{build_tokenizer, build_tokenizer_from_exprs, compute_disallowed_follows};
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+    use crate::ds::u8set::U8Set;
 
     #[test]
     fn test_reference_simple_ab_with_disallowed_follow() {
@@ -686,11 +687,11 @@ mod tests {
         );
     }
 
-    fn build_live_quote_witness_minimal_fixture() -> (Sep1Tokenizer, BTreeMap<u32, BitSet>, usize, Vec<Vec<u8>>) {
-        let comma_or_quote = choice(vec![bytes(b","), bytes(b"'")]);
+    fn build_live_minimal_tokenizer_fixture() -> (Sep1Tokenizer, BTreeMap<u32, BitSet>, usize, Vec<Vec<u8>>) {
+        let b_or_c = class(U8Set::from_bytes(b"bc"));
         let tokenizer = build_tokenizer_from_exprs(&[
-            star(comma_or_quote.clone()),
-            seq(vec![star(comma_or_quote), bytes(b",")]),
+            star(b_or_c.clone()),
+            seq(vec![star(b_or_c), bytes(b"b")]),
         ]);
         let sep1 = Sep1Tokenizer::new(&tokenizer);
 
@@ -701,15 +702,15 @@ mod tests {
         disallowed_follows.insert(0, all_groups.clone());
         disallowed_follows.insert(1, all_groups);
 
-        let tokens = vec![b",\"".to_vec(), b",\'\"".to_vec()];
+        let tokens = vec![b"ba".to_vec(), b"bca".to_vec()];
         let initial_state = sep1.initial_state_id();
         (sep1, disallowed_follows, initial_state, tokens)
     }
 
     #[test]
-    fn test_live_quote_witness_minimal_fast_reference_mismatch() {
+    fn test_live_minimal_tokenizer_fast_reference_mismatch() {
         let (sep1, disallowed_follows, initial_state, tokens) =
-            build_live_quote_witness_minimal_fixture();
+            build_live_minimal_tokenizer_fixture();
 
         let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
             &sep1,
@@ -724,9 +725,9 @@ mod tests {
     }
 
     #[test]
-    fn test_live_quote_witness_minimal_reference_hashes_differ() {
+    fn test_live_minimal_tokenizer_reference_hashes_differ() {
         let (sep1, disallowed_follows, initial_state, tokens) =
-            build_live_quote_witness_minimal_fixture();
+            build_live_minimal_tokenizer_fixture();
         let dfa = sep1.dfa();
         let pre = precompute(&dfa, &disallowed_follows);
         let hash_memo = Mutex::new(HashMap::new());
@@ -754,10 +755,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "expected to fail: current live reference mismatch on minimal inline DFA"]
-    fn repro_live_quote_witness_minimal_reference_should_merge() {
+    #[ignore = "expected to fail: current live reference mismatch on minimal tokenizer expressions"]
+    fn repro_live_minimal_tokenizer_reference_should_merge() {
         let (sep1, disallowed_follows, initial_state, tokens) =
-            build_live_quote_witness_minimal_fixture();
+            build_live_minimal_tokenizer_fixture();
 
         let reference = find_equivalence_classes(&sep1, &tokens, &[initial_state], &disallowed_follows, None);
         assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0, 1]]));
