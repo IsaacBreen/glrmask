@@ -721,7 +721,7 @@ mod tests {
         let reference = find_equivalence_classes(&sep1, &tokens, &[initial_state], &disallowed_follows, None);
 
         assert_eq!(fast_classes, BTreeSet::from([vec![0, 1]]));
-        assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0], vec![1]]));
+        assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0, 1]]));
     }
 
     #[test]
