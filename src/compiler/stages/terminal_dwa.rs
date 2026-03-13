@@ -1422,7 +1422,7 @@ mod tests {
                 .collect(),
             None,
         );
-        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new());
+        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
         (build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None), id_map)
     }
 
@@ -1435,7 +1435,7 @@ mod tests {
             vec![(0, b"a".to_vec()), (1, b"ab".to_vec()), (2, b"b".to_vec())],
             None,
         );
-        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new());
+        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
 
         let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
 
@@ -1492,7 +1492,7 @@ mod tests {
             ],
             None,
         );
-        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new());
+        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
 
         let terminal_dwa = build_terminal_dwa(
             &glr_grammar,

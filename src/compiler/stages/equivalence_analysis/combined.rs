@@ -12,8 +12,9 @@ pub(crate) fn analyze_equivalences(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
 ) -> InternalIdMap {
-    analyze_equivalences_sep1(tokenizer, vocab, disallowed_follows)
+    analyze_equivalences_sep1(tokenizer, vocab, disallowed_follows, ignore_terminal)
 }
 
 /// Sep1-derived combined equivalence analysis.
@@ -25,7 +26,28 @@ fn analyze_equivalences_sep1(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
 ) -> InternalIdMap {
+    // Adjust disallowed_follows for the ignore terminal:
+    // - The ignore terminal can be followed by anything (remove its entry)
+    // - Any terminal can be followed by the ignore terminal (clear it from all sets)
+    let adjusted_disallowed;
+    let effective_disallowed = if let Some(ign) = ignore_terminal {
+        let mut adj = disallowed_follows.clone();
+        adj.remove(&ign);
+        for (_tid, bits) in adj.iter_mut() {
+            if (ign as usize) < bits.len() {
+                bits.clear(ign as usize);
+            }
+        }
+        // Remove entries that became empty after clearing
+        adj.retain(|_, bits| !bits.is_zero());
+        adjusted_disallowed = adj;
+        &adjusted_disallowed
+    } else {
+        disallowed_follows
+    };
+
     let sep1_tok = Sep1Tokenizer::new(tokenizer);
 
     // Extract vocab tokens as byte slices, ordered by token ID.
@@ -45,7 +67,7 @@ fn analyze_equivalences_sep1(
         &sep1_tok,
         &token_bytes,
         &initial_states,
-        disallowed_follows,
+        effective_disallowed,
     );
 
     // Convert state equivalence classes to ManyToOneIdMap
@@ -127,7 +149,7 @@ mod tests {
             ],
             None,
         );
-        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new());
+        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
 
         assert!(id_map.num_tsids() >= 1);
         assert_eq!(id_map.max_token_id(), 2);
@@ -150,7 +172,7 @@ mod tests {
             ];
             let vocab_entries: Vec<(u32, Vec<u8>)> = vocab_strs.iter().enumerate().map(|(i, s)| (i as u32, s.as_bytes().to_vec())).collect();
             let vocab = Vocab::new(vocab_entries, None);
-            let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new());
+            let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
             let classes = &id_map.vocab_tokens.internal_to_originals;
             // Print for debugging
             for (i, class) in classes.iter().enumerate() {
@@ -198,7 +220,7 @@ mod tests {
             let vocab_strs = vec!["{", "}"];
             let vocab_entries: Vec<(u32, Vec<u8>)> = vocab_strs.iter().enumerate().map(|(i, s)| (i as u32, s.as_bytes().to_vec())).collect();
             let vocab = Vocab::new(vocab_entries, None);
-            let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new());
+            let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
             let classes = &id_map.vocab_tokens.internal_to_originals;
             for (i, class) in classes.iter().enumerate() {
                 let content: Vec<&str> = class.iter().map(|&idx| vocab_strs[idx as usize]).collect();
@@ -240,7 +262,7 @@ mod tests {
             let vocab = Vocab::new(vocab_entries, None);
 
             // Full combined analysis (sep1 pipeline)
-            let full_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new());
+            let full_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
             let num_original_states = tok.num_states();
             let num_combined_state_classes = full_map.num_tsids();
             let num_combined_vocab_classes = full_map.num_internal_tokens();

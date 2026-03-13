@@ -195,12 +195,10 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
 
 type Edge = (usize, usize);
 
-struct DagNode {
+/// Flat DAG node: end_state + edges. Disallowed and hash computed separately.
+struct FlatNode {
     end_state: usize,
     edges: Vec<Edge>,
-    hash: u64,
-    disallowed: BitSet,
-    has_disallowed: bool,
 }
 
 /// Walk the DFA from `start_state` on `slice`, returning end state and
@@ -260,9 +258,9 @@ fn edges_from_mp(mp: &[u32], ng: usize, base_pos: usize) -> Vec<Edge> {
         .collect()
 }
 
-/// Build suffix DAG, prune disallowed terminals, and hash for a single
-/// (token, initial_state) pair. Returns the per-state signature matching
-/// slow.rs's computation exactly.
+/// Build suffix DAG, apply reachability pruning, and hash using recursive
+/// tree-based disallowed-follows propagation. Matches the grammars2024
+/// trellis_equivalence_analysis approach.
 fn hash_token_for_state(dfa: &Dfa, token: &[u8], initial_state: usize, tmp_mp: &mut Vec<u32>) -> u64 {
     let ng = dfa.num_groups;
     let len = token.len();
@@ -270,23 +268,24 @@ fn hash_token_for_state(dfa: &Dfa, token: &[u8], initial_state: usize, tmp_mp: &
 
     // ---- Root walk: DFA from initial_state on full token ----
     let root_end = walk_dfa(dfa, token, initial_state, tmp_mp);
-    let root_completion = dfa.completion(root_end);
     let root_edges = edges_from_mp(tmp_mp, ng, 0);
-    let has_any_mp = (0..ng).any(|gid| tmp_mp[gid] != NONE);
 
-    // ---- BFS suffix DAG from root edge targets ----
-    let mut dag: BTreeMap<usize, DagNode> = BTreeMap::new();
+    // ---- BFS to build flat DAG ----
+    let mut dag: BTreeMap<usize, FlatNode> = BTreeMap::new();
     let mut queue: VecDeque<usize> = VecDeque::new();
+
+    // Root node at position 0
+    dag.insert(0, FlatNode {
+        end_state: root_end,
+        edges: root_edges.clone(),
+    });
 
     for &(_, pos) in &root_edges {
         if pos <= len && !dag.contains_key(&pos) {
             queue.push_back(pos);
-            dag.insert(pos, DagNode {
+            dag.insert(pos, FlatNode {
                 end_state: STATE_NONE,
                 edges: Vec::new(),
-                hash: 0,
-                disallowed: BitSet::new(ng),
-                has_disallowed: false,
             });
         }
     }
@@ -298,12 +297,9 @@ fn hash_token_for_state(dfa: &Dfa, token: &[u8], initial_state: usize, tmp_mp: &
         for &(_, target) in &edges {
             if target <= len && !dag.contains_key(&target) {
                 queue.push_back(target);
-                dag.insert(target, DagNode {
+                dag.insert(target, FlatNode {
                     end_state: STATE_NONE,
                     edges: Vec::new(),
-                    hash: 0,
-                    disallowed: BitSet::new(ng),
-                    has_disallowed: false,
                 });
             }
         }
@@ -313,79 +309,116 @@ fn hash_token_for_state(dfa: &Dfa, token: &[u8], initial_state: usize, tmp_mp: &
         node.edges = edges;
     }
 
-    // ---- Disallowed-terminal pruning (forward propagation) ----
-
-    // Root edges → first level
-    for &(gid, pos) in &root_edges {
-        if let Some(node) = dag.get_mut(&pos) {
-            let incoming = dfa.disallowed_for(gid);
-            if node.has_disallowed {
-                node.disallowed = node.disallowed.intersection(incoming);
-            } else {
-                node.disallowed = incoming.clone();
-                node.has_disallowed = true;
-            }
+    // ---- Reachability pruning: only keep nodes/edges that can reach token end ----
+    // A node at position `len` (end of token) is always reachable.
+    // Walk backward through edges to find all reachable nodes.
+    let mut reverse_edges: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (&src, node) in &dag {
+        for &(_, dst) in &node.edges {
+            reverse_edges.entry(dst).or_default().push(src);
         }
     }
 
-    // Forward through DAG (ascending position order)
-    let positions: Vec<usize> = dag.keys().copied().collect();
-    for &pos in &positions {
-        let surviving: Vec<(usize, usize)> = {
-            let node = &dag[&pos];
-            node.edges
-                .iter()
-                .filter(|&&(gid, _)| !node.has_disallowed || !node.disallowed.contains(gid))
-                .copied()
-                .collect()
-        };
-        for &(gid, target) in &surviving {
-            let incoming = dfa.disallowed_for(gid);
-            if let Some(tgt) = dag.get_mut(&target) {
-                if tgt.has_disallowed {
-                    tgt.disallowed = tgt.disallowed.intersection(incoming);
-                } else {
-                    tgt.disallowed = incoming.clone();
-                    tgt.has_disallowed = true;
+    let mut can_reach_end: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut stack: Vec<usize> = Vec::new();
+    if dag.contains_key(&len) {
+        can_reach_end.insert(len);
+        stack.push(len);
+    }
+    while let Some(pos) = stack.pop() {
+        if let Some(preds) = reverse_edges.get(&pos) {
+            for &pred in preds {
+                if can_reach_end.insert(pred) {
+                    stack.push(pred);
                 }
             }
         }
     }
 
-    // ---- Hash bottom-up (descending position) ----
-    for &pos in positions.iter().rev() {
-        let node = &dag[&pos];
-        let dis_opt = node.has_disallowed.then_some(&node.disallowed);
+    // Prune edges that don't reach end
+    for (_pos, node) in dag.iter_mut() {
+        node.edges.retain(|&(_, target)| can_reach_end.contains(&target));
+    }
+
+    // If root can't reach end, produce a degenerate hash
+    if !can_reach_end.contains(&0) {
+        // No valid parse path through the whole token
         let mut h = new_hasher();
-        h.write_u64(dfa.completion_with_disallowed(node.end_state, dis_opt));
+        h.write_u8(0); // None end_state marker
+        return h.finish();
+    }
+
+    // ---- Recursive tree-based hashing with per-parent disallowed context ----
+    // This matches grammars2024's prune_trellis_disallowed_follows + hash_trellis:
+    // at each level, only edges whose gid is NOT disallowed by the parent are kept,
+    // and the disallowed context for each child depends on the edge's gid.
+    fn hash_recursive(
+        dfa: &Dfa,
+        dag: &BTreeMap<usize, FlatNode>,
+        pos: usize,
+        parent_disallowed: Option<&BitSet>,
+        memo: &mut HashMap<(usize, Option<u64>), u64>,
+    ) -> u64 {
+        // Memo key: (position, hash of parent_disallowed for context)
+        let dis_key = parent_disallowed.map(|d| {
+            let mut h = new_hasher();
+            for bit in d.iter() {
+                h.write_u64(bit as u64);
+            }
+            h.finish()
+        });
+        if let Some(&cached) = memo.get(&(pos, dis_key)) {
+            return cached;
+        }
+
+        let node = match dag.get(&pos) {
+            Some(n) => n,
+            None => {
+                let mut h = new_hasher();
+                h.write_u8(0);
+                return h.finish();
+            }
+        };
+
+        let mut h = new_hasher();
+
+        // Hash end_state (completion): possible_future_group_ids, filtered by disallowed
+        h.write_u64(dfa.completion_with_disallowed(node.end_state, parent_disallowed));
+
+        // Hash edges: only those not disallowed by parent
+        let edge_count = node.edges.iter()
+            .filter(|&&(gid, _)| {
+                parent_disallowed.map_or(true, |d| !d.contains(gid))
+            })
+            .count();
+        h.write_u64(edge_count as u64);
+
         for &(gid, target) in &node.edges {
-            if node.has_disallowed && node.disallowed.contains(gid) {
-                continue;
+            if let Some(d) = parent_disallowed {
+                if d.contains(gid) {
+                    continue;
+                }
             }
             h.write_u64(gid as u64);
-            h.write_u64(dag.get(&target).map_or(0, |n| n.hash));
+            // Child's disallowed context comes from THIS edge's gid
+            let child_disallowed = dfa.disallowed_for(gid);
+            let child_dis = if child_disallowed.is_zero() {
+                None
+            } else {
+                Some(child_disallowed)
+            };
+            let child_hash = hash_recursive(dfa, dag, target, child_dis, memo);
+            h.write_u64(child_hash);
         }
-        dag.get_mut(&pos).unwrap().hash = h.finish();
+
+        let result = h.finish();
+        memo.insert((pos, dis_key), result);
+        result
     }
 
-    // ---- Compute root signature (matches slow.rs structure) ----
-    // Reconstruct root mp (clobbered by BFS suffix walks)
-    walk_dfa(dfa, token, initial_state, tmp_mp);
-
-    if (0..ng).any(|gid| tmp_mp[gid] != NONE) {
-        let mut h = new_hasher();
-        h.write_u64(root_completion);
-        for gid in 0..ng {
-            let pv = tmp_mp[gid];
-            if pv != NONE && pv > 0 {
-                h.write_u64(gid as u64);
-                h.write_u64(dag.get(&(pv as usize)).map_or(0, |n| n.hash));
-            }
-        }
-        h.finish()
-    } else {
-        root_completion
-    }
+    let mut memo: HashMap<(usize, Option<u64>), u64> = HashMap::new();
+    // Root: no parent disallowed context (all edges allowed at root)
+    hash_recursive(dfa, &dag, 0, None, &mut memo)
 }
 
 // ---- Public API ----

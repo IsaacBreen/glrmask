@@ -55,8 +55,9 @@ impl InternalIdMap {
         tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
         vocab: &crate::Vocab,
         disallowed_follows: &std::collections::BTreeMap<u32, crate::ds::bitset::BitSet>,
+        ignore_terminal: Option<u32>,
     ) -> Self {
-        combined::analyze_equivalences(tokenizer, vocab, disallowed_follows)
+        combined::analyze_equivalences(tokenizer, vocab, disallowed_follows, ignore_terminal)
     }
 
     pub fn num_tsids(&self) -> u32 {
