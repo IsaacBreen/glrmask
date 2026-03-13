@@ -711,12 +711,57 @@ fn build_incompatibility_graph_sparse(
 ) -> Option<Vec<Vec<usize>>> {
     let overlap_pairs = overlapping_candidate_pairs(candidates, needed)?;
     let nc = candidates.len();
-    let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
+    let mut incompatible_pairs = HashSet::new();
     profile.sparse_graph_buckets += 1;
     profile.sparse_overlap_pairs += overlap_pairs.len();
+
+    // Sparse needed-set overlap is not sufficient on its own: even disjoint-needed
+    // states are incompatible if they expose the same label but remap it to
+    // different targets. Seed the sparse graph with those label-target conflicts.
+    let mut label_targets: rustc_hash::FxHashMap<Label, rustc_hash::FxHashMap<u32, Vec<usize>>> =
+        rustc_hash::FxHashMap::default();
+    for (candidate_idx, &state_id) in candidates.iter().enumerate() {
+        for transition in &productive_transitions[state_id] {
+            let mapped = old_to_new[transition.target as usize];
+            if mapped == UNMAPPED {
+                continue;
+            }
+            label_targets
+                .entry(transition.label)
+                .or_default()
+                .entry(mapped)
+                .or_default()
+                .push(candidate_idx);
+        }
+    }
+
+    for target_groups in label_targets.into_values() {
+        if target_groups.len() <= 1 {
+            continue;
+        }
+        let grouped_candidates: Vec<Vec<usize>> = target_groups.into_values().collect();
+        for left_group_idx in 0..grouped_candidates.len() {
+            for right_group_idx in (left_group_idx + 1)..grouped_candidates.len() {
+                for &left_candidate in &grouped_candidates[left_group_idx] {
+                    for &right_candidate in &grouped_candidates[right_group_idx] {
+                        let pair = if left_candidate < right_candidate {
+                            (left_candidate, right_candidate)
+                        } else {
+                            (right_candidate, left_candidate)
+                        };
+                        incompatible_pairs.insert(pair);
+                    }
+                }
+            }
+        }
+    }
+
     profile.compatibility_checks += overlap_pairs.len();
 
     for (i, j) in overlap_pairs {
+        if incompatible_pairs.contains(&(i, j)) {
+            continue;
+        }
         if !are_compatible(
             candidates[i],
             candidates[j],
@@ -725,9 +770,14 @@ fn build_incompatibility_graph_sparse(
             old_to_new,
             productive_transitions,
         ) {
-            adj[i].push(j);
-            adj[j].push(i);
+            incompatible_pairs.insert((i, j));
         }
+    }
+
+    let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
+    for (i, j) in incompatible_pairs {
+        adj[i].push(j);
+        adj[j].push(i);
     }
 
     Some(adj)
@@ -1594,4 +1644,60 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
         );
     }
     minimized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::weighted_u32::dwa::DWA;
+    use crate::ds::weight::Weight;
+    use range_set_blaze::RangeSetBlaze;
+
+    fn singleton_weight(token: u32) -> Weight {
+        Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([token]))
+    }
+
+    #[test]
+    fn test_sparse_graph_marks_label_target_conflicts_for_disjoint_needed_sets() {
+        let mut dwa = DWA::new(1, 256);
+        let target_left = dwa.add_state();
+        let target_right = dwa.add_state();
+        let mut candidates = Vec::new();
+
+        for token in 0..101u32 {
+            let candidate = dwa.add_state();
+            let target = if token % 2 == 0 { target_left } else { target_right };
+            let weight = singleton_weight(token);
+            dwa.add_transition(candidate, 0, target, weight);
+            candidates.push(candidate as usize);
+        }
+
+        let mut needed = vec![Weight::empty(); dwa.states.len()];
+        needed[target_left as usize] = singleton_weight(10_000);
+        needed[target_right as usize] = singleton_weight(10_001);
+        for token in 0..101u32 {
+            needed[candidates[token as usize]] = singleton_weight(token);
+        }
+
+        let productive_transitions = compute_productive_transitions(&dwa, &needed);
+        let mut old_to_new = vec![UNMAPPED; dwa.states.len()];
+        old_to_new[target_left as usize] = 9;
+        old_to_new[target_right as usize] = 10;
+
+        let mut profile = MinimizeAcyclicProfile::default();
+        let adj = build_incompatibility_graph_sparse(
+            &dwa,
+            &candidates,
+            &needed,
+            &old_to_new,
+            &productive_transitions,
+            &mut profile,
+        )
+        .expect("candidate bucket should be large enough for sparse graph mode");
+
+        assert!(
+            adj[0].contains(&1) && adj[1].contains(&0),
+            "disjoint-needed candidates with the same label but different remapped targets must be incompatible"
+        );
+    }
 }

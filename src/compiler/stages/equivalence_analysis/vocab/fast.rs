@@ -73,7 +73,14 @@ impl Dfa {
         if state >= self.possible_future_groups.len() {
             return self.none_completion_hash;
         }
-        hash_filtered_group_list(&self.possible_future_groups[state], disallowed)
+        let mut h = new_hasher();
+        h.write_u8(2);
+        h.write_u64(disallowed.len() as u64);
+        for &word in disallowed.words() {
+            h.write_u64(word);
+        }
+        h.write_u64(hash_filtered_group_list(&self.possible_future_groups[state], disallowed));
+        h.finish()
     }
 
     /// Look up transition: given a DFA state and a byte, return the next state (u32).
@@ -716,6 +723,53 @@ mod tests {
     use crate::automata::lexer::ast::{bytes, choice};
     use crate::compiler::compile::build_tokenizer_from_exprs;
     use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    fn build_gpt2_unicode_to_byte_map() -> BTreeMap<char, u8> {
+        let mut byte_values: Vec<u32> = (b'!' as u32..=b'~' as u32).collect();
+        byte_values.extend(0xA1u32..=0xACu32);
+        byte_values.extend(0xAEu32..=0xFFu32);
+
+        let mut unicode_values = byte_values.clone();
+        let mut extra = 0u32;
+        for byte in 0u32..=255u32 {
+            if !byte_values.contains(&byte) {
+                byte_values.push(byte);
+                unicode_values.push(256 + extra);
+                extra += 1;
+            }
+        }
+
+        let mut unicode_to_byte = BTreeMap::new();
+        for (byte, codepoint) in byte_values.into_iter().zip(unicode_values.into_iter()) {
+            let ch = char::from_u32(codepoint).expect("valid GPT-2 codepoint");
+            unicode_to_byte.insert(ch, byte as u8);
+        }
+        unicode_to_byte
+    }
+
+    fn load_cached_gpt2_vocab_bytes() -> Vec<Vec<u8>> {
+        let vocab_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../constraint-framework-analysis/.cache/vocab_cache/vocab.json");
+        let raw = std::fs::read_to_string(&vocab_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", vocab_path.display()));
+        let vocab: BTreeMap<String, u32> =
+            serde_json::from_str(&raw).expect("cached GPT-2 vocab should parse");
+        let unicode_to_byte = build_gpt2_unicode_to_byte_map();
+        let max_id = vocab.values().copied().max().unwrap_or(0) as usize;
+        let mut tokens = vec![Vec::new(); max_id + 1];
+
+        for (token_str, token_id) in vocab {
+            let token_bytes: Vec<u8> = token_str
+                .chars()
+                .map(|ch| unicode_to_byte[&ch])
+                .collect();
+            tokens[token_id as usize] = token_bytes;
+        }
+
+        tokens
+    }
 
     #[test]
     fn test_disallowed_follow_merges_ab_and_ac() {
@@ -743,5 +797,197 @@ mod tests {
             classes.iter().any(|class| class == &vec![0, 1]),
             "expected ab and ac to be equivalent with disallowed follows, got {classes:?}"
         );
+    }
+
+    #[test]
+    fn test_completion_with_disallowed_distinguishes_detector_state() {
+        let dfa = Dfa {
+            start_state: 0,
+            num_states: 1,
+            byte_to_class: [0; 256],
+            num_classes: 1,
+            trans_by_class: vec![NONE],
+            finalizers: vec![SmallVec::new()],
+            is_dead_end: vec![false],
+            num_groups: 3,
+            possible_future_groups: vec![smallvec::smallvec![0usize]],
+            completion_hash: vec![123],
+            none_completion_hash: 456,
+            self_loop_bytes: vec![[0; 4]],
+            disallowed_follows: vec![BitSet::new(3); 3],
+        };
+        let mut disallowed_a = BitSet::new(3);
+        disallowed_a.set(1);
+        let mut disallowed_b = BitSet::new(3);
+        disallowed_b.set(2);
+
+        assert_ne!(
+            dfa.completion_with_disallowed(0, Some(&disallowed_a)),
+            dfa.completion_with_disallowed(0, Some(&disallowed_b)),
+            "different disallowed-follow detector states must not collapse when filtered futures match"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_g_gb_witness_fast_suffix_hashes() {
+        let lark = include_str!("../../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
+        let analyzed = crate::compiler::glr::analysis::AnalyzedGrammar::from_grammar_def(&grammar);
+        let disallowed_follows = crate::compiler::compile::compute_disallowed_follows(&analyzed);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let dfa = build_dfa(&sep1, &disallowed_follows);
+        let initial_states = [269usize];
+        let tokens = [b"G".as_slice(), b"GB".as_slice()];
+
+        for (ti, token) in tokens.iter().enumerate() {
+            println!("\n=== fast token {ti} {:?} ===", String::from_utf8_lossy(token));
+            let mut scratch = Scratch::new(initial_states.len(), dfa.num_groups);
+            run_batch(&dfa, &mut scratch, token, &initial_states);
+
+            let mut dirty = scratch.dirty_groups[0].clone();
+            dirty.sort_unstable();
+            dirty.dedup();
+            println!("end_state={:?}", scratch.current_states[0]);
+            println!("targets={:?}", scratch.targets);
+            println!("dirty groups / positions:");
+            for &gid in &dirty {
+                let pos = scratch.match_positions[gid];
+                println!("  gid {gid} -> {pos}");
+            }
+
+            if !scratch.targets.is_empty() {
+                hash_suffixes(&dfa, token, &mut scratch);
+                let mut positions = scratch.dag_queue.clone();
+                positions.sort_unstable();
+                println!("suffix DAG:");
+                for pos in positions {
+                    let (hash, edges) = scratch.dag[&pos].clone();
+                    let end_state = scratch.dag_end_states.get(&pos).copied().unwrap_or(STATE_NONE);
+                    println!("  pos {pos}: end_state={end_state} hash=0x{hash:016X} edges={edges:?}");
+                }
+            }
+
+            let mut sig_scratch = Scratch::new(initial_states.len(), dfa.num_groups);
+            let sig = token_signature(&dfa, token, &initial_states, &mut sig_scratch);
+            println!("signature=0x{sig:016X}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_g_gb_on_full_vocab_reduced_states() {
+        let lark = include_str!("../../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
+        let analyzed = crate::compiler::glr::analysis::AnalyzedGrammar::from_grammar_def(&grammar);
+        let disallowed_follows = crate::compiler::compile::compute_disallowed_follows(&analyzed);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+
+        let full_tokens = load_cached_gpt2_vocab_bytes();
+        assert_eq!(full_tokens[38], b"G");
+        assert_eq!(full_tokens[4579], b"GB");
+
+        let states: Vec<usize> = (0..sep1.dfa().states.len()).collect();
+        let mapping = crate::compiler::stages::equivalence_analysis::state::fast::find_state_equivalence_classes(
+            &sep1,
+            &full_tokens,
+            &states,
+        );
+
+        let rep_269 = mapping[269];
+        let reduced_states: Vec<usize> = {
+            let mut set = BTreeSet::new();
+            for &rep in &mapping {
+                set.insert(rep);
+            }
+            set.into_iter().collect()
+        };
+
+        println!("full-vocab rep(269) = {rep_269}");
+        println!("full-vocab reduced state count = {}", reduced_states.len());
+        println!("state 269 is representative: {}", reduced_states.contains(&269));
+
+        let pair_tokens = vec![full_tokens[38].clone(), full_tokens[4579].clone()];
+        let pair_classes = find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &pair_tokens,
+            &reduced_states,
+            &disallowed_follows,
+        );
+        println!("pair classes on full-vocab reduced states: {pair_classes:?}");
+
+        let dfa = build_dfa(&sep1, &disallowed_follows);
+        let mut left_scratch = Scratch::new(reduced_states.len(), dfa.num_groups);
+        let mut right_scratch = Scratch::new(reduced_states.len(), dfa.num_groups);
+        let left_sig = token_signature(&dfa, &full_tokens[38], &reduced_states, &mut left_scratch);
+        let right_sig = token_signature(&dfa, &full_tokens[4579], &reduced_states, &mut right_scratch);
+        println!("signature(G)=0x{left_sig:016X}");
+        println!("signature(GB)=0x{right_sig:016X}");
+        println!("signatures equal: {}", left_sig == right_sig);
+
+        let full_classes = find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &full_tokens,
+            &reduced_states,
+            &disallowed_follows,
+        );
+        let same_full_class = full_classes
+            .iter()
+            .any(|class| class.contains(&38) && class.contains(&4579));
+        println!("same full fast class: {same_full_class}");
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_o56012_current_witness_fast_suffix_hashes() {
+        let lark = include_str!("../../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
+        let (normalized, tokenizer) =
+            crate::compiler::grammar::transforms::prepare_grammar_for_compile(&grammar);
+        let analyzed = crate::compiler::glr::analysis::AnalyzedGrammar::from_grammar_def(&normalized);
+        let disallowed_follows = crate::compiler::compile::compute_disallowed_follows(&analyzed);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let dfa = build_dfa(&sep1, &disallowed_follows);
+        let initial_states = [9686usize];
+        let tokens = [b",\"".as_slice(), b",'\"".as_slice()];
+
+        for (ti, token) in tokens.iter().enumerate() {
+            println!("\n=== fast token {ti} {:?} ===", String::from_utf8_lossy(token));
+            let mut scratch = Scratch::new(initial_states.len(), dfa.num_groups);
+            run_batch(&dfa, &mut scratch, token, &initial_states);
+
+            let mut dirty = scratch.dirty_groups[0].clone();
+            dirty.sort_unstable();
+            dirty.dedup();
+            println!("end_state={:?}", scratch.current_states[0]);
+            println!("targets={:?}", scratch.targets);
+            println!("dirty groups / positions:");
+            for &gid in &dirty {
+                let pos = scratch.match_positions[gid];
+                println!("  gid {gid} -> {pos}");
+            }
+
+            if !scratch.targets.is_empty() {
+                hash_suffixes(&dfa, token, &mut scratch);
+                let mut positions = scratch.dag_queue.clone();
+                positions.sort_unstable();
+                println!("suffix DAG:");
+                for pos in positions {
+                    let (hash, edges) = scratch.dag[&pos].clone();
+                    let end_state = scratch.dag_end_states.get(&pos).copied().unwrap_or(STATE_NONE);
+                    let disallowed = scratch.dag_disallowed.get(&pos).cloned();
+                    println!(
+                        "  pos {pos}: end_state={end_state} hash=0x{hash:016X} disallowed={:?} edges={edges:?}",
+                        disallowed
+                    );
+                }
+            }
+
+            let mut sig_scratch = Scratch::new(initial_states.len(), dfa.num_groups);
+            let sig = token_signature(&dfa, token, &initial_states, &mut sig_scratch);
+            println!("signature=0x{sig:016X}");
+        }
     }
 }

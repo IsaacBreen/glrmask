@@ -478,7 +478,6 @@ fn process_token_for_state(
         Some(disallowed_detector) => minimize(&subtract(&min_dfa, disallowed_detector)),
         None => min_dfa,
     };
-    dbg!(token, initial_state, &dag, &nfa, &pruned_dfa);
     let final_hash = canonical_hash(&pruned_dfa);
 
     hash_memo.lock().unwrap().insert(nfa_hash, final_hash);
@@ -664,6 +663,59 @@ mod tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
     use crate::ds::u8set::U8Set;
+    use std::path::Path;
+
+    fn build_gpt2_unicode_to_byte_map() -> BTreeMap<char, u8> {
+        let mut byte_values: Vec<u32> = (b'!' as u32..=b'~' as u32).collect();
+        byte_values.extend(0xA1u32..=0xACu32);
+        byte_values.extend(0xAEu32..=0xFFu32);
+
+        let mut unicode_values = byte_values.clone();
+        let mut extra = 0u32;
+        for byte in 0u32..=255u32 {
+            if !byte_values.contains(&byte) {
+                byte_values.push(byte);
+                unicode_values.push(256 + extra);
+                extra += 1;
+            }
+        }
+
+        let mut unicode_to_byte = BTreeMap::new();
+        for (byte, codepoint) in byte_values.into_iter().zip(unicode_values.into_iter()) {
+            let ch = char::from_u32(codepoint).expect("valid GPT-2 codepoint");
+            unicode_to_byte.insert(ch, byte as u8);
+        }
+        unicode_to_byte
+    }
+
+    fn load_cached_gpt2_vocab_bytes() -> Vec<Vec<u8>> {
+        let vocab_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../constraint-framework-analysis/.cache/vocab_cache/vocab.json");
+        let raw = std::fs::read_to_string(&vocab_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", vocab_path.display()));
+        let vocab: BTreeMap<String, u32> =
+            serde_json::from_str(&raw).expect("cached GPT-2 vocab should parse");
+        let unicode_to_byte = build_gpt2_unicode_to_byte_map();
+        let max_id = vocab.values().copied().max().unwrap_or(0) as usize;
+        let mut tokens = vec![Vec::new(); max_id + 1];
+
+        for (token_str, token_id) in vocab {
+            let token_bytes: Vec<u8> = token_str
+                .chars()
+                .map(|ch| unicode_to_byte[&ch])
+                .collect();
+            tokens[token_id as usize] = token_bytes;
+        }
+
+        tokens
+    }
+
+    fn format_vocab_classes(classes: &VocabEquivalenceResult, token_ids: &[usize]) -> Vec<Vec<usize>> {
+        classes
+            .iter()
+            .map(|class| class.iter().map(|&idx| token_ids[idx]).collect())
+            .collect()
+    }
 
     #[test]
     fn test_reference_simple_ab_with_disallowed_follow() {
@@ -713,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn test_live_minimal_tokenizer_fast_reference_mismatch() {
+    fn test_live_minimal_tokenizer_fast_reference_agree() {
         let (sep1, disallowed_follows, initial_state, tokens) =
             build_live_minimal_tokenizer_fixture();
 
@@ -726,11 +778,11 @@ mod tests {
         let reference = find_equivalence_classes(&sep1, &tokens, &[initial_state], &disallowed_follows, None);
 
         assert_eq!(fast_classes, BTreeSet::from([vec![0, 1]]));
-        assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0, 1]]));
+        assert_eq!(reference.vocab_classes, fast_classes);
     }
 
     #[test]
-    fn test_live_minimal_tokenizer_reference_hashes_differ() {
+    fn test_live_minimal_tokenizer_reference_hashes_match() {
         let (sep1, disallowed_follows, initial_state, tokens) =
             build_live_minimal_tokenizer_fixture();
         let dfa = sep1.dfa();
@@ -756,17 +808,7 @@ mod tests {
             &mut Vec::new(),
         );
 
-        assert_ne!(left_hash, right_hash);
-    }
-
-    #[test]
-    #[ignore = "expected to fail: current live reference mismatch on minimal tokenizer expressions"]
-    fn repro_live_minimal_tokenizer_reference_should_merge() {
-        let (sep1, disallowed_follows, initial_state, tokens) =
-            build_live_minimal_tokenizer_fixture();
-
-        let reference = find_equivalence_classes(&sep1, &tokens, &[initial_state], &disallowed_follows, None);
-        assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0, 1]]));
+        assert_eq!(left_hash, right_hash);
     }
 
     /// Diagnostic: trace the trellis + NFA + DFA for the live witness pair at state 9686.
@@ -776,9 +818,10 @@ mod tests {
     fn trace_witness_tokens() {
         let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
         let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
-        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        let (normalized, tokenizer) =
+            crate::compiler::grammar::transforms::prepare_grammar_for_compile(&grammar);
+        let analyzed = AnalyzedGrammar::from_grammar_def(&normalized);
         let disallowed_follows = compute_disallowed_follows(&analyzed);
-        let tokenizer = build_tokenizer(&grammar);
         let sep1_tok = Sep1Tokenizer::new(&tokenizer);
         let dfa = sep1_tok.dfa();
         let pre = precompute(dfa, &disallowed_follows);
@@ -884,6 +927,303 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn trace_g_gb_witness_tokens() {
+        let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
+        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        let disallowed_follows = compute_disallowed_follows(&analyzed);
+        let tokenizer = build_tokenizer(&grammar);
+        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
+        let dfa = sep1_tok.dfa();
+        let pre = precompute(dfa, &disallowed_follows);
+        let state = 269usize;
+        let tokens: [&[u8]; 2] = [b"G", b"GB"];
+
+        for (ti, token) in tokens.iter().enumerate() {
+            println!("\n{}", "=".repeat(60));
+            println!("=== Token {} : {:?} (hex: {:02X?}) ===", ti, String::from_utf8_lossy(token), token);
+
+            let mut mp = vec![NONE; pre.num_groups];
+            let end_state = walk_tokenizer_dfa(dfa, pre.num_groups, token, state, &mut mp);
+            println!("\nDFA walk from state {}:", state);
+            println!(
+                "  State {}: finalizers={:?}, futures={} ",
+                state,
+                dfa.states[state].finalizers,
+                dfa.states[state].possible_future_group_ids.len()
+            );
+            let mut cur = state;
+            for (i, &byte) in token.iter().enumerate() {
+                let ns = dfa.states[cur].transitions[byte as usize];
+                if ns == u32::MAX {
+                    println!("  byte {} (0x{:02X}): DEAD", i, byte);
+                    break;
+                }
+                cur = ns as usize;
+                println!(
+                    "  byte {} (0x{:02X} '{}'): -> state {} finalizers={:?} futures_len={}",
+                    i,
+                    byte,
+                    char::from(byte),
+                    cur,
+                    dfa.states[cur].finalizers,
+                    dfa.states[cur].possible_future_group_ids.len()
+                );
+            }
+            println!("  end_state = {}", if end_state == STATE_NONE { "DEAD".to_string() } else { end_state.to_string() });
+
+            let matches: Vec<(usize, u32)> = (0..pre.num_groups)
+                .filter_map(|gid| {
+                    let p = mp[gid];
+                    (p != NONE).then_some((gid, p))
+                })
+                .collect();
+            println!("  match positions: {:?}", matches);
+
+            let mut tmp_mp = vec![NONE; pre.num_groups];
+            let dag = build_trellis_dag(dfa, pre.num_groups, token, state, &mut tmp_mp);
+            println!("\nTrellis DAG ({} nodes):", dag.len());
+            for (&pos, node) in &dag {
+                let edge_str: Vec<String> = node.edges.iter().map(|(gid, tgt)| format!("gid{}->pos{}", gid, tgt)).collect();
+                println!(
+                    "  pos {}: end_state={}, edges=[{}]",
+                    pos,
+                    if node.end_state == STATE_NONE { "DEAD".to_string() } else { node.end_state.to_string() },
+                    edge_str.join(", ")
+                );
+            }
+
+            let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, None, token.len());
+            println!("\nNFA: {} states", nfa.num_states());
+            let det_dfa = determinize(&nfa);
+            let min_dfa = minimize(&det_dfa);
+            println!("Determinized DFA: {} states", det_dfa.num_states());
+            println!("Minimized DFA: {} states", min_dfa.num_states());
+            let pruned_dfa = match &pre.disallowed_detector {
+                Some(dd) => {
+                    let s = subtract(&min_dfa, dd);
+                    let m = minimize(&s);
+                    println!("After subtract+minimize: {} states", m.num_states());
+                    m
+                }
+                None => min_dfa.clone(),
+            };
+            println!("Canonical hash: 0x{:016X}", canonical_hash(&pruned_dfa));
+            println!("\nPruned DFA states:");
+            for sid in 0..pruned_dfa.num_states() {
+                let s = &pruned_dfa.states[sid as usize];
+                let trans: Vec<String> = s.transitions.iter().map(|(&label, &target)| format!("{}->s{}", label, target)).collect();
+                println!("  s{}: accepting={} trans=[{}]", sid, s.is_accepting, trans.join(", "));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_g_gb_all_states_fast_vs_reference() {
+        let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
+        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        let disallowed_follows = compute_disallowed_follows(&analyzed);
+        let tokenizer = build_tokenizer(&grammar);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let initial_states: Vec<usize> = (0..sep1.dfa().states.len()).collect();
+        let tokens = vec![b"G".to_vec(), b"GB".to_vec()];
+
+        let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &tokens,
+            &initial_states,
+            &disallowed_follows,
+        );
+        let reference = find_equivalence_classes(&sep1, &tokens, &initial_states, &disallowed_follows, None);
+
+        println!("fast classes: {:?}", fast_classes);
+        println!("reference classes: {:?}", reference.vocab_classes);
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_g_gb_state_reduction() {
+        let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
+        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        let disallowed_follows = compute_disallowed_follows(&analyzed);
+        let tokenizer = build_tokenizer(&grammar);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let tokens = vec![b"G".to_vec(), b"GB".to_vec()];
+        let states: Vec<usize> = (0..sep1.dfa().states.len()).collect();
+
+        let mapping = crate::compiler::stages::equivalence_analysis::state::fast::find_state_equivalence_classes(
+            &sep1,
+            &tokens,
+            &states,
+        );
+        let rep_269 = mapping[269];
+        let class_269: Vec<usize> = states
+            .iter()
+            .zip(mapping.iter())
+            .filter_map(|(&state, &rep)| (rep == rep_269).then_some(state))
+            .collect();
+        println!("rep(269) = {rep_269}, class size = {}", class_269.len());
+        println!("class(269) sample = {:?}", &class_269[..class_269.len().min(20)]);
+
+        let reduced_states: Vec<usize> = {
+            let mut set = BTreeSet::new();
+            for &rep in &mapping {
+                set.insert(rep);
+            }
+            set.into_iter().collect()
+        };
+        println!("reduced state count = {}", reduced_states.len());
+        println!("state 269 is representative: {}", reduced_states.contains(&269));
+
+        let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &tokens,
+            &reduced_states,
+            &disallowed_follows,
+        );
+        let reference = find_equivalence_classes(&sep1, &tokens, &reduced_states, &disallowed_follows, None);
+        println!("fast classes on reduced states: {:?}", fast_classes);
+        println!("reference classes on reduced states: {:?}", reference.vocab_classes);
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_o56012_current_witness_across_engines() {
+        let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
+        let (normalized, tokenizer) =
+            crate::compiler::grammar::transforms::prepare_grammar_for_compile(&grammar);
+        let analyzed = AnalyzedGrammar::from_grammar_def(&normalized);
+        let disallowed_follows = compute_disallowed_follows(&analyzed);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let full_tokens = load_cached_gpt2_vocab_bytes();
+        let all_states: Vec<usize> = (0..sep1.dfa().states.len()).collect();
+
+        let state_mapping = crate::compiler::stages::equivalence_analysis::state::fast::find_state_equivalence_classes(
+            &sep1,
+            &full_tokens,
+            &all_states,
+        );
+        let reduced_states: Vec<usize> = {
+            let mut set = BTreeSet::new();
+            for &rep in &state_mapping {
+                set.insert(rep);
+            }
+            set.into_iter().collect()
+        };
+
+        let witness_ids = vec![553usize, 16078, 27267, 40264, 42911, 44388];
+        let witness_tokens: Vec<Vec<u8>> = witness_ids
+            .iter()
+            .map(|&token_id| full_tokens[token_id].clone())
+            .collect();
+        let pair_ids = vec![553usize, 16078];
+        let pair_tokens: Vec<Vec<u8>> = pair_ids
+            .iter()
+            .map(|&token_id| full_tokens[token_id].clone())
+            .collect();
+        let ignore_terminal = normalized.ignore_terminal.map(|terminal| terminal as usize);
+
+        println!("normalized tokenizer states: {}", tokenizer.num_states());
+        println!("reduced state count: {}", reduced_states.len());
+        for &token_id in &witness_ids {
+            println!(
+                "token {token_id}: {:?}",
+                String::from_utf8_lossy(&full_tokens[token_id])
+            );
+        }
+
+        let fast_witness_all = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &witness_tokens,
+            &all_states,
+            &disallowed_follows,
+        );
+        let fast_witness_reduced = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &witness_tokens,
+            &reduced_states,
+            &disallowed_follows,
+        );
+        let medium_witness_reduced = crate::compiler::stages::equivalence_analysis::vocab::medium::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &witness_tokens,
+            &reduced_states,
+            &disallowed_follows,
+        );
+        let slow_witness_reduced = crate::compiler::stages::equivalence_analysis::vocab::slow::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &witness_tokens,
+            &reduced_states,
+            &disallowed_follows,
+        );
+        let reference_witness_all = find_equivalence_classes(
+            &sep1,
+            &witness_tokens,
+            &all_states,
+            &disallowed_follows,
+            ignore_terminal,
+        );
+        let reference_witness_reduced = find_equivalence_classes(
+            &sep1,
+            &witness_tokens,
+            &reduced_states,
+            &disallowed_follows,
+            ignore_terminal,
+        );
+        let fast_pair_reduced = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &pair_tokens,
+            &reduced_states,
+            &disallowed_follows,
+        );
+        let reference_pair_reduced = find_equivalence_classes(
+            &sep1,
+            &pair_tokens,
+            &reduced_states,
+            &disallowed_follows,
+            ignore_terminal,
+        );
+
+        println!(
+            "fast witness classes on all states: {:?}",
+            format_vocab_classes(&fast_witness_all, &witness_ids)
+        );
+        println!(
+            "fast witness classes on reduced states: {:?}",
+            format_vocab_classes(&fast_witness_reduced, &witness_ids)
+        );
+        println!(
+            "medium witness classes on reduced states: {:?}",
+            format_vocab_classes(&medium_witness_reduced, &witness_ids)
+        );
+        println!(
+            "slow witness classes on reduced states: {:?}",
+            format_vocab_classes(&slow_witness_reduced, &witness_ids)
+        );
+        println!(
+            "reference witness classes on all states: {:?}",
+            format_vocab_classes(&reference_witness_all.vocab_classes, &witness_ids)
+        );
+        println!(
+            "reference witness classes on reduced states: {:?}",
+            format_vocab_classes(&reference_witness_reduced.vocab_classes, &witness_ids)
+        );
+        println!(
+            "fast pair classes on reduced states: {:?}",
+            format_vocab_classes(&fast_pair_reduced, &pair_ids)
+        );
+        println!(
+            "reference pair classes on reduced states: {:?}",
+            format_vocab_classes(&reference_pair_reduced.vocab_classes, &pair_ids)
+        );
     }
 
     /// Extracts the reachable sub-DFA from state 9686 and prints it as

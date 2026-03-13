@@ -328,7 +328,7 @@ fn print_vocab_verification_stats(label: &str, vocab_classes: &VocabEquivalenceR
     );
 }
 
-pub(crate) fn repro_live_minimal_tokenizer_fineness_panic() {
+pub(crate) fn check_live_minimal_tokenizer_fineness() {
     let b_or_c = crate::automata::lexer::ast::class(crate::ds::u8set::U8Set::from_bytes(b"bc"));
     let tokenizer = crate::compiler::compile::build_tokenizer_from_exprs(&[
         crate::automata::lexer::ast::star(b_or_c.clone()),

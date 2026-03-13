@@ -1,12 +1,11 @@
 //! Minimization for acyclic unweighted DFAs.
 //!
-//! Uses reverse-topological signature-based merging: two states are
-//! equivalent when they have the same acceptance flag and identical
-//! transition maps (after class substitution).  Processing in
-//! reverse-topological order guarantees that children are classified
-//! before their parents.
+//! Uses reverse-topological signature-based merging under the crate's
+//! partial-DFA semantics: missing transitions are treated as transitions to
+//! a shared implicit rejecting sink. Processing in reverse-topological order
+//! guarantees that children are classified before their parents.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::dfa::DFA;
 
@@ -51,22 +50,42 @@ pub fn minimize(dfa: &DFA) -> DFA {
     // `topo` is in reverse-topological order (leaves first).
 
     let reachable: HashSet<usize> = topo.iter().copied().collect();
+    let labels: Vec<i32> = topo
+        .iter()
+        .flat_map(|&state_id| dfa.states[state_id].transitions.keys().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    const DEAD_CLASS: usize = 0;
+    let dead_signature = StateSignature {
+        is_accepting: false,
+        transitions: labels.iter().map(|&label| (label, DEAD_CLASS)).collect(),
+    };
+
     let mut signature_to_class = HashMap::<StateSignature, usize>::new();
+    signature_to_class.insert(dead_signature.clone(), DEAD_CLASS);
     let mut class_of_state = vec![usize::MAX; dfa.states.len()];
-    let mut class_representatives = Vec::<usize>::new();
+    let mut class_representatives = HashMap::<usize, usize>::new();
+    let mut next_class_id = 1usize;
 
     // Process leaves before parents.
     for &state_id in &topo {
         let state = &dfa.states[state_id];
-        let mut transitions: Vec<(i32, usize)> = state
-            .transitions
+        let transitions: Vec<(i32, usize)> = labels
             .iter()
-            .filter_map(|(&label, &target)| {
-                let target = target as usize;
-                reachable.contains(&target).then_some((label, class_of_state[target]))
+            .map(|&label| {
+                let target_class = state
+                    .transitions
+                    .get(&label)
+                    .and_then(|&target| {
+                        let target = target as usize;
+                        reachable.contains(&target).then_some(class_of_state[target])
+                    })
+                    .unwrap_or(DEAD_CLASS);
+                (label, target_class)
             })
             .collect();
-        transitions.sort_unstable();
 
         let signature = StateSignature {
             is_accepting: state.is_accepting,
@@ -76,29 +95,52 @@ pub fn minimize(dfa: &DFA) -> DFA {
         let class_id = if let Some(&existing) = signature_to_class.get(&signature) {
             existing
         } else {
-            let new_id = class_representatives.len();
+            let new_id = next_class_id;
+            next_class_id += 1;
             signature_to_class.insert(signature, new_id);
-            class_representatives.push(state_id);
+            class_representatives.insert(new_id, state_id);
             new_id
         };
         class_of_state[state_id] = class_id;
     }
 
     // ---- Rebuild minimized DFA ----
+    if class_of_state[dfa.start_state as usize] == DEAD_CLASS {
+        return DFA::new();
+    }
+
+    let mut class_ids: Vec<usize> = class_representatives.keys().copied().collect();
+    class_ids.sort_unstable();
+    let class_to_state: HashMap<usize, u32> = class_ids
+        .iter()
+        .enumerate()
+        .map(|(new_state, &class_id)| (class_id, new_state as u32))
+        .collect();
+
     let mut minimized = DFA::new();
     // Replace the default first state.
-    minimized.states = vec![super::dfa::DFAState::default(); class_representatives.len()];
-    minimized.start_state = class_of_state[dfa.start_state as usize] as u32;
+    minimized.states = vec![super::dfa::DFAState::default(); class_ids.len()];
+    minimized.start_state = class_to_state[&class_of_state[dfa.start_state as usize]];
 
-    for (class_id, &repr_state_id) in class_representatives.iter().enumerate() {
+    for &class_id in &class_ids {
+        let repr_state_id = class_representatives[&class_id];
         let repr = &dfa.states[repr_state_id];
-        minimized.states[class_id].is_accepting = repr.is_accepting;
-        minimized.states[class_id].transitions = repr
+        let out_state = class_to_state[&class_id] as usize;
+        minimized.states[out_state].is_accepting = repr.is_accepting;
+        minimized.states[out_state].transitions = repr
             .transitions
             .iter()
             .filter_map(|(&label, &target)| {
                 let target = target as usize;
-                reachable.contains(&target).then_some((label, class_of_state[target] as u32))
+                if !reachable.contains(&target) {
+                    return None;
+                }
+                let target_class = class_of_state[target];
+                if target_class == DEAD_CLASS {
+                    None
+                } else {
+                    Some((label, class_to_state[&target_class]))
+                }
             })
             .collect();
     }
@@ -138,7 +180,7 @@ mod tests {
     #[test]
     fn test_minimize_preserves_distinct_states() {
         //  0 --1--> 1 (accept)
-        //  0 --2--> 2 (non-accept)
+        //  0 --2--> 2 (non-accept, equivalent to implicit dead)
         let mut dfa = DFA::new();
         let s1 = dfa.add_state();
         let s2 = dfa.add_state();
@@ -147,7 +189,7 @@ mod tests {
         dfa.set_accepting(s1, true);
 
         let minimized = minimize(&dfa);
-        assert_eq!(minimized.num_states(), 3);
+        assert_eq!(minimized.num_states(), 2);
     }
 
     #[test]
@@ -158,5 +200,35 @@ mod tests {
         };
         let minimized = minimize(&dfa);
         assert_eq!(minimized.num_states(), 0);
+    }
+
+    #[test]
+    fn test_minimize_collapses_all_rejecting_partial_dfa() {
+        let mut dfa = DFA::new();
+        let s1 = dfa.add_state();
+        let s2 = dfa.add_state();
+        dfa.add_transition(s1, 0, 0);
+        dfa.add_transition(s1, 1, 0);
+        dfa.add_transition(s2, 0, 0);
+        dfa.add_transition(s2, 1, s1);
+        dfa.start_state = s2;
+
+        let minimized = minimize(&dfa);
+        assert_eq!(minimized.num_states(), 1);
+        assert!(!minimized.states[0].is_accepting);
+        assert!(minimized.states[0].transitions.is_empty());
+    }
+
+    #[test]
+    fn test_minimize_omits_transition_to_dead_class() {
+        let mut dfa = DFA::new();
+        let reject = dfa.add_state();
+        dfa.set_accepting(0, true);
+        dfa.add_transition(0, 0, reject);
+
+        let minimized = minimize(&dfa);
+        assert_eq!(minimized.num_states(), 1);
+        assert!(minimized.states[0].is_accepting);
+        assert!(minimized.states[0].transitions.is_empty());
     }
 }
