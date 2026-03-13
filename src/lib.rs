@@ -18,3 +18,8 @@ pub use compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 pub use error::{GlrMaskError, Result};
 pub use runtime::{Constraint, ConstraintState};
 pub use vocab::Vocab;
+
+#[doc(hidden)]
+pub fn __repro_live_quote_witness_minimal_fineness_panic() {
+	compiler::stages::equivalence_analysis::combined_equivalence_analysis::repro_live_quote_witness_minimal_fineness_panic();
+}

@@ -686,104 +686,75 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_reference_witness_pair_hashes_differ() {
-        let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
-        let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
-        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
-        let disallowed_follows = compute_disallowed_follows(&analyzed);
-        let tokenizer = build_tokenizer(&grammar);
-        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
-        let dfa = sep1_tok.dfa();
-        let pre = precompute(dfa, &disallowed_follows);
-        let hash_memo = Mutex::new(HashMap::new());
-        let state = 9686usize;
-
-        let left_hash = process_token_for_state(
-            dfa,
-            &pre,
-            b"!",
-            state,
-            None,
-            &hash_memo,
-            &mut Vec::new(),
-        );
-        let right_hash = process_token_for_state(
-            dfa,
-            &pre,
-            &[b' ', 0xC2],
-            state,
-            None,
-            &hash_memo,
-            &mut Vec::new(),
-        );
-
-        assert_ne!(left_hash, right_hash);
-    }
-
-    fn build_quote_branch_minimal_dfa() -> FlatDfa {
+    fn build_live_quote_witness_minimal_fixture() -> (FlatDfa, BTreeMap<u32, BitSet>, usize, Vec<Vec<u8>>) {
         let dead = u32::MAX;
+        let mut live_transitions = [dead; 256];
+        live_transitions[b'"' as usize] = 0;
+        live_transitions[b'\'' as usize] = 2;
+        live_transitions[b',' as usize] = 1;
 
-        let mut suffix_start = [dead; 256];
-        suffix_start[b'\'' as usize] = 2;
-        suffix_start[b'"' as usize] = 3;
-
-        let mut after_comma = [dead; 256];
-        after_comma[b'\'' as usize] = 2;
-        after_comma[b'"' as usize] = 3;
-
-        let mut after_quote_prefix = [dead; 256];
-        after_quote_prefix[b'"' as usize] = 3;
-
-        let mut live_start = suffix_start;
-        live_start[b',' as usize] = 1;
-
-        FlatDfa {
+        let dfa = FlatDfa {
             states: vec![
                 FlatDfaState {
-                    transitions: suffix_start,
-                    finalizers: vec![3, 4],
-                    possible_future_group_ids: vec![0, 1, 2, 3, 4, 5],
-                },
-                FlatDfaState {
-                    transitions: after_comma,
-                    finalizers: vec![1, 3, 4, 5],
-                    possible_future_group_ids: vec![0, 1, 2, 3, 4, 5],
-                },
-                FlatDfaState {
-                    transitions: after_quote_prefix,
-                    finalizers: vec![1, 3, 4],
-                    possible_future_group_ids: vec![0, 1, 2, 3, 4, 5],
-                },
-                FlatDfaState {
                     transitions: [dead; 256],
-                    finalizers: vec![0, 2],
-                    possible_future_group_ids: vec![0, 2],
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![],
                 },
                 FlatDfaState {
-                    transitions: live_start,
-                    finalizers: vec![1, 2, 3, 4],
-                    possible_future_group_ids: vec![0, 1, 2, 3, 4, 5],
+                    transitions: live_transitions,
+                    finalizers: vec![0, 1],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    transitions: live_transitions,
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![0, 1],
                 },
             ],
-            start_state: 0,
-        }
+            start_state: 2,
+        };
+
+        let mut disallowed_follows = BTreeMap::new();
+        let mut all_groups = BitSet::new(2);
+        all_groups.set(0);
+        all_groups.set(1);
+        disallowed_follows.insert(0, all_groups.clone());
+        disallowed_follows.insert(1, all_groups);
+
+        let tokens = vec![b",\"".to_vec(), b",\'\"".to_vec()];
+        (dfa, disallowed_follows, 2, tokens)
     }
 
     #[test]
-    #[ignore]
-    fn diagnose_quote_branch_minimal_dfa() {
-        let dfa = build_quote_branch_minimal_dfa();
-        let disallowed_follows = BTreeMap::new();
+    fn test_live_quote_witness_minimal_fast_reference_mismatch() {
+        let (dfa, disallowed_follows, initial_state, tokens) =
+            build_live_quote_witness_minimal_fixture();
+        let sep1 = Sep1Tokenizer { flat_dfa: dfa.clone() };
+
+        let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &tokens,
+            &[initial_state],
+            &disallowed_follows,
+        );
+        let reference = find_equivalence_classes(&sep1, &tokens, &[initial_state], &disallowed_follows, None);
+
+        assert_eq!(fast_classes, BTreeSet::from([vec![0, 1]]));
+        assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0], vec![1]]));
+    }
+
+    #[test]
+    fn test_live_quote_witness_minimal_reference_hashes_differ() {
+        let (dfa, disallowed_follows, initial_state, tokens) =
+            build_live_quote_witness_minimal_fixture();
         let pre = precompute(&dfa, &disallowed_follows);
         let hash_memo = Mutex::new(HashMap::new());
-        let tokens = vec![b",\"".to_vec(), b",\'\"".to_vec()];
 
         let left_hash = process_token_for_state(
             &dfa,
             &pre,
             &tokens[0],
-            4,
+            initial_state,
             None,
             &hash_memo,
             &mut Vec::new(),
@@ -792,27 +763,27 @@ mod tests {
             &dfa,
             &pre,
             &tokens[1],
-            4,
+            initial_state,
             None,
             &hash_memo,
             &mut Vec::new(),
         );
-        println!("reference left=0x{left_hash:016X} right=0x{right_hash:016X}");
 
-        let sep1 = Sep1Tokenizer { flat_dfa: dfa.clone() };
-        let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
-            &sep1,
-            &tokens,
-            &[4],
-            &disallowed_follows,
-        );
-        println!("fast classes: {:?}", fast_classes);
-
-        let reference = find_equivalence_classes(&sep1, &tokens, &[4], &disallowed_follows, None);
-        println!("reference classes: {:?}", reference.vocab_classes);
+        assert_ne!(left_hash, right_hash);
     }
 
-    /// Diagnostic: trace the trellis + NFA + DFA for both witness tokens at state 9686.
+    #[test]
+    #[ignore = "expected to fail: current live reference mismatch on minimal inline DFA"]
+    fn repro_live_quote_witness_minimal_reference_should_merge() {
+        let (dfa, disallowed_follows, initial_state, tokens) =
+            build_live_quote_witness_minimal_fixture();
+        let sep1 = Sep1Tokenizer { flat_dfa: dfa };
+
+        let reference = find_equivalence_classes(&sep1, &tokens, &[initial_state], &disallowed_follows, None);
+        assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0, 1]]));
+    }
+
+    /// Diagnostic: trace the trellis + NFA + DFA for the live witness pair at state 9686.
     /// Run with: cargo test --lib trace_witness_tokens -- --nocapture --ignored
     #[test]
     #[ignore]
@@ -826,7 +797,7 @@ mod tests {
         let dfa = sep1_tok.dfa();
         let pre = precompute(dfa, &disallowed_follows);
         let state = 9686usize;
-        let tokens: [&[u8]; 4] = [b"!", &[b' ', 0xC2], b",\"", b",\'\""];
+        let tokens: [&[u8]; 2] = [b",\"", b",\'\""];
 
         for (ti, token) in tokens.iter().enumerate() {
             println!("\n{}", "=".repeat(60));

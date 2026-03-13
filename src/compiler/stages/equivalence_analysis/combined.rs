@@ -239,25 +239,6 @@ mod tests {
                 expected_sorted, actual_sorted);
         }
 
-        #[test]
-        fn repro_reference_vocab_mismatch_witness_pair() {
-            let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
-            let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
-            let analyzed = crate::compiler::glr::analysis::AnalyzedGrammar::from_grammar_def(&grammar);
-            let disallowed_follows = crate::compiler::compile::compute_disallowed_follows(&analyzed);
-            let tokenizer = build_tokenizer(&grammar);
-            let sep1_tokenizer = crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer::new(&tokenizer);
-            let tokens = vec![b"!".to_vec(), vec![b' ', 0xC2]];
-
-            let _ = crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis::compute_combined_equivalence(
-                &sep1_tokenizer,
-                &tokens,
-                &[9686],
-                &disallowed_follows,
-                None,
-            );
-        }
-
         /// Diagnostic test: measures equivalence analysis effectiveness.
         /// Run with: cargo test --lib measure_equivalence_effectiveness -- --nocapture
         #[test]
