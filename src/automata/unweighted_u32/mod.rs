@@ -6,3 +6,4 @@ pub mod dfa;
 pub mod determinize;
 pub mod minimize;
 pub mod nfa;
+pub mod subtract;

@@ -6,10 +6,10 @@
 //! 2. Converts the DAG to an NFA with context-dependent states
 //!    `(position, Option<parent_gid>)`.
 //! 3. Replaces ignore-terminal edges with epsilon transitions (transparent).
-//! 4. Encodes completion (possible future groups) and disallowed-follows
-//!    pruning directly in the NFA structure.
+//! 4. Encodes completion (possible future groups) directly in the NFA.
 //! 5. Determinizes → minimizes the resulting DFA.
-//! 6. Computes a canonical hash of the minimal DFA (invariant to state
+//! 6. Subtracts a precomputed disallowed-follow DFA and minimizes again.
+//! 7. Computes a canonical hash of the minimal DFA (invariant to state
 //!    renumbering) via recursive structural hashing.
 //!
 //! The per-(token, state) hashes form a matrix. Rows (across states) give
@@ -33,6 +33,7 @@ use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::dfa::{Label, DFA};
 use crate::automata::unweighted_u32::minimize::minimize;
 use crate::automata::unweighted_u32::nfa::NFA;
+use crate::automata::unweighted_u32::subtract::subtract;
 use crate::ds::bitset::BitSet;
 
 use super::state::fast::StateEquivalenceResult;
@@ -82,15 +83,8 @@ fn completion_label(gid: usize) -> Label {
 }
 
 #[inline]
-fn label_gid(label: Label, num_groups: usize) -> usize {
-    assert_ne!(label, Label::MIN, "reference pruning encountered invalid label {label}");
-    let gid = if label >= 0 {
-        label as usize
-    } else {
-        (-label - 1) as usize
-    };
-    assert!(gid < num_groups, "reference pruning label {label} resolved to out-of-range gid {gid} for {num_groups} groups");
-    gid
+fn terminal_label(gid: usize) -> Label {
+    gid as Label
 }
 
 #[inline]
@@ -102,7 +96,7 @@ fn future_groups_cover_all_terminals(future_groups: &[usize], num_groups: usize)
 
 struct PrecomputedData {
     num_groups: usize,
-    disallowed_follows: Vec<BitSet>,
+    disallowed_detector: Option<DFA>,
 }
 
 fn normalize_disallowed_follows(
@@ -137,10 +131,47 @@ fn precompute(dfa: &FlatDfa, disallowed_follows: &BTreeMap<u32, BitSet>) -> Prec
         .max()
         .map_or(0, |m| m + 1);
 
+    let normalized = normalize_disallowed_follows(num_groups, disallowed_follows);
+    let disallowed_detector = normalized
+        .iter()
+        .any(|bits| !bits.is_zero())
+        .then(|| build_disallowed_follow_dfa(&normalized));
+
     PrecomputedData {
         num_groups,
-        disallowed_follows: normalize_disallowed_follows(num_groups, disallowed_follows),
+        disallowed_detector,
     }
+}
+
+fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
+    let num_groups = disallowed_follows.len();
+    let mut dfa = DFA::new();
+    if num_groups == 0 {
+        return dfa;
+    }
+
+    let mut clean_states = Vec::with_capacity(num_groups);
+    let mut bad_states = Vec::with_capacity(num_groups);
+    for _ in 0..num_groups {
+        clean_states.push(dfa.add_state());
+        let bad = dfa.add_state();
+        dfa.set_accepting(bad, true);
+        bad_states.push(bad);
+    }
+
+    for gid in 0..num_groups {
+        dfa.add_transition(dfa.start_state, terminal_label(gid), clean_states[gid]);
+    }
+
+    for prev_gid in 0..num_groups {
+        for next_gid in disallowed_follows[prev_gid].iter() {
+            let label = terminal_label(next_gid);
+            dfa.add_transition(clean_states[prev_gid], label, bad_states[next_gid]);
+            dfa.add_transition(bad_states[prev_gid], label, bad_states[next_gid]);
+        }
+    }
+
+    dfa
 }
 
 // ---- Trellis DAG construction ----
@@ -352,107 +383,6 @@ fn build_nfa_from_trellis(
     nfa
 }
 
-// ---- Disallowed-follow pruning on NFA ----
-//
-// Process the acyclic NFA in topological order.
-//
-// Each state carries the set of terminals disallowed for its outgoing edges.
-// Start states begin with an empty disallowed set. When traversing:
-//   - epsilon edge: propagate the current disallowed set
-//   - labeled edge: propagate disallowed_follows[label]
-//
-// If multiple predecessors reach a state, intersect the propagated sets.
-// Outgoing labeled edges are pruned before propagation, so pruned edges do not
-// contribute constraints to downstream states.
-
-fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], num_groups: usize) {
-    let n = nfa.states.len();
-    assert_eq!(disallowed_follows.len(), num_groups);
-
-    let mut indegree = vec![0usize; n];
-    for state in &nfa.states {
-        for &tgt in &state.epsilons {
-            indegree[tgt as usize] += 1;
-        }
-        for targets in state.transitions.values() {
-            for &tgt in targets {
-                indegree[tgt as usize] += 1;
-            }
-        }
-    }
-
-    let mut topo_queue: VecDeque<u32> = indegree
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &deg)| (deg == 0).then_some(idx as u32))
-        .collect();
-    let mut topo_order = Vec::with_capacity(n);
-    while let Some(state) = topo_queue.pop_front() {
-        topo_order.push(state);
-        for &tgt in &nfa.states[state as usize].epsilons {
-            indegree[tgt as usize] -= 1;
-            if indegree[tgt as usize] == 0 {
-                topo_queue.push_back(tgt);
-            }
-        }
-        for targets in nfa.states[state as usize].transitions.values() {
-            for &tgt in targets {
-                indegree[tgt as usize] -= 1;
-                if indegree[tgt as usize] == 0 {
-                    topo_queue.push_back(tgt);
-                }
-            }
-        }
-    }
-    assert_eq!(topo_order.len(), n, "reference pruning expects an acyclic NFA");
-
-    let mut incoming_disallowed: Vec<Option<BitSet>> = vec![None; n];
-    let empty = BitSet::new(num_groups);
-    for &start in &nfa.start_states {
-        incoming_disallowed[start as usize] = Some(empty.clone());
-    }
-
-    for state in topo_order {
-        let current = match incoming_disallowed[state as usize].clone() {
-            Some(bits) => bits,
-            None => continue,
-        };
-
-        let mut kept_transitions: Vec<(Label, Vec<u32>)> = Vec::new();
-        for (&label, targets) in &nfa.states[state as usize].transitions {
-            let gid = label_gid(label, num_groups);
-            if !current.contains(gid) {
-                kept_transitions.push((label, targets.clone()));
-            }
-        }
-
-        nfa.states[state as usize]
-            .transitions
-            .retain(|&label, _| {
-                let gid = label_gid(label, num_groups);
-                !current.contains(gid)
-            });
-
-        for &tgt in &nfa.states[state as usize].epsilons {
-            match &mut incoming_disallowed[tgt as usize] {
-                Some(existing) => *existing = existing.intersection(&current),
-                None => incoming_disallowed[tgt as usize] = Some(current.clone()),
-            }
-        }
-
-        for (label, targets) in kept_transitions {
-            let gid = label_gid(label, num_groups);
-            let propagated = disallowed_follows[gid].clone();
-            for tgt in targets {
-                match &mut incoming_disallowed[tgt as usize] {
-                    Some(existing) => *existing = existing.intersection(&propagated),
-                    None => incoming_disallowed[tgt as usize] = Some(propagated.clone()),
-                }
-            }
-        }
-    }
-}
-
 // ---- Canonical hash of minimized DFA ----
 
 fn canonical_nfa_hash(nfa: &NFA) -> u64 {
@@ -568,11 +498,13 @@ fn process_token_for_state(
         return cached;
     }
 
-    apply_disallowed_pruning_nfa(&mut nfa, &pre.disallowed_follows, pre.num_groups);
-
     let det_dfa = determinize(&nfa);
     let min_dfa = minimize(&det_dfa);
-    let final_hash = canonical_hash(&min_dfa);
+    let pruned_dfa = match &pre.disallowed_detector {
+        Some(disallowed_detector) => minimize(&subtract(&min_dfa, disallowed_detector)),
+        None => min_dfa,
+    };
+    let final_hash = canonical_hash(&pruned_dfa);
 
     hash_memo.lock().unwrap().insert(nfa_hash, final_hash);
     final_hash
