@@ -265,97 +265,154 @@ fn prune_reachable(dag: &mut BTreeMap<usize, FlatNode>, token_len: usize) {
 
 // ---- NFA construction from trellis DAG ----
 
-/// NFA state key: (position_in_token, Option<parent_group_that_led_here>)
-type NfaStateKey = (usize, Option<usize>);
-
 fn build_nfa_from_trellis(
     dfa: &FlatDfa,
-    pre: &PrecomputedData,
     dag: &BTreeMap<usize, FlatNode>,
     ignore_terminal: Option<usize>,
 ) -> NFA {
     let mut nfa = NFA::new_empty();
-    let mut state_map: HashMap<NfaStateKey, u32> = HashMap::new();
-    let mut worklist: VecDeque<NfaStateKey> = VecDeque::new();
+    let mut state_map: HashMap<usize, u32> = HashMap::new();
+    let mut worklist: VecDeque<usize> = VecDeque::new();
 
     // Global accepting sink for completion transitions
     let accept_sink = nfa.add_state();
     nfa.set_accepting(accept_sink);
 
     let mut get_or_create = |nfa: &mut NFA,
-                             state_map: &mut HashMap<NfaStateKey, u32>,
-                             worklist: &mut VecDeque<NfaStateKey>,
-                             key: NfaStateKey|
+                             state_map: &mut HashMap<usize, u32>,
+                             worklist: &mut VecDeque<usize>,
+                             pos: usize|
      -> u32 {
-        if let Some(&id) = state_map.get(&key) {
+        if let Some(&id) = state_map.get(&pos) {
             id
         } else {
             let id = nfa.add_state();
-            state_map.insert(key, id);
-            worklist.push_back(key);
+            state_map.insert(pos, id);
+            worklist.push_back(pos);
             id
         }
     };
 
-    // Root: position 0, no parent context
-    let root_key: NfaStateKey = (0, None);
-    let root_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, root_key);
+    // Root: position 0
+    let root_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, 0);
     nfa.start_states = vec![root_id];
 
-    while let Some(key) = worklist.pop_front() {
-        let (pos, parent_gid) = key;
-        let nfa_state = state_map[&key];
+    while let Some(pos) = worklist.pop_front() {
+        let nfa_state = state_map[&pos];
 
         let node = match dag.get(&pos) {
             Some(n) => n,
             None => continue,
         };
 
-        let disallowed = parent_gid.map(|pgid| &pre.disallowed_follows[pgid]);
-
-        // --- Completion transitions ---
+        // --- Completion transitions (no disallowed filtering) ---
         if node.end_state != STATE_NONE && node.end_state < dfa.states.len() {
             let future_groups = &dfa.states[node.end_state].possible_future_group_ids;
-            let mut has_any = false;
-            for &gid in future_groups {
-                if let Some(d) = disallowed {
-                    if d.contains(gid) {
-                        continue;
-                    }
-                }
-                has_any = true;
-                nfa.add_transition(nfa_state, completion_label(gid), accept_sink);
-            }
-            if !has_any {
+            if future_groups.is_empty() {
                 nfa.add_transition(nfa_state, ALIVE_MARKER, accept_sink);
+            } else {
+                for &gid in future_groups {
+                    nfa.add_transition(nfa_state, completion_label(gid), accept_sink);
+                }
             }
         }
 
-        // --- Edge transitions ---
+        // --- Edge transitions (no disallowed filtering) ---
         for &(gid, target_pos) in &node.edges {
-            if let Some(d) = disallowed {
-                if d.contains(gid) {
-                    continue;
-                }
-            }
-
             let is_ignore = ignore_terminal.map_or(false, |ig| gid == ig);
 
             if is_ignore {
-                // Epsilon: ignore terminal is transparent, inherit parent context
-                let child_key: NfaStateKey = (target_pos, parent_gid);
-                let child_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, child_key);
+                // Epsilon: ignore terminal is transparent
+                let child_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, target_pos);
                 nfa.add_epsilon(nfa_state, child_id);
             } else {
-                // Labeled transition: child gets this gid as context
-                let child_key: NfaStateKey = (target_pos, Some(gid));
-                let child_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, child_key);
+                // Labeled transition
+                let child_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, target_pos);
                 nfa.add_transition(nfa_state, gid as Label, child_id);
             }
         }
     }
 
     nfa
+}
+
+// ---- Disallowed-follow pruning on minimized DFA ----
+//
+// 1. For each DFA state, collect incoming edge labels.
+// 2. For each incoming label that is a non-negative group ID, look up its
+//    disallowed-follows set. Intersect all such sets → state's disallowed set.
+// 3. States with an incoming edge from the start state: clear disallowed set
+//    (no prior context).
+// 4. Prune outgoing transitions whose group ID is in the state's disallowed set.
+
+fn apply_disallowed_pruning(dfa: &mut DFA, disallowed_follows: &[BitSet], num_groups: usize) {
+    let n = dfa.states.len();
+
+    // Collect incoming non-negative labels and start-state reachability per state.
+    let mut incoming_gids: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut from_start: Vec<bool> = vec![false; n];
+
+    for (src, state) in dfa.states.iter().enumerate() {
+        for (&label, &target) in &state.transitions {
+            let tgt = target as usize;
+            if label >= 0 {
+                incoming_gids[tgt].push(label as usize);
+            }
+            if src as u32 == dfa.start_state {
+                from_start[tgt] = true;
+            }
+        }
+    }
+
+    // Compute disallowed set per state.
+    let mut state_disallowed: Vec<Option<BitSet>> = Vec::with_capacity(n);
+
+    for idx in 0..n {
+        if from_start[idx] {
+            state_disallowed.push(None); // no restrictions
+            continue;
+        }
+        let gids = &incoming_gids[idx];
+        if gids.is_empty() {
+            state_disallowed.push(None); // no incoming group edges → no info
+            continue;
+        }
+        // Start with "all disallowed" and intersect down
+        let mut acc = BitSet::all(num_groups);
+        for &gid in gids {
+            if gid < disallowed_follows.len() {
+                acc = acc.intersection(&disallowed_follows[gid]);
+            } else {
+                // Unknown group → empty disallowed → intersection = empty
+                acc = BitSet::new(num_groups);
+                break;
+            }
+        }
+        if acc.is_empty() {
+            state_disallowed.push(None);
+        } else {
+            state_disallowed.push(Some(acc));
+        }
+    }
+
+    // Prune outgoing transitions.
+    for idx in 0..n {
+        let disallowed = match &state_disallowed[idx] {
+            Some(d) => d,
+            None => continue,
+        };
+        dfa.states[idx].transitions.retain(|&label, _| {
+            let gid = if label >= 0 {
+                label as usize
+            } else if label != ALIVE_MARKER {
+                // Completion label: -(gid+1)
+                (-(label + 1)) as usize
+            } else {
+                return true; // ALIVE_MARKER: never prune
+            };
+            !disallowed.contains(gid)
+        });
+    }
 }
 
 // ---- Canonical hash of minimized DFA ----
@@ -403,10 +460,16 @@ fn process_token_for_state(
     let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
     prune_reachable(&mut dag, token.len());
 
-    let nfa = build_nfa_from_trellis(dfa, pre, &dag, ignore_terminal);
+    let nfa = build_nfa_from_trellis(dfa, &dag, ignore_terminal);
     let det_dfa = determinize(&nfa);
     let min_dfa = minimize(&det_dfa);
-    canonical_hash(&min_dfa)
+
+    // Apply disallowed-follow pruning on the minimized DFA, then minimize again
+    let mut pruned_dfa = min_dfa;
+    apply_disallowed_pruning(&mut pruned_dfa, &pre.disallowed_follows, pre.num_groups);
+    let final_dfa = minimize(&pruned_dfa);
+
+    canonical_hash(&final_dfa)
 }
 
 // ---- Public API ----
