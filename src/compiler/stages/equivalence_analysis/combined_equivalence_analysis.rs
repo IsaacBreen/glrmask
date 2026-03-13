@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::compat::{FlatDfa, FlatDfaState, GroupID, Sep1Tokenizer};
+use super::compat::{FlatDfa, GroupID, Sep1Tokenizer};
 use crate::ds::bitset::BitSet;
 
 use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};
@@ -329,34 +329,18 @@ fn print_vocab_verification_stats(label: &str, vocab_classes: &VocabEquivalenceR
 }
 
 pub(crate) fn repro_live_quote_witness_minimal_fineness_panic() {
-    let dead = u32::MAX;
-    let mut live_transitions = [dead; 256];
-    live_transitions[b'"' as usize] = 0;
-    live_transitions[b'\'' as usize] = 2;
-    live_transitions[b',' as usize] = 1;
-
-    let regex = Sep1Tokenizer {
-        flat_dfa: FlatDfa {
-            states: vec![
-                FlatDfaState {
-                    transitions: [dead; 256],
-                    finalizers: vec![],
-                    possible_future_group_ids: vec![],
-                },
-                FlatDfaState {
-                    transitions: live_transitions,
-                    finalizers: vec![0, 1],
-                    possible_future_group_ids: vec![0, 1],
-                },
-                FlatDfaState {
-                    transitions: live_transitions,
-                    finalizers: vec![0],
-                    possible_future_group_ids: vec![0, 1],
-                },
-            ],
-            start_state: 2,
-        },
-    };
+    let comma_or_quote = crate::automata::lexer::ast::choice(vec![
+        crate::automata::lexer::ast::bytes(b","),
+        crate::automata::lexer::ast::bytes(b"'"),
+    ]);
+    let tokenizer = crate::compiler::compile::build_tokenizer_from_exprs(&[
+        crate::automata::lexer::ast::star(comma_or_quote.clone()),
+        crate::automata::lexer::ast::seq(vec![
+            crate::automata::lexer::ast::star(comma_or_quote),
+            crate::automata::lexer::ast::bytes(b","),
+        ]),
+    ]);
+    let regex = Sep1Tokenizer::new(&tokenizer);
 
     let mut disallowed_follows = BTreeMap::new();
     let mut all_groups = BitSet::new(2);
@@ -366,7 +350,7 @@ pub(crate) fn repro_live_quote_witness_minimal_fineness_panic() {
     disallowed_follows.insert(1, all_groups);
 
     let tokens = vec![b",\"".to_vec(), b",\'\"".to_vec()];
-    let initial_states = [2usize];
+    let initial_states = [regex.initial_state_id()];
 
     let fast_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
         &regex,

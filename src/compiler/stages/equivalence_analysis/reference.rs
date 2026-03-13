@@ -654,7 +654,7 @@ pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::lexer::ast::bytes;
+    use crate::automata::lexer::ast::{bytes, choice, seq, star};
     use crate::compiler::compile::{build_tokenizer, build_tokenizer_from_exprs, compute_disallowed_follows};
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
@@ -686,33 +686,13 @@ mod tests {
         );
     }
 
-    fn build_live_quote_witness_minimal_fixture() -> (FlatDfa, BTreeMap<u32, BitSet>, usize, Vec<Vec<u8>>) {
-        let dead = u32::MAX;
-        let mut live_transitions = [dead; 256];
-        live_transitions[b'"' as usize] = 0;
-        live_transitions[b'\'' as usize] = 2;
-        live_transitions[b',' as usize] = 1;
-
-        let dfa = FlatDfa {
-            states: vec![
-                FlatDfaState {
-                    transitions: [dead; 256],
-                    finalizers: vec![],
-                    possible_future_group_ids: vec![],
-                },
-                FlatDfaState {
-                    transitions: live_transitions,
-                    finalizers: vec![0, 1],
-                    possible_future_group_ids: vec![0, 1],
-                },
-                FlatDfaState {
-                    transitions: live_transitions,
-                    finalizers: vec![0],
-                    possible_future_group_ids: vec![0, 1],
-                },
-            ],
-            start_state: 2,
-        };
+    fn build_live_quote_witness_minimal_fixture() -> (Sep1Tokenizer, BTreeMap<u32, BitSet>, usize, Vec<Vec<u8>>) {
+        let comma_or_quote = choice(vec![bytes(b","), bytes(b"'")]);
+        let tokenizer = build_tokenizer_from_exprs(&[
+            star(comma_or_quote.clone()),
+            seq(vec![star(comma_or_quote), bytes(b",")]),
+        ]);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
 
         let mut disallowed_follows = BTreeMap::new();
         let mut all_groups = BitSet::new(2);
@@ -722,14 +702,14 @@ mod tests {
         disallowed_follows.insert(1, all_groups);
 
         let tokens = vec![b",\"".to_vec(), b",\'\"".to_vec()];
-        (dfa, disallowed_follows, 2, tokens)
+        let initial_state = sep1.initial_state_id();
+        (sep1, disallowed_follows, initial_state, tokens)
     }
 
     #[test]
     fn test_live_quote_witness_minimal_fast_reference_mismatch() {
-        let (dfa, disallowed_follows, initial_state, tokens) =
+        let (sep1, disallowed_follows, initial_state, tokens) =
             build_live_quote_witness_minimal_fixture();
-        let sep1 = Sep1Tokenizer { flat_dfa: dfa.clone() };
 
         let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
             &sep1,
@@ -745,8 +725,9 @@ mod tests {
 
     #[test]
     fn test_live_quote_witness_minimal_reference_hashes_differ() {
-        let (dfa, disallowed_follows, initial_state, tokens) =
+        let (sep1, disallowed_follows, initial_state, tokens) =
             build_live_quote_witness_minimal_fixture();
+        let dfa = sep1.dfa();
         let pre = precompute(&dfa, &disallowed_follows);
         let hash_memo = Mutex::new(HashMap::new());
 
@@ -775,9 +756,8 @@ mod tests {
     #[test]
     #[ignore = "expected to fail: current live reference mismatch on minimal inline DFA"]
     fn repro_live_quote_witness_minimal_reference_should_merge() {
-        let (dfa, disallowed_follows, initial_state, tokens) =
+        let (sep1, disallowed_follows, initial_state, tokens) =
             build_live_quote_witness_minimal_fixture();
-        let sep1 = Sep1Tokenizer { flat_dfa: dfa };
 
         let reference = find_equivalence_classes(&sep1, &tokens, &[initial_state], &disallowed_follows, None);
         assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0, 1]]));
