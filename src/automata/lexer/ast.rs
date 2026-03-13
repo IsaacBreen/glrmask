@@ -1,6 +1,10 @@
-//! NOTE: keep only the structural regex AST and helper constructors here.
-//! The old Regex/DFA-behavior tests are intentionally omitted until the
-//! sep1-style lexer rewrite lands.
+//! Regex AST and constructor surface.
+//!
+//! These constructors form the public "builder" API for regex expressions.
+//! Even if some (like `seq`, `star`, `opt`) have no in-tree callers right now,
+//! they are retained deliberately: every `Expr` variant should have a
+//! corresponding named constructor so the API surface stays coherent and
+//! usable for tests, downstream crate consumers, and future grammar work.
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
