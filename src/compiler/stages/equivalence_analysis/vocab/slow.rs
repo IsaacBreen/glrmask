@@ -13,13 +13,14 @@
 
 // Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
 
-use super::super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
+use super::super::compat::{FlatDfa, FlatDfaState, GroupID, Sep1Tokenizer};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
+use std::time::{Duration, Instant};
 
 use crate::ds::bitset::BitSet;
 
@@ -33,6 +34,8 @@ const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
 const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
+const SLOW_VOCAB_EQUIV_PROGRESS_ENV: &str = "SLOW_VOCAB_EQUIV_PROGRESS";
+const SLOW_VOCAB_EQUIV_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
 // ---- Deterministic hashing ----
 
@@ -163,7 +166,8 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
         .iter()
         .flat_map(|s| {
             s.finalizers
-                .iter().copied()
+                .iter()
+                .copied()
                 .chain(s.possible_future_group_ids.iter().copied())
         })
         .max()
@@ -177,7 +181,8 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
 
     for state in &dfa.states {
         let mut table = [NONE; 256];
-        for (byte_idx, &target) in state.transitions.iter().enumerate() { let byte = byte_idx as u8;
+        for (byte_idx, &target) in state.transitions.iter().enumerate() {
+            let byte = byte_idx as u8;
             table[byte_idx] = target;
         }
         transitions.push(table);
@@ -254,6 +259,58 @@ fn intersect_node_disallowed(scratch: &mut Scratch, pos: usize, incoming: &BitSe
 fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
     scratch.dag_disallowed_generation[pos] == scratch.dag_generation
         && scratch.dag_disallowed[pos].contains(gid)
+}
+
+#[inline]
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+struct ProgressReporter {
+    enabled: bool,
+    total: usize,
+    processed: usize,
+    started_at: Instant,
+    last_report_at: Instant,
+}
+
+impl ProgressReporter {
+    fn new(total: usize) -> Self {
+        let now = Instant::now();
+        ProgressReporter {
+            enabled: env_flag_enabled(SLOW_VOCAB_EQUIV_PROGRESS_ENV),
+            total,
+            processed: 0,
+            started_at: now,
+            last_report_at: now,
+        }
+    }
+
+    #[inline]
+    fn record(&mut self, count: usize) {
+        if !self.enabled || count == 0 {
+            return;
+        }
+
+        self.processed = self.processed.saturating_add(count).min(self.total);
+        let now = Instant::now();
+        let should_report = self.processed == self.total
+            || now.duration_since(self.last_report_at) >= SLOW_VOCAB_EQUIV_PROGRESS_INTERVAL;
+        if should_report {
+            eprintln!(
+                "[slow vocab equiv] processed {}/{} tokens in {:.1}s",
+                self.processed,
+                self.total,
+                now.duration_since(self.started_at).as_secs_f64(),
+            );
+            self.last_report_at = now;
+        }
+    }
 }
 
 // ---- Vocab Trie ----
@@ -447,11 +504,7 @@ fn run_suffix(
 
 /// Build suffix DAG via BFS from target positions and hash bottom-up.
 /// Uses scratch.targets as input positions.
-fn hash_suffixes(
-    dfa: &Dfa,
-    slice: &[u8],
-    scratch: &mut Scratch,
-) {
+fn hash_suffixes(dfa: &Dfa, slice: &[u8], scratch: &mut Scratch) {
     let len = slice.len();
     scratch.dag_generation = scratch.dag_generation.wrapping_add(1);
     scratch.queue.clear();
@@ -517,11 +570,13 @@ fn hash_suffixes(
     for idx in 0..scratch.queue.len() {
         let pos = scratch.queue[idx];
         let mut h = new_hasher();
-        h.write_u64(dfa.completion_with_disallowed(
-            scratch.dag_end_states[pos],
-            (scratch.dag_disallowed_generation[pos] == scratch.dag_generation)
-                .then_some(&scratch.dag_disallowed[pos]),
-        ));
+        h.write_u64(
+            dfa.completion_with_disallowed(
+                scratch.dag_end_states[pos],
+                (scratch.dag_disallowed_generation[pos] == scratch.dag_generation)
+                    .then_some(&scratch.dag_disallowed[pos]),
+            ),
+        );
         // Need to iterate edges without borrowing dag mutably at the same time
         for ei in 0..scratch.dag[pos].edges.len() {
             let (gid, target) = scratch.dag[pos].edges[ei];
@@ -616,13 +671,20 @@ fn u8set_is_subset(a: &[u64; 4], b: &[u64; 4]) -> bool {
 }
 
 /// Assign the same hash to all tokens in a trie subtree.
-fn assign_hash_to_subtree(trie: &VocabTrie, node: u32, hash: u64, hashes: &mut [u64]) {
+fn assign_hash_to_subtree(
+    trie: &VocabTrie,
+    node: u32,
+    hash: u64,
+    hashes: &mut [u64],
+    progress: &mut ProgressReporter,
+) {
     let n = &trie.nodes[node as usize];
     if n.token_idx != u32::MAX {
         hashes[n.token_idx as usize] = hash;
+        progress.record(1);
     }
     for &(_, child) in &n.children {
-        assign_hash_to_subtree(trie, child, hash, hashes);
+        assign_hash_to_subtree(trie, child, hash, hashes, progress);
     }
 }
 
@@ -643,6 +705,7 @@ fn walk_trie<S: AsRef<[u8]>>(
     strings: &[S],
     scratch: &mut Scratch,
     hashes: &mut [u64],
+    progress: &mut ProgressReporter,
 ) {
     let n = &trie.nodes[node as usize];
 
@@ -650,7 +713,6 @@ fn walk_trie<S: AsRef<[u8]>>(
     if n.token_idx != u32::MAX {
         let ti = n.token_idx as usize;
         let bytes = strings[ti].as_ref();
-
 
         // Collect suffix targets across all initial states
         scratch.targets.clear();
@@ -702,6 +764,7 @@ fn walk_trie<S: AsRef<[u8]>>(
             hash = hash.wrapping_mul(HASH_SEED1).wrapping_add(sig);
         }
         hashes[ti] = hash;
+        progress.record(1);
     }
 
     // Recurse into children
@@ -814,14 +877,14 @@ fn walk_trie<S: AsRef<[u8]>>(
                         hash = hash.wrapping_mul(HASH_SEED1).wrapping_add(sig);
                     }
 
-                    assign_hash_to_subtree(trie, child, hash, hashes);
+                    assign_hash_to_subtree(trie, child, hash, hashes, progress);
                     continue;
                 }
             }
         }
 
         walk_trie(
-            trie, child, dfa, states, mp, cd, ni, ng, max_depth, strings, scratch, hashes,
+            trie, child, dfa, states, mp, cd, ni, ng, max_depth, strings, scratch, hashes, progress,
         );
     }
 }
@@ -851,6 +914,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     let mut mp = vec![NONE; max_depth * ni * ng];
     let max_token_len = strings.iter().map(|s| s.as_ref().len()).max().unwrap_or(0);
     let mut scratch = Scratch::new(ng, max_token_len);
+    let mut progress = ProgressReporter::new(nt);
 
     // Initialize depth 0: set initial DFA states and their finalizers
     for (si, &s) in initial_states.iter().enumerate() {
@@ -864,8 +928,19 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     }
 
     walk_trie(
-        &trie, 0, &dfa, &mut states, &mut mp, 0, ni, ng, max_depth, strings, &mut scratch,
+        &trie,
+        0,
+        &dfa,
+        &mut states,
+        &mut mp,
+        0,
+        ni,
+        ng,
+        max_depth,
+        strings,
+        &mut scratch,
         &mut hashes,
+        &mut progress,
     );
 
     // Group tokens by hash → equivalence classes
@@ -885,26 +960,18 @@ pub fn partition_is_at_least_as_fine(
     finer: &VocabEquivalenceResult,
     coarser: &VocabEquivalenceResult,
 ) -> bool {
-    finer.iter().all(|fc| {
-        coarser
-            .iter()
-            .any(|cc| fc.iter().all(|t| cc.contains(t)))
-    })
+    finer
+        .iter()
+        .all(|fc| coarser.iter().any(|cc| fc.iter().all(|t| cc.contains(t))))
 }
 
 /// Returns true if one partition refines the other (or they are equal).
-pub fn partitions_are_comparable(
-    a: &VocabEquivalenceResult,
-    b: &VocabEquivalenceResult,
-) -> bool {
+pub fn partitions_are_comparable(a: &VocabEquivalenceResult, b: &VocabEquivalenceResult) -> bool {
     partition_is_at_least_as_fine(a, b) || partition_is_at_least_as_fine(b, a)
 }
 
 /// Returns true if both partitions have identical classes.
-pub fn partitions_are_equivalent(
-    a: &VocabEquivalenceResult,
-    b: &VocabEquivalenceResult,
-) -> bool {
+pub fn partitions_are_equivalent(a: &VocabEquivalenceResult, b: &VocabEquivalenceResult) -> bool {
     a == b
 }
 

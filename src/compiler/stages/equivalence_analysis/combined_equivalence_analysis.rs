@@ -13,22 +13,25 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
+use super::compat::{FlatDfa, FlatDfaState, GroupID, Sep1Tokenizer};
 use crate::ds::bitset::BitSet;
 
 use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};
 use super::vocab::fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
+use super::vocab::slow::partitions_are_comparable;
+
+const MEDIUM_VOCAB_EQUIV_VERIFICATION_ENV: &str = "MEDIUM_VOCAB_EQUIV_VERIFICATION";
+const SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "SLOW_VOCAB_EQUIV_VERIFICATION";
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
     /// Vocab equivalence classes: sets of token indices that behave identically.
     pub vocab_classes: VocabEquivalenceResult,
-    
+
     /// State equivalence classes: sets of state IDs that behave identically.
     pub state_classes: StateEquivalenceResult,
 }
 
-#[cfg(test)]
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .map(|v| {
@@ -38,15 +41,20 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
-fn should_run_trellis_verification() -> bool {
-    // Trellis checks are expensive and can panic on known mismatch classes.
-    // We therefore gate them behind explicit pedantic/debug/test signals.
-    let pedantic_mode = env_flag_enabled("SEP1_PEDANTIC");
-    // let debug_gate = false;
-    let debug_gate = false;
-    let test_gate = cfg!(test) && env_flag_enabled("SEP1_TEST_TRELLIS_VERIFY");
-    pedantic_mode || debug_gate || test_gate
+fn verify_vocab_partition(
+    label: &str,
+    fast_vocab_classes: &VocabEquivalenceResult,
+    candidate_vocab_classes: &VocabEquivalenceResult,
+) {
+    if !partitions_are_comparable(fast_vocab_classes, candidate_vocab_classes) {
+        panic!(
+            "Vocab equivalence mismatch (fast vs {label} not comparable)!\nFast ({} classes): {:?}\n{label} ({} classes): {:?}",
+            fast_vocab_classes.len(),
+            fast_vocab_classes,
+            candidate_vocab_classes.len(),
+            candidate_vocab_classes,
+        );
+    }
 }
 
 /// Compute combined state and vocab equivalence analysis.
@@ -88,18 +96,19 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             &owned_tokens,
             initial_states,
         );
-        
+
         // Build reduced state set
         let mut rep_set: BTreeSet<usize> = BTreeSet::new();
         for &rep in &state_reps {
             rep_set.insert(rep);
         }
-        
+
         let reduced: Vec<usize> = rep_set.into_iter().collect();
-        
+
         // Convert to StateEquivalenceResult format
-        let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
-        
+        let state_classes =
+            state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
+
         (reduced, state_classes)
     } else {
         // No reduction needed - use all states as their own representatives
@@ -120,64 +129,26 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         disallowed_follows,
     );
 
-    #[cfg(test)]
-    {
-        if std::env::var("SKIP_EQUIV_VERIFICATION").is_ok() {
-            // Skipping verification
-        } else {
-        fn vocab_is_refinement(
-            candidate: &VocabEquivalenceResult,
-            target: &VocabEquivalenceResult,
-        ) -> bool {
-            candidate.iter().all(|candidate_class| {
-                target.iter().any(|target_class| {
-                    candidate_class
-                        .iter()
-                        .all(|token| target_class.contains(token))
-                })
-            })
-        }
-
-        fn vocab_is_comparable(
-            a: &VocabEquivalenceResult,
-            b: &VocabEquivalenceResult,
-        ) -> bool {
-            vocab_is_refinement(a, b) || vocab_is_refinement(b, a)
-        }
-
-        // Cross-validate: fast version vs trellis (slow) version
-        let trellis_vocab_classes = super::vocab::slow::find_vocab_equivalence_classes_with_follow(
+    if env_flag_enabled(SLOW_VOCAB_EQUIV_VERIFICATION_ENV) {
+        let slow_vocab_classes = super::vocab::slow::find_vocab_equivalence_classes_with_follow(
             regex,
             tokens,
             &reduced_states,
             disallowed_follows,
         );
-        if !vocab_is_comparable(&vocab_classes, &trellis_vocab_classes) {
-            panic!(
-                "Vocab equivalence mismatch (fast vs trellis/slow not comparable)!\nFast ({} classes): {:?}\nTrellis ({} classes): {:?}",
-                vocab_classes.len(), vocab_classes,
-                trellis_vocab_classes.len(), trellis_vocab_classes
-            );
-        }
-
-        // Cross-validate: flat (medium) version
-        let flat_vocab_classes = super::vocab::medium::find_vocab_equivalence_classes_with_follow(
-            regex,
-            tokens,
-            &reduced_states,
-            disallowed_follows,
-        );
-        if !vocab_is_comparable(&vocab_classes, &flat_vocab_classes) {
-            panic!(
-                "Vocab equivalence mismatch (fast vs flat/medium not comparable)!\nFast ({} classes): {:?}\nFlat ({} classes): {:?}",
-                vocab_classes.len(), vocab_classes,
-                flat_vocab_classes.len(), flat_vocab_classes
-            );
-        }
-
-        } // end of else (SKIP_EQUIV_VERIFICATION)
+        verify_vocab_partition("slow", &vocab_classes, &slow_vocab_classes);
     }
-    
+
+    if env_flag_enabled(MEDIUM_VOCAB_EQUIV_VERIFICATION_ENV) {
+        let medium_vocab_classes = super::vocab::medium::find_vocab_equivalence_classes_with_follow(
+            regex,
+            tokens,
+            &reduced_states,
+            disallowed_follows,
+        );
+        verify_vocab_partition("medium", &vocab_classes, &medium_vocab_classes);
+    }
+
     CombinedEquivalenceResult {
         vocab_classes,
         state_classes,
