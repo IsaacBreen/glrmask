@@ -183,15 +183,3 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         state_classes,
     }
 }
-
-/// Minimized entry point that just returns vocab equivalence classes.
-///
-/// Use this when you don't need the state mapping information.
-pub fn find_vocab_equivalence_classes_with_state_reduction<S: AsRef<[u8]> + Sync>(
-    regex: &Sep1Tokenizer,
-    tokens: &[S],
-    initial_states: &[usize],
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> VocabEquivalenceResult {
-    compute_combined_equivalence(regex, tokens, initial_states, disallowed_follows).vocab_classes
-}

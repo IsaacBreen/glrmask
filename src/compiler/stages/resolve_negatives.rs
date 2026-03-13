@@ -378,12 +378,6 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
     result
 }
 
-pub(crate) fn apply_cancellations(nwa: &mut NWA) {
-    for (from, to, weight) in compute_cancellations(nwa) {
-        nwa.add_epsilon(from, to, weight);
-    }
-}
-
 pub(crate) fn compute_cancellations_range(
     nwa: &NWA,
     range: std::ops::Range<u32>,

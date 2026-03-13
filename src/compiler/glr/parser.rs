@@ -35,10 +35,6 @@ impl GLRParser {
         Self { table, stack }
     }
 
-    pub fn can_shift(&self, token: TerminalID) -> bool {
-        !advance_stacks(&self.table, &self.stack, token).is_empty()
-    }
-
     pub fn step(&self, token: TerminalID) -> (Self, bool) {
         let next_stack = advance_stacks(&self.table, &self.stack, token);
         let progressed = !next_stack.is_empty();

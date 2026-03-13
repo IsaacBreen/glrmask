@@ -130,43 +130,6 @@ impl AnalyzedGrammar {
             Err(violations.join("\n"))
         }
     }
-
-    pub fn first_of_seq(&self, seq: &[Symbol]) -> BTreeSet<TerminalID> {
-        let mut out = BTreeSet::new();
-        for symbol in seq {
-            match symbol {
-                Symbol::Terminal(terminal) => {
-                    out.insert(*terminal);
-                    return out;
-                }
-                Symbol::Nonterminal(nonterminal) => {
-                    if let Some(first) = self.first.get(*nonterminal as usize) {
-                        out.extend(first.iter().copied());
-                    }
-                    if !self.nullable.contains(nonterminal) {
-                        return out;
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    pub fn seq_is_nullable(&self, seq: &[Symbol]) -> bool {
-        seq.iter().all(|symbol| match symbol {
-            Symbol::Terminal(_) => false,
-            Symbol::Nonterminal(nonterminal) => self.nullable.contains(nonterminal),
-        })
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn eliminate_direct_left_recursion(
-    rules: &mut Vec<Rule>,
-    fresh_nt: &mut impl FnMut() -> NonterminalID,
-) {
-    let _ = rules;
-    let _ = fresh_nt;
 }
 
 /// Eliminate right recursion (both indirect and direct).

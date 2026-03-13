@@ -348,21 +348,6 @@ impl Constraint {
         RangeSetBlaze::from_iter([0..=self.internal_token_to_tokens.len().saturating_sub(1) as u32])
     }
 
-    pub(crate) fn internalize_token_set(
-        &self,
-        original_tokens: &RangeSetBlaze<u32>,
-    ) -> RangeSetBlaze<u32> {
-        if self.original_token_to_internal.is_empty() {
-            return original_tokens.clone();
-        }
-
-        let mut internal_tokens = RangeSetBlaze::new();
-        for token_id in original_tokens.iter() {
-            internal_tokens.insert(self.internal_token_for_original(token_id));
-        }
-        internal_tokens
-    }
-
     pub(crate) fn expand_internal_token_set(
         &self,
         internal_tokens: &RangeSetBlaze<u32>,

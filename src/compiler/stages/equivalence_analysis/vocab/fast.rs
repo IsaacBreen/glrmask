@@ -632,16 +632,6 @@ fn token_signature(
     sig
 }
 
-pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
-    regex: &Sep1Tokenizer,
-    strings: &[S],
-    initial_states: &[usize],
-) -> VocabEquivalenceResult {
-    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, &BTreeMap::new())
-}
-
-/// Find vocab equivalence classes.
-/// API compatibility but unused internally.
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     strings: &[S],

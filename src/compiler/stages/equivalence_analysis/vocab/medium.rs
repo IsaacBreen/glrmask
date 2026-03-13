@@ -802,14 +802,6 @@ fn classify_sorted_collect<S: AsRef<[u8]>>(
 
 // ---- Public API ----
 
-pub fn find_vocab_equivalence_classes<S: AsRef<[u8]> + Sync>(
-    regex: &Sep1Tokenizer,
-    strings: &[S],
-    initial_states: &[usize],
-) -> VocabEquivalenceResult {
-    find_vocab_equivalence_classes_with_follow(regex, strings, initial_states, &BTreeMap::new())
-}
-
 /// Flat vocab equivalence analysis with recursive byte-level classification.
 ///
 /// Phase 1: Recursively group tokens by byte prefix. At each depth, advance
