@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ahash::{AHasher, RandomState};
@@ -73,16 +73,17 @@ fn env_flag_enabled(name: &str) -> bool {
 //   - Edge labels (group IDs from the trellis): `gid as Label` (non-negative)
 //   - Completion labels (possible future groups at a node):
 //     `-(gid as Label + 1)` for each future group
-//     `ALIVE_MARKER` for alive nodes with no (allowed) future groups
 //
 // Edge labels and completion labels never overlap.
-
-/// Marker label for a live DFA state that has no possible future groups.
-const ALIVE_MARKER: Label = i32::MIN;
 
 #[inline]
 fn completion_label(gid: usize) -> Label {
     -(gid as Label + 1)
+}
+
+#[inline]
+fn future_groups_cover_all_terminals(future_groups: &[usize], num_groups: usize) -> bool {
+    future_groups.len() == num_groups && future_groups.iter().copied().eq(0..num_groups)
 }
 
 // ---- Precomputed data (derived from FlatDfa, reused across all tokens) ----
@@ -270,6 +271,7 @@ fn prune_reachable(dag: &mut BTreeMap<usize, FlatNode>, token_len: usize) {
 fn build_nfa_from_trellis(
     dfa: &FlatDfa,
     dag: &BTreeMap<usize, FlatNode>,
+    num_groups: usize,
     ignore_terminal: Option<usize>,
 ) -> NFA {
     let mut nfa = NFA::new_empty();
@@ -310,8 +312,8 @@ fn build_nfa_from_trellis(
         // --- Completion transitions (no disallowed filtering) ---
         if node.end_state != STATE_NONE && node.end_state < dfa.states.len() {
             let future_groups = &dfa.states[node.end_state].possible_future_group_ids;
-            if future_groups.is_empty() {
-                nfa.add_transition(nfa_state, ALIVE_MARKER, accept_sink);
+            if future_groups_cover_all_terminals(future_groups, num_groups) {
+                nfa.add_epsilon(nfa_state, accept_sink);
             } else {
                 for &gid in future_groups {
                     nfa.add_transition(nfa_state, completion_label(gid), accept_sink);
@@ -413,13 +415,31 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
 
     // Mark states that should have no disallowed set:
     //   - states in the epsilon closure of start
-    //   - states with incoming labeled edges from any state in the start closure
+    //   - states reached by one transition from the start closure
+    //   - epsilon descendants of those states
     let mut no_disallowed: Vec<bool> = vec![false; n];
+    let mut clear_queue: VecDeque<u32> = VecDeque::new();
+
     for &s in &start_closure {
-        no_disallowed[s as usize] = true;
+        if !no_disallowed[s as usize] {
+            no_disallowed[s as usize] = true;
+            clear_queue.push_back(s);
+        }
         for targets in nfa.states[s as usize].transitions.values() {
             for &tgt in targets {
+                if !no_disallowed[tgt as usize] {
+                    no_disallowed[tgt as usize] = true;
+                    clear_queue.push_back(tgt);
+                }
+            }
+        }
+    }
+
+    while let Some(state) = clear_queue.pop_front() {
+        for &tgt in &nfa.states[state as usize].epsilons {
+            if !no_disallowed[tgt as usize] {
                 no_disallowed[tgt as usize] = true;
+                clear_queue.push_back(tgt);
             }
         }
     }
@@ -456,11 +476,8 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
         nfa.states[idx].transitions.retain(|&label, _| {
             let gid = if label >= 0 {
                 label as usize
-            } else if label != ALIVE_MARKER {
-                // Completion label: -(gid+1)
-                (-(label + 1)) as usize
             } else {
-                return true; // ALIVE_MARKER: never prune
+                (-(label + 1)) as usize
             };
             !disallowed.contains(gid)
         });
@@ -468,6 +485,68 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
 }
 
 // ---- Canonical hash of minimized DFA ----
+
+fn canonical_nfa_hash(nfa: &NFA) -> u64 {
+    if nfa.states.is_empty() {
+        let mut h = new_hasher();
+        h.write_u8(0);
+        return h.finish();
+    }
+
+    let mut memo: HashMap<u32, u64> = HashMap::new();
+    let mut start_hashes: Vec<u64> = nfa
+        .start_states
+        .iter()
+        .map(|&state| hash_nfa_state(nfa, state, &mut memo))
+        .collect();
+    start_hashes.sort_unstable();
+
+    let mut h = new_hasher();
+    h.write_u64(start_hashes.len() as u64);
+    for state_hash in start_hashes {
+        h.write_u64(state_hash);
+    }
+    h.finish()
+}
+
+fn hash_nfa_state(nfa: &NFA, state: u32, memo: &mut HashMap<u32, u64>) -> u64 {
+    if let Some(&cached) = memo.get(&state) {
+        return cached;
+    }
+
+    let s = &nfa.states[state as usize];
+    let mut h = new_hasher();
+    h.write_u8(if s.is_accepting { 1 } else { 0 });
+
+    let mut epsilon_hashes: Vec<u64> = s
+        .epsilons
+        .iter()
+        .map(|&target| hash_nfa_state(nfa, target, memo))
+        .collect();
+    epsilon_hashes.sort_unstable();
+    h.write_u64(epsilon_hashes.len() as u64);
+    for target_hash in epsilon_hashes {
+        h.write_u64(target_hash);
+    }
+
+    h.write_u64(s.transitions.len() as u64);
+    for (&label, targets) in &s.transitions {
+        let mut target_hashes: Vec<u64> = targets
+            .iter()
+            .map(|&target| hash_nfa_state(nfa, target, memo))
+            .collect();
+        target_hashes.sort_unstable();
+        h.write_i32(label);
+        h.write_u64(target_hashes.len() as u64);
+        for target_hash in target_hashes {
+            h.write_u64(target_hash);
+        }
+    }
+
+    let result = h.finish();
+    memo.insert(state, result);
+    result
+}
 
 fn canonical_hash(dfa: &DFA) -> u64 {
     if dfa.states.is_empty() {
@@ -505,6 +584,7 @@ fn process_token_for_state(
     token: &[u8],
     initial_state: usize,
     ignore_terminal: Option<usize>,
+    hash_memo: &Mutex<HashMap<u64, u64>>,
     tmp_mp: &mut Vec<u32>,
 ) -> u64 {
     tmp_mp.resize(pre.num_groups, NONE);
@@ -512,12 +592,21 @@ fn process_token_for_state(
     let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
     prune_reachable(&mut dag, token.len());
 
-    let mut nfa = build_nfa_from_trellis(dfa, &dag, ignore_terminal);
+    let mut nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, ignore_terminal);
+    let nfa_hash = canonical_nfa_hash(&nfa);
+
+    if let Some(&cached) = hash_memo.lock().unwrap().get(&nfa_hash) {
+        return cached;
+    }
+
     apply_disallowed_pruning_nfa(&mut nfa, &pre.disallowed_follows, pre.num_groups);
 
     let det_dfa = determinize(&nfa);
     let min_dfa = minimize(&det_dfa);
-    canonical_hash(&min_dfa)
+    let final_hash = canonical_hash(&min_dfa);
+
+    hash_memo.lock().unwrap().insert(nfa_hash, final_hash);
+    final_hash
 }
 
 // ---- Public API ----
@@ -551,6 +640,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
 
     let show_progress = env_flag_enabled(PROGRESS_ENV);
     let started = Instant::now();
+    let hash_memo = Arc::new(Mutex::new(HashMap::<u64, u64>::new()));
 
     // Compute per-(token, state) hash matrix in parallel.
     // Layout: hashes[ti * ns + si] = hash for token ti at state initial_states[si]
@@ -559,6 +649,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
     let progress_thread = if show_progress {
         let counter = counter.clone();
         let nt = nt;
+        let started = started;
         Some(std::thread::spawn(move || {
             loop {
                 std::thread::sleep(PROGRESS_INTERVAL);
@@ -581,6 +672,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
     #[cfg(feature = "rayon")]
     let hashes: Vec<u64> = {
         use rayon::prelude::*;
+        let hash_memo = hash_memo.clone();
         let rows: Vec<Vec<u64>> = strings
             .par_iter()
             .map(|token_ref| {
@@ -595,6 +687,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
                             token,
                             state,
                             ignore_terminal,
+                            &hash_memo,
                             &mut tmp_mp,
                         )
                     })
@@ -609,6 +702,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
     #[cfg(not(feature = "rayon"))]
     let hashes: Vec<u64> = {
         let mut tmp_mp = vec![NONE; pre.num_groups];
+        let hash_memo = hash_memo.clone();
         strings
             .iter()
             .flat_map(|token_ref| {
@@ -622,6 +716,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
                             token,
                             state,
                             ignore_terminal,
+                            &hash_memo,
                             &mut tmp_mp,
                         )
                     })
