@@ -203,12 +203,6 @@ fn walk_tokenizer_dfa(
     let mut cur = start_state;
     let mut done = dfa.states[cur].possible_future_group_ids.is_empty();
 
-    for &gid in &dfa.states[cur].finalizers {
-        if gid < ng && mp[gid] == NONE {
-            mp[gid] = 0;
-        }
-    }
-
     for (i, &byte) in slice.iter().enumerate() {
         if done {
             break;
