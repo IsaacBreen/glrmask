@@ -22,6 +22,8 @@ use super::vocab::slow::partitions_are_comparable;
 
 const MEDIUM_VOCAB_EQUIV_VERIFICATION_ENV: &str = "MEDIUM_VOCAB_EQUIV_VERIFICATION";
 const SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "SLOW_VOCAB_EQUIV_VERIFICATION";
+const VERY_SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "VERY_SLOW_VOCAB_EQUIV_VERIFICATION";
+const VERY_SLOW_VOCAB_EQUIV_PRIMARY_ENV: &str = "VERY_SLOW_VOCAB_EQUIV_PRIMARY";
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -157,6 +159,33 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         print_vocab_verification_stats("medium", &medium_vocab_classes);
         verify_vocab_partition("medium", &vocab_classes, &medium_vocab_classes);
     }
+
+    if env_flag_enabled(VERY_SLOW_VOCAB_EQUIV_VERIFICATION_ENV) {
+        let very_slow_vocab_classes =
+            super::vocab::very_slow::find_vocab_equivalence_classes_with_follow(
+                regex,
+                tokens,
+                &reduced_states,
+                disallowed_follows,
+            );
+        print_vocab_verification_stats("very_slow", &very_slow_vocab_classes);
+        verify_vocab_partition("very_slow", &vocab_classes, &very_slow_vocab_classes);
+    }
+
+    // If VERY_SLOW_VOCAB_EQUIV_PRIMARY is set, replace the fast result with very_slow
+    let vocab_classes = if env_flag_enabled(VERY_SLOW_VOCAB_EQUIV_PRIMARY_ENV) {
+        let very_slow_vocab_classes =
+            super::vocab::very_slow::find_vocab_equivalence_classes_with_follow(
+                regex,
+                tokens,
+                &reduced_states,
+                disallowed_follows,
+            );
+        print_vocab_verification_stats("very_slow (primary)", &very_slow_vocab_classes);
+        very_slow_vocab_classes
+    } else {
+        vocab_classes
+    };
 
     CombinedEquivalenceResult {
         vocab_classes,

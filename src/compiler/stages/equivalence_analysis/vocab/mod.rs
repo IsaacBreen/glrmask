@@ -7,3 +7,4 @@
 pub mod fast;
 pub mod medium;
 pub mod slow;
+pub mod very_slow;
