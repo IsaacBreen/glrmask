@@ -68,6 +68,7 @@ fn analyze_equivalences_sep1(
         &token_bytes,
         &initial_states,
         effective_disallowed,
+        ignore_terminal,
     );
 
     // Convert state equivalence classes to ManyToOneIdMap

@@ -18,12 +18,15 @@ use crate::ds::bitset::BitSet;
 
 use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};
 use super::vocab::fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
-use super::vocab::slow::partitions_are_comparable;
+use super::vocab::slow::{partitions_are_comparable, partition_is_at_least_as_fine};
 
 const MEDIUM_VOCAB_EQUIV_VERIFICATION_ENV: &str = "MEDIUM_VOCAB_EQUIV_VERIFICATION";
 const SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "SLOW_VOCAB_EQUIV_VERIFICATION";
 const VERY_SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "VERY_SLOW_VOCAB_EQUIV_VERIFICATION";
 const VERY_SLOW_VOCAB_EQUIV_PRIMARY_ENV: &str = "VERY_SLOW_VOCAB_EQUIV_PRIMARY";
+const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
+const REFERENCE_VOCAB_EQUIV_PRIMARY_ENV: &str = "REFERENCE_VOCAB_EQUIV_PRIMARY";
+const REFERENCE_STATE_EQUIV_PRIMARY_ENV: &str = "REFERENCE_STATE_EQUIV_PRIMARY";
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -59,6 +62,26 @@ fn verify_vocab_partition(
     }
 }
 
+/// Verify that the reference analysis merges at least as aggressively as fast.
+/// The reference is the ground truth — it must merge everything that fast merges,
+/// and potentially more. Panics if fast merged tokens that reference kept separate.
+fn verify_vocab_partition_reference(
+    fast_vocab_classes: &VocabEquivalenceResult,
+    reference_vocab_classes: &VocabEquivalenceResult,
+) {
+    if !partition_is_at_least_as_fine(fast_vocab_classes, reference_vocab_classes) {
+        panic!(
+            "Fast vocab equivalence merged tokens that reference kept separate!\n\
+             Fast ({} classes): {:?}\n\
+             Reference ({} classes): {:?}",
+            fast_vocab_classes.len(),
+            fast_vocab_classes,
+            reference_vocab_classes.len(),
+            reference_vocab_classes,
+        );
+    }
+}
+
 fn print_vocab_verification_stats(label: &str, vocab_classes: &VocabEquivalenceResult) {
     eprintln!(
         "[vocab equiv verification] {label}: {} classes",
@@ -85,6 +108,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
     // State equivalence reduction: groups initial states with identical tokenizer
     // behavior. The cost is O(V×S) token walks (same as vocab analysis), so it's
@@ -172,8 +196,40 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         verify_vocab_partition("very_slow", &vocab_classes, &very_slow_vocab_classes);
     }
 
-    // If VERY_SLOW_VOCAB_EQUIV_PRIMARY is set, replace the fast result with very_slow
-    let vocab_classes = if env_flag_enabled(VERY_SLOW_VOCAB_EQUIV_PRIMARY_ENV) {
+    // --- Reference analysis ---
+    // Run once if any reference env var is enabled, reuse the result.
+    let need_reference_verify = env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV);
+    let need_reference_vocab = env_flag_enabled(REFERENCE_VOCAB_EQUIV_PRIMARY_ENV);
+    let need_reference_state = env_flag_enabled(REFERENCE_STATE_EQUIV_PRIMARY_ENV);
+
+    let reference_result = if need_reference_verify || need_reference_vocab || need_reference_state {
+        Some(super::reference::find_equivalence_classes(
+            regex,
+            tokens,
+            &reduced_states,
+            disallowed_follows,
+            ignore_terminal.map(|t| t as usize),
+        ))
+    } else {
+        None
+    };
+
+    if need_reference_verify {
+        let ref_result = reference_result.as_ref().unwrap();
+        print_vocab_verification_stats("reference", &ref_result.vocab_classes);
+        eprintln!(
+            "[state equiv verification] reference: {} classes",
+            ref_result.state_classes.len()
+        );
+        verify_vocab_partition_reference(&vocab_classes, &ref_result.vocab_classes);
+    }
+
+    // Replace vocab classes if reference or very_slow primary is requested
+    let vocab_classes = if need_reference_vocab {
+        let ref_result = reference_result.as_ref().unwrap();
+        print_vocab_verification_stats("reference (primary)", &ref_result.vocab_classes);
+        ref_result.vocab_classes.clone()
+    } else if env_flag_enabled(VERY_SLOW_VOCAB_EQUIV_PRIMARY_ENV) {
         let very_slow_vocab_classes =
             super::vocab::very_slow::find_vocab_equivalence_classes_with_follow(
                 regex,
@@ -185,6 +241,18 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         very_slow_vocab_classes
     } else {
         vocab_classes
+    };
+
+    // Replace state classes if reference state primary is requested
+    let state_classes = if need_reference_state {
+        let ref_result = reference_result.as_ref().unwrap();
+        eprintln!(
+            "[state equiv] reference (primary): {} classes",
+            ref_result.state_classes.len()
+        );
+        ref_result.state_classes.clone()
+    } else {
+        state_classes
     };
 
     CombinedEquivalenceResult {

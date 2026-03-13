@@ -1,6 +1,7 @@
 
 pub mod combined;
 pub mod compat;
+pub mod reference;
 pub mod state;
 pub mod vocab;
 pub mod combined_equivalence_analysis;
