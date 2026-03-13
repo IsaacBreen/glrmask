@@ -18,8 +18,3 @@ pub use compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 pub use error::{GlrMaskError, Result};
 pub use runtime::{Constraint, ConstraintState};
 pub use vocab::Vocab;
-
-#[doc(hidden)]
-pub fn __repro_old_prune_reference_fineness_panic() {
-    compiler::stages::equivalence_analysis::combined_equivalence_analysis::repro_old_prune_reference_fineness_panic();
-}

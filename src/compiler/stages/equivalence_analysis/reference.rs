@@ -686,152 +686,6 @@ mod tests {
         );
     }
 
-    fn build_dead_suffix_minimal_dfa() -> FlatDfa {
-        let dead = u32::MAX;
-
-        let mut start_transitions = [dead; 256];
-        start_transitions[b'!' as usize] = 1;
-        start_transitions[b' ' as usize] = 1;
-        start_transitions[0xC2] = 2;
-
-        let mut matched_transitions = [dead; 256];
-        matched_transitions[0xC2] = 2;
-
-        let dead_suffix_transitions = [dead; 256];
-
-        FlatDfa {
-            states: vec![
-                FlatDfaState {
-                    transitions: start_transitions,
-                    finalizers: vec![],
-                    possible_future_group_ids: vec![0],
-                },
-                FlatDfaState {
-                    transitions: matched_transitions,
-                    finalizers: vec![0],
-                    possible_future_group_ids: vec![],
-                },
-                FlatDfaState {
-                    transitions: dead_suffix_transitions,
-                    finalizers: vec![],
-                    possible_future_group_ids: vec![],
-                },
-            ],
-            start_state: 0,
-        }
-    }
-
-    fn hash_token_for_state_with_optional_prune(
-        dfa: &FlatDfa,
-        pre: &PrecomputedData,
-        token: &[u8],
-        initial_state: usize,
-        prune: bool,
-    ) -> u64 {
-        fn prune_reachable_for_test(dag: &mut BTreeMap<usize, FlatNode>, token_len: usize) {
-            let mut reverse_edges: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-            for (&src, node) in dag.iter() {
-                for &(_, dst) in &node.edges {
-                    reverse_edges.entry(dst).or_default().push(src);
-                }
-            }
-
-            let mut can_reach_end = std::collections::HashSet::new();
-            let mut stack = Vec::new();
-            if dag.contains_key(&token_len) {
-                can_reach_end.insert(token_len);
-                stack.push(token_len);
-            }
-            while let Some(pos) = stack.pop() {
-                if let Some(preds) = reverse_edges.get(&pos) {
-                    for &pred in preds {
-                        if can_reach_end.insert(pred) {
-                            stack.push(pred);
-                        }
-                    }
-                }
-            }
-
-            for node in dag.values_mut() {
-                node.edges.retain(|&(_, target)| can_reach_end.contains(&target));
-            }
-        }
-
-        let mut tmp_mp = vec![NONE; pre.num_groups];
-        let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, &mut tmp_mp);
-        if prune {
-            prune_reachable_for_test(&mut dag, token.len());
-        }
-
-        let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, None);
-        let det_dfa = determinize(&nfa);
-        let min_dfa = minimize(&det_dfa);
-        let pruned_dfa = match &pre.disallowed_detector {
-            Some(disallowed_detector) => minimize(&subtract(&min_dfa, disallowed_detector)),
-            None => min_dfa,
-        };
-        canonical_hash(&pruned_dfa)
-    }
-
-    #[test]
-    fn test_minimal_dead_suffix_dfa_reference_merges_equivalent_tokens() {
-        let dfa = build_dead_suffix_minimal_dfa();
-        let disallowed_follows = BTreeMap::new();
-        let pre = precompute(&dfa, &disallowed_follows);
-
-        let bang_hash = hash_token_for_state_with_optional_prune(&dfa, &pre, b"!", 0, false);
-        let spaced_dead_hash = hash_token_for_state_with_optional_prune(
-            &dfa,
-            &pre,
-            &[b' ', 0xC2],
-            0,
-            false,
-        );
-
-        assert_eq!(bang_hash, spaced_dead_hash);
-    }
-
-    #[test]
-    fn test_minimal_dead_suffix_dfa_prune_reachable_splits_equivalent_tokens() {
-        let dfa = build_dead_suffix_minimal_dfa();
-        let disallowed_follows = BTreeMap::new();
-        let pre = precompute(&dfa, &disallowed_follows);
-
-        let bang_hash = hash_token_for_state_with_optional_prune(&dfa, &pre, b"!", 0, true);
-        let spaced_dead_hash = hash_token_for_state_with_optional_prune(
-            &dfa,
-            &pre,
-            &[b' ', 0xC2],
-            0,
-            true,
-        );
-
-        assert_ne!(bang_hash, spaced_dead_hash);
-    }
-
-    #[test]
-    #[ignore = "expected to fail: reproduces the old prune_reachable dead-suffix bug"]
-    fn repro_old_prune_reachable_dead_suffix_bug() {
-        let dfa = build_dead_suffix_minimal_dfa();
-        let disallowed_follows = BTreeMap::new();
-        let pre = precompute(&dfa, &disallowed_follows);
-
-        let bang_hash = hash_token_for_state_with_optional_prune(&dfa, &pre, b"!", 0, true);
-        let spaced_dead_hash = hash_token_for_state_with_optional_prune(
-            &dfa,
-            &pre,
-            &[b' ', 0xC2],
-            0,
-            true,
-        );
-
-        assert_eq!(
-            bang_hash,
-            spaced_dead_hash,
-            "old prune_reachable wrongly splits equivalent tokens on the minimal dead-suffix DFA"
-        );
-    }
-
     #[test]
     fn test_reference_witness_pair_hashes_differ() {
         let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
@@ -865,6 +719,97 @@ mod tests {
         );
 
         assert_ne!(left_hash, right_hash);
+    }
+
+    fn build_quote_branch_minimal_dfa() -> FlatDfa {
+        let dead = u32::MAX;
+
+        let mut suffix_start = [dead; 256];
+        suffix_start[b'\'' as usize] = 2;
+        suffix_start[b'"' as usize] = 3;
+
+        let mut after_comma = [dead; 256];
+        after_comma[b'\'' as usize] = 2;
+        after_comma[b'"' as usize] = 3;
+
+        let mut after_quote_prefix = [dead; 256];
+        after_quote_prefix[b'"' as usize] = 3;
+
+        let mut live_start = suffix_start;
+        live_start[b',' as usize] = 1;
+
+        FlatDfa {
+            states: vec![
+                FlatDfaState {
+                    transitions: suffix_start,
+                    finalizers: vec![3, 4],
+                    possible_future_group_ids: vec![0, 1, 2, 3, 4, 5],
+                },
+                FlatDfaState {
+                    transitions: after_comma,
+                    finalizers: vec![1, 3, 4, 5],
+                    possible_future_group_ids: vec![0, 1, 2, 3, 4, 5],
+                },
+                FlatDfaState {
+                    transitions: after_quote_prefix,
+                    finalizers: vec![1, 3, 4],
+                    possible_future_group_ids: vec![0, 1, 2, 3, 4, 5],
+                },
+                FlatDfaState {
+                    transitions: [dead; 256],
+                    finalizers: vec![0, 2],
+                    possible_future_group_ids: vec![0, 2],
+                },
+                FlatDfaState {
+                    transitions: live_start,
+                    finalizers: vec![1, 2, 3, 4],
+                    possible_future_group_ids: vec![0, 1, 2, 3, 4, 5],
+                },
+            ],
+            start_state: 0,
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_quote_branch_minimal_dfa() {
+        let dfa = build_quote_branch_minimal_dfa();
+        let disallowed_follows = BTreeMap::new();
+        let pre = precompute(&dfa, &disallowed_follows);
+        let hash_memo = Mutex::new(HashMap::new());
+        let tokens = vec![b",\"".to_vec(), b",\'\"".to_vec()];
+
+        let left_hash = process_token_for_state(
+            &dfa,
+            &pre,
+            &tokens[0],
+            4,
+            None,
+            &hash_memo,
+            &mut Vec::new(),
+        );
+        let right_hash = process_token_for_state(
+            &dfa,
+            &pre,
+            &tokens[1],
+            4,
+            None,
+            &hash_memo,
+            &mut Vec::new(),
+        );
+        println!("reference left=0x{left_hash:016X} right=0x{right_hash:016X}");
+
+        let sep1 = Sep1Tokenizer { flat_dfa: dfa.clone() };
+        let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1,
+            &tokens,
+            &[4],
+            &disallowed_follows,
+        );
+        println!("fast classes: {:?}", fast_classes);
+
+        let reference = find_equivalence_classes(&sep1, &tokens, &[4], &disallowed_follows, None);
+        println!("reference classes: {:?}", reference.vocab_classes);
     }
 
     /// Diagnostic: trace the trellis + NFA + DFA for both witness tokens at state 9686.
