@@ -2444,6 +2444,12 @@ fn test_ported_mask_commit_consistency_minimal_repro_minimized_copy() {
         .expect("minimal copy should compile without panicking");
 }
 
+#[test]
+#[ignore = "expected to fail: reproduces the fineness panic in combined_equivalence_analysis"]
+fn test_old_prune_reference_fineness_repro_panics() {
+    glrmask::__repro_old_prune_reference_fineness_panic();
+}
+
 /// Ported from sep1 `test_python_reported_bug_def_rep_space_f`.
 #[test]
 fn test_ported_python_reported_bug_def_rep_space_f() {

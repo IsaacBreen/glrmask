@@ -495,6 +495,24 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<usize>,
 ) -> ReferenceEquivalenceResult {
+    find_equivalence_classes_with_progress(
+        regex,
+        strings,
+        initial_states,
+        disallowed_follows,
+        ignore_terminal,
+        env_flag_enabled(PROGRESS_ENV),
+    )
+}
+
+pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
+    regex: &Sep1Tokenizer,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<usize>,
+    show_progress: bool,
+) -> ReferenceEquivalenceResult {
     let dfa = regex.dfa();
     let pre = precompute(dfa, disallowed_follows);
     let nt = strings.len();
@@ -509,7 +527,6 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
         return ReferenceEquivalenceResult { vocab_classes, state_classes };
     }
 
-    let show_progress = env_flag_enabled(PROGRESS_ENV);
     let started = Instant::now();
     let hash_memo = Arc::new(Mutex::new(HashMap::<u64, u64>::new()));
 
@@ -666,6 +683,152 @@ mod tests {
         assert_eq!(
             result.state_classes,
             BTreeSet::from([BTreeSet::from([sep1_tok.initial_state_id()])]),
+        );
+    }
+
+    fn build_dead_suffix_minimal_dfa() -> FlatDfa {
+        let dead = u32::MAX;
+
+        let mut start_transitions = [dead; 256];
+        start_transitions[b'!' as usize] = 1;
+        start_transitions[b' ' as usize] = 1;
+        start_transitions[0xC2] = 2;
+
+        let mut matched_transitions = [dead; 256];
+        matched_transitions[0xC2] = 2;
+
+        let dead_suffix_transitions = [dead; 256];
+
+        FlatDfa {
+            states: vec![
+                FlatDfaState {
+                    transitions: start_transitions,
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![0],
+                },
+                FlatDfaState {
+                    transitions: matched_transitions,
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![],
+                },
+                FlatDfaState {
+                    transitions: dead_suffix_transitions,
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![],
+                },
+            ],
+            start_state: 0,
+        }
+    }
+
+    fn hash_token_for_state_with_optional_prune(
+        dfa: &FlatDfa,
+        pre: &PrecomputedData,
+        token: &[u8],
+        initial_state: usize,
+        prune: bool,
+    ) -> u64 {
+        fn prune_reachable_for_test(dag: &mut BTreeMap<usize, FlatNode>, token_len: usize) {
+            let mut reverse_edges: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+            for (&src, node) in dag.iter() {
+                for &(_, dst) in &node.edges {
+                    reverse_edges.entry(dst).or_default().push(src);
+                }
+            }
+
+            let mut can_reach_end = std::collections::HashSet::new();
+            let mut stack = Vec::new();
+            if dag.contains_key(&token_len) {
+                can_reach_end.insert(token_len);
+                stack.push(token_len);
+            }
+            while let Some(pos) = stack.pop() {
+                if let Some(preds) = reverse_edges.get(&pos) {
+                    for &pred in preds {
+                        if can_reach_end.insert(pred) {
+                            stack.push(pred);
+                        }
+                    }
+                }
+            }
+
+            for node in dag.values_mut() {
+                node.edges.retain(|&(_, target)| can_reach_end.contains(&target));
+            }
+        }
+
+        let mut tmp_mp = vec![NONE; pre.num_groups];
+        let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, &mut tmp_mp);
+        if prune {
+            prune_reachable_for_test(&mut dag, token.len());
+        }
+
+        let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, None);
+        let det_dfa = determinize(&nfa);
+        let min_dfa = minimize(&det_dfa);
+        let pruned_dfa = match &pre.disallowed_detector {
+            Some(disallowed_detector) => minimize(&subtract(&min_dfa, disallowed_detector)),
+            None => min_dfa,
+        };
+        canonical_hash(&pruned_dfa)
+    }
+
+    #[test]
+    fn test_minimal_dead_suffix_dfa_reference_merges_equivalent_tokens() {
+        let dfa = build_dead_suffix_minimal_dfa();
+        let disallowed_follows = BTreeMap::new();
+        let pre = precompute(&dfa, &disallowed_follows);
+
+        let bang_hash = hash_token_for_state_with_optional_prune(&dfa, &pre, b"!", 0, false);
+        let spaced_dead_hash = hash_token_for_state_with_optional_prune(
+            &dfa,
+            &pre,
+            &[b' ', 0xC2],
+            0,
+            false,
+        );
+
+        assert_eq!(bang_hash, spaced_dead_hash);
+    }
+
+    #[test]
+    fn test_minimal_dead_suffix_dfa_prune_reachable_splits_equivalent_tokens() {
+        let dfa = build_dead_suffix_minimal_dfa();
+        let disallowed_follows = BTreeMap::new();
+        let pre = precompute(&dfa, &disallowed_follows);
+
+        let bang_hash = hash_token_for_state_with_optional_prune(&dfa, &pre, b"!", 0, true);
+        let spaced_dead_hash = hash_token_for_state_with_optional_prune(
+            &dfa,
+            &pre,
+            &[b' ', 0xC2],
+            0,
+            true,
+        );
+
+        assert_ne!(bang_hash, spaced_dead_hash);
+    }
+
+    #[test]
+    #[ignore = "expected to fail: reproduces the old prune_reachable dead-suffix bug"]
+    fn repro_old_prune_reachable_dead_suffix_bug() {
+        let dfa = build_dead_suffix_minimal_dfa();
+        let disallowed_follows = BTreeMap::new();
+        let pre = precompute(&dfa, &disallowed_follows);
+
+        let bang_hash = hash_token_for_state_with_optional_prune(&dfa, &pre, b"!", 0, true);
+        let spaced_dead_hash = hash_token_for_state_with_optional_prune(
+            &dfa,
+            &pre,
+            &[b' ', 0xC2],
+            0,
+            true,
+        );
+
+        assert_eq!(
+            bang_hash,
+            spaced_dead_hash,
+            "old prune_reachable wrongly splits equivalent tokens on the minimal dead-suffix DFA"
         );
     }
 

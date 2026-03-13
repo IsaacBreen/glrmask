@@ -12,7 +12,6 @@
 //! large DFAs by reducing the workload of the expensive vocab analysis.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use super::compat::{FlatDfa, FlatDfaState, GroupID, Sep1Tokenizer};
 use crate::ds::bitset::BitSet;
@@ -42,15 +41,7 @@ fn env_flag_enabled(name: &str) -> bool {
             let trimmed = v.trim();
             !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
         })
-        .unwrap_or_else(|_| name == REFERENCE_EQUIV_VERIFICATION_ENV && running_under_rust_test())
-}
-
-fn running_under_rust_test() -> bool {
-    let Some(arg0) = std::env::args_os().next() else {
-        return false;
-    };
-    let path = Path::new(&arg0);
-    path.components().any(|component| component.as_os_str() == "deps")
+        .unwrap_or(false)
 }
 
 fn verify_vocab_partition(
@@ -268,12 +259,13 @@ fn find_reference_distinguishing_state<S: AsRef<[u8]> + Sync>(
         .iter()
         .copied()
         .filter(|&state| {
-            let result = super::reference::find_equivalence_classes(
+            let result = super::reference::find_equivalence_classes_with_progress(
                 regex,
                 &pair_tokens,
                 &[state],
                 disallowed_follows,
                 ignore_terminal.map(|terminal| terminal as usize),
+                false,
             );
             result.vocab_classes.len() > 1
         })
@@ -333,6 +325,54 @@ fn print_vocab_verification_stats(label: &str, vocab_classes: &VocabEquivalenceR
     eprintln!(
         "[vocab equiv verification] {label}: {} classes",
         vocab_classes.len()
+    );
+}
+
+pub(crate) fn repro_old_prune_reference_fineness_panic() {
+    let dead = u32::MAX;
+
+    let mut start_transitions = [dead; 256];
+    start_transitions[b'!' as usize] = 1;
+    start_transitions[b' ' as usize] = 1;
+    start_transitions[0xC2] = 2;
+
+    let mut matched_transitions = [dead; 256];
+    matched_transitions[0xC2] = 2;
+
+    let dfa = FlatDfa {
+        states: vec![
+            FlatDfaState {
+                transitions: start_transitions,
+                finalizers: vec![],
+                possible_future_group_ids: vec![0],
+            },
+            FlatDfaState {
+                transitions: matched_transitions,
+                finalizers: vec![0],
+                possible_future_group_ids: vec![],
+            },
+            FlatDfaState {
+                transitions: [dead; 256],
+                finalizers: vec![],
+                possible_future_group_ids: vec![],
+            },
+        ],
+        start_state: 0,
+    };
+
+    let regex = Sep1Tokenizer { flat_dfa: dfa };
+    let tokens = vec![b"!".to_vec(), vec![b' ', 0xC2]];
+    let fast_vocab_classes = BTreeSet::from([vec![0, 1]]);
+    let buggy_reference_vocab_classes = BTreeSet::from([vec![0], vec![1]]);
+
+    verify_vocab_partition_reference(
+        &regex,
+        &fast_vocab_classes,
+        &buggy_reference_vocab_classes,
+        &tokens,
+        &[0],
+        &BTreeMap::new(),
+        None,
     );
 }
 
