@@ -189,11 +189,24 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     out
 }
 
+fn escape_single_quoted(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("\\'"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 fn token_repr(bytes: &[u8]) -> String {
-    truncate_chars(
-        &format!("{:?}", String::from_utf8_lossy(bytes)),
-        DWA_SAMPLE_TOKEN_REPR_LIMIT,
-    )
+    let escaped = escape_single_quoted(&String::from_utf8_lossy(bytes));
+    format!("'{}'", truncate_chars(&escaped, DWA_SAMPLE_TOKEN_REPR_LIMIT))
 }
 
 fn sample_weight_tokens(
@@ -238,8 +251,8 @@ fn sample_weight_tokens(
         .map(|token_id| {
             internal_token_bytes
                 .get(&token_id)
-                .map(|bytes| format!("{}:{}", token_id, token_repr(bytes)))
-                .unwrap_or_else(|| format!("{}:<missing>", token_id))
+                .map(|bytes| token_repr(bytes))
+                .unwrap_or_else(|| format!("'<missing:{}>'", token_id))
         })
         .collect();
 
