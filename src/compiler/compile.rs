@@ -212,11 +212,15 @@ fn escape_single_quoted(text: &str) -> String {
     escaped
 }
 
+fn single_quoted(text: &str) -> String {
+    format!("'{}'", escape_single_quoted(text))
+}
+
 fn token_repr(bytes: &[u8]) -> String {
     let escaped = escape_single_quoted(&String::from_utf8_lossy(bytes));
-    colorize(
-        format!("'{}'", truncate_chars(&escaped, DWA_SAMPLE_TOKEN_REPR_LIMIT)),
-        ANSI_DWA_TOKEN,
+    format!(
+        "'{}'",
+        colorize(truncate_chars(&escaped, DWA_SAMPLE_TOKEN_REPR_LIMIT), ANSI_DWA_TOKEN),
     )
 }
 
@@ -293,10 +297,21 @@ enum MaxValidPathLen {
 fn terminal_label_name(grammar: &GrammarDef, label: i32) -> String {
     assert!(label >= 0, "terminal DWA emitted unexpected negative label {label}");
     let terminal = label as u32;
-    colorize(
-        format!("'{}'", grammar.terminal_display_name(terminal).replace('\'', "\\'")),
-        ANSI_DWA_TERM,
-    )
+    let rendered = grammar
+        .terminals
+        .iter()
+        .find(|candidate| candidate.id() == terminal)
+        .map(|terminal_def| match terminal_def {
+            Terminal::Literal { bytes, .. } => single_quoted(&String::from_utf8_lossy(bytes)),
+            _ => grammar.terminal_display_name(terminal),
+        })
+        .unwrap_or_else(|| grammar.terminal_display_name(terminal));
+    let rendered = if rendered == "STRING_QUOTE" {
+        single_quoted("\"")
+    } else {
+        rendered
+    };
+    colorize(rendered, ANSI_DWA_TERM)
 }
 
 fn terminal_dwa_max_valid_path_len(terminal_dwa: &DWA) -> Option<MaxValidPathLen> {
@@ -566,9 +581,9 @@ fn log_terminal_dwa_sample_paths(
     }
 
     let max_valid_len = match max_valid_len {
-        Some(MaxValidPathLen::Finite(len)) => colorize(format!("max_valid_len={len}"), ANSI_DWA_LEN),
-        Some(MaxValidPathLen::Infinite) => colorize("max_valid_len=infinite", ANSI_DWA_LEN),
-        None => colorize("max_valid_len=none", ANSI_DWA_LEN),
+        Some(MaxValidPathLen::Finite(len)) => format!("max_valid_len={}", colorize(len.to_string(), ANSI_DWA_LEN)),
+        Some(MaxValidPathLen::Infinite) => format!("max_valid_len={}", colorize("infinite", ANSI_DWA_LEN)),
+        None => format!("max_valid_len={}", colorize("none", ANSI_DWA_LEN)),
     };
     eprintln!(
         "[glrmask/dwa_sample] terminal DWA sample paths (n={}, attempts={}, {}):",
@@ -577,7 +592,7 @@ fn log_terminal_dwa_sample_paths(
         max_valid_len,
     );
     for (idx, (path, len, weight)) in collected.iter().enumerate() {
-        let len_repr = colorize(format!("len={len}"), ANSI_DWA_LEN);
+        let len_repr = colorize(len.to_string(), ANSI_DWA_LEN);
         eprintln!(
             "[glrmask/dwa_sample]   Path {}: {} (len={}, {})",
             idx,
