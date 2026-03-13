@@ -75,10 +75,10 @@ impl Dfa {
         }
         let mut h = new_hasher();
         h.write_u8(2);
-        h.write_u64(disallowed.len() as u64);
-        for &word in disallowed.words() {
-            h.write_u64(word);
-        }
+        // h.write_u64(disallowed.len() as u64);
+        // for &word in disallowed.words() {
+        //     h.write_u64(word);
+        // }
         h.write_u64(hash_filtered_group_list(&self.possible_future_groups[state], disallowed));
         h.finish()
     }
