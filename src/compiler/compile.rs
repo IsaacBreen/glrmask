@@ -23,6 +23,7 @@ use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::parser_dwa::{
     ParserDwaBuildReport,
     build_parser_dwa_from_terminal_dwa_with_report,
+    build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report,
 };
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
@@ -774,13 +775,24 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let collect_token_bytes_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "collect_token_bytes", phase_started_at);
 
-    let (mut terminal_dwa, terminal_build) = build_terminal_dwa_with_report(
-        &glr_grammar,
-        &tokenizer,
-        vocab,
-        &id_map,
-        normalized.ignore_terminal,
+    // Overlap terminal-DWA construction with template compilation.
+    // Templates only need (table, grammar) — no dependency on terminal_dwa or id_map.
+    #[cfg(feature = "rayon")]
+    let ((mut terminal_dwa, terminal_build), (characterizations, templates)) = rayon::join(
+        || build_terminal_dwa_with_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal),
+        || {
+            let characterizations = characterize_terminals(&table, &glr_grammar);
+            let templates = Templates::from_characterizations(&characterizations);
+            (characterizations, templates)
+        },
     );
+    #[cfg(not(feature = "rayon"))]
+    let ((mut terminal_dwa, terminal_build), (characterizations, templates)) = {
+        let td = build_terminal_dwa_with_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal);
+        let characterizations = characterize_terminals(&table, &glr_grammar);
+        let templates = Templates::from_characterizations(&characterizations);
+        (td, (characterizations, templates))
+    };
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][compile] build_terminal_dwa_ms={:.3}",
@@ -815,11 +827,14 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, &internal_token_bytes);
 
-    let (parser_dwa, parser_build) = build_parser_dwa_from_terminal_dwa_with_report(
+    // Use precomputed templates — avoid recomputing characterize_terminals + from_characterizations
+    let (parser_dwa, parser_build) = build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
         &table,
         &glr_grammar,
         &tokenizer,
         &terminal_dwa,
+        characterizations,
+        templates,
     );
     if profile_enabled {
         eprintln!(
@@ -860,6 +875,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         );
     }
 
+    let phase_started_at = std::time::Instant::now();
     let mut constraint = Constraint {
         parser_dwa,
         table,
@@ -877,8 +893,28 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         internal_token_dense_words: 0,
         weight_token_dense_masks: rustc_hash::FxHashMap::default(),
     };
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] build_constraint_struct_ms={:.3}",
+            ms(phase_started_at.elapsed()),
+        );
+    }
+    let phase_started_at = std::time::Instant::now();
     constraint.build_buf_masks();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] build_buf_masks_ms={:.3}",
+            ms(phase_started_at.elapsed()),
+        );
+    }
+    let phase_started_at = std::time::Instant::now();
     constraint.build_dense_token_masks();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] build_dense_token_masks_ms={:.3}",
+            ms(phase_started_at.elapsed()),
+        );
+    }
     constraint
 }
 

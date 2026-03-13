@@ -1149,49 +1149,15 @@ fn try_all_compatible_height_0_coloring(
 // Phase 4: Merge + Reconstruct
 // ---------------------------------------------------------------------------
 
-/// Stores a transition weight that may come from a single source (no merging
-/// needed) or multiple sources (accumulated in a WeightBuilder).
-enum TransitionWeight {
-    /// From exactly one source state — stored as-is, no expansion.
-    Single(Weight),
-    /// From merging multiple source states — accumulated via WeightBuilder.
-    Merged(WeightBuilder),
-}
-
-impl TransitionWeight {
-    fn add(&mut self, weight: Weight) {
-        match self {
-            TransitionWeight::Single(existing) => {
-                let mut builder = WeightBuilder::new();
-                builder.union_weight(existing);
-                builder.union_weight(&weight);
-                *self = TransitionWeight::Merged(builder);
-            }
-            TransitionWeight::Merged(builder) => {
-                builder.union_weight(&weight);
-            }
-        }
-    }
-
-    fn build(self) -> Weight {
-        match self {
-            TransitionWeight::Single(w) => w,
-            TransitionWeight::Merged(builder) => builder.build(),
-        }
-    }
-}
-
 struct MergedStateBuilder {
-    final_weight: Weight,
-    final_weight_builder: WeightBuilder,
-    transitions: rustc_hash::FxHashMap<Label, (u32, TransitionWeight)>,
+    final_weights_pending: Vec<Weight>,
+    transitions: rustc_hash::FxHashMap<Label, (u32, Vec<Weight>)>,
 }
 
 impl Default for MergedStateBuilder {
     fn default() -> Self {
         Self {
-            final_weight: Weight::empty(),
-            final_weight_builder: WeightBuilder::new(),
+            final_weights_pending: Vec::new(),
             transitions: rustc_hash::FxHashMap::default(),
         }
     }
@@ -1199,25 +1165,47 @@ impl Default for MergedStateBuilder {
 
 impl MergedStateBuilder {
     fn add_final_weight(&mut self, weight: &Weight) {
-        self.final_weight_builder.union_weight(weight);
+        self.final_weights_pending.push(weight.clone());
     }
 
     fn add_transition(&mut self, label: Label, target: u32, weight: Weight) {
         use std::collections::hash_map::Entry;
         match self.transitions.entry(label) {
             Entry::Occupied(mut entry) => {
-                let (existing_target, existing_tw) = entry.get_mut();
+                let (existing_target, pending) = entry.get_mut();
                 debug_assert_eq!(*existing_target, target);
-                existing_tw.add(weight);
+                pending.push(weight);
             }
             Entry::Vacant(entry) => {
-                entry.insert((target, TransitionWeight::Single(weight)));
+                entry.insert((target, vec![weight]));
             }
         }
     }
 
     fn finalize_for_reuse(&mut self) {
-        self.final_weight = std::mem::take(&mut self.final_weight_builder).build();
+        // Only finalize final_weights — transition weights are batch-built in reconstruct.
+        let pending = std::mem::take(&mut self.final_weights_pending);
+        // Store the built weight back as a single-element pending for reconstruct to pick up.
+        let built = batch_build_weight(pending);
+        if !built.is_empty() {
+            self.final_weights_pending.push(built);
+        }
+    }
+}
+
+/// Batch-build a Weight from a Vec of pending weights using a hybrid strategy.
+fn batch_build_weight(pending: Vec<Weight>) -> Weight {
+    match pending.len() {
+        0 => Weight::empty(),
+        1 => pending.into_iter().next().unwrap(),
+        n if n <= 16 => Weight::union_all(pending.iter()),
+        _ => {
+            let mut builder = WeightBuilder::new();
+            for w in &pending {
+                builder.union_weight(w);
+            }
+            builder.build()
+        }
     }
 }
 
@@ -1267,11 +1255,13 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
         .into_iter()
         .map(|b| {
             let mut state = DWAState::default();
-            if !b.final_weight.is_empty() {
-                state.final_weight = Some(b.final_weight);
+            // final_weights_pending has at most one element after finalize_for_reuse
+            let final_weight = b.final_weights_pending.into_iter().next().unwrap_or_else(Weight::empty);
+            if !final_weight.is_empty() {
+                state.final_weight = Some(final_weight);
             }
-            for (lbl, (target, tw)) in b.transitions {
-                let weight = tw.build();
+            for (lbl, (target, pending)) in b.transitions {
+                let weight = batch_build_weight(pending);
                 if !weight.is_empty() {
                     state.transitions.insert(lbl, (target, weight));
                 }

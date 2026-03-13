@@ -10,7 +10,7 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize_with_threshold;
+use crate::automata::weighted::minimize::{minimize_with_threshold, minimize_fast};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
@@ -26,7 +26,7 @@ use crate::compiler::stages::profile_stats::{
     collect_weighted_nwa_stats,
 };
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::stages::templates::characterize::characterize_terminals;
+use crate::compiler::stages::templates::characterize::{characterize_terminals, TerminalCharacterization};
 use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
 use crate::ds::weight::Weight;
 
@@ -224,46 +224,71 @@ fn build_state_summaries(
     templates: &Templates,
 ) -> (Vec<StateSummary>, BundleStats) {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
-    let mut group_targets_time = std::time::Duration::ZERO;
-    let mut build_bundle_time = std::time::Duration::ZERO;
-    let mut bundle_count = 0usize;
-    let mut unique_bundle_targets = HashSet::new();
-    let mut bundle_cache: HashMap<Vec<(TerminalID, Weight)>, (usize, Arc<NWA>)> = HashMap::new();
-    let mut bundle_cache_hits = 0usize;
-    let mut next_bundle_id = 0usize;
+    let group_targets_started = std::time::Instant::now();
 
+    // Phase 1: Collect all (state_id, target, bundle_key) triples.
+    let mut state_groups: Vec<Vec<(u32, Vec<(TerminalID, Weight)>, Bundle)>> = Vec::with_capacity(terminal_dwa.states.len());
+    let mut unique_keys: HashMap<Vec<(TerminalID, Weight)>, usize> = HashMap::new();
+    let mut unique_bundles_ordered: Vec<(usize, Vec<(TerminalID, Weight)>, Bundle)> = Vec::new();
+    let mut bundle_count = 0usize;
+    let mut bundle_cache_hits = 0usize;
+
+    for (state_id, _state) in terminal_dwa.states.iter().enumerate() {
+        let groups = group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32);
+        let mut state_entries = Vec::with_capacity(groups.len());
+        for (target, bundle) in groups {
+            bundle_count += 1;
+            let bundle_key: Vec<(TerminalID, Weight)> = bundle
+                .iter()
+                .map(|(&terminal, weight)| (terminal, weight.clone()))
+                .collect();
+            if let Some(&existing_id) = unique_keys.get(&bundle_key) {
+                bundle_cache_hits += 1;
+                state_entries.push((target, bundle_key, bundle));
+                let _ = existing_id; // referenced via unique_keys later
+            } else {
+                let id = unique_bundles_ordered.len();
+                unique_keys.insert(bundle_key.clone(), id);
+                unique_bundles_ordered.push((id, bundle_key.clone(), bundle.clone()));
+                state_entries.push((target, bundle_key, bundle));
+            }
+        }
+        state_groups.push(state_entries);
+    }
+    let group_targets_time = group_targets_started.elapsed();
+
+    // Phase 2: Build all unique bundles in parallel.
+    let build_bundle_started = std::time::Instant::now();
+    #[cfg(feature = "rayon")]
+    let built_bundles: Vec<Arc<NWA>> = {
+        use rayon::prelude::*;
+        unique_bundles_ordered
+            .par_iter()
+            .map(|(_id, _key, bundle)| Arc::new(templates.build_bundle(bundle)))
+            .collect()
+    };
+    #[cfg(not(feature = "rayon"))]
+    let built_bundles: Vec<Arc<NWA>> = unique_bundles_ordered
+        .iter()
+        .map(|(_id, _key, bundle)| Arc::new(templates.build_bundle(bundle)))
+        .collect();
+    let build_bundle_time = build_bundle_started.elapsed();
+
+    // Phase 3: Assemble StateSummary structs using prebuilt bundles.
+    let mut unique_bundle_targets = HashSet::new();
     let summaries: Vec<StateSummary> = terminal_dwa
         .states
         .iter()
         .enumerate()
         .map(|(state_id, state)| {
-            let phase_started_at = std::time::Instant::now();
-            let groups = group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32);
-            group_targets_time += phase_started_at.elapsed();
-
-            let branches = groups
-                .into_iter()
-                .map(|(target, bundle)| {
-                    bundle_count += 1;
-                    let bundle_key: Vec<(TerminalID, Weight)> = bundle
-                        .iter()
-                        .map(|(&terminal, weight)| (terminal, weight.clone()))
-                        .collect();
-                    let phase_started_at = std::time::Instant::now();
-                    let (bundle_id, built_bundle) = if let Some((bundle_id, existing)) = bundle_cache.get(&bundle_key) {
-                        bundle_cache_hits += 1;
-                        (*bundle_id, Arc::clone(existing))
-                    } else {
-                        let bundle_id = next_bundle_id;
-                        next_bundle_id += 1;
-                        let built_bundle = Arc::new(templates.build_bundle(&bundle));
-                        bundle_cache.insert(bundle_key, (bundle_id, Arc::clone(&built_bundle)));
-                        (bundle_id, built_bundle)
-                    };
-                    unique_bundle_targets.insert((target, bundle_id));
-                    build_bundle_time += phase_started_at.elapsed();
+            let branches = state_groups[state_id]
+                .iter()
+                .map(|(target, bundle_key, _bundle)| {
+                    let bundle_id = unique_keys[bundle_key];
+                    let built_bundle = Arc::clone(&built_bundles[bundle_id]);
+                    unique_bundle_targets.insert((*target, bundle_id));
                     Branch {
-                        target,
+                        target: *target,
                         bundle_id,
                         bundle: built_bundle,
                     }
@@ -283,7 +308,7 @@ fn build_state_summaries(
             group_targets_time.as_secs_f64() * 1000.0,
             build_bundle_time.as_secs_f64() * 1000.0,
             bundle_count,
-            bundle_cache.len(),
+            unique_bundles_ordered.len(),
             unique_bundle_targets.len(),
             bundle_cache_hits,
         );
@@ -293,7 +318,7 @@ fn build_state_summaries(
         summaries,
         BundleStats {
             total_bundles: bundle_count,
-            unique_bundles: bundle_cache.len(),
+            unique_bundles: unique_bundles_ordered.len(),
             unique_bundle_targets: unique_bundle_targets.len(),
             bundle_cache_hits,
             group_targets_time,
@@ -438,10 +463,30 @@ pub(crate) fn build_parser_dwa_with_report(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> (DWA, ParserDwaBuildReport) {
-    let (terminal_dwa, terminal_build) =
-        build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal);
+    // Overlap terminal-DWA construction with template compilation:
+    // terminal_dwa depends on (grammar, tokenizer, vocab, id_map)
+    // templates depend on (table, grammar) only — no terminal_dwa
+    #[cfg(feature = "rayon")]
+    let ((terminal_dwa, terminal_build), (characterizations, templates)) = rayon::join(
+        || build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal),
+        || {
+            let characterizations = characterize_terminals(table, grammar);
+            let templates = Templates::from_characterizations(&characterizations);
+            (characterizations, templates)
+        },
+    );
+    #[cfg(not(feature = "rayon"))]
+    let ((terminal_dwa, terminal_build), (characterizations, templates)) = {
+        let td = build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal);
+        let characterizations = characterize_terminals(table, grammar);
+        let templates = Templates::from_characterizations(&characterizations);
+        (td, (characterizations, templates))
+    };
+
     let (mut parser_dwa, mut report) =
-        build_parser_dwa_from_terminal_dwa_with_report(table, grammar, tokenizer, &terminal_dwa);
+        build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
+            table, grammar, tokenizer, &terminal_dwa, characterizations, templates,
+        );
     report.terminal_build = Some(terminal_build);
     parser_dwa.clip_weights(id_map.max_internal_token_id());
     (parser_dwa, report)
@@ -463,30 +508,42 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_report(
     terminal_dwa: &DWA,
 ) -> (DWA, ParserDwaBuildReport) {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
-    let total_started_at = std::time::Instant::now();
-    let mut report = ParserDwaBuildReport::default();
-
     let phase_started_at = std::time::Instant::now();
     let characterizations = characterize_terminals(table, grammar);
-    report.characterize_terminals_time = phase_started_at.elapsed();
-    report.characterizations = collect_characterization_stats(&characterizations);
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa] characterize_terminals_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0
+            phase_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
-
     let phase_started_at = std::time::Instant::now();
     let templates = Templates::from_characterizations(&characterizations);
-    report.build_templates_time = phase_started_at.elapsed();
-    report.templates = collect_template_stats(&templates);
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa] build_templates_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0
+            "[glrmask/profile][parser_dwa] from_characterizations_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
+    build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
+        table, grammar, tokenizer, terminal_dwa, characterizations, templates,
+    )
+}
+
+pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    terminal_dwa: &DWA,
+    characterizations: BTreeMap<TerminalID, TerminalCharacterization>,
+    templates: Templates,
+) -> (DWA, ParserDwaBuildReport) {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
+    let total_started_at = std::time::Instant::now();
+    let mut report = ParserDwaBuildReport::default();
+
+    // characterize_terminals and build_templates already done above
+    report.characterizations = collect_characterization_stats(&characterizations);
+    report.templates = collect_template_stats(&templates);
 
     let phase_started_at = std::time::Instant::now();
     let (states, bundle_stats) = build_state_summaries(terminal_dwa, grammar, &templates);
