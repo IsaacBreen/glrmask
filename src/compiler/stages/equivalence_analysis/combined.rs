@@ -334,41 +334,5 @@ mod tests {
                 println!("  Class {}: {:?}", i, content);
             }
         }
+    }
 
-        #[test]
-        #[ignore]
-        fn diagnose_o56012_analyze_equivalences() {
-            let lark = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
-            let grammar = crate::import::lark::parse_lark(lark).expect("lark should parse");
-            let (normalized, tokenizer) =
-                crate::compiler::grammar::transforms::prepare_grammar_for_compile(&grammar);
-            let analyzed = crate::compiler::glr::analysis::AnalyzedGrammar::from_grammar_def(&normalized);
-            let disallowed_follows = crate::compiler::compile::compute_disallowed_follows(&analyzed);
-            let vocab = load_cached_gpt2_vocab();
-
-            assert_eq!(vocab.entries.get(&38).unwrap().as_slice(), b"G");
-            assert_eq!(vocab.entries.get(&4579).unwrap().as_slice(), b"GB");
-
-            println!("normalized ignore terminal: {:?}", normalized.ignore_terminal);
-            println!("normalized tokenizer states: {}", tokenizer.num_states());
-
-            let id_map = analyze_equivalences(
-                &tokenizer,
-                &vocab,
-                &disallowed_follows,
-                normalized.ignore_terminal,
-            );
-            let left_internal = id_map.vocab_tokens.original_to_internal[38usize];
-            let right_internal = id_map.vocab_tokens.original_to_internal[4579usize];
-            println!("internal(G)={left_internal}");
-            println!("internal(GB)={right_internal}");
-            println!("same internal token: {}", left_internal == right_internal);
-
-            if left_internal == right_internal {
-                println!(
-                    "merged class: {:?}",
-                    id_map.vocab_tokens.internal_to_originals[left_internal as usize]
-                );
-            }
-        }
-}
