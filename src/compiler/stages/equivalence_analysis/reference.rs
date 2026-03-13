@@ -280,35 +280,6 @@ fn build_trellis_dag(
     dag
 }
 
-fn prune_reachable(dag: &mut BTreeMap<usize, FlatNode>, token_len: usize) {
-    let mut reverse_edges: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (&src, node) in dag.iter() {
-        for &(_, dst) in &node.edges {
-            reverse_edges.entry(dst).or_default().push(src);
-        }
-    }
-
-    let mut can_reach_end: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut stack: Vec<usize> = Vec::new();
-    if dag.contains_key(&token_len) {
-        can_reach_end.insert(token_len);
-        stack.push(token_len);
-    }
-    while let Some(pos) = stack.pop() {
-        if let Some(preds) = reverse_edges.get(&pos) {
-            for &pred in preds {
-                if can_reach_end.insert(pred) {
-                    stack.push(pred);
-                }
-            }
-        }
-    }
-
-    for (_pos, node) in dag.iter_mut() {
-        node.edges.retain(|&(_, target)| can_reach_end.contains(&target));
-    }
-}
-
 // ---- NFA construction from trellis DAG ----
 
 fn build_nfa_from_trellis(
@@ -489,7 +460,6 @@ fn process_token_for_state(
     tmp_mp.resize(pre.num_groups, NONE);
 
     let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
-    // prune_reachable(&mut dag, token.len());
 
     let mut nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, ignore_terminal);
     let nfa_hash = canonical_nfa_hash(&nfa);
@@ -798,7 +768,6 @@ mod tests {
 
             // Step 3: Build NFA
             let mut dag2 = build_trellis_dag(dfa, pre.num_groups, token, state, &mut tmp_mp);
-            // prune_reachable(&mut dag2, token.len());
             let nfa = build_nfa_from_trellis(dfa, &dag2, pre.num_groups, None);
             println!("\nNFA: {} states", nfa.num_states());
 
