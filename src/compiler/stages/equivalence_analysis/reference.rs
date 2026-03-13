@@ -367,33 +367,28 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
         }
     }
 
-    // Reverse epsilon graph: for each A -ε→ B, record B → A.
-    let mut eps_predecessors: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for (src_idx, state) in nfa.states.iter().enumerate() {
-        for &tgt in &state.epsilons {
-            eps_predecessors[tgt as usize].push(src_idx as u32);
-        }
-    }
-
-    // Propagate incoming terminals through reverse epsilon edges (fixpoint).
+    // Propagate incoming terminals forward through epsilon edges (fixpoint).
     let mut incoming: Vec<BTreeSet<usize>> = direct_incoming;
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for idx in 0..n {
-            if eps_predecessors[idx].is_empty() {
-                continue;
-            }
-            let mut to_add = Vec::new();
-            for &pred in &eps_predecessors[idx] {
-                for &gid in &incoming[pred as usize] {
-                    to_add.push(gid);
-                }
-            }
-            for gid in to_add {
-                if incoming[idx].insert(gid) {
+    let mut queue: VecDeque<u32> = incoming
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, gids)| (!gids.is_empty()).then_some(idx as u32))
+        .collect();
+
+    while let Some(src) = queue.pop_front() {
+        let propagated: Vec<usize> = incoming[src as usize].iter().copied().collect();
+        if propagated.is_empty() {
+            continue;
+        }
+        for &tgt in &nfa.states[src as usize].epsilons {
+            let mut changed = false;
+            for &gid in &propagated {
+                if incoming[tgt as usize].insert(gid) {
                     changed = true;
                 }
+            }
+            if changed {
+                queue.push_back(tgt);
             }
         }
     }
@@ -415,33 +410,9 @@ fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], nu
 
     // Mark states that should have no disallowed set:
     //   - states in the epsilon closure of start
-    //   - states reached by one transition from the start closure
-    //   - epsilon descendants of those states
     let mut no_disallowed: Vec<bool> = vec![false; n];
-    let mut clear_queue: VecDeque<u32> = VecDeque::new();
-
     for &s in &start_closure {
-        if !no_disallowed[s as usize] {
-            no_disallowed[s as usize] = true;
-            clear_queue.push_back(s);
-        }
-        for targets in nfa.states[s as usize].transitions.values() {
-            for &tgt in targets {
-                if !no_disallowed[tgt as usize] {
-                    no_disallowed[tgt as usize] = true;
-                    clear_queue.push_back(tgt);
-                }
-            }
-        }
-    }
-
-    while let Some(state) = clear_queue.pop_front() {
-        for &tgt in &nfa.states[state as usize].epsilons {
-            if !no_disallowed[tgt as usize] {
-                no_disallowed[tgt as usize] = true;
-                clear_queue.push_back(tgt);
-            }
-        }
+        no_disallowed[s as usize] = true;
     }
 
     // Compute disallowed set per state.
