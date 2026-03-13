@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -250,6 +250,190 @@ fn sample_weight_tokens(
     }
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct ValidPathConfig {
+    state: u32,
+    weight: Weight,
+}
+
+struct ValidPathNode {
+    accepting: bool,
+    transitions: Vec<usize>,
+}
+
+enum MaxValidPathLen {
+    Finite(usize),
+    Infinite,
+}
+
+fn terminal_label_name(grammar: &GrammarDef, label: i32) -> String {
+    assert!(label >= 0, "terminal DWA emitted unexpected negative label {label}");
+    let terminal = label as u32;
+    format!("'{}'", grammar.terminal_display_name(terminal).replace('\'', "\\'"))
+}
+
+fn terminal_dwa_max_valid_path_len(terminal_dwa: &DWA) -> Option<MaxValidPathLen> {
+    if terminal_dwa.states.is_empty() {
+        return None;
+    }
+
+    let mut node_ids = HashMap::<ValidPathConfig, usize>::new();
+    let mut node_configs = Vec::<ValidPathConfig>::new();
+    let mut nodes = Vec::<ValidPathNode>::new();
+    let mut queue = VecDeque::<usize>::new();
+
+    let start = ValidPathConfig {
+        state: terminal_dwa.start_state,
+        weight: Weight::all(),
+    };
+    node_ids.insert(start.clone(), 0);
+    node_configs.push(start);
+    nodes.push(ValidPathNode {
+        accepting: false,
+        transitions: Vec::new(),
+    });
+    queue.push_back(0);
+
+    while let Some(node_id) = queue.pop_front() {
+        let config = node_configs[node_id].clone();
+        let state = &terminal_dwa.states[config.state as usize];
+
+        nodes[node_id].accepting = state
+            .final_weight
+            .as_ref()
+            .map(|final_weight| !config.weight.intersection(final_weight).is_empty())
+            .unwrap_or(false);
+
+        let mut next_ids = Vec::new();
+        for (next_state, edge_weight) in state.transitions.values() {
+            let next_weight = config.weight.intersection(edge_weight);
+            if next_weight.is_empty() {
+                continue;
+            }
+            let next_config = ValidPathConfig {
+                state: *next_state,
+                weight: next_weight,
+            };
+            let next_id = if let Some(&existing) = node_ids.get(&next_config) {
+                existing
+            } else {
+                let new_id = nodes.len();
+                node_ids.insert(next_config.clone(), new_id);
+                node_configs.push(next_config);
+                nodes.push(ValidPathNode {
+                    accepting: false,
+                    transitions: Vec::new(),
+                });
+                queue.push_back(new_id);
+                new_id
+            };
+            next_ids.push(next_id);
+        }
+        next_ids.sort_unstable();
+        next_ids.dedup();
+        nodes[node_id].transitions = next_ids;
+    }
+
+    let mut reverse = vec![Vec::<usize>::new(); nodes.len()];
+    for (node_id, node) in nodes.iter().enumerate() {
+        for &next_id in &node.transitions {
+            reverse[next_id].push(node_id);
+        }
+    }
+
+    let mut productive = vec![false; nodes.len()];
+    let mut productive_queue = VecDeque::new();
+    for (node_id, node) in nodes.iter().enumerate() {
+        if node.accepting {
+            productive[node_id] = true;
+            productive_queue.push_back(node_id);
+        }
+    }
+    while let Some(node_id) = productive_queue.pop_front() {
+        for &prev_id in &reverse[node_id] {
+            if !productive[prev_id] {
+                productive[prev_id] = true;
+                productive_queue.push_back(prev_id);
+            }
+        }
+    }
+
+    if !productive[0] {
+        return None;
+    }
+
+    let mut reachable = vec![false; nodes.len()];
+    let mut reachable_queue = VecDeque::from([0usize]);
+    reachable[0] = true;
+    while let Some(node_id) = reachable_queue.pop_front() {
+        for &next_id in &nodes[node_id].transitions {
+            if productive[next_id] && !reachable[next_id] {
+                reachable[next_id] = true;
+                reachable_queue.push_back(next_id);
+            }
+        }
+    }
+
+    let reachable_count = reachable
+        .iter()
+        .zip(productive.iter())
+        .filter(|(is_reachable, is_productive)| **is_reachable && **is_productive)
+        .count();
+
+    let mut indegree = vec![0usize; nodes.len()];
+    for (node_id, node) in nodes.iter().enumerate() {
+        if !(reachable[node_id] && productive[node_id]) {
+            continue;
+        }
+        for &next_id in &node.transitions {
+            if reachable[next_id] && productive[next_id] {
+                indegree[next_id] += 1;
+            }
+        }
+    }
+
+    let mut topo_queue = VecDeque::new();
+    for node_id in 0..nodes.len() {
+        if reachable[node_id] && productive[node_id] && indegree[node_id] == 0 {
+            topo_queue.push_back(node_id);
+        }
+    }
+
+    let mut topo_order = Vec::with_capacity(reachable_count);
+    while let Some(node_id) = topo_queue.pop_front() {
+        topo_order.push(node_id);
+        for &next_id in &nodes[node_id].transitions {
+            if reachable[next_id] && productive[next_id] {
+                indegree[next_id] -= 1;
+                if indegree[next_id] == 0 {
+                    topo_queue.push_back(next_id);
+                }
+            }
+        }
+    }
+
+    if topo_order.len() != reachable_count {
+        return Some(MaxValidPathLen::Infinite);
+    }
+
+    let mut longest = vec![None::<usize>; nodes.len()];
+    for &node_id in topo_order.iter().rev() {
+        let mut best = nodes[node_id].accepting.then_some(0);
+        for &next_id in &nodes[node_id].transitions {
+            if !(reachable[next_id] && productive[next_id]) {
+                continue;
+            }
+            if let Some(next_best) = longest[next_id] {
+                let candidate = next_best + 1;
+                best = Some(best.map_or(candidate, |current| current.max(candidate)));
+            }
+        }
+        longest[node_id] = best;
+    }
+
+    longest[0].map(MaxValidPathLen::Finite)
+}
+
 fn log_terminal_dwa_sample_paths(
     grammar: &GrammarDef,
     terminal_dwa: &DWA,
@@ -282,14 +466,7 @@ fn log_terminal_dwa_sample_paths(
         .map(|prob| prob.clamp(0.0, 1.0))
         .unwrap_or(if sample_long { 0.1 } else { 0.3 });
 
-    let format_terminal = |label: i32| -> String {
-        if label >= 0 {
-            let terminal = label as u32;
-            format!("T{}('{}')", terminal, grammar.terminal_display_name(terminal))
-        } else {
-            format!("L{}", label)
-        }
-    };
+    let max_valid_len = terminal_dwa_max_valid_path_len(terminal_dwa);
 
     let mut rng = rand::thread_rng();
     let mut collected: Vec<(String, usize, Weight)> = Vec::new();
@@ -333,7 +510,7 @@ fn log_terminal_dwa_sample_paths(
 
             let idx = rng.gen_range(0..choices.len());
             let (label, next_state, next_weight) = choices.swap_remove(idx);
-            path.push(format_terminal(label));
+            path.push(terminal_label_name(grammar, label));
             weight = next_weight;
             state = next_state;
             steps += 1;
@@ -361,10 +538,16 @@ fn log_terminal_dwa_sample_paths(
         collected.truncate(num_sample_paths);
     }
 
+    let max_valid_len = match max_valid_len {
+        Some(MaxValidPathLen::Finite(len)) => len.to_string(),
+        Some(MaxValidPathLen::Infinite) => "infinite".to_string(),
+        None => "none".to_string(),
+    };
     eprintln!(
-        "[glrmask/dwa_sample] terminal DWA sample paths (n={}, attempts={}):",
+        "[glrmask/dwa_sample] terminal DWA sample paths (n={}, attempts={}, max_valid_len={}):",
         collected.len(),
         attempts,
+        max_valid_len,
     );
     for (idx, (path, len, weight)) in collected.iter().enumerate() {
         eprintln!(
