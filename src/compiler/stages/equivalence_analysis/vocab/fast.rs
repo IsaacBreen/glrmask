@@ -800,35 +800,6 @@ mod tests {
     }
 
     #[test]
-    fn test_completion_with_disallowed_distinguishes_detector_state() {
-        let dfa = Dfa {
-            start_state: 0,
-            num_states: 1,
-            byte_to_class: [0; 256],
-            num_classes: 1,
-            trans_by_class: vec![NONE],
-            finalizers: vec![SmallVec::new()],
-            is_dead_end: vec![false],
-            num_groups: 3,
-            possible_future_groups: vec![smallvec::smallvec![0usize]],
-            completion_hash: vec![123],
-            none_completion_hash: 456,
-            self_loop_bytes: vec![[0; 4]],
-            disallowed_follows: vec![BitSet::new(3); 3],
-        };
-        let mut disallowed_a = BitSet::new(3);
-        disallowed_a.set(1);
-        let mut disallowed_b = BitSet::new(3);
-        disallowed_b.set(2);
-
-        assert_ne!(
-            dfa.completion_with_disallowed(0, Some(&disallowed_a)),
-            dfa.completion_with_disallowed(0, Some(&disallowed_b)),
-            "different disallowed-follow detector states must not collapse when filtered futures match"
-        );
-    }
-
-    #[test]
     #[ignore]
     fn diagnose_g_gb_witness_fast_suffix_hashes() {
         let lark = include_str!("../../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");

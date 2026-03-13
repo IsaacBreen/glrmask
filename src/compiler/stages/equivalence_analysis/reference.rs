@@ -811,6 +811,56 @@ mod tests {
         assert_eq!(left_hash, right_hash);
     }
 
+    /// Self-contained reproducer: fast vs reference vocab equivalence mismatch.
+    ///
+    /// Tokenizer (3 groups):
+    ///   group 0: `a`
+    ///   group 1: `b*`
+    ///   group 2: `c`
+    ///
+    /// Disallowed follows: after group 2, group 1 is forbidden.
+    ///
+    /// Tokens: `ca` vs `cba`.
+    ///
+    /// Both tokens start with `c` (group 2). In the suffix after `c`, the
+    /// disallowed-follow constraint forbids group 1 (`b*`). Token `cba` has a
+    /// `b` byte that could match group 1 in an unconstrained segmentation, but
+    /// the constraint blocks it. The reference analysis (trellis→NFA→DFA with
+    /// subtraction) correctly distinguishes the constrained suffix behavior;
+    /// the fast analysis (suffix DAG hashing) incorrectly merges them because
+    /// it intersects disallowed states across all paths reaching the same
+    /// suffix position, losing the per-path constraint context.
+    #[test]
+    fn test_self_contained_fast_reference_vocab_mismatch() {
+        let exprs = [
+            bytes(b"a"),             // group 0
+            star(bytes(b"b")),       // group 1
+            bytes(b"c"),             // group 2
+        ];
+        let tokenizer = build_tokenizer_from_exprs(&exprs);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+
+        let mut disallowed = BTreeMap::new();
+        let mut bits = BitSet::new(3);
+        bits.set(1);
+        disallowed.insert(2u32, bits); // after group 2, group 1 forbidden
+
+        let tokens: Vec<Vec<u8>> = vec![b"ca".to_vec(), b"cba".to_vec()];
+        let states = vec![sep1.initial_state_id()];
+
+        let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1, &tokens, &states, &disallowed,
+        );
+        let reference = find_equivalence_classes(&sep1, &tokens, &states, &disallowed, None);
+
+        // BUG: fast merges tokens that reference correctly splits.
+        // When fixed, change both to assert the same partition.
+        assert_eq!(fast, BTreeSet::from([vec![0, 1]]),
+            "fast incorrectly merges the two tokens");
+        assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0], vec![1]]),
+            "reference correctly splits the two tokens");
+    }
+
     /// Diagnostic: trace the trellis + NFA + DFA for the live witness pair at state 9686.
     /// Run with: cargo test --lib trace_witness_tokens -- --nocapture --ignored
     #[test]
