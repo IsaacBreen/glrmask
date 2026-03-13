@@ -33,6 +33,10 @@ use crate::ds::weight::Weight;
 use crate::runtime::Constraint;
 
 const DWA_SAMPLE_TOKEN_REPR_LIMIT: usize = 48;
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_DWA_TERM: &str = "\x1b[38;5;45m";
+const ANSI_DWA_TOKEN: &str = "\x1b[38;5;114m";
+const ANSI_DWA_LEN: &str = "\x1b[38;5;220m";
 
 /// Convert ever-allowed follow sets into the `BTreeMap<u32, BitSet>` disallowed-follows
 /// format expected by the equivalence analysis.
@@ -189,6 +193,10 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     out
 }
 
+fn colorize(text: impl AsRef<str>, ansi: &str) -> String {
+    format!("{ansi}{}{ANSI_RESET}", text.as_ref())
+}
+
 fn escape_single_quoted(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -206,7 +214,10 @@ fn escape_single_quoted(text: &str) -> String {
 
 fn token_repr(bytes: &[u8]) -> String {
     let escaped = escape_single_quoted(&String::from_utf8_lossy(bytes));
-    format!("'{}'", truncate_chars(&escaped, DWA_SAMPLE_TOKEN_REPR_LIMIT))
+    colorize(
+        format!("'{}'", truncate_chars(&escaped, DWA_SAMPLE_TOKEN_REPR_LIMIT)),
+        ANSI_DWA_TOKEN,
+    )
 }
 
 fn sample_weight_tokens(
@@ -282,7 +293,10 @@ enum MaxValidPathLen {
 fn terminal_label_name(grammar: &GrammarDef, label: i32) -> String {
     assert!(label >= 0, "terminal DWA emitted unexpected negative label {label}");
     let terminal = label as u32;
-    format!("'{}'", grammar.terminal_display_name(terminal).replace('\'', "\\'"))
+    colorize(
+        format!("'{}'", grammar.terminal_display_name(terminal).replace('\'', "\\'")),
+        ANSI_DWA_TERM,
+    )
 }
 
 fn terminal_dwa_max_valid_path_len(terminal_dwa: &DWA) -> Option<MaxValidPathLen> {
@@ -552,22 +566,23 @@ fn log_terminal_dwa_sample_paths(
     }
 
     let max_valid_len = match max_valid_len {
-        Some(MaxValidPathLen::Finite(len)) => len.to_string(),
-        Some(MaxValidPathLen::Infinite) => "infinite".to_string(),
-        None => "none".to_string(),
+        Some(MaxValidPathLen::Finite(len)) => colorize(format!("max_valid_len={len}"), ANSI_DWA_LEN),
+        Some(MaxValidPathLen::Infinite) => colorize("max_valid_len=infinite", ANSI_DWA_LEN),
+        None => colorize("max_valid_len=none", ANSI_DWA_LEN),
     };
     eprintln!(
-        "[glrmask/dwa_sample] terminal DWA sample paths (n={}, attempts={}, max_valid_len={}):",
+        "[glrmask/dwa_sample] terminal DWA sample paths (n={}, attempts={}, {}):",
         collected.len(),
         attempts,
         max_valid_len,
     );
     for (idx, (path, len, weight)) in collected.iter().enumerate() {
+        let len_repr = colorize(format!("len={len}"), ANSI_DWA_LEN);
         eprintln!(
             "[glrmask/dwa_sample]   Path {}: {} (len={}, {})",
             idx,
             path,
-            len,
+            len_repr,
             sample_weight_tokens(weight, internal_token_bytes, max_tokens),
         );
     }
