@@ -25,6 +25,7 @@ rayon = { version = "1", optional = true }
 
 # Logging
 tracing = "0.1"
+rand = "0.8"
 
 # Error handling
 thiserror = "1"

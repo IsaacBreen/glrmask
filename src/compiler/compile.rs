@@ -29,7 +29,10 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
 use crate::compiler::stages::terminal_dwa::compute_ever_allowed_follows;
 use crate::ds::bitset::BitSet;
+use crate::ds::weight::Weight;
 use crate::runtime::Constraint;
+
+const DWA_SAMPLE_TOKEN_REPR_LIMIT: usize = 48;
 
 /// Convert ever-allowed follow sets into the `BTreeMap<u32, BitSet>` disallowed-follows
 /// format expected by the equivalence analysis.
@@ -152,6 +155,229 @@ fn reduction_ratio(original: usize, reduced: usize) -> f64 {
 
 fn ms(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name).ok().and_then(|value| value.parse().ok())
+}
+
+fn env_f64(name: &str) -> Option<f64> {
+    std::env::var(name).ok().and_then(|value| value.parse().ok())
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return text.to_string();
+        };
+        out.push(ch);
+    }
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
+fn token_repr(bytes: &[u8]) -> String {
+    truncate_chars(
+        &format!("{:?}", String::from_utf8_lossy(bytes)),
+        DWA_SAMPLE_TOKEN_REPR_LIMIT,
+    )
+}
+
+fn sample_weight_tokens(
+    weight: &Weight,
+    internal_token_bytes: &BTreeMap<u32, Vec<u8>>,
+    max_tokens: usize,
+) -> String {
+    if weight.is_empty() {
+        return "tokens=[]".to_string();
+    }
+    if weight.is_full() {
+        return "tokens=ALL".to_string();
+    }
+
+    let mut candidate_ids = Vec::new();
+    for range in weight.token_union().ranges() {
+        let mut token_id = *range.start();
+        while token_id <= *range.end() && candidate_ids.len() < 256 {
+            candidate_ids.push(token_id);
+            if token_id == u32::MAX {
+                break;
+            }
+            token_id = token_id.saturating_add(1);
+        }
+        if candidate_ids.len() >= 256 {
+            break;
+        }
+    }
+
+    candidate_ids.sort_by(|left, right| {
+        let left_bytes = internal_token_bytes.get(left).map(Vec::as_slice).unwrap_or(&[]);
+        let right_bytes = internal_token_bytes.get(right).map(Vec::as_slice).unwrap_or(&[]);
+        right_bytes
+            .len()
+            .cmp(&left_bytes.len())
+            .then_with(|| left.cmp(right))
+    });
+
+    let samples: Vec<String> = candidate_ids
+        .into_iter()
+        .take(max_tokens)
+        .map(|token_id| {
+            internal_token_bytes
+                .get(&token_id)
+                .map(|bytes| format!("{}:{}", token_id, token_repr(bytes)))
+                .unwrap_or_else(|| format!("{}:<missing>", token_id))
+        })
+        .collect();
+
+    if samples.is_empty() {
+        "tokens=[]".to_string()
+    } else {
+        format!("tokens=[{}]", samples.join(", "))
+    }
+}
+
+fn log_terminal_dwa_sample_paths(
+    grammar: &GrammarDef,
+    terminal_dwa: &DWA,
+    internal_token_bytes: &BTreeMap<u32, Vec<u8>>,
+) {
+    use rand::Rng;
+
+    let Some(num_sample_paths) = env_usize("DWA_SAMPLE_PATHS") else {
+        return;
+    };
+
+    if terminal_dwa.states.is_empty() {
+        eprintln!("[glrmask/dwa_sample] terminal DWA is empty");
+        return;
+    }
+
+    let sample_long = env_flag_enabled("DWA_SAMPLE_LONG");
+    let min_len = env_usize("DWA_SAMPLE_MIN_LEN");
+    let max_tokens = env_usize("DWA_SAMPLE_MAX_TOKENS").unwrap_or(3);
+    let target_samples = if sample_long {
+        num_sample_paths.saturating_mul(20).max(num_sample_paths)
+    } else {
+        num_sample_paths
+    };
+    let max_attempts = env_usize("DWA_SAMPLE_MAX_ATTEMPTS")
+        .unwrap_or_else(|| target_samples.saturating_mul(50).max(target_samples));
+    let max_steps = env_usize("DWA_SAMPLE_MAX_STEPS")
+        .unwrap_or(if sample_long { 2048 } else { 512 });
+    let end_prob = env_f64("DWA_SAMPLE_END_PROB")
+        .map(|prob| prob.clamp(0.0, 1.0))
+        .unwrap_or(if sample_long { 0.1 } else { 0.3 });
+
+    let format_terminal = |label: i32| -> String {
+        if label >= 0 {
+            let terminal = label as u32;
+            format!("T{}('{}')", terminal, grammar.terminal_display_name(terminal))
+        } else {
+            format!("L{}", label)
+        }
+    };
+
+    let mut rng = rand::thread_rng();
+    let mut collected: Vec<(String, usize, Weight)> = Vec::new();
+    let mut attempts = 0usize;
+
+    while collected.len() < target_samples && attempts < max_attempts {
+        let mut state = terminal_dwa.start_state;
+        let mut path = Vec::new();
+        let mut weight = Weight::all();
+        let mut steps = 0usize;
+        let mut accepted = false;
+
+        loop {
+            let end_weight = terminal_dwa.states[state as usize]
+                .final_weight
+                .as_ref()
+                .map(|final_weight| weight.intersection(final_weight))
+                .filter(|weight| !weight.is_empty());
+
+            let mut choices = Vec::new();
+            for (&label, (next_state, edge_weight)) in &terminal_dwa.states[state as usize].transitions {
+                let next_weight = weight.intersection(edge_weight);
+                if !next_weight.is_empty() {
+                    choices.push((label, *next_state, next_weight));
+                }
+            }
+
+            if let Some(final_weight) = end_weight {
+                if (choices.is_empty() || rng.gen_bool(end_prob))
+                    && min_len.map_or(true, |min| path.len() >= min)
+                {
+                    collected.push((path.join(" -> "), path.len(), final_weight));
+                    accepted = true;
+                    break;
+                }
+            }
+
+            if choices.is_empty() || steps >= max_steps {
+                break;
+            }
+
+            let idx = rng.gen_range(0..choices.len());
+            let (label, next_state, next_weight) = choices.swap_remove(idx);
+            path.push(format_terminal(label));
+            weight = next_weight;
+            state = next_state;
+            steps += 1;
+        }
+
+        attempts += 1;
+        if !accepted {
+            continue;
+        }
+    }
+
+    let mut deduped = BTreeMap::new();
+    for (path, len, weight) in collected {
+        deduped.entry(path).or_insert((len, weight));
+    }
+    let mut collected: Vec<(String, usize, Weight)> = deduped
+        .into_iter()
+        .map(|(path, (len, weight))| (path, len, weight))
+        .collect();
+
+    if sample_long {
+        collected.sort_by(|left, right| right.1.cmp(&left.1));
+    }
+    if collected.len() > num_sample_paths {
+        collected.truncate(num_sample_paths);
+    }
+
+    eprintln!(
+        "[glrmask/dwa_sample] terminal DWA sample paths (n={}, attempts={}):",
+        collected.len(),
+        attempts,
+    );
+    for (idx, (path, len, weight)) in collected.iter().enumerate() {
+        eprintln!(
+            "[glrmask/dwa_sample]   Path {}: {} (len={}, {})",
+            idx,
+            path,
+            len,
+            sample_weight_tokens(weight, internal_token_bytes, max_tokens),
+        );
+    }
+    if collected.is_empty() {
+        eprintln!("[glrmask/dwa_sample]   (no non-empty terminal DWA paths collected)");
+    }
 }
 
 fn log_compile_summary(
@@ -360,6 +586,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     let possible_matches = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
     log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
+
+    log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, &internal_token_bytes);
 
     let (parser_dwa, parser_build) = build_parser_dwa_from_terminal_dwa_with_report(
         &table,
