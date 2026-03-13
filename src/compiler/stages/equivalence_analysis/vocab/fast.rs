@@ -549,8 +549,19 @@ fn hash_suffixes(
     for idx in 0..scratch.dag_queue.len() {
         let pos = scratch.dag_queue[idx];
         let (_, edges) = scratch.dag[&pos].clone();
+
+        let first_hop_target = edges.iter().map(|&(_, t)| t).min();
+        let first_hop_blocked = first_hop_target.is_some_and(|ft| {
+            edges.iter()
+                .filter(|&&(_, t)| t == ft)
+                .all(|&(gid, _)| node_disallows_gid(scratch, pos, gid))
+        });
+
         for &(gid, target) in &edges {
             if node_disallows_gid(scratch, pos, gid) {
+                continue;
+            }
+            if first_hop_blocked && Some(target) != first_hop_target {
                 continue;
             }
             if target <= len {
@@ -567,8 +578,25 @@ fn hash_suffixes(
         let end_state = scratch.dag_end_states.get(&pos).copied().unwrap_or(STATE_NONE);
         let mut h = new_hasher();
         h.write_u64(dfa.completion_with_disallowed(end_state, scratch.dag_disallowed.get(&pos)));
+
+        // Multi-segment edge fix: the earliest-target edges represent
+        // "first hop" (single-segment) choices from this position.
+        // Edges at later positions represent multi-segment paths that
+        // necessarily pass through the first hop's segment. If ALL
+        // first-hop groups are disallowed, later edges are unreachable.
+        let first_hop_target = edges.iter().map(|&(_, t)| t).min();
+        let first_hop_blocked = first_hop_target.is_some_and(|ft| {
+            edges.iter()
+                .filter(|&&(_, t)| t == ft)
+                .all(|&(gid, _)| node_disallows_gid(scratch, pos, gid))
+        });
+
         for &(gid, target) in &edges {
             if node_disallows_gid(scratch, pos, gid) {
+                continue;
+            }
+            // Skip later-hop edges when ALL first-hop edges are disallowed
+            if first_hop_blocked && Some(target) != first_hop_target {
                 continue;
             }
             h.write_u64(gid as u64);

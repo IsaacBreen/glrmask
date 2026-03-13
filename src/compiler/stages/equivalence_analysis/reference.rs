@@ -825,11 +825,10 @@ mod tests {
     /// Both tokens start with `c` (group 2). In the suffix after `c`, the
     /// disallowed-follow constraint forbids group 1 (`b*`). Token `cba` has a
     /// `b` byte that could match group 1 in an unconstrained segmentation, but
-    /// the constraint blocks it. The reference analysis (trellis→NFA→DFA with
-    /// subtraction) correctly distinguishes the constrained suffix behavior;
-    /// the fast analysis (suffix DAG hashing) incorrectly merges them because
-    /// it intersects disallowed states across all paths reaching the same
-    /// suffix position, losing the per-path constraint context.
+    /// the constraint blocks it. The fast analysis previously failed to detect
+    /// this because multi-segment suffix DAG edges passed through the blocked
+    /// group 1 segment without being filtered. The fix detects when all
+    /// first-hop edges are disallowed and filters later-hop edges accordingly.
     #[test]
     fn test_self_contained_fast_reference_vocab_mismatch() {
         let exprs = [
@@ -853,12 +852,12 @@ mod tests {
         );
         let reference = find_equivalence_classes(&sep1, &tokens, &states, &disallowed, None);
 
-        // BUG: fast merges tokens that reference correctly splits.
-        // When fixed, change both to assert the same partition.
-        assert_eq!(fast, BTreeSet::from([vec![0, 1]]),
-            "fast incorrectly merges the two tokens");
+        // Both should split: "ca" has valid segmentation (group2→group0),
+        // while "cba" has none (only path goes through forbidden group1).
+        assert_eq!(fast, BTreeSet::from([vec![0], vec![1]]),
+            "fast should split the two tokens");
         assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0], vec![1]]),
-            "reference correctly splits the two tokens");
+            "reference should split the two tokens");
     }
 
     /// Diagnostic: trace the trellis + NFA + DFA for the live witness pair at state 9686.
