@@ -227,7 +227,8 @@ fn token_repr(bytes: &[u8]) -> String {
 
 fn sample_weight_tokens(
     weight: &Weight,
-    internal_token_bytes: &BTreeMap<u32, Vec<u8>>,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
     max_tokens: usize,
 ) -> String {
     if weight.is_empty() {
@@ -237,39 +238,60 @@ fn sample_weight_tokens(
         return "tokens=ALL".to_string();
     }
 
-    let mut candidate_ids = Vec::new();
+    // Collect internal token IDs from the weight, capping at 256
+    let mut internal_ids = Vec::new();
     for range in weight.token_union().ranges() {
         let mut token_id = *range.start();
-        while token_id <= *range.end() && candidate_ids.len() < 256 {
-            candidate_ids.push(token_id);
+        while token_id <= *range.end() && internal_ids.len() < 256 {
+            internal_ids.push(token_id);
             if token_id == u32::MAX {
                 break;
             }
             token_id = token_id.saturating_add(1);
         }
-        if candidate_ids.len() >= 256 {
+        if internal_ids.len() >= 256 {
             break;
         }
     }
 
-    candidate_ids.sort_by(|left, right| {
-        let left_bytes = internal_token_bytes.get(left).map(Vec::as_slice).unwrap_or(&[]);
-        let right_bytes = internal_token_bytes.get(right).map(Vec::as_slice).unwrap_or(&[]);
-        right_bytes
+    // Expand internal IDs to original token IDs and collect (bytes, original_id) pairs.
+    // Deduplicate by bytes so we don't show the same string multiple times.
+    let mut seen_bytes = std::collections::HashSet::new();
+    let mut candidates: Vec<(Vec<u8>, u32)> = Vec::new();
+    for internal_id in internal_ids {
+        let originals = match id_map.vocab_tokens.internal_to_originals.get(internal_id as usize) {
+            Some(ids) => ids.as_slice(),
+            None => continue,
+        };
+        for &original_id in originals {
+            if let Some(bytes) = vocab.entries.get(&original_id) {
+                if seen_bytes.insert(bytes.clone()) {
+                    candidates.push((bytes.clone(), original_id));
+                }
+            }
+            // Cap total candidates to avoid excessive work
+            if candidates.len() >= 512 {
+                break;
+            }
+        }
+        if candidates.len() >= 512 {
+            break;
+        }
+    }
+
+    // Sort shortest first (most readable), break ties by bytes then by id
+    candidates.sort_by(|(left_bytes, left_id), (right_bytes, right_id)| {
+        left_bytes
             .len()
-            .cmp(&left_bytes.len())
-            .then_with(|| left.cmp(right))
+            .cmp(&right_bytes.len())
+            .then_with(|| left_bytes.cmp(right_bytes))
+            .then_with(|| left_id.cmp(right_id))
     });
 
-    let samples: Vec<String> = candidate_ids
+    let samples: Vec<String> = candidates
         .into_iter()
         .take(max_tokens)
-        .map(|token_id| {
-            internal_token_bytes
-                .get(&token_id)
-                .map(|bytes| token_repr(bytes))
-                .unwrap_or_else(|| format!("'<missing:{}>'", token_id))
-        })
+        .map(|(bytes, _)| token_repr(&bytes))
         .collect();
 
     if samples.is_empty() {
@@ -480,7 +502,8 @@ fn terminal_dwa_max_valid_path_len(terminal_dwa: &DWA) -> Option<MaxValidPathLen
 fn log_terminal_dwa_sample_paths(
     grammar: &GrammarDef,
     terminal_dwa: &DWA,
-    internal_token_bytes: &BTreeMap<u32, Vec<u8>>,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
 ) {
     use rand::Rng;
 
@@ -599,7 +622,7 @@ fn log_terminal_dwa_sample_paths(
             idx,
             path,
             len_repr,
-            sample_weight_tokens(weight, internal_token_bytes, max_tokens),
+            sample_weight_tokens(weight, vocab, id_map, max_tokens),
         );
     }
     if collected.is_empty() {
@@ -825,7 +848,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let possible_matches = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
     log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
 
-    log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, &internal_token_bytes);
+    log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, vocab, &id_map);
 
     // Use precomputed templates — avoid recomputing characterize_terminals + from_characterizations
     let (parser_dwa, parser_build) = build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
