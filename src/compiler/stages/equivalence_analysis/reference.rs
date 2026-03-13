@@ -336,59 +336,109 @@ fn build_nfa_from_trellis(
     nfa
 }
 
-// ---- Disallowed-follow pruning on minimized DFA ----
+// ---- Disallowed-follow pruning on NFA ----
 //
-// 1. For each DFA state, collect incoming edge labels.
-// 2. For each incoming label that is a non-negative group ID, look up its
-//    disallowed-follows set. Intersect all such sets → state's disallowed set.
-// 3. States with an incoming edge from the start state: clear disallowed set
-//    (no prior context).
-// 4. Prune outgoing transitions whose group ID is in the state's disallowed set.
+// 1. For each NFA state, collect incoming non-negative edge labels (group IDs).
+// 2. Propagate incoming terminal sets across epsilon edges: if A -ε→ B, B
+//    inherits A's incoming terminals (transitively).
+// 3. Compute epsilon closure of start states. Clear disallowed set for all
+//    states in the closure AND states with incoming labeled edges from them.
+// 4. For each state, intersect disallowed_follows for its incoming terminals
+//    → state's disallowed set.
+// 5. Prune outgoing transitions whose group ID is in the disallowed set.
 
-fn apply_disallowed_pruning(dfa: &mut DFA, disallowed_follows: &[BitSet], num_groups: usize) {
-    let n = dfa.states.len();
+fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], num_groups: usize) {
+    let n = nfa.states.len();
 
-    // Collect incoming non-negative labels and start-state reachability per state.
-    let mut incoming_gids: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut from_start: Vec<bool> = vec![false; n];
-
-    for (src, state) in dfa.states.iter().enumerate() {
-        for (&label, &target) in &state.transitions {
-            let tgt = target as usize;
+    // Direct incoming non-negative labels per state.
+    let mut direct_incoming: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    for (src_idx, state) in nfa.states.iter().enumerate() {
+        for (&label, targets) in &state.transitions {
             if label >= 0 {
-                incoming_gids[tgt].push(label as usize);
+                let gid = label as usize;
+                for &tgt in targets {
+                    direct_incoming[tgt as usize].insert(gid);
+                }
             }
-            if src as u32 == dfa.start_state {
-                from_start[tgt] = true;
+        }
+    }
+
+    // Reverse epsilon graph: for each A -ε→ B, record B → A.
+    let mut eps_predecessors: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (src_idx, state) in nfa.states.iter().enumerate() {
+        for &tgt in &state.epsilons {
+            eps_predecessors[tgt as usize].push(src_idx as u32);
+        }
+    }
+
+    // Propagate incoming terminals through reverse epsilon edges (fixpoint).
+    let mut incoming: Vec<BTreeSet<usize>> = direct_incoming;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for idx in 0..n {
+            if eps_predecessors[idx].is_empty() {
+                continue;
+            }
+            let mut to_add = Vec::new();
+            for &pred in &eps_predecessors[idx] {
+                for &gid in &incoming[pred as usize] {
+                    to_add.push(gid);
+                }
+            }
+            for gid in to_add {
+                if incoming[idx].insert(gid) {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Epsilon closure of start states.
+    let mut start_closure: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    for &s in &nfa.start_states {
+        start_closure.insert(s);
+        queue.push_back(s);
+    }
+    while let Some(s) = queue.pop_front() {
+        for &tgt in &nfa.states[s as usize].epsilons {
+            if start_closure.insert(tgt) {
+                queue.push_back(tgt);
+            }
+        }
+    }
+
+    // Mark states that should have no disallowed set:
+    //   - states in the epsilon closure of start
+    //   - states with incoming labeled edges from any state in the start closure
+    let mut no_disallowed: Vec<bool> = vec![false; n];
+    for &s in &start_closure {
+        no_disallowed[s as usize] = true;
+        for targets in nfa.states[s as usize].transitions.values() {
+            for &tgt in targets {
+                no_disallowed[tgt as usize] = true;
             }
         }
     }
 
     // Compute disallowed set per state.
     let mut state_disallowed: Vec<Option<BitSet>> = Vec::with_capacity(n);
-
     for idx in 0..n {
-        if from_start[idx] {
-            state_disallowed.push(None); // no restrictions
+        if no_disallowed[idx] || incoming[idx].is_empty() {
+            state_disallowed.push(None);
             continue;
         }
-        let gids = &incoming_gids[idx];
-        if gids.is_empty() {
-            state_disallowed.push(None); // no incoming group edges → no info
-            continue;
-        }
-        // Start with "all disallowed" and intersect down
         let mut acc = BitSet::all(num_groups);
-        for &gid in gids {
+        for &gid in &incoming[idx] {
             if gid < disallowed_follows.len() {
                 acc = acc.intersection(&disallowed_follows[gid]);
             } else {
-                // Unknown group → empty disallowed → intersection = empty
                 acc = BitSet::new(num_groups);
                 break;
             }
         }
-        if acc.is_empty() {
+        if acc.is_zero() {
             state_disallowed.push(None);
         } else {
             state_disallowed.push(Some(acc));
@@ -401,7 +451,7 @@ fn apply_disallowed_pruning(dfa: &mut DFA, disallowed_follows: &[BitSet], num_gr
             Some(d) => d,
             None => continue,
         };
-        dfa.states[idx].transitions.retain(|&label, _| {
+        nfa.states[idx].transitions.retain(|&label, _| {
             let gid = if label >= 0 {
                 label as usize
             } else if label != ALIVE_MARKER {
@@ -460,16 +510,12 @@ fn process_token_for_state(
     let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
     prune_reachable(&mut dag, token.len());
 
-    let nfa = build_nfa_from_trellis(dfa, &dag, ignore_terminal);
+    let mut nfa = build_nfa_from_trellis(dfa, &dag, ignore_terminal);
+    apply_disallowed_pruning_nfa(&mut nfa, &pre.disallowed_follows, pre.num_groups);
+
     let det_dfa = determinize(&nfa);
     let min_dfa = minimize(&det_dfa);
-
-    // Apply disallowed-follow pruning on the minimized DFA, then minimize again
-    let mut pruned_dfa = min_dfa;
-    apply_disallowed_pruning(&mut pruned_dfa, &pre.disallowed_follows, pre.num_groups);
-    let final_dfa = minimize(&pruned_dfa);
-
-    canonical_hash(&final_dfa)
+    canonical_hash(&min_dfa)
 }
 
 // ---- Public API ----
