@@ -57,6 +57,13 @@ fn verify_vocab_partition(
     }
 }
 
+fn print_vocab_verification_stats(label: &str, vocab_classes: &VocabEquivalenceResult) {
+    eprintln!(
+        "[vocab equiv verification] {label}: {} classes",
+        vocab_classes.len()
+    );
+}
+
 /// Compute combined state and vocab equivalence analysis.
 ///
 /// This function:
@@ -136,6 +143,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             &reduced_states,
             disallowed_follows,
         );
+        print_vocab_verification_stats("slow", &slow_vocab_classes);
         verify_vocab_partition("slow", &vocab_classes, &slow_vocab_classes);
     }
 
@@ -146,6 +154,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             &reduced_states,
             disallowed_follows,
         );
+        print_vocab_verification_stats("medium", &medium_vocab_classes);
         verify_vocab_partition("medium", &vocab_classes, &medium_vocab_classes);
     }
 
