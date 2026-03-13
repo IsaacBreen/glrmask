@@ -184,6 +184,7 @@ fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
 
 type Edge = (usize, usize); // (group_id, target_position)
 
+#[derive(Debug)]
 struct FlatNode {
     end_state: usize,
     edges: Vec<Edge>,
@@ -255,7 +256,7 @@ fn build_trellis_dag(
     dag.insert(0, FlatNode { end_state: root_end, edges: root_edges.clone() });
 
     for &(_, pos) in &root_edges {
-        if pos <= len && !dag.contains_key(&pos) {
+        if pos < len && !dag.contains_key(&pos) {
             queue.push_back(pos);
             dag.insert(pos, FlatNode { end_state: STATE_NONE, edges: Vec::new() });
         }
@@ -266,7 +267,7 @@ fn build_trellis_dag(
         let edges = edges_from_mp(tmp_mp, ng, pos);
 
         for &(_, target) in &edges {
-            if target <= len && !dag.contains_key(&target) {
+            if target < len && !dag.contains_key(&target) {
                 queue.push_back(target);
                 dag.insert(target, FlatNode { end_state: STATE_NONE, edges: Vec::new() });
             }
@@ -287,6 +288,7 @@ fn build_nfa_from_trellis(
     dag: &BTreeMap<usize, FlatNode>,
     num_groups: usize,
     ignore_terminal: Option<usize>,
+    end_pos: usize,
 ) -> NFA {
     let mut nfa = NFA::new_empty();
     let mut state_map: HashMap<usize, u32> = HashMap::new();
@@ -303,6 +305,8 @@ fn build_nfa_from_trellis(
      -> u32 {
         if let Some(&id) = state_map.get(&pos) {
             id
+        } else if pos == end_pos {
+            accept_sink
         } else {
             let id = nfa.add_state();
             state_map.insert(pos, id);
@@ -324,7 +328,7 @@ fn build_nfa_from_trellis(
         };
 
         // --- Completion transitions (no disallowed filtering) ---
-        if node.end_state != STATE_NONE && node.end_state < dfa.states.len() {
+        if node.end_state != STATE_NONE {
             let future_groups = &dfa.states[node.end_state].possible_future_group_ids;
             if future_groups_cover_all_terminals(future_groups, num_groups) {
                 nfa.add_epsilon(nfa_state, accept_sink);
@@ -461,7 +465,7 @@ fn process_token_for_state(
 
     let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
 
-    let mut nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, ignore_terminal);
+    let mut nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, ignore_terminal, token.len());
     let nfa_hash = canonical_nfa_hash(&nfa);
 
     if let Some(&cached) = hash_memo.lock().unwrap().get(&nfa_hash) {
@@ -474,6 +478,7 @@ fn process_token_for_state(
         Some(disallowed_detector) => minimize(&subtract(&min_dfa, disallowed_detector)),
         None => min_dfa,
     };
+    dbg!(token, initial_state, &dag, &nfa, &pruned_dfa);
     let final_hash = canonical_hash(&pruned_dfa);
 
     hash_memo.lock().unwrap().insert(nfa_hash, final_hash);
@@ -828,7 +833,7 @@ mod tests {
 
             // Step 3: Build NFA
             let mut dag2 = build_trellis_dag(dfa, pre.num_groups, token, state, &mut tmp_mp);
-            let nfa = build_nfa_from_trellis(dfa, &dag2, pre.num_groups, None);
+            let nfa = build_nfa_from_trellis(dfa, &dag2, pre.num_groups, None, token.len());
             println!("\nNFA: {} states", nfa.num_states());
 
             // Step 4: Determinize + minimize
