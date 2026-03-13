@@ -28,6 +28,20 @@ pub fn minimize(dwa: &DWA) -> DWA {
     super::minimize_acyclic::minimize_acyclic(dwa)
 }
 
+/// Like [`minimize`], but switches from the O(n²) incompatibility graph to
+/// partition-refinement coloring when any height bucket exceeds
+/// `partition_refine_threshold` candidates. Produces a slightly larger DWA
+/// for those buckets but avoids the quadratic cost.
+pub fn minimize_with_threshold(dwa: &DWA, partition_refine_threshold: usize) -> DWA {
+    if dwa.states.is_empty() {
+        return dwa.clone();
+    }
+    if !dwa.is_acyclic() {
+        return dwa.clone();
+    }
+    super::minimize_acyclic::minimize_acyclic_with_threshold(dwa, partition_refine_threshold)
+}
+
 /// Fast minimize that uses signature-based partition refinement instead of
 /// O(n²) pairwise graph coloring. Produces a valid (correct) DWA that may
 /// be slightly larger than the graph-coloring result (doesn't merge states

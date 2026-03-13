@@ -1291,10 +1291,20 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Default threshold: always use the full incompatibility graph approach.
+const PARTITION_REFINE_THRESHOLD: usize = usize::MAX;
+
 /// Minimize an acyclic DWA using weight pushing + graph-coloring.
 ///
 /// Falls back to the caller's DWA unchanged if the input is cyclic.
 pub fn minimize_acyclic(dwa: &DWA) -> DWA {
+    minimize_acyclic_with_threshold(dwa, PARTITION_REFINE_THRESHOLD)
+}
+
+/// Like [`minimize_acyclic`], but switches from the O(n²) incompatibility
+/// graph to partition-refinement coloring when a height bucket has more than
+/// `partition_refine_threshold` candidates.
+pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: usize) -> DWA {
     if dwa.states.is_empty() {
         return dwa.clone();
     }
@@ -1410,18 +1420,24 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         }
 
         // Build incompatibility graph and color it.
-        // For large buckets, try sparse overlap filter first.
+        // For very large buckets, use partition-refinement coloring (O(n log n))
+        // instead of the O(n²) incompatibility graph approach.
         let graph_started_at = std::time::Instant::now();
-        let adj = build_incompatibility_graph_sparse(
-            &pushed,
-            candidates,
-            &needed,
-            &old_to_new,
-            &productive_transitions,
-            &mut profile,
-        )
-        .unwrap_or_else(|| {
-            build_incompatibility_graph(
+        let coloring = if candidates.len() > partition_refine_threshold {
+            // Partition refinement: hash-based grouping + diamond merge.
+            // Avoids the O(n²) pairwise compatibility checks that dominate
+            // build time on large grammars (e.g. kb_143 with 2307 candidates).
+            partition_refine_coloring(
+                candidates,
+                &pushed,
+                &needed,
+                &old_to_new,
+                &productive_transitions,
+            )
+        } else {
+            // For small buckets, the full incompatibility graph gives
+            // optimal merging without much cost.
+            let adj = build_incompatibility_graph_sparse(
                 &pushed,
                 candidates,
                 &needed,
@@ -1429,8 +1445,18 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                 &productive_transitions,
                 &mut profile,
             )
-        });
-        let coloring = greedy_coloring(&adj);
+            .unwrap_or_else(|| {
+                build_incompatibility_graph(
+                    &pushed,
+                    candidates,
+                    &needed,
+                    &old_to_new,
+                    &productive_transitions,
+                    &mut profile,
+                )
+            });
+            greedy_coloring(&adj)
+        };
         profile.graph_color_ms += graph_started_at.elapsed();
 
         let setup_started = std::time::Instant::now();
