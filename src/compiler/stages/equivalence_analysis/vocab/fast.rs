@@ -552,13 +552,45 @@ fn hash_suffixes(
         }
     }
 
-    // Hash bottom-up: process deeper positions first
+    // Hash bottom-up: process deeper positions first.
+    //
+    // Prune dead-end positions: a suffix DAG node is "live" only if it can
+    // reach token_len (i.e. the match path covers the full token). A node at
+    // pos == len is live (it IS token_len). A node at pos < len is live only
+    // if it has an allowed edge to a live position. Dead nodes get hash 0.
+    // This matches the reference analysis's prune_reachable step, which removes
+    // trellis paths that can't form a complete token segmentation.
     scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
+
+    // First pass: compute liveness bottom-up (deepest positions first)
+    let mut live: hashbrown::HashSet<usize> = hashbrown::HashSet::new();
+    for &pos in &scratch.dag_queue {
+        if pos == len {
+            live.insert(pos);
+        } else {
+            let (_, ref edges) = scratch.dag[&pos];
+            let has_live_edge = edges.iter().any(|&(gid, target)| {
+                !node_disallows_gid(scratch, pos, gid) && live.contains(&target)
+            });
+            if has_live_edge {
+                live.insert(pos);
+            }
+        }
+    }
+
+    // Second pass: hash bottom-up, including liveness flag.
+    // Dead-end positions (can't reach token_len) get a different hash than
+    // live positions with the same completion, preventing false merges where
+    // a dead-end match and a complete match look identical. The liveness flag
+    // ensures dead-ends with different completions still hash differently
+    // (unlike a flat sentinel of 0).
     for idx in 0..scratch.dag_queue.len() {
         let pos = scratch.dag_queue[idx];
+        let is_live = live.contains(&pos);
         let (_, edges) = scratch.dag[&pos].clone();
         let end_state = scratch.dag_end_states.get(&pos).copied().unwrap_or(STATE_NONE);
         let mut h = new_hasher();
+        h.write_u8(if is_live { 1 } else { 0 });
         h.write_u64(dfa.completion_with_disallowed(end_state, scratch.dag_disallowed.get(&pos)));
         for &(gid, target) in &edges {
             if node_disallows_gid(scratch, pos, gid) {
