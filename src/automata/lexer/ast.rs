@@ -39,10 +39,6 @@ pub fn class(set: U8Set) -> Expr {
     Expr::U8Class(set)
 }
 
-pub fn seq(exprs: Vec<Expr>) -> Expr {
-    Expr::Seq(exprs)
-}
-
 pub fn choice(exprs: Vec<Expr>) -> Expr {
     Expr::Choice(exprs)
 }
@@ -55,16 +51,8 @@ pub fn repeat(expr: impl Into<Expr>, min: usize, max: Option<usize>) -> Expr {
     }
 }
 
-pub fn star(expr: impl Into<Expr>) -> Expr {
-    repeat(expr, 0, None)
-}
-
 pub fn plus(expr: impl Into<Expr>) -> Expr {
     repeat(expr, 1, None)
-}
-
-pub fn opt(expr: impl Into<Expr>) -> Expr {
-    repeat(expr, 0, Some(1))
 }
 
 pub fn eps() -> Expr {

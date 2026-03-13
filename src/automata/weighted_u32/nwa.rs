@@ -35,13 +35,6 @@ impl NwaBody {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NwaTraversalData {
-    pub comp_id: Vec<usize>,
-    pub sccs: Vec<Vec<usize>>,
-    pub topo: Vec<usize>,
-}
-
 impl NWA {
     pub fn new(num_tsids: u32, max_token: u32) -> Self {
         let _ = (num_tsids, max_token);
@@ -208,52 +201,6 @@ impl NWA {
         rev
     }
 
-    pub fn compute_traversal_data(&self) -> NwaTraversalData {
-        let (sccs, comp_id) = compute_sccs(self);
-        let mut scc_adj = vec![HashSet::new(); sccs.len()];
-        let mut indeg = vec![0usize; sccs.len()];
-
-        for (src, state) in self.states.iter().enumerate() {
-            let src_comp = comp_id[src];
-            let mut neighbors = Vec::new();
-            for targets in state.transitions.values() {
-                for (dst, _) in targets {
-                    neighbors.push(*dst as usize);
-                }
-            }
-            for (dst, _) in &state.epsilons {
-                neighbors.push(*dst as usize);
-            }
-
-            for dst in neighbors {
-                let dst_comp = comp_id[dst];
-                if src_comp != dst_comp && scc_adj[src_comp].insert(dst_comp) {
-                    indeg[dst_comp] += 1;
-                }
-            }
-        }
-
-        let mut topo = Vec::with_capacity(sccs.len());
-        let mut queue = VecDeque::new();
-        for (comp, degree) in indeg.iter().enumerate() {
-            if *degree == 0 {
-                queue.push_back(comp);
-            }
-        }
-
-        while let Some(comp) = queue.pop_front() {
-            topo.push(comp);
-            for &next in &scc_adj[comp] {
-                indeg[next] -= 1;
-                if indeg[next] == 0 {
-                    queue.push_back(next);
-                }
-            }
-        }
-
-        NwaTraversalData { comp_id, sccs, topo }
-    }
-
     pub fn is_acyclic(&self) -> bool {
         let num_states = self.states.len();
 
@@ -323,17 +270,6 @@ impl NWA {
         true
     }
 
-    pub fn max_position(&self) -> u32 {
-        self.states.len().saturating_sub(1) as u32
-    }
-
-    pub fn display_with_symbols<'a>(
-        &'a self,
-        symbols: &'a std::collections::BTreeMap<Label, String>,
-    ) -> NWADisplayWithSymbols<'a> {
-        NWADisplayWithSymbols { nwa: self, symbols }
-    }
-
     pub fn display_with_all_maps<'a>(
         &'a self,
         symbols: &'a std::collections::BTreeMap<Label, String>,
@@ -347,78 +283,6 @@ impl NWA {
             token_names,
         }
     }
-}
-
-fn compute_sccs(nwa: &NWA) -> (Vec<Vec<usize>>, Vec<usize>) {
-    let num_states = nwa.states.len();
-    let mut adj = vec![Vec::new(); num_states];
-    let mut rev_adj = vec![Vec::new(); num_states];
-
-    for (src, state) in nwa.states.iter().enumerate() {
-        let mut neighbors = Vec::new();
-        for targets in state.transitions.values() {
-            for (dst, _) in targets {
-                neighbors.push(*dst as usize);
-            }
-        }
-        for (dst, _) in &state.epsilons {
-            neighbors.push(*dst as usize);
-        }
-
-        for dst in neighbors {
-            adj[src].push(dst);
-            rev_adj[dst].push(src);
-        }
-    }
-
-    let mut order = Vec::new();
-    let mut visited = vec![false; num_states];
-    for start in 0..num_states {
-        if visited[start] {
-            continue;
-        }
-        let mut stack = vec![(start, false)];
-        while let Some((state, processed)) = stack.pop() {
-            if processed {
-                order.push(state);
-                continue;
-            }
-            if visited[state] {
-                continue;
-            }
-            visited[state] = true;
-            stack.push((state, true));
-            for &next in &adj[state] {
-                if !visited[next] {
-                    stack.push((next, false));
-                }
-            }
-        }
-    }
-
-    let mut comp_id = vec![usize::MAX; num_states];
-    let mut sccs = Vec::new();
-    for &start in order.iter().rev() {
-        if comp_id[start] != usize::MAX {
-            continue;
-        }
-        let comp = sccs.len();
-        let mut stack = vec![start];
-        comp_id[start] = comp;
-        let mut component = Vec::new();
-        while let Some(state) = stack.pop() {
-            component.push(state);
-            for &prev in &rev_adj[state] {
-                if comp_id[prev] == usize::MAX {
-                    comp_id[prev] = comp;
-                    stack.push(prev);
-                }
-            }
-        }
-        sccs.push(component);
-    }
-
-    (sccs, comp_id)
 }
 
 fn fmt_nwa_states(
@@ -462,27 +326,6 @@ impl std::fmt::Display for NWA {
         let starts = self.start_states.iter().map(|s| format!("State {s}")).collect::<Vec<_>>().join(", ");
         writeln!(f, "NWA: {} states, start={starts}", self.states.len())?;
         fmt_nwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
-    }
-}
-
-pub struct NWADisplayWithSymbols<'a> {
-    nwa: &'a NWA,
-    symbols: &'a std::collections::BTreeMap<Label, String>,
-}
-
-impl std::fmt::Display for NWADisplayWithSymbols<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let nwa = self.nwa;
-        let starts = nwa.start_states.iter().map(|s| format!("State {s}")).collect::<Vec<_>>().join(", ");
-        writeln!(f, "NWA: {} states, start={starts}", nwa.states.len())?;
-        let syms = self.symbols;
-        fmt_nwa_states(nwa, f,
-            &|label| match syms.get(&label) {
-                Some(name) => name.clone(),
-                None => format!("{label}"),
-            },
-            &|w| format!("{w}"),
-        )
     }
 }
 

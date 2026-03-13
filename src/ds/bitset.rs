@@ -161,10 +161,6 @@ impl BitSet {
         &self.words
     }
 
-    pub fn words_mut(&mut self) -> &mut [u64] {
-        &mut self.words
-    }
-
     pub fn fill_u32_mask(&self, buf: &mut [u32]) {
         
         for (i, &word) in self.words.iter().enumerate() {

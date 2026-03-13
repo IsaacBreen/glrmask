@@ -138,13 +138,6 @@ impl DWA {
         true
     }
 
-    pub fn display_with_symbols<'a>(
-        &'a self,
-        symbols: &'a BTreeMap<Label, String>,
-    ) -> DWADisplayWithSymbols<'a> {
-        DWADisplayWithSymbols { dwa: self, symbols }
-    }
-
     pub fn display_with_all_maps<'a>(
         &'a self,
         symbols: &'a BTreeMap<Label, String>,
@@ -191,26 +184,6 @@ impl std::fmt::Display for DWA {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "DWA: {} states, start=State {}", self.states.len(), self.start_state)?;
         fmt_dwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
-    }
-}
-
-pub struct DWADisplayWithSymbols<'a> {
-    dwa: &'a DWA,
-    symbols: &'a BTreeMap<Label, String>,
-}
-
-impl std::fmt::Display for DWADisplayWithSymbols<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let dwa = self.dwa;
-        writeln!(f, "DWA: {} states, start=State {}", dwa.states.len(), dwa.start_state)?;
-        let syms = self.symbols;
-        fmt_dwa_states(dwa, f,
-            &|label| match syms.get(&label) {
-                Some(name) => name.clone(),
-                None => format!("{label}"),
-            },
-            &|w| format!("{w}"),
-        )
     }
 }
 

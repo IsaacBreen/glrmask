@@ -1022,10 +1022,6 @@ impl Weight {
         }
     }
 
-    pub fn divide(&self, other: &Self) -> Self {
-        self.difference(other)
-    }
-
     pub fn from_token_set_for_tsid(tsid: u32, tokens: RangeSetBlaze<u32>) -> Self {
         if tokens.is_empty() {
             return Self::empty();

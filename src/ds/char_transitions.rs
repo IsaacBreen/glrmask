@@ -20,10 +20,6 @@ impl<T> CharTransitions<T> {
         Self { entries: Vec::new() }
     }
 
-    pub fn from_sorted_entries(entries: Vec<(u8, T)>) -> Self {
-        Self { entries }
-    }
-
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -76,13 +72,6 @@ impl<T> CharTransitions<T> {
         self.entries.iter().map(|(_, v)| v)
     }
 
-    pub fn keys_as_u8set(&self) -> U8Set {
-        let mut set = U8Set::empty();
-        for (key, _) in &self.entries {
-            set.insert(*key);
-        }
-        set
-    }
 }
 
 impl<T> Index<u8> for CharTransitions<T> {

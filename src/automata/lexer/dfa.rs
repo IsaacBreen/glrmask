@@ -81,21 +81,9 @@ impl DFA {
         }
     }
 
-    pub fn mark_finalizer(&mut self, state: u32, group_id: GroupId) {
-        if let Some(entry) = self.states.get_mut(state as usize) {
-            entry.finalizers.set(group_id as usize);
-        }
-    }
-
     pub fn clear_finalizer(&mut self, state: u32, group_id: GroupId) {
         if let Some(entry) = self.states.get_mut(state as usize) {
             entry.finalizers.clear(group_id as usize);
-        }
-    }
-
-    pub fn mark_possible_future_group(&mut self, state: u32, group_id: GroupId) {
-        if let Some(entry) = self.states.get_mut(state as usize) {
-            entry.possible_future_group_ids.set(group_id as usize);
         }
     }
 

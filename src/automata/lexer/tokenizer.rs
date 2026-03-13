@@ -82,18 +82,8 @@ impl Tokenizer {
             .collect()
     }
 
-    pub fn terminal_matches(&self, state: u32, terminal: TerminalID) -> bool {
-        self.all_matched_terminals(state).contains(&terminal)
-    }
-
     pub fn num_states(&self) -> u32 {
         self.dfa.num_states() as u32
-    }
-
-    pub fn compute_reachable_terminals(&self) -> Vec<BTreeSet<TerminalID>> {
-        (0..self.num_states())
-            .map(|state| self.possible_future_terminals(state))
-            .collect()
     }
 
     pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
@@ -123,17 +113,6 @@ impl Tokenizer {
         }
     }
 
-    pub fn execute(&self, input: &[u8], start: u32) -> (u32, BTreeSet<TerminalID>) {
-        let mut state = start;
-        for &byte in input {
-            let Some(next) = self.step(state, byte) else {
-                return (state, BTreeSet::new());
-            };
-            state = next;
-        }
-        (state, self.all_matched_terminals(state))
-    }
-
     pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
         let exec = self.execute_from_state(input, start);
         let end_state = exec.end_state.unwrap_or(start);
@@ -159,32 +138,6 @@ impl Tokenizer {
         self.possible_future_terminals(state)
     }
 
-    pub fn execute_all_matches_cb<F>(&self, input: &[u8], start: u32, cb: F) -> u32
-    where
-        F: FnMut(usize, &BTreeSet<u32>),
-    {
-        let result = self.execute_all_matches(input, start);
-        let mut cb = cb;
-        for (offset, matches) in &result.matches {
-            let mapped: BTreeSet<u32> = matches.iter().copied().collect();
-            cb(*offset, &mapped);
-        }
-        result.end_state
-    }
-
-    pub fn execute_all_matches_cb_filtered<F>(
-        &self,
-        input: &[u8],
-        start: u32,
-        state_has_used: &[bool],
-        cb: F,
-    ) -> u32
-    where
-        F: FnMut(usize, &BTreeSet<u32>),
-    {
-        let _ = state_has_used;
-        self.execute_all_matches_cb(input, start, cb)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
