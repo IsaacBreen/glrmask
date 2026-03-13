@@ -342,116 +342,117 @@ fn build_nfa_from_trellis(
 
 // ---- Disallowed-follow pruning on NFA ----
 //
-// 1. For each NFA state, collect incoming non-negative edge labels (group IDs).
-// 2. Propagate incoming terminal sets across epsilon edges: if A -ε→ B, B
-//    inherits A's incoming terminals (transitively).
-// 3. Compute epsilon closure of start states. Clear disallowed set for all
-//    states in the closure AND states with incoming labeled edges from them.
-// 4. For each state, intersect disallowed_follows for its incoming terminals
-//    → state's disallowed set.
-// 5. Prune outgoing transitions whose group ID is in the disallowed set.
+// Process the acyclic NFA in topological order.
+//
+// Each state carries the set of terminals disallowed for its outgoing edges.
+// Start states begin with an empty disallowed set. When traversing:
+//   - epsilon edge: propagate the current disallowed set
+//   - labeled edge: propagate disallowed_follows[label]
+//
+// If multiple predecessors reach a state, intersect the propagated sets.
+// Outgoing labeled edges are pruned before propagation, so pruned edges do not
+// contribute constraints to downstream states.
 
 fn apply_disallowed_pruning_nfa(nfa: &mut NFA, disallowed_follows: &[BitSet], num_groups: usize) {
     let n = nfa.states.len();
 
-    // Direct incoming non-negative labels per state.
-    let mut direct_incoming: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
-    for (src_idx, state) in nfa.states.iter().enumerate() {
-        for (&label, targets) in &state.transitions {
-            if label >= 0 {
-                let gid = label as usize;
-                for &tgt in targets {
-                    direct_incoming[tgt as usize].insert(gid);
-                }
+    let mut indegree = vec![0usize; n];
+    for state in &nfa.states {
+        for &tgt in &state.epsilons {
+            indegree[tgt as usize] += 1;
+        }
+        for targets in state.transitions.values() {
+            for &tgt in targets {
+                indegree[tgt as usize] += 1;
             }
         }
     }
 
-    // Propagate incoming terminals forward through epsilon edges (fixpoint).
-    let mut incoming: Vec<BTreeSet<usize>> = direct_incoming;
-    let mut queue: VecDeque<u32> = incoming
+    let mut topo_queue: VecDeque<u32> = indegree
         .iter()
         .enumerate()
-        .filter_map(|(idx, gids)| (!gids.is_empty()).then_some(idx as u32))
+        .filter_map(|(idx, &deg)| (deg == 0).then_some(idx as u32))
         .collect();
-
-    while let Some(src) = queue.pop_front() {
-        let propagated: Vec<usize> = incoming[src as usize].iter().copied().collect();
-        if propagated.is_empty() {
-            continue;
+    let mut topo_order = Vec::with_capacity(n);
+    while let Some(state) = topo_queue.pop_front() {
+        topo_order.push(state);
+        for &tgt in &nfa.states[state as usize].epsilons {
+            indegree[tgt as usize] -= 1;
+            if indegree[tgt as usize] == 0 {
+                topo_queue.push_back(tgt);
+            }
         }
-        for &tgt in &nfa.states[src as usize].epsilons {
-            let mut changed = false;
-            for &gid in &propagated {
-                if incoming[tgt as usize].insert(gid) {
-                    changed = true;
+        for targets in nfa.states[state as usize].transitions.values() {
+            for &tgt in targets {
+                indegree[tgt as usize] -= 1;
+                if indegree[tgt as usize] == 0 {
+                    topo_queue.push_back(tgt);
                 }
             }
-            if changed {
-                queue.push_back(tgt);
-            }
         }
+    }
+    debug_assert_eq!(topo_order.len(), n, "reference pruning expects an acyclic NFA");
+
+    let mut incoming_disallowed: Vec<Option<BitSet>> = vec![None; n];
+    let empty = BitSet::new(num_groups);
+    for &start in &nfa.start_states {
+        incoming_disallowed[start as usize] = Some(empty.clone());
     }
 
-    // Epsilon closure of start states.
-    let mut start_closure: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut queue: VecDeque<u32> = VecDeque::new();
-    for &s in &nfa.start_states {
-        start_closure.insert(s);
-        queue.push_back(s);
-    }
-    while let Some(s) = queue.pop_front() {
-        for &tgt in &nfa.states[s as usize].epsilons {
-            if start_closure.insert(tgt) {
-                queue.push_back(tgt);
-            }
-        }
-    }
-
-    // Mark states that should have no disallowed set:
-    //   - states in the epsilon closure of start
-    let mut no_disallowed: Vec<bool> = vec![false; n];
-    for &s in &start_closure {
-        no_disallowed[s as usize] = true;
-    }
-
-    // Compute disallowed set per state.
-    let mut state_disallowed: Vec<Option<BitSet>> = Vec::with_capacity(n);
-    for idx in 0..n {
-        if no_disallowed[idx] || incoming[idx].is_empty() {
-            state_disallowed.push(None);
-            continue;
-        }
-        let mut acc = BitSet::all(num_groups);
-        for &gid in &incoming[idx] {
-            if gid < disallowed_follows.len() {
-                acc = acc.intersection(&disallowed_follows[gid]);
-            } else {
-                acc = BitSet::new(num_groups);
-                break;
-            }
-        }
-        if acc.is_zero() {
-            state_disallowed.push(None);
-        } else {
-            state_disallowed.push(Some(acc));
-        }
-    }
-
-    // Prune outgoing transitions.
-    for idx in 0..n {
-        let disallowed = match &state_disallowed[idx] {
-            Some(d) => d,
+    for state in topo_order {
+        let current = match incoming_disallowed[state as usize].clone() {
+            Some(bits) => bits,
             None => continue,
         };
-        nfa.states[idx].transitions.retain(|&label, _| {
+
+        let mut kept_transitions: Vec<(Label, Vec<u32>)> = Vec::new();
+        for (&label, targets) in &nfa.states[state as usize].transitions {
             let gid = if label >= 0 {
                 label as usize
             } else {
                 (-(label + 1)) as usize
             };
-            !disallowed.contains(gid)
-        });
+            if !current.contains(gid) {
+                kept_transitions.push((label, targets.clone()));
+            }
+        }
+
+        nfa.states[state as usize]
+            .transitions
+            .retain(|&label, _| {
+                let gid = if label >= 0 {
+                    label as usize
+                } else {
+                    (-(label + 1)) as usize
+                };
+                !current.contains(gid)
+            });
+
+        for &tgt in &nfa.states[state as usize].epsilons {
+            match &mut incoming_disallowed[tgt as usize] {
+                Some(existing) => *existing = existing.intersection(&current),
+                None => incoming_disallowed[tgt as usize] = Some(current.clone()),
+            }
+        }
+
+        for (label, targets) in kept_transitions {
+            let gid = if label >= 0 {
+                label as usize
+            } else {
+                (-(label + 1)) as usize
+            };
+            let propagated = if gid < disallowed_follows.len() {
+                disallowed_follows[gid].clone()
+            } else {
+                BitSet::new(num_groups)
+            };
+            for tgt in targets {
+                match &mut incoming_disallowed[tgt as usize] {
+                    Some(existing) => *existing = existing.intersection(&propagated),
+                    None => incoming_disallowed[tgt as usize] = Some(propagated.clone()),
+                }
+            }
+        }
     }
 }
 
