@@ -235,19 +235,12 @@ fn sample_path_matching_tokens(
     max_tokens: usize,
 ) -> String {
     // Build the concatenated byte string for this path from leading literal terminals.
-    // Also handles Pattern terminals whose regex is a simple byte sequence.
     let mut path_bytes = Vec::new();
     for &label in labels {
         let tid = label as u32;
         match grammar.terminals.iter().find(|t| t.id() == tid) {
             Some(Terminal::Literal { bytes, .. }) => path_bytes.extend_from_slice(bytes),
-            Some(Terminal::Pattern { pattern, utf8, .. }) => {
-                match parse_regex(pattern, *utf8) {
-                    Expr::U8Seq(bytes) => path_bytes.extend_from_slice(&bytes),
-                    _ => break,
-                }
-            }
-            _ => break,
+            _ => break, // stop at first non-literal
         }
     }
 
@@ -565,182 +558,6 @@ fn terminal_dwa_max_valid_path_len(terminal_dwa: &DWA) -> Option<MaxValidPathLen
     }
 
     longest[0].map(MaxValidPathLen::Finite)
-}
-
-/// Evaluate the terminal DWA on a specific label path, returning the final weight
-/// (accumulated edge-weight intersections, intersected with the final weight at the
-/// accepting state). Returns None if the path is rejected (dead end or empty weight).
-fn evaluate_terminal_dwa_path(terminal_dwa: &DWA, labels: &[i32]) -> Option<Weight> {
-    let mut state = terminal_dwa.start_state;
-    let mut weight = Weight::all();
-
-    for &label in labels {
-        let st = &terminal_dwa.states[state as usize];
-        if let Some((next_state, edge_weight)) = st.transitions.get(&label) {
-            weight = weight.intersection(edge_weight);
-            if weight.is_empty() {
-                return None;
-            }
-            state = *next_state;
-        } else {
-            return None;
-        }
-    }
-
-    let st = &terminal_dwa.states[state as usize];
-    st.final_weight.as_ref().map(|fw| {
-        let w = weight.intersection(fw);
-        if w.is_empty() { return None; }
-        Some(w)
-    }).flatten()
-}
-
-/// Debug: print the full weight for specific terminal paths through the DWA.
-fn log_terminal_dwa_path_weights(
-    grammar: &GrammarDef,
-    terminal_dwa: &DWA,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-) {
-    let debug_paths_str = match std::env::var("DWA_DEBUG_PATHS") {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    // Parse DWA_DEBUG_PATHS as semicolon-separated terminal names/patterns
-    // Each path is a comma-separated list of terminal names
-    for path_spec in debug_paths_str.split(';') {
-        let path_spec = path_spec.trim();
-        if path_spec.is_empty() {
-            continue;
-        }
-
-        let term_names: Vec<&str> = path_spec.split(',').map(|s| s.trim()).collect();
-        let mut labels = Vec::new();
-        let mut resolved = true;
-        for name in &term_names {
-            // Find terminal by name or by literal bytes
-            let found = grammar.terminals.iter().find(|t| {
-                match t {
-                    Terminal::Literal { bytes, .. } => {
-                        String::from_utf8_lossy(bytes) == *name
-                            || grammar.terminal_display_name(t.id()) == *name
-                    }
-                    Terminal::Pattern { pattern, .. } => {
-                        pattern == name
-                            || grammar.terminal_display_name(t.id()) == *name
-                    }
-                    Terminal::Expr { .. } => {
-                        grammar.terminal_display_name(t.id()) == *name
-                    }
-                }
-            });
-            match found {
-                Some(t) => labels.push(t.id() as i32),
-                None => {
-                    eprintln!("[dwa_debug_path] terminal '{}' not found in grammar", name);
-                    resolved = false;
-                    break;
-                }
-            }
-        }
-        if !resolved {
-            continue;
-        }
-
-        let label_display: Vec<String> = labels
-            .iter()
-            .map(|&l| terminal_label_name(grammar, l))
-            .collect();
-        let path_display = label_display.join(" -> ");
-
-        match evaluate_terminal_dwa_path(terminal_dwa, &labels) {
-            Some(weight) => {
-                // Print full weight: all (tsid_range, token_set) entries
-                eprintln!("[dwa_debug_path] Path [{}] => ACCEPTED", path_display);
-                eprintln!("[dwa_debug_path]   is_full={} is_empty={}", weight.is_full(), weight.is_empty());
-                let mut entry_count = 0u32;
-                for (tsid_range, token_set) in weight.0.range_values() {
-                    let tsid_lo = *tsid_range.start();
-                    let tsid_hi = *tsid_range.end();
-                    // Show first 20 token ranges
-                    let token_ranges: Vec<String> = token_set
-                        .ranges()
-                        .take(20)
-                        .map(|r| {
-                            if r.start() == r.end() {
-                                format!("{}", r.start())
-                            } else {
-                                format!("{}..={}", r.start(), r.end())
-                            }
-                        })
-                        .collect();
-                    let token_count = token_set.len();
-                    eprintln!(
-                        "[dwa_debug_path]   tsid={}..={}: {} tokens, ranges=[{}{}]",
-                        tsid_lo,
-                        tsid_hi,
-                        token_count,
-                        token_ranges.join(", "),
-                        if token_ranges.len() < token_set.ranges_len() as usize { ", ..." } else { "" },
-                    );
-                    entry_count += 1;
-                    if entry_count >= 50 {
-                        eprintln!("[dwa_debug_path]   ... ({} more tsid entries omitted)", 
-                            weight.0.ranges_len() - entry_count as usize);
-                        break;
-                    }
-                }
-
-                // token_union
-                let tu = weight.token_union();
-                let tu_ranges: Vec<String> = tu
-                    .ranges()
-                    .take(30)
-                    .map(|r| {
-                        if r.start() == r.end() {
-                            format!("{}", r.start())
-                        } else {
-                            format!("{}..={}", r.start(), r.end())
-                        }
-                    })
-                    .collect();
-                eprintln!(
-                    "[dwa_debug_path]   token_union: {} tokens, ranges=[{}{}]",
-                    tu.len(),
-                    tu_ranges.join(", "),
-                    if tu_ranges.len() < tu.ranges_len() as usize { ", ..." } else { "" },
-                );
-
-                // Map token_union internal IDs to vocab tokens
-                let mut token_reprs = Vec::new();
-                for range in tu.ranges() {
-                    let mut tid = *range.start();
-                    while tid <= *range.end() && token_reprs.len() < 20 {
-                        if let Some(originals) = id_map.vocab_tokens.internal_to_originals.get(tid as usize) {
-                            for &orig_id in originals {
-                                if let Some(bytes) = vocab.entries.get(&orig_id) {
-                                    token_reprs.push(format!(
-                                        "int_id={} orig_id={} '{}'",
-                                        tid, orig_id, String::from_utf8_lossy(bytes)
-                                    ));
-                                }
-                            }
-                        }
-                        if tid == u32::MAX { break; }
-                        tid = tid.saturating_add(1);
-                    }
-                    if token_reprs.len() >= 20 { break; }
-                }
-                for repr in &token_reprs {
-                    eprintln!("[dwa_debug_path]   vocab: {}", repr);
-                }
-            }
-            None => {
-                eprintln!("[dwa_debug_path] Path [{}] => REJECTED", path_display);
-            }
-        }
-    }
 }
 
 fn log_terminal_dwa_sample_paths(
@@ -1098,7 +915,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
 
     log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, vocab, &id_map);
-    log_terminal_dwa_path_weights(&normalized, &terminal_dwa, vocab, &id_map);
 
     // Use precomputed templates — avoid recomputing characterize_terminals + from_characterizations
     let (parser_dwa, parser_build) = build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
