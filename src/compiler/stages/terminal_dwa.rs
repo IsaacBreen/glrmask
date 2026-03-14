@@ -861,17 +861,18 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         assoc_by_state: &BTreeMap<TokenizerState, Vec<NwaState>>,
     ) {
-        for child_node in node.children().values() {
-            let internal_child_token_id = child_node.token_id() as u32;
-            for (&tokenizer_state, source_nodes) in assoc_by_state {
-                let accessible_terminals = self.tokenizer.tokens_accessible_from_state(tokenizer_state);
-                for terminal_id in accessible_terminals {
-                    self.add_leaf_token_set_from_sources(
-                        source_nodes,
-                        terminal_id,
-                        &child_node.reachable_token_ids(),
-                    );
-                }
+        let mut accessible = node.reachable_token_ids().clone();
+        if node.has_token() {
+            accessible.remove(node.token_id() as usize);
+        }
+        for (&tokenizer_state, source_nodes) in assoc_by_state {
+            let accessible_terminals = self.tokenizer.tokens_accessible_from_state(tokenizer_state);
+            for terminal_id in accessible_terminals {
+                self.add_leaf_token_set_from_sources(
+                    source_nodes,
+                    terminal_id,
+                    &accessible,
+                );
             }
         }
     }
