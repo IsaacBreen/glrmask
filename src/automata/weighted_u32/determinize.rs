@@ -5,7 +5,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
+use std::collections::hash_map::Entry as HashMapEntry;
 
 use rustc_hash::FxHashMap;
 
@@ -39,14 +40,16 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         ));
     }
 
-    fn canonicalize(subset: &BTreeMap<u32, Weight>) -> Vec<(u32, Weight)> {
-        subset
+    fn canonicalize(subset: &FxHashMap<u32, Weight>) -> Vec<(u32, Weight)> {
+        let mut entries: Vec<_> = subset
             .iter()
             .filter_map(|(&state_id, weight)| (!weight.is_empty()).then_some((state_id, weight.clone())))
-            .collect()
+            .collect();
+        entries.sort_by_key(|(state_id, _)| *state_id);
+        entries
     }
 
-    fn epsilon_closure(nwa: &NWA, seed: &BTreeMap<u32, Weight>) -> BTreeMap<u32, Weight> {
+    fn epsilon_closure(nwa: &NWA, seed: &FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
         let mut closure = seed.clone();
         let mut queue: VecDeque<u32> = seed.keys().copied().collect();
 
@@ -78,7 +81,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     let mut dwa = DWA::new(0, 0);
     let start_id = dwa.start_state;
 
-    let mut start_subset = BTreeMap::new();
+    let mut start_subset = FxHashMap::default();
     for &state_id in &nwa.start_states {
         let existing = start_subset
             .get(&state_id)
@@ -109,6 +112,8 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     subset_map.insert(start_key.clone(), start_id);
     worklist.push_back((start_key, start_entries));
 
+    let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
+
     while let Some((subset_key_ids, subset_entries)) = worklist.pop_front() {
         if let Some(profile) = profile.as_mut() {
             profile.subsets_processed += 1;
@@ -129,8 +134,6 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             dwa.set_final_weight(from_state, final_weight);
         }
 
-        let mut raw_targets: BTreeMap<i32, BTreeMap<u32, Weight>> = BTreeMap::new();
-
         let raw_targets_started_at = profile_enabled.then(std::time::Instant::now);
         for (nwa_state_id, path_weight) in &subset_entries {
             let state = &nwa.states[*nwa_state_id as usize];
@@ -147,14 +150,14 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
                     let target_entry = raw_targets.entry(label).or_default();
                     match target_entry.entry(*dst) {
-                        std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                        HashMapEntry::Occupied(mut occupied) => {
                             if let Some(profile) = profile.as_mut() {
                                 profile.raw_target_collisions += 1;
                             }
                             let existing = occupied.get_mut();
                             *existing = existing.union(&next_weight);
                         }
-                        std::collections::btree_map::Entry::Vacant(vacant) => {
+                        HashMapEntry::Vacant(vacant) => {
                             vacant.insert(next_weight);
                         }
                     }
@@ -165,15 +168,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             profile.raw_targets_ms += started_at.elapsed();
         }
 
-        for (label, target_subset) in raw_targets {
-            if target_subset.is_empty() {
-                continue;
-            }
-            // Filter out empty weights (shouldn't happen but defensive)
-            let target_subset: BTreeMap<u32, Weight> = target_subset
-                .into_iter()
-                .filter(|(_, w)| !w.is_empty())
-                .collect();
+        for (label, target_subset) in raw_targets.drain() {
             if target_subset.is_empty() {
                 continue;
             }
@@ -205,7 +200,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
             let normalize_started_at = profile_enabled.then(std::time::Instant::now);
             let edge_complement = edge_weight.complement();
-            let normalized: BTreeMap<u32, Weight> = if edge_complement.is_empty() {
+            let normalized: FxHashMap<u32, Weight> = if edge_complement.is_empty() {
                 expanded
             } else {
                 expanded
