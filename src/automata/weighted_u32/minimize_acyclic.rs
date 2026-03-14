@@ -471,11 +471,16 @@ fn are_compatible(
     needed: &[Weight],
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
+    known_overlapping: bool,
 ) -> bool {
     let needed_u = &needed[u];
     let needed_v = &needed[v];
 
-    let domain_disjoint = needed_u.is_disjoint(needed_v);
+    let domain_disjoint = if known_overlapping {
+        false
+    } else {
+        needed_u.is_disjoint(needed_v)
+    };
 
     // Compute overlap lazily — only needed for non-disjoint case
     let overlap = if domain_disjoint {
@@ -647,6 +652,7 @@ fn build_incompatibility_graph(
                 needed,
                 old_to_new,
                 productive_transitions,
+                false,
             ) {
                 adj[i].push(j);
                 adj[j].push(i);
@@ -677,15 +683,27 @@ fn overlapping_candidate_pairs(
 
     let mut overlap_pairs = HashSet::new();
     let mut active: Vec<(u32, usize, Arc<range_set_blaze::RangeSetBlaze<u32>>)> = Vec::new();
+    // Cache: for the current segment's token set, map active token set pointer → overlaps?
+    let mut disjoint_cache: FxHashMap<usize, bool> = FxHashMap::default();
 
     for (start, end, idx, tokens) in segments {
         active.retain(|(active_end, _, _)| *active_end >= start);
+        disjoint_cache.clear();
 
         for (_, active_idx, active_tokens) in &active {
             if *active_idx == idx {
                 continue;
             }
-            if Arc::ptr_eq(active_tokens, &tokens) || !active_tokens.is_disjoint(tokens.as_ref()) {
+            let active_ptr = Arc::as_ptr(active_tokens) as usize;
+            let overlaps = match disjoint_cache.entry(active_ptr) {
+                std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    let v = Arc::ptr_eq(active_tokens, &tokens)
+                        || !active_tokens.is_disjoint(tokens.as_ref());
+                    *e.insert(v)
+                }
+            };
+            if overlaps {
                 let pair = if *active_idx < idx {
                     (*active_idx, idx)
                 } else {
@@ -769,6 +787,7 @@ fn build_incompatibility_graph_sparse(
             needed,
             old_to_new,
             productive_transitions,
+            true,
         ) {
             incompatible_pairs.insert((i, j));
         }
