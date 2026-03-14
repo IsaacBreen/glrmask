@@ -11,39 +11,8 @@ use rustc_hash::FxHashMap;
 
 use super::dwa::DWA;
 use super::nwa::NWA;
-use crate::ds::weight::{Weight, WeightBuilder};
+use crate::ds::weight::Weight;
 use crate::GlrMaskError;
-
-/// Like TransitionWeight in minimize: stores either a single weight or
-/// multiple merged via WeightBuilder. Avoids the expand/compress cycle
-/// when there's only one contribution.
-enum RawTargetWeight {
-    Single(Weight),
-    Merged(WeightBuilder),
-}
-
-impl RawTargetWeight {
-    fn add(&mut self, weight: Weight) {
-        match self {
-            RawTargetWeight::Single(existing) => {
-                let mut builder = WeightBuilder::new();
-                builder.union_weight(existing);
-                builder.union_weight(&weight);
-                *self = RawTargetWeight::Merged(builder);
-            }
-            RawTargetWeight::Merged(builder) => {
-                builder.union_weight(&weight);
-            }
-        }
-    }
-
-    fn build(self) -> Weight {
-        match self {
-            RawTargetWeight::Single(w) => w,
-            RawTargetWeight::Merged(builder) => builder.build(),
-        }
-    }
-}
 
 #[derive(Default)]
 struct DeterminizeProfile {
@@ -160,7 +129,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             dwa.set_final_weight(from_state, final_weight);
         }
 
-        let mut raw_targets: BTreeMap<i32, BTreeMap<u32, RawTargetWeight>> = BTreeMap::new();
+        let mut raw_targets: BTreeMap<i32, BTreeMap<u32, Weight>> = BTreeMap::new();
 
         let raw_targets_started_at = profile_enabled.then(std::time::Instant::now);
         for (nwa_state_id, path_weight) in &subset_entries {
@@ -182,10 +151,11 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                             if let Some(profile) = profile.as_mut() {
                                 profile.raw_target_collisions += 1;
                             }
-                            occupied.get_mut().add(next_weight);
+                            let existing = occupied.get_mut();
+                            *existing = existing.union(&next_weight);
                         }
                         std::collections::btree_map::Entry::Vacant(vacant) => {
-                            vacant.insert(RawTargetWeight::Single(next_weight));
+                            vacant.insert(next_weight);
                         }
                     }
                 }
@@ -199,12 +169,10 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             if target_subset.is_empty() {
                 continue;
             }
+            // Filter out empty weights (shouldn't happen but defensive)
             let target_subset: BTreeMap<u32, Weight> = target_subset
                 .into_iter()
-                .filter_map(|(state_id, rtw)| {
-                    let w = rtw.build();
-                    (!w.is_empty()).then_some((state_id, w))
-                })
+                .filter(|(_, w)| !w.is_empty())
                 .collect();
             if target_subset.is_empty() {
                 continue;
