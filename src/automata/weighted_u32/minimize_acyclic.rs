@@ -1289,7 +1289,7 @@ fn try_all_compatible_height_0_coloring(
 
 struct MergedStateBuilder {
     final_weights_pending: Vec<Weight>,
-    transitions: rustc_hash::FxHashMap<Label, (u32, Vec<Weight>)>,
+    transitions: rustc_hash::FxHashMap<Label, (u32, Weight)>,
 }
 
 impl Default for MergedStateBuilder {
@@ -1310,20 +1310,18 @@ impl MergedStateBuilder {
         use std::collections::hash_map::Entry;
         match self.transitions.entry(label) {
             Entry::Occupied(mut entry) => {
-                let (existing_target, pending) = entry.get_mut();
+                let (existing_target, existing_weight) = entry.get_mut();
                 debug_assert_eq!(*existing_target, target);
-                pending.push(weight);
+                *existing_weight = existing_weight.union(&weight);
             }
             Entry::Vacant(entry) => {
-                entry.insert((target, vec![weight]));
+                entry.insert((target, weight));
             }
         }
     }
 
     fn finalize_for_reuse(&mut self) {
-        // Only finalize final_weights — transition weights are batch-built in reconstruct.
         let pending = std::mem::take(&mut self.final_weights_pending);
-        // Store the built weight back as a single-element pending for reconstruct to pick up.
         let built = batch_build_weight(pending);
         if !built.is_empty() {
             self.final_weights_pending.push(built);
@@ -1338,9 +1336,6 @@ fn batch_build_weight(pending: Vec<Weight>) -> Weight {
         1 => pending.into_iter().next().unwrap(),
         n if n <= 16 => Weight::union_all(pending.iter()),
         _ => {
-            // Hierarchical union: group into chunks and reduce.
-            // This avoids the per-TSID expansion of WeightBuilder, keeping
-            // operations at the range level throughout.
             let mut current = pending;
             while current.len() > 16 {
                 current = current
@@ -1399,13 +1394,11 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
         .into_iter()
         .map(|b| {
             let mut state = DWAState::default();
-            // final_weights_pending has at most one element after finalize_for_reuse
             let final_weight = b.final_weights_pending.into_iter().next().unwrap_or_else(Weight::empty);
             if !final_weight.is_empty() {
                 state.final_weight = Some(final_weight);
             }
-            for (lbl, (target, pending)) in b.transitions {
-                let weight = batch_build_weight(pending);
+            for (lbl, (target, weight)) in b.transitions {
                 if !weight.is_empty() {
                     state.transitions.insert(lbl, (target, weight));
                 }
