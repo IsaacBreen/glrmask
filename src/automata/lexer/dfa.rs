@@ -43,7 +43,7 @@ impl DFA {
         self.states.len()
     }
 
-    pub fn add_state(&mut self) -> u32 {
+    pub(super) fn add_state(&mut self) -> u32 {
         let id = self.states.len() as u32;
         let groups = self.group_id_to_u8set.len();
         self.states.push(DFAState {
@@ -54,7 +54,7 @@ impl DFA {
         id
     }
 
-    pub fn ensure_group_capacity(&mut self, num_groups: usize) {
+    pub(super) fn ensure_group_capacity(&mut self, num_groups: usize) {
         if self.group_id_to_u8set.len() < num_groups {
             self.group_id_to_u8set.resize(num_groups, U8Set::empty());
         }
@@ -75,13 +75,13 @@ impl DFA {
         }
     }
 
-    pub fn add_transition(&mut self, from: u32, byte: u8, to: u32) {
+    pub(super) fn add_transition(&mut self, from: u32, byte: u8, to: u32) {
         if let Some(state) = self.states.get_mut(from as usize) {
             state.transitions.insert(byte, to);
         }
     }
 
-    pub fn clear_finalizers_for_state(&mut self, state: u32) -> BitSet {
+    pub(super) fn clear_finalizers_for_state(&mut self, state: u32) -> BitSet {
         if let Some(entry) = self.states.get_mut(state as usize) {
             std::mem::take(&mut entry.finalizers)
         } else {
@@ -101,7 +101,7 @@ impl DFA {
         }
     }
 
-    pub fn set_group_u8set(&mut self, group_id: GroupId, set: U8Set) {
+    pub(super) fn set_group_u8set(&mut self, group_id: GroupId, set: U8Set) {
         if let Some(entry) = self.group_id_to_u8set.get_mut(group_id as usize) {
             *entry = set;
         }
@@ -145,7 +145,7 @@ impl DFA {
 
     /// Create a clone of an existing state (transitions, finalizers,
     /// possible_future_group_ids) and return the new state's id.
-    pub fn clone_state(&mut self, source: u32) -> u32 {
+    pub(super) fn clone_state(&mut self, source: u32) -> u32 {
         let cloned = self.states[source as usize].clone();
         let id = self.states.len() as u32;
         self.states.push(cloned);
@@ -154,7 +154,7 @@ impl DFA {
 
     /// Rewrite every transition that targets `old_target` so it targets
     /// `new_target` instead.
-    pub fn redirect_transitions(&mut self, old_target: u32, new_target: u32) {
+    pub(super) fn redirect_transitions(&mut self, old_target: u32, new_target: u32) {
         for state in &mut self.states {
             for (_, target) in state.transitions.iter_mut() {
                 if *target == old_target {

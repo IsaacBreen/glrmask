@@ -14,7 +14,7 @@ impl Constraint {
         );
         let mut state = start_state;
         for (i, &byte) in input.iter().enumerate() {
-            let next = self.tokenizer.dfa.get_transition(state, byte);
+            let next = self.tokenizer.get_transition(state, byte);
             let is_dead = next == crate::automata::dfa::DEAD;
             let finals = if !is_dead {
                 self.tokenizer

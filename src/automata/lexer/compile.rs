@@ -232,7 +232,7 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Regex {
-    pub dfa: DFA,
+    pub(crate) dfa: DFA,
 }
 
 impl Regex {

@@ -17,7 +17,7 @@ pub use super::regex::parse_regex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {
-    pub dfa: DFA,
+    pub(crate) dfa: DFA,
     pub num_terminals: u32,
 }
 
@@ -71,6 +71,10 @@ impl Tokenizer {
 
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
         self.dfa.step(state, byte)
+    }
+
+    pub fn get_transition(&self, state: u32, byte: u8) -> u32 {
+        self.dfa.get_transition(state, byte)
     }
 
     pub fn run(&self, input: &[u8]) -> u32 {
