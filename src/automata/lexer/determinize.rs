@@ -18,21 +18,25 @@ impl NFA {
             .map(|group| *group as usize + 1)
             .unwrap_or(0);
 
-        let mut reachable_groups = vec![BTreeSet::new(); self.states.len()];
+        let mut reachable_groups: Vec<BitSet> = (0..self.states.len())
+            .map(|_| BitSet::new(group_count))
+            .collect();
         let mut changed = true;
         while changed {
             changed = false;
             for state_id in (0..self.states.len()).rev() {
-                let mut next_groups = reachable_groups[state_id].clone();
-                next_groups.extend(self.states[state_id].finalizers.iter().copied());
-                for &next in &self.states[state_id].epsilon_transitions {
-                    next_groups.extend(reachable_groups[next as usize].iter().copied());
+                let mut next = reachable_groups[state_id].clone();
+                for &group in &self.states[state_id].finalizers {
+                    next.set(group as usize);
                 }
-                for (_, next) in &self.states[state_id].transitions {
-                    next_groups.extend(reachable_groups[*next as usize].iter().copied());
+                for &next_state in &self.states[state_id].epsilon_transitions {
+                    next.union_with(&reachable_groups[next_state as usize]);
                 }
-                if next_groups != reachable_groups[state_id] {
-                    reachable_groups[state_id] = next_groups;
+                for (_, next_state) in &self.states[state_id].transitions {
+                    next.union_with(&reachable_groups[*next_state as usize]);
+                }
+                if next != reachable_groups[state_id] {
+                    reachable_groups[state_id] = next;
                     changed = true;
                 }
             }
@@ -64,9 +68,7 @@ impl NFA {
                 for &group in &nfa_state.finalizers {
                     finalizers.set(group as usize);
                 }
-                for &group in &reachable_groups[nfa_state_id as usize] {
-                    future.set(group as usize);
-                }
+                future.union_with(&reachable_groups[nfa_state_id as usize]);
                 for (set, next) in &nfa_state.transitions {
                     for byte in set.iter() {
                         transitions.entry(byte).or_default().insert(*next);
