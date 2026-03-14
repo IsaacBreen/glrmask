@@ -1089,7 +1089,7 @@ mod tests {
         );
 
         assert_ne!(hash_a, hash_1,
-            "tokens ' a' (hash={hash_a}) and ' 1' (hash={hash_1}) should have different \
+                   "tokens ' a' (hash={hash_a}) and ' 1' (hash={hash_1}) should have different \
              reference hashes from the distinguishing state");
     }
 
@@ -1105,7 +1105,55 @@ mod tests {
         use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
         use crate::import::lark::parse_lark;
 
-        let lark_text = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        fn format_gid(grammar: &crate::compiler::grammar::GrammarDef, gid: usize) -> String {
+            format!("{gid}:{}", grammar.terminal_display_name(gid as u32))
+        }
+
+        fn pretty_trellis(
+            grammar: &crate::compiler::grammar::GrammarDef,
+            dfa: &FlatDfa,
+            dag: &BTreeMap<usize, FlatNode>,
+        ) -> String {
+            let mut out = String::new();
+
+            for (&pos, node) in dag {
+                use std::fmt::Write;
+
+                let end_state_str = if node.end_state == STATE_NONE {
+                    "NONE".to_string()
+                } else {
+                    let future = &dfa.states[node.end_state].possible_future_group_ids;
+                    let future_names = future
+                        .iter()
+                        .map(|&gid| format_gid(grammar, gid))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{} (future=[{}])", node.end_state, future_names)
+                };
+
+                let edges_str = if node.edges.is_empty() {
+                    "[]".to_string()
+                } else {
+                    let parts = node
+                        .edges
+                        .iter()
+                        .map(|(gid, target)| format!("{} -> {}", format_gid(grammar, *gid), target))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("[{}]", parts)
+                };
+
+                let _ = writeln!(
+                    out,
+                    "pos {pos:>3}: end_state={end_state_str}, edges={edges_str}"
+                );
+            }
+
+            out
+        }
+
+        let lark_text =
+            include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
         let grammar = parse_lark(lark_text).expect("fixture grammar should parse");
         let (normalized, tokenizer) = prepare_grammar_for_compile(&grammar);
         let analyzed = AnalyzedGrammar::from_grammar_def(&normalized);
@@ -1114,24 +1162,58 @@ mod tests {
         let dfa = sep1.dfa();
         let pre = precompute(dfa, &disallowed_follows);
 
-        let token_space_a: &[u8] = &[32, 97];  // " a"
-        let token_space_1: &[u8] = &[32, 49];  // " 1"
+        let token_space_a: &[u8] = &[32, 97]; // " a"
+        let token_space_1: &[u8] = &[32, 49]; // " 1"
 
-        // The witness found the mismatch at distinguishing state 1065.
         for distinguishing_state in 0..dfa.num_states() {
             let hash_memo = Mutex::new(HashMap::new());
 
             let hash_a = process_token_for_state(
-                dfa, &pre, token_space_a, distinguishing_state, None, &hash_memo, &mut Vec::new(),
+                dfa,
+                &pre,
+                token_space_a,
+                distinguishing_state,
+                None,
+                &hash_memo,
+                &mut Vec::new(),
             );
             let hash_1 = process_token_for_state(
-                dfa, &pre, token_space_1, distinguishing_state, None, &hash_memo, &mut Vec::new(),
+                dfa,
+                &pre,
+                token_space_1,
+                distinguishing_state,
+                None,
+                &hash_memo,
+                &mut Vec::new(),
             );
 
-            // Reference analysis should produce different hashes for these tokens
-            // from the distinguishing state.
-            assert_eq!(hash_a, hash_1,
-                       "reference: tokens ' a' and ' 1' should have the same hashes from state {distinguishing_state}");
+            let trellis_a = build_trellis_dag(
+                dfa,
+                pre.num_groups,
+                token_space_a,
+                distinguishing_state,
+                &mut Vec::new(),
+            );
+            let trellis_1 = build_trellis_dag(
+                dfa,
+                pre.num_groups,
+                token_space_1,
+                distinguishing_state,
+                &mut Vec::new(),
+            );
+
+            if hash_a != hash_1 {
+                eprintln!(
+                    "Reference analysis: tokens ' a' and ' 1' differ from state {distinguishing_state}\n\
+                 hash_a={hash_a}, hash_1={hash_1}\n\
+                 \n\
+                 Trellis for ' a':\n{}\n\
+                 Trellis for ' 1':\n{}",
+                    pretty_trellis(&normalized, dfa, &trellis_a),
+                    pretty_trellis(&normalized, dfa, &trellis_1),
+                );
+                panic!();
+            }
         }
     }
 }
