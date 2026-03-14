@@ -20,6 +20,13 @@ use crate::compiler::stages::templates::compile_dfa::Templates;
 use crate::ds::weight::Weight;
 
 impl Templates {
+    /// Assemble a weighted NWA for one bundle of (terminal, weight) entries.
+    ///
+    /// Pipeline: group-by-weight → unweighted DFA union → product determinize → minimize → NWA.
+    ///
+    /// The **determinize** step (product construction) is essential for correctness
+    /// and performance — it fuses all group DFAs into a single DWA that the
+    /// downstream parser composition relies on. Do not remove it.
     pub(crate) fn build_bundle(
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
@@ -98,8 +105,34 @@ impl Templates {
         let det_ms = det_started.elapsed().as_secs_f64() * 1000.0;
         let dwa_states = bundle_dwa.states.len();
 
+        // Per-bundle minimize.
+        //
+        // Minimize can only help when num_groups > 1, because the "diamond"
+        // optimization merges states whose weight domains are disjoint — which
+        // requires at least two distinct weights. With a single weight group,
+        // all states carry the same weight, so only structurally identical
+        // states can be merged (which the product construction already avoids).
+        //
+        // INVESTIGATION NOTES (kb_143, 2025-06):
+        //   - minimize_fast (partition refinement): ~270ms total across all bundles,
+        //     0% state reduction on every bundle. Product-DWA states are
+        //     structurally unique, so partition refinement finds nothing to merge.
+        //   - minimize (exact graph-coloring with diamond merging): achieves 8-37%
+        //     reduction per bundle BUT takes ~70 seconds total, while the final
+        //     parser DWA is nearly identical (2,466 vs 2,461 states). The parser
+        //     DWA minimize at the end compensates fully for any unmerged bundle states.
+        //
+        // Per-bundle DETERMINIZE (above) is essential and must not be removed —
+        // it converts the union of weighted group DFAs into a single product DWA
+        // that the downstream composition relies on. The minimize step is kept as
+        // a cheap best-effort pass for multi-group bundles; a faster
+        // bundle-specific minimize algorithm could improve this in the future.
         let min_started = std::time::Instant::now();
-        let minimized = minimize_fast(&bundle_dwa);
+        let minimized = if num_groups > 1 {
+            minimize_fast(&bundle_dwa)
+        } else {
+            bundle_dwa
+        };
         let min_ms = min_started.elapsed().as_secs_f64() * 1000.0;
         let min_states = minimized.states.len();
 
