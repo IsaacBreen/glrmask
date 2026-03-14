@@ -114,57 +114,46 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
         return (false, None, Vec::new()); // cyclic
     };
 
-    // 2. Backward reachable sets (reverse topo order = leaves first)
+    // 2+3 combined: backward reachable sets + push transition weights.
+    // In reverse topo order, each state's targets have already been processed,
+    // so we compute reachable[u] and push transitions in a single pass.
     let mut reachable: Vec<Weight> = vec![Weight::empty(); n];
     let mut intersection_cache = FxHashMap::default();
+    let mut changed = false;
     for &u in topo.iter().rev() {
         let st = &dwa.states[u];
         let mut acc = st.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
-        for (_, (target, w)) in &st.transitions {
+        let mut acc_full = acc.is_full();
+        let mut pushed: Vec<(Label, u32, Option<Weight>)> = Vec::new();
+        for (&lbl, (target, w)) in &st.transitions {
             let t = *target as usize;
             if t >= n {
                 continue;
             }
             if reachable[t].is_full() {
-                acc = acc.union(w);
-            } else if !reachable[t].is_empty() {
-                let tmp = memoized_intersection(&mut intersection_cache, w, &reachable[t]);
-                acc = acc.union(&tmp);
-            }
-            if acc.is_full() {
-                break;
+                if !acc_full {
+                    acc = acc.union(w);
+                    acc_full = acc.is_full();
+                }
+                // w ∩ all = w, no push needed
+            } else if reachable[t].is_empty() {
+                // w ∩ empty = empty, remove transition
+                pushed.push((lbl, *target, None));
+                // Contributes nothing to acc
+            } else {
+                let new_w = memoized_intersection(&mut intersection_cache, w, &reachable[t]);
+                if !acc_full {
+                    acc = acc.union(&new_w);
+                    acc_full = acc.is_full();
+                }
+                if new_w != *w {
+                    pushed.push((lbl, *target, if new_w.is_empty() { None } else { Some(new_w) }));
+                }
             }
         }
         reachable[u] = acc;
-    }
 
-    // 3. Intersect each transition weight with reachable[target]
-    let mut changed = false;
-    for u in 0..n {
-        // Two-pass approach: first read-only pass collects changes, second pass applies them.
-        // This avoids cloning all weights upfront.
-        let changes: Vec<(Label, u32, Option<Weight>)> = dwa.states[u]
-            .transitions
-            .iter()
-            .filter_map(|(&lbl, &(target, ref w))| {
-                let t = target as usize;
-                if t >= n || reachable[t].is_full() {
-                    return None;
-                }
-                let new_w = if reachable[t].is_empty() {
-                    Weight::empty()
-                } else {
-                    memoized_intersection(&mut intersection_cache, w, &reachable[t])
-                };
-                if new_w != *w {
-                    Some((lbl, target, if new_w.is_empty() { None } else { Some(new_w) }))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for (lbl, target, new_w_opt) in changes {
+        for (lbl, target, new_w_opt) in pushed {
             if let Some(new_w) = new_w_opt {
                 dwa.states[u].transitions.insert(lbl, (target, new_w));
             } else {
