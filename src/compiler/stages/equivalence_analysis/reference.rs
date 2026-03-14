@@ -1264,6 +1264,10 @@ mod tests {
         let dfa = sep1.dfa();
         let pre = precompute(dfa, &disallowed);
 
+        if let Some(dd) = &pre.disallowed_detector {
+            println!("Disallowed follows:\n{}", pretty_dfa(group_names, dd));
+        }
+
         // Compute and print final DFAs for both tokens
         for (i, token) in tokens.iter().enumerate() {
             let mut tmp_mp = Vec::new();
