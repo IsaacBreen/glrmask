@@ -977,7 +977,109 @@ mod tests {
         let token_space_a: &[u8] = &[32, 97];  // " a"
         let token_space_1: &[u8] = &[32, 49];  // " 1"
 
-        // Process from the distinguishing state (new state 3).
+        // Debug: process each token step by step and print intermediate DFAs.
+        for (label, token) in [("' a'", token_space_a), ("' 1'", token_space_1)] {
+            eprintln!("\n============================================================");
+            eprintln!("=== Token {label} (bytes {:?}) from state 3 ===", token);
+            eprintln!("============================================================");
+
+            let mut tmp_mp = vec![NONE; pre.num_groups];
+
+            // 1. Build trellis DAG
+            let dag = build_trellis_dag(&dfa, pre.num_groups, token, 3, &mut tmp_mp);
+            eprintln!("\n--- Trellis DAG ---");
+            for (&pos, node) in &dag {
+                eprintln!("  pos={pos}: end_state={}{}, edges={:?}",
+                    if node.end_state == STATE_NONE { "NONE".to_string() } else { node.end_state.to_string() },
+                    if node.end_state != STATE_NONE {
+                        format!(" (pfg={:?})", dfa.states[node.end_state].possible_future_group_ids)
+                    } else { String::new() },
+                    node.edges);
+            }
+
+            // 2. Build NFA from trellis
+            let nfa = build_nfa_from_trellis(&dfa, &dag, pre.num_groups, None, token.len());
+            eprintln!("\n--- NFA ({} states, starts={:?}) ---", nfa.states.len(), nfa.start_states);
+            for (i, s) in nfa.states.iter().enumerate() {
+                let acc = if s.is_accepting { " [ACCEPT]" } else { "" };
+                if !s.transitions.is_empty() || !s.epsilons.is_empty() || s.is_accepting {
+                    eprintln!("  state {i}{acc}:");
+                    for (&lbl, targets) in &s.transitions {
+                        let label_str = if lbl < 0 {
+                            format!("completion({})", -(lbl + 1))
+                        } else {
+                            format!("edge(gid={})", lbl)
+                        };
+                        eprintln!("    {label_str} → {:?}", targets);
+                    }
+                    for &eps in &s.epsilons {
+                        eprintln!("    ε → {eps}");
+                    }
+                }
+            }
+
+            // 3. Determinize
+            let det_dfa = determinize(&nfa);
+            eprintln!("\n--- Determinized DFA ({} states, start={}) ---", det_dfa.states.len(), det_dfa.start_state);
+            for (i, s) in det_dfa.states.iter().enumerate() {
+                let acc = if s.is_accepting { " [ACCEPT]" } else { "" };
+                if !s.transitions.is_empty() || s.is_accepting {
+                    eprintln!("  state {i}{acc}:");
+                    for (&lbl, &target) in &s.transitions {
+                        let label_str = if lbl < 0 {
+                            format!("completion({})", -(lbl + 1))
+                        } else {
+                            format!("edge(gid={})", lbl)
+                        };
+                        eprintln!("    {label_str} → {target}");
+                    }
+                }
+            }
+
+            // 4. Minimize (acyclic)
+            let min_dfa = minimize_acyclic(&det_dfa);
+            eprintln!("\n--- Minimized DFA ({} states, start={}) ---", min_dfa.states.len(), min_dfa.start_state);
+            for (i, s) in min_dfa.states.iter().enumerate() {
+                let acc = if s.is_accepting { " [ACCEPT]" } else { "" };
+                if !s.transitions.is_empty() || s.is_accepting {
+                    eprintln!("  state {i}{acc}:");
+                    for (&lbl, &target) in &s.transitions {
+                        let label_str = if lbl < 0 {
+                            format!("completion({})", -(lbl + 1))
+                        } else {
+                            format!("edge(gid={})", lbl)
+                        };
+                        eprintln!("    {label_str} → {target}");
+                    }
+                }
+            }
+
+            // 5. Subtract disallowed follows + minimize
+            let pruned_dfa = match &pre.disallowed_detector {
+                Some(dd) => minimize_acyclic(&subtract(&min_dfa, dd)),
+                None => min_dfa.clone(),
+            };
+            eprintln!("\n--- Final DFA after subtract+minimize ({} states, start={}) ---", pruned_dfa.states.len(), pruned_dfa.start_state);
+            for (i, s) in pruned_dfa.states.iter().enumerate() {
+                let acc = if s.is_accepting { " [ACCEPT]" } else { "" };
+                if !s.transitions.is_empty() || s.is_accepting {
+                    eprintln!("  state {i}{acc}:");
+                    for (&lbl, &target) in &s.transitions {
+                        let label_str = if lbl < 0 {
+                            format!("completion({})", -(lbl + 1))
+                        } else {
+                            format!("edge(gid={})", lbl)
+                        };
+                        eprintln!("    {label_str} → {target}");
+                    }
+                }
+            }
+
+            let final_hash = canonical_hash(&pruned_dfa);
+            eprintln!("\n>>> Hash for {label}: {final_hash}");
+        }
+
+        // Now run the actual assertions.
         let hash_a = process_token_for_state(
             &dfa, &pre, token_space_a, 3, None, &hash_memo, &mut Vec::new(),
         );
