@@ -203,6 +203,7 @@ pub(crate) fn inline_single_use_nonterminals(
     protected_nonterminals: &std::collections::BTreeSet<NonterminalID>,
 ) {
     loop {
+        // Build indexes
         let mut productions_by_lhs = std::collections::BTreeMap::<NonterminalID, Vec<usize>>::new();
         let mut consumer_occurrences = std::collections::BTreeMap::<NonterminalID, usize>::new();
 
@@ -215,30 +216,33 @@ pub(crate) fn inline_single_use_nonterminals(
             }
         }
 
-        let candidate = productions_by_lhs
-            .iter()
-            .filter_map(|(&nonterminal, production_indexes)| {
-                if protected_nonterminals.contains(&nonterminal) || production_indexes.len() != 1 {
-                    return None;
-                }
+        // Collect ALL candidates at once
+        let mut candidates: std::collections::BTreeMap<NonterminalID, (usize, Vec<Symbol>)> =
+            std::collections::BTreeMap::new();
 
-                let rule = &rules[production_indexes[0]];
-                if rule.rhs.is_empty()
-                    || rule
-                        .rhs
-                        .iter()
-                        .any(|symbol| matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal))
-                {
-                    return None;
-                }
+        for (&nonterminal, production_indexes) in &productions_by_lhs {
+            if protected_nonterminals.contains(&nonterminal) || production_indexes.len() != 1 {
+                continue;
+            }
 
-                let consumer_count = consumer_occurrences.get(&nonterminal).copied().unwrap_or(0);
-                let should_inline = rule.rhs.len() == 1 || consumer_count == 1;
-                if !should_inline {
-                    return None;
-                }
+            let rule = &rules[production_indexes[0]];
+            if rule.rhs.is_empty()
+                || rule
+                    .rhs
+                    .iter()
+                    .any(|symbol| matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal))
+            {
+                continue;
+            }
 
-                let creates_direct_left_recursion = rules.iter().enumerate().any(|(index, outer_rule)| {
+            let consumer_count = consumer_occurrences.get(&nonterminal).copied().unwrap_or(0);
+            let should_inline = rule.rhs.len() == 1 || consumer_count == 1;
+            if !should_inline {
+                continue;
+            }
+
+            let creates_direct_left_recursion =
+                rules.iter().enumerate().any(|(index, outer_rule)| {
                     if index == production_indexes[0] {
                         return false;
                     }
@@ -248,36 +252,78 @@ pub(crate) fn inline_single_use_nonterminals(
                             && matches!(rule.rhs.first(), Some(Symbol::Nonterminal(first)) if *first == outer_rule.lhs)
                     })
                 });
-                if creates_direct_left_recursion {
-                    return None;
-                }
-
-                Some((nonterminal, production_indexes[0], rule.rhs.clone()))
-            })
-            .next();
-
-        let Some((nonterminal, production_index, replacement_rhs)) = candidate else {
-            break;
-        };
-
-        let mut rewritten = Vec::with_capacity(rules.len());
-        for (index, rule) in rules.iter().enumerate() {
-            if index == production_index {
+            if creates_direct_left_recursion {
                 continue;
             }
 
-            let mut changed = false;
-            let mut new_rhs = Vec::with_capacity(rule.rhs.len());
-            for symbol in &rule.rhs {
-                if matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal) {
-                    new_rhs.extend(replacement_rhs.iter().cloned());
-                    changed = true;
-                } else {
-                    new_rhs.push(symbol.clone());
+            candidates.insert(nonterminal, (production_indexes[0], rule.rhs.clone()));
+        }
+
+        if candidates.is_empty() {
+            break;
+        }
+
+        // Transitively expand candidate RHS: if a candidate's RHS references
+        // another candidate, substitute it. Iterate until stable.
+        let candidate_nts: std::collections::BTreeSet<NonterminalID> =
+            candidates.keys().copied().collect();
+        let mut expanded = true;
+        while expanded {
+            expanded = false;
+            let snapshot: Vec<(NonterminalID, Vec<Symbol>)> = candidates
+                .iter()
+                .map(|(&nt, (_, rhs))| (nt, rhs.clone()))
+                .collect();
+            for (nt, rhs) in snapshot {
+                if rhs.iter().any(|s| {
+                    matches!(s, Symbol::Nonterminal(id) if candidate_nts.contains(id) && *id != nt)
+                }) {
+                    let mut new_rhs = Vec::with_capacity(rhs.len());
+                    for symbol in &rhs {
+                        if let Symbol::Nonterminal(id) = symbol {
+                            if *id != nt {
+                                if let Some((_, sub_rhs)) = candidates.get(id) {
+                                    new_rhs.extend(sub_rhs.iter().cloned());
+                                    continue;
+                                }
+                            }
+                        }
+                        new_rhs.push(symbol.clone());
+                    }
+                    if new_rhs != rhs {
+                        candidates.get_mut(&nt).unwrap().1 = new_rhs;
+                        expanded = true;
+                    }
                 }
             }
+        }
 
-            if changed {
+        // Collect production indexes to remove
+        let remove_indexes: std::collections::BTreeSet<usize> =
+            candidates.values().map(|(idx, _)| *idx).collect();
+
+        // Rewrite all rules in one pass
+        let mut rewritten = Vec::with_capacity(rules.len());
+        for (index, rule) in rules.iter().enumerate() {
+            if remove_indexes.contains(&index) {
+                continue;
+            }
+
+            let has_candidate = rule.rhs.iter().any(|s| {
+                matches!(s, Symbol::Nonterminal(id) if candidates.contains_key(id))
+            });
+
+            if has_candidate {
+                let mut new_rhs = Vec::with_capacity(rule.rhs.len());
+                for symbol in &rule.rhs {
+                    if let Symbol::Nonterminal(id) = symbol {
+                        if let Some((_, replacement_rhs)) = candidates.get(id) {
+                            new_rhs.extend(replacement_rhs.iter().cloned());
+                            continue;
+                        }
+                    }
+                    new_rhs.push(symbol.clone());
+                }
                 rewritten.push(Rule {
                     lhs: rule.lhs,
                     rhs: new_rhs,
