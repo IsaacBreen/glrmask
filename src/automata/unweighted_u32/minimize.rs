@@ -22,10 +22,12 @@ struct StateSignature {
 /// Returns the input unchanged if it is cyclic (cannot minimize cyclic DFAs
 /// with this reverse-topological approach).
 pub fn minimize(dfa: &DFA) -> DFA {
+    debug_assert!(
+        dfa.is_acyclic(),
+        "determinize: input NFA is cyclic"
+    );
+
     if dfa.states.is_empty() {
-        return dfa.clone();
-    }
-    if !dfa.is_acyclic() {
         return dfa.clone();
     }
 
