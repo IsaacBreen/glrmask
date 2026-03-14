@@ -203,6 +203,18 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
                         current = next;
                     }
 
+                    // When min=0, current is still the shared `start` state.
+                    // The loop-back edge (loop_state → current) must NOT point
+                    // at state 0 (the NFA initial state), because that would
+                    // make every terminal reachable from inside the loop,
+                    // polluting `possible_future_group_ids`.  Insert a fresh
+                    // intermediate so the loop is self-contained.
+                    if current == start {
+                        let fresh = nfa.add_state();
+                        nfa.add_epsilon(start, fresh);
+                        current = fresh;
+                    }
+
                     nfa.add_epsilon(current, end);
                     let loop_state = nfa.add_state();
                     compile_expr(expr, nfa, current, loop_state);
