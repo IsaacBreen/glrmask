@@ -225,6 +225,67 @@ fn token_repr(bytes: &[u8]) -> String {
     )
 }
 
+/// Given a terminal DWA path (as a list of terminal IDs), find vocab tokens whose
+/// bytes match the concatenated terminal byte string. Shows tokens that are a prefix
+/// of the path bytes or whose bytes the path bytes are a prefix of.
+fn sample_path_matching_tokens(
+    grammar: &GrammarDef,
+    labels: &[i32],
+    vocab: &Vocab,
+    max_tokens: usize,
+) -> String {
+    // Build the concatenated byte string for this path from leading literal terminals.
+    let mut path_bytes = Vec::new();
+    for &label in labels {
+        let tid = label as u32;
+        match grammar.terminals.iter().find(|t| t.id() == tid) {
+            Some(Terminal::Literal { bytes, .. }) => path_bytes.extend_from_slice(bytes),
+            _ => break, // stop at first non-literal
+        }
+    }
+
+    if path_bytes.is_empty() {
+        return "tokens=?".to_string();
+    }
+
+    // Find vocab tokens whose bytes overlap with path_bytes:
+    // - token bytes are a prefix of path_bytes (token covers start of path), OR
+    // - path_bytes is a prefix of token bytes (token extends beyond path)
+    let mut candidates: Vec<(Vec<u8>, u32)> = Vec::new();
+    for (&token_id, token_bytes) in &vocab.entries {
+        if token_bytes.is_empty() {
+            continue;
+        }
+        let is_prefix_of_path = path_bytes.starts_with(token_bytes);
+        let path_is_prefix_of_token = token_bytes.starts_with(&path_bytes);
+        if is_prefix_of_path || path_is_prefix_of_token {
+            candidates.push((token_bytes.clone(), token_id));
+        }
+    }
+
+    // Sort: exact match first, then by length (shortest first), then by bytes
+    candidates.sort_by(|(a_bytes, a_id), (b_bytes, b_id)| {
+        let a_exact = a_bytes.as_slice() == path_bytes.as_slice();
+        let b_exact = b_bytes.as_slice() == path_bytes.as_slice();
+        b_exact.cmp(&a_exact)
+            .then_with(|| a_bytes.len().cmp(&b_bytes.len()))
+            .then_with(|| a_bytes.cmp(b_bytes))
+            .then_with(|| a_id.cmp(b_id))
+    });
+
+    let samples: Vec<String> = candidates
+        .into_iter()
+        .take(max_tokens)
+        .map(|(bytes, _)| token_repr(&bytes))
+        .collect();
+
+    if samples.is_empty() {
+        "tokens=[]".to_string()
+    } else {
+        format!("tokens=[{}]", samples.join(", "))
+    }
+}
+
 fn sample_weight_tokens(
     weight: &Weight,
     vocab: &Vocab,
@@ -535,12 +596,12 @@ fn log_terminal_dwa_sample_paths(
     let max_valid_len = terminal_dwa_max_valid_path_len(terminal_dwa);
 
     let mut rng = rand::thread_rng();
-    let mut collected: Vec<(String, usize, Weight)> = Vec::new();
+    let mut collected: Vec<(String, usize, Vec<i32>)> = Vec::new();
     let mut attempts = 0usize;
 
     while collected.len() < target_samples && attempts < max_attempts {
         let mut state = terminal_dwa.start_state;
-        let mut path = Vec::new();
+        let mut path_labels: Vec<i32> = Vec::new();
         let mut weight = Weight::all();
         let mut steps = 0usize;
         let mut accepted = false;
@@ -560,11 +621,16 @@ fn log_terminal_dwa_sample_paths(
                 }
             }
 
-            if let Some(final_weight) = end_weight {
+            if end_weight.is_some() {
                 if (choices.is_empty() || rng.gen_bool(end_prob))
-                    && min_len.map_or(true, |min| path.len() >= min)
+                    && min_len.map_or(true, |min| path_labels.len() >= min)
                 {
-                    collected.push((path.join(" -> "), path.len(), final_weight));
+                    let display = path_labels
+                        .iter()
+                        .map(|&l| terminal_label_name(grammar, l))
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    collected.push((display, path_labels.len(), path_labels.clone()));
                     accepted = true;
                     break;
                 }
@@ -576,7 +642,7 @@ fn log_terminal_dwa_sample_paths(
 
             let idx = rng.gen_range(0..choices.len());
             let (label, next_state, next_weight) = choices.swap_remove(idx);
-            path.push(terminal_label_name(grammar, label));
+            path_labels.push(label);
             weight = next_weight;
             state = next_state;
             steps += 1;
@@ -589,12 +655,12 @@ fn log_terminal_dwa_sample_paths(
     }
 
     let mut deduped = BTreeMap::new();
-    for (path, len, weight) in collected {
-        deduped.entry(path).or_insert((len, weight));
+    for (path, len, labels) in collected {
+        deduped.entry(path).or_insert((len, labels));
     }
-    let mut collected: Vec<(String, usize, Weight)> = deduped
+    let mut collected: Vec<(String, usize, Vec<i32>)> = deduped
         .into_iter()
-        .map(|(path, (len, weight))| (path, len, weight))
+        .map(|(path, (len, labels))| (path, len, labels))
         .collect();
 
     if sample_long {
@@ -615,14 +681,14 @@ fn log_terminal_dwa_sample_paths(
         attempts,
         max_valid_len,
     );
-    for (idx, (path, len, weight)) in collected.iter().enumerate() {
+    for (idx, (path, len, labels)) in collected.iter().enumerate() {
         let len_repr = colorize(len.to_string(), ANSI_DWA_LEN);
         eprintln!(
             "[glrmask/dwa_sample]   Path {}: {} (len={}, {})",
             idx,
             path,
             len_repr,
-            sample_weight_tokens(weight, vocab, id_map, max_tokens),
+            sample_path_matching_tokens(grammar, labels, vocab, max_tokens),
         );
     }
     if collected.is_empty() {
