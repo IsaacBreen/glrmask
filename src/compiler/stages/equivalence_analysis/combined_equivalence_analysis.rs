@@ -287,10 +287,17 @@ fn dump_witness_json<S: AsRef<[u8]>>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) {
     let dfa = regex.dfa();
+    let tokenizer_start = dfa.start_state;
 
-    // Collect reachable states from the distinguishing state, remapping to dense ids.
+    // Collect reachable states from BOTH the distinguishing state AND the
+    // tokenizer's start state. The trellis DAG restarts segments from the
+    // tokenizer start, so both regions are needed for a self-contained test.
     let mut visited = vec![false; dfa.states.len()];
     let mut stack = vec![distinguishing_state];
+    if tokenizer_start != distinguishing_state && tokenizer_start < dfa.states.len() {
+        stack.push(tokenizer_start);
+        visited[tokenizer_start] = true;
+    }
     visited[distinguishing_state] = true;
     let mut reachable_order: Vec<usize> = Vec::new();
 
@@ -361,8 +368,10 @@ fn dump_witness_json<S: AsRef<[u8]>>(
             .unwrap_or(0),
         "disallowed_follows": disallowed_follows_json,
         "pruned_dfa": {
-            "start_state": 0,
-            "original_start_state": distinguishing_state,
+            "start_state": old_to_new.get(&tokenizer_start).copied().unwrap_or(0),
+            "distinguishing_state": old_to_new[&distinguishing_state],
+            "original_start_state": tokenizer_start,
+            "original_distinguishing_state": distinguishing_state,
             "num_states": pruned_states.len(),
             "states": pruned_states,
         },

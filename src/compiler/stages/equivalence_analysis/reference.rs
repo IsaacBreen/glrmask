@@ -863,12 +863,25 @@ mod tests {
     /// Witness-based reproducer for fast vocab equivalence mismatch on
     /// Github_hard/o56012 (Fibaro Home Center RGB Controller schema).
     ///
-    /// Constructed from witness.json: pruned DFA (25 states from
-    /// distinguishing state 1065) plus disallowed_follows.
+    /// Constructed from witness.json using only the 6 DFA states actually
+    /// visited when processing tokens " a" and " 1" from the distinguishing
+    /// state 1065:
     ///
-    /// The reference analysis correctly separates tokens " a" and " 1",
-    /// but the fast analysis incorrectly merges them. This test should
-    /// FAIL until the fast analysis bug is fixed.
+    ///   new 0 (orig 0)    = tokenizer start state
+    ///   new 1 (orig 6)    = state reached by byte '1' from start
+    ///   new 2 (orig 13)   = state reached by byte 'a' from start
+    ///   new 3 (orig 1065) = distinguishing state (initial walk start)
+    ///   new 4 (orig 1090) = first hop from distinguishing state
+    ///   new 5 (orig 1114) = second hop / self-loop
+    ///
+    /// Key difference: from the start state (0), byte '1' reaches state 1
+    /// (finalizers [1,2,3,6,24]) while byte 'a' reaches state 2 (finalizers
+    /// [1,6]). This creates different trellis DAGs which the reference
+    /// analysis correctly distinguishes.
+    ///
+    /// The reference analysis (process_token_for_state) correctly produces
+    /// different hashes for these two tokens. The fast analysis incorrectly
+    /// merges them — that is the bug this witness demonstrates.
     #[test]
     fn test_witness_o56012_space_a_vs_space_1() {
         // Helper: build a FlatDfaState with transitions from (start_byte, end_byte, target) ranges.
@@ -892,53 +905,71 @@ mod tests {
         }
 
         // Helper: insert a disallowed_follows entry.
-        fn df(map: &mut BTreeMap<u32, BitSet>, gid: usize, num_groups: usize, disallowed: &[usize]) {
+        fn df(map: &mut BTreeMap<u32, BitSet>, gid: u32, num_groups: usize, disallowed: &[usize]) {
             let mut bits = BitSet::new(num_groups);
             for &g in disallowed {
                 bits.set(g);
             }
-            map.insert(gid as u32, bits);
+            map.insert(gid, bits);
         }
 
-        // 25-state pruned DFA from witness.json (states reachable from distinguishing state 1065).
+        let ng: usize = 110; // num_groups from the full grammar
+
+        // 6 states: minimal subset of the full 1167-state DFA that covers both
+        // token traces. Transitions to states outside this set map to dead (u32::MAX).
         let flat_states = vec![
-            s(0, &[(32, 33, 1), (35, 91, 1), (93, 127, 1), (92, 92, 2), (194, 223, 3), (224, 239, 4), (240, 244, 5)], &[1, 6], &[1, 6]),
-            s(1, &[(32, 33, 6), (35, 91, 6), (93, 127, 6), (92, 92, 7), (194, 223, 8), (224, 239, 9), (240, 244, 10)], &[1, 6], &[1, 6]),
-            s(2, &[(34, 34, 1), (47, 47, 1), (92, 92, 1), (98, 98, 1), (102, 102, 1), (110, 110, 1), (114, 114, 1), (116, 116, 1), (117, 117, 11)], &[], &[1, 6]),
-            s(3, &[(128, 191, 1)], &[], &[1, 6]),
-            s(4, &[(128, 191, 12)], &[], &[1, 6]),
-            s(5, &[(128, 191, 13)], &[], &[1, 6]),
-            s(6, &[(32, 33, 6), (35, 91, 6), (93, 127, 6), (92, 92, 7), (194, 223, 8), (224, 239, 9), (240, 244, 10)], &[1], &[1]),
-            s(7, &[(34, 34, 6), (47, 47, 6), (92, 92, 6), (98, 98, 6), (102, 102, 6), (110, 110, 6), (114, 114, 6), (116, 116, 6), (117, 117, 14)], &[], &[1]),
-            s(8, &[(128, 191, 6)], &[], &[1]),
-            s(9, &[(128, 191, 15)], &[], &[1]),
-            s(10, &[(128, 191, 16)], &[], &[1]),
-            s(11, &[(48, 57, 17), (65, 70, 17), (97, 102, 17)], &[], &[1, 6]),
-            s(12, &[(128, 191, 1)], &[], &[1, 6]),
-            s(13, &[(128, 191, 18)], &[], &[1, 6]),
-            s(14, &[(48, 57, 19), (65, 70, 19), (97, 102, 19)], &[], &[1]),
-            s(15, &[(128, 191, 6)], &[], &[1]),
-            s(16, &[(128, 191, 20)], &[], &[1]),
-            s(17, &[(48, 57, 21), (65, 70, 21), (97, 102, 21)], &[], &[1, 6]),
-            s(18, &[(128, 191, 1)], &[], &[1, 6]),
-            s(19, &[(48, 57, 22), (65, 70, 22), (97, 102, 22)], &[], &[1]),
-            s(20, &[(128, 191, 6)], &[], &[1]),
-            s(21, &[(48, 57, 23), (65, 70, 23), (97, 102, 23)], &[], &[1, 6]),
-            s(22, &[(48, 57, 24), (65, 70, 24), (97, 102, 24)], &[], &[1]),
-            s(23, &[(48, 57, 1), (65, 70, 1), (97, 102, 1)], &[], &[1, 6]),
-            s(24, &[(48, 57, 6), (65, 70, 6), (97, 102, 6)], &[], &[1]),
+            // State 0 (original 0): tokenizer start state. Only bytes 49 ('1') and 97 ('a')
+            // have targets in this pruned set; all other bytes are dead.
+            s(0, &[(49, 49, 1), (97, 97, 2)], &[], &(0..ng).collect::<Vec<_>>()),
+            // State 1 (original 6): reached by byte '1' from start.
+            s(1, &[], &[1, 2, 3, 6, 24], &[1, 2, 3, 6, 24]),
+            // State 2 (original 13): reached by byte 'a' from start.
+            s(2, &[], &[1, 6], &[1, 6, 38, 39, 43, 96]),
+            // State 3 (original 1065): distinguishing state, initial walk starts here.
+            s(3, &[(32, 33, 4), (35, 91, 4), (93, 127, 4)], &[1, 6], &[1, 6]),
+            // State 4 (original 1090): first hop from distinguishing state.
+            s(4, &[(32, 33, 5), (35, 91, 5), (93, 127, 5)], &[1, 6], &[1, 6]),
+            // State 5 (original 1114): second hop, self-loop on printable ASCII.
+            s(5, &[(32, 33, 5), (35, 91, 5), (93, 127, 5)], &[1], &[1]),
         ];
         let dfa = FlatDfa { states: flat_states, start_state: 0 };
 
-        // Disallowed follows from witness.json (restricted to groups 0..7).
+        // Disallowed follows from witness.json. 110 groups with 6 unique patterns:
+        //   Pattern A: groups {0}         → disallow {2..=5, 8, 11}
+        //   Pattern B: 99 groups (1,6,13...) → disallow {1..=109}
+        //   Pattern C: groups {2,3,4,5,9,12} → disallow {0..=8, 11, 13..=109}
+        //   Pattern D: groups {7,10}      → disallow {1, 6..=7, 9..=10, 12..=109}
+        //   Pattern E: group {8}          → disallow {1..=8, 10..=109}
+        //   Pattern F: group {11}         → disallow {1, 6..=7, 9..=10, 13..=109}
         let mut disallowed_follows = BTreeMap::new();
-        df(&mut disallowed_follows, 0, 7, &[2, 3, 4, 5]);
-        df(&mut disallowed_follows, 1, 7, &[1, 2, 3, 4, 5, 6]);
-        df(&mut disallowed_follows, 2, 7, &[0, 1, 2, 3, 4, 5, 6]);
-        df(&mut disallowed_follows, 3, 7, &[0, 1, 2, 3, 4, 5, 6]);
-        df(&mut disallowed_follows, 4, 7, &[0, 1, 2, 3, 4, 5, 6]);
-        df(&mut disallowed_follows, 5, 7, &[0, 1, 2, 3, 4, 5, 6]);
-        df(&mut disallowed_follows, 6, 7, &[1, 2, 3, 4, 5, 6]);
+        // Pattern A
+        df(&mut disallowed_follows, 0, ng, &[2, 3, 4, 5, 8, 11]);
+        // Pattern B: groups 1,6,13..109 (and others)
+        let pattern_b: Vec<usize> = (1..ng).collect();
+        for &gid in &[1u32, 6, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+            29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+            49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
+            69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88,
+            89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
+            107, 108, 109] {
+            df(&mut disallowed_follows, gid, ng, &pattern_b);
+        }
+        // Pattern C: groups 2,3,4,5,9,12
+        let pattern_c: Vec<usize> = (0..=8).chain(std::iter::once(11)).chain(13..ng).collect();
+        for &gid in &[2u32, 3, 4, 5, 9, 12] {
+            df(&mut disallowed_follows, gid, ng, &pattern_c);
+        }
+        // Pattern D: groups 7,10
+        let pattern_d: Vec<usize> = std::iter::once(1).chain(6..=7).chain(9..=10).chain(12..ng).collect();
+        for &gid in &[7u32, 10] {
+            df(&mut disallowed_follows, gid, ng, &pattern_d);
+        }
+        // Pattern E: group 8
+        let pattern_e: Vec<usize> = (1..=8).chain(10..ng).collect();
+        df(&mut disallowed_follows, 8, ng, &pattern_e);
+        // Pattern F: group 11
+        let pattern_f: Vec<usize> = std::iter::once(1).chain(6..=7).chain(9..=10).chain(13..ng).collect();
+        df(&mut disallowed_follows, 11, ng, &pattern_f);
 
         let pre = precompute(&dfa, &disallowed_follows);
         let hash_memo = Mutex::new(HashMap::new());
@@ -946,11 +977,12 @@ mod tests {
         let token_space_a: &[u8] = &[32, 97];  // " a"
         let token_space_1: &[u8] = &[32, 49];  // " 1"
 
+        // Process from the distinguishing state (new state 3).
         let hash_a = process_token_for_state(
-            &dfa, &pre, token_space_a, 0, None, &hash_memo, &mut Vec::new(),
+            &dfa, &pre, token_space_a, 3, None, &hash_memo, &mut Vec::new(),
         );
         let hash_1 = process_token_for_state(
-            &dfa, &pre, token_space_1, 0, None, &hash_memo, &mut Vec::new(),
+            &dfa, &pre, token_space_1, 3, None, &hash_memo, &mut Vec::new(),
         );
 
         assert_ne!(hash_a, hash_1,
