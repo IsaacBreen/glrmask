@@ -379,6 +379,7 @@ fn sample_weight_tokens(
             .then_with(|| left_id.cmp(right_id))
     });
 
+    let total = candidates.len();
     let samples: Vec<String> = candidates
         .into_iter()
         .take(max_tokens)
@@ -387,6 +388,9 @@ fn sample_weight_tokens(
 
     if samples.is_empty() {
         "tokens=[]".to_string()
+    } else if total > max_tokens {
+        let remaining = total - max_tokens;
+        format!("tokens=[{}, ...and {} others]", samples.join(", "), remaining)
     } else {
         format!("tokens=[{}]", samples.join(", "))
     }
@@ -713,13 +717,11 @@ fn log_terminal_dwa_sample_paths(
         attempts,
         max_valid_len,
     );
-    for (idx, (path, len, _labels, end_weight)) in collected.iter().enumerate() {
-        let len_repr = colorize(len.to_string(), ANSI_DWA_LEN);
+    for (idx, (path, _len, _labels, end_weight)) in collected.iter().enumerate() {
         eprintln!(
-            "[glrmask/dwa_sample]   Path {}: {} (len={}, {})",
+            "[glrmask/dwa_sample]   Path {}: {} ({})",
             idx,
             path,
-            len_repr,
             sample_weight_tokens(end_weight, vocab, id_map, max_tokens),
         );
     }
