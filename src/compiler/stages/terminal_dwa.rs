@@ -1617,126 +1617,46 @@ mod tests {
         );
     }
 
+    /// Regression test: a Kleene-star terminal (min=0) at the top level used
+    /// to create an NFA loop-back edge to state 0 (the global initial state),
+    /// making ALL terminals appear in `possible_future_group_ids` for any DFA
+    /// state reachable from that loop.  This caused unrelated literals (like
+    /// `"a"`) to get DWA transitions for tokens that can't byte-match them.
     #[test]
-    fn test_temp() {
+    fn test_kleene_star_no_spurious_terminal_transition() {
+        // X: /[0-9]/* is a Kleene-star terminal.  With vocab=["0"], only X
+        // should get a transition from the DWA start state.  Literal "a"
+        // (byte 0x61) should NOT get a transition because "0" != "a".
         let lark = r#"
-        PATTERN_2: /[\x80-\xBF]/
-        STRING_CHAR: /[\x20-!#-\x5B\x5D-\x7F]/
-            | /[\xC2-\xDF]/ PATTERN_2
-            | /[\xE0-\xEF]/ PATTERN_2 PATTERN_2
-            | /[\xF0-\xF4]/ PATTERN_2 PATTERN_2 PATTERN_2
-        HEX: /[0-9A-Fa-f]/
-        ESCAPE_SHORT_CHAR: /["\x2F\x5Cbfnrt]/
-        ESCAPE_SEQ: "\\" ESCAPE_SHORT_CHAR | "\\" "u" HEX HEX HEX HEX
-        STRING_CONTENT: (STRING_CHAR | ESCAPE_SEQ)*
-        JSON_STRING: "\"" STRING_CONTENT "\""
-        DIGIT: /[0-9]/
-        NONZERO_DIGIT: /[1-9]/
-        INT_PART: "0" | NONZERO_DIGIT DIGIT*
-        FRAC_PART: "." DIGIT+
-        EXP_MARK: /[Ee]/
-        EXP_SIGN: /[+\x2D]/
-        EXP_PART: EXP_MARK EXP_SIGN? DIGIT+
-        JSON_INTEGER: "-"? INT_PART
-        JSON_NUMBER: "-"? INT_PART FRAC_PART? EXP_PART?
-        JSON_BOOL: "true" | "false"
-        JSON_NULL: "null"
-        JSON_KEY_COLON: JSON_STRING ":"
-        json_kv: JSON_STRING ":" json_value
-        json_object: "{" "}" | "{" json_kv ("," json_kv)* "}"
-        json_array: "[" "]" | "[" json_value ("," json_value)* "]"
-        json_value: json_object
-            | json_array
-            | JSON_STRING
-            | JSON_NUMBER
-            | JSON_INTEGER
-            | JSON_BOOL
-            | JSON_NULL
-        ap_extra_0_nc: JSON_KEY_COLON json_value ap_extra_0_c | ""
-        ap_extra_0_c: "," JSON_KEY_COLON json_value ap_extra_0_c | ""
-        obj_ord_0_t0: "\"groupID\":" JSON_NUMBER
-        obj_ord_0_t1: "\"devices\":" "[" JSON_NUMBER ("," JSON_NUMBER)~0..253 "]"
-        obj_ord_0_t2: obj_ord_0_t0 "," obj_ord_0_t1 | obj_ord_0_t0 | obj_ord_0_t1
-        obj_ord_0_0_nc: obj_ord_0_t2 ap_extra_0_c | ap_extra_0_nc
-        def_associationitem: "{" obj_ord_0_0_nc "}"
-        obj_ord_1_t0: "\"id\":" JSON_INTEGER
-        STR_TERM_0: "\"" (STRING_CHAR | ESCAPE_SEQ)~0..20 "\""
-        obj_ord_1_t1: "\"name\":" STR_TERM_0
-        obj_ord_1_t2: obj_ord_1_t0 "," obj_ord_1_t1 | obj_ord_1_t0 | obj_ord_1_t1
-        obj_ord_1_t3: "\"roomID\":" JSON_INTEGER
-        obj_ord_1_t4: "\"type\":" "\"rgb_driver\""
-        obj_ord_1_t5: "\"remoteGatewayId\":" JSON_INTEGER
-        obj_ord_1_t6: obj_ord_1_t4 "," obj_ord_1_t5 | obj_ord_1_t4 | obj_ord_1_t5
-        obj_ord_1_t7: obj_ord_1_t3 "," obj_ord_1_t6 | obj_ord_1_t3 | obj_ord_1_t6
-        obj_ord_1_t8: obj_ord_1_t2 "," obj_ord_1_t7 | obj_ord_1_t2 | obj_ord_1_t7
-        obj_ord_1_t9: "\"remoteDeviceID\":" JSON_INTEGER
-        obj_ord_2_t0: "\"isLight\":" ("\"0\"" | "\"1\"")
-        obj_ord_2_t1: "\"isBatteryOperated\":" ("\"0\"" | "\"1\"") "," obj_ord_2_t0
-            | "\"isBatteryOperated\":" ("\"0\"" | "\"1\"")
-        obj_ord_2_t2: "\"lastColorSet\":" JSON_STRING
-        obj_ord_2_t3: "\"lastUsedPrograms\":" JSON_STRING
-        obj_ord_2_t4: obj_ord_2_t2 "," obj_ord_2_t3 | obj_ord_2_t2 | obj_ord_2_t3
-        obj_ord_2_t5: obj_ord_2_t1 "," obj_ord_2_t4 | obj_ord_2_t1
-        obj_ord_2_t6: "\"liliOffCommand\":" JSON_STRING
-        obj_ord_2_t7: "\"liliOnCommand\":" JSON_STRING
-        obj_ord_2_t8: obj_ord_2_t6 "," obj_ord_2_t7 | obj_ord_2_t6 | obj_ord_2_t7
-        obj_ord_2_t9: obj_ord_2_t8 "," "\"log\":" JSON_STRING "," "\"logTemp\":" JSON_STRING
-            | "\"log\":" JSON_STRING "," "\"logTemp\":" JSON_STRING
-        obj_ord_2_t11: "\"nodeID\":" JSON_STRING "," "\"parametersTemplate\":" JSON_STRING
-            | "\"parametersTemplate\":" JSON_STRING
-        obj_ord_3_t0: "\"id\":" JSON_NUMBER
-        obj_ord_3_t1: "\"size\":" JSON_NUMBER
-        obj_ord_3_t2: obj_ord_3_t0 "," obj_ord_3_t1 | obj_ord_3_t0 | obj_ord_3_t1
-        obj_ord_3_t3: "\"value\":" JSON_NUMBER
-        obj_ord_3_t4: "\"lastSetValue\":" JSON_NUMBER
-        obj_ord_3_t5: obj_ord_3_t3 "," obj_ord_3_t4 | obj_ord_3_t3 | obj_ord_3_t4
-        obj_ord_3_t6: obj_ord_3_t2 "," obj_ord_3_t5 | obj_ord_3_t2 | obj_ord_3_t5
-        obj_ord_3_0_nc: obj_ord_3_t6 ap_extra_0_c | ap_extra_0_nc
-        _arr_item_1: "{" obj_ord_3_0_nc "}"
-        obj_ord_2_t12: "\"parameters\":" ("[" "]" | "[" _arr_item_1 ("," _arr_item_1)* "]")
-        obj_ord_2_t13: "\"associationView\":" ("[" "]"
-            | "[" def_associationitem ("," def_associationitem)~0..4 "]")
-        obj_ord_2_t14: "\"associationSet\":" ("[" "]"
-            | "[" def_associationitem ("," def_associationitem)~0..4 "]")
-        obj_ord_2_t15: obj_ord_2_t13 "," obj_ord_2_t14 | obj_ord_2_t13 | obj_ord_2_t14
-        obj_ord_2_t16: obj_ord_2_t12 "," obj_ord_2_t15 | obj_ord_2_t12 | obj_ord_2_t15
-        obj_ord_2_t17: "\"zwaveInfo\":" JSON_STRING "," "\"zwaveVersion\":" JSON_STRING "," obj_ord_2_t16
-            | "\"zwaveInfo\":" JSON_STRING "," "\"zwaveVersion\":" JSON_STRING
-        obj_ord_2_0_nc: "\"UIMessageSendTime\":" JSON_STRING "," "\"associationMode\":" JSON_STRING "," "\"bScaler\":" JSON_STRING "," "\"buttonType\":" JSON_STRING "," "\"classConfigure\":" JSON_STRING "," "\"classGeneric\":" JSON_STRING "," "\"classSupport\":" JSON_STRING "," "\"classVersion\":" JSON_STRING "," "\"color\":" JSON_STRING "," "\"currentProgram\":" JSON_STRING "," "\"currentProgramID\":" JSON_STRING "," "\"dead\":" JSON_STRING "," "\"deviceControlType\":" JSON_STRING "," "\"deviceIcon\":" JSON_STRING "," "\"disabled\":" JSON_STRING "," "\"emailNotificationID\":" JSON_STRING "," "\"emailNotificationType\":" JSON_STRING "," "\"endPoint\":" JSON_STRING "," "\"favoriteProgram\":" JSON_STRING "," "\"gScaler\":" JSON_STRING "," obj_ord_2_t5 "," obj_ord_2_t9 "," "\"meterSupport\":" JSON_STRING "," "\"mode\":" JSON_STRING "," "\"needConfigure\":" JSON_STRING "," obj_ord_2_t11 "," "\"parentID\":" JSON_STRING "," "\"pollingRetryError\":" JSON_STRING "," "\"pollingTime\":" JSON_STRING "," "\"pollingTimeNext\":" JSON_STRING "," "\"pollingTimeSec\":" JSON_STRING "," "\"productInfo\":" JSON_STRING "," "\"programsSortOrder\":" JSON_STRING "," "\"pushNotificationID\":" JSON_STRING "," "\"pushNotificationType\":" JSON_STRING "," "\"rScaler\":" JSON_STRING "," "\"rememberColor\":" JSON_STRING "," "\"requestNodeNeighborState\":" JSON_STRING "," "\"requestNodeNeighborStateTimeStemp\":" JSON_STRING "," "\"saveLogs\":" ("\"0\"" | "\"1\"") "," "\"sensorSupport\":" JSON_STRING "," "\"showChildren\":" ("\"0\"" | "\"1\"") "," "\"showEnergy\":" ("\"0\"" | "\"1\"") "," "\"smsNotificationID\":" JSON_STRING "," "\"smsNotificationType\":" JSON_STRING "," "\"sortOrder\":" JSON_STRING "," "\"unit\":" JSON_STRING "," "\"unitMeter\":" JSON_STRING "," "\"unitSensor\":" JSON_STRING "," "\"useTemplate\":" ("\"0\"" | "\"1\"") "," "\"userDescription\":" JSON_STRING "," "\"value\":" JSON_STRING "," "\"valueMeter\":" JSON_STRING "," "\"valueSensor\":" JSON_STRING "," "\"zwaveCompany\":" JSON_STRING "," obj_ord_2_t17
-        obj_ord_1_t10: "\"properties\":" "{" obj_ord_2_0_nc "}"
-        obj_ord_4_t1: "\"silentSetColor\":" JSON_INTEGER "," "\"startProgram\":" JSON_INTEGER
-            | "\"startProgram\":" JSON_INTEGER
-        obj_ord_1_t11: "\"actions\":" "{" "\"firmwareUpdate\":" JSON_INTEGER "," "\"pollingTimeSec\":" JSON_INTEGER "," "\"requestNodeNeighborUpdate\":" JSON_INTEGER "," "\"resetMeter\":" JSON_INTEGER "," "\"setB\":" JSON_INTEGER "," "\"setColor\":" JSON_INTEGER "," "\"setG\":" JSON_INTEGER "," "\"setR\":" JSON_INTEGER "," "\"setValue\":" JSON_INTEGER "," "\"setW\":" JSON_INTEGER "," obj_ord_4_t1 "," "\"turnOff\":" JSON_INTEGER "," "\"turnOn\":" JSON_INTEGER "}"
-        obj_ord_1_t12: obj_ord_1_t10 "," obj_ord_1_t11 | obj_ord_1_t10 | obj_ord_1_t11
-        obj_ord_1_t13: obj_ord_1_t9 "," obj_ord_1_t12 | obj_ord_1_t9 | obj_ord_1_t12
-        obj_ord_1_t14: "\"created\":" JSON_NUMBER
-        obj_ord_1_t15: "\"modified\":" JSON_NUMBER
-        obj_ord_1_t16: "\"sortOrder\":" JSON_NUMBER
-        obj_ord_1_t17: obj_ord_1_t15 "," obj_ord_1_t16 | obj_ord_1_t15 | obj_ord_1_t16
-        obj_ord_1_t18: obj_ord_1_t14 "," obj_ord_1_t17 | obj_ord_1_t14 | obj_ord_1_t17
-        obj_ord_1_t19: obj_ord_1_t13 "," obj_ord_1_t18 | obj_ord_1_t13 | obj_ord_1_t18
-        obj_ord_1_t20: obj_ord_1_t8 "," obj_ord_1_t19 | obj_ord_1_t8 | obj_ord_1_t19
-        obj_ord_1_0_nc: obj_ord_1_t20 | ""
-        start: "{" obj_ord_1_0_nc "}"
-        "#;
-
+X: /[0-9]/*
+start: "a" X
+"#;
         let grammar = crate::import::lark::parse_lark(lark).unwrap();
         let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
         let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
-        let vocab = Vocab::new(
-            vec![(0, b"0".to_vec())],
-            None,
+        let vocab = Vocab::new(vec![(0, b"0".to_vec())], None);
+        let id_map = InternalIdMap::build(
+            &tokenizer, &vocab, &std::collections::BTreeMap::new(), None,
         );
-        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
-        let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
+        let terminal_dwa = build_terminal_dwa(
+            &glr_grammar, &tokenizer, &vocab, &id_map, None,
+        );
+        let start = &terminal_dwa.states[terminal_dwa.start_state as usize];
 
-        let start_state = &terminal_dwa.states[terminal_dwa.start_state as usize];
+        let a_id = grammar.terminals.iter().find_map(|t| match t {
+            Terminal::Literal { id, bytes } if bytes == b"a" => Some(*id as i32),
+            _ => None,
+        }).expect("literal 'a' terminal must exist");
+
+        assert!(
+            !start.transitions.contains_key(&a_id),
+            "literal 'a' should NOT have a DWA transition with vocab=[\"0\"], \
+             but it does — the Kleene-star NFA loop-back is polluting \
+             possible_future_group_ids",
+        );
         assert_eq!(
-            start_state.transitions.len(),
-            1,
-            "terminal DWA start state should have exactly 1 transition (for terminal A) \
-             but has {} transitions",
-            start_state.transitions.len(),
+            start.transitions.len(), 1,
+            "only terminal X should get a transition from start",
         );
     }
 }
