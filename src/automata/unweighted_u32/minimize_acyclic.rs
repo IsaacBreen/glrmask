@@ -21,7 +21,7 @@ struct StateSignature {
 ///
 /// Panics (debug) if the input is cyclic.
 pub fn minimize_acyclic(dfa: &DFA) -> DFA {
-    debug_assert!(
+    assert!(
         dfa.is_acyclic(),
         "minimize_acyclic: input DFA is cyclic"
     );
