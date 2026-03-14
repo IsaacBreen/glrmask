@@ -1104,52 +1104,57 @@ mod tests {
     fn test_witness_o56012_space_a_vs_space_2() {
         use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
         use crate::import::lark::parse_lark;
+        use crate::automata::unweighted_u32::dfa::DFA;
+        use crate::automata::unweighted_u32::determinize::determinize;
+        use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
+        use crate::automata::unweighted_u32::subtract::subtract;
 
-        fn format_gid(grammar: &crate::compiler::grammar::GrammarDef, gid: usize) -> String {
-            format!("{gid}:{}", grammar.terminal_display_name(gid as u32))
+        fn format_label(grammar: &crate::compiler::grammar::GrammarDef, label: Label) -> String {
+            if label >= 0 {
+                let gid = label as usize;
+                format!("{gid}:{}", grammar.terminal_display_name(gid as u32))
+            } else {
+                let gid = (-(label + 1)) as usize;
+                format!("complete({gid}:{})", grammar.terminal_display_name(gid as u32))
+            }
         }
 
-        fn pretty_trellis(
-            grammar: &crate::compiler::grammar::GrammarDef,
-            dfa: &FlatDfa,
-            dag: &BTreeMap<usize, FlatNode>,
-        ) -> String {
+        fn pretty_dfa(grammar: &crate::compiler::grammar::GrammarDef, dfa: &DFA) -> String {
+            use std::fmt::Write;
             let mut out = String::new();
-
-            for (&pos, node) in dag {
-                use std::fmt::Write;
-
-                let end_state_str = if node.end_state == STATE_NONE {
-                    "NONE".to_string()
+            let _ = writeln!(out, "  {} states, start={}", dfa.states.len(), dfa.start_state);
+            for (i, state) in dfa.states.iter().enumerate() {
+                let accept_str = if state.is_accepting { " [accept]" } else { "" };
+                let trans_parts: Vec<String> = state
+                    .transitions
+                    .iter()
+                    .map(|(&label, &target)| format!("{} -> {}", format_label(grammar, label), target))
+                    .collect();
+                let trans_str = if trans_parts.is_empty() {
+                    String::new()
                 } else {
-                    let future = &dfa.states[node.end_state].possible_future_group_ids;
-                    let future_names = future
-                        .iter()
-                        .map(|&gid| format_gid(grammar, gid))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("{} (future=[{}])", node.end_state, future_names)
+                    format!(" {{ {} }}", trans_parts.join(", "))
                 };
-
-                let edges_str = if node.edges.is_empty() {
-                    "[]".to_string()
-                } else {
-                    let parts = node
-                        .edges
-                        .iter()
-                        .map(|(gid, target)| format!("{} -> {}", format_gid(grammar, *gid), target))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("[{}]", parts)
-                };
-
-                let _ = writeln!(
-                    out,
-                    "pos {pos:>3}: end_state={end_state_str}, edges={edges_str}"
-                );
+                let _ = writeln!(out, "  state {i}{accept_str}{trans_str}");
             }
-
             out
+        }
+
+        fn compute_final_dfa(
+            dfa: &FlatDfa,
+            pre: &PrecomputedData,
+            token: &[u8],
+            initial_state: usize,
+        ) -> DFA {
+            let mut tmp_mp = Vec::new();
+            let dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, &mut tmp_mp);
+            let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, None, token.len());
+            let det = determinize(&nfa);
+            let min = minimize_acyclic(&det);
+            match &pre.disallowed_detector {
+                Some(dd) => minimize_acyclic(&subtract(&min, dd)),
+                None => min,
+            }
         }
 
         let lark_text =
@@ -1166,51 +1171,21 @@ mod tests {
         let token_space_1: &[u8] = &[32, 49]; // " 1"
 
         for distinguishing_state in 0..dfa.num_states() {
-            let hash_memo = Mutex::new(HashMap::new());
+            let final_a = compute_final_dfa(dfa, &pre, token_space_a, distinguishing_state);
+            let final_1 = compute_final_dfa(dfa, &pre, token_space_1, distinguishing_state);
 
-            let hash_a = process_token_for_state(
-                dfa,
-                &pre,
-                token_space_a,
-                distinguishing_state,
-                None,
-                &hash_memo,
-                &mut Vec::new(),
-            );
-            let hash_1 = process_token_for_state(
-                dfa,
-                &pre,
-                token_space_1,
-                distinguishing_state,
-                None,
-                &hash_memo,
-                &mut Vec::new(),
-            );
-
-            let trellis_a = build_trellis_dag(
-                dfa,
-                pre.num_groups,
-                token_space_a,
-                distinguishing_state,
-                &mut Vec::new(),
-            );
-            let trellis_1 = build_trellis_dag(
-                dfa,
-                pre.num_groups,
-                token_space_1,
-                distinguishing_state,
-                &mut Vec::new(),
-            );
+            let hash_a = canonical_hash(&final_a);
+            let hash_1 = canonical_hash(&final_1);
 
             if hash_a != hash_1 {
                 eprintln!(
                     "Reference analysis: tokens ' a' and ' 1' differ from state {distinguishing_state}\n\
-                 hash_a={hash_a}, hash_1={hash_1}\n\
-                 \n\
-                 Trellis for ' a':\n{}\n\
-                 Trellis for ' 1':\n{}",
-                    pretty_trellis(&normalized, dfa, &trellis_a),
-                    pretty_trellis(&normalized, dfa, &trellis_1),
+                     hash_a={hash_a}, hash_1={hash_1}\n\
+                     \n\
+                     Final DFA for ' a':\n{}\
+                     Final DFA for ' 1':\n{}",
+                    pretty_dfa(&normalized, &final_a),
+                    pretty_dfa(&normalized, &final_1),
                 );
                 panic!();
             }
@@ -1236,6 +1211,42 @@ mod tests {
     /// analysis incorrectly merges them.
     #[test]
     fn test_minimal_equiv_mismatch_o56012() {
+        use crate::automata::unweighted_u32::dfa::DFA;
+        use crate::automata::unweighted_u32::determinize::determinize;
+        use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
+        use crate::automata::unweighted_u32::subtract::subtract;
+
+        let group_names: &[&str] = &["'{' (group 0)", "'}' (group 1)"];
+
+        fn format_label(group_names: &[&str], label: Label) -> String {
+            if label >= 0 {
+                group_names.get(label as usize)
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| format!("group {label}"))
+            } else {
+                let gid = (-(label + 1)) as usize;
+                let name = group_names.get(gid).copied().unwrap_or("?");
+                format!("complete({name})")
+            }
+        }
+
+        fn pretty_dfa(group_names: &[&str], dfa: &DFA) -> String {
+            use std::fmt::Write;
+            let mut out = String::new();
+            let _ = writeln!(out, "  {} states, start={}", dfa.states.len(), dfa.start_state);
+            for (i, state) in dfa.states.iter().enumerate() {
+                let accept = if state.is_accepting { " [accept]" } else { "" };
+                let trans: Vec<String> = state.transitions.iter()
+                    .map(|(&l, &t)| format!("{} -> {}", format_label(group_names, l), t))
+                    .collect();
+                let trans_str = if trans.is_empty() { String::new() } else {
+                    format!(" {{ {} }}", trans.join(", "))
+                };
+                let _ = writeln!(out, "  state {i}{accept}{trans_str}");
+            }
+            out
+        }
+
         let tokenizer = build_tokenizer_from_exprs(&[bytes(b"{"), bytes(b"}")]);
         let sep1 = Sep1Tokenizer::new(&tokenizer);
 
@@ -1253,10 +1264,36 @@ mod tests {
         let tokens: Vec<Vec<u8>> = vec![b"}:".to_vec(), b"}}}".to_vec()];
         let states = vec![sep1.initial_state_id()];
 
+        let dfa = sep1.dfa();
+        let pre = precompute(dfa, &disallowed);
+
+        // Compute and print final DFAs for both tokens
+        for (i, token) in tokens.iter().enumerate() {
+            let mut tmp_mp = Vec::new();
+            let dag = build_trellis_dag(dfa, pre.num_groups, token, states[0], &mut tmp_mp);
+            let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, None, token.len());
+            let det = determinize(&nfa);
+            let min = minimize_acyclic(&det);
+            let final_dfa = match &pre.disallowed_detector {
+                Some(dd) => minimize_acyclic(&subtract(&min, dd)),
+                None => min,
+            };
+            let hash = canonical_hash(&final_dfa);
+            eprintln!(
+                "Token {i} {:?} (hex {:02x?}) — hash={hash}\n{}",
+                String::from_utf8_lossy(token),
+                token,
+                pretty_dfa(group_names, &final_dfa),
+            );
+        }
+
         let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
             &sep1, &tokens, &states, &disallowed,
         );
         let reference = find_equivalence_classes(&sep1, &tokens, &states, &disallowed, None);
+
+        eprintln!("Fast classes: {:?}", fast);
+        eprintln!("Reference classes: {:?}", reference.vocab_classes);
 
         // Reference correctly separates; fast incorrectly merges.
         assert_eq!(
