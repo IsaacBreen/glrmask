@@ -859,4 +859,53 @@ mod tests {
         assert_eq!(reference.vocab_classes, BTreeSet::from([vec![0], vec![1]]),
             "reference should split the two tokens");
     }
+
+    /// Witness-based reproducer for fast vocab equivalence mismatch on
+    /// Github_hard/o56012 (Fibaro Home Center RGB Controller schema).
+    ///
+    /// The reference analysis correctly separates tokens " a" and " 1" from
+    /// the distinguishing state 1065, but the fast analysis incorrectly
+    /// merges them. This test asserts that _both_ analyses separate the
+    /// tokens, so it should FAIL until the fast analysis bug is fixed.
+    #[test]
+    fn test_witness_o56012_space_a_vs_space_1() {
+        use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
+        use crate::import::lark::parse_lark;
+
+        let lark_text = include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+        let grammar = parse_lark(lark_text).expect("fixture grammar should parse");
+        let (normalized, tokenizer) = prepare_grammar_for_compile(&grammar);
+        let analyzed = AnalyzedGrammar::from_grammar_def(&normalized);
+        let disallowed_follows = compute_disallowed_follows(&analyzed);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let dfa = sep1.dfa();
+        let pre = precompute(dfa, &disallowed_follows);
+
+        let token_space_a: &[u8] = &[32, 97];  // " a"
+        let token_space_1: &[u8] = &[32, 49];  // " 1"
+
+        // The witness found the mismatch at distinguishing state 1065.
+        let distinguishing_state = 1065;
+        let hash_memo = Mutex::new(HashMap::new());
+
+        let hash_a = process_token_for_state(
+            dfa, &pre, token_space_a, distinguishing_state, None, &hash_memo, &mut Vec::new(),
+        );
+        let hash_1 = process_token_for_state(
+            dfa, &pre, token_space_1, distinguishing_state, None, &hash_memo, &mut Vec::new(),
+        );
+
+        // Reference analysis should produce different hashes for these tokens
+        // from the distinguishing state.
+        assert_ne!(hash_a, hash_1,
+            "reference: tokens ' a' and ' 1' should have different hashes from state {distinguishing_state}");
+
+        // Fast analysis should also separate them (this currently FAILS).
+        let tokens = vec![token_space_a.to_vec(), token_space_1.to_vec()];
+        let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1, &tokens, &[distinguishing_state], &disallowed_follows,
+        );
+        assert_eq!(fast, BTreeSet::from([vec![0], vec![1]]),
+            "fast: tokens ' a' and ' 1' should be in separate classes from state {distinguishing_state}");
+    }
 }

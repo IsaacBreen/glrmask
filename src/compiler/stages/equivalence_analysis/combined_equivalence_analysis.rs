@@ -284,6 +284,7 @@ fn dump_witness_json<S: AsRef<[u8]>>(
     left_token: usize,
     right_token: usize,
     distinguishing_state: usize,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) {
     let dfa = regex.dfa();
 
@@ -337,6 +338,14 @@ fn dump_witness_json<S: AsRef<[u8]>>(
         }));
     }
 
+    // Serialize disallowed_follows: map group_id -> list of group_ids that are disallowed.
+    let disallowed_follows_json: BTreeMap<String, Vec<usize>> = disallowed_follows
+        .iter()
+        .map(|(&group_id, bits)| {
+            (group_id.to_string(), bits.iter().collect())
+        })
+        .collect();
+
     let witness_json = serde_json::json!({
         "left_token_index": left_token,
         "left_token_bytes": tokens[left_token].as_ref(),
@@ -345,6 +354,12 @@ fn dump_witness_json<S: AsRef<[u8]>>(
         "right_token_bytes": tokens[right_token].as_ref(),
         "right_token_preview": format_token_preview(tokens[right_token].as_ref()),
         "distinguishing_state": distinguishing_state,
+        "num_groups": regex.dfa().states.iter()
+            .flat_map(|s| s.finalizers.iter().chain(s.possible_future_group_ids.iter()))
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0),
+        "disallowed_follows": disallowed_follows_json,
         "pruned_dfa": {
             "start_state": 0,
             "original_start_state": distinguishing_state,
@@ -400,6 +415,7 @@ fn verify_vocab_partition_reference<S: AsRef<[u8]> + Sync>(
                     witness.left_token,
                     witness.right_token,
                     dist_state,
+                    disallowed_follows,
                 );
             }
             state_str
