@@ -72,15 +72,8 @@ fn env_flag_enabled(name: &str) -> bool {
 //
 // NFA labels encode two kinds of information:
 //   - Edge labels (group IDs from the trellis): `gid as Label` (non-negative)
-//   - Completion labels (possible future groups at a node):
-//     `-(gid as Label + 1)` for each future group
-//
-// Edge labels and completion labels never overlap.
-
-#[inline]
-fn completion_label(gid: usize) -> Label {
-    -(gid as Label + 1)
-}
+//   - Completion labels use the same label space as edge labels:
+//     `terminal_label(gid)` for each future group
 
 #[inline]
 fn terminal_label(gid: usize) -> Label {
@@ -172,10 +165,6 @@ fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
 
     for gid in 0..num_groups {
         dfa.add_transition(accept, terminal_label(gid), accept);
-        // Completion labels also self-loop on accept: once a disallowed pair
-        // has been detected, any trailing completion label must not escape
-        // back to the implicit non-accepting sink during subtraction.
-        dfa.add_transition(accept, completion_label(gid), accept);
     }
 
     dfa
@@ -335,7 +324,7 @@ fn build_nfa_from_trellis(
                 nfa.add_epsilon(nfa_state, accept_sink);
             } else {
                 for &gid in future_groups {
-                    nfa.add_transition(nfa_state, completion_label(gid), accept_sink);
+                    nfa.add_transition(nfa_state, terminal_label(gid), accept_sink);
                 }
             }
         }
@@ -1111,13 +1100,8 @@ mod tests {
         use crate::automata::unweighted_u32::subtract::subtract;
 
         fn format_label(grammar: &crate::compiler::grammar::GrammarDef, label: Label) -> String {
-            if label >= 0 {
-                let gid = label as usize;
-                format!("{gid}:{}", grammar.terminal_display_name(gid as u32))
-            } else {
-                let gid = (-(label + 1)) as usize;
-                format!("complete({gid}:{})", grammar.terminal_display_name(gid as u32))
-            }
+            let gid = label as usize;
+            format!("{gid}:{}", grammar.terminal_display_name(gid as u32))
         }
 
         fn pretty_dfa(grammar: &crate::compiler::grammar::GrammarDef, dfa: &DFA) -> String {
@@ -1220,15 +1204,9 @@ mod tests {
         let group_names: &[&str] = &["'{' (group 0)", "'}' (group 1)"];
 
         fn format_label(group_names: &[&str], label: Label) -> String {
-            if label >= 0 {
-                group_names.get(label as usize)
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| format!("group {label}"))
-            } else {
-                let gid = (-(label + 1)) as usize;
-                let name = group_names.get(gid).copied().unwrap_or("?");
-                format!("complete({name})")
-            }
+            group_names.get(label as usize)
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| format!("group {label}"))
         }
 
         fn pretty_dfa(group_names: &[&str], dfa: &DFA) -> String {
