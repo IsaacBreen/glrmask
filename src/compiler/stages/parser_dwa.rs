@@ -583,10 +583,10 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
     report.default_edges_before_resolve = default_edges_before_resolve;
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa] compose_state_ms={:.3} memo_entries={} nwa_states={}",
+            "[glrmask/profile][parser_dwa] compose_state_ms={:.3} memo_entries={} {}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
             memo.iter().filter(|entry| entry.is_some()).count(),
-            parser_nwa.states.len(),
+            report.parser_nwa_before_resolve,
         );
         if let Some(profile) = compose_profile.as_ref() {
             eprintln!(
@@ -657,18 +657,17 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
     report.total_time = total_started_at.elapsed();
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} det_ms={:.3} min_ms={:.3} pre_min_states={} dwa_states={}",
+            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} det_ms={:.3} min_ms={:.3} pre_min_states={} {}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
             det_elapsed.as_secs_f64() * 1000.0,
             min_elapsed.as_secs_f64() * 1000.0,
-            parser_dwa_pre_minimize.states.len(),
-            core_dwa.states.len(),
+            report.parser_dwa_pre_minimize.states,
+            report.parser_dwa_minimized,
         );
         eprintln!(
-            "[glrmask/profile][parser_dwa] total_ms={:.3} dwa_states={} dwa_transitions={}",
+            "[glrmask/profile][parser_dwa] total_ms={:.3} {}",
             total_started_at.elapsed().as_secs_f64() * 1000.0,
-            core_dwa.num_states(),
-            core_dwa.num_transitions(),
+            report.parser_dwa_minimized,
         );
     }
 

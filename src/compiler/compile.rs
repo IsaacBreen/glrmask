@@ -973,7 +973,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][compile] total_ms={:.3} rules={} terminals={} vocab_entries={} tokenizer_states={} internal_tsids={} glr_table_states={} terminal_dwa_states={} parser_dwa_states={}",
+            "[glrmask/profile][compile] total_ms={:.3} rules={} terminals={} vocab_entries={} tokenizer_states={} internal_tsids={} glr_table_states={} terminal_{} parser_{}",
             compile_started_at.elapsed().as_secs_f64() * 1000.0,
             normalized.rules.len(),
             normalized.terminals.len(),
@@ -981,8 +981,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
             tokenizer.num_states(),
             id_map.num_tsids(),
             table.num_states,
-            terminal_dwa.num_states(),
-            parser_dwa.num_states(),
+            terminal_build.terminal_minimized_dwa,
+            parser_build.parser_dwa_minimized,
         );
     }
 
