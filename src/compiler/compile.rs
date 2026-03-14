@@ -628,7 +628,7 @@ fn log_terminal_dwa_sample_paths(
     let max_valid_len = terminal_dwa_max_valid_path_len(terminal_dwa);
 
     let mut rng = rand::thread_rng();
-    let mut collected: Vec<(String, usize, Vec<i32>)> = Vec::new();
+    let mut collected: Vec<(String, usize, Vec<i32>, Weight)> = Vec::new();
     let mut attempts = 0usize;
 
     while collected.len() < target_samples && attempts < max_attempts {
@@ -653,7 +653,7 @@ fn log_terminal_dwa_sample_paths(
                 }
             }
 
-            if end_weight.is_some() {
+            if let Some(ref ew) = end_weight {
                 if (choices.is_empty() || rng.gen_bool(end_prob))
                     && min_len.map_or(true, |min| path_labels.len() >= min)
                 {
@@ -662,7 +662,7 @@ fn log_terminal_dwa_sample_paths(
                         .map(|&l| terminal_label_name(grammar, l))
                         .collect::<Vec<_>>()
                         .join(" -> ");
-                    collected.push((display, path_labels.len(), path_labels.clone()));
+                    collected.push((display, path_labels.len(), path_labels.clone(), ew.clone()));
                     accepted = true;
                     break;
                 }
@@ -687,12 +687,12 @@ fn log_terminal_dwa_sample_paths(
     }
 
     let mut deduped = BTreeMap::new();
-    for (path, len, labels) in collected {
-        deduped.entry(path).or_insert((len, labels));
+    for (path, len, labels, end_weight) in collected {
+        deduped.entry(path).or_insert((len, labels, end_weight));
     }
-    let mut collected: Vec<(String, usize, Vec<i32>)> = deduped
+    let mut collected: Vec<(String, usize, Vec<i32>, Weight)> = deduped
         .into_iter()
-        .map(|(path, (len, labels))| (path, len, labels))
+        .map(|(path, (len, labels, end_weight))| (path, len, labels, end_weight))
         .collect();
 
     if sample_long {
@@ -713,23 +713,17 @@ fn log_terminal_dwa_sample_paths(
         attempts,
         max_valid_len,
     );
-    let mut displayed = 0usize;
-    for (path, len, labels) in collected.iter() {
-        let tokens_str = sample_path_matching_tokens(grammar, labels, vocab, max_tokens);
-        if tokens_str == "tokens=[]" || tokens_str == "tokens=?" {
-            continue;
-        }
+    for (idx, (path, len, _labels, end_weight)) in collected.iter().enumerate() {
         let len_repr = colorize(len.to_string(), ANSI_DWA_LEN);
         eprintln!(
             "[glrmask/dwa_sample]   Path {}: {} (len={}, {})",
-            displayed,
+            idx,
             path,
             len_repr,
-            tokens_str,
+            sample_weight_tokens(end_weight, vocab, id_map, max_tokens),
         );
-        displayed += 1;
     }
-    if displayed == 0 {
+    if collected.is_empty() {
         eprintln!("[glrmask/dwa_sample]   (no non-empty terminal DWA paths collected)");
     }
 }

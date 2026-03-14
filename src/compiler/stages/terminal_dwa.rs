@@ -1364,12 +1364,13 @@ pub(crate) fn build_terminal_dwa_with_report(
 
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][terminal_dwa] total_ms={:.3} vocab_entries={} internal_tsids={} nwa_states={} dwa_states={}",
+            "[glrmask/profile][terminal_dwa] total_ms={:.3} vocab_entries={} internal_tsids={} nwa_states={} dwa_states={} dwa_transitions={}",
             total_started_at.elapsed().as_secs_f64() * 1000.0,
             vocab.entries.len(),
             id_map.num_tsids(),
             report.terminal_nwa.states,
             dwa.num_states(),
+            dwa.num_transitions(),
         );
     }
 

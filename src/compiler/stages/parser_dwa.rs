@@ -665,8 +665,10 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
             core_dwa.states.len(),
         );
         eprintln!(
-            "[glrmask/profile][parser_dwa] total_ms={:.3}",
+            "[glrmask/profile][parser_dwa] total_ms={:.3} dwa_states={} dwa_transitions={}",
             total_started_at.elapsed().as_secs_f64() * 1000.0,
+            core_dwa.num_states(),
+            core_dwa.num_transitions(),
         );
     }
 
