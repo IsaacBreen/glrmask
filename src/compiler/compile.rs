@@ -225,6 +225,23 @@ fn token_repr(bytes: &[u8]) -> String {
     )
 }
 
+/// Try to extract a fixed byte sequence from an Expr tree.
+/// Returns Some(bytes) if the expr always matches exactly one fixed string,
+/// None otherwise (e.g., contains character classes, repetitions, choices).
+fn expr_to_fixed_bytes(expr: &Expr) -> Option<Vec<u8>> {
+    match expr {
+        Expr::U8Seq(bytes) => Some(bytes.clone()),
+        Expr::Seq(parts) => {
+            let mut result = Vec::new();
+            for part in parts {
+                result.extend(expr_to_fixed_bytes(part)?);
+            }
+            Some(result)
+        }
+        _ => None,
+    }
+}
+
 /// Given a terminal DWA path (as a list of terminal IDs), find vocab tokens whose
 /// bytes match the concatenated terminal byte string. Shows tokens that are a prefix
 /// of the path bytes or whose bytes the path bytes are a prefix of.
@@ -235,12 +252,25 @@ fn sample_path_matching_tokens(
     max_tokens: usize,
 ) -> String {
     // Build the concatenated byte string for this path from leading literal terminals.
+    // Handles Literal, Pattern (simple regex), and Expr (terminal rules) terminals.
     let mut path_bytes = Vec::new();
     for &label in labels {
         let tid = label as u32;
         match grammar.terminals.iter().find(|t| t.id() == tid) {
             Some(Terminal::Literal { bytes, .. }) => path_bytes.extend_from_slice(bytes),
-            _ => break, // stop at first non-literal
+            Some(Terminal::Pattern { pattern, utf8, .. }) => {
+                match parse_regex(pattern, *utf8) {
+                    Expr::U8Seq(bytes) => path_bytes.extend_from_slice(&bytes),
+                    _ => break,
+                }
+            }
+            Some(Terminal::Expr { expr, .. }) => {
+                match expr_to_fixed_bytes(expr) {
+                    Some(bytes) => path_bytes.extend_from_slice(&bytes),
+                    None => break,
+                }
+            }
+            _ => break,
         }
     }
 
@@ -387,14 +417,16 @@ fn terminal_label_name(grammar: &GrammarDef, label: i32) -> String {
         .find(|candidate| candidate.id() == terminal)
         .map(|terminal_def| match terminal_def {
             Terminal::Literal { bytes, .. } => single_quoted(&String::from_utf8_lossy(bytes)),
+            Terminal::Expr { expr, .. } => {
+                if let Some(bytes) = expr_to_fixed_bytes(expr) {
+                    single_quoted(&String::from_utf8_lossy(&bytes))
+                } else {
+                    grammar.terminal_display_name(terminal)
+                }
+            }
             _ => grammar.terminal_display_name(terminal),
         })
         .unwrap_or_else(|| grammar.terminal_display_name(terminal));
-    let rendered = if rendered == "STRING_QUOTE" {
-        single_quoted("\"")
-    } else {
-        rendered
-    };
     colorize(rendered, ANSI_DWA_TERM)
 }
 
@@ -681,17 +713,23 @@ fn log_terminal_dwa_sample_paths(
         attempts,
         max_valid_len,
     );
-    for (idx, (path, len, labels)) in collected.iter().enumerate() {
+    let mut displayed = 0usize;
+    for (path, len, labels) in collected.iter() {
+        let tokens_str = sample_path_matching_tokens(grammar, labels, vocab, max_tokens);
+        if tokens_str == "tokens=[]" || tokens_str == "tokens=?" {
+            continue;
+        }
         let len_repr = colorize(len.to_string(), ANSI_DWA_LEN);
         eprintln!(
             "[glrmask/dwa_sample]   Path {}: {} (len={}, {})",
-            idx,
+            displayed,
             path,
             len_repr,
-            sample_path_matching_tokens(grammar, labels, vocab, max_tokens),
+            tokens_str,
         );
+        displayed += 1;
     }
-    if collected.is_empty() {
+    if displayed == 0 {
         eprintln!("[glrmask/dwa_sample]   (no non-empty terminal DWA paths collected)");
     }
 }
@@ -1038,6 +1076,9 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         &id_map,
         normalized.ignore_terminal,
     );
+
+    log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, vocab, &id_map);
+
     let parser_dwa = build_parser_dwa_from_terminal_dwa(
         &table,
         &glr_grammar,
