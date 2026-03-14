@@ -49,9 +49,19 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         entries
     }
 
-    fn epsilon_closure(nwa: &NWA, seed: &FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
-        let mut closure = seed.clone();
-        let mut queue: VecDeque<u32> = seed.keys().copied().collect();
+    fn epsilon_closure(nwa: &NWA, seed: FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
+        // Fast path: single-state seed with no epsilon transitions (99.6% of calls)
+        if seed.len() == 1 {
+            let (&state_id, _) = seed.iter().next().unwrap();
+            if let Some(state) = nwa.states.get(state_id as usize) {
+                if state.epsilons.is_empty() {
+                    return seed;
+                }
+            }
+        }
+
+        let mut closure = seed;
+        let mut queue: VecDeque<u32> = closure.keys().copied().collect();
 
         while let Some(state_id) = queue.pop_front() {
             let Some(current_weight) = closure.get(&state_id).cloned() else {
@@ -90,10 +100,11 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         start_subset.insert(state_id, existing.union(&Weight::all()));
     }
     let start_closure_started_at = profile_enabled.then(std::time::Instant::now);
-    let start_subset = epsilon_closure(nwa, &start_subset);
+    let start_seed_len = start_subset.len();
+    let start_subset = epsilon_closure(nwa, start_subset);
     if let (Some(profile), Some(started_at)) = (profile.as_mut(), start_closure_started_at) {
         profile.epsilon_closure_calls += 1;
-        profile.epsilon_closure_seed_states += nwa.start_states.len();
+        profile.epsilon_closure_seed_states += start_seed_len;
         profile.epsilon_closure_output_states += start_subset.len();
         profile.epsilon_closure_ms += started_at.elapsed();
     }
@@ -187,10 +198,11 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             }
 
             let closure_started_at = profile_enabled.then(std::time::Instant::now);
-            let expanded = epsilon_closure(nwa, &target_subset);
+            let seed_len = target_subset.len();
+            let expanded = epsilon_closure(nwa, target_subset);
             if let (Some(profile), Some(started_at)) = (profile.as_mut(), closure_started_at) {
                 profile.epsilon_closure_calls += 1;
-                profile.epsilon_closure_seed_states += target_subset.len();
+                profile.epsilon_closure_seed_states += seed_len;
                 profile.epsilon_closure_output_states += expanded.len();
                 profile.epsilon_closure_ms += started_at.elapsed();
             }
