@@ -83,7 +83,7 @@ impl BitSet {
         self.words.iter().all(|&word| word == 0)
     }
 
-    fn union_with(&mut self, other: &BitSet) {
+    pub fn union_with(&mut self, other: &BitSet) {
         debug_assert_eq!(self.len, other.len);
         for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
             *lhs |= *rhs;
