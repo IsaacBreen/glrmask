@@ -48,6 +48,12 @@ impl Tokenizer {
         for &tid in &nullable {
             self.dfa.clear_finalizer(self.start_state(), tid);
         }
+        // Assert that there are no transitions *to* the start state.
+        for state in self.dfa.states() {
+            for target in state.transitions.values() {
+                assert_ne!(*target, self.start_state(), "Nullable start state should have no incoming transitions");
+            }
+        }
         nullable
     }
 
