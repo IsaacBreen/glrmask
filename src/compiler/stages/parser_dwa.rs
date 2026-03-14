@@ -10,7 +10,7 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::{minimize_with_threshold, minimize_fast};
+use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
@@ -650,7 +650,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
     let det_elapsed = phase_started_at.elapsed();
     report.parser_dwa_pre_minimize = collect_weighted_dwa_stats(&parser_dwa_pre_minimize);
     let min_started_at = std::time::Instant::now();
-    let core_dwa = minimize_with_threshold(&parser_dwa_pre_minimize, 200);
+    let core_dwa = minimize(&parser_dwa_pre_minimize);
     let min_elapsed = min_started_at.elapsed();
     report.determinize_minimize_time = phase_started_at.elapsed();
     report.parser_dwa_minimized = collect_weighted_dwa_stats(&core_dwa);

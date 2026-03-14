@@ -783,6 +783,125 @@ fn build_incompatibility_graph_sparse(
     Some(adj)
 }
 
+/// Compute a 128-bit signature for a candidate state.
+///
+/// Two states with the same signature are guaranteed compatible (they have
+/// identical final weights on their needed domain, and identical productive
+/// transitions with the same mapped targets and weights).  This lets us
+/// deduplicate candidates before building the O(n²) incompatibility graph.
+fn compute_state_signature(
+    state_id: usize,
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+
+    let state = &dwa.states[state_id];
+
+    let mut hasher = DefaultHasher::new();
+
+    // Hash final weight restricted to needed set
+    match &state.final_weight {
+        Some(fw) => {
+            1u8.hash(&mut hasher);
+            let restricted = fw.intersection(&needed[state_id]);
+            restricted.hash(&mut hasher);
+        }
+        None => {
+            0u8.hash(&mut hasher);
+        }
+    }
+
+    // Hash productive transitions (already sorted by label from compute_productive_transitions)
+    let trans = &productive_transitions[state_id];
+    trans.len().hash(&mut hasher);
+    for t in trans {
+        t.label.hash(&mut hasher);
+        let mapped = old_to_new[t.target as usize];
+        mapped.hash(&mut hasher);
+        t.weight.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
+/// Color candidates using signature-based deduplication and a strategy that
+/// adapts based on the bucket: greedy-without-graph for smaller sets, and
+/// sparse overlap graph + greedy coloring for larger sets.
+fn build_and_color_with_signature_dedup(
+    dwa: &DWA,
+    candidates: &[usize],
+    needed: &[Weight],
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+    profile: &mut MinimizeAcyclicProfile,
+) -> Vec<usize> {
+    let nc = candidates.len();
+
+    // Step 1: Compute signatures for all candidates
+    let signatures: Vec<u64> = candidates
+        .iter()
+        .map(|&id| compute_state_signature(id, dwa, needed, old_to_new, productive_transitions))
+        .collect();
+
+    // Step 2: Group by signature, keeping track of one representative per group
+    let mut sig_to_rep_idx: FxHashMap<u64, usize> = FxHashMap::default();
+    let mut unique_indices: Vec<usize> = Vec::new(); // indices into candidates
+    for (idx, &sig) in signatures.iter().enumerate() {
+        sig_to_rep_idx.entry(sig).or_insert_with(|| {
+            let rep = unique_indices.len();
+            unique_indices.push(idx);
+            rep
+        });
+    }
+
+    let k = unique_indices.len();
+
+    if minimize_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][sig_dedup] candidates={} unique_sigs={} dedup_ratio={:.2}",
+            nc, k, k as f64 / nc as f64,
+        );
+    }
+
+    // Step 3: Build sub-candidate list of unique representatives
+    let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
+
+    // Step 4: Build and color the representative graph using sparse overlap
+    let rep_adj = build_incompatibility_graph_sparse(
+        dwa,
+        &rep_candidates,
+        needed,
+        old_to_new,
+        productive_transitions,
+        profile,
+    )
+    .unwrap_or_else(|| {
+        build_incompatibility_graph(
+            dwa,
+            &rep_candidates,
+            needed,
+            old_to_new,
+            productive_transitions,
+            profile,
+        )
+    });
+
+    let rep_coloring = greedy_coloring(&rep_adj);
+
+    // Step 5: Map all candidates back — each gets the color of its representative
+    let mut coloring = vec![0usize; nc];
+    for (idx, &sig) in signatures.iter().enumerate() {
+        let rep = sig_to_rep_idx[&sig];
+        coloring[idx] = rep_coloring[rep];
+    }
+
+    coloring
+}
+
 /// Greedy graph coloring — O(V + E), good heuristic.
 fn greedy_coloring(adj: &[Vec<usize>]) -> Vec<usize> {
     let n = adj.len();
@@ -1410,43 +1529,19 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
         }
 
         // Build incompatibility graph and color it.
-        // For very large buckets, use partition-refinement coloring (O(n log n))
-        // instead of the O(n²) incompatibility graph approach.
+        // Uses signature-based deduplication: candidates with identical
+        // (final_weight_on_needed, mapped transitions, weights) share a
+        // signature and are guaranteed compatible, so we only build the
+        // O(K²) graph among unique-signature representatives (K << N).
         let graph_started_at = std::time::Instant::now();
-        let coloring = if candidates.len() > partition_refine_threshold {
-            // Partition refinement: hash-based grouping + diamond merge.
-            // Avoids the O(n²) pairwise compatibility checks that dominate
-            // build time on large grammars (e.g. kb_143 with 2307 candidates).
-            partition_refine_coloring(
-                candidates,
-                &pushed,
-                &needed,
-                &old_to_new,
-                &productive_transitions,
-            )
-        } else {
-            // For small buckets, the full incompatibility graph gives
-            // optimal merging without much cost.
-            let adj = build_incompatibility_graph_sparse(
-                &pushed,
-                candidates,
-                &needed,
-                &old_to_new,
-                &productive_transitions,
-                &mut profile,
-            )
-            .unwrap_or_else(|| {
-                build_incompatibility_graph(
-                    &pushed,
-                    candidates,
-                    &needed,
-                    &old_to_new,
-                    &productive_transitions,
-                    &mut profile,
-                )
-            });
-            greedy_coloring(&adj)
-        };
+        let coloring = build_and_color_with_signature_dedup(
+            &pushed,
+            candidates,
+            &needed,
+            &old_to_new,
+            &productive_transitions,
+            &mut profile,
+        );
         profile.graph_color_ms += graph_started_at.elapsed();
 
         let setup_started = std::time::Instant::now();
