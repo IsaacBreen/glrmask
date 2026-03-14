@@ -31,7 +31,7 @@ use std::hash::Hasher;
 use super::compat::{FlatDfa, FlatDfaState, Sep1Tokenizer};
 use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::dfa::{Label, DFA};
-use crate::automata::unweighted_u32::minimize::minimize;
+use crate::automata::unweighted_u32::minimize_cyclic::minimize_cyclic as minimize;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::automata::unweighted_u32::subtract::subtract;
 use crate::ds::bitset::BitSet;

@@ -19,12 +19,11 @@ struct StateSignature {
 /// Minimize an acyclic unweighted DFA by merging states with identical
 /// signatures (acceptance + transition map modulo equivalence class).
 ///
-/// Returns the input unchanged if it is cyclic (cannot minimize cyclic DFAs
-/// with this reverse-topological approach).
-pub fn minimize(dfa: &DFA) -> DFA {
+/// Panics (debug) if the input is cyclic.
+pub fn minimize_acyclic(dfa: &DFA) -> DFA {
     debug_assert!(
         dfa.is_acyclic(),
-        "determinize: input NFA is cyclic"
+        "minimize_acyclic: input DFA is cyclic"
     );
 
     if dfa.states.is_empty() {
@@ -157,7 +156,7 @@ mod tests {
     #[test]
     fn test_minimize_single_state() {
         let dfa = DFA::new();
-        let minimized = minimize(&dfa);
+        let minimized = minimize_acyclic(&dfa);
         assert_eq!(minimized.num_states(), 1);
     }
 
@@ -174,7 +173,7 @@ mod tests {
         dfa.set_accepting(s1, true);
         dfa.set_accepting(s2, true);
 
-        let minimized = minimize(&dfa);
+        let minimized = minimize_acyclic(&dfa);
         // 2 classes: start (non-accept) + merged accept.
         assert_eq!(minimized.num_states(), 2);
     }
@@ -190,7 +189,7 @@ mod tests {
         dfa.add_transition(0, 2, s2);
         dfa.set_accepting(s1, true);
 
-        let minimized = minimize(&dfa);
+        let minimized = minimize_acyclic(&dfa);
         assert_eq!(minimized.num_states(), 2);
     }
 
@@ -200,7 +199,7 @@ mod tests {
             states: Vec::new(),
             start_state: 0,
         };
-        let minimized = minimize(&dfa);
+        let minimized = minimize_acyclic(&dfa);
         assert_eq!(minimized.num_states(), 0);
     }
 
@@ -215,7 +214,7 @@ mod tests {
         dfa.add_transition(s2, 1, s1);
         dfa.start_state = s2;
 
-        let minimized = minimize(&dfa);
+        let minimized = minimize_acyclic(&dfa);
         assert_eq!(minimized.num_states(), 1);
         assert!(!minimized.states[0].is_accepting);
         assert!(minimized.states[0].transitions.is_empty());
@@ -228,7 +227,7 @@ mod tests {
         dfa.set_accepting(0, true);
         dfa.add_transition(0, 0, reject);
 
-        let minimized = minimize(&dfa);
+        let minimized = minimize_acyclic(&dfa);
         assert_eq!(minimized.num_states(), 1);
         assert!(minimized.states[0].is_accepting);
         assert!(minimized.states[0].transitions.is_empty());

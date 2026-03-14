@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::determinize::determinize;
-use crate::automata::unweighted_u32::minimize::minimize as minimize_dfa;
+use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minimize_dfa;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::compiler::glr::labels::{encode_negative_label, encode_positive_label, DEFAULT_LABEL};
 use crate::compiler::grammar::model::TerminalID;
