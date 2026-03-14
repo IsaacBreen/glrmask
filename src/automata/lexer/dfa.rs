@@ -81,9 +81,11 @@ impl DFA {
         }
     }
 
-    pub fn clear_finalizer(&mut self, state: u32, group_id: GroupId) {
+    pub fn clear_finalizers_for_state(&mut self, state: u32) -> BitSet {
         if let Some(entry) = self.states.get_mut(state as usize) {
-            entry.finalizers.clear(group_id as usize);
+            std::mem::take(&mut entry.finalizers)
+        } else {
+            BitSet::empty(0)
         }
     }
 
@@ -139,5 +141,26 @@ impl DFA {
 
     pub fn states(&self) -> &[DFAState] {
         &self.states
+    }
+
+    /// Create a clone of an existing state (transitions, finalizers,
+    /// possible_future_group_ids) and return the new state's id.
+    pub fn clone_state(&mut self, source: u32) -> u32 {
+        let cloned = self.states[source as usize].clone();
+        let id = self.states.len() as u32;
+        self.states.push(cloned);
+        id
+    }
+
+    /// Rewrite every transition that targets `old_target` so it targets
+    /// `new_target` instead.
+    pub fn redirect_transitions(&mut self, old_target: u32, new_target: u32) {
+        for state in &mut self.states {
+            for (_, target) in state.transitions.iter_mut() {
+                if *target == old_target {
+                    *target = new_target;
+                }
+            }
+        }
     }
 }

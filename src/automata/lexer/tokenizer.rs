@@ -44,17 +44,29 @@ impl Tokenizer {
     /// the set.  After this call the tokenizer no longer reports those
     /// terminals as matched at state 0.
     pub fn drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
-        let nullable = self.matched_terminals(self.start_state());
-        for &tid in &nullable {
-            self.dfa.clear_finalizer(self.start_state(), tid);
-        }
-        // Assert that there are no transitions *to* the start state.
-        for state in self.dfa.states() {
-            for target in state.transitions.values() {
-                assert_ne!(*target, self.start_state(), "Nullable start state should have no incoming transitions");
-            }
-        }
+        self.isolate_start_state();
+        let nullable = self.dfa.clear_finalizers_for_state(self.start_state()).iter().map(|terminal| terminal as TerminalID).collect();
         nullable
+    }
+
+    /// Ensure that no byte transition in the DFA targets the start state.
+    ///
+    /// If any transition does, a copy of the start state is created and all
+    /// such transitions are redirected to the copy.  This keeps the DFA
+    /// equivalent while guaranteeing the start state is only reachable at
+    /// position 0.
+    fn isolate_start_state(&mut self) {
+        let start = self.start_state();
+        let has_incoming = self.dfa.states().iter().any(|st| {
+            st.transitions.values().any(|&target| target == start)
+        });
+        if !has_incoming {
+            return;
+        }
+        // Clone the start state as a new state.
+        let clone_id = self.dfa.clone_state(start);
+        // Redirect every transition that points to start → clone.
+        self.dfa.redirect_transitions(start, clone_id);
     }
 
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
