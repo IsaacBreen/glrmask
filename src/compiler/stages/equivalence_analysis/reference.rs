@@ -172,6 +172,10 @@ fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
 
     for gid in 0..num_groups {
         dfa.add_transition(accept, terminal_label(gid), accept);
+        // Completion labels also self-loop on accept: once a disallowed pair
+        // has been detected, any trailing completion label must not escape
+        // back to the implicit non-accepting sink during subtraction.
+        dfa.add_transition(accept, completion_label(gid), accept);
     }
 
     dfa
@@ -1264,28 +1268,67 @@ mod tests {
         let dfa = sep1.dfa();
         let pre = precompute(dfa, &disallowed);
 
-        if let Some(dd) = &pre.disallowed_detector {
-            println!("Disallowed follows:\n{}", pretty_dfa(group_names, dd));
+        // Print tokenizer DFA
+        eprintln!("Tokenizer DFA: {} states, start={}", dfa.num_states(), dfa.start_state);
+        for (i, state) in dfa.states.iter().enumerate() {
+            let trans: Vec<String> = state.transitions.iter().enumerate()
+                .filter(|&(_, &t)| t != u32::MAX)
+                .map(|(b, &t)| format!("0x{b:02x}({}) -> {t}", b as u8 as char))
+                .collect();
+            eprintln!("  state {i}: finalizers={:?} pfg={:?} trans=[{}]",
+                state.finalizers, state.possible_future_group_ids, trans.join(", "));
         }
 
-        // Compute and print final DFAs for both tokens
+        if let Some(dd) = &pre.disallowed_detector {
+            eprintln!("Disallowed detector DFA:\n{}", pretty_dfa(group_names, dd));
+        }
+
+        // Compute and print intermediate DFAs for both tokens
         for (i, token) in tokens.iter().enumerate() {
             let mut tmp_mp = Vec::new();
             let dag = build_trellis_dag(dfa, pre.num_groups, token, states[0], &mut tmp_mp);
+            eprintln!("--- Token {i} {:?} ---", String::from_utf8_lossy(token));
+            eprintln!("Trellis DAG:");
+            for (&pos, node) in &dag {
+                let edges: Vec<String> = node.edges.iter()
+                    .map(|(gid, target)| format!("group {} -> pos {}", gid, target))
+                    .collect();
+                eprintln!("  pos {pos}: end_state={}, edges=[{}]",
+                    if node.end_state == STATE_NONE { "NONE".to_string() } else { node.end_state.to_string() },
+                    edges.join(", "));
+            }
+
             let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, None, token.len());
+            eprintln!("NFA: {} states, starts={:?}", nfa.states.len(), nfa.start_states);
+            for (si, s) in nfa.states.iter().enumerate() {
+                let eps: Vec<String> = s.epsilons.iter().map(|e| e.to_string()).collect();
+                let trans: Vec<String> = s.transitions.iter()
+                    .map(|(label, targets)| {
+                        let label_str = format_label(group_names, *label);
+                        let tgt: Vec<String> = targets.iter().map(|t| t.to_string()).collect();
+                        format!("{label_str} -> [{}]", tgt.join(", "))
+                    })
+                    .collect();
+                eprintln!("  nfa state {si}: accept={} eps=[{}] trans=[{}]",
+                    s.is_accepting, eps.join(", "), trans.join(", "));
+            }
+
             let det = determinize(&nfa);
+            eprintln!("Det DFA:\n{}", pretty_dfa(group_names, &det));
             let min = minimize_acyclic(&det);
+            eprintln!("Min DFA:\n{}", pretty_dfa(group_names, &min));
             let final_dfa = match &pre.disallowed_detector {
-                Some(dd) => minimize_acyclic(&subtract(&min, dd)),
+                Some(dd) => {
+                    let sub = subtract(&min, dd);
+                    eprintln!("Subtracted DFA:\n{}", pretty_dfa(group_names, &sub));
+                    let result = minimize_acyclic(&sub);
+                    eprintln!("Final (minimized subtracted) DFA:\n{}", pretty_dfa(group_names, &result));
+                    result
+                }
                 None => min,
             };
             let hash = canonical_hash(&final_dfa);
-            eprintln!(
-                "Token {i} {:?} (hex {:02x?}) — hash={hash}\n{}",
-                String::from_utf8_lossy(token),
-                token,
-                pretty_dfa(group_names, &final_dfa),
-            );
+            eprintln!("Hash: {hash}\n");
         }
 
         let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
@@ -1296,15 +1339,11 @@ mod tests {
         eprintln!("Fast classes: {:?}", fast);
         eprintln!("Reference classes: {:?}", reference.vocab_classes);
 
-        // Reference correctly separates; fast incorrectly merges.
+        // After fixing disallowed-follow subtraction, both tokens produce
+        // empty DFAs (no valid segmentation), so both analyses should merge them.
         assert_eq!(
-            reference.vocab_classes,
-            BTreeSet::from([vec![0], vec![1]]),
-            "reference should separate the two tokens"
-        );
-        assert_ne!(
-            fast, reference.vocab_classes,
-            "fast should NOT match reference (this is the bug)"
+            reference.vocab_classes, fast,
+            "reference and fast should agree (both merge)"
         );
     }
 }

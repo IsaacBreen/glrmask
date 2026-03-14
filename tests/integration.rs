@@ -2591,21 +2591,20 @@ fn test_ported_minimal_python_example_with_compiled_grammar() {
     assert!(!token_allowed(&mask, 10), "plus should not be allowed immediately after the second plus");
 }
 
-/// Minimal reproduction of the fast-vs-reference vocab equivalence mismatch
+/// Regression test for the fast-vs-reference vocab equivalence mismatch
 /// originally found on Github_hard/o56012. Minimized by ddmin from 85 rules /
 /// 1302 nodes / 50257 tokens down to 1 rule / 3 nodes / 2 tokens.
 ///
 /// Grammar: start: "{" "}"
 /// Vocab:   ["}:" (0x7d3a), "}}}" (0x7d7d7d)]
 ///
-/// The fast equivalence analysis incorrectly merges these tokens into the same
-/// class, but the reference analysis correctly separates them. Building with
-/// REFERENCE_EQUIV_VERIFICATION=1 triggers the verification panic.
+/// Previously the reference analysis failed to subtract disallowed follows
+/// through completion labels, causing it to incorrectly separate these tokens.
+/// The fix adds completion-label self-loops on the disallowed detector's accept
+/// state, so both analyses now correctly merge them.
 #[test]
-#[should_panic(expected = "Fast vocab equivalence merged tokens that reference kept separate!")]
 fn test_equiv_mismatch_o56012_minimized() {
     // SAFETY: set_var is unsafe in edition 2024 due to potential races.
-    // This test is isolated by #[should_panic] and no other test reads this var.
     unsafe { std::env::set_var("REFERENCE_EQUIV_VERIFICATION", "1"); }
     let vocab = Vocab::new(
         vec![
@@ -2614,5 +2613,6 @@ fn test_equiv_mismatch_o56012_minimized() {
         ],
         None,
     );
+    // Should succeed without panic — both fast and reference agree.
     let _c = Constraint::from_lark(r#"start: "{" "}""#, &vocab).unwrap();
 }
