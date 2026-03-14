@@ -1624,17 +1624,17 @@ mod tests {
     /// `"a"`) to get DWA transitions for tokens that can't byte-match them.
     #[test]
     fn test_kleene_star_no_spurious_terminal_transition() {
-        // X: /[0-9]/* is a Kleene-star terminal.  With vocab=["0"], only X
+        // X: "b"* is a Kleene-star terminal.  With vocab=["b"], only X
         // should get a transition from the DWA start state.  Literal "a"
-        // (byte 0x61) should NOT get a transition because "0" != "a".
+        // (byte 0x61) should NOT get a transition because "b" != "a".
         let lark = r#"
-X: /[0-9]/*
+X: "b"*
 start: "a" X
 "#;
         let grammar = crate::import::lark::parse_lark(lark).unwrap();
         let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
         let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
-        let vocab = Vocab::new(vec![(0, b"0".to_vec())], None);
+        let vocab = Vocab::new(vec![(0, b"b".to_vec())], None);
         let id_map = InternalIdMap::build(
             &tokenizer, &vocab, &std::collections::BTreeMap::new(), None,
         );
@@ -1650,7 +1650,7 @@ start: "a" X
 
         assert!(
             !start.transitions.contains_key(&a_id),
-            "literal 'a' should NOT have a DWA transition with vocab=[\"0\"], \
+            "literal 'a' should NOT have a DWA transition with vocab=[\"b\"], \
              but it does — the Kleene-star NFA loop-back is polluting \
              possible_future_group_ids",
         );
