@@ -23,7 +23,11 @@ use crate::compiler::possible_matches::PossibleMatchesComputer;
 type NwaState = u32;
 /// Tokenizer state identifier.
 type TokenizerState = u32;
+use crate::compiler::compile::compute_disallowed_follows;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::equivalence_analysis::reference::{
+    build_disallowed_follow_dfa, normalize_disallowed_follows,
+};
 use crate::compiler::stages::profile_stats::{
     WeightedDwaStats,
     WeightedNwaStats,
@@ -39,7 +43,7 @@ pub(crate) struct TerminalDwaBuildReport {
     pub build_nwa_from_trie_time: std::time::Duration,
     pub collapse_always_allowed_time: std::time::Duration,
     pub collapse_always_allowed_applied: bool,
-    pub prune_disallowed_follows_time: std::time::Duration,
+    pub subtract_disallowed_time: std::time::Duration,
     pub determinize_time: std::time::Duration,
     pub minimize_time: std::time::Duration,
     pub total_time: std::time::Duration,
@@ -404,13 +408,6 @@ fn topological_order(nwa: &NWA) -> Vec<usize> {
     order
 }
 
-fn intersect_or_insert(entry: &mut Option<HashSet<TerminalID>>, next: &HashSet<TerminalID>) {
-    match entry {
-        None => *entry = Some(next.clone()),
-        Some(existing) => existing.retain(|terminal| next.contains(terminal)),
-    }
-}
-
 fn collapse_always_allowed(
     nwa: &mut NWA,
     always_allowed_by_label: &[Vec<TerminalID>],
@@ -598,8 +595,6 @@ fn should_collapse_always_allowed(vocab: &Vocab) -> bool {
 /// Terminal labels (≥ 0) advance the DFA. Other labels and epsilons leave the
 /// DFA state unchanged.
 fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::DFA) -> NWA {
-    use crate::automata::unweighted::dfa::DFA as UnweightedDFA;
-
     // Product state: (nwa_state, Option<dfa_state>).
     // None means the DFA fell to the implicit non-accepting sink.
     type ProdState = (u32, Option<u32>);
@@ -668,9 +663,6 @@ fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::
                 dfa_sid // non-terminal labels don't advance DFA
             };
 
-            // Check if the destination DFA state is accepting
-            // If it's the accept state already, we still advance to it and check
-            // at the DESTINATION whether to emit final weights
             for (nwa_dst, weight) in targets {
                 let ps = (*nwa_dst, next_dfa);
                 let dst_id = get_or_create(&mut result, &mut state_ids, &mut worklist, ps);
@@ -680,82 +672,6 @@ fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::
     }
 
     result
-}
-
-fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
-    let ever_allowed_by_label = compute_ever_allowed_follows(grammar);
-    let terminals_count = grammar.num_terminals as usize;
-
-    if ever_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states.is_empty() {
-        return false;
-    }
-
-    let all_terminals: HashSet<TerminalID> = (0..grammar.num_terminals).collect();
-    let disallowed_after: Vec<HashSet<TerminalID>> = (0..terminals_count)
-        .map(|label| {
-            let mut disallowed = all_terminals.clone();
-            for follow in ever_allowed_by_label.get(label).into_iter().flatten() {
-                disallowed.remove(follow);
-            }
-            disallowed
-        })
-        .collect();
-
-    let topo_order = topological_order(nwa);
-
-    let mut disallowed_intersected: Vec<Option<HashSet<TerminalID>>> = vec![None; nwa.states.len()];
-    for &start in &nwa.start_states {
-        disallowed_intersected[start as usize] = Some(HashSet::new());
-    }
-
-    for &sid in &topo_order {
-        let src_disallowed = match &disallowed_intersected[sid] {
-            Some(d) => d.clone(),
-            None => HashSet::new(),
-        };
-
-        let epsilon_targets: Vec<u32> =
-            nwa.states[sid].epsilons.iter().map(|(dst, _)| *dst).collect();
-        for dst in epsilon_targets {
-            intersect_or_insert(&mut disallowed_intersected[dst as usize], &src_disallowed);
-        }
-
-        let labeled_targets: Vec<(i32, Vec<u32>)> = nwa.states[sid]
-            .transitions
-            .iter()
-            .map(|(&label, targets)| (label, targets.iter().map(|(dst, _)| *dst).collect()))
-            .collect();
-        for (label, targets) in labeled_targets {
-            let label_dis = if label >= 0 && (label as usize) < disallowed_after.len() {
-                &disallowed_after[label as usize]
-            } else {
-                continue;
-            };
-            for dst in targets {
-                intersect_or_insert(&mut disallowed_intersected[dst as usize], label_dis);
-            }
-        }
-    }
-
-    let mut changed = false;
-    for (state_id, state) in nwa.states.iter_mut().enumerate() {
-        let disallowed = match &disallowed_intersected[state_id] {
-            Some(d) if !d.is_empty() => d,
-            _ => continue,
-        };
-
-        let before = state.transitions.len();
-        state.transitions.retain(|label, _| {
-            *label < 0 || !disallowed.contains(&(*label as TerminalID))
-        });
-        changed |= state.transitions.len() != before;
-    }
-
-    if prune_unreachable_states(nwa) {
-        changed = true;
-    }
-
-    changed
 }
 
 fn token_weight_all_tsids(num_tsids: u32, internal_token_id: u32) -> Weight {
@@ -1433,18 +1349,18 @@ pub(crate) fn build_terminal_dwa_with_report(
 
     let phase_started_at = std::time::Instant::now();
     {
-        let disallowed_follows = crate::compiler::compile::compute_disallowed_follows(grammar);
-        let normalized = crate::compiler::stages::equivalence_analysis::reference::normalize_disallowed_follows(
+        let disallowed_follows = compute_disallowed_follows(grammar);
+        let normalized = normalize_disallowed_follows(
             grammar.num_terminals as usize,
             &disallowed_follows,
         );
         if normalized.iter().any(|bits| !bits.is_zero()) {
-            let disallowed_dfa = crate::compiler::stages::equivalence_analysis::reference::build_disallowed_follow_dfa(&normalized);
+            let disallowed_dfa = build_disallowed_follow_dfa(&normalized);
             nwa = subtract_disallowed_dfa(&nwa, &disallowed_dfa);
         }
     }
-    report.prune_disallowed_follows_time = phase_started_at.elapsed();
-    log_terminal_profile(profile_enabled, "prune_disallowed_follows", phase_started_at);
+    report.subtract_disallowed_time = phase_started_at.elapsed();
+    log_terminal_profile(profile_enabled, "subtract_disallowed", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize, profile_enabled);

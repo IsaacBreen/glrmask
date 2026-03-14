@@ -774,7 +774,7 @@ fn log_compile_summary(
         terminal_build.terminal_nwa.transitions,
     );
     eprintln!(
-        "[glrmask/profile][summary] terminal_dwa det states={} final={} trans={} det_ms={:.3} | min states={} final={} trans={} min_ms={:.3} collapse={} prune_ms={:.3}",
+        "[glrmask/profile][summary] terminal_dwa det states={} final={} trans={} det_ms={:.3} | min states={} final={} trans={} min_ms={:.3} collapse={} subtract_disallowed_ms={:.3}",
         terminal_build.terminal_dwa.states,
         terminal_build.terminal_dwa.final_states,
         terminal_build.terminal_dwa.transitions,
@@ -784,7 +784,7 @@ fn log_compile_summary(
         terminal_build.terminal_minimized_dwa.transitions,
         ms(terminal_build.minimize_time),
         if terminal_build.collapse_always_allowed_applied { "applied" } else { "skipped" },
-        ms(terminal_build.prune_disallowed_follows_time),
+        ms(terminal_build.subtract_disallowed_time),
     );
     eprintln!(
         "[glrmask/profile][summary] templates characterize_ms={:.3} terminals={} shifts={} reduces={} escapes={} rereduces={} | build_ms={:.3} templates={} total_states={} total_trans={} max_states={} max_trans={}",

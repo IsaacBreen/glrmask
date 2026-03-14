@@ -268,6 +268,7 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
     for (group_id, set) in group_sets.into_iter().enumerate() {
         dfa.set_group_u8set(group_id as u32, set);
     }
+    let dfa = dfa.minimize();
     Regex { dfa }
 }
 

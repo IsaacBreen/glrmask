@@ -143,6 +143,20 @@ impl DFA {
         &self.states
     }
 
+    pub(super) fn states_mut(&mut self) -> &mut Vec<DFAState> {
+        &mut self.states
+    }
+
+    pub(super) fn num_groups(&self) -> usize {
+        self.group_id_to_u8set.len()
+    }
+
+    pub(super) fn set_possible_future_group_ids(&mut self, state: u32, ids: BitSet) {
+        if let Some(entry) = self.states.get_mut(state as usize) {
+            entry.possible_future_group_ids = ids;
+        }
+    }
+
     /// Create a clone of an existing state (transitions, finalizers,
     /// possible_future_group_ids) and return the new state's id.
     pub(super) fn clone_state(&mut self, source: u32) -> u32 {
