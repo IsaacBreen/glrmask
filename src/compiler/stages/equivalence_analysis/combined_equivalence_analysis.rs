@@ -11,7 +11,7 @@
 //! This combined approach significantly improves performance for grammars with
 //! large DFAs by reducing the workload of the expensive vocab analysis.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::compat::{FlatDfa, GroupID, Sep1Tokenizer};
 use crate::ds::bitset::BitSet;
@@ -275,6 +275,91 @@ fn find_reference_distinguishing_state<S: AsRef<[u8]> + Sync>(
         })
 }
 
+/// Dump a witness JSON file containing the two LLM tokens and the tokenizer DFA
+/// pruned from the distinguishing state. Written to `witness.json` in the
+/// current directory.
+fn dump_witness_json<S: AsRef<[u8]>>(
+    regex: &Sep1Tokenizer,
+    tokens: &[S],
+    left_token: usize,
+    right_token: usize,
+    distinguishing_state: usize,
+) {
+    let dfa = regex.dfa();
+
+    // Collect reachable states from the distinguishing state, remapping to dense ids.
+    let mut visited = vec![false; dfa.states.len()];
+    let mut stack = vec![distinguishing_state];
+    visited[distinguishing_state] = true;
+    let mut reachable_order: Vec<usize> = Vec::new();
+
+    while let Some(state) = stack.pop() {
+        reachable_order.push(state);
+        for &target in &dfa.states[state].transitions {
+            if target == u32::MAX {
+                continue;
+            }
+            let t = target as usize;
+            if t < dfa.states.len() && !visited[t] {
+                visited[t] = true;
+                stack.push(t);
+            }
+        }
+    }
+    reachable_order.sort_unstable();
+
+    // Build old→new state id mapping.
+    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
+    for (new_id, &old_id) in reachable_order.iter().enumerate() {
+        old_to_new.insert(old_id, new_id);
+    }
+
+    // Build pruned DFA states as JSON-serializable structures.
+    let mut pruned_states = Vec::new();
+    for &old_id in &reachable_order {
+        let state = &dfa.states[old_id];
+        // Compact transition repr: only non-dead entries, mapped to new ids.
+        let mut transitions = serde_json::Map::new();
+        for (byte, &target) in state.transitions.iter().enumerate() {
+            if target == u32::MAX {
+                continue;
+            }
+            let t = target as usize;
+            if let Some(&new_target) = old_to_new.get(&t) {
+                transitions.insert(byte.to_string(), serde_json::json!(new_target));
+            }
+        }
+        pruned_states.push(serde_json::json!({
+            "original_id": old_id,
+            "finalizers": state.finalizers,
+            "possible_future_group_ids": state.possible_future_group_ids,
+            "transitions": transitions,
+        }));
+    }
+
+    let witness_json = serde_json::json!({
+        "left_token_index": left_token,
+        "left_token_bytes": tokens[left_token].as_ref(),
+        "left_token_preview": format_token_preview(tokens[left_token].as_ref()),
+        "right_token_index": right_token,
+        "right_token_bytes": tokens[right_token].as_ref(),
+        "right_token_preview": format_token_preview(tokens[right_token].as_ref()),
+        "distinguishing_state": distinguishing_state,
+        "pruned_dfa": {
+            "start_state": 0,
+            "original_start_state": distinguishing_state,
+            "num_states": pruned_states.len(),
+            "states": pruned_states,
+        },
+    });
+
+    let path = "witness.json";
+    match std::fs::write(path, serde_json::to_string_pretty(&witness_json).unwrap_or_default()) {
+        Ok(()) => eprintln!("[witness] Dumped to {path}"),
+        Err(e) => eprintln!("[witness] Failed to write {path}: {e}"),
+    }
+}
+
 /// Verify that the reference analysis merges at least as aggressively as fast.
 /// The reference is the ground truth — it must merge everything that fast merges,
 /// and potentially more. Panics if fast merged tokens that reference kept separate.
@@ -303,10 +388,21 @@ fn verify_vocab_partition_reference<S: AsRef<[u8]> + Sync>(
                 witness.left_token,
                 witness.right_token,
             );
-            match state {
+            let state_str = match state {
                 Some(state) => format!("{} distinguishing_state={state}", witness.summary),
                 None => format!("{} distinguishing_state=unavailable", witness.summary),
+            };
+            // Dump witness JSON if a distinguishing state was found.
+            if let Some(dist_state) = state {
+                dump_witness_json(
+                    regex,
+                    tokens,
+                    witness.left_token,
+                    witness.right_token,
+                    dist_state,
+                );
             }
+            state_str
         })
         .unwrap_or_else(|| "unavailable".to_string());
         eprintln!("[reference vocab mismatch] {witness}");
