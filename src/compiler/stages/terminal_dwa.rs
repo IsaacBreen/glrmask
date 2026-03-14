@@ -1563,4 +1563,56 @@ mod tests {
         assert!(!original_tokens.contains(&1), "'b' is only ever allowed after 'a', not always allowed, so 'ab' must not collapse");
         assert!(!original_tokens.contains(&2), "the 'abc' chain must not collapse when the first follow is not always allowed");
     }
+
+    /// Grammar: start: A B; A: "a"+; B: "b"+ with vocab = ["a"]
+    /// The terminal DWA should have exactly one transition from start (on terminal A).
+    #[test]
+    fn test_terminal_dwa_expr_terminals_a_plus_b_plus_single_token() {
+        use crate::automata::lexer::ast::Expr;
+
+        let grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Expr {
+                    id: 0,
+                    expr: Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                        min: 1,
+                        max: None,
+                    },
+                },
+                Terminal::Expr {
+                    id: 1,
+                    expr: Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                        min: 1,
+                        max: None,
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+
+        let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
+        let vocab = Vocab::new(
+            vec![(0, b"a".to_vec())],
+            None,
+        );
+        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
+        let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
+
+        let start_state = &terminal_dwa.states[terminal_dwa.start_state as usize];
+        assert_eq!(
+            start_state.transitions.len(),
+            1,
+            "terminal DWA start state should have exactly 1 transition (for terminal A) \
+             but has {} transitions",
+            start_state.transitions.len(),
+        );
+    }
 }
