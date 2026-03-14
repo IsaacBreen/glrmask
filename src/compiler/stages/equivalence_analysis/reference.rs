@@ -92,7 +92,7 @@ struct PrecomputedData {
     disallowed_detector: Option<DFA>,
 }
 
-fn normalize_disallowed_follows(
+pub(crate) fn normalize_disallowed_follows(
     num_groups: usize,
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> Vec<BitSet> {
@@ -133,7 +133,7 @@ fn precompute(dfa: &FlatDfa, disallowed_follows: &BTreeMap<u32, BitSet>) -> Prec
     }
 }
 
-fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
+pub(crate) fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
     let num_groups = disallowed_follows.len();
     if num_groups == 0 {
         return DFA::new();

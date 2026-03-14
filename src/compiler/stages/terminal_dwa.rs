@@ -588,6 +588,100 @@ fn should_collapse_always_allowed(vocab: &Vocab) -> bool {
     vocab.entries.len() <= 8_192
 }
 
+/// Subtract a disallowed-follow DFA from a weighted NWA.
+///
+/// Computes the product NWA × DFA where the result keeps only paths that the
+/// NWA accepts but the DFA does NOT accept. The DFA detects sequences
+/// containing a disallowed terminal follow pair; subtracting it removes
+/// exactly those paths from the NWA.
+///
+/// Terminal labels (≥ 0) advance the DFA. Other labels and epsilons leave the
+/// DFA state unchanged.
+fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::DFA) -> NWA {
+    use crate::automata::unweighted::dfa::DFA as UnweightedDFA;
+
+    // Product state: (nwa_state, Option<dfa_state>).
+    // None means the DFA fell to the implicit non-accepting sink.
+    type ProdState = (u32, Option<u32>);
+
+    let right_start = (!right.states.is_empty()).then_some(right.start_state);
+
+    let mut result = NWA {
+        states: Vec::new(),
+        start_states: Vec::new(),
+    };
+    let mut state_ids: HashMap<ProdState, u32> = HashMap::new();
+    let mut worklist: VecDeque<ProdState> = VecDeque::new();
+
+    let mut get_or_create = |result: &mut NWA,
+                              state_ids: &mut HashMap<ProdState, u32>,
+                              worklist: &mut VecDeque<ProdState>,
+                              ps: ProdState|
+     -> u32 {
+        if let Some(&id) = state_ids.get(&ps) {
+            id
+        } else {
+            let id = result.add_state();
+            state_ids.insert(ps, id);
+            worklist.push_back(ps);
+            id
+        }
+    };
+
+    // Seed start states
+    for &nwa_start in &nwa.start_states {
+        let ps = (nwa_start, right_start);
+        let id = get_or_create(&mut result, &mut state_ids, &mut worklist, ps);
+        result.start_states.push(id);
+    }
+
+    while let Some((nwa_sid, dfa_sid)) = worklist.pop_front() {
+        let result_sid = state_ids[&(nwa_sid, dfa_sid)];
+        let nwa_state = &nwa.states[nwa_sid as usize];
+        let dfa_accepting = dfa_sid
+            .map(|s| right.states[s as usize].is_accepting)
+            .unwrap_or(false);
+
+        // Final weight: keep iff DFA is not accepting (no disallowed pair detected)
+        if !dfa_accepting {
+            if let Some(fw) = &nwa_state.final_weight {
+                result.set_final_weight(result_sid, fw.clone());
+            }
+        }
+
+        // Epsilon transitions: DFA state unchanged
+        for (nwa_dst, weight) in &nwa_state.epsilons {
+            let ps = (*nwa_dst, dfa_sid);
+            let dst_id = get_or_create(&mut result, &mut state_ids, &mut worklist, ps);
+            result.add_epsilon(result_sid, dst_id, weight.clone());
+        }
+
+        // Labeled transitions
+        for (&label, targets) in &nwa_state.transitions {
+            // Advance DFA only on terminal labels (≥ 0)
+            let next_dfa = if label >= 0 {
+                // Some(s) → look up transition; None stays None (sink)
+                dfa_sid.and_then(|s| {
+                    right.states[s as usize].transitions.get(&label).copied()
+                })
+            } else {
+                dfa_sid // non-terminal labels don't advance DFA
+            };
+
+            // Check if the destination DFA state is accepting
+            // If it's the accept state already, we still advance to it and check
+            // at the DESTINATION whether to emit final weights
+            for (nwa_dst, weight) in targets {
+                let ps = (*nwa_dst, next_dfa);
+                let dst_id = get_or_create(&mut result, &mut state_ids, &mut worklist, ps);
+                result.add_transition(result_sid, label, dst_id, weight.clone());
+            }
+        }
+    }
+
+    result
+}
+
 fn prune_disallowed_follows(nwa: &mut NWA, grammar: &AnalyzedGrammar) -> bool {
     let ever_allowed_by_label = compute_ever_allowed_follows(grammar);
     let terminals_count = grammar.num_terminals as usize;
@@ -1338,7 +1432,17 @@ pub(crate) fn build_terminal_dwa_with_report(
     }
 
     let phase_started_at = std::time::Instant::now();
-    let _ = prune_disallowed_follows(&mut nwa, grammar);
+    {
+        let disallowed_follows = crate::compiler::compile::compute_disallowed_follows(grammar);
+        let normalized = crate::compiler::stages::equivalence_analysis::reference::normalize_disallowed_follows(
+            grammar.num_terminals as usize,
+            &disallowed_follows,
+        );
+        if normalized.iter().any(|bits| !bits.is_zero()) {
+            let disallowed_dfa = crate::compiler::stages::equivalence_analysis::reference::build_disallowed_follow_dfa(&normalized);
+            nwa = subtract_disallowed_dfa(&nwa, &disallowed_dfa);
+        }
+    }
     report.prune_disallowed_follows_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "prune_disallowed_follows", phase_started_at);
 
