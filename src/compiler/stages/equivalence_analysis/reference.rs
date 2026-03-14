@@ -1216,4 +1216,57 @@ mod tests {
             }
         }
     }
+
+    /// Minimal reproduction of fast-vs-reference vocab equivalence mismatch.
+    ///
+    /// Derived from automated grammar minimization of Github_hard/o56012:
+    ///   grammar `start: "{" "}"` → 2 tokenizer groups
+    ///   vocab `["}:", "}}}"]`
+    ///
+    /// The tokenizer has 2 groups:
+    ///   group 0: `{`
+    ///   group 1: `}`
+    ///
+    /// Disallowed follows (from grammar structure):
+    ///   after group 0 (`{`): group 0 is disallowed (only `}` can follow `{`)
+    ///   after group 1 (`}`): both groups disallowed (nothing follows `}`)
+    ///
+    /// The reference analysis correctly separates `}:` and `}}}` because they
+    /// produce different trellis structures from the initial state. The fast
+    /// analysis incorrectly merges them.
+    #[test]
+    fn test_minimal_equiv_mismatch_o56012() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"{"), bytes(b"}")]);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+
+        // After group 0 (`{`): group 0 disallowed
+        let mut disallowed = BTreeMap::new();
+        let mut after_0 = BitSet::new(2);
+        after_0.set(0);
+        disallowed.insert(0u32, after_0);
+        // After group 1 (`}`): both groups disallowed
+        let mut after_1 = BitSet::new(2);
+        after_1.set(0);
+        after_1.set(1);
+        disallowed.insert(1u32, after_1);
+
+        let tokens: Vec<Vec<u8>> = vec![b"}:".to_vec(), b"}}}".to_vec()];
+        let states = vec![sep1.initial_state_id()];
+
+        let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+            &sep1, &tokens, &states, &disallowed,
+        );
+        let reference = find_equivalence_classes(&sep1, &tokens, &states, &disallowed, None);
+
+        // Reference correctly separates; fast incorrectly merges.
+        assert_eq!(
+            reference.vocab_classes,
+            BTreeSet::from([vec![0], vec![1]]),
+            "reference should separate the two tokens"
+        );
+        assert_ne!(
+            fast, reference.vocab_classes,
+            "fast should NOT match reference (this is the bug)"
+        );
+    }
 }
