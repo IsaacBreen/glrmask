@@ -61,6 +61,37 @@ impl InternalIdMap {
         combined::analyze_equivalences(tokenizer, vocab, disallowed_follows, ignore_terminal)
     }
 
+    /// Build a trivial identity map where each tokenizer state and vocab token
+    /// maps to its own singleton equivalence class (no merging).
+    pub fn build_identity(
+        tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+        vocab: &crate::Vocab,
+    ) -> Self {
+        let num_states = tokenizer.num_states() as usize;
+        let tokenizer_states = ManyToOneIdMap {
+            original_to_internal: (0..num_states as u32).collect(),
+            internal_to_originals: (0..num_states as u32).map(|i| vec![i]).collect(),
+        };
+
+        let max_token_id = vocab.entries.keys().last().copied().unwrap_or(0) as usize;
+        let mut original_to_internal = vec![u32::MAX; max_token_id + 1];
+        let mut internal_to_originals = Vec::new();
+        for &token_id in vocab.entries.keys() {
+            let internal_id = internal_to_originals.len() as u32;
+            original_to_internal[token_id as usize] = internal_id;
+            internal_to_originals.push(vec![token_id]);
+        }
+        let vocab_tokens = ManyToOneIdMap {
+            original_to_internal,
+            internal_to_originals,
+        };
+
+        Self {
+            tokenizer_states,
+            vocab_tokens,
+        }
+    }
+
     pub fn num_tsids(&self) -> u32 {
         self.tokenizer_states.num_internal_ids()
     }

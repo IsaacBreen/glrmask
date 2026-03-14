@@ -844,7 +844,12 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 
     let phase_started_at = std::time::Instant::now();
     let disallowed_follows = compute_disallowed_follows(&glr_grammar);
-    let mut id_map = InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, normalized.ignore_terminal);
+    let mut id_map = if env_flag_enabled("GLRMASK_SKIP_EQ_ANALYSIS") {
+        eprintln!("[glrmask] GLRMASK_SKIP_EQ_ANALYSIS: using identity id_map (no equivalence merging)");
+        InternalIdMap::build_identity(&tokenizer, vocab)
+    } else {
+        InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, normalized.ignore_terminal)
+    };
     let build_internal_id_map_time = phase_started_at.elapsed();
     if profile_enabled {
         eprintln!(
