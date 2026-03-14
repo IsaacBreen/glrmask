@@ -1118,19 +1118,20 @@ mod tests {
         let token_space_1: &[u8] = &[32, 49];  // " 1"
 
         // The witness found the mismatch at distinguishing state 1065.
-        let distinguishing_state = 1065;
-        let hash_memo = Mutex::new(HashMap::new());
+        for distinguishing_state in 0..dfa.num_states() {
+            let hash_memo = Mutex::new(HashMap::new());
 
-        let hash_a = process_token_for_state(
-            dfa, &pre, token_space_a, distinguishing_state, None, &hash_memo, &mut Vec::new(),
-        );
-        let hash_1 = process_token_for_state(
-            dfa, &pre, token_space_1, distinguishing_state, None, &hash_memo, &mut Vec::new(),
-        );
+            let hash_a = process_token_for_state(
+                dfa, &pre, token_space_a, distinguishing_state, None, &hash_memo, &mut Vec::new(),
+            );
+            let hash_1 = process_token_for_state(
+                dfa, &pre, token_space_1, distinguishing_state, None, &hash_memo, &mut Vec::new(),
+            );
 
-        // Reference analysis should produce different hashes for these tokens
-        // from the distinguishing state.
-        assert_eq!(hash_a, hash_1,
-            "reference: tokens ' a' and ' 1' should have the same hashes from state {distinguishing_state}");
+            // Reference analysis should produce different hashes for these tokens
+            // from the distinguishing state.
+            assert_eq!(hash_a, hash_1,
+                       "reference: tokens ' a' and ' 1' should have the same hashes from state {distinguishing_state}");
+        }
     }
 }
