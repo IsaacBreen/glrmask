@@ -1319,11 +1319,17 @@ fn batch_build_weight(pending: Vec<Weight>) -> Weight {
         1 => pending.into_iter().next().unwrap(),
         n if n <= 16 => Weight::union_all(pending.iter()),
         _ => {
-            let mut builder = WeightBuilder::new();
-            for w in &pending {
-                builder.union_weight(w);
+            // Hierarchical union: group into chunks and reduce.
+            // This avoids the per-TSID expansion of WeightBuilder, keeping
+            // operations at the range level throughout.
+            let mut current = pending;
+            while current.len() > 16 {
+                current = current
+                    .chunks(16)
+                    .map(|chunk| Weight::union_all(chunk.iter()))
+                    .collect();
             }
-            builder.build()
+            Weight::union_all(current.iter())
         }
     }
 }
