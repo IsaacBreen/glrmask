@@ -31,7 +31,7 @@ use std::hash::Hasher;
 use super::compat::{FlatDfa, FlatDfaState, Sep1Tokenizer};
 use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::dfa::{Label, DFA};
-use crate::automata::unweighted_u32::minimize_cyclic::minimize_cyclic as minimize;
+use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::automata::unweighted_u32::subtract::subtract;
 use crate::ds::bitset::BitSet;
@@ -177,7 +177,7 @@ fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
         dfa.add_transition(accept, terminal_label(gid), accept);
     }
 
-    minimize(&dfa)
+    dfa
 }
 
 // ---- Trellis DAG construction ----
@@ -473,9 +473,9 @@ fn process_token_for_state(
     }
 
     let det_dfa = determinize(&nfa);
-    let min_dfa = minimize(&det_dfa);
+    let min_dfa = minimize_acyclic(&det_dfa);
     let pruned_dfa = match &pre.disallowed_detector {
-        Some(disallowed_detector) => minimize(&subtract(&min_dfa, disallowed_detector)),
+        Some(disallowed_detector) => minimize_acyclic(&subtract(&min_dfa, disallowed_detector)),
         None => min_dfa,
     };
     let final_hash = canonical_hash(&pruned_dfa);
