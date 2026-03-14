@@ -1326,7 +1326,7 @@ pub(crate) fn build_terminal_dwa_with_report(
     if should_collapse_always_allowed(vocab) {
         let phase_started_at = std::time::Instant::now();
         let always_allowed_by_label = compute_always_allowed_follows(grammar);
-        // let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+        let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
         report.collapse_always_allowed_applied = true;
         report.collapse_always_allowed_time = phase_started_at.elapsed();
         log_terminal_profile(profile_enabled, "collapse_always_allowed", phase_started_at);
@@ -1338,12 +1338,12 @@ pub(crate) fn build_terminal_dwa_with_report(
     }
 
     let phase_started_at = std::time::Instant::now();
-    // let _ = prune_disallowed_follows(&mut nwa, grammar);
+    let _ = prune_disallowed_follows(&mut nwa, grammar);
     report.prune_disallowed_follows_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "prune_disallowed_follows", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
-    // deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize, profile_enabled);
+    deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize, profile_enabled);
     log_terminal_profile(profile_enabled, "deduplicate_roots", phase_started_at);
 
     report.terminal_nwa = collect_weighted_nwa_stats(&nwa);
