@@ -132,10 +132,7 @@ fn precompute(dfa: &FlatDfa, disallowed_follows: &BTreeMap<u32, BitSet>) -> Prec
         .map_or(0, |m| m + 1);
 
     let normalized = normalize_disallowed_follows(num_groups, disallowed_follows);
-    let disallowed_detector = normalized
-        .iter()
-        .any(|bits| !bits.is_zero())
-        .then(|| build_disallowed_follow_dfa(&normalized));
+    let disallowed_detector = Some(build_disallowed_follow_dfa(&normalized));
 
     PrecomputedData {
         num_groups,
