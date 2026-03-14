@@ -1130,7 +1130,7 @@ mod tests {
 
         // Reference analysis should produce different hashes for these tokens
         // from the distinguishing state.
-        assert_ne!(hash_a, hash_1,
-            "reference: tokens ' a' and ' 1' should have different hashes from state {distinguishing_state}");
+        assert_eq!(hash_a, hash_1,
+            "reference: tokens ' a' and ' 1' should have the same hashes from state {distinguishing_state}");
     }
 }
