@@ -2347,14 +2347,26 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Branch(b) => {
                     let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc_np_ab(e, memo, m));
-                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
-                    for (v, kids) in b.children.iter() {
-                        let mut new_kids: OrdMap<isize, Arc<Upper<T, B>>> = OrdMap::new();
-                        for child in kids.values() {
+                    // Fast path: single child entry with single child.
+                    if b.children.len() == 1 && new_empty_opt.is_none() {
+                        let (v, kids) = b.children.iter().next().unwrap();
+                        if kids.len() == 1 {
+                            let child = kids.values().next().unwrap();
                             if let Some(nc) = transform_np_ab::<T, A, B, M>(child, memo, m) {
-                                new_kids.insert(nc.max_depth(), nc);
+                                let new_kids = OrdMap::unit(nc.max_depth(), nc);
+                                let new_children = IHashMap::unit(v.clone(), new_kids);
+                                return Some(new_branch(new_children, None));
+                            } else {
+                                return None;
                             }
                         }
+                    }
+                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
+                    for (v, kids) in b.children.iter() {
+                        let new_kids: OrdMap<isize, Arc<Upper<T, B>>> = kids.values()
+                            .filter_map(|child| transform_np_ab::<T, A, B, M>(child, memo, m))
+                            .map(|nc| (nc.max_depth(), nc))
+                            .collect();
                         if !new_kids.is_empty() {
                             new_children.insert(v.clone(), new_kids);
                         }
@@ -2424,14 +2436,26 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Branch(b) => {
                     let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc_td(e, memo, m));
-                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
-                    for (v, kids) in b.children.iter() {
-                        let mut new_kids: OrdMap<isize, Arc<Upper<T, B>>> = OrdMap::new();
-                        for child in kids.values() {
+                    // Fast path: single child entry with single child.
+                    if b.children.len() == 1 && new_empty_opt.is_none() {
+                        let (v, kids) = b.children.iter().next().unwrap();
+                        if kids.len() == 1 {
+                            let child = kids.values().next().unwrap();
                             if let Some(nc) = transform_td::<T, A, B, M>(child, memo, m) {
-                                new_kids.insert(nc.max_depth(), nc);
+                                let new_kids = OrdMap::unit(nc.max_depth(), nc);
+                                let new_children = IHashMap::unit(v.clone(), new_kids);
+                                return Some(new_branch(new_children, None));
+                            } else {
+                                return None;
                             }
                         }
+                    }
+                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
+                    for (v, kids) in b.children.iter() {
+                        let new_kids: OrdMap<isize, Arc<Upper<T, B>>> = kids.values()
+                            .filter_map(|child| transform_td::<T, A, B, M>(child, memo, m))
+                            .map(|nc| (nc.max_depth(), nc))
+                            .collect();
                         if !new_kids.is_empty() {
                             new_children.insert(v.clone(), new_kids);
                         }
@@ -2559,14 +2583,26 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Branch(b) => {
                     let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc_np(e, memo, m));
-                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-                    for (v, kids) in b.children.iter() {
-                        let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                        for child in kids.values() {
+                    // Fast path: single child entry with single child.
+                    if b.children.len() == 1 && new_empty_opt.is_none() {
+                        let (v, kids) = b.children.iter().next().unwrap();
+                        if kids.len() == 1 {
+                            let child = kids.values().next().unwrap();
                             if let Some(nc) = transform_np::<T, A, M>(child, memo, m) {
-                                new_kids.insert(nc.max_depth(), nc);
+                                let new_kids = OrdMap::unit(nc.max_depth(), nc);
+                                let new_children = IHashMap::unit(v.clone(), new_kids);
+                                return Some(new_branch(new_children, None));
+                            } else {
+                                return None;
                             }
                         }
+                    }
+                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                    for (v, kids) in b.children.iter() {
+                        let new_kids: OrdMap<isize, Arc<Upper<T, A>>> = kids.values()
+                            .filter_map(|child| transform_np::<T, A, M>(child, memo, m))
+                            .map(|nc| (nc.max_depth(), nc))
+                            .collect();
                         if !new_kids.is_empty() {
                             new_children.insert(v.clone(), new_kids);
                         }
