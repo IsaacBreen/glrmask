@@ -1306,6 +1306,29 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
             report.parser_dwa_minimized,
         );
         profile_dump_small_automaton("final_minimized", &core_dwa, core_dwa.states.len());
+
+        // Per-state transition count distribution
+        let mut trans_dist: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        let mut single_chain = 0usize;
+        let mut has_default_count = 0usize;
+        for state in &core_dwa.states {
+            let n = state.transitions.len();
+            *trans_dist.entry(n).or_default() += 1;
+            if n == 1 {
+                single_chain += 1;
+            }
+            if state.transitions.contains_key(&DEFAULT_LABEL) {
+                has_default_count += 1;
+            }
+        }
+        let dist_str: Vec<String> = trans_dist.iter().map(|(k, v)| format!("{}:{}", k, v)).collect();
+        eprintln!(
+            "[glrmask/profile][parser_dwa] transition_dist total_states={} single_trans={} has_default={} dist=[{}]",
+            core_dwa.states.len(),
+            single_chain,
+            has_default_count,
+            dist_str.join(", "),
+        );
     }
 
     (core_dwa, report)

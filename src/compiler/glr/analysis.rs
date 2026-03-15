@@ -686,8 +686,21 @@ fn build_non_nullable_tree(
         return leaf_nt;
     }
 
-    let chunk_nts: Vec<NonterminalID> = nn_segment
-        .chunks(k)
+    let tree_shape = std::env::var("GLRMASK_TREE_SHAPE").unwrap_or_default();
+    let chunks: Vec<&[Symbol]> = if tree_shape == "right" {
+        // Right-heavy: first element is its own chunk, rest is one chunk
+        let (first, rest) = nn_segment.split_at(1);
+        if rest.is_empty() { vec![first] } else { vec![first, rest] }
+    } else if tree_shape == "left" {
+        // Left-heavy: all but last is one chunk, last element is its own chunk
+        let (bulk, last) = nn_segment.split_at(nn_segment.len() - 1);
+        if bulk.is_empty() { vec![last] } else { vec![bulk, last] }
+    } else {
+        // Balanced (default): chunks of size k
+        nn_segment.chunks(k).collect()
+    };
+    let chunk_nts: Vec<NonterminalID> = chunks
+        .into_iter()
         .map(|chunk| {
             build_non_nullable_tree(chunk, k, fresh_nt, new_rules, nullable, by_lhs, nn_cache)
         })
