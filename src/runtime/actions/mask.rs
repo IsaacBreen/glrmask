@@ -12,16 +12,21 @@ use std::sync::Arc;
 /// Dense bitmap accumulator for the mask BFS. Stores the set of allowed internal
 /// tokens as a fixed-size u64 bitmap, enabling O(1)-per-word intersection (AND),
 /// union (OR), and equality checks instead of O(k) RangeSetBlaze operations.
+///
+/// Uses `Arc<[u64]>` for cheap cloning (refcount bump instead of heap alloc),
+/// which is critical since `apply_and_prune` clones accumulators for memoization.
 #[derive(Clone)]
 struct DenseMaskAcc {
     start: u32,
     end: u32,
-    dense: Box<[u64]>,
+    dense: Arc<[u64]>,
 }
 
 impl PartialEq for DenseMaskAcc {
     fn eq(&self, other: &Self) -> bool {
-        self.start == other.start && self.end == other.end && self.dense == other.dense
+        self.start == other.start
+            && self.end == other.end
+            && (Arc::ptr_eq(&self.dense, &other.dense) || self.dense == other.dense)
     }
 }
 impl Eq for DenseMaskAcc {}
@@ -44,7 +49,7 @@ impl DenseMaskAcc {
                 *w |= 1u64 << bit;
             }
         }
-        Self { start, end, dense: dense.into_boxed_slice() }
+        Self { start, end, dense: dense.into() }
     }
 
     fn is_empty(&self) -> bool {
@@ -86,7 +91,7 @@ impl DenseMaskAcc {
         }
 
         if any_nonzero {
-            Some(Self { start: self.start, end: self.end, dense: result.into_boxed_slice() })
+            Some(Self { start: self.start, end: self.end, dense: result.into() })
         } else {
             None
         }
@@ -125,7 +130,7 @@ impl DenseMaskAcc {
                     }
                 }
             }
-            Some(Self { start: self.start, end: self.end, dense: dense.into_boxed_slice() })
+            Some(Self { start: self.start, end: self.end, dense: dense.into() })
         }
     }
 
@@ -205,11 +210,11 @@ impl Merge for DenseMaskAcc {
     fn merge(&self, other: &Self) -> Self {
         let start = self.start.min(other.start);
         let end = self.end.max(other.end);
-        let dense: Box<[u64]> = self.dense.iter()
+        let dense: Arc<[u64]> = self.dense.iter()
             .zip(other.dense.iter())
             .map(|(&a, &b)| a | b)
             .collect::<Vec<_>>()
-            .into_boxed_slice();
+            .into();
         Self { start, end, dense }
     }
 }
