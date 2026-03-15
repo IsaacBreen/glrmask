@@ -2474,6 +2474,38 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some(reduced)
     }
 
+    /// Visit each accumulator in the GSS without collecting or merging.
+    /// Uses pointer-based visited set to avoid hashing accumulators.
+    pub fn for_each_acc(&self, mut f: impl FnMut(&A)) {
+        fn walk<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            node: &Arc<Upper<T, A>>,
+            visited: &mut HashSet<usize>,
+            f: &mut impl FnMut(&A),
+        ) {
+            let ptr = Arc::as_ptr(node) as usize;
+            if !visited.insert(ptr) {
+                return;
+            }
+            match &**node {
+                Upper::Branch(b) => {
+                    if let Some(acc) = &b.empty {
+                        f(acc);
+                    }
+                    for kids in b.children.values() {
+                        for child in kids.values() {
+                            walk(child, visited, f);
+                        }
+                    }
+                }
+                Upper::Interface(i) => {
+                    f(&i.acc);
+                }
+            }
+        }
+        let mut visited = HashSet::new();
+        walk(&self.inner, &mut visited, &mut f);
+    }
+
     pub fn truncate(&self, max_len: isize) -> Self {
         if max_len < 0 {
             return Self::empty();

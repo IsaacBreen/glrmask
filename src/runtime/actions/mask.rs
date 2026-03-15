@@ -358,19 +358,29 @@ impl<'a> ConstraintState<'a> {
                     if let Some(metrics) = metrics.as_deref_mut() {
                         metrics.final_weight_checks += 1;
                     }
-                    if let Some(reduced_acc) = gss.reduce_acc() {
-                        if final_weight.is_full() {
+                    if final_weight.is_full() {
+                        let mut hit = false;
+                        gss.for_each_acc(|acc| {
+                            acc.or_to_buf(&self.constraint, buf);
+                            hit = true;
+                        });
+                        if hit {
                             if let Some(metrics) = metrics.as_deref_mut() {
                                 metrics.final_weight_full_hits += 1;
                             }
-                            reduced_acc.or_to_buf(&self.constraint, buf);
-                        } else {
+                        }
+                    } else {
+                        let mut hit = false;
+                        gss.for_each_acc(|acc| {
+                            acc.or_intersection_to_buf(
+                                &self.constraint, final_weight, precomputed, buf,
+                            );
+                            hit = true;
+                        });
+                        if hit {
                             if let Some(metrics) = metrics.as_deref_mut() {
                                 metrics.final_weight_intersection_hits += 1;
                             }
-                            reduced_acc.or_intersection_to_buf(
-                                &self.constraint, final_weight, precomputed, buf,
-                            );
                         }
                     }
                 }
