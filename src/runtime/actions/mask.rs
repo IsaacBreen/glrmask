@@ -43,11 +43,35 @@ impl std::hash::Hash for DenseMaskAcc {
 impl DenseMaskAcc {
     fn from_internal_tokens(start: u32, end: u32, tokens: &RangeSetBlaze<u32>, dense_words: usize) -> Self {
         let mut dense = vec![0u64; dense_words];
-        for t in tokens.iter() {
-            let idx = t as usize / 64;
-            let bit = t as usize % 64;
-            if let Some(w) = dense.get_mut(idx) {
-                *w |= 1u64 << bit;
+        // Iterate ranges for bulk word-level filling.
+        for range in tokens.ranges() {
+            let lo = *range.start() as usize;
+            let hi = *range.end() as usize;
+            let word_lo = lo / 64;
+            let word_hi = hi / 64;
+            if word_lo == word_hi {
+                // Single word: set bits [lo%64 .. hi%64].
+                if let Some(w) = dense.get_mut(word_lo) {
+                    let mask = if hi % 64 == 63 { !0u64 } else { (1u64 << (hi % 64 + 1)) - 1 };
+                    let mask = mask & !((1u64 << (lo % 64)) - 1);
+                    *w |= mask;
+                }
+            } else {
+                // First partial word.
+                if let Some(w) = dense.get_mut(word_lo) {
+                    *w |= !((1u64 << (lo % 64)) - 1);
+                }
+                // Full middle words.
+                for wi in (word_lo + 1)..word_hi {
+                    if let Some(w) = dense.get_mut(wi) {
+                        *w = !0u64;
+                    }
+                }
+                // Last partial word.
+                if let Some(w) = dense.get_mut(word_hi) {
+                    let mask = if hi % 64 == 63 { !0u64 } else { (1u64 << (hi % 64 + 1)) - 1 };
+                    *w |= mask;
+                }
             }
         }
         Self { start, end, dense: dense.into() }
@@ -532,40 +556,45 @@ impl<'a> ConstraintState<'a> {
         gss: &crate::compiler::glr::parser::ParserGSS,
         dense_words: usize,
     ) -> DenseMaskGSS {
+        let universe = &self.constraint.seed_universe_dense;
+        let terminal_masks = &self.constraint.seed_terminal_dense;
+
         gss.apply_and_prune(|terminals_disallowed| {
-            let mut allowed = self.constraint.internal_token_universe();
             if terminals_disallowed.is_empty()
                 || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
             {
-                if allowed.is_empty() {
+                if universe.iter().all(|&w| w == 0) {
                     return None;
                 }
-                return Some(
-                    DenseMaskAcc::from_internal_tokens(internal_tsid, internal_tsid, &allowed, dense_words),
-                );
+                let dense: Arc<[u64]> = Arc::from(&**universe);
+                return Some(DenseMaskAcc {
+                    start: internal_tsid,
+                    end: internal_tsid,
+                    dense,
+                });
             }
 
+            // Start from universe, subtract disallowed terminals via bitwise ANDNOT.
+            let mut dense: Vec<u64> = universe.to_vec();
             for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed {
-                if disallowed_in_state.is_empty() {
-                    continue;
-                }
-
-                let state_matches = self.constraint.possible_matches_for_state_internal(orig_tokenizer_state);
-                if !state_matches.is_empty() {
-                    for (terminal_id, llm_tokens) in state_matches {
-                        if disallowed_in_state.contains(&terminal_id) {
-                            allowed = allowed - llm_tokens;
+                for &terminal_id in disallowed_in_state {
+                    if let Some(mask) = terminal_masks.get(&(orig_tokenizer_state, terminal_id)) {
+                        for (d, m) in dense.iter_mut().zip(mask.iter()) {
+                            *d &= !m;
                         }
                     }
                 }
             }
 
-            if allowed.is_empty() {
+            if dense.iter().all(|&w| w == 0) {
                 None
             } else {
-                Some(
-                    DenseMaskAcc::from_internal_tokens(internal_tsid, internal_tsid, &allowed, dense_words),
-                )
+                let dense: Arc<[u64]> = dense.into();
+                Some(DenseMaskAcc {
+                    start: internal_tsid,
+                    end: internal_tsid,
+                    dense,
+                })
             }
         })
     }

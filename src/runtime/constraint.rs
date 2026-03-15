@@ -51,6 +51,13 @@ pub struct Constraint {
     pub(crate) internal_token_dense_words: usize,
     #[serde(skip)]
     pub(crate) weight_token_dense_masks: FxHashMap<usize, Box<[u64]>>,
+    /// Precomputed dense bitmask for the seed phase: for each (tokenizer_state, terminal_id),
+    /// the dense bitmap of internal tokens that terminal covers in that state.
+    #[serde(skip)]
+    pub(crate) seed_terminal_dense: FxHashMap<(u32, TerminalID), Box<[u64]>>,
+    /// Dense bitmap of the full internal token universe.
+    #[serde(skip)]
+    pub(crate) seed_universe_dense: Box<[u64]>,
     /// Fast DWA transition lookup (FxHashMap instead of BTreeMap).
     /// Built from parser_dwa.states at load/build time.
     #[serde(skip)]
@@ -75,6 +82,8 @@ impl Clone for Constraint {
             internal_token_buf_masks: self.internal_token_buf_masks.clone(),
             internal_token_dense_words: self.internal_token_dense_words,
             weight_token_dense_masks: self.weight_token_dense_masks.clone(),
+            seed_terminal_dense: self.seed_terminal_dense.clone(),
+            seed_universe_dense: self.seed_universe_dense.clone(),
             dwa_fast_transitions: self.dwa_fast_transitions.clone(),
         }
     }
@@ -125,6 +134,34 @@ impl Constraint {
             }
         }
         self.weight_token_dense_masks = dense_masks;
+    }
+
+    /// Precompute dense bitmaps for the seed phase: one bitmap per (state, terminal)
+    /// pair, plus the universe bitmap. This lets seed_weight_dense use bitwise ANDNOT
+    /// instead of RangeSetBlaze subtraction.
+    pub(crate) fn build_seed_dense_masks(&mut self) {
+        let dw = self.internal_token_dense_words;
+        if dw == 0 {
+            self.seed_terminal_dense.clear();
+            self.seed_universe_dense = Box::new([]);
+            return;
+        }
+
+        // Universe bitmap.
+        let universe = self.internal_token_universe();
+        self.seed_universe_dense = self.dense_words_from_internal_set(&universe);
+
+        // Per-(state, terminal) bitmaps.
+        let mut terminal_masks = FxHashMap::default();
+        for (&tok_state, terminals) in &self.possible_matches {
+            for (&terminal_id, llm_tokens) in terminals {
+                terminal_masks.insert(
+                    (tok_state, terminal_id),
+                    self.dense_words_from_internal_set(llm_tokens),
+                );
+            }
+        }
+        self.seed_terminal_dense = terminal_masks;
     }
 
     fn collect_weight_dense_masks(
@@ -405,11 +442,8 @@ impl Constraint {
     pub(crate) fn possible_matches_for_state_internal(
         &self,
         tokenizer_state: u32,
-    ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        self.possible_matches
-            .get(&tokenizer_state)
-            .cloned()
-            .unwrap_or_default()
+    ) -> Option<&BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
+        self.possible_matches.get(&tokenizer_state)
     }
 
 }

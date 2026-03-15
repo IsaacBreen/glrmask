@@ -71,6 +71,7 @@ impl Constraint {
         constraint.build_buf_masks();
         constraint.build_dense_token_masks();
         constraint.build_fast_transitions();
+        constraint.build_seed_dense_masks();
         Ok(constraint)
     }
 }
@@ -99,7 +100,8 @@ mod tests {
 
         let internal_matches: std::collections::BTreeSet<u32> = loaded
             .possible_matches_for_state_internal(tokenizer_state)
-            .values()
+            .into_iter()
+            .flat_map(|m| m.values())
             .flat_map(|token_ids| token_ids.iter())
             .collect();
         assert_eq!(internal_matches, std::collections::BTreeSet::from([internal_token]));

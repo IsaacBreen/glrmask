@@ -1162,6 +1162,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         internal_token_buf_masks: Vec::new(),
         internal_token_dense_words: 0,
         weight_token_dense_masks: rustc_hash::FxHashMap::default(),
+        seed_terminal_dense: rustc_hash::FxHashMap::default(),
+        seed_universe_dense: Box::new([]),
         dwa_fast_transitions: Vec::new(),
     };
     if profile_enabled {
@@ -1187,6 +1189,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         );
     }
     constraint.build_fast_transitions();
+    constraint.build_seed_dense_masks();
     constraint
 }
 
@@ -1251,11 +1254,14 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         internal_token_buf_masks: Vec::new(),
         internal_token_dense_words: 0,
         weight_token_dense_masks: rustc_hash::FxHashMap::default(),
+        seed_terminal_dense: rustc_hash::FxHashMap::default(),
+        seed_universe_dense: Box::new([]),
         dwa_fast_transitions: Vec::new(),
     };
     constraint.build_buf_masks();
     constraint.build_dense_token_masks();
     constraint.build_fast_transitions();
+    constraint.build_seed_dense_masks();
 
     let debug = CompileDebug::from_parts(
         grammar.clone(),
@@ -1431,7 +1437,8 @@ mod tests {
 
         let internal_matches: std::collections::BTreeSet<u32> = constraint
             .possible_matches_for_state_internal(tokenizer_state)
-            .values()
+            .into_iter()
+            .flat_map(|m| m.values())
             .flat_map(|token_ids| token_ids.iter())
             .collect();
         assert_eq!(internal_matches, std::collections::BTreeSet::from([internal_token]));
