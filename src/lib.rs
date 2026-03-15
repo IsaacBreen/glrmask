@@ -16,7 +16,7 @@ mod vocab;
 
 pub use compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 pub use error::{GlrMaskError, Result};
-pub use runtime::{Constraint, ConstraintState};
+pub use runtime::{Constraint, ConstraintState, ConstraintStateSummary, MaskDebugMetrics};
 pub use vocab::Vocab;
 
 #[doc(hidden)]

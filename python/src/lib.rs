@@ -186,6 +186,73 @@ impl PyConstraintState {
         Ok(())
     }
 
+    fn debug_mask_metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let metrics = self
+            .inner
+            .with_dependent(|_owner, state| state.debug_mask_metrics());
+
+        let state_summary = PyDict::new(py);
+        state_summary.set_item("tokenizer_state_count", metrics.state_summary.tokenizer_state_count)?;
+        state_summary.set_item(
+            "nonempty_tokenizer_state_count",
+            metrics.state_summary.nonempty_tokenizer_state_count,
+        )?;
+        state_summary.set_item("parser_top_values_total", metrics.state_summary.parser_top_values_total)?;
+        state_summary.set_item("parser_top_values_max", metrics.state_summary.parser_top_values_max)?;
+        state_summary.set_item("parser_unique_nodes_total", metrics.state_summary.parser_unique_nodes_total)?;
+        state_summary.set_item("parser_unique_nodes_max", metrics.state_summary.parser_unique_nodes_max)?;
+        state_summary.set_item("parser_total_edges_total", metrics.state_summary.parser_total_edges_total)?;
+        state_summary.set_item(
+            "parser_accumulator_instances_total",
+            metrics.state_summary.parser_accumulator_instances_total,
+        )?;
+        state_summary.set_item("parser_max_depth", metrics.state_summary.parser_max_depth)?;
+
+        let weight_ops = PyDict::new(py);
+        let total_weight_op_calls = metrics.weight_ops.union_calls
+            + metrics.weight_ops.intersection_calls
+            + metrics.weight_ops.difference_calls
+            + metrics.weight_ops.single_intersection_calls;
+        weight_ops.set_item("total_calls", total_weight_op_calls)?;
+        weight_ops.set_item("union_calls", metrics.weight_ops.union_calls)?;
+        weight_ops.set_item("union_memo_hits", metrics.weight_ops.union_memo_hits)?;
+        weight_ops.set_item("intersection_calls", metrics.weight_ops.intersection_calls)?;
+        weight_ops.set_item("intersection_memo_hits", metrics.weight_ops.intersection_memo_hits)?;
+        weight_ops.set_item("difference_calls", metrics.weight_ops.difference_calls)?;
+        weight_ops.set_item("difference_memo_hits", metrics.weight_ops.difference_memo_hits)?;
+        weight_ops.set_item("single_intersection_calls", metrics.weight_ops.single_intersection_calls)?;
+        weight_ops.set_item(
+            "single_intersection_range_overlaps",
+            metrics.weight_ops.single_intersection_range_overlaps,
+        )?;
+
+        let out = PyDict::new(py);
+        out.set_item("state_summary", state_summary)?;
+        out.set_item("weight_ops", weight_ops)?;
+        out.set_item("mask_words", metrics.mask_words)?;
+        out.set_item("allowed_token_count", metrics.allowed_token_count)?;
+        out.set_item("seeded_entries", metrics.seeded_entries)?;
+        out.set_item("seeded_empty_after_weight", metrics.seeded_empty_after_weight)?;
+        out.set_item("queue_depth_buckets_processed", metrics.queue_depth_buckets_processed)?;
+        out.set_item("queue_items_processed", metrics.queue_items_processed)?;
+        out.set_item("final_weight_checks", metrics.final_weight_checks)?;
+        out.set_item("final_weight_full_hits", metrics.final_weight_full_hits)?;
+        out.set_item("final_weight_intersection_hits", metrics.final_weight_intersection_hits)?;
+        out.set_item("parser_states_peeked", metrics.parser_states_peeked)?;
+        out.set_item("transitions_considered", metrics.transitions_considered)?;
+        out.set_item("transitions_hit", metrics.transitions_hit)?;
+        out.set_item("transitions_missing", metrics.transitions_missing)?;
+        out.set_item("transitions_popped_empty", metrics.transitions_popped_empty)?;
+        out.set_item("transitions_pruned_empty", metrics.transitions_pruned_empty)?;
+        out.set_item("transitions_enqueued", metrics.transitions_enqueued)?;
+        out.set_item("max_queue_items", metrics.max_queue_items)?;
+        out.set_item("max_weighted_gss_top_values", metrics.max_weighted_gss_top_values)?;
+        out.set_item("max_weighted_gss_unique_nodes", metrics.max_weighted_gss_unique_nodes)?;
+        out.set_item("max_weighted_gss_total_edges", metrics.max_weighted_gss_total_edges)?;
+        out.set_item("max_weighted_gss_depth", metrics.max_weighted_gss_depth)?;
+        Ok(out)
+    }
+
     fn commit_token(&mut self, token_id: u32) {
         self.inner
             .with_dependent_mut(|_owner, state| state.commit_token(token_id));

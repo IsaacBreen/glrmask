@@ -1,6 +1,7 @@
 use crate::runtime::state::ConstraintState;
-use crate::ds::leveled_gss::{LeveledGSS, Merge};
-use crate::ds::weight::Weight;
+use crate::ds::leveled_gss::{LeveledGSS, LeveledGSSSummary, Merge};
+use crate::ds::weight::{Weight, WeightDebugStats, reset_weight_debug_stats, snapshot_weight_debug_stats};
+use crate::runtime::state::ConstraintStateSummary;
 use range_set_blaze::RangeSetBlaze;
 use std::sync::Arc;
 
@@ -103,6 +104,56 @@ impl Merge for RuntimeWeight {
 
 type WeightedParserGSS = LeveledGSS<u32, RuntimeWeight>;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MaskDebugMetrics {
+    pub state_summary: ConstraintStateSummary,
+    pub weight_ops: WeightDebugStats,
+    pub mask_words: usize,
+    pub allowed_token_count: usize,
+    pub seeded_entries: usize,
+    pub seeded_empty_after_weight: usize,
+    pub queue_depth_buckets_processed: usize,
+    pub queue_items_processed: usize,
+    pub final_weight_checks: usize,
+    pub final_weight_full_hits: usize,
+    pub final_weight_intersection_hits: usize,
+    pub parser_states_peeked: usize,
+    pub transitions_considered: usize,
+    pub transitions_hit: usize,
+    pub transitions_missing: usize,
+    pub transitions_popped_empty: usize,
+    pub transitions_pruned_empty: usize,
+    pub transitions_enqueued: usize,
+    pub max_queue_items: usize,
+    pub max_weighted_gss_top_values: usize,
+    pub max_weighted_gss_unique_nodes: usize,
+    pub max_weighted_gss_total_edges: usize,
+    pub max_weighted_gss_depth: isize,
+}
+
+fn queue_item_count(
+    queue: &std::collections::BTreeMap<
+        isize,
+        std::collections::BTreeMap<u32, WeightedParserGSS>,
+    >,
+) -> usize {
+    queue.values().map(|items| items.len()).sum()
+}
+
+fn update_weighted_gss_metrics(metrics: &mut MaskDebugMetrics, gss: &WeightedParserGSS) {
+    let summary: LeveledGSSSummary = gss.summary();
+    metrics.max_weighted_gss_top_values = metrics
+        .max_weighted_gss_top_values
+        .max(summary.top_values_count);
+    metrics.max_weighted_gss_unique_nodes = metrics
+        .max_weighted_gss_unique_nodes
+        .max(summary.total_unique_nodes);
+    metrics.max_weighted_gss_total_edges = metrics
+        .max_weighted_gss_total_edges
+        .max(summary.total_edges);
+    metrics.max_weighted_gss_depth = metrics.max_weighted_gss_depth.max(summary.max_depth);
+}
+
 impl<'a> ConstraintState<'a> {
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
@@ -111,6 +162,24 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
+        self.fill_mask_impl(buf, None);
+    }
+
+    pub fn debug_mask_metrics(&self) -> MaskDebugMetrics {
+        let mut metrics = MaskDebugMetrics {
+            state_summary: self.summary(),
+            mask_words: self.constraint.mask_len(),
+            ..MaskDebugMetrics::default()
+        };
+        let mut buf = vec![0u32; self.constraint.mask_len()];
+        reset_weight_debug_stats();
+        self.fill_mask_impl(&mut buf, Some(&mut metrics));
+        metrics.allowed_token_count = buf.iter().map(|word| word.count_ones() as usize).sum();
+        metrics.weight_ops = snapshot_weight_debug_stats();
+        metrics
+    }
+
+    fn fill_mask_impl(&self, buf: &mut [u32], mut metrics: Option<&mut MaskDebugMetrics>) {
         buf.fill(0);
 
         let parser_dwa = self.constraint.parser_dwa();
@@ -132,6 +201,9 @@ impl<'a> ConstraintState<'a> {
             let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
             let seeded = self.seed_weight(internal_tsid, gss);
             if seeded.is_empty() {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.seeded_empty_after_weight += 1;
+                }
                 continue;
             }
             queue
@@ -140,40 +212,87 @@ impl<'a> ConstraintState<'a> {
                 .entry(parser_dwa.start_state)
                 .and_modify(|existing| *existing = existing.merge(&seeded))
                 .or_insert(seeded);
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.seeded_entries += 1;
+                if let Some(seed_bucket) = queue.get(&queue.keys().next_back().copied().unwrap_or_default()) {
+                    if let Some(seed_gss) = seed_bucket.get(&parser_dwa.start_state) {
+                        update_weighted_gss_metrics(metrics, seed_gss);
+                    }
+                }
+                metrics.max_queue_items = metrics.max_queue_items.max(queue_item_count(&queue));
+            }
         }
 
         // Process DWA states depth-first.
         while let Some((_, items)) = queue.pop_last() {
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.queue_depth_buckets_processed += 1;
+            }
             for (wa_state, gss) in items {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.queue_items_processed += 1;
+                    update_weighted_gss_metrics(metrics, &gss);
+                }
                 let dwa_state = &parser_dwa.states[wa_state as usize];
 
                 // Final weight → OR allowed tokens into buf.
                 if let Some(final_weight) = &dwa_state.final_weight {
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.final_weight_checks += 1;
+                    }
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         if final_weight.is_full() {
+                            if let Some(metrics) = metrics.as_deref_mut() {
+                                metrics.final_weight_full_hits += 1;
+                            }
                             reduced_acc.or_to_buf(self, buf);
                         } else if let RuntimeWeight::Single { start, end, tokens } = &reduced_acc {
+                            if let Some(metrics) = metrics.as_deref_mut() {
+                                metrics.final_weight_intersection_hits += 1;
+                            }
                             self.constraint
                                 .or_single_weight_intersection_to_buf(*start, *end, tokens, final_weight, buf);
                         } else {
+                            if let Some(metrics) = metrics.as_deref_mut() {
+                                metrics.final_weight_intersection_hits += 1;
+                            }
                             reduced_acc.or_intersection_to_buf(self, final_weight, buf);
                         }
                     }
                 }
 
                 // Advance through DWA transitions for each parser state.
-                for parser_state in gss.peek_values() {
-                    let mut advance = |label: i32, current: &WeightedParserGSS| {
+                let parser_states = gss.peek_values();
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.parser_states_peeked += parser_states.len();
+                }
+                for parser_state in parser_states {
+                    let mut advance = |label: i32, current: &WeightedParserGSS, metrics: &mut Option<&mut MaskDebugMetrics>| {
+                        if let Some(metrics) = metrics.as_deref_mut() {
+                            metrics.transitions_considered += 1;
+                        }
                         let Some((target, weight)) = dwa_state.transitions.get(&label) else {
+                            if let Some(metrics) = metrics.as_deref_mut() {
+                                metrics.transitions_missing += 1;
+                            }
                             return;
                         };
+                        if let Some(metrics) = metrics.as_deref_mut() {
+                            metrics.transitions_hit += 1;
+                        }
                         let isolated = current.isolate(Some(parser_state));
                         let popped = isolated.pop();
                         if popped.is_empty() {
+                            if let Some(metrics) = metrics.as_deref_mut() {
+                                metrics.transitions_popped_empty += 1;
+                            }
                             return;
                         }
                         let pruned = popped.apply_and_prune(|allowed| allowed.intersect_with_weight(weight));
                         if pruned.is_empty() {
+                            if let Some(metrics) = metrics.as_deref_mut() {
+                                metrics.transitions_pruned_empty += 1;
+                            }
                             return;
                         }
                         queue
@@ -182,10 +301,20 @@ impl<'a> ConstraintState<'a> {
                             .entry(*target)
                             .and_modify(|existing| *existing = existing.merge(&pruned))
                             .or_insert(pruned);
+                        if let Some(metrics) = metrics.as_deref_mut() {
+                            metrics.transitions_enqueued += 1;
+                            if let Some(enqueued) = queue
+                                .get(&queue.keys().next_back().copied().unwrap_or_default())
+                                .and_then(|bucket| bucket.get(target))
+                            {
+                                update_weighted_gss_metrics(metrics, enqueued);
+                            }
+                            metrics.max_queue_items = metrics.max_queue_items.max(queue_item_count(&queue));
+                        }
                     };
 
-                    advance(crate::compiler::glr::labels::encode_positive_label(parser_state), &gss);
-                    advance(crate::compiler::glr::labels::DEFAULT_LABEL, &gss);
+                    advance(crate::compiler::glr::labels::encode_positive_label(parser_state), &gss, &mut metrics);
+                    advance(crate::compiler::glr::labels::DEFAULT_LABEL, &gss, &mut metrics);
                 }
             }
         }

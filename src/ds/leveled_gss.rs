@@ -51,6 +51,18 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeveledGSSSummary {
+    pub top_values_count: usize,
+    pub upperbranch_nodes: usize,
+    pub interface_nodes: usize,
+    pub lower_nodes: usize,
+    pub total_unique_nodes: usize,
+    pub total_edges: usize,
+    pub accumulator_instances: usize,
+    pub max_depth: isize,
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GSSPathsInfo {
@@ -1760,6 +1772,78 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn max_depth(&self) -> isize {
         self.inner.max_depth()
+    }
+
+    pub fn summary(&self) -> LeveledGSSSummary {
+        let mut visited_upperbranch: HashSet<usize> = HashSet::new();
+        let mut visited_interface: HashSet<usize> = HashSet::new();
+        let mut visited_lower: HashSet<usize> = HashSet::new();
+
+        let mut upperbranch_nodes = 0usize;
+        let mut interface_nodes = 0usize;
+        let mut lower_nodes = 0usize;
+        let mut total_edges = 0usize;
+        let mut accumulator_instances = 0usize;
+
+        let mut upper_queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
+        upper_queue.push_back(self.inner.clone());
+        let mut lower_queue: VecDeque<Arc<Lower<T>>> = VecDeque::new();
+
+        while let Some(node) = upper_queue.pop_front() {
+            match &*node {
+                Upper::Branch(branch) => {
+                    let node_id = Arc::as_ptr(branch) as usize;
+                    if !visited_upperbranch.insert(node_id) {
+                        continue;
+                    }
+                    upperbranch_nodes += 1;
+                    if branch.empty.is_some() {
+                        accumulator_instances += 1;
+                    }
+                    for children in branch.children.values() {
+                        total_edges += children.len();
+                        for child in children.values() {
+                            upper_queue.push_back(child.clone());
+                        }
+                    }
+                }
+                Upper::Interface(interface) => {
+                    let node_id = Arc::as_ptr(interface) as usize;
+                    if !visited_interface.insert(node_id) {
+                        continue;
+                    }
+                    interface_nodes += 1;
+                    accumulator_instances += 1;
+                    total_edges += 1;
+                    lower_queue.push_back(interface.inner.clone());
+                }
+            }
+        }
+
+        while let Some(node) = lower_queue.pop_front() {
+            let node_id = Arc::as_ptr(&node) as usize;
+            if !visited_lower.insert(node_id) {
+                continue;
+            }
+            lower_nodes += 1;
+            for children in node.children.values() {
+                total_edges += children.len();
+                for child in children.values() {
+                    lower_queue.push_back(child.clone());
+                }
+            }
+        }
+
+        LeveledGSSSummary {
+            top_values_count: self.inner.children_keys().len(),
+            upperbranch_nodes,
+            interface_nodes,
+            lower_nodes,
+            total_unique_nodes: upperbranch_nodes + interface_nodes + lower_nodes,
+            total_edges,
+            accumulator_instances,
+            max_depth: self.max_depth(),
+        }
     }
 
     pub fn isolate(&self, value: Option<T>) -> Self {
