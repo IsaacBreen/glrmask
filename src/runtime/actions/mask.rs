@@ -401,6 +401,7 @@ impl<'a> ConstraintState<'a> {
                     metrics.queue_items_processed += 1;
                 }
                 let dwa_state = &parser_dwa.states[wa_state as usize];
+                let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
 
                 // Final weight → OR allowed tokens into buf.
                 let t_fw = if timed { Some(std::time::Instant::now()) } else { None };
@@ -454,7 +455,7 @@ impl<'a> ConstraintState<'a> {
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.transitions_considered += 1;
                         }
-                        let Some((target, weight)) = dwa_state.transitions.get(&label) else {
+                        let Some((target, weight)) = fast_trans.get(&label) else {
                             if let Some(metrics) = metrics.as_deref_mut() {
                                 metrics.transitions_missing += 1;
                             }

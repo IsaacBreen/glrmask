@@ -1162,6 +1162,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         internal_token_buf_masks: Vec::new(),
         internal_token_dense_words: 0,
         weight_token_dense_masks: rustc_hash::FxHashMap::default(),
+        dwa_fast_transitions: Vec::new(),
     };
     if profile_enabled {
         eprintln!(
@@ -1185,6 +1186,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
             ms(phase_started_at.elapsed()),
         );
     }
+    constraint.build_fast_transitions();
     constraint
 }
 
@@ -1249,9 +1251,11 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         internal_token_buf_masks: Vec::new(),
         internal_token_dense_words: 0,
         weight_token_dense_masks: rustc_hash::FxHashMap::default(),
+        dwa_fast_transitions: Vec::new(),
     };
     constraint.build_buf_masks();
     constraint.build_dense_token_masks();
+    constraint.build_fast_transitions();
 
     let debug = CompileDebug::from_parts(
         grammar.clone(),

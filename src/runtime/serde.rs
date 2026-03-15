@@ -70,6 +70,7 @@ impl Constraint {
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         constraint.build_buf_masks();
         constraint.build_dense_token_masks();
+        constraint.build_fast_transitions();
         Ok(constraint)
     }
 }

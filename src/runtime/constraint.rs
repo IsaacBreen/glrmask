@@ -51,6 +51,10 @@ pub struct Constraint {
     pub(crate) internal_token_dense_words: usize,
     #[serde(skip)]
     pub(crate) weight_token_dense_masks: FxHashMap<usize, Box<[u64]>>,
+    /// Fast DWA transition lookup (FxHashMap instead of BTreeMap).
+    /// Built from parser_dwa.states at load/build time.
+    #[serde(skip)]
+    pub(crate) dwa_fast_transitions: Vec<FxHashMap<i32, (u32, crate::ds::weight::Weight)>>,
 }
 
 impl Clone for Constraint {
@@ -71,6 +75,7 @@ impl Clone for Constraint {
             internal_token_buf_masks: self.internal_token_buf_masks.clone(),
             internal_token_dense_words: self.internal_token_dense_words,
             weight_token_dense_masks: self.weight_token_dense_masks.clone(),
+            dwa_fast_transitions: self.dwa_fast_transitions.clone(),
         }
     }
 }
@@ -91,6 +96,15 @@ impl Constraint {
                 *word_map.entry(word).or_default() |= 1u32 << bit;
             }
             word_map.into_iter().collect()
+        }).collect();
+    }
+
+    /// Build fast transition lookup tables from the DWA's BTreeMap transitions.
+    pub(crate) fn build_fast_transitions(&mut self) {
+        self.dwa_fast_transitions = self.parser_dwa.states.iter().map(|state| {
+            state.transitions.iter().map(|(&label, (target, weight))| {
+                (label, (*target, weight.clone()))
+            }).collect()
         }).collect();
     }
 
