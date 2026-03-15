@@ -1768,52 +1768,57 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Equivalent to calling `self.isolate(Some(v)).pop()` for each v in `peek_values()`,
     /// but avoids repeated HashMap lookups.
     pub fn decompose_and_pop(&self) -> Vec<(T, Self)> {
-        let mut result = Vec::new();
         match &*self.inner {
             Upper::Branch(b) => {
+                let mut result = Vec::with_capacity(b.children.len());
                 for (val, kids) in b.children.iter() {
-                    // isolate: single child → Branch { children: {val: kids}, empty: None }
-                    // pop: go one level deeper into kids
-                    let mut merged: Option<Arc<Upper<T, A>>> = None;
-                    for child in kids.values() {
-                        merged = Some(match merged {
-                            Some(acc) => merge_upper(&acc, child),
-                            None => child.clone(),
-                        });
-                    }
-                    if let Some(m) = merged {
-                        let gss = LeveledGSS { inner: try_promote(&m) };
-                        if !gss.is_empty() {
-                            result.push((val.clone(), gss));
+                    // Fast path: single child needs no merge.
+                    let m = if kids.len() == 1 {
+                        kids.values().next().unwrap().clone()
+                    } else {
+                        let mut it = kids.values();
+                        let mut acc = it.next().unwrap().clone();
+                        for child in it {
+                            acc = merge_upper(&acc, child);
                         }
+                        acc
+                    };
+                    // Skip try_promote if already Interface (try_promote is a no-op for Interface).
+                    let inner = if matches!(&*m, Upper::Interface(_)) {
+                        m
+                    } else {
+                        try_promote(&m)
+                    };
+                    let is_empty = matches!(&*inner,
+                        Upper::Branch(b) if b.children.is_empty() && b.empty.is_none());
+                    if !is_empty {
+                        result.push((val.clone(), LeveledGSS { inner }));
                     }
                 }
+                result
             }
             Upper::Interface(i) => {
+                let mut result = Vec::with_capacity(i.inner.children.len());
                 for (val, kids) in i.inner.children.iter() {
-                    // isolate: single child in lower → new Lower { children: {val: kids}, empty: false }
-                    // Then wrapped in Interface with same acc
-                    // pop: go one level deeper into kids
-                    let mut merged_lower: Option<Arc<Lower<T>>> = None;
-                    for child in kids.values() {
-                        merged_lower = Some(match merged_lower {
-                            Some(acc) => merge_lower(&acc, child),
-                            None => child.clone(),
-                        });
-                    }
-                    if let Some(lower) = merged_lower {
-                        if !lower.children.is_empty() || lower.empty {
-                            let upper = new_interface(lower, i.acc.clone());
-                            let gss = LeveledGSS { inner: upper };
-                            if !gss.is_empty() {
-                                result.push((val.clone(), gss));
-                            }
+                    // Fast path: single child needs no merge.
+                    let lower = if kids.len() == 1 {
+                        kids.values().next().unwrap().clone()
+                    } else {
+                        let mut it = kids.values();
+                        let mut acc = it.next().unwrap().clone();
+                        for child in it {
+                            acc = merge_lower(&acc, child);
                         }
+                        acc
+                    };
+                    if !lower.children.is_empty() || lower.empty {
+                        let upper = new_interface(lower, i.acc.clone());
+                        result.push((val.clone(), LeveledGSS { inner: upper }));
                     }
                 }
+                result
             }
         }
-        result
     }
 
     pub fn is_empty(&self) -> bool {
