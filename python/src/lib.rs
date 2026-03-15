@@ -262,6 +262,7 @@ impl PyConstraintState {
         out.set_item("transition_gss_ns", metrics.transition_gss_ns)?;
         out.set_item("transition_intersect_ns", metrics.transition_intersect_ns)?;
         out.set_item("transition_enqueue_ns", metrics.transition_enqueue_ns)?;
+        out.set_item("queue_pop_ns", metrics.queue_pop_ns)?;
         out.set_item("total_ns", metrics.total_ns)?;
         out.set_item("internal_token_dense_words", metrics.internal_token_dense_words)?;
         Ok(out)

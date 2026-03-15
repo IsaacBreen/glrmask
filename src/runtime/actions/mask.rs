@@ -63,6 +63,28 @@ impl DenseMaskAcc {
         weight: &Weight,
         precomputed: &rustc_hash::FxHashMap<usize, Box<[u64]>>,
     ) -> Option<Self> {
+        // Fast path: single-TSID accumulator (start == end) — point lookup.
+        if self.start == self.end {
+            let token_set = weight.0.get(self.start)?;
+            let key = Arc::as_ptr(token_set) as usize;
+            if let Some(other_dense) = precomputed.get(&key) {
+                let mut result = vec![0u64; self.dense.len()];
+                let mut any_nonzero = false;
+                for ((r, &s), &o) in result.iter_mut().zip(self.dense.iter()).zip(other_dense.iter()) {
+                    let v = s & o;
+                    *r = v;
+                    if v != 0 { any_nonzero = true; }
+                }
+                return if any_nonzero {
+                    Some(Self { start: self.start, end: self.end, dense: result.into() })
+                } else {
+                    None
+                };
+            }
+            return self.intersect_with_weight_fallback(weight);
+        }
+
+        // General path: iterate entries.
         let mut result = vec![0u64; self.dense.len()];
         let mut any_nonzero = false;
         let mut fallback_needed = false;
@@ -85,8 +107,6 @@ impl DenseMaskAcc {
         }
 
         if fallback_needed {
-            // Rare case: DWA weight entry not precomputed. Fall back to
-            // full intersection then convert.
             return self.intersect_with_weight_fallback(weight);
         }
 
@@ -134,6 +154,22 @@ impl DenseMaskAcc {
         }
     }
 
+    /// Fast intersection using a pre-combined dense mask (OR of all weight entries).
+    fn intersect_with_combined_dense(&self, combined: &[u64]) -> Option<Self> {
+        let mut result = vec![0u64; self.dense.len()];
+        let mut any_nonzero = false;
+        for ((r, &s), &c) in result.iter_mut().zip(self.dense.iter()).zip(combined.iter()) {
+            let v = s & c;
+            *r = v;
+            if v != 0 { any_nonzero = true; }
+        }
+        if any_nonzero {
+            Some(Self { start: self.start, end: self.end, dense: result.into() })
+        } else {
+            None
+        }
+    }
+
     /// OR this accumulator's tokens (intersected with `final_weight`) into the output buffer.
     fn or_intersection_to_buf(
         &self,
@@ -142,29 +178,28 @@ impl DenseMaskAcc {
         precomputed: &rustc_hash::FxHashMap<usize, Box<[u64]>>,
         buf: &mut [u32],
     ) {
+        // Fast path: single-TSID accumulator (start == end).
+        if self.start == self.end {
+            if let Some(token_set) = final_weight.0.get(self.start) {
+                let key = Arc::as_ptr(token_set) as usize;
+                if let Some(other_dense) = precomputed.get(&key) {
+                    constraint.or_dense_intersection_to_buf(&self.dense, other_dense, buf);
+                    return;
+                }
+            } else {
+                return; // TSID not in weight → no tokens
+            }
+        }
+
+        // General path: iterate entries.
         for (range, other_tokens) in final_weight.0.range_values() {
             if self.end < *range.start() || *range.end() < self.start {
                 continue;
             }
             let key = Arc::as_ptr(other_tokens) as usize;
             if let Some(other_dense) = precomputed.get(&key) {
-                for (wi, (&sd, &od)) in self.dense.iter().zip(other_dense.iter()).enumerate() {
-                    let mut overlap = sd & od;
-                    while overlap != 0 {
-                        let bit = overlap.trailing_zeros() as usize;
-                        let internal_token = wi * 64 + bit;
-                        if let Some(masks) = constraint.internal_token_buf_masks.get(internal_token) {
-                            for &(buf_word, mask) in masks {
-                                if let Some(slot) = buf.get_mut(buf_word as usize) {
-                                    *slot |= mask;
-                                }
-                            }
-                        }
-                        overlap &= overlap - 1;
-                    }
-                }
+                constraint.or_dense_intersection_to_buf(&self.dense, other_dense, buf);
             } else {
-                // Fallback
                 let mut tokens = RangeSetBlaze::new();
                 for (wi, &w) in self.dense.iter().enumerate() {
                     let mut bits = w;
@@ -259,6 +294,7 @@ pub struct MaskDebugMetrics {
     pub transition_gss_ns: u64,
     pub transition_intersect_ns: u64,
     pub transition_enqueue_ns: u64,
+    pub queue_pop_ns: u64,
     pub total_ns: u64,
     pub internal_token_dense_words: usize,
 }
@@ -299,9 +335,10 @@ impl<'a> ConstraintState<'a> {
 
         let dense_words = self.constraint.internal_token_dense_words;
         let precomputed = &self.constraint.weight_token_dense_masks;
+        let timed = metrics.is_some();
 
-        let t_total = std::time::Instant::now();
-        let t_seed_start = std::time::Instant::now();
+        let t_total = if timed { Some(std::time::Instant::now()) } else { None };
+        let t_seed_start = if timed { Some(std::time::Instant::now()) } else { None };
 
         // Flat queue: (depth, dwa_state, gss). Processed highest-depth-first.
         let mut queue: Vec<(isize, u32, DenseMaskGSS)> = Vec::with_capacity(32);
@@ -332,10 +369,11 @@ impl<'a> ConstraintState<'a> {
         }
 
         // Process DWA states depth-first.
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.seed_ns = t_seed_start.elapsed().as_nanos() as u64;
+        if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_seed_start) {
+            metrics.seed_ns = t.elapsed().as_nanos() as u64;
         }
         while !queue.is_empty() {
+            let t_pop = if timed { Some(std::time::Instant::now()) } else { None };
             // Find max depth.
             let max_depth = queue.iter().map(|(d, _, _)| *d).max().unwrap();
             // Extract all items at max depth.
@@ -349,7 +387,8 @@ impl<'a> ConstraintState<'a> {
                     i += 1;
                 }
             }
-            if let Some(metrics) = metrics.as_deref_mut() {
+            if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_pop) {
+                metrics.queue_pop_ns += t.elapsed().as_nanos() as u64;
                 metrics.queue_depth_buckets_processed += 1;
                 if metrics.queue_depth_buckets_processed == 1 {
                     metrics.max_depth_bucket_processed = max_depth;
@@ -364,7 +403,7 @@ impl<'a> ConstraintState<'a> {
                 let dwa_state = &parser_dwa.states[wa_state as usize];
 
                 // Final weight → OR allowed tokens into buf.
-                let t_fw = std::time::Instant::now();
+                let t_fw = if timed { Some(std::time::Instant::now()) } else { None };
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(metrics) = metrics.as_deref_mut() {
                         metrics.final_weight_checks += 1;
@@ -397,14 +436,14 @@ impl<'a> ConstraintState<'a> {
                 }
 
                 // Advance through DWA transitions for each parser state.
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.final_weight_ns += t_fw.elapsed().as_nanos() as u64;
+                if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_fw) {
+                    metrics.final_weight_ns += t.elapsed().as_nanos() as u64;
                 }
-                let t_gss = std::time::Instant::now();
+                let t_gss = if timed { Some(std::time::Instant::now()) } else { None };
                 let decomposed = gss.decompose_and_pop();
-                if let Some(metrics) = metrics.as_deref_mut() {
+                if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_gss) {
                     metrics.parser_states_peeked += decomposed.len();
-                    metrics.transition_gss_ns += t_gss.elapsed().as_nanos() as u64;
+                    metrics.transition_gss_ns += t.elapsed().as_nanos() as u64;
                 }
                 for (parser_state, popped) in &decomposed {
                     let labels = [
@@ -429,34 +468,35 @@ impl<'a> ConstraintState<'a> {
                                 metrics.positive_transitions_hit += 1;
                             }
                         }
-                        let t_int = std::time::Instant::now();
+                        let t_int = if timed { Some(std::time::Instant::now()) } else { None };
                         let pruned = popped.apply_and_prune(|allowed| {
                             allowed.intersect_with_weight(weight, precomputed)
                         });
                         if pruned.is_empty() {
-                            if let Some(metrics) = metrics.as_deref_mut() {
+                            if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_int) {
                                 metrics.transitions_pruned_empty += 1;
-                                metrics.transition_intersect_ns += t_int.elapsed().as_nanos() as u64;
+                                metrics.transition_intersect_ns += t.elapsed().as_nanos() as u64;
                             }
                             continue;
                         }
-                        let t_enq = std::time::Instant::now();
-                        if let Some(metrics) = metrics.as_deref_mut() {
-                            metrics.transition_intersect_ns += t_enq.duration_since(t_int).as_nanos() as u64;
+                        let t_enq = if timed { Some(std::time::Instant::now()) } else { None };
+                        if let (Some(metrics), Some(te), Some(ti)) = (metrics.as_deref_mut(), t_enq, t_int) {
+                            metrics.transition_intersect_ns += te.duration_since(ti).as_nanos() as u64;
                         }
                         let new_depth = pruned.max_depth();
                         if let Some(pos) = queue.iter().position(|(d, s, _)| *d == new_depth && *s == *target) {
                             queue[pos].2 = queue[pos].2.merge(&pruned);
                         } else {
                             queue.push((new_depth, *target, pruned));
-                        }                        if let Some(metrics) = metrics.as_deref_mut() {
+                        }
+                        if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_enq) {
                             metrics.transitions_enqueued += 1;
                             if is_default {
                                 metrics.default_transitions_enqueued += 1;
                             } else {
                                 metrics.positive_transitions_enqueued += 1;
                             }
-                            metrics.transition_enqueue_ns += t_enq.elapsed().as_nanos() as u64;
+                            metrics.transition_enqueue_ns += t.elapsed().as_nanos() as u64;
                         }
                     }
                 }
@@ -477,8 +517,8 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.total_ns = t_total.elapsed().as_nanos() as u64;
+        if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_total) {
+            metrics.total_ns = t.elapsed().as_nanos() as u64;
         }
     }
 

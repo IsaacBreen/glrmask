@@ -138,7 +138,7 @@ impl Constraint {
         words.into_boxed_slice()
     }
 
-    fn or_dense_intersection_to_buf(
+    pub(crate) fn or_dense_intersection_to_buf(
         &self,
         left_words: &[u64],
         right_words: &[u64],
