@@ -2216,29 +2216,33 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             };
         }
 
-        let mut acc_memo: StdHashMap<A, Option<B>> = StdHashMap::new();
+        // Use a flat Vec for memo instead of HashMap — avoids hashing cost
+        // for the typical case of 2-4 unique accumulators.
+        let mut acc_memo: Vec<(A, Option<B>)> = Vec::with_capacity(4);
 
         fn mutate_acc<A, B, M>(
             a: &A,
-            memo: &mut StdHashMap<A, Option<B>>,
+            memo: &mut Vec<(A, Option<B>)>,
             m: &mut M,
         ) -> Option<B>
         where
-            A: Clone + Eq + Hash,
+            A: Clone + Eq,
             B: Clone,
             M: FnMut(&A) -> Option<B>,
         {
-            if let Some(v) = memo.get(a) {
-                return v.clone();
+            for (k, v) in memo.iter() {
+                if k == a {
+                    return v.clone();
+                }
             }
             let r = m(a);
-            memo.insert(a.clone(), r.clone());
+            memo.push((a.clone(), r.clone()));
             r
         }
 
         fn transform<T, A, B, M>(
             node: &Arc<Upper<T, A>>,
-            memo: &mut StdHashMap<A, Option<B>>,
+            memo: &mut Vec<(A, Option<B>)>,
             m: &mut M,
         ) -> Option<Arc<Upper<T, B>>>
         where
@@ -2284,6 +2288,80 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         let res_inner_opt = transform::<T, A, B, M>(&self.inner, &mut acc_memo, &mut mutator);
         res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
+    }
+
+    /// Like apply_and_prune but skips try_promote. Use when the tree is already
+    /// canonical and the transformation preserves structure (e.g., DenseMaskAcc → DenseMaskAcc).
+    pub fn apply_and_prune_no_promote(&self, mut mutator: impl FnMut(&A) -> Option<A>) -> Self {
+        // Fast path: single Interface at root.
+        if let Upper::Interface(i) = &*self.inner {
+            return match mutator(&i.acc) {
+                Some(new_acc) => LeveledGSS { inner: new_interface(i.inner.clone(), new_acc) },
+                None => LeveledGSS::empty(),
+            };
+        }
+
+        let mut acc_memo: Vec<(A, Option<A>)> = Vec::with_capacity(4);
+
+        fn mutate_acc_np<A, M>(
+            a: &A,
+            memo: &mut Vec<(A, Option<A>)>,
+            m: &mut M,
+        ) -> Option<A>
+        where
+            A: Clone + Eq,
+            M: FnMut(&A) -> Option<A>,
+        {
+            for (k, v) in memo.iter() {
+                if k == a {
+                    return v.clone();
+                }
+            }
+            let r = m(a);
+            memo.push((a.clone(), r.clone()));
+            r
+        }
+
+        fn transform_np<T, A, M>(
+            node: &Arc<Upper<T, A>>,
+            memo: &mut Vec<(A, Option<A>)>,
+            m: &mut M,
+        ) -> Option<Arc<Upper<T, A>>>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            M: FnMut(&A) -> Option<A>,
+        {
+            match &**node {
+                Upper::Interface(i) => {
+                    let new_acc_opt = mutate_acc_np(&i.acc, memo, m);
+                    new_acc_opt.map(|new_acc| new_interface(i.inner.clone(), new_acc))
+                }
+                Upper::Branch(b) => {
+                    let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc_np(e, memo, m));
+                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                    for (v, kids) in b.children.iter() {
+                        let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
+                        for child in kids.values() {
+                            if let Some(nc) = transform_np::<T, A, M>(child, memo, m) {
+                                new_kids.insert(nc.max_depth(), nc);
+                            }
+                        }
+                        if !new_kids.is_empty() {
+                            new_children.insert(v.clone(), new_kids);
+                        }
+                    }
+                    if new_children.is_empty() && new_empty_opt.is_none() {
+                        None
+                    } else {
+                        Some(new_branch(new_children, new_empty_opt))
+                    }
+                }
+            }
+        }
+
+        let res_inner_opt = transform_np::<T, A, _>(&self.inner, &mut acc_memo, &mut mutator);
+        res_inner_opt.map_or_else(Self::empty, |inner| Self { inner })
     }
 
     pub fn merge(&self, other: &Self) -> Self {

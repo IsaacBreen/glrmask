@@ -24,9 +24,10 @@ struct DenseMaskAcc {
 
 impl PartialEq for DenseMaskAcc {
     fn eq(&self, other: &Self) -> bool {
-        self.start == other.start
-            && self.end == other.end
-            && (Arc::ptr_eq(&self.dense, &other.dense) || self.dense == other.dense)
+        Arc::ptr_eq(&self.dense, &other.dense)
+            || (self.start == other.start
+                && self.end == other.end
+                && self.dense == other.dense)
     }
 }
 impl Eq for DenseMaskAcc {}
