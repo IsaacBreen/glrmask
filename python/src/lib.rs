@@ -260,14 +260,20 @@ impl PyConstraintState {
         Ok(out)
     }
 
-    fn commit_token(&mut self, token_id: u32) {
+    fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| state.commit_token(token_id));
+            .with_dependent_mut(|_owner, state| {
+                state.commit_token(token_id)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+            })
     }
 
-    fn commit_tokens(&mut self, token_ids: Vec<u32>) {
+    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids));
+            .with_dependent_mut(|_owner, state| {
+                state.commit_tokens(&token_ids)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+            })
     }
 
     fn commit_bytes(&mut self, data: &[u8]) {

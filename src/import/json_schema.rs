@@ -1560,7 +1560,7 @@ mod tests {
             if !allowed {
                 return false;
             }
-            state.commit_token(id);
+            state.commit_token(id).unwrap();
         }
         state.is_finished()
     }

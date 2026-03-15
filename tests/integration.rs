@@ -39,12 +39,12 @@ fn test_ebnf_simple_literal() {
     assert!(token_allowed(&mask, 0), "'a' should be allowed first");
     assert!(!token_allowed(&mask, 1), "'b' should NOT be allowed first");
 
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     assert!(!token_allowed(&mask, 0), "'a' should NOT be allowed after 'a'");
     assert!(token_allowed(&mask, 1), "'b' should be allowed after 'a'");
 
-    s.commit_token(1);
+    s.commit_token(1).unwrap();
     assert!(s.is_finished(), "should accept after 'ab'");
 }
 
@@ -59,7 +59,7 @@ fn test_ebnf_choice() {
     assert!(token_allowed(&mask, 1), "'y' allowed");
     assert!(!token_allowed(&mask, 2), "'z' not allowed");
 
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     assert!(s.is_finished(), "accept after 'x'");
 }
 
@@ -81,11 +81,11 @@ fn test_ebnf_multi_rule() {
     assert!(token_allowed(&mask, 1), "'b' allowed initially");
     assert!(!token_allowed(&mask, 2), "'.' not allowed initially");
 
-    s.commit_token(0); // commit "a"
+    s.commit_token(0).unwrap(); // commit "a"
     let mask = s.mask();
     assert!(token_allowed(&mask, 2), "'.' allowed after 'a'");
 
-    s.commit_token(2); // commit "."
+    s.commit_token(2).unwrap(); // commit "."
     assert!(s.is_finished(), "accept after 'a.'");
 }
 
@@ -98,15 +98,15 @@ fn test_ebnf_sequence_of_three() {
     // Step through a → b → c.
     let m = s.mask();
     assert!(token_allowed(&m, 0) && !token_allowed(&m, 1) && !token_allowed(&m, 2));
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
 
     let m = s.mask();
     assert!(!token_allowed(&m, 0) && token_allowed(&m, 1) && !token_allowed(&m, 2));
-    s.commit_token(1);
+    s.commit_token(1).unwrap();
 
     let m = s.mask();
     assert!(!token_allowed(&m, 0) && !token_allowed(&m, 1) && token_allowed(&m, 2));
-    s.commit_token(2);
+    s.commit_token(2).unwrap();
 
     assert!(s.is_finished());
 }
@@ -129,11 +129,11 @@ fn test_lark_simple() {
 
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "'a' allowed first");
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
 
     let mask = s.mask();
     assert!(token_allowed(&mask, 1), "'b' allowed after 'a'");
-    s.commit_token(1);
+    s.commit_token(1).unwrap();
 
     assert!(s.is_finished());
 }
@@ -242,10 +242,10 @@ fn test_json_schema_null() {
     assert!(token_allowed(&mask, 0), "'n' allowed for null");
 
     // Commit "n", "u", "l", "l"
-    s.commit_token(0); // n
-    s.commit_token(1); // u
-    s.commit_token(2); // l
-    s.commit_token(2); // l
+    s.commit_token(0).unwrap(); // n
+    s.commit_token(1).unwrap(); // u
+    s.commit_token(2).unwrap(); // l
+    s.commit_token(2).unwrap(); // l
     assert!(s.is_finished(), "accept after 'null'");
 }
 
@@ -292,7 +292,7 @@ fn test_commit_invalid_token() {
     let mut s = c.start();
 
     // Token 99 is not in the vocabulary — should panic.
-    s.commit_token(99);
+    s.commit_token(99).unwrap();
 }
 
 #[test]
@@ -309,12 +309,12 @@ fn test_multiple_independent_sequences() {
     assert!(!token_allowed(&mask, 3), "'d' not allowed initially");
 
     // Choose "a" path.
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     assert!(token_allowed(&mask, 1), "'b' allowed after 'a'");
     assert!(!token_allowed(&mask, 3), "'d' not allowed after 'a'");
 
-    s.commit_token(1);
+    s.commit_token(1).unwrap();
     assert!(s.is_finished(), "accept after 'ab'");
 }
 
@@ -338,11 +338,11 @@ fn test_save_load_roundtrip() {
     assert!(token_allowed(&mask, 0));
     assert!(!token_allowed(&mask, 1));
 
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     assert!(token_allowed(&mask, 1));
 
-    s.commit_token(1);
+    s.commit_token(1).unwrap();
     assert!(s.is_finished());
 }
 
@@ -362,7 +362,7 @@ fn test_save_load_file_roundtrip() {
     assert!(token_allowed(&mask, 2), "'z' allowed");
 
     // Take the "z" path.
-    s.commit_token(2);
+    s.commit_token(2).unwrap();
     assert!(s.is_finished(), "accept after 'z'");
 
     // Cleanup.
@@ -418,7 +418,7 @@ start: JSON_STRING
 
     // After committing ", we're inside the string
     let mut state = constraint.start();
-    state.commit_token(1); // commit "
+    state.commit_token(1).unwrap(); // commit "
 
     let mask = state.mask();
     let active: Vec<usize> = (1..=6).filter(|&i| token_allowed(&mask, i)).collect();
@@ -467,7 +467,7 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     assert!(token_allowed(&mask0, 0), "'[' should be allowed");
 
     // Commit "["
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
 
     // Step 1: should allow digits and "-"
     let mask1 = s.mask();
@@ -483,7 +483,7 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     
     // Debug dump to see terminal IDs and DFA structure
     
-    s.commit_token(3);
+    s.commit_token(3).unwrap();
 
     // Step 2: should allow ",", "]", ",-", and digit tokens
     let mask2 = s.mask();
@@ -495,14 +495,14 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     assert!(token_allowed(&mask2, 7), "',-' (id=7) should be allowed after '[1'");
 
     // Commit ","
-    s.commit_token(2);
+    s.commit_token(2).unwrap();
     let mask3 = s.mask();
     eprintln!("Step 3 mask after '[1,': {:?}", iter_allowed(&mask3));
     assert!(token_allowed(&mask3, 3), "'1' should be allowed after ','");
 
     // Commit "2" (using token "1" which is id=3 with bytes "1")
     // Actually, let's commit token 3 (bytes="1") representing a second digit
-    s.commit_token(3);
+    s.commit_token(3).unwrap();
     let mask4 = s.mask();
     let allowed4 = iter_allowed(&mask4);
     eprintln!("Step 4 mask after '[1,1': {:?}", allowed4);
@@ -546,8 +546,8 @@ fn test_plan_api_mask_and_is_finished() {
     assert!(!s.is_finished());
 
     // Advance to completion.
-    s.commit_token(0);
-    s.commit_token(1);
+    s.commit_token(0).unwrap();
+    s.commit_token(1).unwrap();
     assert!(s.is_finished());
     let _ = bitmask; // suppress unused warning
 }
@@ -649,12 +649,12 @@ fn test_ported_trivial() {
     assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
     assert!(!token_allowed(&mask, 1), "'$' should NOT be allowed initially");
 
-    s.commit_token(0); // commit "a"
+    s.commit_token(0).unwrap(); // commit "a"
     let mask = s.mask();
     assert!(!token_allowed(&mask, 0), "'a' should NOT be allowed after 'a'");
     assert!(token_allowed(&mask, 1), "'$' should be allowed after 'a'");
 
-    s.commit_token(1); // commit "$"
+    s.commit_token(1).unwrap(); // commit "$"
     assert!(s.is_finished(), "should be finished after 'a$'");
 }
 
@@ -681,7 +681,7 @@ fn test_ported_simple() {
     assert!(token_allowed(&mask, 1), "'ac' should be allowed initially");
     assert!(!token_allowed(&mask, 2), "'$' should NOT be allowed initially");
 
-    s.commit_token(0); // commit "ab"
+    s.commit_token(0).unwrap(); // commit "ab"
     let mask = s.mask();
     assert!(!token_allowed(&mask, 0), "'ab' not allowed after 'ab'");
     assert!(!token_allowed(&mask, 1), "'ac' not allowed after 'ab'");
@@ -708,12 +708,12 @@ fn test_ported_simple_minimized() {
     assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
     assert!(!token_allowed(&mask, 1), "'$' should NOT be allowed initially");
 
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     assert!(!token_allowed(&mask, 0), "'a' NOT allowed after 'a'");
     assert!(token_allowed(&mask, 1), "'$' should be allowed after 'a'");
 
-    s.commit_token(1);
+    s.commit_token(1).unwrap();
     assert!(s.is_finished());
 }
 
@@ -738,22 +738,22 @@ fn test_ported_x_semicolon_x() {
     assert!(!token_allowed(&mask0, 1), "';' NOT initially");
     assert!(!token_allowed(&mask0, 2), "'$' NOT initially");
 
-    s.commit_token(0); // "x"
+    s.commit_token(0).unwrap(); // "x"
     let mask1 = s.mask();
     assert!(token_allowed(&mask1, 1), "';' should be allowed after x");
     assert!(token_allowed(&mask1, 0), "x should be allowed after x (second stmt)");
     assert!(token_allowed(&mask1, 2), "'$' should be allowed after x");
 
-    s.commit_token(1); // ";"
+    s.commit_token(1).unwrap(); // ";"
     let mask2 = s.mask();
     assert!(token_allowed(&mask2, 0), "x should be allowed after x;");
     assert!(token_allowed(&mask2, 2), "'$' should be allowed after x;");
 
-    s.commit_token(0); // second "x"
+    s.commit_token(0).unwrap(); // second "x"
     let mask3 = s.mask();
     assert!(token_allowed(&mask3, 2), "'$' should be allowed after x;x");
 
-    s.commit_token(2); // "$"
+    s.commit_token(2).unwrap(); // "$"
     assert!(s.is_finished(), "should be finished after x;x$");
 }
 
@@ -788,7 +788,7 @@ fn test_ported_expression() {
     assert!(token_allowed(&mask, 5), "'(i' should be allowed initially");
     assert!(!token_allowed(&mask, 6), "'+i' should NOT be allowed initially");
 
-    s.commit_token(5); // commit "(i"
+    s.commit_token(5).unwrap(); // commit "(i"
     let mask = s.mask();
     // After "(i": can follow with '+' (1), '*' (2), ')' (4), '+i' (6)
     assert!(!token_allowed(&mask, 0), "'i' should NOT be allowed after '(i'");
@@ -815,14 +815,14 @@ fn test_ported_a_plus_commit_equivalence() {
 
     // Scenario 1: commit "a" three times
     let mut s1 = c.start();
-    s1.commit_token(0);
-    s1.commit_token(0);
-    s1.commit_token(0);
+    s1.commit_token(0).unwrap();
+    s1.commit_token(0).unwrap();
+    s1.commit_token(0).unwrap();
     let mask1 = s1.mask();
 
     // Scenario 2: commit "aaa" once
     let mut s2 = c.start();
-    s2.commit_token(1);
+    s2.commit_token(1).unwrap();
     let mask2 = s2.mask();
 
     assert_eq!(
@@ -860,7 +860,7 @@ fn test_ported_hideous_ambiguity() {
             );
             break;
         }
-        s.commit_token(0);
+        s.commit_token(0).unwrap();
     }
 }
 
@@ -879,7 +879,7 @@ fn test_ported_def_token() {
 
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "'def' (id=0) should be allowed initially");
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     assert!(s.is_finished(), "should be finished after 'def'");
 }
 
@@ -899,13 +899,13 @@ fn test_ported_hash_restart() {
 
     // Scenario 1: separate tokens
     let mut s1 = c.start();
-    s1.commit_token(0); // "#"
-    s1.commit_token(1); // "a"
+    s1.commit_token(0).unwrap(); // "#"
+    s1.commit_token(1).unwrap(); // "a"
     let mask1 = s1.mask();
 
     // Scenario 2: combined token "#a"
     let mut s2 = c.start();
-    s2.commit_token(2); // "#a"
+    s2.commit_token(2).unwrap(); // "#a"
     let mask2 = s2.mask();
 
     assert_eq!(
@@ -930,14 +930,14 @@ fn test_ported_multi_commit_hash() {
 
     // Scenario 1: three separate commits
     let mut s1 = c.start();
-    s1.commit_token(0); // "#"
-    s1.commit_token(1); // "a"
-    s1.commit_token(1); // "a"
+    s1.commit_token(0).unwrap(); // "#"
+    s1.commit_token(1).unwrap(); // "a"
+    s1.commit_token(1).unwrap(); // "a"
     let mask1 = s1.mask();
 
     // Scenario 2: one combined token
     let mut s2 = c.start();
-    s2.commit_token(2); // "#aa"
+    s2.commit_token(2).unwrap(); // "#aa"
     let mask2 = s2.mask();
 
     assert_eq!(
@@ -969,13 +969,13 @@ fn test_ported_indirect_recursion() {
     assert!(token_allowed(&mask, 1), "'b' should be allowed initially");
     assert!(!token_allowed(&mask, 2), "'$' should NOT be allowed initially");
 
-    s.commit_token(0); // "a"
+    s.commit_token(0).unwrap(); // "a"
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "'a' allowed after 'a' (recursive)");
     assert!(token_allowed(&mask, 1), "'b' allowed after 'a'");
     assert!(!token_allowed(&mask, 2), "'$' NOT allowed after 'a'");
 
-    s.commit_token(1); // "b"
+    s.commit_token(1).unwrap(); // "b"
     let mask = s.mask();
     assert!(!token_allowed(&mask, 0), "'a' NOT allowed after 'ab'");
     assert!(!token_allowed(&mask, 1), "'b' NOT allowed after 'ab'");
@@ -999,7 +999,7 @@ fn test_ported_repetition_left_recursive() {
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
 
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "'a' should be allowed after first 'a'");
 }
@@ -1056,14 +1056,14 @@ fn test_ported_trivial_indirect_expression() {
     assert!(token_allowed(&mask, 2), "'(i' should be allowed initially");
     assert!(!token_allowed(&mask, 3), "'$' should NOT be allowed initially");
 
-    s.commit_token(1); // "("
+    s.commit_token(1).unwrap(); // "("
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "'i' after '('");
     assert!(token_allowed(&mask, 1), "'(' after '(' (recursive)");
     assert!(token_allowed(&mask, 2), "'(i' after '('");
     assert!(!token_allowed(&mask, 3), "'$' NOT after '('");
 
-    s.commit_token(0); // "i"
+    s.commit_token(0).unwrap(); // "i"
     let mask = s.mask();
     assert!(!token_allowed(&mask, 0), "'i' NOT after '(i'");
     assert!(!token_allowed(&mask, 1), "'(' NOT after '(i'");
@@ -1094,14 +1094,14 @@ fn test_ported_trivial_direct_expression() {
     assert!(token_allowed(&mask, 2), "'(i' should be allowed initially");
     assert!(!token_allowed(&mask, 3), "'$' should NOT be allowed initially");
 
-    s.commit_token(1); // "("
+    s.commit_token(1).unwrap(); // "("
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "'i' after '('");
     assert!(token_allowed(&mask, 1), "'(' after '(' (recursive)");
     assert!(token_allowed(&mask, 2), "'(i' after '('");
     assert!(!token_allowed(&mask, 3), "'$' NOT after '('");
 
-    s.commit_token(0); // "i"
+    s.commit_token(0).unwrap(); // "i"
     let mask = s.mask();
     assert!(token_allowed(&mask, 3), "'$' should be allowed after '(i'");
 }
@@ -1133,7 +1133,7 @@ fn test_ported_limited_vocab_direct_expression() {
     assert!(!token_allowed(&mask, 1), "token 1 (absent) not in mask");
     assert!(token_allowed(&mask, 2), "only '(i' (id=2) should be in mask");
 
-    s.commit_token(2); // commit "(i"
+    s.commit_token(2).unwrap(); // commit "(i"
     let mask = s.mask();
     // After "(i" we need EOF ('$') which is not in the vocab → empty mask
     let allowed = iter_allowed(&mask);
@@ -1188,7 +1188,7 @@ fn test_ported_js_minimized_ebnf_string() {
     assert!(token_allowed(&mask, 1), "'!\"' (unary + STRING_LITERAL start) should be in initial mask");
     assert!(token_allowed(&mask, 2), "'\"' (STRING_LITERAL start) should be in initial mask");
 
-    s.commit_token(0); // "a" — completes one IDENTIFIER expression
+    s.commit_token(0).unwrap(); // "a" — completes one IDENTIFIER expression
     let mask = s.mask();
     // Grammar now expects ';' then possibly more expressions or EOF ('$');
     // none of the vocab tokens satisfy this → empty mask.
@@ -1413,7 +1413,7 @@ fn test_ported_force_empty_after_complete() {
     )
     .unwrap();
     let mut s = c.start();
-    s.commit_token(0); // commit "a" → parse complete
+    s.commit_token(0).unwrap(); // commit "a" → parse complete
 
     let forced = s.force();
     assert!(forced.is_empty(), "after complete parse, force() must return [] not {:?}", forced);
@@ -1439,8 +1439,8 @@ fn test_ported_force_after_partial_commit() {
     assert_eq!(forced, vec![0u32, 1, 2, 3], "all tokens forced initially");
 
     // After committing 'a' and 'b', the remaining 'c' and 'd' are forced.
-    s.commit_token(0);
-    s.commit_token(1);
+    s.commit_token(0).unwrap();
+    s.commit_token(1).unwrap();
     let forced_mid = s.force();
     assert_eq!(forced_mid, vec![2u32, 3], "after 'ab', 'cd' is forced");
 }
@@ -1489,7 +1489,7 @@ fn test_ported_force_commit_roundtrip() {
     // Committing all forced tokens must succeed without panic.
     for token in &forced {
         let token_id = *token;
-        s.commit_token(token_id)
+        s.commit_token(token_id).unwrap();
     }
     assert!(s.is_finished(), "should be finished after committing forced sequence");
 }
@@ -1550,7 +1550,7 @@ STR_CHAR: "a" | ":" | "-"
 "#;
     let c = Constraint::from_lark(lark, &vocab).unwrap();
     let mut s = c.start();
-    s.commit_token(0u32); // "a"
+    s.commit_token(0u32).unwrap(); // "a"
     let mask = s.mask();
     assert!(token_allowed(&mask, 1), "':x' must be allowed after 'a'");
     assert!(!token_allowed(&mask, 2), "false-positive ':-' must NOT be allowed after 'a'");
@@ -1583,8 +1583,8 @@ STR_CHAR: /[A-Za-z0-9 \[\]\-:{}@.]/
     );
     let c = Constraint::from_lark(lark, &vocab).unwrap();
     let mut s = c.start();
-    s.commit_token(0u32); // `{"`
-    s.commit_token(1u32); // `name`
+    s.commit_token(0u32).unwrap(); // `{"`
+    s.commit_token(1u32).unwrap(); // `name`
     let mask = s.mask();
     assert!(token_allowed(&mask, 2), "'\":\"' must be allowed after '{{\"name'");
     assert!(!token_allowed(&mask, 3), r#"false-positive '":[' must NOT be allowed"#);
@@ -1620,7 +1620,7 @@ STRING_CHAR: /[^\x00-\x1F"\\]/
     );
     let c = Constraint::from_lark(lark, &vocab).unwrap();
     let mut s = c.start();
-    s.commit_token(0u32); // `{"`
+    s.commit_token(0u32).unwrap(); // `{"`
     let mask = s.mask();
     assert!(token_allowed(&mask, 2), "ASCII 'a' must be allowed as JSON string content after {{\"");
     assert!(!token_allowed(&mask, 1), "standalone 0xA1 must NOT be allowed as JSON string content after {{\"");
@@ -1662,7 +1662,7 @@ QUOTE: "\""
 
     // Test via state.commit() path
     let mut s = c.start();
-    s.commit_token(0u32); // `{"`
+    s.commit_token(0u32).unwrap(); // `{"`
     let mask = s.mask();
     assert!(token_allowed(&mask, 1), "span token b'\\\":\\\"\\\",\\\"' must be in mask after commit(0)");
 
@@ -1735,7 +1735,7 @@ DIGIT: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
     );
     let c = Constraint::from_lark(lark, &vocab).unwrap();
     let mut s = c.start();
-    s.commit_token(4895u32); // `{"`
+    s.commit_token(4895u32).unwrap(); // `{"`
     let mask = s.mask();
     assert!(
         token_allowed(&mask, 34713),
@@ -1773,14 +1773,14 @@ EOF ::= '$'"#,
     assert!(token_allowed(&mask, 1), "'b' must be in initial mask");
     assert!(!token_allowed(&mask, 2), "'$' must NOT be in initial mask (s not yet satisfied)");
 
-    s.commit_token(0u32); // "a"
+    s.commit_token(0u32).unwrap(); // "a"
     let mask = s.mask();
     // After "a", e = s recurses: expect 'a' or 'b' again.
     assert!(token_allowed(&mask, 0), "'a' must be in mask after first 'a'");
     assert!(token_allowed(&mask, 1), "'b' must be in mask after first 'a'");
     assert!(!token_allowed(&mask, 2), "'$' must NOT be in mask (s not yet fully satisfied)");
 
-    s.commit_token(1u32); // "b"
+    s.commit_token(1u32).unwrap(); // "b"
     let mask = s.mask();
     // After "ab", s = A e = A B (complete). Now expect EOF.
     assert!(!token_allowed(&mask, 0), "'a' must NOT be in mask after 'ab'");
@@ -1871,7 +1871,7 @@ f ::= "(" e ")" | "i""#,
     assert!(!token_allowed(&mask, 5), "+i must NOT be in initial mask");
 
     // Commit "(i" (spans '(' then 'i').
-    s.commit_token(4);
+    s.commit_token(4).unwrap();
     let mask = s.mask();
     // After "(i", expect {+, ), +i}.
     assert!(token_allowed(&mask, 1), "+ must be in mask after (i");
@@ -1918,7 +1918,7 @@ f ::= "i""#,
     assert!(!token_allowed(&mask, 3), "+i must NOT be in initial mask");
 
     // Commit "i".
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     // After "i", expect {+, *, +i}.
     assert!(token_allowed(&mask, 1), "+ must be in mask after i");
@@ -1963,7 +1963,7 @@ f ::= "(" e ")" | "i""#,
     assert!(!token_allowed(&mask, 2), ") must NOT be in initial mask");
 
     // Commit "(i" (spans '(' then 'i').
-    s.commit_token(3);
+    s.commit_token(3).unwrap();
     let mask = s.mask();
     // After "(i", only ")" closes the paren.
     assert!(token_allowed(&mask, 2), ") must be in mask after (i");
@@ -2006,7 +2006,7 @@ f ::= "i""#,
     assert!(!token_allowed(&mask, 2), "+i must NOT be in initial mask");
 
     // Commit "i".
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     // After "i", expect {+, +i}.
     assert!(token_allowed(&mask, 1), "+ must be in mask after i");
@@ -2051,7 +2051,7 @@ f ::= "(" e | "i""#,
     assert!(!token_allowed(&mask, 3), "$ must NOT be in initial mask");
 
     // Commit "(" → recurse into another E.
-    s.commit_token(1);
+    s.commit_token(1).unwrap();
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "i must be in mask after (");
     assert!(token_allowed(&mask, 1), "( must be in mask after (");
@@ -2059,7 +2059,7 @@ f ::= "(" e | "i""#,
     assert!(!token_allowed(&mask, 3), "$ must NOT be in mask after (");
 
     // Commit "i" → inner E satisfied, now expect EOF.
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     assert!(token_allowed(&mask, 3), "$ must be in mask after (i");
     assert!(!token_allowed(&mask, 0), "i must NOT be in mask after (i");
@@ -2097,13 +2097,13 @@ f ::= "i""#,
     assert!(!token_allowed(&mask, 1), "$ must NOT be in initial mask");
 
     // Commit "i" → E satisfied.
-    s.commit_token(0);
+    s.commit_token(0).unwrap();
     let mask = s.mask();
     assert!(token_allowed(&mask, 1), "$ must be in mask after i");
     assert!(!token_allowed(&mask, 0), "i must NOT be in mask after i");
 
     // Commit "$" → parse complete.
-    s.commit_token(1);
+    s.commit_token(1).unwrap();
     let mask = s.mask();
     assert!(iter_allowed(&mask).is_empty(), "mask must be empty after i$");
 }
@@ -2423,7 +2423,7 @@ start: "{" obj_required_0_0 "}"
     let mut s = c.start();
 
     for token in [0u32, 1, 2, 3, 4, 1] {
-        s.commit_token(token);
+        s.commit_token(token).unwrap();
     }
 
     let mask = s.mask();
@@ -2529,7 +2529,7 @@ fn test_ported_sentence_grammar_from_prompt() {
         "initial mask should allow exactly the A-side sentence starters"
     );
 
-    s.commit_token(2); // "apple"
+    s.commit_token(2).unwrap(); // "apple"
     let mask = s.mask();
     assert_eq!(
         iter_allowed(&mask),
@@ -2537,7 +2537,7 @@ fn test_ported_sentence_grammar_from_prompt() {
         "after 'apple' only the separating space should be allowed"
     );
 
-    s.commit_token(5); // " "
+    s.commit_token(5).unwrap(); // " "
     let mask = s.mask();
     assert_eq!(
         iter_allowed(&mask),
@@ -2549,7 +2549,7 @@ fn test_ported_sentence_grammar_from_prompt() {
         "'eth' should not be allowed because it is not a valid prefix of any B alternative"
     );
 
-    s.commit_token(6); // "eats"
+    s.commit_token(6).unwrap(); // "eats"
     assert!(s.is_finished(), "'apple eats' should finish the simple sentence grammar");
     assert!(
         iter_allowed(&s.mask()).is_empty(),
@@ -2581,7 +2581,7 @@ fn test_ported_minimal_python_example_with_compiled_grammar() {
     for token in [1u32, 2, 3, 10, 4, 5, 6, 10] {
         let mask = s.mask();
         assert!(token_allowed(&mask, token as usize), "token {token} should be allowed before commit");
-        s.commit_token(token);
+        s.commit_token(token).unwrap();
     }
 
     let mask = s.mask();

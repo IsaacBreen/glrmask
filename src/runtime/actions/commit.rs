@@ -172,33 +172,31 @@ impl<'a> ConstraintState<'a> {
     /// in the current mask) drives the constraint into a fail state — this is
     /// normal and observable via an all-zero mask.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `token_id` is not present in the vocabulary at all.  This is
-    /// always a programming error (mismatched vocabulary, stale token mapping,
-    /// or off-by-one bug) and is caught unconditionally in both debug and
-    /// release builds.
-    #[track_caller]
+    /// Returns an error if `token_id` is not present in the vocabulary at all.
     pub fn commit_token(
         &mut self,
         token_id: u32,
-    ) {
+    ) -> Result<(), String> {
         let bytes = self.constraint.token_bytes
             .get(&token_id)
-            .unwrap_or_else(|| {
-                panic!("commit_token: token_id {token_id} not in vocabulary")
-            });
+            .ok_or_else(|| {
+                format!("commit_token: token_id {token_id} not in vocabulary")
+            })?;
         commit_bytes_impl(self.constraint, &mut self.state, bytes);
+        Ok(())
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) {
         commit_bytes_impl(self.constraint, &mut self.state, bytes);
     }
 
-    pub fn commit_tokens(&mut self, tokens: &[u32]) {
+    pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {
         for &token in tokens {
-            self.commit_token(token);
+            self.commit_token(token)?;
         }
+        Ok(())
     }
 
     pub(crate) fn process_bytes_raw(&mut self, bytes: &[u8]) {

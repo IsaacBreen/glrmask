@@ -54,7 +54,7 @@ impl<'a> ConstraintState<'a> {
                 break;
             };
             forced.push(token);
-            cursor.commit_token(token);
+            cursor.commit_token(token).expect("forced token should be in vocabulary");
             if cursor.state.is_empty() || cursor.is_complete() {
                 break;
             }

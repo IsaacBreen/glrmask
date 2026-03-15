@@ -1328,7 +1328,7 @@ mod tests {
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
 
         state
-            .commit_token(0);
+            .commit_token(0).unwrap();
         assert!(
             !state.is_finished(),
             "not yet accepting after 'a'"
@@ -1339,7 +1339,7 @@ mod tests {
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
 
         state
-            .commit_token(1);
+            .commit_token(1).unwrap();
         assert!(state.is_finished(), "should accept after 'ab'");
     }
 
@@ -1357,7 +1357,7 @@ mod tests {
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed");
 
         state
-            .commit_token(0);
+            .commit_token(0).unwrap();
         assert!(
             state.is_finished(),
             "parse should accept after 'a'"
@@ -1378,7 +1378,7 @@ mod tests {
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
 
         state
-            .commit_token(0);
+            .commit_token(0).unwrap();
         assert!(
             !state.is_finished(),
             "not yet accepting after 'a'"
@@ -1389,7 +1389,7 @@ mod tests {
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
 
         state
-            .commit_token(1);
+            .commit_token(1).unwrap();
         assert!(state.is_finished(), "should accept after 'ab'");
     }
 
@@ -1407,7 +1407,7 @@ mod tests {
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
 
         state
-            .commit_token(0);
+            .commit_token(0).unwrap();
         assert!(!state.is_finished(), "not accepting after 'a'");
 
         let mask = state.mask();
@@ -1415,7 +1415,7 @@ mod tests {
         assert!(mask_has_token(&mask, 1), "token 'b' should be allowed after 'a'");
 
         state
-            .commit_token(1);
+            .commit_token(1).unwrap();
         assert!(state.is_finished(), "should accept after 'ab'");
     }
 
@@ -1436,21 +1436,21 @@ mod tests {
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
         assert!(!mask_has_token(&mask, 2), "token 'c' should NOT be allowed initially");
 
-        state.commit_token(0);
+        state.commit_token(0).unwrap();
 
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "no 'a' after 'a'");
         assert!(mask_has_token(&mask, 1), "'b' after 'a'");
         assert!(!mask_has_token(&mask, 2), "no 'c' after 'a'");
 
-        state.commit_token(1);
+        state.commit_token(1).unwrap();
 
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "no 'a' after 'ab'");
         assert!(!mask_has_token(&mask, 1), "no 'b' after 'ab'");
         assert!(mask_has_token(&mask, 2), "'c' after 'ab'");
 
-        state.commit_token(2);
+        state.commit_token(2).unwrap();
         assert!(state.is_finished(), "should accept after 'abc'");
     }
 
@@ -1471,21 +1471,21 @@ mod tests {
         assert!(!mask_has_token(&mask, 1), "token 'b' should NOT be allowed initially");
         assert!(!mask_has_token(&mask, 2), "token 'c' should NOT be allowed initially");
 
-        state.commit_token(0);
+        state.commit_token(0).unwrap();
 
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "no 'a' after 'a'");
         assert!(mask_has_token(&mask, 1), "'b' after 'a'");
         assert!(!mask_has_token(&mask, 2), "no 'c' after 'a'");
 
-        state.commit_token(1);
+        state.commit_token(1).unwrap();
 
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "no 'a' after 'ab'");
         assert!(!mask_has_token(&mask, 1), "no 'b' after 'ab'");
         assert!(mask_has_token(&mask, 2), "'c' after 'ab'");
 
-        state.commit_token(2);
+        state.commit_token(2).unwrap();
         assert!(state.is_finished(), "should accept after 'abc'");
     }
 
@@ -1518,7 +1518,7 @@ mod tests {
         assert!(mask_has_token(&mask, 0), "token 'a' should be allowed initially");
         assert!(!mask_has_token(&mask, 1), "token 'b' should not be allowed initially");
 
-        state.commit_token(0);
+        state.commit_token(0).unwrap();
         assert!(
             !state.is_finished(),
             "the shorter literal 'a' should not complete a grammar expecting 'ab'"
@@ -1530,7 +1530,7 @@ mod tests {
             "token 'b' should remain allowed as a continuation of the longer literal 'ab'"
         );
 
-        state.commit_token(1);
+        state.commit_token(1).unwrap();
         assert!(state.is_finished(), "should accept after committing 'ab' byte by byte");
     }
 
@@ -1918,7 +1918,7 @@ mod tests {
         assert!(!mask_has_token(&mask, 1), "token 'b' should not be allowed initially");
         assert!(!mask_has_token(&mask, 2), "dead terminal token 'x' should not leak into the mask");
 
-        state.commit_token(0);
+        state.commit_token(0).unwrap();
         let mask = state.mask();
         assert!(!mask_has_token(&mask, 0), "token 'a' should not be allowed after committing 'a'");
         assert!(mask_has_token(&mask, 1), "token 'b' should remain the live continuation after remapping");
@@ -1998,7 +1998,7 @@ mod tests {
         assert!(mask_has_token(&mask, 3), "token ' a' should be allowed via ignore+terminal composition");
         assert!(!mask_has_token(&mask, 4), "token ' b' should not be allowed before 'a'");
 
-        state.commit_token(3);
+        state.commit_token(3).unwrap();
         assert!(!state.is_finished(), "consuming ignored space plus 'a' should still leave trailing 'b'");
 
         let mask = state.mask();
@@ -2008,7 +2008,7 @@ mod tests {
         assert!(!mask_has_token(&mask, 3), "token ' a' should not be allowed once the grammar expects 'b'");
         assert!(mask_has_token(&mask, 4), "token ' b' should be allowed via ignore+terminal composition after 'a'");
 
-        state.commit_token(4);
+        state.commit_token(4).unwrap();
         assert!(state.is_finished(), "consuming ignored space plus 'b' should finish the grammar");
     }
 

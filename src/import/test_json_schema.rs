@@ -52,7 +52,7 @@ fn schema_accepts(schema: &str, inputs: &[&str]) {
                 byte,
                 i
             );
-            s.commit_token(byte as u32);
+            s.commit_token(byte as u32).unwrap();
         }
     }
 }
@@ -90,7 +90,7 @@ fn test_ebnf_ws_nullable() {
     let mut s = c.start();
 
     // Commit '{'
-    s.commit_token(b'{' as u32);
+    s.commit_token(b'{' as u32).unwrap();
 
     // '}' should be valid (WS is nullable)
     let mask = s.mask();
@@ -113,7 +113,7 @@ WS ::= ( ' ' | '\\t' | '\\n' | '\\r' )*";
     let c = ebnf_constraint(ebnf);
     let mut s = c.start();
 
-    s.commit_token(b'{' as u32);
+    s.commit_token(b'{' as u32).unwrap();
     let mask = s.mask();
 
     assert!(
@@ -314,7 +314,7 @@ fn test_schema_const2() {
             byte
         );
         let token_id = *byte as u32;
-        s.commit_token(token_id)
+        s.commit_token(token_id).unwrap()
     }
 }
 
@@ -343,10 +343,10 @@ fn test_json_schema_allows_name_after_brace_newline_space_quote_prefix() {
         .expect("schema should compile with sparse multibyte vocab");
     let mut s = c.start();
 
-    s.commit_token(90u32);
-    s.commit_token(198u32);
-    s.commit_token(220u32);
-    s.commit_token(366u32);
+    s.commit_token(90u32).unwrap();
+    s.commit_token(198u32).unwrap();
+    s.commit_token(220u32).unwrap();
+    s.commit_token(366u32).unwrap();
 
     let mask = s.mask();
     assert!(
@@ -390,9 +390,9 @@ fn test_json_schema_name_prefix_disallows_quote_colon_minus_token() {
         .expect("newsletter schema should compile");
     let mut s = c.start();
 
-    s.commit_token(1u32);
-    s.commit_token(2u32);
-    s.commit_token(3u32);
+    s.commit_token(1u32).unwrap();
+    s.commit_token(2u32).unwrap();
+    s.commit_token(3u32).unwrap();
 
     let mask = s.mask();
     assert!(
@@ -628,6 +628,6 @@ fn test_prefix_items_default_to_required_like_cfa() {
         "CFA-style prefixItems lowering should allow the full tuple payload"
     );
 
-    state.commit_token(2);
+    state.commit_token(2).unwrap();
     assert!(state.is_finished(), "[1,2] should finish successfully");
 }
