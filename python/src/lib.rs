@@ -257,6 +257,12 @@ impl PyConstraintState {
         out.set_item("positive_transitions_enqueued", metrics.positive_transitions_enqueued)?;
         out.set_item("default_transitions_hit", metrics.default_transitions_hit)?;
         out.set_item("default_transitions_enqueued", metrics.default_transitions_enqueued)?;
+        out.set_item("seed_ns", metrics.seed_ns)?;
+        out.set_item("final_weight_ns", metrics.final_weight_ns)?;
+        out.set_item("transition_gss_ns", metrics.transition_gss_ns)?;
+        out.set_item("transition_intersect_ns", metrics.transition_intersect_ns)?;
+        out.set_item("transition_enqueue_ns", metrics.transition_enqueue_ns)?;
+        out.set_item("total_ns", metrics.total_ns)?;
         Ok(out)
     }
 
