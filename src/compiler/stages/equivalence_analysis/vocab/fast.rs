@@ -318,6 +318,7 @@ impl Scratch {
 /// Uses dirty_groups tracking to avoid O(num_states * num_groups) memset.
 /// INVARIANT: match_positions entries are NONE except for dirty entries from a previous
 /// call that must have been cleaned up by the caller (token_signature does this).
+/// Each `dirty_groups[i]` entry is unique within a run_batch call.
 fn run_batch(
     dfa: &Dfa,
     scratch: &mut Scratch,
@@ -376,8 +377,10 @@ fn run_batch(
                     for &gid in &dfa.finalizers[ns] {
                         if gid < num_groups {
                             let ix = base + gid;
+                            if scratch.match_positions[ix] == NONE {
+                                scratch.dirty_groups[i].push(gid);
+                            }
                             scratch.match_positions[ix] = position;
-                            scratch.dirty_groups[i].push(gid);
                         }
                     }
                     if dfa.is_dead_end[ns] {
@@ -420,8 +423,11 @@ fn run_batch(
                         let s = scratch.current_states[i];
                         for &gid in &dfa.finalizers[s] {
                             if gid < num_groups {
-                                scratch.match_positions[base + gid] = token_len;
-                                scratch.dirty_groups[i].push(gid);
+                                let ix = base + gid;
+                                if scratch.match_positions[ix] == NONE {
+                                    scratch.dirty_groups[i].push(gid);
+                                }
+                                scratch.match_positions[ix] = token_len;
                             }
                         }
                     }
@@ -625,10 +631,9 @@ fn token_signature(
         let completion = dfa.completion(scratch.current_states[i]);
         let base = i * num_groups;
 
-        // Sort and dedup dirty groups for deterministic hashing
+        // Sort dirty groups for deterministic hashing.
         let dirty = &mut scratch.dirty_groups[i];
         dirty.sort_unstable();
-        dirty.dedup();
 
         let state_sig = if !dirty.is_empty() {
             // Check if any dirty group has a non-zero match position
