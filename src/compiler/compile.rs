@@ -743,6 +743,128 @@ fn log_terminal_dwa_sample_paths(
     }
 }
 
+fn parser_dwa_label_name(label: i32) -> String {
+    use crate::compiler::glr::labels::DEFAULT_LABEL;
+    if label == DEFAULT_LABEL {
+        "*".to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+fn log_parser_dwa_sample_paths(
+    parser_dwa: &DWA,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+) {
+    use rand::Rng;
+
+    let Some(num_sample_paths) = env_usize("PARSER_DWA_SAMPLE_PATHS") else {
+        return;
+    };
+
+    if parser_dwa.states.is_empty() {
+        eprintln!("[glrmask/parser_dwa_sample] parser DWA is empty");
+        return;
+    }
+
+    let sample_long = env_flag_enabled("PARSER_DWA_SAMPLE_LONG");
+    let max_tokens = env_usize("PARSER_DWA_SAMPLE_MAX_TOKENS").unwrap_or(3);
+    let target_samples = if sample_long {
+        num_sample_paths.saturating_mul(20).max(num_sample_paths)
+    } else {
+        num_sample_paths
+    };
+    let max_attempts = target_samples.saturating_mul(50).max(target_samples);
+    let max_steps = if sample_long { 2048 } else { 512 };
+    let end_prob = if sample_long { 0.1 } else { 0.3 };
+
+    let mut rng = rand::thread_rng();
+    let mut collected: Vec<(String, usize, Weight)> = Vec::new();
+    let mut attempts = 0usize;
+
+    while collected.len() < target_samples && attempts < max_attempts {
+        let mut state = parser_dwa.start_state;
+        let mut path_labels: Vec<i32> = Vec::new();
+        let mut weight = Weight::all();
+        let mut steps = 0usize;
+
+        loop {
+            let end_weight = parser_dwa.states[state as usize]
+                .final_weight
+                .as_ref()
+                .map(|fw| weight.intersection(fw))
+                .filter(|w| !w.is_empty());
+
+            let mut choices = Vec::new();
+            for (&label, (next_state, edge_weight)) in &parser_dwa.states[state as usize].transitions {
+                let next_weight = weight.intersection(edge_weight);
+                if !next_weight.is_empty() {
+                    choices.push((label, *next_state, next_weight));
+                }
+            }
+
+            if let Some(ref ew) = end_weight {
+                if choices.is_empty() || rng.gen_bool(end_prob) {
+                    let display = path_labels
+                        .iter()
+                        .map(|&l| parser_dwa_label_name(l))
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    collected.push((display, path_labels.len(), ew.clone()));
+                    break;
+                }
+            }
+
+            if choices.is_empty() || steps >= max_steps {
+                break;
+            }
+
+            let idx = rng.gen_range(0..choices.len());
+            let (label, next_state, next_weight) = choices.swap_remove(idx);
+            path_labels.push(label);
+            weight = next_weight;
+            state = next_state;
+            steps += 1;
+        }
+
+        attempts += 1;
+    }
+
+    let mut deduped = BTreeMap::new();
+    for (path, len, end_weight) in collected {
+        deduped.entry(path).or_insert((len, end_weight));
+    }
+    let mut collected: Vec<(String, usize, Weight)> = deduped
+        .into_iter()
+        .map(|(path, (len, ew))| (path, len, ew))
+        .collect();
+
+    if sample_long {
+        collected.sort_by(|a, b| b.1.cmp(&a.1));
+    }
+    if collected.len() > num_sample_paths {
+        collected.truncate(num_sample_paths);
+    }
+
+    eprintln!(
+        "[glrmask/parser_dwa_sample] parser DWA sample paths (n={}, attempts={}):",
+        collected.len(),
+        attempts,
+    );
+    for (idx, (path, _len, end_weight)) in collected.iter().enumerate() {
+        eprintln!(
+            "[glrmask/parser_dwa_sample]   Path {}: {} ({})",
+            idx,
+            path,
+            sample_weight_tokens(end_weight, vocab, id_map, max_tokens),
+        );
+    }
+    if collected.is_empty() {
+        eprintln!("[glrmask/parser_dwa_sample]   (no paths collected)");
+    }
+}
+
 fn log_compile_summary(
     normalized: &GrammarDef,
     tokenizer: &Tokenizer,
@@ -989,6 +1111,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         );
     }
 
+    log_parser_dwa_sample_paths(&parser_dwa, vocab, &id_map);
+
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][compile] total_ms={:.3} rules={} terminals={} vocab_entries={} tokenizer_states={} internal_tsids={} glr_table_states={} terminal_{} parser_{}",
@@ -1104,6 +1228,8 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         &tokenizer,
         &terminal_dwa,
     );
+
+    log_parser_dwa_sample_paths(&parser_dwa, vocab, &id_map);
 
     let vocab_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(token_id, bytes)| (*token_id, bytes.clone())).collect();
     let token_bytes = vocab.entries.clone();
