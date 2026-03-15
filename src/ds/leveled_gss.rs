@@ -677,13 +677,16 @@ where
     A: Merge + Clone + Eq + Hash,
 {
     if let Upper::Branch(b) = &**node {
-        let all_children: Vec<_> = b
-            .children
-            .values()
-            .flat_map(|kids| kids.values())
-            .collect();
+        // Check all children are Interface (early exit without allocation).
+        let mut has_children = false;
+        for c in b.children.values().flat_map(|kids| kids.values()) {
+            has_children = true;
+            if !matches!(&**c, Upper::Interface(_)) {
+                return node.clone();
+            }
+        }
 
-        if all_children.is_empty() {
+        if !has_children {
             if let Some(empty) = &b.empty {
                 let lower_root = new_lower(IHashMap::new(), true);
                 return new_interface(lower_root, empty.clone());
@@ -691,18 +694,12 @@ where
             return node.clone();
         }
 
-        if !all_children
-            .iter()
-            .all(|c| matches!(&***c, Upper::Interface(_)))
-        {
-            return node.clone();
-        }
-
+        // All children are Interface. Collect accumulators (re-iterate).
         let mut accs: HashSet<A> = HashSet::new();
         if let Some(empty) = &b.empty {
             accs.insert(empty.clone());
         }
-        for c in all_children {
+        for c in b.children.values().flat_map(|kids| kids.values()) {
             if let Upper::Interface(ic) = &**c {
                 accs.insert(ic.acc.clone());
             }
