@@ -255,6 +255,7 @@ pub struct MaskDebugMetrics {
     pub transition_intersect_ns: u64,
     pub transition_enqueue_ns: u64,
     pub total_ns: u64,
+    pub internal_token_dense_words: usize,
 }
 
 impl<'a> ConstraintState<'a> {
@@ -279,6 +280,7 @@ impl<'a> ConstraintState<'a> {
         self.fill_mask_impl(&mut buf, Some(&mut metrics));
         metrics.allowed_token_count = buf.iter().map(|word| word.count_ones() as usize).sum();
         metrics.weight_ops = snapshot_weight_debug_stats();
+        metrics.internal_token_dense_words = self.constraint.internal_token_dense_words;
         metrics
     }
 
@@ -377,7 +379,26 @@ impl<'a> ConstraintState<'a> {
                     metrics.parser_states_peeked += parser_states.len();
                 }
                 for parser_state in parser_states {
-                    let mut advance = |label: i32, is_default: bool, current: &DenseMaskGSS, metrics: &mut Option<&mut MaskDebugMetrics>| {
+                    // Compute isolate+pop once per parser state (shared by positive and default transitions).
+                    let t_gss = std::time::Instant::now();
+                    let isolated = gss.isolate(Some(parser_state));
+                    let popped = isolated.pop();
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.transition_gss_ns += t_gss.elapsed().as_nanos() as u64;
+                    }
+                    if popped.is_empty() {
+                        if let Some(metrics) = metrics.as_deref_mut() {
+                            metrics.transitions_considered += 2;
+                            metrics.transitions_popped_empty += 2;
+                        }
+                        continue;
+                    }
+
+                    let labels = [
+                        (crate::compiler::glr::labels::encode_positive_label(parser_state), false),
+                        (crate::compiler::glr::labels::DEFAULT_LABEL, true),
+                    ];
+                    for (label, is_default) in labels {
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.transitions_considered += 1;
                         }
@@ -385,7 +406,7 @@ impl<'a> ConstraintState<'a> {
                             if let Some(metrics) = metrics.as_deref_mut() {
                                 metrics.transitions_missing += 1;
                             }
-                            return;
+                            continue;
                         };
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.transitions_hit += 1;
@@ -395,20 +416,7 @@ impl<'a> ConstraintState<'a> {
                                 metrics.positive_transitions_hit += 1;
                             }
                         }
-                        let t_gss = std::time::Instant::now();
-                        let isolated = current.isolate(Some(parser_state));
-                        let popped = isolated.pop();
-                        if popped.is_empty() {
-                            if let Some(metrics) = metrics.as_deref_mut() {
-                                metrics.transitions_popped_empty += 1;
-                                metrics.transition_gss_ns += t_gss.elapsed().as_nanos() as u64;
-                            }
-                            return;
-                        }
                         let t_int = std::time::Instant::now();
-                        if let Some(metrics) = metrics.as_deref_mut() {
-                            metrics.transition_gss_ns += t_int.duration_since(t_gss).as_nanos() as u64;
-                        }
                         let pruned = popped.apply_and_prune(|allowed| {
                             allowed.intersect_with_weight(weight, precomputed)
                         });
@@ -417,7 +425,7 @@ impl<'a> ConstraintState<'a> {
                                 metrics.transitions_pruned_empty += 1;
                                 metrics.transition_intersect_ns += t_int.elapsed().as_nanos() as u64;
                             }
-                            return;
+                            continue;
                         }
                         let t_enq = std::time::Instant::now();
                         if let Some(metrics) = metrics.as_deref_mut() {
@@ -438,10 +446,7 @@ impl<'a> ConstraintState<'a> {
                             }
                             metrics.transition_enqueue_ns += t_enq.elapsed().as_nanos() as u64;
                         }
-                    };
-
-                    advance(crate::compiler::glr::labels::encode_positive_label(parser_state), false, &gss, &mut metrics);
-                    advance(crate::compiler::glr::labels::DEFAULT_LABEL, true, &gss, &mut metrics);
+                    }
                 }
             }
         }
