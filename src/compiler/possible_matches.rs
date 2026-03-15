@@ -119,15 +119,30 @@ pub(crate) fn build_possible_matches_by_state(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
 ) -> PossibleMatchesByState {
-    build_possible_matches_from_token_bytes(tokenizer, token_bytes)
+    let token_entries: Vec<(u32, Vec<u8>)> = token_bytes
+        .iter()
+        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
+        .collect();
+    build_possible_matches_from_token_entries(tokenizer, &token_entries)
 }
 
 pub(crate) fn build_possible_matches_from_token_bytes(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
 ) -> PossibleMatchesByState {
+    let token_entries: Vec<(u32, Vec<u8>)> = token_bytes
+        .iter()
+        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
+        .collect();
+    build_possible_matches_from_token_entries(tokenizer, &token_entries)
+}
+
+pub(crate) fn build_possible_matches_from_token_entries(
+    tokenizer: &Tokenizer,
+    token_entries: &[(u32, Vec<u8>)],
+) -> PossibleMatchesByState {
     let trie = VocabPrefixTree::build(
-        &token_bytes
+        &token_entries
             .iter()
             .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
             .collect::<Vec<_>>(),
@@ -144,4 +159,33 @@ pub(crate) fn build_possible_matches_from_token_bytes(
     }
 
     possible_matches_by_state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::lexer::ast::bytes;
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+    use range_set_blaze::RangeSetBlaze;
+
+    #[test]
+    fn test_possible_matches_supports_distinct_bytes_for_same_internal_token() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"b")]);
+        let token_entries = vec![(0u32, b"a".to_vec()), (0u32, b"b".to_vec())];
+
+        let possible_matches =
+            build_possible_matches_from_token_entries(&tokenizer, &token_entries);
+        let start_matches = possible_matches
+            .get(&tokenizer.initial_state())
+            .expect("start state should have possible matches");
+
+        assert_eq!(
+            start_matches.get(&0),
+            Some(&RangeSetBlaze::from_iter([0u32..=0u32]))
+        );
+        assert_eq!(
+            start_matches.get(&1),
+            Some(&RangeSetBlaze::from_iter([0u32..=0u32]))
+        );
+    }
 }

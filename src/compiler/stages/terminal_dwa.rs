@@ -1197,16 +1197,15 @@ fn representative_original_ids(map: &crate::compiler::stages::equivalence_analys
         .collect()
 }
 
-fn representative_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
-    id_map
-        .vocab_tokens
-        .internal_to_originals
+fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
+    vocab
+        .entries
         .iter()
-        .enumerate()
-        .filter_map(|(internal_id, original_ids)| {
-            let representative = *original_ids.first()?;
-            let bytes = vocab.entries.get(&representative)?.clone();
-            Some((internal_id as u32, bytes))
+        .filter_map(|(&original_token_id, bytes)| {
+            id_map
+                .vocab_tokens
+                .internal_id_for_original(original_token_id)
+                .map(|internal_token_id| (internal_token_id, bytes.clone()))
         })
         .collect()
 }
@@ -1243,9 +1242,9 @@ pub(crate) fn build_terminal_dwa_with_report(
     nwa.start_states.push(start_state);
 
     let phase_started_at = std::time::Instant::now();
-    let representative_vocab = representative_vocab_entries(vocab, id_map);
+    let internal_vocab = internal_vocab_entries(vocab, id_map);
     let vocab_tree = VocabPrefixTree::build(
-        &representative_vocab
+        &internal_vocab
             .iter()
             .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
             .collect::<Vec<_>>(),
@@ -1402,6 +1401,7 @@ mod tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
     use crate::compiler::grammar::model::tests::simple_ab_grammar;
+    use crate::compiler::stages::equivalence_analysis::ManyToOneIdMap;
     use std::collections::BTreeSet;
 
     fn expand_original_tokens(weight: &Weight, id_map: &InternalIdMap) -> BTreeSet<u32> {
@@ -1539,6 +1539,62 @@ mod tests {
         assert!(
             original_tokens.contains(&2),
             "tokens with ignored prefixes should also be accepted on the same terminal word"
+        );
+    }
+
+    #[test]
+    fn test_terminal_dwa_supports_distinct_bytes_for_same_internal_token() {
+        let grammar = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
+        let vocab = Vocab::new(vec![(10, b"a".to_vec()), (20, b"b".to_vec())], None);
+        let mut id_map = InternalIdMap::build_identity(&tokenizer, &vocab);
+        let mut original_to_internal = vec![u32::MAX; 21];
+        original_to_internal[10] = 0;
+        original_to_internal[20] = 0;
+        id_map.vocab_tokens = ManyToOneIdMap {
+            original_to_internal,
+            internal_to_originals: vec![vec![10, 20]],
+        };
+
+        let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
+
+        let a_weight = terminal_dwa.eval_word(&[0]);
+        let a_original_tokens = expand_original_tokens(&a_weight, &id_map);
+        assert!(
+            a_original_tokens.contains(&10) && a_original_tokens.contains(&20),
+            "merged internal token should stay reachable on terminal 'a'"
+        );
+
+        let b_weight = terminal_dwa.eval_word(&[1]);
+        let b_original_tokens = expand_original_tokens(&b_weight, &id_map);
+        assert!(
+            b_original_tokens.contains(&10) && b_original_tokens.contains(&20),
+            "merged internal token should stay reachable on terminal 'b'"
         );
     }
 

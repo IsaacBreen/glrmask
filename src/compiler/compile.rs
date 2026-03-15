@@ -130,6 +130,19 @@ fn build_internal_token_bytes(vocab: &Vocab, id_map: &InternalIdMap) -> BTreeMap
         .collect()
 }
 
+fn build_internal_token_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
+    vocab
+        .entries
+        .iter()
+        .filter_map(|(&original_token_id, bytes)| {
+            id_map
+                .vocab_tokens
+                .internal_id_for_original(original_token_id)
+                .map(|internal_token_id| (internal_token_id, bytes.clone()))
+        })
+        .collect()
+}
+
 use crate::compiler::grammar::transforms::{expand_nullable_terminals, compact_unused_terminals, inline_single_use_nonterminals, compact_bounded_repeat_ladders, prepare_grammar_for_compile};
 
 
@@ -950,7 +963,12 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     // Build internal_token_bytes and possible_matches with post-compact id_map
     let phase_started_at = std::time::Instant::now();
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
-    let possible_matches = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
+    let internal_token_entries = build_internal_token_entries(vocab, &id_map);
+    let possible_matches =
+        crate::compiler::possible_matches::build_possible_matches_from_token_entries(
+            &tokenizer,
+            &internal_token_entries,
+        );
     log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
 
     log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, vocab, &id_map);
@@ -1061,7 +1079,12 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     let id_map = InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, normalized.ignore_terminal);
 
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
-    let possible_matches_by_state = build_possible_matches_by_state(&tokenizer, &internal_token_bytes);
+    let internal_token_entries = build_internal_token_entries(vocab, &id_map);
+    let possible_matches_by_state =
+        crate::compiler::possible_matches::build_possible_matches_from_token_entries(
+            &tokenizer,
+            &internal_token_entries,
+        );
 
     let characterizations = characterize_terminals(&table, &glr_grammar);
     let templates = Templates::from_characterizations(&characterizations);
