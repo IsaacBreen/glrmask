@@ -2292,6 +2292,86 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
     }
 
+    /// Like apply_and_prune but skips try_promote for cross-type A→B transforms.
+    /// Use when the source tree is already canonical and promotion is unnecessary.
+    pub fn apply_and_prune_no_promote_ab<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
+    where
+        B: Merge + Clone + Eq + Hash,
+        M: FnMut(&A) -> Option<B>,
+    {
+        // Fast path: single Interface at root.
+        if let Upper::Interface(i) = &*self.inner {
+            return match mutator(&i.acc) {
+                Some(new_acc) => LeveledGSS { inner: new_interface(i.inner.clone(), new_acc) },
+                None => LeveledGSS::empty(),
+            };
+        }
+
+        let mut acc_memo: Vec<(A, Option<B>)> = Vec::with_capacity(4);
+
+        fn mutate_acc_np_ab<A, B, M>(
+            a: &A,
+            memo: &mut Vec<(A, Option<B>)>,
+            m: &mut M,
+        ) -> Option<B>
+        where
+            A: Clone + Eq,
+            B: Clone,
+            M: FnMut(&A) -> Option<B>,
+        {
+            for (k, v) in memo.iter() {
+                if k == a {
+                    return v.clone();
+                }
+            }
+            let r = m(a);
+            memo.push((a.clone(), r.clone()));
+            r
+        }
+
+        fn transform_np_ab<T, A, B, M>(
+            node: &Arc<Upper<T, A>>,
+            memo: &mut Vec<(A, Option<B>)>,
+            m: &mut M,
+        ) -> Option<Arc<Upper<T, B>>>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            B: Merge + Clone + Eq + Hash,
+            M: FnMut(&A) -> Option<B>,
+        {
+            match &**node {
+                Upper::Interface(i) => {
+                    mutate_acc_np_ab(&i.acc, memo, m)
+                        .map(|new_acc| new_interface(i.inner.clone(), new_acc))
+                }
+                Upper::Branch(b) => {
+                    let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc_np_ab(e, memo, m));
+                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
+                    for (v, kids) in b.children.iter() {
+                        let mut new_kids: OrdMap<isize, Arc<Upper<T, B>>> = OrdMap::new();
+                        for child in kids.values() {
+                            if let Some(nc) = transform_np_ab::<T, A, B, M>(child, memo, m) {
+                                new_kids.insert(nc.max_depth(), nc);
+                            }
+                        }
+                        if !new_kids.is_empty() {
+                            new_children.insert(v.clone(), new_kids);
+                        }
+                    }
+                    if new_children.is_empty() && new_empty_opt.is_none() {
+                        None
+                    } else {
+                        Some(new_branch(new_children, new_empty_opt))
+                    }
+                }
+            }
+        }
+
+        let res_inner_opt = transform_np_ab::<T, A, B, M>(&self.inner, &mut acc_memo, &mut mutator);
+        res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
+    }
+
     /// Like apply_and_prune but skips try_promote. Use when the tree is already
     /// canonical and the transformation preserves structure (e.g., DenseMaskAcc → DenseMaskAcc).
     pub fn apply_and_prune_no_promote(&self, mut mutator: impl FnMut(&A) -> Option<A>) -> Self {

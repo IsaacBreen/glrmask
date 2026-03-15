@@ -494,7 +494,7 @@ impl<'a> ConstraintState<'a> {
                             }
                         }
                         let t_int = if timed { Some(std::time::Instant::now()) } else { None };
-                        let pruned = popped.apply_and_prune(|allowed| {
+                        let pruned = popped.apply_and_prune_no_promote(|allowed| {
                             allowed.intersect_with_weight(weight, precomputed)
                         });
                         if pruned.is_empty() {
@@ -559,7 +559,7 @@ impl<'a> ConstraintState<'a> {
         let universe = &self.constraint.seed_universe_dense;
         let terminal_masks = &self.constraint.seed_terminal_dense;
 
-        gss.apply_and_prune(|terminals_disallowed| {
+        gss.apply_and_prune_no_promote_ab(|terminals_disallowed| {
             if terminals_disallowed.is_empty()
                 || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
             {
