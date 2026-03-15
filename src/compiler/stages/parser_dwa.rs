@@ -176,6 +176,13 @@ fn count_special_edges(nwa: &NWA) -> (usize, usize) {
     (negative_edges, default_edges)
 }
 
+fn profile_dump_small_automaton(stage: &str, automaton: &impl std::fmt::Display, num_states: usize) {
+    if std::env::var_os("GLRMASK_PROFILE_PARSER_DWA_DUMP_SMALL").is_none() || num_states > 8 {
+        return;
+    }
+    eprintln!("[glrmask/profile][parser_dwa][dump] {stage}\n{automaton}");
+}
+
 fn append_dwa(into: &mut DWA, other: &DWA) -> u32 {
     let offset = into.states.len() as u32;
     for _ in &other.states {
@@ -812,36 +819,34 @@ fn optimize_parser_default_transitions(
     recognizer: &ViableSuffixRecognizer,
     num_parser_states: u32,
 ) -> bool {
-    fn subtract_final_weights_from_outgoing_with_changed(nwa: &mut NWA) -> bool {
-        let mut changed = false;
-        for state in &mut nwa.states {
-            let Some(final_weight) = state.final_weight.clone() else {
-                continue;
-            };
-            if final_weight.is_empty() {
-                continue;
-            }
+    fn subtract_weight_from_outgoing(
+        state: &mut crate::automata::weighted::nwa::NWAState,
+        weight_to_subtract: &Weight,
+    ) -> bool {
+        if weight_to_subtract.is_empty() {
+            return false;
+        }
 
-            for (_, weight) in &mut state.epsilons {
-                let new_weight = weight.difference(&final_weight);
-                if new_weight != *weight {
-                    *weight = new_weight;
+        let mut changed = false;
+        for (_, edge_weight) in &mut state.epsilons {
+            let new_weight = edge_weight.difference(weight_to_subtract);
+            if new_weight != *edge_weight {
+                *edge_weight = new_weight;
+                changed = true;
+            }
+        }
+        for targets in state.transitions.values_mut() {
+            for (_, edge_weight) in targets.iter_mut() {
+                let new_weight = edge_weight.difference(weight_to_subtract);
+                if new_weight != *edge_weight {
+                    *edge_weight = new_weight;
                     changed = true;
                 }
             }
-            for targets in state.transitions.values_mut() {
-                for (_, weight) in targets.iter_mut() {
-                    let new_weight = weight.difference(&final_weight);
-                    if new_weight != *weight {
-                        *weight = new_weight;
-                        changed = true;
-                    }
-                }
-                targets.retain(|(_, weight)| !weight.is_empty());
-            }
-            state.epsilons.retain(|(_, weight)| !weight.is_empty());
-            state.transitions.retain(|_, targets| !targets.is_empty());
+            targets.retain(|(_, edge_weight)| !edge_weight.is_empty());
         }
+        state.epsilons.retain(|(_, edge_weight)| !edge_weight.is_empty());
+        state.transitions.retain(|_, targets| !targets.is_empty());
         changed
     }
 
@@ -867,6 +872,9 @@ fn optimize_parser_default_transitions(
 
         for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
             if possible_ids.is_empty() {
+                continue;
+            }
+            if possible_ids.len() < 2 {
                 continue;
             }
 
@@ -936,8 +944,7 @@ fn optimize_parser_default_transitions(
             }
 
             let mut lifted_final = Weight::empty();
-            let mut lifted_by_index: Vec<(usize, Weight)> = Vec::new();
-            for (index, (target, weight)) in default_targets.iter().enumerate() {
+            for (_index, (target, weight)) in default_targets.iter().enumerate() {
                 let Some(target_final) = nwa.states[*target as usize].final_weight.as_ref() else {
                     continue;
                 };
@@ -946,34 +953,15 @@ fn optimize_parser_default_transitions(
                     continue;
                 }
                 lifted_final = lifted_final.union(&lifted);
-                lifted_by_index.push((index, lifted));
             }
 
-            if union_final_weight(&mut nwa.states[state_id].final_weight, lifted_final) {
+            if union_final_weight(&mut nwa.states[state_id].final_weight, lifted_final.clone()) {
                 changed = true;
             }
 
-            if let Some(default_entries) = nwa.states[state_id].transitions.get_mut(&DEFAULT_LABEL) {
-                for (index, lifted) in lifted_by_index {
-                    let new_weight = default_entries[index].1.difference(&lifted);
-                    if new_weight != default_entries[index].1 {
-                        default_entries[index].1 = new_weight;
-                        changed = true;
-                    }
-                }
-                default_entries.retain(|(_, weight)| !weight.is_empty());
+            if subtract_weight_from_outgoing(&mut nwa.states[state_id], &lifted_final) {
+                changed = true;
             }
-            if nwa.states[state_id]
-                .transitions
-                .get(&DEFAULT_LABEL)
-                .is_some_and(|targets| targets.is_empty())
-            {
-                nwa.states[state_id].transitions.remove(&DEFAULT_LABEL);
-            }
-        }
-
-        if subtract_final_weights_from_outgoing_with_changed(nwa) {
-            changed = true;
         }
 
         for state in &mut nwa.states {
@@ -1236,20 +1224,34 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
             det_elapsed.as_secs_f64() * 1000.0,
             report.parser_dwa_pre_minimize.states,
         );
+        profile_dump_small_automaton(
+            "determinize_with_supports",
+            &parser_dwa_pre_minimize,
+            parser_dwa_pre_minimize.states.len(),
+        );
     }
 
     let mut optimized_parser_nwa = dwa_to_nwa(&parser_dwa_pre_minimize);
     let optimize_started_at = std::time::Instant::now();
-    optimize_parser_default_transitions(
-        &mut optimized_parser_nwa,
-        &determinized.supports,
-        &viable_suffix_recognizer,
-        table.num_states,
-    );
+    let default_opt_enabled = std::env::var_os("GLRMASK_DISABLE_PARSER_DEFAULT_OPT").is_none();
+    if default_opt_enabled {
+        optimize_parser_default_transitions(
+            &mut optimized_parser_nwa,
+            &determinized.supports,
+            &viable_suffix_recognizer,
+            table.num_states,
+        );
+    }
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa] default_opt_ms={:.3}",
+            "[glrmask/profile][parser_dwa] default_opt_ms={:.3} enabled={}",
             optimize_started_at.elapsed().as_secs_f64() * 1000.0,
+            default_opt_enabled,
+        );
+        profile_dump_small_automaton(
+            "after_default_opt_nwa",
+            &optimized_parser_nwa,
+            optimized_parser_nwa.states.len(),
         );
     }
 
@@ -1262,6 +1264,11 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
             "[glrmask/profile][parser_dwa] subtract_final_weights_ms={:.3}",
             subtract_started_at.elapsed().as_secs_f64() * 1000.0,
         );
+        profile_dump_small_automaton(
+            "after_subtract_final_nwa",
+            &optimized_parser_nwa,
+            optimized_parser_nwa.states.len(),
+        );
     }
 
     let min_started_at = std::time::Instant::now();
@@ -1272,6 +1279,11 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
             "[glrmask/profile][parser_dwa] determinize_after_defaults_ms={:.3} states={}",
             min_started_at.elapsed().as_secs_f64() * 1000.0,
             determinized_after_defaults.num_states(),
+        );
+        profile_dump_small_automaton(
+            "determinize_after_defaults",
+            &determinized_after_defaults,
+            determinized_after_defaults.states.len(),
         );
     }
     let core_dwa = minimize(&determinized_after_defaults);
@@ -1293,6 +1305,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
             total_started_at.elapsed().as_secs_f64() * 1000.0,
             report.parser_dwa_minimized,
         );
+        profile_dump_small_automaton("final_minimized", &core_dwa, core_dwa.states.len());
     }
 
     (core_dwa, report)
