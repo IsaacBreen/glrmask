@@ -1073,6 +1073,65 @@ fn optimize_parser_default_transitions(
     any_changed
 }
 
+/// Expand all DEFAULT_LABEL transitions into explicit per-parser-state transitions,
+/// using the viable suffix recognizer to determine which parser state IDs are reachable.
+/// After this pass, no DEFAULT_LABEL transitions remain.
+fn expand_parser_default_transitions(
+    nwa: &mut NWA,
+    state_supports: &[Vec<u32>],
+    recognizer: &ViableSuffixRecognizer,
+    num_parser_states: u32,
+) {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
+
+    let possible_by_state: Vec<Vec<u32>> = state_supports
+        .iter()
+        .map(|support| {
+            recognizer
+                .subset_to_state
+                .get(support)
+                .and_then(|state_id| recognizer.possible_outgoing_ids.get(*state_id as usize))
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+
+    let mut states_expanded = 0usize;
+    let mut transitions_created = 0usize;
+
+    for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
+        let default_targets = match nwa.states[state_id].transitions.get(&DEFAULT_LABEL) {
+            Some(targets) => targets.clone(),
+            None => continue,
+        };
+
+        for (target, weight) in &default_targets {
+            for &parser_state_id in possible_ids {
+                let label = parser_state_id as i32;
+                if add_or_union_transition(
+                    &mut nwa.states[state_id],
+                    label,
+                    *target,
+                    weight.clone(),
+                ) {
+                    transitions_created += 1;
+                }
+            }
+        }
+
+        nwa.states[state_id].transitions.remove(&DEFAULT_LABEL);
+        states_expanded += 1;
+    }
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] expand_defaults states_expanded={} transitions_created={}",
+            states_expanded,
+            transitions_created,
+        );
+    }
+}
+
 pub fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -1316,6 +1375,23 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
             &optimized_parser_nwa,
             optimized_parser_nwa.states.len(),
         );
+    }
+
+    let expand_defaults_enabled = std::env::var_os("GLRMASK_EXPAND_PARSER_DEFAULTS").is_some();
+    if expand_defaults_enabled {
+        let expand_started_at = std::time::Instant::now();
+        expand_parser_default_transitions(
+            &mut optimized_parser_nwa,
+            &determinized.supports,
+            &viable_suffix_recognizer,
+            table.num_states,
+        );
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][parser_dwa] expand_defaults_ms={:.3}",
+                expand_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
     }
 
     let subtract_started_at = std::time::Instant::now();
