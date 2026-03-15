@@ -866,30 +866,15 @@ fn optimize_parser_default_transitions(
     let mut any_changed = false;
     let mut iterations = 0usize;
 
-    // Diagnostic counters for profiling why the optimization may not fire.
-    let mut diag_empty_possible = 0usize;
-    let mut diag_singleton = 0usize;
-    let mut diag_mismatch_labels = 0usize;
-    let mut diag_mismatch_has_default_subset = 0usize;
-    let mut diag_mismatch_no_default_subset = 0usize;
-    let mut diag_mismatch_superset = 0usize;
-    let mut diag_mismatch_other = 0usize;
-    let mut diag_multi_target = 0usize;
-    let mut diag_diff_targets = 0usize;
-    let mut diag_empty_weight = 0usize;
-    let mut diag_synthesized = 0usize;
-
     loop {
         iterations += 1;
         let mut changed = false;
 
         for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
             if possible_ids.is_empty() {
-                if iterations == 1 { diag_empty_possible += 1; }
                 continue;
             }
             if possible_ids.len() < 2 {
-                if iterations == 1 { diag_singleton += 1; }
                 continue;
             }
 
@@ -900,29 +885,12 @@ fn optimize_parser_default_transitions(
                 .filter_map(|(&label, _)| parser_state_label(label, num_parser_states))
                 .collect();
             if actual_positive != possible_set {
-                if iterations == 1 {
-                    diag_mismatch_labels += 1;
-                    // Check if state has default transitions covering the gap
-                    let has_default = nwa.states[state_id].transitions.contains_key(&DEFAULT_LABEL);
-                    let is_subset = actual_positive.is_subset(&possible_set);
-                    let is_superset = actual_positive.is_superset(&possible_set);
-                    if has_default && is_subset {
-                        diag_mismatch_has_default_subset += 1;
-                    } else if !has_default && is_subset {
-                        diag_mismatch_no_default_subset += 1;
-                    } else if is_superset {
-                        diag_mismatch_superset += 1;
-                    } else {
-                        diag_mismatch_other += 1;
-                    }
-                }
                 continue;
             }
 
             let mut shared_target: Option<u32> = None;
             let mut default_weight: Option<Weight> = None;
             let mut valid = true;
-            let mut different_targets = false;
 
             for parser_state_id in possible_ids {
                 let Some(targets) = nwa.states[state_id].transitions.get(&(*parser_state_id as i32)) else {
@@ -930,7 +898,6 @@ fn optimize_parser_default_transitions(
                     break;
                 };
                 if targets.len() != 1 {
-                    if iterations == 1 { diag_multi_target += 1; }
                     valid = false;
                     break;
                 }
@@ -938,7 +905,6 @@ fn optimize_parser_default_transitions(
                 let (target, weight) = &targets[0];
                 match shared_target {
                     Some(existing) if existing != *target => {
-                        different_targets = true;
                         valid = false;
                         break;
                     }
@@ -952,11 +918,6 @@ fn optimize_parser_default_transitions(
                 });
             }
 
-            if different_targets && iterations == 1 {
-                diag_diff_targets += 1;
-                continue;
-            }
-
             let Some(target) = shared_target else {
                 continue;
             };
@@ -964,11 +925,9 @@ fn optimize_parser_default_transitions(
                 continue;
             };
             if !valid || default_weight.is_empty() {
-                if iterations == 1 { diag_empty_weight += 1; }
                 continue;
             }
 
-            if iterations == 1 { diag_synthesized += 1; }
             if add_or_union_transition(&mut nwa.states[state_id], DEFAULT_LABEL, target, default_weight) {
                 changed = true;
             }
@@ -1049,24 +1008,6 @@ fn optimize_parser_default_transitions(
             "[glrmask/profile][parser_dwa] default_opt iterations={} changed={}",
             iterations,
             any_changed,
-        );
-        eprintln!(
-            "[glrmask/profile][parser_dwa] default_opt_diag states={} empty_possible={} singleton={} mismatch_labels={} multi_target={} diff_targets={} empty_weight={} synthesized={}",
-            state_supports.len(),
-            diag_empty_possible,
-            diag_singleton,
-            diag_mismatch_labels,
-            diag_multi_target,
-            diag_diff_targets,
-            diag_empty_weight,
-            diag_synthesized,
-        );
-        eprintln!(
-            "[glrmask/profile][parser_dwa] default_opt_mismatch_detail has_default_subset={} no_default_subset={} superset={} other={}",
-            diag_mismatch_has_default_subset,
-            diag_mismatch_no_default_subset,
-            diag_mismatch_superset,
-            diag_mismatch_other,
         );
     }
 
@@ -1278,14 +1219,10 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
     let det_elapsed = phase_started_at.elapsed();
     report.parser_dwa_pre_minimize = collect_weighted_dwa_stats(&parser_dwa_pre_minimize);
     if profile_enabled {
-        let pre_min_default_trans = parser_dwa_pre_minimize.states.iter()
-            .filter(|s| s.transitions.contains_key(&DEFAULT_LABEL))
-            .count();
         eprintln!(
-            "[glrmask/profile][parser_dwa] determinize_with_supports_ms={:.3} states={} default_trans={}",
+            "[glrmask/profile][parser_dwa] determinize_with_supports_ms={:.3} states={}",
             det_elapsed.as_secs_f64() * 1000.0,
             report.parser_dwa_pre_minimize.states,
-            pre_min_default_trans,
         );
         profile_dump_small_automaton(
             "determinize_with_supports",
@@ -1355,17 +1292,13 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
     report.parser_dwa_minimized = collect_weighted_dwa_stats(&core_dwa);
     report.total_time = total_started_at.elapsed();
     if profile_enabled {
-        let post_min_default_trans = core_dwa.states.iter()
-            .filter(|s| s.transitions.contains_key(&DEFAULT_LABEL))
-            .count();
         eprintln!(
-            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} det_ms={:.3} min_ms={:.3} pre_min_states={} {} post_min_default_trans={}",
+            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} det_ms={:.3} min_ms={:.3} pre_min_states={} {}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
             det_elapsed.as_secs_f64() * 1000.0,
             min_elapsed.as_secs_f64() * 1000.0,
             report.parser_dwa_pre_minimize.states,
             report.parser_dwa_minimized,
-            post_min_default_trans,
         );
         eprintln!(
             "[glrmask/profile][parser_dwa] total_ms={:.3} {}",
