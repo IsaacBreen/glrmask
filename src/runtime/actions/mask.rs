@@ -296,6 +296,7 @@ pub struct MaskDebugMetrics {
     pub transition_intersect_ns: u64,
     pub transition_enqueue_ns: u64,
     pub queue_pop_ns: u64,
+    pub bfs_loop_ns: u64,
     pub total_ns: u64,
     pub internal_token_dense_words: usize,
 }
@@ -373,6 +374,7 @@ impl<'a> ConstraintState<'a> {
         if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_seed_start) {
             metrics.seed_ns = t.elapsed().as_nanos() as u64;
         }
+        let t_bfs_loop = if timed { Some(std::time::Instant::now()) } else { None };
         while !queue.is_empty() {
             let t_pop = if timed { Some(std::time::Instant::now()) } else { None };
             // Find max depth.
@@ -503,6 +505,9 @@ impl<'a> ConstraintState<'a> {
                     }
                 }
             }
+        }
+        if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_bfs_loop) {
+            metrics.bfs_loop_ns = t.elapsed().as_nanos() as u64;
         }
 
         // EOS token: clear unconditionally, then re-set if constraint is complete.

@@ -174,15 +174,12 @@ impl PyConstraintState {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
         })?;
-        for v in slice.iter_mut() {
-            *v = 0;
-        }
-        let n = slice.len();
-        let mut buf = vec![0u32; n];
-        self.inner.with_dependent(|_owner, state| state.fill_mask(&mut buf));
-        for (dst, src) in slice.iter_mut().zip(buf.iter()) {
-            *dst = *src as i32;
-        }
+        // Safety: i32 and u32 have identical size, alignment, and bit representation.
+        // fill_mask writes valid u32 bitmask values where the high bit is meaningful.
+        let buf: &mut [u32] = unsafe {
+            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
+        };
+        self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
         Ok(())
     }
 
@@ -263,6 +260,7 @@ impl PyConstraintState {
         out.set_item("transition_intersect_ns", metrics.transition_intersect_ns)?;
         out.set_item("transition_enqueue_ns", metrics.transition_enqueue_ns)?;
         out.set_item("queue_pop_ns", metrics.queue_pop_ns)?;
+        out.set_item("bfs_loop_ns", metrics.bfs_loop_ns)?;
         out.set_item("total_ns", metrics.total_ns)?;
         out.set_item("internal_token_dense_words", metrics.internal_token_dense_words)?;
         Ok(out)
