@@ -2208,6 +2208,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         B: Merge + Clone + Eq + Hash,
         M: FnMut(&A) -> Option<B>,
     {
+        // Fast path: single Interface at root — no memo or tree traversal needed.
+        if let Upper::Interface(i) = &*self.inner {
+            return match mutator(&i.acc) {
+                Some(new_acc) => LeveledGSS { inner: new_interface(i.inner.clone(), new_acc) },
+                None => LeveledGSS::empty(),
+            };
+        }
+
         let mut acc_memo: StdHashMap<A, Option<B>> = StdHashMap::new();
 
         fn mutate_acc<A, B, M>(
