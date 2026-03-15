@@ -366,28 +366,115 @@ impl<'a> ConstraintState<'a> {
         // Flat queue: (depth, dwa_state, gss). Processed highest-depth-first.
         let mut queue: Vec<(isize, u32, DenseMaskGSS)> = Vec::with_capacity(32);
 
-        // Seed: build initial dense GSS from each tokenizer state.
+        let start_state = parser_dwa.start_state;
+        let start_dwa_state = &parser_dwa.states[start_state as usize];
+        let start_fast_trans = &self.constraint.dwa_fast_transitions[start_state as usize];
+
+        // Seed: decompose parser GSS and produce DenseMaskGSS sub-trees directly,
+        // skipping the construction of the root-level Branch node.
         for (&tokenizer_state, gss) in &self.state {
             if gss.is_empty() {
                 continue;
             }
             let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
-            let seeded = self.seed_weight_dense(internal_tsid, gss, dense_words);
-            if seeded.is_empty() {
+            let universe = &self.constraint.seed_universe_dense;
+            let terminal_masks = &self.constraint.seed_terminal_dense;
+
+            let (decomposed, root_accs) = gss.apply_transform_and_decompose(|terminals_disallowed| {
+                if terminals_disallowed.is_empty()
+                    || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
+                {
+                    if universe.iter().all(|&w| w == 0) {
+                        return None;
+                    }
+                    let dense: Arc<[u64]> = Arc::from(&**universe);
+                    return Some(DenseMaskAcc {
+                        start: internal_tsid,
+                        end: internal_tsid,
+                        dense,
+                    });
+                }
+                let mut dense: Vec<u64> = universe.to_vec();
+                for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed {
+                    for &terminal_id in disallowed_in_state {
+                        if let Some(mask) = terminal_masks.get(&(orig_tokenizer_state, terminal_id)) {
+                            for (d, m) in dense.iter_mut().zip(mask.iter()) {
+                                *d &= !m;
+                            }
+                        }
+                    }
+                }
+                if dense.iter().all(|&w| w == 0) {
+                    None
+                } else {
+                    Some(DenseMaskAcc {
+                        start: internal_tsid,
+                        end: internal_tsid,
+                        dense: dense.into(),
+                    })
+                }
+            });
+
+            if decomposed.is_empty() && root_accs.is_empty() {
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.seeded_empty_after_weight += 1;
                 }
                 continue;
             }
-            let depth = seeded.max_depth();
-            let state = parser_dwa.start_state;
-            if let Some(pos) = queue.iter().position(|(d, s, _)| *d == depth && *s == state) {
-                queue[pos].2 = queue[pos].2.merge(&seeded);
-            } else {
-                queue.push((depth, state, seeded));
-            }
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.seeded_entries += 1;
+            }
+
+            // Apply start_state's final_weight to the seed accumulators.
+            if let Some(final_weight) = &start_dwa_state.final_weight {
+                if final_weight.is_full() {
+                    for acc in &root_accs {
+                        acc.or_to_buf(&self.constraint, buf);
+                    }
+                    for (_, sub_gss) in &decomposed {
+                        sub_gss.for_each_acc(|acc| {
+                            acc.or_to_buf(&self.constraint, buf);
+                        });
+                    }
+                } else {
+                    for acc in &root_accs {
+                        acc.or_intersection_to_buf(
+                            &self.constraint, final_weight, precomputed, buf,
+                        );
+                    }
+                    for (_, sub_gss) in &decomposed {
+                        sub_gss.for_each_acc(|acc| {
+                            acc.or_intersection_to_buf(
+                                &self.constraint, final_weight, precomputed, buf,
+                            );
+                        });
+                    }
+                }
+            }
+
+            // Apply start_state transitions to each decomposed sub-GSS.
+            for (parser_state, popped) in &decomposed {
+                let labels = [
+                    (crate::compiler::glr::labels::encode_positive_label(*parser_state), false),
+                    (crate::compiler::glr::labels::DEFAULT_LABEL, true),
+                ];
+                for (label, _is_default) in labels {
+                    let Some((target, weight)) = start_fast_trans.get(&label) else {
+                        continue;
+                    };
+                    let pruned = popped.apply_and_prune_no_promote(|allowed| {
+                        allowed.intersect_with_weight(weight, precomputed)
+                    });
+                    if pruned.is_empty() {
+                        continue;
+                    }
+                    let new_depth = pruned.max_depth();
+                    if let Some(pos) = queue.iter().position(|(d, s, _)| *d == new_depth && *s == *target) {
+                        queue[pos].2 = queue[pos].2.merge(&pruned);
+                    } else {
+                        queue.push((new_depth, *target, pruned));
+                    }
+                }
             }
         }
 

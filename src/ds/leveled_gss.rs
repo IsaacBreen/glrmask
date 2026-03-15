@@ -2372,6 +2372,144 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
     }
 
+    /// Like apply_and_prune_no_promote_ab followed by decompose_and_pop, but avoids
+    /// building the root-level Branch node. Returns (value, sub_gss) pairs directly,
+    /// plus a Vec of "root accumulators" (transformed empty values at the root Branch)
+    /// to be checked for final_weight separately.
+    pub fn apply_transform_and_decompose<B, M>(
+        &self,
+        mut mutator: M,
+    ) -> (Vec<(T, LeveledGSS<T, B>)>, Vec<B>)
+    where
+        B: Merge + Clone + Eq + Hash,
+        M: FnMut(&A) -> Option<B>,
+    {
+        let mut acc_memo: Vec<(A, Option<B>)> = Vec::with_capacity(4);
+
+        fn mutate_acc_td<A, B, M>(
+            a: &A,
+            memo: &mut Vec<(A, Option<B>)>,
+            m: &mut M,
+        ) -> Option<B>
+        where
+            A: Clone + Eq,
+            B: Clone,
+            M: FnMut(&A) -> Option<B>,
+        {
+            for (k, v) in memo.iter() {
+                if k == a {
+                    return v.clone();
+                }
+            }
+            let r = m(a);
+            memo.push((a.clone(), r.clone()));
+            r
+        }
+
+        fn transform_td<T, A, B, M>(
+            node: &Arc<Upper<T, A>>,
+            memo: &mut Vec<(A, Option<B>)>,
+            m: &mut M,
+        ) -> Option<Arc<Upper<T, B>>>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            B: Merge + Clone + Eq + Hash,
+            M: FnMut(&A) -> Option<B>,
+        {
+            match &**node {
+                Upper::Interface(i) => {
+                    mutate_acc_td(&i.acc, memo, m)
+                        .map(|new_acc| new_interface(i.inner.clone(), new_acc))
+                }
+                Upper::Branch(b) => {
+                    let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc_td(e, memo, m));
+                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
+                    for (v, kids) in b.children.iter() {
+                        let mut new_kids: OrdMap<isize, Arc<Upper<T, B>>> = OrdMap::new();
+                        for child in kids.values() {
+                            if let Some(nc) = transform_td::<T, A, B, M>(child, memo, m) {
+                                new_kids.insert(nc.max_depth(), nc);
+                            }
+                        }
+                        if !new_kids.is_empty() {
+                            new_children.insert(v.clone(), new_kids);
+                        }
+                    }
+                    if new_children.is_empty() && new_empty_opt.is_none() {
+                        None
+                    } else {
+                        Some(new_branch(new_children, new_empty_opt))
+                    }
+                }
+            }
+        }
+
+        match &*self.inner {
+            Upper::Interface(i) => {
+                // Interface root: transform acc, then decompose inner Lower's children.
+                let new_acc = match mutate_acc_td(&i.acc, &mut acc_memo, &mut mutator) {
+                    Some(a) => a,
+                    None => return (Vec::new(), Vec::new()),
+                };
+                let mut result = Vec::with_capacity(i.inner.children.len());
+                for (val, kids) in i.inner.children.iter() {
+                    let lower = if kids.len() == 1 {
+                        kids.values().next().unwrap().clone()
+                    } else {
+                        let mut it = kids.values();
+                        let mut acc = it.next().unwrap().clone();
+                        for child in it {
+                            acc = merge_lower(&acc, child);
+                        }
+                        acc
+                    };
+                    if !lower.children.is_empty() || lower.empty {
+                        let upper = new_interface(lower, new_acc.clone());
+                        result.push((val.clone(), LeveledGSS { inner: upper }));
+                    }
+                }
+                (result, Vec::new())
+            }
+            Upper::Branch(b) => {
+                // Branch root: transform each child subtree, decompose into (value, sub_gss) pairs.
+                let root_accs: Vec<B> = b.empty.iter()
+                    .filter_map(|e| mutate_acc_td(e, &mut acc_memo, &mut mutator))
+                    .collect();
+                let mut result = Vec::with_capacity(b.children.len());
+                for (val, kids) in b.children.iter() {
+                    // Transform each child, collect into new_kids.
+                    let mut new_kids: Vec<Arc<Upper<T, B>>> = Vec::new();
+                    for child in kids.values() {
+                        if let Some(nc) = transform_td::<T, A, B, M>(child, &mut acc_memo, &mut mutator) {
+                            new_kids.push(nc);
+                        }
+                    }
+                    if new_kids.is_empty() {
+                        continue;
+                    }
+                    // Merge children (like decompose_and_pop does).
+                    let merged = if new_kids.len() == 1 {
+                        new_kids.into_iter().next().unwrap()
+                    } else {
+                        let mut it = new_kids.into_iter();
+                        let mut acc = it.next().unwrap();
+                        for child in it {
+                            acc = merge_upper(&acc, &child);
+                        }
+                        acc
+                    };
+                    let is_empty = matches!(&*merged,
+                        Upper::Branch(b) if b.children.is_empty() && b.empty.is_none());
+                    if !is_empty {
+                        result.push((val.clone(), LeveledGSS { inner: merged }));
+                    }
+                }
+                (result, root_accs)
+            }
+        }
+    }
+
     /// Like apply_and_prune but skips try_promote. Use when the tree is already
     /// canonical and the transformation preserves structure (e.g., DenseMaskAcc → DenseMaskAcc).
     pub fn apply_and_prune_no_promote(&self, mut mutator: impl FnMut(&A) -> Option<A>) -> Self {
