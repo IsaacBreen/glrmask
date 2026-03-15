@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::Vocab;
@@ -12,7 +12,10 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
+use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
@@ -43,6 +46,18 @@ struct Branch {
 struct StateSummary {
     final_weight: Option<Weight>,
     branches: Vec<Branch>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ViableSuffixRecognizer {
+    subset_to_state: HashMap<Vec<u32>, u32>,
+    possible_outgoing_ids: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Clone)]
+struct DeterminizedDwaWithSupports {
+    dwa: DWA,
+    supports: Vec<Vec<u32>>,
 }
 
 #[derive(Default)]
@@ -444,6 +459,573 @@ fn compose_state(
     composed
 }
 
+fn union_final_weight(slot: &mut Option<Weight>, add: Weight) -> bool {
+    if add.is_empty() {
+        return false;
+    }
+
+    match slot {
+        Some(existing) => {
+            let updated = existing.union(&add);
+            if updated != *existing {
+                *existing = updated;
+                true
+            } else {
+                false
+            }
+        }
+        None => {
+            *slot = Some(add);
+            true
+        }
+    }
+}
+
+fn add_or_union_transition(
+    state: &mut crate::automata::weighted::nwa::NWAState,
+    label: i32,
+    target: u32,
+    add: Weight,
+) -> bool {
+    if add.is_empty() {
+        return false;
+    }
+
+    let targets = state.transitions.entry(label).or_default();
+    for (existing_target, existing_weight) in targets.iter_mut() {
+        if *existing_target == target {
+            let updated = existing_weight.union(&add);
+            if updated != *existing_weight {
+                *existing_weight = updated;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    targets.push((target, add));
+    true
+}
+
+fn parser_state_label(label: i32, num_parser_states: u32) -> Option<u32> {
+    if label >= 0 && (label as u32) < num_parser_states {
+        Some(label as u32)
+    } else {
+        None
+    }
+}
+
+fn nwa_to_unweighted(nwa: &NWA) -> UnweightedNfa {
+    let mut out = UnweightedNfa::new_empty();
+    out.states = vec![crate::automata::unweighted_u32::nfa::NFAState::default(); nwa.states.len()];
+    out.start_states = nwa.start_states.clone();
+
+    for (state_id, state) in nwa.states.iter().enumerate() {
+        if state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty()) {
+            out.states[state_id].is_accepting = true;
+        }
+
+        for (&label, targets) in &state.transitions {
+            for (target, weight) in targets {
+                if !weight.is_empty() {
+                    out.states[state_id].transitions.entry(label).or_default().push(*target);
+                }
+            }
+        }
+
+        for (target, weight) in &state.epsilons {
+            if !weight.is_empty() {
+                out.states[state_id].epsilons.push(*target);
+            }
+        }
+    }
+
+    out
+}
+
+fn determinize_unweighted_with_subset_map(nfa: &UnweightedNfa) -> (UnweightedDfa, HashMap<Vec<u32>, u32>) {
+    fn epsilon_closure(nfa: &UnweightedNfa, seeds: &[u32]) -> BTreeSet<u32> {
+        let mut closed = BTreeSet::new();
+        let mut queue: VecDeque<u32> = seeds.iter().copied().collect();
+        while let Some(state_id) = queue.pop_front() {
+            if closed.insert(state_id) {
+                for &target in &nfa.states[state_id as usize].epsilons {
+                    if !closed.contains(&target) {
+                        queue.push_back(target);
+                    }
+                }
+            }
+        }
+        closed
+    }
+
+    if nfa.states.is_empty() || nfa.start_states.is_empty() {
+        return (UnweightedDfa::new(), HashMap::new());
+    }
+
+    let mut dfa = UnweightedDfa::new();
+    let mut subset_map: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut worklist: VecDeque<Vec<u32>> = VecDeque::new();
+
+    let start_closure = epsilon_closure(nfa, &nfa.start_states);
+    let start_key: Vec<u32> = start_closure.iter().copied().collect();
+    subset_map.insert(start_key.clone(), dfa.start_state);
+    worklist.push_back(start_key);
+
+    while let Some(subset_key) = worklist.pop_front() {
+        let dfa_state = subset_map[&subset_key];
+        if subset_key.iter().any(|&state_id| nfa.states[state_id as usize].is_accepting) {
+            dfa.set_accepting(dfa_state, true);
+        }
+
+        let mut label_targets: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
+        for &state_id in &subset_key {
+            for (&label, targets) in &nfa.states[state_id as usize].transitions {
+                let entry = label_targets.entry(label).or_default();
+                for &target in targets {
+                    entry.insert(target);
+                }
+            }
+        }
+
+        for (label, raw_targets) in label_targets {
+            let closure = epsilon_closure(nfa, &raw_targets.iter().copied().collect::<Vec<_>>());
+            let next_key: Vec<u32> = closure.iter().copied().collect();
+            if next_key.is_empty() {
+                continue;
+            }
+
+            let next_state = if let Some(&existing) = subset_map.get(&next_key) {
+                existing
+            } else {
+                let new_state = dfa.add_state();
+                subset_map.insert(next_key.clone(), new_state);
+                worklist.push_back(next_key);
+                new_state
+            };
+            dfa.add_transition(dfa_state, label, next_state);
+        }
+    }
+
+    (dfa, subset_map)
+}
+
+fn build_viable_suffix_recognizer(nwa: &NWA, num_parser_states: u32) -> ViableSuffixRecognizer {
+    let unweighted = nwa_to_unweighted(nwa);
+    let (dfa, subset_to_state) = determinize_unweighted_with_subset_map(&unweighted);
+    let possible_outgoing_ids = dfa
+        .states
+        .iter()
+        .map(|state| {
+            let mut ids = BTreeSet::new();
+            for &label in state.transitions.keys() {
+                if label == DEFAULT_LABEL {
+                    ids.extend(0..num_parser_states);
+                } else if let Some(parser_state_id) = parser_state_label(label, num_parser_states) {
+                    ids.insert(parser_state_id);
+                }
+            }
+            ids.into_iter().collect()
+        })
+        .collect();
+
+    ViableSuffixRecognizer {
+        subset_to_state,
+        possible_outgoing_ids,
+    }
+}
+
+fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
+    fn canonicalize(subset: &HashMap<u32, Weight>) -> Vec<(u32, Weight)> {
+        let mut entries: Vec<_> = subset
+            .iter()
+            .filter_map(|(&state_id, weight)| (!weight.is_empty()).then_some((state_id, weight.clone())))
+            .collect();
+        entries.sort_by_key(|(state_id, _)| *state_id);
+        entries
+    }
+
+    fn epsilon_closure(nwa: &NWA, seed: HashMap<u32, Weight>) -> HashMap<u32, Weight> {
+        let mut closure = seed;
+        let mut queue: VecDeque<u32> = closure.keys().copied().collect();
+
+        while let Some(state_id) = queue.pop_front() {
+            let Some(current_weight) = closure.get(&state_id).cloned() else {
+                continue;
+            };
+            let Some(state) = nwa.states.get(state_id as usize) else {
+                continue;
+            };
+            for (target, edge_weight) in &state.epsilons {
+                let contribution = current_weight.intersection(edge_weight);
+                if contribution.is_empty() {
+                    continue;
+                }
+                let existing = closure.get(target).cloned().unwrap_or_else(Weight::empty);
+                if !contribution.is_subset(&existing) {
+                    closure.insert(*target, existing.union(&contribution));
+                    queue.push_back(*target);
+                }
+            }
+        }
+
+        closure
+    }
+
+    let mut dwa = DWA::new(0, 0);
+    let mut supports = vec![Vec::new()];
+
+    let mut start_subset = HashMap::new();
+    for &state_id in &nwa.start_states {
+        let existing = start_subset.get(&state_id).cloned().unwrap_or_else(Weight::empty);
+        start_subset.insert(state_id, existing.union(&Weight::all()));
+    }
+    let start_subset = epsilon_closure(nwa, start_subset);
+    if start_subset.is_empty() {
+        return DeterminizedDwaWithSupports { dwa, supports };
+    }
+
+    let start_entries = canonicalize(&start_subset);
+    supports[0] = start_entries.iter().map(|(state_id, _)| *state_id).collect();
+
+    let mut subset_map: HashMap<Vec<(u32, usize)>, u32> = HashMap::new();
+    let mut worklist: VecDeque<(Vec<(u32, usize)>, Vec<(u32, Weight)>)> = VecDeque::new();
+    let start_key: Vec<(u32, usize)> = start_entries
+        .iter()
+        .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
+        .collect();
+    subset_map.insert(start_key.clone(), dwa.start_state);
+    worklist.push_back((start_key, start_entries));
+
+    while let Some((subset_key_ids, subset_entries)) = worklist.pop_front() {
+        let from_state = subset_map[&subset_key_ids];
+
+        let mut final_weight = Weight::empty();
+        for (nwa_state_id, path_weight) in &subset_entries {
+            if let Some(state_final) = nwa.states[*nwa_state_id as usize].final_weight.as_ref() {
+                final_weight = final_weight.union(&path_weight.intersection(state_final));
+            }
+        }
+        if !final_weight.is_empty() {
+            dwa.set_final_weight(from_state, final_weight);
+        }
+
+        let mut raw_targets: HashMap<i32, HashMap<u32, Weight>> = HashMap::new();
+        for (nwa_state_id, path_weight) in &subset_entries {
+            let state = &nwa.states[*nwa_state_id as usize];
+            for (&label, targets) in &state.transitions {
+                for (target, transition_weight) in targets {
+                    let next_weight = path_weight.intersection(transition_weight);
+                    if next_weight.is_empty() {
+                        continue;
+                    }
+
+                    let target_entry = raw_targets.entry(label).or_default();
+                    target_entry
+                        .entry(*target)
+                        .and_modify(|existing| *existing = existing.union(&next_weight))
+                        .or_insert(next_weight);
+                }
+            }
+        }
+
+        for (label, target_subset) in raw_targets {
+            if target_subset.is_empty() {
+                continue;
+            }
+
+            let edge_weight = Weight::union_all(target_subset.values());
+            if edge_weight.is_empty() {
+                continue;
+            }
+
+            let expanded = epsilon_closure(nwa, target_subset);
+            if expanded.is_empty() {
+                continue;
+            }
+
+            let edge_complement = edge_weight.complement();
+            let normalized: HashMap<u32, Weight> = if edge_complement.is_empty() {
+                expanded
+            } else {
+                expanded
+                    .into_iter()
+                    .filter_map(|(state_id, weight)| {
+                        let normalized_weight = weight.union(&edge_complement);
+                        (!normalized_weight.is_empty()).then_some((state_id, normalized_weight))
+                    })
+                    .collect()
+            };
+
+            let next_entries = canonicalize(&normalized);
+            if next_entries.is_empty() {
+                continue;
+            }
+
+            let next_key_ids: Vec<(u32, usize)> = next_entries
+                .iter()
+                .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
+                .collect();
+            let next_support: Vec<u32> = next_entries.iter().map(|(state_id, _)| *state_id).collect();
+
+            let to_state = if let Some(existing) = subset_map.get(&next_key_ids).copied() {
+                existing
+            } else {
+                let new_state = dwa.add_state();
+                subset_map.insert(next_key_ids.clone(), new_state);
+                worklist.push_back((next_key_ids, next_entries));
+                supports.push(next_support);
+                new_state
+            };
+
+            dwa.add_transition(from_state, label, to_state, edge_weight);
+        }
+    }
+
+    DeterminizedDwaWithSupports { dwa, supports }
+}
+
+fn dwa_to_nwa(dwa: &DWA) -> NWA {
+    let mut nwa = NWA::new(0, 0);
+    nwa.states = vec![crate::automata::weighted::nwa::NWAState::default(); dwa.states.len()];
+    nwa.start_states = vec![dwa.start_state];
+
+    for (state_id, state) in dwa.states.iter().enumerate() {
+        if let Some(final_weight) = state.final_weight.clone() {
+            nwa.states[state_id].final_weight = Some(final_weight);
+        }
+        for (&label, (target, weight)) in &state.transitions {
+            nwa.states[state_id]
+                .transitions
+                .entry(label)
+                .or_default()
+                .push((*target, weight.clone()));
+        }
+    }
+
+    nwa
+}
+
+fn optimize_parser_default_transitions(
+    nwa: &mut NWA,
+    state_supports: &[Vec<u32>],
+    recognizer: &ViableSuffixRecognizer,
+    num_parser_states: u32,
+) -> bool {
+    fn subtract_final_weights_from_outgoing_with_changed(nwa: &mut NWA) -> bool {
+        let mut changed = false;
+        for state in &mut nwa.states {
+            let Some(final_weight) = state.final_weight.clone() else {
+                continue;
+            };
+            if final_weight.is_empty() {
+                continue;
+            }
+
+            for (_, weight) in &mut state.epsilons {
+                let new_weight = weight.difference(&final_weight);
+                if new_weight != *weight {
+                    *weight = new_weight;
+                    changed = true;
+                }
+            }
+            for targets in state.transitions.values_mut() {
+                for (_, weight) in targets.iter_mut() {
+                    let new_weight = weight.difference(&final_weight);
+                    if new_weight != *weight {
+                        *weight = new_weight;
+                        changed = true;
+                    }
+                }
+                targets.retain(|(_, weight)| !weight.is_empty());
+            }
+            state.epsilons.retain(|(_, weight)| !weight.is_empty());
+            state.transitions.retain(|_, targets| !targets.is_empty());
+        }
+        changed
+    }
+
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
+    let possible_by_state: Vec<Vec<u32>> = state_supports
+        .iter()
+        .map(|support| {
+            recognizer
+                .subset_to_state
+                .get(support)
+                .and_then(|state_id| recognizer.possible_outgoing_ids.get(*state_id as usize))
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+
+    let mut any_changed = false;
+    let mut iterations = 0usize;
+
+    loop {
+        iterations += 1;
+        let mut changed = false;
+
+        for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
+            if possible_ids.is_empty() {
+                continue;
+            }
+
+            let possible_set: BTreeSet<u32> = possible_ids.iter().copied().collect();
+            let actual_positive: BTreeSet<u32> = nwa.states[state_id]
+                .transitions
+                .iter()
+                .filter_map(|(&label, _)| parser_state_label(label, num_parser_states))
+                .collect();
+            if actual_positive != possible_set {
+                continue;
+            }
+
+            let mut shared_target: Option<u32> = None;
+            let mut default_weight: Option<Weight> = None;
+            let mut valid = true;
+
+            for parser_state_id in possible_ids {
+                let Some(targets) = nwa.states[state_id].transitions.get(&(*parser_state_id as i32)) else {
+                    valid = false;
+                    break;
+                };
+                if targets.len() != 1 {
+                    valid = false;
+                    break;
+                }
+
+                let (target, weight) = &targets[0];
+                match shared_target {
+                    Some(existing) if existing != *target => {
+                        valid = false;
+                        break;
+                    }
+                    None => shared_target = Some(*target),
+                    _ => {}
+                }
+
+                default_weight = Some(match default_weight {
+                    Some(existing) => existing.intersection(weight),
+                    None => weight.clone(),
+                });
+            }
+
+            let Some(target) = shared_target else {
+                continue;
+            };
+            let Some(default_weight) = default_weight else {
+                continue;
+            };
+            if !valid || default_weight.is_empty() {
+                continue;
+            }
+
+            if add_or_union_transition(&mut nwa.states[state_id], DEFAULT_LABEL, target, default_weight) {
+                changed = true;
+            }
+        }
+
+        for state_id in 0..nwa.states.len() {
+            let default_targets = nwa.states[state_id]
+                .transitions
+                .get(&DEFAULT_LABEL)
+                .cloned()
+                .unwrap_or_default();
+            if default_targets.is_empty() {
+                continue;
+            }
+
+            let mut lifted_final = Weight::empty();
+            let mut lifted_by_index: Vec<(usize, Weight)> = Vec::new();
+            for (index, (target, weight)) in default_targets.iter().enumerate() {
+                let Some(target_final) = nwa.states[*target as usize].final_weight.as_ref() else {
+                    continue;
+                };
+                let lifted = weight.intersection(target_final);
+                if lifted.is_empty() {
+                    continue;
+                }
+                lifted_final = lifted_final.union(&lifted);
+                lifted_by_index.push((index, lifted));
+            }
+
+            if union_final_weight(&mut nwa.states[state_id].final_weight, lifted_final) {
+                changed = true;
+            }
+
+            if let Some(default_entries) = nwa.states[state_id].transitions.get_mut(&DEFAULT_LABEL) {
+                for (index, lifted) in lifted_by_index {
+                    let new_weight = default_entries[index].1.difference(&lifted);
+                    if new_weight != default_entries[index].1 {
+                        default_entries[index].1 = new_weight;
+                        changed = true;
+                    }
+                }
+                default_entries.retain(|(_, weight)| !weight.is_empty());
+            }
+            if nwa.states[state_id]
+                .transitions
+                .get(&DEFAULT_LABEL)
+                .is_some_and(|targets| targets.is_empty())
+            {
+                nwa.states[state_id].transitions.remove(&DEFAULT_LABEL);
+            }
+        }
+
+        if subtract_final_weights_from_outgoing_with_changed(nwa) {
+            changed = true;
+        }
+
+        for state in &mut nwa.states {
+            let mut default_by_target: HashMap<u32, Weight> = HashMap::new();
+            if let Some(default_targets) = state.transitions.get(&DEFAULT_LABEL) {
+                for (target, weight) in default_targets {
+                    default_by_target
+                        .entry(*target)
+                        .and_modify(|existing| *existing = existing.union(weight))
+                        .or_insert_with(|| weight.clone());
+                }
+            }
+            if default_by_target.is_empty() {
+                continue;
+            }
+
+            for (&label, targets) in state.transitions.iter_mut() {
+                if label == DEFAULT_LABEL {
+                    continue;
+                }
+                for (target, weight) in targets.iter_mut() {
+                    let Some(default_weight) = default_by_target.get(target) else {
+                        continue;
+                    };
+                    let new_weight = weight.difference(default_weight);
+                    if new_weight != *weight {
+                        *weight = new_weight;
+                        changed = true;
+                    }
+                }
+                targets.retain(|(_, weight)| !weight.is_empty());
+            }
+            state.transitions.retain(|_, targets| !targets.is_empty());
+        }
+
+        if !changed {
+            break;
+        }
+        any_changed = true;
+    }
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] default_opt iterations={} changed={}",
+            iterations,
+            any_changed,
+        );
+    }
+
+    any_changed
+}
+
 pub fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -633,24 +1215,66 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
         );
     }
 
-    let phase_started_at = std::time::Instant::now();
-    parser_nwa.subtract_final_weights_from_outgoing();
-    report.subtract_final_weights_time = phase_started_at.elapsed();
-    report.parser_nwa_after_subtract = collect_weighted_nwa_stats(&parser_nwa);
+    let vsr_started_at = std::time::Instant::now();
+    let viable_suffix_recognizer = build_viable_suffix_recognizer(&parser_nwa, table.num_states);
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa] subtract_final_weights_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0,
+            "[glrmask/profile][parser_dwa] viable_suffix_ms={:.3} states={}",
+            vsr_started_at.elapsed().as_secs_f64() * 1000.0,
+            viable_suffix_recognizer.possible_outgoing_ids.len(),
         );
     }
 
     let phase_started_at = std::time::Instant::now();
-    let parser_dwa_pre_minimize = determinize(&parser_nwa)
-        .expect("parser NWA determinization failed despite acyclic terminal/template composition");
+    let determinized = determinize_with_supports(&parser_nwa);
+    let parser_dwa_pre_minimize = determinized.dwa;
     let det_elapsed = phase_started_at.elapsed();
     report.parser_dwa_pre_minimize = collect_weighted_dwa_stats(&parser_dwa_pre_minimize);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] determinize_with_supports_ms={:.3} states={}",
+            det_elapsed.as_secs_f64() * 1000.0,
+            report.parser_dwa_pre_minimize.states,
+        );
+    }
+
+    let mut optimized_parser_nwa = dwa_to_nwa(&parser_dwa_pre_minimize);
+    let optimize_started_at = std::time::Instant::now();
+    optimize_parser_default_transitions(
+        &mut optimized_parser_nwa,
+        &determinized.supports,
+        &viable_suffix_recognizer,
+        table.num_states,
+    );
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] default_opt_ms={:.3}",
+            optimize_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let subtract_started_at = std::time::Instant::now();
+    optimized_parser_nwa.subtract_final_weights_from_outgoing();
+    report.subtract_final_weights_time = subtract_started_at.elapsed();
+    report.parser_nwa_after_subtract = collect_weighted_nwa_stats(&optimized_parser_nwa);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] subtract_final_weights_ms={:.3}",
+            subtract_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
     let min_started_at = std::time::Instant::now();
-    let core_dwa = minimize(&parser_dwa_pre_minimize);
+    let determinized_after_defaults = determinize(&optimized_parser_nwa)
+        .expect("parser NWA determinization failed after default-transition optimization");
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] determinize_after_defaults_ms={:.3} states={}",
+            min_started_at.elapsed().as_secs_f64() * 1000.0,
+            determinized_after_defaults.num_states(),
+        );
+    }
+    let core_dwa = minimize(&determinized_after_defaults);
     let min_elapsed = min_started_at.elapsed();
     report.determinize_minimize_time = phase_started_at.elapsed();
     report.parser_dwa_minimized = collect_weighted_dwa_stats(&core_dwa);
@@ -680,6 +1304,14 @@ mod tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::grammar::model::GrammarDef;
     use crate::compiler::grammar::model::tests::*;
+    use range_set_blaze::RangeSetBlaze;
+
+    fn token_weight(tokens: &[u32]) -> Weight {
+        Weight::from_token_set_for_tsid(
+            0,
+            RangeSetBlaze::from_iter(tokens.iter().copied().map(|token| token..=token)),
+        )
+    }
 
     fn make_vocab_and_preprocessing(gdef: &GrammarDef) -> (Vocab, Tokenizer, InternalIdMap) {
         let tok = crate::compiler::compile::build_tokenizer(gdef);
@@ -713,5 +1345,58 @@ mod tests {
 
         let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp, None);
         assert!(dwa.num_states() > 0);
+    }
+
+    #[test]
+    fn test_optimize_parser_defaults_synthesizes_and_subtracts_same_destination_weight() {
+        let mut dwa = DWA::new(0, 0);
+        let accept = dwa.add_state();
+        dwa.add_transition(0, 0, accept, token_weight(&[1, 2]));
+        dwa.add_transition(0, 1, accept, token_weight(&[2, 3]));
+
+        let mut nwa = dwa_to_nwa(&dwa);
+        let supports = vec![vec![0], vec![1]];
+        let recognizer = ViableSuffixRecognizer {
+            subset_to_state: HashMap::from([(vec![0], 0), (vec![1], 1)]),
+            possible_outgoing_ids: vec![vec![0, 1], vec![]],
+        };
+
+        assert!(optimize_parser_default_transitions(&mut nwa, &supports, &recognizer, 2));
+
+        let defaults = nwa.states[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].0, accept);
+        assert_eq!(defaults[0].1, token_weight(&[2]));
+
+        let explicit_zero = &nwa.states[0].transitions[&0][0];
+        let explicit_one = &nwa.states[0].transitions[&1][0];
+        assert_eq!(explicit_zero.1, token_weight(&[1]));
+        assert_eq!(explicit_one.1, token_weight(&[3]));
+    }
+
+    #[test]
+    fn test_optimize_parser_defaults_lifts_default_weight_into_source_final() {
+        let mut nwa = NWA::new(0, 0);
+        nwa.states = vec![crate::automata::weighted::nwa::NWAState::default(); 2];
+        nwa.start_states = vec![0];
+        nwa.states[0]
+            .transitions
+            .entry(DEFAULT_LABEL)
+            .or_default()
+            .push((1, token_weight(&[1, 2])));
+        nwa.states[1].final_weight = Some(token_weight(&[2, 3]));
+
+        let supports = vec![vec![0], vec![1]];
+        let recognizer = ViableSuffixRecognizer {
+            subset_to_state: HashMap::from([(vec![0], 0), (vec![1], 1)]),
+            possible_outgoing_ids: vec![vec![], vec![]],
+        };
+
+        assert!(optimize_parser_default_transitions(&mut nwa, &supports, &recognizer, 4));
+
+        assert_eq!(nwa.states[0].final_weight, Some(token_weight(&[2])));
+        let defaults = nwa.states[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].1, token_weight(&[1]));
     }
 }
