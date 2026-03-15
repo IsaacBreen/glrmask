@@ -43,6 +43,7 @@ fn main() {
     let mut tokens_path: Option<String> = None;
     let mut iters: usize = 500;
     let mut warmup: usize = 50;
+    let mut force_step: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -52,6 +53,7 @@ fn main() {
             "--tokens" => { i += 1; tokens_path = Some(args[i].clone()); }
             "--iters" => { i += 1; iters = args[i].parse().unwrap(); }
             "--warmup" => { i += 1; warmup = args[i].parse().unwrap(); }
+            "--step" => { i += 1; force_step = Some(args[i].parse().unwrap()); }
             _ => { eprintln!("Unknown arg: {}", args[i]); std::process::exit(1); }
         }
         i += 1;
@@ -147,8 +149,9 @@ fn main() {
         }
     }
     step_times.sort_by_key(|&(_, ns)| std::cmp::Reverse(ns));
-    let hot_step = step_times[0].0;
-    eprintln!("Hottest step: {} ({} ns), top-5: {:?}", hot_step, step_times[0].1,
+    let hot_step = force_step.unwrap_or(step_times[0].0);
+    eprintln!("Hottest step: {} ({} ns), top-5: {:?}", hot_step,
+        step_times.iter().find(|(i,_)| *i == hot_step).map(|(_,ns)| *ns).unwrap_or(0),
         step_times.iter().take(5).map(|&(i, ns)| format!("s{}={}ns", i, ns)).collect::<Vec<_>>());
 
     // --- Benchmark the hot step ---
@@ -200,5 +203,10 @@ fn main() {
     println!("  transition_enqueue_ns:  {:>7}", metrics.transition_enqueue_ns);
     println!("  queue_pop_ns:           {:>7}", metrics.queue_pop_ns);
     println!("  final_weight_ns:        {:>7}", metrics.final_weight_ns);
+    println!("  queue_depth_buckets:    {:>7}", metrics.queue_depth_buckets_processed);
+    println!("  queue_items_processed:  {:>7}", metrics.queue_items_processed);
+    println!("  transitions_hit:        {:>7}", metrics.transitions_hit);
+    println!("  transitions_enqueued:   {:>7}", metrics.transitions_enqueued);
+    println!("  parser_states_peeked:   {:>7}", metrics.parser_states_peeked);
     println!("  state: {:?}", metrics.state_summary);
 }
