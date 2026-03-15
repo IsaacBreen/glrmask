@@ -303,11 +303,8 @@ impl<'a> ConstraintState<'a> {
         let t_total = std::time::Instant::now();
         let t_seed_start = std::time::Instant::now();
 
-        // Queue keyed by GSS depth (process deepest first).
-        let mut queue = std::collections::BTreeMap::<
-            isize,
-            std::collections::BTreeMap<u32, DenseMaskGSS>,
-        >::new();
+        // Flat queue: (depth, dwa_state, gss). Processed highest-depth-first.
+        let mut queue: Vec<(isize, u32, DenseMaskGSS)> = Vec::with_capacity(32);
 
         // Seed: build initial dense GSS from each tokenizer state.
         for (&tokenizer_state, gss) in &self.state {
@@ -322,12 +319,13 @@ impl<'a> ConstraintState<'a> {
                 }
                 continue;
             }
-            queue
-                .entry(seeded.max_depth())
-                .or_default()
-                .entry(parser_dwa.start_state)
-                .and_modify(|existing| *existing = existing.merge(&seeded))
-                .or_insert(seeded);
+            let depth = seeded.max_depth();
+            let state = parser_dwa.start_state;
+            if let Some(pos) = queue.iter().position(|(d, s, _)| *d == depth && *s == state) {
+                queue[pos].2 = queue[pos].2.merge(&seeded);
+            } else {
+                queue.push((depth, state, seeded));
+            }
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.seeded_entries += 1;
             }
@@ -337,13 +335,26 @@ impl<'a> ConstraintState<'a> {
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.seed_ns = t_seed_start.elapsed().as_nanos() as u64;
         }
-        while let Some((depth_key, items)) = queue.pop_last() {
+        while !queue.is_empty() {
+            // Find max depth.
+            let max_depth = queue.iter().map(|(d, _, _)| *d).max().unwrap();
+            // Extract all items at max depth.
+            let mut items: Vec<(u32, DenseMaskGSS)> = Vec::new();
+            let mut i = 0;
+            while i < queue.len() {
+                if queue[i].0 == max_depth {
+                    let (_, wa_state, gss) = queue.swap_remove(i);
+                    items.push((wa_state, gss));
+                } else {
+                    i += 1;
+                }
+            }
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.queue_depth_buckets_processed += 1;
                 if metrics.queue_depth_buckets_processed == 1 {
-                    metrics.max_depth_bucket_processed = depth_key;
+                    metrics.max_depth_bucket_processed = max_depth;
                 }
-                metrics.min_depth_bucket_processed = depth_key;
+                metrics.min_depth_bucket_processed = max_depth;
                 metrics.max_items_in_depth_bucket = metrics.max_items_in_depth_bucket.max(items.len());
             }
             for (wa_state, gss) in items {
@@ -433,13 +444,12 @@ impl<'a> ConstraintState<'a> {
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.transition_intersect_ns += t_enq.duration_since(t_int).as_nanos() as u64;
                         }
-                        queue
-                            .entry(pruned.max_depth())
-                            .or_default()
-                            .entry(*target)
-                            .and_modify(|existing| *existing = existing.merge(&pruned))
-                            .or_insert(pruned);
-                        if let Some(metrics) = metrics.as_deref_mut() {
+                        let new_depth = pruned.max_depth();
+                        if let Some(pos) = queue.iter().position(|(d, s, _)| *d == new_depth && *s == *target) {
+                            queue[pos].2 = queue[pos].2.merge(&pruned);
+                        } else {
+                            queue.push((new_depth, *target, pruned));
+                        }                        if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.transitions_enqueued += 1;
                             if is_default {
                                 metrics.default_transitions_enqueued += 1;
