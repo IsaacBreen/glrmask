@@ -250,6 +250,13 @@ impl PyConstraintState {
         out.set_item("max_weighted_gss_unique_nodes", metrics.max_weighted_gss_unique_nodes)?;
         out.set_item("max_weighted_gss_total_edges", metrics.max_weighted_gss_total_edges)?;
         out.set_item("max_weighted_gss_depth", metrics.max_weighted_gss_depth)?;
+        out.set_item("max_depth_bucket_processed", metrics.max_depth_bucket_processed)?;
+        out.set_item("min_depth_bucket_processed", metrics.min_depth_bucket_processed)?;
+        out.set_item("max_items_in_depth_bucket", metrics.max_items_in_depth_bucket)?;
+        out.set_item("positive_transitions_hit", metrics.positive_transitions_hit)?;
+        out.set_item("positive_transitions_enqueued", metrics.positive_transitions_enqueued)?;
+        out.set_item("default_transitions_hit", metrics.default_transitions_hit)?;
+        out.set_item("default_transitions_enqueued", metrics.default_transitions_enqueued)?;
         Ok(out)
     }
 

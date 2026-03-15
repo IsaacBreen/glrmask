@@ -35,8 +35,14 @@ pub struct GLRTable {
 
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
-        let (item_sets, transitions) = build_lr0_item_sets(grammar);
-        let mut table = build_slr1_table(grammar, &item_sets, &transitions);
+        let use_lr1 = std::env::var("GLRMASK_LR1").unwrap_or_default() == "1";
+        let mut table = if use_lr1 {
+            let (item_sets, transitions) = build_lr1_item_sets(grammar);
+            build_lr1_table(grammar, &item_sets, &transitions)
+        } else {
+            let (item_sets, transitions) = build_lr0_item_sets(grammar);
+            build_slr1_table(grammar, &item_sets, &transitions)
+        };
         table.merge_identical_rows();
         table
     }
@@ -314,6 +320,257 @@ fn build_slr1_table(
                     .or_default()
                     .push_reduce(item.rule);
             }
+        }
+    }
+
+    let action = pending
+        .into_iter()
+        .map(|by_terminal| {
+            by_terminal
+                .into_iter()
+                .map(|(terminal, pending)| (terminal, pending.finish()))
+                .collect()
+        })
+        .collect();
+
+    GLRTable {
+        action,
+        goto,
+        num_states: item_sets.len() as u32,
+        num_terminals: grammar.num_terminals,
+        num_rules: grammar.rules.len() as u32,
+        rules: grammar.rules.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LR(1) item set construction
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct LR1Item {
+    rule: u32,
+    dot: u32,
+    lookahead: TerminalID,
+}
+
+impl LR1Item {
+    fn new(rule: u32, dot: u32, lookahead: TerminalID) -> Self {
+        Self { rule, dot, lookahead }
+    }
+
+    fn next_symbol<'a>(&self, rules: &'a [Rule]) -> Option<&'a Symbol> {
+        let rhs = &rules[self.rule as usize].rhs;
+        rhs.get(self.dot as usize)
+    }
+}
+
+/// Compute FIRST set for a sequence of symbols followed by a lookahead terminal.
+fn first_of_sequence(
+    symbols: &[Symbol],
+    lookahead: TerminalID,
+    first: &[BTreeSet<TerminalID>],
+    nullable: &BTreeSet<NonterminalID>,
+) -> BTreeSet<TerminalID> {
+    let mut result = BTreeSet::new();
+    let mut all_nullable = true;
+    for sym in symbols {
+        match sym {
+            Symbol::Terminal(t) => {
+                result.insert(*t);
+                all_nullable = false;
+                break;
+            }
+            Symbol::Nonterminal(nt) => {
+                result.extend(&first[*nt as usize]);
+                if !nullable.contains(nt) {
+                    all_nullable = false;
+                    break;
+                }
+            }
+        }
+    }
+    if all_nullable {
+        result.insert(lookahead);
+    }
+    result
+}
+
+fn lr1_closure(
+    items: &BTreeSet<LR1Item>,
+    grammar: &AnalyzedGrammar,
+) -> BTreeSet<LR1Item> {
+    let rules = &grammar.rules;
+    let mut result = items.clone();
+    let mut queue: VecDeque<LR1Item> = items.iter().copied().collect();
+
+    while let Some(item) = queue.pop_front() {
+        if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
+            let rhs = &rules[item.rule as usize].rhs;
+            let beta = &rhs[(item.dot as usize + 1)..];
+
+            let lookaheads = first_of_sequence(beta, item.lookahead, &grammar.first, &grammar.nullable);
+
+            for (i, r) in rules.iter().enumerate() {
+                if r.lhs == *nt {
+                    for &la in &lookaheads {
+                        let new_item = LR1Item::new(i as u32, 0, la);
+                        if result.insert(new_item) {
+                            queue.push_back(new_item);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+fn lr1_goto_set(
+    items: &BTreeSet<LR1Item>,
+    sym: &Symbol,
+    grammar: &AnalyzedGrammar,
+) -> BTreeSet<LR1Item> {
+    let rules = &grammar.rules;
+    let mut kernel = BTreeSet::new();
+    for item in items {
+        if item.next_symbol(rules) == Some(sym) {
+            kernel.insert(LR1Item::new(item.rule, item.dot + 1, item.lookahead));
+        }
+    }
+    lr1_closure(&kernel, grammar)
+}
+
+fn build_lr1_item_sets(
+    grammar: &AnalyzedGrammar,
+) -> (Vec<BTreeSet<LR1Item>>, Vec<BTreeMap<Symbol, u32>>) {
+    let rules = &grammar.rules;
+
+    let initial = {
+        let mut s = BTreeSet::new();
+        s.insert(LR1Item::new(0, 0, EOF));
+        lr1_closure(&s, grammar)
+    };
+
+    let mut item_sets: Vec<BTreeSet<LR1Item>> = vec![initial.clone()];
+    let mut transitions: Vec<BTreeMap<Symbol, u32>> = vec![BTreeMap::new()];
+    let mut set_to_id: FxHashMap<Vec<LR1Item>, u32> = FxHashMap::default();
+    set_to_id.insert(initial.iter().copied().collect(), 0);
+
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    queue.push_back(0);
+
+    while let Some(sid) = queue.pop_front() {
+        let symbols: BTreeSet<Symbol> = item_sets[sid as usize]
+            .iter()
+            .filter_map(|item| item.next_symbol(rules).cloned())
+            .collect();
+
+        for sym in &symbols {
+            let target_set = lr1_goto_set(&item_sets[sid as usize], sym, grammar);
+            if target_set.is_empty() {
+                continue;
+            }
+
+            let key: Vec<LR1Item> = target_set.iter().copied().collect();
+            let target_id = if let Some(&id) = set_to_id.get(&key) {
+                id
+            } else {
+                let id = item_sets.len() as u32;
+                set_to_id.insert(key, id);
+                item_sets.push(target_set);
+                transitions.push(BTreeMap::new());
+                queue.push_back(id);
+                id
+            };
+
+            transitions[sid as usize].insert(sym.clone(), target_id);
+        }
+    }
+
+    (item_sets, transitions)
+}
+
+fn build_lr1_table(
+    grammar: &AnalyzedGrammar,
+    item_sets: &[BTreeSet<LR1Item>],
+    transitions: &[BTreeMap<Symbol, u32>],
+) -> GLRTable {
+    #[derive(Default)]
+    struct PendingAction {
+        shift: Option<u32>,
+        reduces: Vec<u32>,
+        accept: bool,
+    }
+
+    impl PendingAction {
+        fn push_shift(&mut self, target: u32) {
+            match self.shift {
+                Some(existing) => debug_assert_eq!(existing, target),
+                None => self.shift = Some(target),
+            }
+        }
+
+        fn push_reduce(&mut self, rule_id: u32) {
+            self.reduces.push(rule_id);
+        }
+
+        fn push_accept(&mut self) {
+            self.accept = true;
+        }
+
+        fn finish(mut self) -> Action {
+            self.reduces.sort_unstable();
+            self.reduces.dedup();
+            match (self.shift, self.reduces.len(), self.accept) {
+                (Some(target), 0, false) => Action::Shift(target),
+                (None, 1, false) => Action::Reduce(self.reduces[0]),
+                (None, 0, true) => Action::Accept,
+                (shift, _, accept) => Action::Split {
+                    shift,
+                    reduces: self.reduces,
+                    accept,
+                },
+            }
+        }
+    }
+
+    let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
+        .take(item_sets.len())
+        .collect::<Vec<_>>();
+    let mut goto = vec![BTreeMap::<NonterminalID, u32>::new(); item_sets.len()];
+
+    for (state_id, items) in item_sets.iter().enumerate() {
+        for (symbol, &target) in &transitions[state_id] {
+            match symbol {
+                Symbol::Terminal(terminal) => {
+                    pending[state_id]
+                        .entry(*terminal)
+                        .or_default()
+                        .push_shift(target);
+                }
+                Symbol::Nonterminal(nonterminal) => {
+                    goto[state_id].insert(*nonterminal, target);
+                }
+            }
+        }
+
+        for item in items {
+            let rule = &grammar.rules[item.rule as usize];
+            if item.dot as usize != rule.rhs.len() {
+                continue;
+            }
+
+            if item.rule == 0 {
+                pending[state_id].entry(item.lookahead).or_default().push_accept();
+                continue;
+            }
+
+            // LR(1): reduce only on the item's specific lookahead
+            pending[state_id]
+                .entry(item.lookahead)
+                .or_default()
+                .push_reduce(item.rule);
         }
     }
 

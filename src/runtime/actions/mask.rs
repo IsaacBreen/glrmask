@@ -129,6 +129,13 @@ pub struct MaskDebugMetrics {
     pub max_weighted_gss_unique_nodes: usize,
     pub max_weighted_gss_total_edges: usize,
     pub max_weighted_gss_depth: isize,
+    pub max_depth_bucket_processed: isize,
+    pub min_depth_bucket_processed: isize,
+    pub max_items_in_depth_bucket: usize,
+    pub positive_transitions_hit: usize,
+    pub positive_transitions_enqueued: usize,
+    pub default_transitions_hit: usize,
+    pub default_transitions_enqueued: usize,
 }
 
 fn queue_item_count(
@@ -224,9 +231,14 @@ impl<'a> ConstraintState<'a> {
         }
 
         // Process DWA states depth-first.
-        while let Some((_, items)) = queue.pop_last() {
+        while let Some((depth_key, items)) = queue.pop_last() {
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.queue_depth_buckets_processed += 1;
+                if metrics.queue_depth_buckets_processed == 1 {
+                    metrics.max_depth_bucket_processed = depth_key;
+                }
+                metrics.min_depth_bucket_processed = depth_key;
+                metrics.max_items_in_depth_bucket = metrics.max_items_in_depth_bucket.max(items.len());
             }
             for (wa_state, gss) in items {
                 if let Some(metrics) = metrics.as_deref_mut() {
@@ -267,7 +279,7 @@ impl<'a> ConstraintState<'a> {
                     metrics.parser_states_peeked += parser_states.len();
                 }
                 for parser_state in parser_states {
-                    let mut advance = |label: i32, current: &WeightedParserGSS, metrics: &mut Option<&mut MaskDebugMetrics>| {
+                    let mut advance = |label: i32, is_default: bool, current: &WeightedParserGSS, metrics: &mut Option<&mut MaskDebugMetrics>| {
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.transitions_considered += 1;
                         }
@@ -279,6 +291,11 @@ impl<'a> ConstraintState<'a> {
                         };
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.transitions_hit += 1;
+                            if is_default {
+                                metrics.default_transitions_hit += 1;
+                            } else {
+                                metrics.positive_transitions_hit += 1;
+                            }
                         }
                         let isolated = current.isolate(Some(parser_state));
                         let popped = isolated.pop();
@@ -303,6 +320,11 @@ impl<'a> ConstraintState<'a> {
                             .or_insert(pruned);
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.transitions_enqueued += 1;
+                            if is_default {
+                                metrics.default_transitions_enqueued += 1;
+                            } else {
+                                metrics.positive_transitions_enqueued += 1;
+                            }
                             if let Some(enqueued) = queue
                                 .get(&queue.keys().next_back().copied().unwrap_or_default())
                                 .and_then(|bucket| bucket.get(target))
@@ -313,8 +335,8 @@ impl<'a> ConstraintState<'a> {
                         }
                     };
 
-                    advance(crate::compiler::glr::labels::encode_positive_label(parser_state), &gss, &mut metrics);
-                    advance(crate::compiler::glr::labels::DEFAULT_LABEL, &gss, &mut metrics);
+                    advance(crate::compiler::glr::labels::encode_positive_label(parser_state), false, &gss, &mut metrics);
+                    advance(crate::compiler::glr::labels::DEFAULT_LABEL, true, &gss, &mut metrics);
                 }
             }
         }

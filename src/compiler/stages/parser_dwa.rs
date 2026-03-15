@@ -1219,10 +1219,14 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
     let det_elapsed = phase_started_at.elapsed();
     report.parser_dwa_pre_minimize = collect_weighted_dwa_stats(&parser_dwa_pre_minimize);
     if profile_enabled {
+        let pre_min_default_trans = parser_dwa_pre_minimize.states.iter()
+            .filter(|s| s.transitions.contains_key(&DEFAULT_LABEL))
+            .count();
         eprintln!(
-            "[glrmask/profile][parser_dwa] determinize_with_supports_ms={:.3} states={}",
+            "[glrmask/profile][parser_dwa] determinize_with_supports_ms={:.3} states={} default_trans={}",
             det_elapsed.as_secs_f64() * 1000.0,
             report.parser_dwa_pre_minimize.states,
+            pre_min_default_trans,
         );
         profile_dump_small_automaton(
             "determinize_with_supports",
@@ -1292,13 +1296,17 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_repo
     report.parser_dwa_minimized = collect_weighted_dwa_stats(&core_dwa);
     report.total_time = total_started_at.elapsed();
     if profile_enabled {
+        let post_min_default_trans = core_dwa.states.iter()
+            .filter(|s| s.transitions.contains_key(&DEFAULT_LABEL))
+            .count();
         eprintln!(
-            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} det_ms={:.3} min_ms={:.3} pre_min_states={} {}",
+            "[glrmask/profile][parser_dwa] determinize_minimize_ms={:.3} det_ms={:.3} min_ms={:.3} pre_min_states={} {} post_min_default_trans={}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
             det_elapsed.as_secs_f64() * 1000.0,
             min_elapsed.as_secs_f64() * 1000.0,
             report.parser_dwa_pre_minimize.states,
             report.parser_dwa_minimized,
+            post_min_default_trans,
         );
         eprintln!(
             "[glrmask/profile][parser_dwa] total_ms={:.3} {}",
