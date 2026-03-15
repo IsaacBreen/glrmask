@@ -389,28 +389,15 @@ impl<'a> ConstraintState<'a> {
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.final_weight_ns += t_fw.elapsed().as_nanos() as u64;
                 }
-                let parser_states = gss.peek_values();
+                let t_gss = std::time::Instant::now();
+                let decomposed = gss.decompose_and_pop();
                 if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.parser_states_peeked += parser_states.len();
+                    metrics.parser_states_peeked += decomposed.len();
+                    metrics.transition_gss_ns += t_gss.elapsed().as_nanos() as u64;
                 }
-                for parser_state in parser_states {
-                    // Compute isolate+pop once per parser state (shared by positive and default transitions).
-                    let t_gss = std::time::Instant::now();
-                    let isolated = gss.isolate(Some(parser_state));
-                    let popped = isolated.pop();
-                    if let Some(metrics) = metrics.as_deref_mut() {
-                        metrics.transition_gss_ns += t_gss.elapsed().as_nanos() as u64;
-                    }
-                    if popped.is_empty() {
-                        if let Some(metrics) = metrics.as_deref_mut() {
-                            metrics.transitions_considered += 2;
-                            metrics.transitions_popped_empty += 2;
-                        }
-                        continue;
-                    }
-
+                for (parser_state, popped) in &decomposed {
                     let labels = [
-                        (crate::compiler::glr::labels::encode_positive_label(parser_state), false),
+                        (crate::compiler::glr::labels::encode_positive_label(*parser_state), false),
                         (crate::compiler::glr::labels::DEFAULT_LABEL, true),
                     ];
                     for (label, is_default) in labels {
