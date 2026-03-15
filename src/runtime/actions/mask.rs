@@ -69,18 +69,15 @@ impl DenseMaskAcc {
             let token_set = weight.0.get(self.start)?;
             let key = Arc::as_ptr(token_set) as usize;
             if let Some(other_dense) = precomputed.get(&key) {
-                let mut result = vec![0u64; self.dense.len()];
-                let mut any_nonzero = false;
-                for ((r, &s), &o) in result.iter_mut().zip(self.dense.iter()).zip(other_dense.iter()) {
-                    let v = s & o;
-                    *r = v;
-                    if v != 0 { any_nonzero = true; }
+                // Check emptiness before allocating.
+                if !self.dense.iter().zip(other_dense.iter()).any(|(&s, &o)| s & o != 0) {
+                    return None;
                 }
-                return if any_nonzero {
-                    Some(Self { start: self.start, end: self.end, dense: result.into() })
-                } else {
-                    None
-                };
+                let result: Arc<[u64]> = self.dense.iter()
+                    .zip(other_dense.iter())
+                    .map(|(&s, &o)| s & o)
+                    .collect();
+                return Some(Self { start: self.start, end: self.end, dense: result });
             }
             return self.intersect_with_weight_fallback(weight);
         }
