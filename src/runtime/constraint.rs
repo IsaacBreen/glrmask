@@ -200,12 +200,9 @@ impl Constraint {
             while overlap != 0 {
                 let bit = overlap.trailing_zeros() as usize;
                 let internal_token = word_index * 64 + bit;
-                if let Some(masks) = self.internal_token_buf_masks.get(internal_token) {
-                    for &(buf_word, mask) in masks {
-                        if let Some(slot) = buf.get_mut(buf_word as usize) {
-                            *slot |= mask;
-                        }
-                    }
+                let masks = &self.internal_token_buf_masks[internal_token];
+                for &(buf_word, mask) in masks {
+                    buf[buf_word as usize] |= mask;
                 }
                 overlap &= overlap - 1;
             }
@@ -225,44 +222,6 @@ impl Constraint {
         });
     }
 
-    /// OR all tokens from `weight` directly into `buf` using precomputed bitmasks.
-    pub(crate) fn or_weight_to_buf(&self, weight: &crate::ds::weight::Weight, buf: &mut [u32]) {
-        if weight.is_full() {
-            // All tokens allowed — set all bits.
-            for slot in buf.iter_mut() {
-                *slot = u32::MAX;
-            }
-            return;
-        }
-        if !self.internal_token_buf_masks.is_empty() {
-            // Fast path: use precomputed bitmask fragments.
-            // Iterate unique token sets in the weight to avoid processing
-            // the same internal token multiple times from different TSIDs.
-            for token_set in weight.unique_token_sets() {
-                for internal_token in token_set.iter() {
-                    if let Some(masks) = self.internal_token_buf_masks.get(internal_token as usize) {
-                        for &(word_idx, mask) in masks {
-                            if let Some(slot) = buf.get_mut(word_idx as usize) {
-                                *slot |= mask;
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Fallback: no equivalence classes, set bits directly.
-            for token_set in weight.unique_token_sets() {
-                for token_id in token_set.iter() {
-                    let word = token_id as usize / 32;
-                    let bit = token_id as usize % 32;
-                    if let Some(slot) = buf.get_mut(word) {
-                        *slot |= 1u32 << bit;
-                    }
-                }
-            }
-        }
-    }
-
     pub(crate) fn or_internal_token_set_to_buf(
         &self,
         internal_tokens: &RangeSetBlaze<u32>,
@@ -270,12 +229,9 @@ impl Constraint {
     ) {
         if !self.internal_token_buf_masks.is_empty() {
             for internal_token in internal_tokens.iter() {
-                if let Some(masks) = self.internal_token_buf_masks.get(internal_token as usize) {
-                    for &(word_idx, mask) in masks {
-                        if let Some(slot) = buf.get_mut(word_idx as usize) {
-                            *slot |= mask;
-                        }
-                    }
+                let masks = &self.internal_token_buf_masks[internal_token as usize];
+                for &(word_idx, mask) in masks {
+                    buf[word_idx as usize] |= mask;
                 }
             }
         } else {

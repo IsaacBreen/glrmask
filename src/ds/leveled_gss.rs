@@ -1,4 +1,5 @@
 use im::{HashMap as IHashMap, OrdMap};
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
@@ -2292,99 +2293,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
     }
 
-    /// Like apply_and_prune but skips try_promote for cross-type A→B transforms.
-    /// Use when the source tree is already canonical and promotion is unnecessary.
-    pub fn apply_and_prune_no_promote_ab<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
-    where
-        B: Merge + Clone + Eq + Hash,
-        M: FnMut(&A) -> Option<B>,
-    {
-        // Fast path: single Interface at root.
-        if let Upper::Interface(i) = &*self.inner {
-            return match mutator(&i.acc) {
-                Some(new_acc) => LeveledGSS { inner: new_interface(i.inner.clone(), new_acc) },
-                None => LeveledGSS::empty(),
-            };
-        }
-
-        let mut acc_memo: Vec<(A, Option<B>)> = Vec::with_capacity(4);
-
-        fn mutate_acc_np_ab<A, B, M>(
-            a: &A,
-            memo: &mut Vec<(A, Option<B>)>,
-            m: &mut M,
-        ) -> Option<B>
-        where
-            A: Clone + Eq,
-            B: Clone,
-            M: FnMut(&A) -> Option<B>,
-        {
-            for (k, v) in memo.iter() {
-                if k == a {
-                    return v.clone();
-                }
-            }
-            let r = m(a);
-            memo.push((a.clone(), r.clone()));
-            r
-        }
-
-        fn transform_np_ab<T, A, B, M>(
-            node: &Arc<Upper<T, A>>,
-            memo: &mut Vec<(A, Option<B>)>,
-            m: &mut M,
-        ) -> Option<Arc<Upper<T, B>>>
-        where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
-            B: Merge + Clone + Eq + Hash,
-            M: FnMut(&A) -> Option<B>,
-        {
-            match &**node {
-                Upper::Interface(i) => {
-                    mutate_acc_np_ab(&i.acc, memo, m)
-                        .map(|new_acc| new_interface(i.inner.clone(), new_acc))
-                }
-                Upper::Branch(b) => {
-                    let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc_np_ab(e, memo, m));
-                    // Fast path: single child entry with single child.
-                    if b.children.len() == 1 && new_empty_opt.is_none() {
-                        let (v, kids) = b.children.iter().next().unwrap();
-                        if kids.len() == 1 {
-                            let child = kids.values().next().unwrap();
-                            if let Some(nc) = transform_np_ab::<T, A, B, M>(child, memo, m) {
-                                let new_kids = OrdMap::unit(nc.max_depth(), nc);
-                                let new_children = IHashMap::unit(v.clone(), new_kids);
-                                return Some(new_branch(new_children, None));
-                            } else {
-                                return None;
-                            }
-                        }
-                    }
-                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
-                    for (v, kids) in b.children.iter() {
-                        let new_kids: OrdMap<isize, Arc<Upper<T, B>>> = kids.values()
-                            .filter_map(|child| transform_np_ab::<T, A, B, M>(child, memo, m))
-                            .map(|nc| (nc.max_depth(), nc))
-                            .collect();
-                        if !new_kids.is_empty() {
-                            new_children.insert(v.clone(), new_kids);
-                        }
-                    }
-                    if new_children.is_empty() && new_empty_opt.is_none() {
-                        None
-                    } else {
-                        Some(new_branch(new_children, new_empty_opt))
-                    }
-                }
-            }
-        }
-
-        let res_inner_opt = transform_np_ab::<T, A, B, M>(&self.inner, &mut acc_memo, &mut mutator);
-        res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
-    }
-
-    /// Like apply_and_prune_no_promote_ab followed by decompose_and_pop, but avoids
+    /// Like a cross-type no-promote transform followed by decompose_and_pop, but avoids
     /// building the root-level Branch node. Returns (value, sub_gss) pairs directly,
     /// plus a Vec of "root accumulators" (transformed empty values at the root Branch)
     /// to be checked for final_weight separately.
@@ -2872,9 +2781,44 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Visit each accumulator in the GSS without collecting or merging.
     /// Uses pointer-based visited set to avoid hashing accumulators.
     pub fn for_each_acc(&self, mut f: impl FnMut(&A)) {
+        const INLINE_VISITED_PTRS: usize = 16;
+
+        enum VisitedPtrs {
+            Small(SmallVec<[usize; INLINE_VISITED_PTRS]>),
+            Large(HashSet<usize>),
+        }
+
+        impl VisitedPtrs {
+            fn new() -> Self {
+                Self::Small(SmallVec::new())
+            }
+
+            fn insert(&mut self, ptr: usize) -> bool {
+                match self {
+                    Self::Small(seen) => {
+                        if seen.contains(&ptr) {
+                            return false;
+                        }
+                        if seen.len() < INLINE_VISITED_PTRS {
+                            seen.push(ptr);
+                            return true;
+                        }
+                        let mut upgraded = HashSet::with_capacity(seen.len() * 2);
+                        for &existing in seen.iter() {
+                            upgraded.insert(existing);
+                        }
+                        let inserted = upgraded.insert(ptr);
+                        *self = Self::Large(upgraded);
+                        inserted
+                    }
+                    Self::Large(seen) => seen.insert(ptr),
+                }
+            }
+        }
+
         fn walk<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
             node: &Arc<Upper<T, A>>,
-            visited: &mut HashSet<usize>,
+            visited: &mut VisitedPtrs,
             f: &mut impl FnMut(&A),
         ) {
             let ptr = Arc::as_ptr(node) as usize;
@@ -2897,7 +2841,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
             }
         }
-        let mut visited = HashSet::new();
+        let mut visited = VisitedPtrs::new();
         walk(&self.inner, &mut visited, &mut f);
     }
 

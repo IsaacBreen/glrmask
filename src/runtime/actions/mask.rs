@@ -176,22 +176,6 @@ impl DenseMaskAcc {
         }
     }
 
-    /// Fast intersection using a pre-combined dense mask (OR of all weight entries).
-    fn intersect_with_combined_dense(&self, combined: &[u64]) -> Option<Self> {
-        let mut result = vec![0u64; self.dense.len()];
-        let mut any_nonzero = false;
-        for ((r, &s), &c) in result.iter_mut().zip(self.dense.iter()).zip(combined.iter()) {
-            let v = s & c;
-            *r = v;
-            if v != 0 { any_nonzero = true; }
-        }
-        if any_nonzero {
-            Some(Self { start: self.start, end: self.end, dense: result.into() })
-        } else {
-            None
-        }
-    }
-
     /// OR this accumulator's tokens (intersected with `final_weight`) into the output buffer.
     fn or_intersection_to_buf(
         &self,
@@ -250,12 +234,9 @@ impl DenseMaskAcc {
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;
                 let internal_token = wi * 64 + bit;
-                if let Some(masks) = constraint.internal_token_buf_masks.get(internal_token) {
-                    for &(buf_word, mask) in masks {
-                        if let Some(slot) = buf.get_mut(buf_word as usize) {
-                            *slot |= mask;
-                        }
-                    }
+                let masks = &constraint.internal_token_buf_masks[internal_token];
+                for &(buf_word, mask) in masks {
+                    buf[buf_word as usize] |= mask;
                 }
                 bits &= bits - 1;
             }
