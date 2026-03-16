@@ -24,12 +24,12 @@ const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "JSON_KEY_COLON";
 
 const JSON_STRING_REGEX: &str =
-    r#""([^"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
+    r#""([^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
 const JSON_KEY_COLON_REGEX: &str =
-    r#""([^"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
-const JSON_STRING_CHAR_PATTERN: &str = r#"[^"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
-const JSON_ITEM_SEPARATOR: &[u8] = b", ";
-const JSON_KEY_SEPARATOR: &[u8] = b": ";
+    r#""([^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*":"#;
+const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
+const JSON_ITEM_SEPARATOR: &[u8] = b",";
+const JSON_KEY_SEPARATOR: &[u8] = b":";
 
 fn literal_expr(bytes: &[u8]) -> GrammarExpr {
     GrammarExpr::Literal(bytes.to_vec())
@@ -85,7 +85,7 @@ fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
 }
 
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
-    regex_expr(format!(r#""(?:{})": "#, strip_regex_anchors(pattern)))
+    regex_expr(format!(r#""(?:{})":"#, strip_regex_anchors(pattern)))
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
