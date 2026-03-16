@@ -26,6 +26,7 @@ pub(crate) struct WeightedDwaStats {
     pub states: usize,
     pub final_states: usize,
     pub transitions: usize,
+    pub max_depth: usize,
     pub state_pairs: usize,
     pub transitions_to_final: usize,
     pub transitions_to_nonfinal: usize,
@@ -37,8 +38,8 @@ impl fmt::Display for WeightedDwaStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "dwa_states={} dwa_transitions={} state_pairs={} trans_to_leaf={} trans_to_nonleaf={} pairs_to_leaf={} pairs_to_nonleaf={}",
-            self.states, self.transitions, self.state_pairs,
+            "dwa_states={} dwa_transitions={} dwa_max_depth={} state_pairs={} trans_to_leaf={} trans_to_nonleaf={} pairs_to_leaf={} pairs_to_nonleaf={}",
+            self.states, self.transitions, self.max_depth, self.state_pairs,
             self.transitions_to_final, self.transitions_to_nonfinal,
             self.pairs_to_final, self.pairs_to_nonfinal,
         )
@@ -81,9 +82,27 @@ pub(crate) fn collect_weighted_dwa_stats(dwa: &WeightedDwa) -> WeightedDwaStats 
         ..WeightedDwaStats::default()
     };
 
+    let mut queue = std::collections::VecDeque::from([(dwa.start_state, 0usize)]);
+    let mut visited = vec![false; dwa.states.len()];
+    if let Some(start) = visited.get_mut(dwa.start_state as usize) {
+        *start = true;
+    }
+
     let mut all_pairs: BTreeSet<(u32, u32)> = BTreeSet::new();
     let mut pairs_to_final: BTreeSet<(u32, u32)> = BTreeSet::new();
     let mut pairs_to_nonfinal: BTreeSet<(u32, u32)> = BTreeSet::new();
+
+    while let Some((state_id, depth)) = queue.pop_front() {
+        stats.max_depth = stats.max_depth.max(depth);
+        for &(target, _) in dwa.states[state_id as usize].transitions.values() {
+            let target = target as usize;
+            if target >= visited.len() || visited[target] {
+                continue;
+            }
+            visited[target] = true;
+            queue.push_back((target as u32, depth + 1));
+        }
+    }
 
     for (src_idx, state) in dwa.states.iter().enumerate() {
         let src = src_idx as u32;
@@ -118,6 +137,42 @@ pub(crate) fn collect_weighted_dwa_stats(dwa: &WeightedDwa) -> WeightedDwaStats 
     stats.pairs_to_final = pairs_to_final.len();
     stats.pairs_to_nonfinal = pairs_to_nonfinal.len();
     stats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::weighted_u32::dwa::DWA;
+    use crate::ds::weight::Weight;
+
+    #[test]
+    fn test_collect_weighted_dwa_stats_reports_max_depth_from_start() {
+        let mut dwa = DWA::new(1, 1);
+        let s1 = dwa.add_state();
+        let s2 = dwa.add_state();
+        let s3 = dwa.add_state();
+
+        dwa.add_transition(0, 1, s1, Weight::all());
+        dwa.add_transition(s1, 2, s2, Weight::all());
+        dwa.add_transition(s2, 3, s3, Weight::all());
+        dwa.set_final_weight(s3, Weight::all());
+
+        let stats = collect_weighted_dwa_stats(&dwa);
+        assert_eq!(stats.max_depth, 3);
+    }
+
+    #[test]
+    fn test_collect_weighted_dwa_stats_ignores_unreachable_depth() {
+        let mut dwa = DWA::new(1, 1);
+        let reachable = dwa.add_state();
+        let unreachable = dwa.add_state();
+
+        dwa.add_transition(0, 1, reachable, Weight::all());
+        dwa.add_transition(unreachable, 2, unreachable, Weight::all());
+
+        let stats = collect_weighted_dwa_stats(&dwa);
+        assert_eq!(stats.max_depth, 1);
+    }
 }
 
 pub(crate) fn collect_unweighted_dfa_stats(dfa: &UnweightedDfa) -> UnweightedDfaStats {

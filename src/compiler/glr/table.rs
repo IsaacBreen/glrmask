@@ -9,6 +9,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::analysis::{EOF, AnalyzedGrammar};
+use crate::compiler::stages::replace_safe::{ReplaceSafeAnalysis, analyze_replace_safe};
 use crate::compiler::grammar_def::{NonterminalID, Rule, Symbol, TerminalID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -31,6 +32,8 @@ pub struct GLRTable {
     pub num_terminals: u32,
     pub num_rules: u32,
     pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub(crate) replace_safe: ReplaceSafeAnalysis,
 }
 
 impl GLRTable {
@@ -44,7 +47,18 @@ impl GLRTable {
             build_slr1_table(grammar, &item_sets, &transitions)
         };
         table.merge_identical_rows();
+        table.ensure_replace_safe();
         table
+    }
+
+    pub fn ensure_replace_safe(&mut self) {
+        let expected = self.num_states as usize;
+        if self.replace_safe.safe_shift_terminals.len() == expected
+            && self.replace_safe.safe_goto_nonterminals.len() == expected
+        {
+            return;
+        }
+        self.replace_safe = analyze_replace_safe(self);
     }
 
     pub fn action(&self, state: u32, terminal: TerminalID) -> Option<&Action> {
@@ -340,6 +354,7 @@ fn build_slr1_table(
         num_terminals: grammar.num_terminals,
         num_rules: grammar.rules.len() as u32,
         rules: grammar.rules.clone(),
+        replace_safe: ReplaceSafeAnalysis::default(),
     }
 }
 
@@ -591,6 +606,7 @@ fn build_lr1_table(
         num_terminals: grammar.num_terminals,
         num_rules: grammar.rules.len() as u32,
         rules: grammar.rules.clone(),
+        replace_safe: ReplaceSafeAnalysis::default(),
     }
 }
 

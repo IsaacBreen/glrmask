@@ -9,4 +9,5 @@ pub mod compact;
 pub mod templates;
 pub mod terminal_dwa;
 pub mod parser_dwa;
+pub mod replace_safe;
 pub mod resolve_negatives;
