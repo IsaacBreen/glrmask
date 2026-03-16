@@ -695,17 +695,14 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     let start_entries = canonicalize(&start_subset);
     supports[0] = start_entries.iter().map(|(state_id, _)| *state_id).collect();
 
-    let mut subset_map: HashMap<Vec<(u32, usize)>, u32> = HashMap::new();
-    let mut worklist: VecDeque<(Vec<(u32, usize)>, Vec<(u32, Weight)>)> = VecDeque::new();
-    let start_key: Vec<(u32, usize)> = start_entries
-        .iter()
-        .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
-        .collect();
+    let mut subset_map: HashMap<Vec<(u32, Weight)>, u32> = HashMap::new();
+    let mut worklist: VecDeque<(Vec<(u32, Weight)>, Vec<(u32, Weight)>)> = VecDeque::new();
+    let start_key = start_entries.clone();
     subset_map.insert(start_key.clone(), dwa.start_state);
     worklist.push_back((start_key, start_entries));
 
-    while let Some((subset_key_ids, subset_entries)) = worklist.pop_front() {
-        let from_state = subset_map[&subset_key_ids];
+    while let Some((subset_key, subset_entries)) = worklist.pop_front() {
+        let from_state = subset_map[&subset_key];
 
         let mut final_weight = Weight::empty();
         for (nwa_state_id, path_weight) in &subset_entries {
@@ -769,18 +766,14 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                 continue;
             }
 
-            let next_key_ids: Vec<(u32, usize)> = next_entries
-                .iter()
-                .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
-                .collect();
             let next_support: Vec<u32> = next_entries.iter().map(|(state_id, _)| *state_id).collect();
 
-            let to_state = if let Some(existing) = subset_map.get(&next_key_ids).copied() {
+            let to_state = if let Some(existing) = subset_map.get(&next_entries).copied() {
                 existing
             } else {
                 let new_state = dwa.add_state();
-                subset_map.insert(next_key_ids.clone(), new_state);
-                worklist.push_back((next_key_ids, next_entries));
+                subset_map.insert(next_entries.clone(), new_state);
+                worklist.push_back((next_entries.clone(), next_entries));
                 supports.push(next_support);
                 new_state
             };

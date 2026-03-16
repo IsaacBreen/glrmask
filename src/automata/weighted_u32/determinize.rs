@@ -113,23 +113,20 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         return Ok(dwa);
     }
 
-    let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<(Vec<(u32, usize)>, Vec<(u32, Weight)>)> = VecDeque::new();
+    let mut subset_map: FxHashMap<Vec<(u32, Weight)>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<(Vec<(u32, Weight)>, Vec<(u32, Weight)>)> = VecDeque::new();
     let start_entries = canonicalize(&start_subset);
-    let start_key: Vec<(u32, usize)> = start_entries
-        .iter()
-        .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
-        .collect();
+    let start_key = start_entries.clone();
     subset_map.insert(start_key.clone(), start_id);
     worklist.push_back((start_key, start_entries));
 
     let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
 
-    while let Some((subset_key_ids, subset_entries)) = worklist.pop_front() {
+    while let Some((subset_key, subset_entries)) = worklist.pop_front() {
         if let Some(profile) = profile.as_mut() {
             profile.subsets_processed += 1;
         }
-        let from_state = subset_map[&subset_key_ids];
+        let from_state = subset_map[&subset_key];
 
         let final_weight_started_at = profile_enabled.then(std::time::Instant::now);
         let mut final_weight = Weight::empty();
@@ -230,18 +227,13 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             if next_key.is_empty() {
                 continue;
             }
-            let next_key_ids: Vec<(u32, usize)> = next_key
-                .iter()
-                .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
-                .collect();
-
             let subset_lookup_started_at = profile_enabled.then(std::time::Instant::now);
-            let to_state = if let Some(existing) = subset_map.get(&next_key_ids).copied() {
+            let to_state = if let Some(existing) = subset_map.get(&next_key).copied() {
                 existing
             } else {
                 let new_id = dwa.add_state();
-                subset_map.insert(next_key_ids.clone(), new_id);
-                worklist.push_back((next_key_ids, next_key));
+                subset_map.insert(next_key.clone(), new_id);
+                worklist.push_back((next_key.clone(), next_key));
                 new_id
             };
             if let (Some(profile), Some(started_at)) = (profile.as_mut(), subset_lookup_started_at) {

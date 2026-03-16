@@ -55,6 +55,10 @@ fn minimize_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_MINIMIZE_ACYCLIC").is_some()
 }
 
+fn minimize_signature_dedup_enabled() -> bool {
+    std::env::var_os("GLRMASK_DISABLE_MINIMIZE_SIG_DEDUP").is_none()
+}
+
 fn weight_body_id(weight: &Weight) -> usize {
     Arc::as_ptr(&weight.0) as usize
 }
@@ -791,12 +795,15 @@ fn build_incompatibility_graph_sparse(
     Some(adj)
 }
 
-/// Compute a 128-bit signature for a candidate state.
+/// Compute a signature hash for a candidate state.
 ///
-/// Two states with the same signature are guaranteed compatible (they have
-/// identical final weights on their needed domain, and identical productive
-/// transitions with the same mapped targets and weights).  This lets us
-/// deduplicate candidates before building the O(n²) incompatibility graph.
+/// Two states with the same signature are guaranteed to have identical
+/// compatibility relationships with every other state — so they can safely
+/// share a representative in the incompatibility graph.  This requires
+/// hashing:
+///   - the needed set (determines overlap domains with other states)
+///   - the final weight restricted to needed
+///   - all productive transitions (labels, mapped targets, weights)
 fn compute_state_signature(
     state_id: usize,
     dwa: &DWA,
@@ -810,6 +817,11 @@ fn compute_state_signature(
     let state = &dwa.states[state_id];
 
     let mut hasher = DefaultHasher::new();
+
+    // CRITICAL: include needed set — states with different needed sets can
+    // have different compatibility relationships even with identical transitions,
+    // because the overlap domain (needed_u ∩ needed_v) varies.
+    needed[state_id].hash(&mut hasher);
 
     // Hash final weight restricted to needed set
     match &state.final_weight {
@@ -836,6 +848,26 @@ fn compute_state_signature(
     hasher.finish()
 }
 
+/// Check if two states can safely share a representative in the signature-dedup
+/// optimization.  Requires identical needed sets (so overlap domains with every
+/// other state are the same) and identical signatures (final weight on needed,
+/// transitions).
+fn states_dedup_equivalent(
+    u: usize,
+    v: usize,
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+) -> bool {
+    // Different needed sets → different overlap domains → different compatibility
+    // relationships.  Must NOT share a representative.
+    if needed[u] != needed[v] {
+        return false;
+    }
+    states_signature_equal(u, v, dwa, old_to_new, productive_transitions)
+}
+
 /// Color candidates using signature-based deduplication and a strategy that
 /// adapts based on the bucket: greedy-without-graph for smaller sets, and
 /// sparse overlap graph + greedy coloring for larger sets.
@@ -849,21 +881,50 @@ fn build_and_color_with_signature_dedup(
 ) -> Vec<usize> {
     let nc = candidates.len();
 
-    // Step 1: Compute signatures for all candidates
+    // Step 1: Compute signatures for all candidates (now includes needed set)
     let signatures: Vec<u64> = candidates
         .iter()
         .map(|&id| compute_state_signature(id, dwa, needed, old_to_new, productive_transitions))
         .collect();
 
-    // Step 2: Group by signature, keeping track of one representative per group
-    let mut sig_to_rep_idx: FxHashMap<u64, usize> = FxHashMap::default();
-    let mut unique_indices: Vec<usize> = Vec::new(); // indices into candidates
+    // Step 2: Group by signature hash, with collision detection.
+    // States within the same hash group are verified with structural equality
+    // (including needed set) before sharing a representative.
+    let mut sig_groups: FxHashMap<u64, Vec<Vec<usize>>> = FxHashMap::default();
     for (idx, &sig) in signatures.iter().enumerate() {
-        sig_to_rep_idx.entry(sig).or_insert_with(|| {
+        let groups = sig_groups.entry(sig).or_default();
+        let mut placed = false;
+        for sub_group in groups.iter_mut() {
+            let rep_idx = sub_group[0];
+            if states_dedup_equivalent(
+                candidates[idx],
+                candidates[rep_idx],
+                dwa,
+                needed,
+                old_to_new,
+                productive_transitions,
+            ) {
+                sub_group.push(idx);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            groups.push(vec![idx]);
+        }
+    }
+
+    // Step 3: Flatten to unique representative indices
+    let mut unique_indices: Vec<usize> = Vec::new();
+    let mut idx_to_rep: Vec<usize> = vec![0; nc];
+    for groups in sig_groups.values() {
+        for sub_group in groups {
             let rep = unique_indices.len();
-            unique_indices.push(idx);
-            rep
-        });
+            unique_indices.push(sub_group[0]);
+            for &idx in sub_group {
+                idx_to_rep[idx] = rep;
+            }
+        }
     }
 
     let k = unique_indices.len();
@@ -875,10 +936,10 @@ fn build_and_color_with_signature_dedup(
         );
     }
 
-    // Step 3: Build sub-candidate list of unique representatives
+    // Step 4: Build sub-candidate list of unique representatives
     let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
 
-    // Step 4: Build and color the representative graph using sparse overlap
+    // Step 5: Build and color the representative graph using sparse overlap
     let rep_adj = build_incompatibility_graph_sparse(
         dwa,
         &rep_candidates,
@@ -900,10 +961,10 @@ fn build_and_color_with_signature_dedup(
 
     let rep_coloring = greedy_coloring(&rep_adj);
 
-    // Step 5: Map all candidates back — each gets the color of its representative
+    // Step 6: Map all candidates back — each gets the color of its representative
     let mut coloring = vec![0usize; nc];
-    for (idx, &sig) in signatures.iter().enumerate() {
-        let rep = sig_to_rep_idx[&sig];
+    for idx in 0..nc {
+        let rep = idx_to_rep[idx];
         coloring[idx] = rep_coloring[rep];
     }
 
@@ -1541,14 +1602,36 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
         // signature and are guaranteed compatible, so we only build the
         // O(K²) graph among unique-signature representatives (K << N).
         let graph_started_at = std::time::Instant::now();
-        let coloring = build_and_color_with_signature_dedup(
-            &pushed,
-            candidates,
-            &needed,
-            &old_to_new,
-            &productive_transitions,
-            &mut profile,
-        );
+        let coloring = if minimize_signature_dedup_enabled() {
+            build_and_color_with_signature_dedup(
+                &pushed,
+                candidates,
+                &needed,
+                &old_to_new,
+                &productive_transitions,
+                &mut profile,
+            )
+        } else {
+            let adj = build_incompatibility_graph_sparse(
+                &pushed,
+                candidates,
+                &needed,
+                &old_to_new,
+                &productive_transitions,
+                &mut profile,
+            )
+            .unwrap_or_else(|| {
+                build_incompatibility_graph(
+                    &pushed,
+                    candidates,
+                    &needed,
+                    &old_to_new,
+                    &productive_transitions,
+                    &mut profile,
+                )
+            });
+            greedy_coloring(&adj)
+        };
         profile.graph_color_ms += graph_started_at.elapsed();
 
         let setup_started = std::time::Instant::now();

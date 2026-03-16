@@ -184,9 +184,19 @@ impl WeightOpKey {
     }
 }
 
+/// Cached memo entry: stores the result AND weak references to both operands.
+/// The operand weak refs guard against the ABA problem: if either operand's
+/// Arc was dropped and a new Arc reuses the same address, the operand weak
+/// ref will fail to upgrade, and the stale entry is discarded.
+struct WeightOpMemoEntry {
+    result: Weak<WeightMap>,
+    left_operand: Weak<WeightMap>,
+    right_operand: Weak<WeightMap>,
+}
+
 #[derive(Default)]
 struct WeightOpMemo {
-    results: FxHashMap<WeightOpKey, Weak<WeightMap>>,
+    results: FxHashMap<WeightOpKey, WeightOpMemoEntry>,
     inserts_since_cleanup: usize,
 }
 
@@ -195,7 +205,7 @@ impl WeightOpMemo {
         if self.inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
             return;
         }
-        self.results.retain(|_, weak| weak.strong_count() > 0);
+        self.results.retain(|_, entry| entry.result.strong_count() > 0);
         self.inserts_since_cleanup = 0;
     }
 }
@@ -239,6 +249,24 @@ fn record_single_intersection_overlap() {
     });
 }
 
+/// Clear all global weight interning and thread-local op memo caches.
+/// Call this between independent constraint compilations to ensure
+/// no stale interned weights leak from one build into the next.
+pub fn clear_weight_caches() {
+    // Clear thread-local op memo
+    WEIGHT_OP_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        memo.results.clear();
+        memo.inserts_since_cleanup = 0;
+    });
+    // Clear global interner
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    interner.token_sets.clear();
+    interner.weights.clear();
+    interner.token_inserts_since_cleanup = 0;
+    interner.weight_inserts_since_cleanup = 0;
+}
+
 pub(crate) fn reset_weight_debug_stats() {
     WEIGHT_DEBUG_STATS.with(|stats| {
         *stats.borrow_mut() = WeightDebugStats::default();
@@ -253,11 +281,15 @@ fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) 
     let key = WeightOpKey::new(kind, left.ptr_key(), right.ptr_key());
     WEIGHT_OP_MEMO.with(|memo| {
         let mut memo = memo.borrow_mut();
-        let existing = memo.results.get(&key).and_then(Weak::upgrade);
-        if existing.is_none() {
+        let entry = memo.results.get(&key)?;
+        // Guard against ABA: if either operand's Arc was dropped and an address
+        // was reused, the weak operand refs will fail to upgrade.
+        if entry.left_operand.strong_count() == 0 || entry.right_operand.strong_count() == 0 {
             memo.results.remove(&key);
+            return None;
         }
-        existing.map(Weight)
+        let result = entry.result.upgrade()?;
+        Some(Weight(result))
     })
 }
 
@@ -266,7 +298,11 @@ fn store_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight, r
     WEIGHT_OP_MEMO.with(|memo| {
         let mut memo = memo.borrow_mut();
         memo.maybe_cleanup();
-        memo.results.insert(key, Arc::downgrade(&result.0));
+        memo.results.insert(key, WeightOpMemoEntry {
+            result: Arc::downgrade(&result.0),
+            left_operand: Arc::downgrade(&left.0),
+            right_operand: Arc::downgrade(&right.0),
+        });
         memo.inserts_since_cleanup += 1;
     });
 }
@@ -1653,6 +1689,43 @@ mod tests {
 
         assert_eq!(via_union, direct);
         assert_eq!(via_union.ptr_key(), direct.ptr_key());
+    }
+
+    #[test]
+    fn test_weight_op_memo_discards_entries_when_operands_are_gone() {
+        clear_weight_caches();
+
+        let stale_result = Weight::from_compact_ranges(vec![(0..=0, vec![7..=7])]);
+        let stale_operand_weaks = {
+            let left = Weight::from_compact_ranges(vec![(0..=0, vec![1..=1])]);
+            let right = Weight::from_compact_ranges(vec![(0..=0, vec![2..=2])]);
+            (
+                Arc::downgrade(&left.0),
+                Arc::downgrade(&right.0),
+            )
+        };
+
+        let live_left = Weight::from_compact_ranges(vec![(0..=0, vec![3..=3])]);
+        let live_right = Weight::from_compact_ranges(vec![(0..=0, vec![4..=4])]);
+        let lookup_key = WeightOpKey::new(WeightOpKind::Union, live_left.ptr_key(), live_right.ptr_key());
+
+        WEIGHT_OP_MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            memo.results.insert(
+                lookup_key,
+                WeightOpMemoEntry {
+                    result: Arc::downgrade(&stale_result.0),
+                    left_operand: stale_operand_weaks.0,
+                    right_operand: stale_operand_weaks.1,
+                },
+            );
+        });
+
+        assert!(lookup_memoized_weight_op(WeightOpKind::Union, &live_left, &live_right).is_none());
+
+        WEIGHT_OP_MEMO.with(|memo| {
+            assert!(!memo.borrow().results.contains_key(&lookup_key));
+        });
     }
 
     #[test]
