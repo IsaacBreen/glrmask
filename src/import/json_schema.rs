@@ -26,8 +26,10 @@ const JSON_KEY_COLON_RULE: &str = "JSON_KEY_COLON";
 const JSON_STRING_REGEX: &str =
     r#""([^"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
 const JSON_KEY_COLON_REGEX: &str =
-    r#""([^"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*":"#;
+    r#""([^"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
+const JSON_ITEM_SEPARATOR: &[u8] = b", ";
+const JSON_KEY_SEPARATOR: &[u8] = b": ";
 
 fn literal_expr(bytes: &[u8]) -> GrammarExpr {
     GrammarExpr::Literal(bytes.to_vec())
@@ -83,7 +85,7 @@ fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
 }
 
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
-    regex_expr(format!(r#""(?:{})":"#, strip_regex_anchors(pattern)))
+    regex_expr(format!(r#""(?:{})": "#, strip_regex_anchors(pattern)))
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
@@ -92,9 +94,51 @@ fn json_string_literal_bytes(text: &str) -> Vec<u8> {
         .into_bytes()
 }
 
+fn append_json_native(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
+        Value::Number(number) => out.push_str(&number.to_string()),
+        Value::String(text) => {
+            out.push_str(
+                &serde_json::to_string(text).unwrap_or_else(|_| format!("\"{}\"", text)),
+            );
+        }
+        Value::Array(values) => {
+            out.push('[');
+            for (index, item) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(std::str::from_utf8(JSON_ITEM_SEPARATOR).unwrap_or(", "));
+                }
+                append_json_native(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(entries) => {
+            out.push('{');
+            for (index, (key, item)) in entries.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(std::str::from_utf8(JSON_ITEM_SEPARATOR).unwrap_or(", "));
+                }
+                out.push_str(
+                    &serde_json::to_string(key).unwrap_or_else(|_| format!("\"{}\"", key)),
+                );
+                out.push_str(std::str::from_utf8(JSON_KEY_SEPARATOR).unwrap_or(": "));
+                append_json_native(item, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn json_value_literal_bytes(value: &Value) -> Vec<u8> {
+    let mut rendered = String::new();
+    append_json_native(value, &mut rendered);
+    rendered.into_bytes()
+}
+
 fn json_value_literal_expr(value: &Value) -> GrammarExpr {
-    let rendered = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
-    literal_expr(rendered.as_bytes())
+    literal_expr(&json_value_literal_bytes(value))
 }
 
 fn expr_key(expr: &GrammarExpr) -> String {
@@ -601,7 +645,7 @@ impl SchemaCtx {
                     literal_expr(b"{"),
                     GrammarExpr::Ref(JSON_KV_RULE.into()),
                     repeat_expr(
-                        sequence_or_single(vec![literal_expr(b","), GrammarExpr::Ref(JSON_KV_RULE.into())]),
+                        sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), GrammarExpr::Ref(JSON_KV_RULE.into())]),
                         0,
                         None,
                     ),
@@ -617,7 +661,7 @@ impl SchemaCtx {
                     literal_expr(b"["),
                     self.json_value_ref(),
                     repeat_expr(
-                        sequence_or_single(vec![literal_expr(b","), self.json_value_ref()]),
+                        sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), self.json_value_ref()]),
                         0,
                         None,
                     ),
@@ -902,7 +946,7 @@ impl SchemaCtx {
 
     fn json_key_colon_literal(&self, text: &str) -> GrammarExpr {
         let mut bytes = json_string_literal_bytes(text);
-        bytes.push(b':');
+        bytes.extend_from_slice(JSON_KEY_SEPARATOR);
         literal_expr(&bytes)
     }
 
@@ -1024,7 +1068,7 @@ impl SchemaCtx {
                     term_c.clone(),
                     choice_or_single(vec![
                         sequence_or_single(vec![
-                            literal_expr(b","),
+                            literal_expr(JSON_ITEM_SEPARATOR),
                             self.json_key_colon_ref(),
                             value_expr,
                             GrammarExpr::Ref(term_c.clone()),
@@ -1101,7 +1145,7 @@ impl SchemaCtx {
 
         let mut options = vec![sequence_or_single(vec![
             left_expr.clone(),
-            literal_expr(b","),
+            literal_expr(JSON_ITEM_SEPARATOR),
             right_expr.clone(),
         ])];
         if right_can_be_empty {
@@ -1150,7 +1194,7 @@ impl SchemaCtx {
             sequence_or_single(vec![
                 literal_expr(b"{"),
                 pair.clone(),
-                repeat_expr(sequence_or_single(vec![literal_expr(b","), pair]), 0, None),
+                repeat_expr(sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), pair]), 0, None),
                 literal_expr(b"}"),
             ]),
         ]))
@@ -1188,7 +1232,7 @@ impl SchemaCtx {
             let mut parts = vec![literal_expr(b"[")];
             for (index, item_schema) in prefix_items.iter().enumerate() {
                 if index > 0 {
-                    parts.push(literal_expr(b","));
+                    parts.push(literal_expr(JSON_ITEM_SEPARATOR));
                 }
                 parts.push(self.convert_schema(item_schema)?);
             }
@@ -1196,7 +1240,7 @@ impl SchemaCtx {
             if extra_max.is_none() || extra_max.unwrap_or(0) > 0 || extra_min > 0 {
                 let extra_item_expr = self.extract_rule(extra_item_expr, "arr_item");
                 parts.push(repeat_expr(
-                    sequence_or_single(vec![literal_expr(b","), extra_item_expr]),
+                    sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), extra_item_expr]),
                     extra_min,
                     extra_max,
                 ));
@@ -1245,7 +1289,7 @@ impl SchemaCtx {
             literal_expr(b"["),
             item_expr.clone(),
             repeat_expr(
-                sequence_or_single(vec![literal_expr(b","), item_expr]),
+                sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), item_expr]),
                 min_items.saturating_sub(1),
                 max_items.map(|max_items| max_items.saturating_sub(1)),
             ),

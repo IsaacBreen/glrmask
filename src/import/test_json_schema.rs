@@ -130,7 +130,6 @@ WS ::= ( ' ' | '\\t' | '\\n' | '\\r' )*";
 
 /// Ported from `test_schema_simple_object`.
 #[test]
-#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_simple_object() {
     let schema = r#"{
         "type": "object",
@@ -142,13 +141,12 @@ fn test_schema_simple_object() {
         schema,
         &["{}",
           r#"{"name": "test"}"#,
-          r#"{ "name" : "hello world" }"#],
+                    r#"{"name": "hello world"}"#],
     );
 }
 
 /// Ported from `test_schema_additional_properties_true`.
 #[test]
-#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_additional_properties_true() {
     let schema = r#"{
         "type": "object",
@@ -171,7 +169,6 @@ fn test_schema_additional_properties_true() {
 
 /// Ported from `test_schema_additional_properties_schema`.
 #[test]
-#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_additional_properties_schema() {
     let schema = r#"{
         "type": "object",
@@ -193,7 +190,6 @@ fn test_schema_additional_properties_schema() {
 
 /// Ported from `test_schema_dependencies`.
 #[test]
-#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_dependencies() {
     let schema = r#"{
         "type": "object",
@@ -219,7 +215,6 @@ fn test_schema_dependencies() {
 
 /// Ported from `test_schema_nested_objects`.
 #[test]
-#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or key-colon continuation"]
 fn test_schema_nested_objects() {
     let schema = r#"{
         "type": "object",
@@ -244,7 +239,6 @@ fn test_schema_nested_objects() {
 
 /// Ported from `test_schema_array`.
 #[test]
-#[ignore = "still blocked by sep1-style ignored whitespace support, not by schema lowering or array continuation"]
 fn test_schema_array() {
     let schema = r#"{
         "type": "array",
@@ -316,6 +310,22 @@ fn test_schema_const2() {
         let token_id = *byte as u32;
         s.commit_token(token_id).unwrap()
     }
+}
+
+#[test]
+fn test_schema_const_object_native_spacing() {
+    let schema = r#"{
+        "const": {"name": "x", "count": 2}
+    }"#;
+    schema_accepts(schema, &[r#"{"name": "x", "count": 2}"#]);
+}
+
+#[test]
+fn test_schema_const_array_native_spacing() {
+    let schema = r#"{
+        "const": [1, 2, 3]
+    }"#;
+    schema_accepts(schema, &["[1, 2, 3]"]);
 }
 
 /// Ported from `test_json_schema_mask_generation`.
