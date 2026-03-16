@@ -13,6 +13,20 @@ use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
 use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
 use crate::automata::lexer::tokenizer::Tokenizer;
 
+fn max_runtime_reduction_len_from_env() -> Option<usize> {
+    let raw = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN").ok()?;
+    let value = raw.parse::<usize>().unwrap_or_else(|_| {
+        panic!(
+            "GLRMASK_MAX_RUNTIME_REDUCTION_LEN must parse as usize, got {raw:?}"
+        )
+    });
+    assert!(
+        value >= 2,
+        "GLRMASK_MAX_RUNTIME_REDUCTION_LEN must be at least 2; 1 cannot preserve general CFG concatenation"
+    );
+    Some(value)
+}
+
 // ── Nullable terminal expansion ─────────────────────────────────────────────
 
 /// Rewrite grammar rules so that nullable terminals (those matching the empty
@@ -652,6 +666,75 @@ pub(crate) fn compact_bounded_repeat_ladders(
     }
 }
 
+pub(crate) fn bound_runtime_reduction_length(
+    grammar: &mut GrammarDef,
+    max_rhs_len: usize,
+) {
+    if max_rhs_len < 2 {
+        return;
+    }
+
+    let mut next_nt = grammar.num_nonterminals();
+    let mut rewritten = Vec::with_capacity(grammar.rules.len());
+
+    for rule in grammar.rules.drain(..) {
+        if rule.rhs.len() <= max_rhs_len {
+            rewritten.push(rule);
+            continue;
+        }
+
+        let lhs_name = grammar
+            .nonterminal_names
+            .get(&rule.lhs)
+            .cloned()
+            .unwrap_or_else(|| format!("N{}", rule.lhs));
+        let symbols = rule.rhs;
+        let mut consumed = 1usize;
+        let mut stage = 0usize;
+
+        let first_helper = next_nt;
+        next_nt += 1;
+        stage += 1;
+        grammar
+            .nonterminal_names
+            .entry(first_helper)
+            .or_insert_with(|| format!("{lhs_name}__prefix_{stage}"));
+        rewritten.push(Rule {
+            lhs: first_helper,
+            rhs: vec![symbols[0].clone()],
+        });
+
+        let mut prefix_nt = first_helper;
+        while symbols.len() - consumed > max_rhs_len - 1 {
+            let helper = next_nt;
+            next_nt += 1;
+            stage += 1;
+            grammar
+                .nonterminal_names
+                .entry(helper)
+                .or_insert_with(|| format!("{lhs_name}__prefix_{stage}"));
+
+            let take = max_rhs_len - 1;
+            let mut rhs = Vec::with_capacity(max_rhs_len);
+            rhs.push(Symbol::Nonterminal(prefix_nt));
+            rhs.extend(symbols[consumed..consumed + take].iter().cloned());
+            rewritten.push(Rule { lhs: helper, rhs });
+            prefix_nt = helper;
+            consumed += take;
+        }
+
+        let mut final_rhs = Vec::with_capacity(1 + symbols.len() - consumed);
+        final_rhs.push(Symbol::Nonterminal(prefix_nt));
+        final_rhs.extend(symbols[consumed..].iter().cloned());
+        rewritten.push(Rule {
+            lhs: rule.lhs,
+            rhs: final_rhs,
+        });
+    }
+
+    grammar.rules = rewritten;
+}
+
 pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) {
     // Probe nullability against the original terminal set first; nullable
     // terminals are expanded into optional grammar structure before we compact
@@ -672,6 +755,10 @@ pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, 
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
     compact_bounded_repeat_ladders(&mut normalized.rules, normalized.start, &normalized.nonterminal_names);
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+    if let Some(max_rhs_len) = max_runtime_reduction_len_from_env() {
+        bound_runtime_reduction_length(&mut normalized, max_rhs_len);
+        normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+    }
     compact_unused_terminals(&mut normalized);
 
     // Build the real tokenizer only from the compacted live terminal set so
@@ -680,4 +767,96 @@ pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, 
     let _ = tokenizer.drain_nullable_terminals();
 
     (normalized, tokenizer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::grammar::model::Terminal;
+
+    fn literal(id: u32, bytes: &[u8]) -> Terminal {
+        Terminal::Literal {
+            id,
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn test_bound_runtime_reduction_length_rewrites_long_rule_to_prefix_chain() {
+        let mut grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Terminal(1),
+                    Symbol::Terminal(2),
+                    Symbol::Terminal(3),
+                    Symbol::Terminal(4),
+                ],
+            }],
+            start: 0,
+            terminals: vec![
+                literal(0, b"a"),
+                literal(1, b"b"),
+                literal(2, b"c"),
+                literal(3, b"d"),
+                literal(4, b"e"),
+            ],
+            nonterminal_names: std::collections::BTreeMap::from([(0, "Start".to_string())]),
+            ..Default::default()
+        };
+
+        bound_runtime_reduction_length(&mut grammar, 3);
+
+        assert!(grammar.rules.iter().all(|rule| rule.rhs.len() <= 3));
+        assert_eq!(grammar.rules.len(), 3);
+        assert_eq!(grammar.rules[0].lhs, 1);
+        assert_eq!(grammar.rules[0].rhs, vec![Symbol::Terminal(0)]);
+        assert_eq!(grammar.rules[1].lhs, 2);
+        assert_eq!(
+            grammar.rules[1].rhs,
+            vec![
+                Symbol::Nonterminal(1),
+                Symbol::Terminal(1),
+                Symbol::Terminal(2),
+            ]
+        );
+        assert_eq!(
+            grammar.rules[2],
+            Rule {
+                lhs: 0,
+                rhs: vec![
+                    Symbol::Nonterminal(2),
+                    Symbol::Terminal(3),
+                    Symbol::Terminal(4),
+                ],
+            }
+        );
+        assert_eq!(grammar.nonterminal_names.get(&1).map(String::as_str), Some("Start__prefix_1"));
+        assert_eq!(grammar.nonterminal_names.get(&2).map(String::as_str), Some("Start__prefix_2"));
+    }
+
+    #[test]
+    fn test_bound_runtime_reduction_length_leaves_short_rules_unchanged() {
+        let original_rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(2)],
+            },
+        ];
+        let mut grammar = GrammarDef {
+            rules: original_rules.clone(),
+            start: 0,
+            terminals: vec![literal(0, b"a"), literal(1, b"b"), literal(2, b"c")],
+            ..Default::default()
+        };
+
+        bound_runtime_reduction_length(&mut grammar, 2);
+
+        assert_eq!(grammar.rules, original_rules);
+    }
 }
