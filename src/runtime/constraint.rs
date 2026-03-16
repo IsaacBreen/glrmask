@@ -290,6 +290,9 @@ impl Constraint {
     }
 
     pub fn start(&self) -> ConstraintState<'_> {
+        crate::ds::weight::clear_stale_weights();
+        crate::ds::weight::clear_weight_op_caches();
+
         
         let initial_parser_state = 0u32;
         let initial_tok_state = self.tokenizer.initial_state();

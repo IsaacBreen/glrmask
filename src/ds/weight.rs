@@ -64,6 +64,23 @@ impl GlobalWeightInterner {
         });
         self.weight_inserts_since_cleanup = 0;
     }
+
+    fn clear_all(&mut self) {
+        self.token_sets.clear();
+        self.weights.clear();
+        self.token_inserts_since_cleanup = 0;
+        self.weight_inserts_since_cleanup = 0;
+    }
+
+    fn clear_stale(&mut self) {
+        self.token_sets.retain(|_, weak| weak.strong_count() > 0);
+        self.weights.retain(|_, bucket| {
+            bucket.retain(|weak| weak.strong_count() > 0);
+            !bucket.is_empty()
+        });
+        self.token_inserts_since_cleanup = 0;
+        self.weight_inserts_since_cleanup = 0;
+    }
 }
 
 fn intern_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
@@ -208,6 +225,11 @@ impl WeightOpMemo {
         self.results.retain(|_, entry| entry.result.strong_count() > 0);
         self.inserts_since_cleanup = 0;
     }
+
+    fn clear_all(&mut self) {
+        self.results.clear();
+        self.inserts_since_cleanup = 0;
+    }
 }
 
 thread_local! {
@@ -249,22 +271,27 @@ fn record_single_intersection_overlap() {
     });
 }
 
-/// Clear all global weight interning and thread-local op memo caches.
-/// Call this between independent constraint compilations to ensure
-/// no stale interned weights leak from one build into the next.
-pub fn clear_weight_caches() {
-    // Clear thread-local op memo
-    WEIGHT_OP_MEMO.with(|memo| {
-        let mut memo = memo.borrow_mut();
-        memo.results.clear();
-        memo.inserts_since_cleanup = 0;
-    });
-    // Clear global interner
+/// Clear the global interned-weight tables entirely.
+pub fn clear_all_weights() {
     let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
-    interner.token_sets.clear();
-    interner.weights.clear();
-    interner.token_inserts_since_cleanup = 0;
-    interner.weight_inserts_since_cleanup = 0;
+    interner.clear_all();
+}
+
+/// Prune only dead entries from the global weight interner.
+pub fn clear_stale_weights() {
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    interner.clear_stale();
+}
+
+/// Clear the current thread's weight-operation memo caches.
+pub fn clear_weight_op_caches() {
+    WEIGHT_OP_MEMO.with(|memo| memo.borrow_mut().clear_all());
+}
+
+/// Compatibility wrapper retaining the previous behavior.
+pub fn clear_weight_caches() {
+    clear_weight_op_caches();
+    clear_all_weights();
 }
 
 pub(crate) fn reset_weight_debug_stats() {
@@ -1520,6 +1547,10 @@ impl<'de> Deserialize<'de> for Weight {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+
+    static WEIGHT_CACHE_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
     fn test_weight_empty() {
@@ -1693,6 +1724,7 @@ mod tests {
 
     #[test]
     fn test_weight_op_memo_discards_entries_when_operands_are_gone() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
         clear_weight_caches();
 
         let stale_result = Weight::from_compact_ranges(vec![(0..=0, vec![7..=7])]);
@@ -1725,6 +1757,79 @@ mod tests {
 
         WEIGHT_OP_MEMO.with(|memo| {
             assert!(!memo.borrow().results.contains_key(&lookup_key));
+        });
+    }
+
+    #[test]
+    fn test_clear_all_weights_breaks_future_intern_reuse() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
+        clear_weight_caches();
+
+        let first = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2])]);
+        let first_ptr = first.ptr_key();
+
+        clear_all_weights();
+
+        let second = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2])]);
+        assert_ne!(first_ptr, second.ptr_key());
+    }
+
+    #[test]
+    fn test_clear_stale_weights_prunes_dead_interner_entries() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
+        clear_weight_caches();
+
+        let stale_tokens = RangeSetBlaze::from_iter([1..=2]);
+        let fingerprint = {
+            let mut map = WeightMap::new();
+            map.extend_simple(std::iter::once((0..=1, Arc::new(stale_tokens.clone()))));
+            weight_map_fingerprint(&map)
+        };
+        let stale_token_weak = {
+            let shared = Arc::new(stale_tokens.clone());
+            let weak = Arc::downgrade(&shared);
+            drop(shared);
+            weak
+        };
+
+        let stale_weight_weak = {
+            let mut map = WeightMap::new();
+            map.extend_simple(std::iter::once((0..=1, Arc::new(stale_tokens.clone()))));
+            let shared = Arc::new(map);
+            let weak = Arc::downgrade(&shared);
+            let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+            interner.token_sets.insert(stale_tokens.clone(), stale_token_weak);
+            interner.weights.insert(fingerprint, vec![weak.clone()]);
+            drop(shared);
+            weak
+        };
+
+        assert_eq!(stale_weight_weak.strong_count(), 0);
+
+        clear_stale_weights();
+
+        let interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+        assert!(!interner.weights.contains_key(&fingerprint));
+        assert!(!interner.token_sets.contains_key(&stale_tokens));
+    }
+
+    #[test]
+    fn test_clear_weight_op_caches_empties_thread_local_memo() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
+        clear_weight_caches();
+
+        let left = Weight::from_compact_ranges(vec![(0..=0, vec![1..=1])]);
+        let right = Weight::from_compact_ranges(vec![(0..=0, vec![2..=2])]);
+        let _ = left.union(&right);
+
+        WEIGHT_OP_MEMO.with(|memo| {
+            assert!(!memo.borrow().results.is_empty());
+        });
+
+        clear_weight_op_caches();
+
+        WEIGHT_OP_MEMO.with(|memo| {
+            assert!(memo.borrow().results.is_empty());
         });
     }
 

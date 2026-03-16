@@ -15,7 +15,12 @@ pub(crate) mod runtime;
 mod vocab;
 
 pub use compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
-pub use ds::weight::clear_weight_caches;
+pub use ds::weight::{
+    clear_all_weights,
+    clear_stale_weights,
+    clear_weight_caches,
+    clear_weight_op_caches,
+};
 pub use error::{GlrMaskError, Result};
 pub use runtime::{Constraint, ConstraintState, ConstraintStateSummary, MaskDebugMetrics};
 pub use vocab::Vocab;
