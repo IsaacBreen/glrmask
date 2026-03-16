@@ -25,7 +25,6 @@ use crate::compiler::stages::parser_dwa::{
     build_parser_dwa_from_terminal_dwa_with_report,
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report,
 };
-use crate::compiler::stages::replace_safe::ReplaceSafeAnalysis;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
@@ -144,7 +143,7 @@ fn build_internal_token_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u
         .collect()
 }
 
-use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
+use crate::compiler::grammar::transforms::{expand_nullable_terminals, compact_unused_terminals, inline_single_use_nonterminals, compact_bounded_repeat_ladders, prepare_grammar_for_compile};
 
 
 fn compile_profile_enabled() -> bool {
@@ -876,7 +875,6 @@ fn log_compile_summary(
     build_glr_table_time: std::time::Duration,
     build_internal_id_map_time: std::time::Duration,
     collect_token_bytes_time: std::time::Duration,
-    replace_safe: &ReplaceSafeAnalysis,
     terminal_build: &TerminalDwaBuildReport,
     parser_build: &ParserDwaBuildReport,
     total_time: std::time::Duration,
@@ -902,13 +900,6 @@ fn log_compile_summary(
         reduction_ratio(vocab.entries.len(), id_map.vocab_tokens.num_internal_ids() as usize),
     );
     eprintln!(
-        "[glrmask/profile][summary] replace_safe shifts={}/{} gotos={}/{}",
-        replace_safe.safe_shifts,
-        replace_safe.shift_candidates,
-        replace_safe.safe_gotos,
-        replace_safe.goto_candidates,
-    );
-    eprintln!(
         "[glrmask/profile][summary] terminal_nwa states={} start={} final={} eps={} labeled={} total={}",
         terminal_build.terminal_nwa.states,
         terminal_build.terminal_nwa.start_states,
@@ -918,16 +909,14 @@ fn log_compile_summary(
         terminal_build.terminal_nwa.transitions,
     );
     eprintln!(
-        "[glrmask/profile][summary] terminal_dwa det states={} final={} trans={} max_depth={} det_ms={:.3} | min states={} final={} trans={} max_depth={} min_ms={:.3} collapse={} subtract_disallowed_ms={:.3}",
+        "[glrmask/profile][summary] terminal_dwa det states={} final={} trans={} det_ms={:.3} | min states={} final={} trans={} min_ms={:.3} collapse={} subtract_disallowed_ms={:.3}",
         terminal_build.terminal_dwa.states,
         terminal_build.terminal_dwa.final_states,
         terminal_build.terminal_dwa.transitions,
-        terminal_build.terminal_dwa.max_depth,
         ms(terminal_build.determinize_time),
         terminal_build.terminal_minimized_dwa.states,
         terminal_build.terminal_minimized_dwa.final_states,
         terminal_build.terminal_minimized_dwa.transitions,
-        terminal_build.terminal_minimized_dwa.max_depth,
         ms(terminal_build.minimize_time),
         if terminal_build.collapse_always_allowed_applied { "applied" } else { "skipped" },
         ms(terminal_build.subtract_disallowed_time),
@@ -978,15 +967,13 @@ fn log_compile_summary(
         ms(parser_build.resolve_negative_codes_time),
     );
     eprintln!(
-        "[glrmask/profile][summary] parser_dwa pre_min states={} final={} trans={} max_depth={} | post_min states={} final={} trans={} max_depth={} detmin_ms={:.3} subtract_final_ms={:.3} rules={} terminals={} tokenizer_states={} vocab_entries={}",
+        "[glrmask/profile][summary] parser_dwa pre_min states={} final={} trans={} | post_min states={} final={} trans={} detmin_ms={:.3} subtract_final_ms={:.3} rules={} terminals={} tokenizer_states={} vocab_entries={}",
         parser_build.parser_dwa_pre_minimize.states,
         parser_build.parser_dwa_pre_minimize.final_states,
         parser_build.parser_dwa_pre_minimize.transitions,
-        parser_build.parser_dwa_pre_minimize.max_depth,
         parser_build.parser_dwa_minimized.states,
         parser_build.parser_dwa_minimized.final_states,
         parser_build.parser_dwa_minimized.transitions,
-        parser_build.parser_dwa_minimized.max_depth,
         ms(parser_build.determinize_minimize_time),
         ms(parser_build.subtract_final_weights_time),
         normalized.rules.len(),
@@ -997,9 +984,6 @@ fn log_compile_summary(
 }
 
 pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    crate::ds::weight::clear_stale_weights();
-    crate::ds::weight::clear_weight_op_caches();
-
     let profile_enabled = compile_profile_enabled();
     let summary_enabled = compile_summary_enabled();
     let compile_started_at = std::time::Instant::now();
@@ -1026,17 +1010,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let table = GLRTable::build(&glr_grammar);
     let build_glr_table_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "build_glr_table", phase_started_at);
-
-    let replace_safe = table.replace_safe.clone();
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][compile] replace_safe shifts={}/{} gotos={}/{}",
-            replace_safe.safe_shifts,
-            replace_safe.shift_candidates,
-            replace_safe.safe_gotos,
-            replace_safe.goto_candidates,
-        );
-    }
 
     let phase_started_at = std::time::Instant::now();
     let disallowed_follows = compute_disallowed_follows(&glr_grammar);
@@ -1166,7 +1139,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
             build_glr_table_time,
             build_internal_id_map_time,
             collect_token_bytes_time,
-            &replace_safe,
             &terminal_build,
             &parser_build,
             compile_started_at.elapsed(),
@@ -1222,9 +1194,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 }
 
 pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
-    crate::ds::weight::clear_stale_weights();
-    crate::ds::weight::clear_weight_op_caches();
-
     let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
@@ -1702,6 +1671,134 @@ mod tests {
         assert!(state.is_finished(), "should accept after committing 'ab' byte by byte");
     }
 
+    // ── Nullable terminal expansion tests ───────────────────────────────────
+
+    #[test]
+    fn test_expand_nullable_terminals_no_nullables() {
+        let gdef = simple_ab_grammar();
+        let nullable = std::collections::BTreeSet::new();
+        let mut rules = gdef.rules.clone();
+        expand_nullable_terminals(&mut rules, &nullable);
+        assert_eq!(rules.len(), gdef.rules.len());
+        assert_eq!(rules[0].rhs, gdef.rules[0].rhs);
+    }
+
+    #[test]
+    fn test_expand_nullable_terminals_single_nullable() {
+        // Grammar: S → t0 t1, where t0 is nullable.
+        // Expected: fresh NT2, S → NT2 t1, NT2 → ε, NT2 → t0
+        let gdef = simple_ab_grammar(); // S → T0 T1, nonterminals: {0}
+        let nullable = std::collections::BTreeSet::from([0u32]);
+        let mut rules = gdef.rules.clone();
+        expand_nullable_terminals(&mut rules, &nullable);
+
+        // 1 rewritten original rule + 2 fresh-NT rules = 3 total.
+        assert_eq!(rules.len(), 3);
+
+        // The fresh NT id should be grammar.num_nonterminals() = 1.
+        let fresh_nt = gdef.num_nonterminals();
+
+        // S → NT_fresh t1
+        assert_eq!(rules[0].lhs, 0);
+        assert_eq!(
+            rules[0].rhs,
+            vec![Symbol::Nonterminal(fresh_nt), Symbol::Terminal(1)]
+        );
+
+        // NT_fresh → ε and NT_fresh → t0
+        let fresh_rules: Vec<&Rule> =
+            rules.iter().filter(|r| r.lhs == fresh_nt).collect();
+        assert_eq!(fresh_rules.len(), 2);
+        let rhs_set: std::collections::BTreeSet<Vec<Symbol>> =
+            fresh_rules.iter().map(|r| r.rhs.clone()).collect();
+        assert!(rhs_set.contains(&vec![])); // ε
+        assert!(rhs_set.contains(&vec![Symbol::Terminal(0)])); // t0
+    }
+
+    #[test]
+    fn test_expand_nullable_terminals_both_nullable() {
+        // Grammar: S → t0 t1, where both are nullable.
+        // Expected: fresh NT1 for t0, fresh NT2 for t1.
+        // S → NT1 NT2, NT1 → ε | t0, NT2 → ε | t1
+        let gdef = simple_ab_grammar();
+        let nullable = std::collections::BTreeSet::from([0u32, 1u32]);
+        let mut rules = gdef.rules.clone();
+        expand_nullable_terminals(&mut rules, &nullable);
+
+        // 1 rewritten rule + 2*2 fresh-NT rules = 5 total.
+        assert_eq!(rules.len(), 5);
+
+        let nt0 = gdef.num_nonterminals();     // fresh NT for t0
+        let nt1 = gdef.num_nonterminals() + 1; // fresh NT for t1
+
+        // S → NT0 NT1
+        assert_eq!(
+            rules[0].rhs,
+            vec![Symbol::Nonterminal(nt0), Symbol::Nonterminal(nt1)]
+        );
+    }
+
+    #[test]
+    fn test_expand_nullable_terminals_nonterminal_untouched() {
+        // Grammar: S → A t1, A → t0. If t0 is nullable:
+        //   - Fresh NT for t0.
+        //   - S → A t1 unchanged (A is a nonterminal, not touched).
+        //   - A → NT_fresh (rewritten from A → t0).
+        let gdef = two_nt_grammar(); // S → N1 T1, N1 → T0
+        let nullable = std::collections::BTreeSet::from([0u32]);
+        let mut rules = gdef.rules.clone();
+        expand_nullable_terminals(&mut rules, &nullable);
+
+        let fresh_nt = gdef.num_nonterminals(); // = 2
+
+        // S → N1 T1 — N1 is a nonterminal, not rewritten.
+        let s_rules: Vec<&Rule> = rules.iter().filter(|r| r.lhs == 0).collect();
+        assert_eq!(s_rules.len(), 1);
+        assert_eq!(
+            s_rules[0].rhs,
+            vec![Symbol::Nonterminal(1), Symbol::Terminal(1)]
+        );
+
+        // N1 → NT_fresh (was N1 → T0, T0 is nullable so replaced).
+        let n1_rules: Vec<&Rule> = rules.iter().filter(|r| r.lhs == 1).collect();
+        assert_eq!(n1_rules.len(), 1);
+        assert_eq!(n1_rules[0].rhs, vec![Symbol::Nonterminal(fresh_nt)]);
+
+        // Fresh NT → ε and Fresh NT → T0.
+        let fresh_rules: Vec<&Rule> =
+            rules.iter().filter(|r| r.lhs == fresh_nt).collect();
+        assert_eq!(fresh_rules.len(), 2);
+    }
+
+    #[test]
+    fn test_expand_nullable_terminals_multiple_occurrences() {
+        // Grammar: S → t0 t0, where t0 is nullable.
+        // Both occurrences should be replaced by the SAME fresh NT.
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            }],
+            ..Default::default()
+        };
+        let nullable = std::collections::BTreeSet::from([0u32]);
+        let mut rules = gdef.rules.clone();
+        expand_nullable_terminals(&mut rules, &nullable);
+
+        let fresh_nt = gdef.num_nonterminals(); // = 1
+        // S → NT NT (same fresh NT for both positions) + 2 fresh-NT rules = 3.
+        assert_eq!(rules.len(), 3);
+        assert_eq!(
+            rules[0].rhs,
+            vec![Symbol::Nonterminal(fresh_nt), Symbol::Nonterminal(fresh_nt)]
+        );
+    }
+
     #[test]
     fn test_drain_nullable_terminals_from_tokenizer() {
         // Build a tokenizer with a nullable terminal (regex `a*` matches empty string).
@@ -1769,6 +1866,126 @@ mod tests {
         let mut state = constraint.start();
         let mask = state.mask();
         assert!(mask_has_token(&mask, 1), "'b' should be allowed initially (opt_a is nullable)");
+    }
+
+    #[test]
+    fn test_compact_unused_terminals_remaps_rules_and_terminal_ids() {
+        let mut grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"dead".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 2,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        compact_unused_terminals(&mut grammar);
+
+        assert_eq!(
+            grammar.rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+            }],
+            "used terminals should be renumbered densely when a dead terminal is removed from the middle"
+        );
+        assert_eq!(grammar.terminals.len(), 2);
+        assert_eq!(grammar.terminals[0].id(), 0);
+        assert_eq!(grammar.terminals[1].id(), 1);
+        assert_eq!(grammar.terminals[0].name(), "a");
+        assert_eq!(grammar.terminals[1].name(), "b");
+        assert_eq!(grammar.ignore_terminal, None);
+    }
+
+    #[test]
+    fn test_compact_unused_terminals_preserves_ignore_terminal_and_remaps_it() {
+        let mut grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(3)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"dead".to_vec(),
+                },
+                Terminal::Pattern {
+                    id: 2,
+                    pattern: " +".to_string(),
+                    utf8: true,
+                },
+                Terminal::Literal {
+                    id: 3,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+            ignore_terminal: Some(2),
+            ..Default::default()
+        };
+
+        compact_unused_terminals(&mut grammar);
+
+        assert_eq!(
+            grammar.rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+            }],
+            "used terminals should still be renumbered densely when an ignore terminal is retained"
+        );
+        assert_eq!(grammar.terminals.len(), 3);
+        assert_eq!(grammar.terminals[0].name(), "a");
+        assert_eq!(grammar.terminals[1].name(), " +");
+        assert_eq!(grammar.terminals[2].name(), "b");
+        assert_eq!(grammar.ignore_terminal, Some(1));
+    }
+
+    #[test]
+    fn test_compact_unused_terminals_merges_identical_terminals() {
+        // Terminals 0 and 2 are identical ("a"), terminal 1 is different ("b").
+        // After compacting, terminals 0 and 2 should map to the same new ID.
+        let mut grammar = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(2)] },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"a".to_vec() },
+                Terminal::Literal { id: 1, bytes: b"b".to_vec() },
+                Terminal::Literal { id: 2, bytes: b"a".to_vec() },
+            ],
+            nonterminal_names: BTreeMap::new(),
+            terminal_names: BTreeMap::new(),
+            ignore_terminal: None,
+        };
+        compact_unused_terminals(&mut grammar);
+        assert_eq!(grammar.terminals.len(), 2, "identical terminals should be merged");
+        assert_eq!(grammar.terminals[0].name(), "a");
+        assert_eq!(grammar.terminals[1].name(), "b");
+        // Rule 1: T0 → merged "a" (id 0), T1 → "b" (id 1)
+        assert_eq!(grammar.rules[0].rhs, vec![Symbol::Terminal(0), Symbol::Terminal(1)]);
+        // Rule 2: T2 → merged "a" (id 0)
+        assert_eq!(grammar.rules[1].rhs, vec![Symbol::Terminal(0)]);
     }
 
     #[test]
@@ -1930,6 +2147,264 @@ mod tests {
 
         state.commit_token(4).unwrap();
         assert!(state.is_finished(), "consuming ignored space plus 'b' should finish the grammar");
+    }
+
+    #[test]
+    fn test_prepare_grammar_for_compile_retains_and_remaps_names() {
+        let grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"dead".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 2,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+            nonterminal_names: std::collections::BTreeMap::from([(0, "start".to_string())]),
+            terminal_names: std::collections::BTreeMap::from([
+                (0, "A".to_string()),
+                (1, "DEAD".to_string()),
+                (2, "B".to_string()),
+            ]),
+            ignore_terminal: None,
+        };
+
+        let (normalized, _tokenizer) = prepare_grammar_for_compile(&grammar);
+
+        assert_eq!(normalized.nonterminal_names.get(&0).map(String::as_str), Some("start"));
+        assert_eq!(normalized.terminal_names.get(&0).map(String::as_str), Some("A"));
+        assert_eq!(normalized.terminal_names.get(&1).map(String::as_str), Some("B"));
+        assert!(!normalized.terminal_names.values().any(|name| name == "DEAD"));
+    }
+
+    #[test]
+    fn test_inline_single_use_nonterminals_compacts_repetition_tail_chain() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(3)],
+            },
+            Rule {
+                lhs: 3,
+                rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(1), Symbol::Terminal(1)],
+            },
+            Rule {
+                lhs: 3,
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Nonterminal(1),
+                    Symbol::Nonterminal(4),
+                    Symbol::Terminal(1),
+                ],
+            },
+            Rule {
+                lhs: 4,
+                rhs: vec![Symbol::Nonterminal(5)],
+            },
+            Rule {
+                lhs: 4,
+                rhs: vec![Symbol::Nonterminal(4), Symbol::Nonterminal(5)],
+            },
+            Rule {
+                lhs: 5,
+                rhs: vec![Symbol::Nonterminal(6), Symbol::Nonterminal(7)],
+            },
+            Rule {
+                lhs: 6,
+                rhs: vec![Symbol::Terminal(2)],
+            },
+            Rule {
+                lhs: 7,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 8,
+                rhs: vec![Symbol::Nonterminal(9)],
+            },
+            Rule {
+                lhs: 8,
+                rhs: vec![Symbol::Nonterminal(8), Symbol::Nonterminal(9)],
+            },
+            Rule {
+                lhs: 9,
+                rhs: vec![Symbol::Nonterminal(6), Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 10,
+                rhs: vec![Symbol::Terminal(3), Symbol::Nonterminal(2), Symbol::Nonterminal(8), Symbol::Terminal(4)],
+            },
+        ];
+        let names = std::collections::BTreeMap::from([
+            (0, "start".to_string()),
+            (1, "json_kv".to_string()),
+            (2, "json_value".to_string()),
+            (3, "json_object".to_string()),
+            (10, "json_array".to_string()),
+        ]);
+
+        let protected: std::collections::BTreeSet<NonterminalID> = names.keys().copied().chain(std::iter::once(0)).collect();
+
+        inline_single_use_nonterminals(&mut rules, &protected);
+
+        assert!(!rules.iter().any(|rule| matches!(rule.lhs, 6 | 7)));
+        assert!(rules.contains(&Rule {
+            lhs: 5,
+            rhs: vec![Symbol::Terminal(2), Symbol::Nonterminal(1)],
+        }));
+        assert!(rules.contains(&Rule {
+            lhs: 4,
+            rhs: vec![Symbol::Nonterminal(5)],
+        }));
+        assert!(rules.contains(&Rule {
+            lhs: 4,
+            rhs: vec![Symbol::Nonterminal(4), Symbol::Nonterminal(5)],
+        }));
+        assert!(rules.contains(&Rule {
+            lhs: 9,
+            rhs: vec![Symbol::Terminal(2), Symbol::Nonterminal(2)],
+        }));
+        assert!(rules.contains(&Rule {
+            lhs: 8,
+            rhs: vec![Symbol::Nonterminal(9)],
+        }));
+        assert!(rules.contains(&Rule {
+            lhs: 8,
+            rhs: vec![Symbol::Nonterminal(8), Symbol::Nonterminal(9)],
+        }));
+    }
+
+    #[test]
+    fn test_inline_single_use_nonterminals_keeps_multi_symbol_helper_with_multiple_occurrences() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Nonterminal(2), Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 2,
+                rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(3)],
+            },
+            Rule {
+                lhs: 3,
+                rhs: vec![Symbol::Terminal(1)],
+            },
+        ];
+        let names = std::collections::BTreeMap::from([
+            (0, "start".to_string()),
+            (1, "root".to_string()),
+        ]);
+        let protected: std::collections::BTreeSet<NonterminalID> = names.keys().copied().chain(std::iter::once(0)).collect();
+
+        inline_single_use_nonterminals(&mut rules, &protected);
+
+        assert!(rules.iter().any(|rule| rule.lhs == 2));
+        assert!(rules.contains(&Rule {
+            lhs: 1,
+            rhs: vec![Symbol::Nonterminal(2), Symbol::Nonterminal(2)],
+        }));
+        assert!(rules.contains(&Rule {
+            lhs: 2,
+            rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+        }));
+    }
+
+    fn derivable_chunk_counts(
+        rules: &[Rule],
+        nonterminal: NonterminalID,
+        chunk_nt: NonterminalID,
+        memo: &mut std::collections::BTreeMap<NonterminalID, std::collections::BTreeSet<usize>>,
+    ) -> std::collections::BTreeSet<usize> {
+        if let Some(existing) = memo.get(&nonterminal) {
+            return existing.clone();
+        }
+        if nonterminal == chunk_nt {
+            return std::collections::BTreeSet::from([1]);
+        }
+
+        let mut result = std::collections::BTreeSet::new();
+        for rule in rules.iter().filter(|rule| rule.lhs == nonterminal) {
+            let mut totals = std::collections::BTreeSet::from([0usize]);
+            for symbol in &rule.rhs {
+                let counts = match symbol {
+                    Symbol::Terminal(_) => std::collections::BTreeSet::from([0usize]),
+                    Symbol::Nonterminal(id) => derivable_chunk_counts(rules, *id, chunk_nt, memo),
+                };
+                let mut next_totals = std::collections::BTreeSet::new();
+                for left in &totals {
+                    for right in &counts {
+                        next_totals.insert(left + right);
+                    }
+                }
+                totals = next_totals;
+            }
+            result.extend(totals);
+        }
+
+        memo.insert(nonterminal, result.clone());
+        result
+    }
+
+    #[test]
+    fn test_compact_bounded_repeat_ladders_rewrites_linear_family() {
+        let chunk_nt = 20;
+        let family = [30, 31, 32, 33, 34, 35, 36, 37];
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Nonterminal(family[0])],
+            },
+            Rule {
+                lhs: chunk_nt,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+        ];
+        for (index, lhs) in family.iter().copied().enumerate() {
+            rules.push(Rule {
+                lhs,
+                rhs: vec![Symbol::Nonterminal(chunk_nt)],
+            });
+            let long_rhs = if index + 1 == family.len() {
+                vec![Symbol::Nonterminal(chunk_nt), Symbol::Nonterminal(chunk_nt)]
+            } else {
+                vec![Symbol::Nonterminal(chunk_nt), Symbol::Nonterminal(family[index + 1])]
+            };
+            rules.push(Rule { lhs, rhs: long_rhs });
+        }
+
+        let original_family_rule_count = rules.iter().filter(|rule| family.contains(&rule.lhs)).count();
+        let names = std::collections::BTreeMap::from([
+            (0, "start".to_string()),
+            (1, "root".to_string()),
+        ]);
+
+        compact_bounded_repeat_ladders(&mut rules, 0, &names);
+
+        let rewritten_family_rule_count = rules.iter().filter(|rule| family.contains(&rule.lhs)).count();
+        assert!(rewritten_family_rule_count < original_family_rule_count);
+        assert_eq!(rules.iter().filter(|rule| rule.lhs == family[0]).count(), 3);
+
+        let mut memo = std::collections::BTreeMap::new();
+        let counts = derivable_chunk_counts(&rules, family[0], chunk_nt, &mut memo);
+        assert_eq!(counts, (1..=family.len() + 1).collect::<std::collections::BTreeSet<_>>());
     }
 
 }
