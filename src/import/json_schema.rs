@@ -66,6 +66,7 @@ const UNTYPED_SCHEMA_APPLICABLE_TYPES: &[(&str, &[&str])] = &[
     ("string", UNTYPED_STRING_KEYWORD_KEYS),
     ("number", UNTYPED_NUMBER_KEYWORD_KEYS),
 ];
+const UNSAT_SCHEMA_ERROR: &str = "__unsat_schema__";
 
 fn literal_expr(bytes: &[u8]) -> GrammarExpr {
     GrammarExpr::Literal(bytes.to_vec())
@@ -73,6 +74,35 @@ fn literal_expr(bytes: &[u8]) -> GrammarExpr {
 
 fn regex_expr(pattern: impl Into<String>) -> GrammarExpr {
     GrammarExpr::RawRegex(pattern.into())
+}
+
+fn never_expr() -> GrammarExpr {
+    regex_expr(r#"[^\x00-\xFF]"#)
+}
+
+fn unsat_schema_error() -> GlrMaskError {
+    GlrMaskError::GrammarParse(UNSAT_SCHEMA_ERROR.into())
+}
+
+fn is_unsat_schema_error(err: &GlrMaskError) -> bool {
+    matches!(err, GlrMaskError::GrammarParse(message) if message == UNSAT_SCHEMA_ERROR)
+}
+
+fn type_allows_value(type_name: &str, value: &Value) -> bool {
+    match type_name {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => value
+            .as_i64()
+            .is_some()
+            || value.as_u64().is_some()
+            || value.as_f64().map(|number| number.fract() == 0.0).unwrap_or(false),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => true,
+    }
 }
 
 fn empty_expr() -> GrammarExpr {
@@ -542,7 +572,11 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     let mut ctx = SchemaCtx::new(schema);
     ctx.register_root_definitions();
     ctx.materialize_registered_refs()?;
-    let start_expr = ctx.convert_schema(schema)?;
+    let start_expr = match ctx.convert_schema(schema) {
+        Ok(expr) => expr,
+        Err(err) if is_unsat_schema_error(&err) => never_expr(),
+        Err(err) => return Err(err),
+    };
     ctx.insert_rule("start", start_expr);
     let terminal_names: HashSet<String> = ctx
         .rules
@@ -885,7 +919,11 @@ impl SchemaCtx {
 
         self.ref_compile_stack.insert(ref_value.to_string());
         let expr = match self.resolve_local_ref(ref_value) {
-            Ok(target) => self.convert_schema(&target).unwrap_or_else(|_| self.json_value_ref()),
+            Ok(target) => match self.convert_schema(&target) {
+                Ok(expr) => expr,
+                Err(err) if is_unsat_schema_error(&err) => never_expr(),
+                Err(_) => self.json_value_ref(),
+            },
             Err(_) => self.json_value_ref(),
         };
         self.ref_compile_stack.remove(ref_value);
@@ -906,6 +944,14 @@ impl SchemaCtx {
 
         if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
             return self.convert_ref(reference);
+        }
+
+        if matches!(object.get("not"), Some(Value::Object(inner)) if inner.is_empty()) {
+            return Err(unsat_schema_error());
+        }
+
+        if let Some(expr) = self.convert_finite_value_schema(object)? {
+            return Ok(expr);
         }
 
         if let Some(value) = object.get("const") {
@@ -1004,6 +1050,263 @@ impl SchemaCtx {
         }
 
         self.convert_untyped_schema(object)
+    }
+
+    fn convert_finite_value_schema(
+        &mut self,
+        object: &Map<String, Value>,
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if let Some(value) = object.get("const") {
+            let remaining: Map<String, Value> = object
+                .iter()
+                .filter(|(key, _)| key.as_str() != "const")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if self.value_satisfies_schema(value, &Value::Object(remaining)) {
+                return Ok(Some(self.json_literal(value)));
+            }
+            return Err(unsat_schema_error());
+        }
+
+        if let Some(values) = object.get("enum").and_then(Value::as_array) {
+            let remaining: Map<String, Value> = object
+                .iter()
+                .filter(|(key, _)| key.as_str() != "enum")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            let options: Vec<GrammarExpr> = values
+                .iter()
+                .filter(|value| self.value_satisfies_schema(value, &Value::Object(remaining.clone())))
+                .map(|value| self.json_literal(value))
+                .collect();
+            if !options.is_empty() {
+                return Ok(Some(factor_common_affixes(options)));
+            }
+            return Err(unsat_schema_error());
+        }
+
+        Ok(None)
+    }
+
+    fn value_satisfies_schema(&self, value: &Value, schema: &Value) -> bool {
+        let Some(object) = schema.as_object() else {
+            return true;
+        };
+
+        if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+            if let Ok(target) = self.resolve_local_ref(reference) {
+                return self.value_satisfies_schema(value, &target);
+            }
+            return true;
+        }
+
+        if let Some(not_schema) = object.get("not") {
+            if self.value_satisfies_schema(value, not_schema) {
+                return false;
+            }
+        }
+
+        if let Some(const_value) = object.get("const") {
+            if value != const_value {
+                return false;
+            }
+        }
+
+        if let Some(enum_values) = object.get("enum").and_then(Value::as_array) {
+            if !enum_values.iter().any(|item| item == value) {
+                return false;
+            }
+        }
+
+        if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
+            if all_of.iter().any(|item| !self.value_satisfies_schema(value, item)) {
+                return false;
+            }
+        }
+
+        if let Some(any_of) = object.get("anyOf").and_then(Value::as_array) {
+            if !any_of.is_empty() && !any_of.iter().any(|item| self.value_satisfies_schema(value, item)) {
+                return false;
+            }
+        }
+
+        if let Some(one_of) = object.get("oneOf").and_then(Value::as_array) {
+            if !one_of.is_empty() {
+                let matches = one_of
+                    .iter()
+                    .filter(|item| self.value_satisfies_schema(value, item))
+                    .count();
+                if matches != 1 {
+                    return false;
+                }
+            }
+        }
+
+        match object.get("type") {
+            Some(Value::String(type_name)) => {
+                if !type_allows_value(type_name, value) {
+                    return false;
+                }
+            }
+            Some(Value::Array(type_names)) => {
+                let allowed: Vec<&str> = type_names.iter().filter_map(Value::as_str).collect();
+                if !allowed.is_empty() && !allowed.iter().any(|type_name| type_allows_value(type_name, value)) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(text) = value.as_str() {
+            if let Some(min_length) = object.get("minLength").and_then(Value::as_u64) {
+                if text.chars().count() < min_length as usize {
+                    return false;
+                }
+            }
+            if let Some(max_length) = object.get("maxLength").and_then(Value::as_u64) {
+                if text.chars().count() > max_length as usize {
+                    return false;
+                }
+            }
+        }
+
+        if let Some(entries) = value.as_object() {
+            if let Some(min_properties) = object.get("minProperties").and_then(Value::as_u64) {
+                if entries.len() < min_properties as usize {
+                    return false;
+                }
+            }
+            if let Some(max_properties) = object.get("maxProperties").and_then(Value::as_u64) {
+                if entries.len() > max_properties as usize {
+                    return false;
+                }
+            }
+
+            if let Some(required) = object.get("required").and_then(Value::as_array) {
+                for key in required.iter().filter_map(Value::as_str) {
+                    if !entries.contains_key(key) {
+                        return false;
+                    }
+                }
+            }
+
+            let properties = object.get("properties").and_then(Value::as_object);
+            if let Some(properties) = properties {
+                for (key, subschema) in properties {
+                    if let Some(item) = entries.get(key) {
+                        if !self.value_satisfies_schema(item, subschema) {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            match object.get("additionalProperties") {
+                Some(Value::Bool(false)) => {
+                    if let Some(properties) = properties {
+                        if entries.keys().any(|key| !properties.contains_key(key)) {
+                            return false;
+                        }
+                    }
+                }
+                Some(Value::Object(schema)) => {
+                    for (key, item) in entries {
+                        if properties.map(|props| props.contains_key(key)).unwrap_or(false) {
+                            continue;
+                        }
+                        if !self.value_satisfies_schema(item, &Value::Object(schema.clone())) {
+                            return false;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(items) = value.as_array() {
+            if let Some(min_items) = object.get("minItems").and_then(Value::as_u64) {
+                if items.len() < min_items as usize {
+                    return false;
+                }
+            }
+            if let Some(max_items) = object.get("maxItems").and_then(Value::as_u64) {
+                if items.len() > max_items as usize {
+                    return false;
+                }
+            }
+
+            if let Some(prefix_items) = object.get("prefixItems").and_then(Value::as_array) {
+                for (index, subschema) in prefix_items.iter().enumerate() {
+                    if let Some(item) = items.get(index) {
+                        if !self.value_satisfies_schema(item, subschema) {
+                            return false;
+                        }
+                    }
+                }
+                if let Some(item_schema) = object.get("items") {
+                    for item in items.iter().skip(prefix_items.len()) {
+                        if !self.value_satisfies_schema(item, item_schema) {
+                            return false;
+                        }
+                    }
+                }
+            } else if let Some(item_schema) = object.get("items") {
+                for item in items {
+                    if !self.value_satisfies_schema(item, item_schema) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if let Some(number) = value.as_f64() {
+            if value.is_boolean() {
+                return true;
+            }
+            if let Some(minimum) = object.get("minimum").and_then(Value::as_f64) {
+                if number < minimum {
+                    return false;
+                }
+            }
+            if let Some(exclusive_minimum) = object.get("exclusiveMinimum").and_then(Value::as_f64) {
+                if number <= exclusive_minimum {
+                    return false;
+                }
+            }
+            if let Some(maximum) = object.get("maximum").and_then(Value::as_f64) {
+                if number > maximum {
+                    return false;
+                }
+            }
+            if let Some(exclusive_maximum) = object.get("exclusiveMaximum").and_then(Value::as_f64) {
+                if number >= exclusive_maximum {
+                    return false;
+                }
+            }
+            if let Some(multiple_of) = object.get("multipleOf").and_then(Value::as_f64) {
+                if multiple_of != 0.0 {
+                    let quotient = number / multiple_of;
+                    if (quotient - quotient.round()).abs() > 1e-9 {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    fn is_certainly_unsatisfiable(&mut self, schema: &Value) -> bool {
+        let Some(object) = schema.as_object() else {
+            return false;
+        };
+        if matches!(object.get("not"), Some(Value::Object(inner)) if inner.is_empty()) {
+            return true;
+        }
+        if !object.contains_key("const") && !object.contains_key("enum") {
+            return false;
+        }
+        matches!(self.convert_finite_value_schema(object), Err(err) if is_unsat_schema_error(&err))
     }
 
     fn convert_type(&mut self, type_name: &str, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
@@ -1256,11 +1559,18 @@ impl SchemaCtx {
         }
 
         if let Some(properties) = properties {
-            let additional_schema = match additional_properties {
+            let mut additional_schema = match additional_properties {
                 Some(Value::Bool(false)) => None,
                 Some(Value::Object(map)) => Some(Value::Object(map.clone())),
                 _ => Some(serde_json::json!({})),
             };
+            if additional_schema
+                .as_ref()
+                .map(|schema| self.is_certainly_unsatisfiable(schema))
+                .unwrap_or(false)
+            {
+                additional_schema = None;
+            }
             return self.build_ordered_properties_object_expr(
                 properties,
                 &required_list,
@@ -1296,7 +1606,20 @@ impl SchemaCtx {
         additional_properties_schema: Option<Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let mut ordered = Vec::new();
+        let mut known_property_keys: Vec<String> = properties.keys().cloned().collect();
+        known_property_keys.extend(
+            required_list
+                .iter()
+                .filter(|key| !properties.contains_key(*key))
+                .cloned(),
+        );
         for (key, subschema) in properties {
+            if self.is_certainly_unsatisfiable(subschema) {
+                if required_keys.contains(key) {
+                    return Err(unsat_schema_error());
+                }
+                continue;
+            }
             ordered.push((key.clone(), subschema.clone(), required_keys.contains(key)));
         }
         for key in required_list {
@@ -1304,6 +1627,16 @@ impl SchemaCtx {
                 ordered.push((key.clone(), serde_json::json!({}), true));
             }
         }
+
+        let additional_properties_schema = if additional_properties_schema
+            .as_ref()
+            .map(|schema| self.is_certainly_unsatisfiable(schema))
+            .unwrap_or(false)
+        {
+            None
+        } else {
+            additional_properties_schema
+        };
 
         if ordered.is_empty() && additional_properties_schema.is_none() {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
@@ -1321,7 +1654,7 @@ impl SchemaCtx {
 
         let (term_nc, term_c) = if let Some(schema) = additional_properties_schema {
             // Collect known property keys for complement trie
-            let known_keys: Vec<String> = ordered.iter().map(|(k, _, _)| k.clone()).collect();
+            let known_keys = known_property_keys;
 
             // Build complement key that excludes known property names
             let ck_prefix = format!("{}_CK", base_name.to_uppercase());
@@ -2013,6 +2346,21 @@ mod tests {
             r#"{"type": "string", "pattern": "^file:.+\\.km[lz]$"}"#,
             &[b"\"file:\\\\foo.kml\""]
         ));
+    }
+
+    #[test]
+    fn test_impossible_enum_property_is_omitted() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "builtin": {
+                    "enum": ["MODIFIABLE", "DELETABLE"],
+                    "type": "object"
+                }
+            }
+        }"#;
+        assert!(!accepts_sequence(schema, &[b"{", b"\"builtin\"", b": ", b"{}", b"}"]));
+        assert!(accepts_sequence(schema, &[b"{", b"\"builtin \"", b": ", b"\"MODIFIABLE\"", b"}"]));
     }
 
     #[test]
