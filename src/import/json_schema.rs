@@ -30,6 +30,8 @@ const JSON_STRING_REGEX: &str =
 const JSON_KEY_COLON_REGEX: &str =
     r#""([^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
+const JSON_DIRECT_UTF8_PATTERN: &str =
+    r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
 const JSON_KEY_SEPARATOR: &[u8] = b": ";
 const UNTYPED_OBJECT_KEYWORD_KEYS: &[&str] = &[
@@ -146,41 +148,255 @@ fn strip_regex_anchors(pattern: &str) -> &str {
     pattern.strip_suffix('$').unwrap_or(pattern)
 }
 
+fn json_direct_ascii_bytes() -> BTreeSet<u8> {
+    let mut out = BTreeSet::new();
+    out.extend(0x20..=0x21);
+    out.extend(0x23..=0x5B);
+    out.extend(0x5D..=0x7F);
+    out
+}
+
+fn json_escapable_bytes() -> BTreeSet<u8> {
+    let mut out = BTreeSet::new();
+    out.extend(0x00..=0x1F);
+    out.insert(0x22);
+    out.insert(0x2F);
+    out.insert(0x5C);
+    out
+}
+
+fn compress_byte_set(values: &BTreeSet<u8>) -> Vec<(u8, u8)> {
+    let mut ranges = Vec::new();
+    let mut iter = values.iter().copied();
+    let Some(mut start) = iter.next() else {
+        return ranges;
+    };
+    let mut end = start;
+    for value in iter {
+        if value == end.saturating_add(1) {
+            end = value;
+            continue;
+        }
+        ranges.push((start, end));
+        start = value;
+        end = value;
+    }
+    ranges.push((start, end));
+    ranges
+}
+
+fn regex_char_class_from_ranges(ranges: &[(u8, u8)]) -> String {
+    let mut out = String::from("[");
+    for (start, end) in ranges {
+        if start == end {
+            out.push_str(&format!(r#"\x{:02X}"#, start));
+        } else {
+            out.push_str(&format!(r#"\x{:02X}-\x{:02X}"#, start, end));
+        }
+    }
+    out.push(']');
+    out
+}
+
+fn regex_literal_bytes(bytes: &[u8]) -> String {
+    bytes.iter()
+        .map(|byte| format!(r#"\x{:02X}"#, byte))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn hex_nibble_fragment(value: u8) -> String {
+    match value {
+        0..=9 => char::from(b'0' + value).to_string(),
+        10..=15 => format!("[{}{}]", char::from(b'A' + value - 10), char::from(b'a' + value - 10)),
+        _ => String::new(),
+    }
+}
+
+fn json_unicode_escape_fragment(byte: u8) -> String {
+    format!(
+        r#"\x5Cu00{}{}"#,
+        hex_nibble_fragment((byte >> 4) & 0x0F),
+        hex_nibble_fragment(byte & 0x0F)
+    )
+}
+
+fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
+    let mut fragments = Vec::new();
+    match byte {
+        b'"' => fragments.push(String::from(r#"\x5C\x22"#)),
+        b'/' => fragments.push(String::from(r#"\x5C\x2F"#)),
+        b'\\' => fragments.push(String::from(r#"\x5C\x5C"#)),
+        0x08 => fragments.push(String::from(r#"\x5Cb"#)),
+        0x09 => fragments.push(String::from(r#"\x5Ct"#)),
+        0x0A => fragments.push(String::from(r#"\x5Cn"#)),
+        0x0C => fragments.push(String::from(r#"\x5Cf"#)),
+        0x0D => fragments.push(String::from(r#"\x5Cr"#)),
+        _ => {}
+    }
+    if !json_direct_ascii_bytes().contains(&byte) {
+        fragments.push(json_unicode_escape_fragment(byte));
+    }
+    fragments
+}
+
+fn parse_class_escape_set(input: &[u8], pos: usize) -> Option<(BTreeSet<u8>, usize)> {
+    if pos + 1 >= input.len() {
+        return None;
+    }
+    let mut set = BTreeSet::new();
+    match input[pos + 1] {
+        b'd' => set.extend(b'0'..=b'9'),
+        b's' => {
+            set.extend(0x09..=0x0D);
+            set.insert(0x20);
+            set.insert(0x85);
+            set.insert(0xA0);
+        }
+        b'w' => {
+            set.extend(b'0'..=b'9');
+            set.extend(b'A'..=b'Z');
+            set.insert(b'_');
+            set.extend(b'a'..=b'z');
+        }
+        _ => return None,
+    }
+    Some((set, pos + 2))
+}
+
+fn parse_class_escape_byte(input: &[u8], pos: usize) -> (u8, usize) {
+    if pos + 1 >= input.len() {
+        return (b'\\', pos + 1);
+    }
+    match input[pos + 1] {
+        b'n' => (b'\n', pos + 2),
+        b'r' => (b'\r', pos + 2),
+        b't' => (b'\t', pos + 2),
+        b'x' if pos + 3 < input.len() => {
+            let hex = |digit: u8| -> u8 {
+                match digit {
+                    b'0'..=b'9' => digit - b'0',
+                    b'a'..=b'f' => 10 + digit - b'a',
+                    b'A'..=b'F' => 10 + digit - b'A',
+                    _ => 0,
+                }
+            };
+            let hi = hex(input[pos + 2]);
+            let lo = hex(input[pos + 3]);
+            (((hi << 4) | lo), pos + 4)
+        }
+        other => (other, pos + 2),
+    }
+}
+
+fn jsonified_char_class_fragment(matched: &BTreeSet<u8>, negate: bool) -> Option<String> {
+    let direct_ascii_all = json_direct_ascii_bytes();
+    let escapable_all = json_escapable_bytes();
+    let mut parts = Vec::new();
+
+    if negate {
+        let direct_ascii: BTreeSet<u8> = direct_ascii_all.difference(matched).copied().collect();
+        if !direct_ascii.is_empty() {
+            parts.push(regex_char_class_from_ranges(&compress_byte_set(&direct_ascii)));
+        }
+        parts.push(String::from(JSON_DIRECT_UTF8_PATTERN));
+        for byte in escapable_all.difference(matched).copied() {
+            parts.extend(json_escaped_byte_fragments(byte));
+        }
+    } else {
+        let direct_ascii: BTreeSet<u8> = direct_ascii_all.intersection(matched).copied().collect();
+        if !direct_ascii.is_empty() {
+            parts.push(regex_char_class_from_ranges(&compress_byte_set(&direct_ascii)));
+        }
+        for byte in matched.iter().copied().filter(|byte| *byte >= 0x80) {
+            parts.push(regex_literal_bytes(char::from(byte).to_string().as_bytes()));
+        }
+        for byte in escapable_all.intersection(matched).copied() {
+            parts.extend(json_escaped_byte_fragments(byte));
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    if parts.len() == 1 {
+        return parts.into_iter().next();
+    }
+    Some(format!("(?:{})", parts.join("|")))
+}
+
+fn jsonify_regex_char_class(input: &[u8], start: usize) -> Option<(String, usize)> {
+    let mut pos = start + 1;
+    let mut negate = false;
+    if pos < input.len() && input[pos] == b'^' {
+        negate = true;
+        pos += 1;
+    }
+    let mut matched = BTreeSet::new();
+    while pos < input.len() && input[pos] != b']' {
+        if input[pos] == b'\\' {
+            if let Some((escape_set, next_pos)) = parse_class_escape_set(input, pos) {
+                matched.extend(escape_set);
+                pos = next_pos;
+                continue;
+            }
+        }
+
+        let (start_byte, next_pos) = if input[pos] == b'\\' {
+            parse_class_escape_byte(input, pos)
+        } else {
+            (input[pos], pos + 1)
+        };
+        pos = next_pos;
+
+        if pos + 1 < input.len() && input[pos] == b'-' && input[pos + 1] != b']' {
+            pos += 1;
+            let (end_byte, next_pos) = if input[pos] == b'\\' {
+                parse_class_escape_byte(input, pos)
+            } else {
+                (input[pos], pos + 1)
+            };
+            pos = next_pos;
+            matched.extend(start_byte..=end_byte);
+        } else {
+            matched.insert(start_byte);
+        }
+    }
+    if pos >= input.len() || input[pos] != b']' {
+        return None;
+    }
+    let fragment = jsonified_char_class_fragment(&matched, negate)?;
+    Some((fragment, pos + 1))
+}
+
 /// Replace bare `.` in a regex pattern with the JSON string character class,
 /// so that `.` does not match `"`, `\`, or control characters inside a JSON string.
 fn jsonify_regex_dot(pattern: &str) -> String {
     let json_dot = r#"(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#;
-    let chars: Vec<char> = pattern.chars().collect();
     let mut out = String::with_capacity(pattern.len() * 2);
+    let bytes = pattern.as_bytes();
     let mut i = 0;
-    let mut in_class = false;
-    while i < chars.len() {
-        let ch = chars[i];
-        if ch == '\\' && i + 1 < chars.len() {
-            // Escaped character — pass through both chars
-            out.push(ch);
-            out.push(chars[i + 1]);
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'\\' && i + 1 < bytes.len() {
+            out.push(ch as char);
+            out.push(bytes[i + 1] as char);
             i += 2;
             continue;
         }
-        if ch == '[' && !in_class {
-            in_class = true;
-            out.push(ch);
-            i += 1;
-            continue;
+        if ch == b'[' {
+            if let Some((fragment, next_pos)) = jsonify_regex_char_class(bytes, i) {
+                out.push_str(&fragment);
+                i = next_pos;
+                continue;
+            }
         }
-        if ch == ']' && in_class {
-            in_class = false;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-        if ch == '.' && !in_class {
+        if ch == b'.' {
             out.push_str(json_dot);
             i += 1;
             continue;
         }
-        out.push(ch);
+        out.push(ch as char);
         i += 1;
     }
     out
@@ -2332,11 +2548,11 @@ mod tests {
     fn test_jsonify_regex_dot_only_rewrites_bare_dot() {
         assert_eq!(
             jsonify_regex_dot(r#".^\.[$]"#),
-            r#"(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})^\.[$]"#
+            r#"(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})^\.[\x24]"#
         );
         assert_eq!(
             jsonify_regex_dot(r#"[.]\.."#),
-            r#"[.]\.(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#
+            r#"[\x2E]\.(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#
         );
     }
 
@@ -2346,6 +2562,14 @@ mod tests {
             r#"{"type": "string", "pattern": "^file:.+\\.km[lz]$"}"#,
             &[b"\"file:\\\\foo.kml\""]
         ));
+    }
+
+    #[test]
+    fn test_pattern_char_class_respects_json_string_encoding() {
+        let schema = r#"{"type": "string", "pattern": "^[^:\\s]+:[^:\\s]+(:[^\\s]+)?$"}"#;
+        assert!(!accepts_sequence(schema, &[b"\"my-app:prod\x01\""]));
+        assert!(!accepts_sequence(schema, &[b"\"my-app:prod\n\""]));
+        assert!(accepts_sequence(schema, &[b"\"my-app:prod\\\"x\""]));
     }
 
     #[test]

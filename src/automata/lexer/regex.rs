@@ -163,6 +163,14 @@ fn parse_char_class(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
     }
     let mut set = U8Set::empty();
     while pos < input.len() && input[pos] != b']' {
+        if input[pos] == b'\\' {
+            if let Some((escape_set, next_pos)) = parse_escape_class_set(input, pos) {
+                set = set.union(&escape_set);
+                pos = next_pos;
+                continue;
+            }
+        }
+
         let start = if input[pos] == b'\\' {
             let byte = parse_escape_byte(input, pos);
             pos += escape_len(input, pos);
@@ -201,6 +209,19 @@ fn parse_char_class(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
         }
     }
     (Expr::U8Class(if negate { !set } else { set }), pos)
+}
+
+fn parse_escape_class_set(input: &[u8], pos: usize) -> Option<(U8Set, usize)> {
+    if pos + 1 >= input.len() {
+        return None;
+    }
+    let set = match input[pos + 1] {
+        b'd' => U8Set::from_range(b'0', b'9'),
+        b's' => U8Set::from_bytes(b" \t\r\n"),
+        b'w' => U8Set::from_predicate(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        _ => return None,
+    };
+    Some((set, pos + 2))
 }
 
 fn utf8_aware_negated_ascii_class(excluded: U8Set) -> Expr {
@@ -313,6 +334,7 @@ fn hex_digit(b: u8) -> u8 {
 mod tests {
     use super::parse_regex;
     use crate::automata::regex::Expr;
+    use crate::ds::u8set::U8Set;
 
     #[test]
     fn test_parse_non_capturing_group() {
@@ -327,5 +349,17 @@ mod tests {
                 Expr::U8Seq(b"d".to_vec()),
             ])
         );
+    }
+
+    #[test]
+    fn test_parse_char_class_space_escape() {
+        let expr = parse_regex(r#"[\s]"#, false);
+        assert_eq!(expr, Expr::U8Class(U8Set::from_bytes(b" \t\r\n")));
+    }
+
+    #[test]
+    fn test_parse_negated_char_class_space_escape() {
+        let expr = parse_regex(r#"[^\s]"#, false);
+        assert_eq!(expr, Expr::U8Class(!U8Set::from_bytes(b" \t\r\n")));
     }
 }
