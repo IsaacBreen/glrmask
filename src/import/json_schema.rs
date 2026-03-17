@@ -2229,15 +2229,9 @@ impl SchemaCtx {
             ]));
         }
 
-        // Final alt: empty string (if no key is the empty string)
-        //            or "at least one more char" (if empty string IS a key)
+        // Final alt: empty string only when no excluded key ends at this node.
         if !has_empty {
             alts.push(empty_expr());
-        } else {
-            alts.push(sequence_or_single(vec![
-                regex_expr(JSON_STRING_CHAR_PATTERN),
-                regex_expr(string_content_regex),
-            ]));
         }
 
         choice_or_single(alts)
@@ -2591,6 +2585,29 @@ mod tests {
     fn test_type_array_of_types() {
         let g = json_schema_to_grammar(r#"{"type": ["string", "null"]}"#).unwrap();
         assert!(!g.rules.is_empty());
+    }
+
+    #[test]
+    fn test_additional_properties_excludes_prefix_related_known_keys() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "foo": {"type": ["string", "null"]},
+                "foo2": {"type": ["string", "null"]}
+            }
+        }"#;
+        assert!(!accepts_sequence(
+            schema,
+            &[b"{", b"\"foo2\"", b": ", b"1", b"}"]
+        ));
+        assert!(accepts_sequence(
+            schema,
+            &[b"{", b"\"foo2\"", b": ", b"null", b"}"]
+        ));
+        assert!(accepts_sequence(
+            schema,
+            &[b"{", b"\"foo3\"", b": ", b"1", b"}"]
+        ));
     }
 
     fn accepts_sequence(schema_json: &str, tokens: &[&[u8]]) -> bool {
