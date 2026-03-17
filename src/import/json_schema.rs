@@ -1017,13 +1017,83 @@ impl SchemaCtx {
         false
     }
 
-    fn build_numeric_ref(&self, type_name: &str, schema: &Map<String, Value>) -> GrammarExpr {
-        let nonneg = Self::is_nonneg_schema(schema);
-        match (type_name, nonneg) {
-            ("integer", true) => GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into()),
-            ("integer", false) => self.json_integer_ref(),
-            (_, true) => GrammarExpr::Ref(JSON_NONNEG_NUMBER_RULE.into()),
-            (_, false) => self.json_number_ref(),
+    fn build_numeric_ref(&mut self, type_name: &str, schema: &Map<String, Value>) -> GrammarExpr {
+        let minimum = schema.get("minimum").and_then(Value::as_f64);
+        let exclusive_minimum = schema.get("exclusiveMinimum").and_then(Value::as_f64);
+        let maximum = schema.get("maximum").and_then(Value::as_f64);
+        let exclusive_maximum = schema.get("exclusiveMaximum").and_then(Value::as_f64);
+
+        // Determine effective bounds
+        let mut left: Option<f64> = None;
+        let mut left_inclusive = true;
+        if let Some(m) = minimum {
+            left = Some(m);
+        }
+        if let Some(em) = exclusive_minimum {
+            if left.is_none() || em >= left.unwrap() {
+                left = Some(em);
+                left_inclusive = false;
+            }
+        }
+
+        let mut right: Option<f64> = None;
+        let mut right_inclusive = true;
+        if let Some(m) = maximum {
+            right = Some(m);
+        }
+        if let Some(em) = exclusive_maximum {
+            if right.is_none() || em <= right.unwrap() {
+                right = Some(em);
+                right_inclusive = false;
+            }
+        }
+
+        let has_bounds = left.is_some() || right.is_some();
+        if !has_bounds {
+            return if type_name == "integer" {
+                self.json_integer_ref()
+            } else {
+                self.json_number_ref()
+            };
+        }
+
+        // Non-negative shortcut when only minimum >= 0 and no maximum
+        let nonneg = left.map_or(false, |l| l >= 0.0);
+        if nonneg && right.is_none() {
+            return if type_name == "integer" {
+                GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())
+            } else {
+                GrammarExpr::Ref(JSON_NONNEG_NUMBER_RULE.into())
+            };
+        }
+
+        // Build precise range regex
+        use crate::import::numeric_range::{rx_float_range, rx_int_range};
+
+        let regex_result = if type_name == "integer" {
+            let int_left = left.map(|l| if left_inclusive { l as i64 } else { l as i64 + 1 });
+            let int_right = right.map(|r| if right_inclusive { r as i64 } else { r as i64 - 1 });
+            rx_int_range(int_left, int_right)
+        } else {
+            rx_float_range(left, right, left_inclusive, right_inclusive)
+        };
+
+        match regex_result {
+            Ok(regex) => GrammarExpr::RawRegex(regex),
+            Err(_) => {
+                // Fallback to generic on error
+                if nonneg {
+                    if type_name == "integer" {
+                        GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())
+                    } else {
+                        GrammarExpr::Ref(JSON_NONNEG_NUMBER_RULE.into())
+                    }
+                } else if type_name == "integer" {
+                    self.json_integer_ref()
+                } else {
+                    self.json_number_ref()
+                }
+            }
         }
     }
 
@@ -1147,6 +1217,18 @@ impl SchemaCtx {
                 &required_list,
                 &required_keys,
                 additional_schema,
+            );
+        }
+
+        // No defined properties but typed additionalProperties — build an
+        // AP-only object that constrains value types.
+        if let Some(Value::Object(map)) = additional_properties {
+            let empty_props = serde_json::Map::new();
+            return self.build_ordered_properties_object_expr(
+                &empty_props,
+                &[],
+                &BTreeSet::new(),
+                Some(Value::Object(map.clone())),
             );
         }
 

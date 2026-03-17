@@ -7,6 +7,7 @@ pub use crate::grammar::ast as ast;
 pub mod ebnf;
 pub mod json_schema;
 pub mod lark;
+pub mod numeric_range;
 
 #[cfg(test)]
 mod test_grammar_import;
