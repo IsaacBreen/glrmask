@@ -1099,6 +1099,40 @@ impl SchemaCtx {
         Ok(current.clone())
     }
 
+    fn schema_for_intersection(&self, schema: &Value) -> Map<String, Value> {
+        let Some(object) = schema.as_object() else {
+            return Map::new();
+        };
+        let Some(ref_value) = object.get("$ref").and_then(Value::as_str) else {
+            return object.clone();
+        };
+        let Ok(resolved) = self.resolve_local_ref(ref_value) else {
+            return object.clone();
+        };
+        let mut merged = resolved.as_object().cloned().unwrap_or_default();
+        let siblings: Map<String, Value> = object
+            .iter()
+            .filter(|(key, _)| key.as_str() != "$ref")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !siblings.is_empty() {
+            merged = merge_two_schemas(&merged, &siblings);
+        }
+        merged
+    }
+
+    fn merge_resolved_subschemas(
+        &self,
+        base: &Map<String, Value>,
+        sub_schemas: &[Value],
+    ) -> Map<String, Value> {
+        let mut merged = base.clone();
+        for schema in sub_schemas {
+            merged = merge_two_schemas(&merged, &self.schema_for_intersection(schema));
+        }
+        merged
+    }
+
     fn stable_ref_rule_name(&self, ref_value: &str) -> String {
         let path = ref_value.strip_prefix("#/").unwrap_or(ref_value);
         let last_segment = path.rsplit('/').next().unwrap_or(path);
@@ -1192,11 +1226,7 @@ impl SchemaCtx {
                     options
                         .iter()
                         .map(|option| {
-                            let merged = if let Some(obj) = option.as_object() {
-                                Value::Object(merge_two_schemas(&base, obj))
-                            } else {
-                                option.clone()
-                            };
+                            let merged = Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)));
                             self.convert_schema(&merged)
                         })
                         .collect::<Result<Vec<_>, _>>()?
@@ -1222,11 +1252,7 @@ impl SchemaCtx {
                     options
                         .iter()
                         .map(|option| {
-                            let merged = if let Some(obj) = option.as_object() {
-                                Value::Object(merge_two_schemas(&base, obj))
-                            } else {
-                                option.clone()
-                            };
+                            let merged = Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)));
                             self.convert_schema(&merged)
                         })
                         .collect::<Result<Vec<_>, _>>()?
@@ -1247,7 +1273,7 @@ impl SchemaCtx {
                     .filter(|(key, _)| key.as_str() != "allOf")
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect::<Map<String, Value>>();
-                let merged = merge_allof_schemas(&base, all_of);
+                let merged = self.merge_resolved_subschemas(&base, all_of);
                 return self.convert_schema(&Value::Object(merged));
             }
         }
@@ -2631,6 +2657,42 @@ mod tests {
         assert!(accepts_sequence(
             r#"{"type": "number", "minimum": 10.5}"#,
             &[b"10.5"]
+        ));
+    }
+
+    #[test]
+    fn test_allof_ref_merge_preserves_required_properties() {
+        let schema = r##"{
+            "type": "object",
+            "properties": {
+                "value": {
+                    "allOf": [
+                        {"$ref": "#/definitions/Type1"},
+                        {"$ref": "#/definitions/Type2"}
+                    ]
+                }
+            },
+            "required": ["value"],
+            "definitions": {
+                "Type1": {
+                    "type": "object",
+                    "properties": {"value1": {"type": "string"}},
+                    "required": ["value1"]
+                },
+                "Type2": {
+                    "type": "object",
+                    "properties": {"value2": {"type": "number"}},
+                    "required": ["value2"]
+                }
+            }
+        }"##;
+        assert!(!accepts_sequence(
+            schema,
+            &[b"{", b"\"value\"", b": ", b"{", b"\"value1\"", b": ", b"\"\"", b"}", b"}"]
+        ));
+        assert!(accepts_sequence(
+            schema,
+            &[b"{", b"\"value\"", b": ", b"{", b"\"value1\"", b": ", b"\"\"", b", ", b"\"value2\"", b": ", b"1", b"}", b"}"]
         ));
     }
 
