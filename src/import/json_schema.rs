@@ -26,10 +26,10 @@ const JSON_KEY_COLON_RULE: &str = "JSON_KEY_COLON";
 const JSON_STRING_REGEX: &str =
     r#""([^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
 const JSON_KEY_COLON_REGEX: &str =
-    r#""([^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*":"#;
+    r#""([^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
-const JSON_ITEM_SEPARATOR: &[u8] = b",";
-const JSON_KEY_SEPARATOR: &[u8] = b":";
+const JSON_ITEM_SEPARATOR: &[u8] = b", ";
+const JSON_KEY_SEPARATOR: &[u8] = b": ";
 
 fn literal_expr(bytes: &[u8]) -> GrammarExpr {
     GrammarExpr::Literal(bytes.to_vec())
@@ -80,12 +80,54 @@ fn strip_regex_anchors(pattern: &str) -> &str {
     pattern.strip_suffix('$').unwrap_or(pattern)
 }
 
+/// Replace bare `.` in a regex pattern with the JSON string character class,
+/// so that `.` does not match `"`, `\`, or control characters inside a JSON string.
+fn jsonify_regex_dot(pattern: &str) -> String {
+    let json_dot = r#"[^\x00-\x1f"\\]"#;
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len() * 2);
+    let mut i = 0;
+    let mut in_class = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\' && i + 1 < chars.len() {
+            // Escaped character — pass through both chars
+            out.push(ch);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if ch == '[' && !in_class {
+            in_class = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ']' && in_class {
+            in_class = false;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '.' && !in_class {
+            out.push_str(json_dot);
+            i += 1;
+            continue;
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
-    regex_expr(format!(r#""(?:{})""#, strip_regex_anchors(pattern)))
+    let inner = jsonify_regex_dot(strip_regex_anchors(pattern));
+    regex_expr(format!(r#""(?:{})""#, inner))
 }
 
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
-    regex_expr(format!(r#""(?:{})":"#, strip_regex_anchors(pattern)))
+    let inner = jsonify_regex_dot(strip_regex_anchors(pattern));
+    regex_expr(format!(r#""(?:{})": "#, inner))
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
@@ -219,6 +261,29 @@ fn type_set(schema: &Map<String, Value>) -> Option<BTreeSet<String>> {
     }
 }
 
+fn has_structural_keywords(schema: &Map<String, Value>) -> bool {
+    const STRUCTURAL: &[&str] = &[
+        "type",
+        "properties",
+        "additionalProperties",
+        "patternProperties",
+        "items",
+        "prefixItems",
+        "minProperties",
+        "maxProperties",
+        "minItems",
+        "maxItems",
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "format",
+        "propertyNames",
+    ];
+    STRUCTURAL.iter().any(|k| schema.contains_key(*k))
+}
+
 fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<String, Value> {
     if s2.is_empty() {
         return s1.clone();
@@ -261,12 +326,21 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
     let props2 = s2.get("properties").and_then(Value::as_object);
     if props1.is_some() || props2.is_some() {
         let mut merged_props = Map::new();
-        let mut keys = BTreeSet::new();
+        // Preserve declaration order: p1 keys first, then new p2 keys
+        let mut keys: Vec<String> = Vec::new();
         if let Some(props) = props1 {
-            keys.extend(props.keys().cloned());
+            for k in props.keys() {
+                if !keys.contains(k) {
+                    keys.push(k.clone());
+                }
+            }
         }
         if let Some(props) = props2 {
-            keys.extend(props.keys().cloned());
+            for k in props.keys() {
+                if !keys.contains(k) {
+                    keys.push(k.clone());
+                }
+            }
         }
         for key in keys {
             match (
@@ -805,20 +879,60 @@ impl SchemaCtx {
 
         if let Some(options) = object.get("anyOf").and_then(Value::as_array) {
             if !options.is_empty() {
-                let options = options
-                    .iter()
-                    .map(|option| self.convert_schema(option))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let base_has_structural = has_structural_keywords(object);
+                let options = if base_has_structural {
+                    let base: Map<String, Value> = object
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "anyOf" && key.as_str() != "oneOf")
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    options
+                        .iter()
+                        .map(|option| {
+                            let merged = if let Some(obj) = option.as_object() {
+                                Value::Object(merge_two_schemas(&base, obj))
+                            } else {
+                                option.clone()
+                            };
+                            self.convert_schema(&merged)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    options
+                        .iter()
+                        .map(|option| self.convert_schema(option))
+                        .collect::<Result<Vec<_>, _>>()?
+                };
                 return Ok(factor_common_affixes(options));
             }
         }
 
         if let Some(options) = object.get("oneOf").and_then(Value::as_array) {
             if !options.is_empty() {
-                let options = options
-                    .iter()
-                    .map(|option| self.convert_schema(option))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let base_has_structural = has_structural_keywords(object);
+                let options = if base_has_structural {
+                    let base: Map<String, Value> = object
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "anyOf" && key.as_str() != "oneOf")
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    options
+                        .iter()
+                        .map(|option| {
+                            let merged = if let Some(obj) = option.as_object() {
+                                Value::Object(merge_two_schemas(&base, obj))
+                            } else {
+                                option.clone()
+                            };
+                            self.convert_schema(&merged)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    options
+                        .iter()
+                        .map(|option| self.convert_schema(option))
+                        .collect::<Result<Vec<_>, _>>()?
+                };
                 return Ok(factor_common_affixes(options));
             }
         }
@@ -1045,41 +1159,46 @@ impl SchemaCtx {
         self.object_rule_counter = base_index + 1;
 
         let (term_nc, term_c) = if let Some(schema) = additional_properties_schema {
-            let cache_key = serde_json::to_string(&schema).unwrap_or_else(|_| format!("{schema:?}"));
-            if let Some(names) = self.ap_catch_all_cache.get(&cache_key) {
-                names.clone()
-            } else {
-                let slot = self.ap_catch_all_cache.len();
-                let term_nc = format!("ap_extra_{slot}_nc");
-                let term_c = format!("ap_extra_{slot}_c");
-                let value_expr = self.convert_schema(&schema)?;
-                self.insert_rule(
-                    term_nc.clone(),
-                    choice_or_single(vec![
-                        sequence_or_single(vec![
-                            self.json_key_colon_ref(),
-                            value_expr.clone(),
-                            GrammarExpr::Ref(term_c.clone()),
-                        ]),
-                        empty_expr(),
+            // Collect known property keys for complement trie
+            let known_keys: Vec<String> = ordered.iter().map(|(k, _, _)| k.clone()).collect();
+
+            // Build complement key that excludes known property names
+            let ck_prefix = format!("{}_CK", base_name.to_uppercase());
+            let complement_key = self.build_complement_key_expr(&known_keys, &ck_prefix);
+
+            // complement_key_colon = complement_key ": "
+            let complement_key_colon = sequence_or_single(vec![
+                complement_key,
+                literal_expr(JSON_KEY_SEPARATOR),
+            ]);
+
+            let term_nc = format!("{base_name}_ap_nc");
+            let term_c = format!("{base_name}_ap_c");
+            let value_expr = self.convert_schema(&schema)?;
+            self.insert_rule(
+                term_nc.clone(),
+                choice_or_single(vec![
+                    sequence_or_single(vec![
+                        complement_key_colon.clone(),
+                        value_expr.clone(),
+                        GrammarExpr::Ref(term_c.clone()),
                     ]),
-                );
-                self.insert_rule(
-                    term_c.clone(),
-                    choice_or_single(vec![
-                        sequence_or_single(vec![
-                            literal_expr(JSON_ITEM_SEPARATOR),
-                            self.json_key_colon_ref(),
-                            value_expr,
-                            GrammarExpr::Ref(term_c.clone()),
-                        ]),
-                        empty_expr(),
+                    empty_expr(),
+                ]),
+            );
+            self.insert_rule(
+                term_c.clone(),
+                choice_or_single(vec![
+                    sequence_or_single(vec![
+                        literal_expr(JSON_ITEM_SEPARATOR),
+                        complement_key_colon,
+                        value_expr,
+                        GrammarExpr::Ref(term_c.clone()),
                     ]),
-                );
-                self.ap_catch_all_cache
-                    .insert(cache_key, (term_nc.clone(), term_c.clone()));
-                (term_nc, term_c)
-            }
+                    empty_expr(),
+                ]),
+            );
+            (term_nc, term_c)
         } else {
             let term_nc = format!("{base_name}_{}_nc", ordered.len());
             let term_c = format!("{base_name}_{}_c", ordered.len());
@@ -1303,6 +1422,115 @@ impl SchemaCtx {
         } else {
             non_empty
         }
+    }
+
+    /// Build an UPPERCASE terminal rule that matches a quoted JSON string key
+    /// whose body is NOT any of the given exact keys.
+    ///
+    /// Returns `GrammarExpr::Ref(name)` to the created terminal rule.
+    ///
+    /// Uses a trie-based complement: at each trie node, we match characters
+    /// that differ from the excluded keys at that position.  UPPERCASE names
+    /// make glrmask compile these as DFA terminals (efficient) instead of
+    /// LR parser rules (which cause GLR state explosion).
+    fn build_complement_key_expr(&mut self, keys: &[String], prefix: &str) -> GrammarExpr {
+        if keys.is_empty() {
+            // No keys to exclude → use the standard JSON_STRING pattern
+            return self.json_string_ref();
+        }
+
+        // STRING_CONTENT = (STRING_CHAR | ESCAPE_SEQ)*
+        let string_content_regex = format!("({})*", JSON_STRING_CHAR_PATTERN);
+
+        // Build the trie complement body as a single nested expression (no intermediate rules).
+        let body_expr = Self::build_complement_trie_expr(keys, &string_content_regex);
+
+        // Wrap in quotes to form a single UPPERCASE terminal: `"` body `"`
+        let full_name = format!("{prefix}_FULL");
+        let full_expr = sequence_or_single(vec![
+            literal_expr(b"\""),
+            body_expr,
+            literal_expr(b"\""),
+        ]);
+        self.insert_rule(full_name.clone(), full_expr);
+
+        GrammarExpr::Ref(full_name)
+    }
+
+    /// Recursively build trie complement as a single nested GrammarExpr (no named rules).
+    fn build_complement_trie_expr(
+        keys: &[String],
+        string_content_regex: &str,
+    ) -> GrammarExpr {
+        let mut by_first: std::collections::BTreeMap<char, Vec<String>> = std::collections::BTreeMap::new();
+        let mut has_empty = false;
+        for k in keys {
+            if k.is_empty() {
+                has_empty = true;
+            } else {
+                let first = k.chars().next().unwrap();
+                by_first
+                    .entry(first)
+                    .or_default()
+                    .push(k[first.len_utf8()..].to_string());
+            }
+        }
+
+        let mut alts: Vec<GrammarExpr> = Vec::new();
+
+        // Alt 1: first byte is a valid JSON string char that doesn't start any excluded key,
+        //        followed by any remaining string content.
+        let excluded_bytes: Vec<u8> = by_first.keys().map(|&c| c as u8).collect();
+        if !excluded_bytes.is_empty() {
+            let mut excluded_set = String::new();
+            excluded_set.push_str(r#"\x00-\x1f"\\"#);  // always excluded in JSON strings
+            for &b in &excluded_bytes {
+                if b == b'-' || b == b']' || b == b'^' || b == b'\\' {
+                    excluded_set.push('\\');
+                    excluded_set.push(b as char);
+                } else {
+                    excluded_set.push(b as char);
+                }
+            }
+            let char_minus_regex = format!("[^{}]", excluded_set);
+            alts.push(sequence_or_single(vec![
+                regex_expr(&char_minus_regex),
+                regex_expr(string_content_regex),
+            ]));
+        } else {
+            alts.push(sequence_or_single(vec![
+                regex_expr(JSON_STRING_CHAR_PATTERN),
+                regex_expr(string_content_regex),
+            ]));
+        }
+
+        // Alt 2: starts with an escape sequence (can't be an ASCII key)
+        alts.push(sequence_or_single(vec![
+            regex_expr(r#"\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#),
+            regex_expr(string_content_regex),
+        ]));
+
+        // Alt 3..N: for each trie-branch char, match it then recurse
+        for (&ch, suffixes) in &by_first {
+            let sub = Self::build_complement_trie_expr(suffixes, string_content_regex);
+            alts.push(sequence_or_single(vec![
+                literal_expr(&[ch as u8]),
+                sub,
+            ]));
+        }
+
+        // Final alt: empty string (if no key is the empty string)
+        //            or "at least one more char" (if empty string IS a key)
+        if !has_empty {
+            alts.push(empty_expr());
+        } else {
+            alts.push(sequence_or_single(vec![
+                regex_expr(JSON_STRING_CHAR_PATTERN),
+                regex_expr(string_content_regex),
+            ]));
+        }
+
+        choice_or_single(alts)
     }
 
     fn is_trivial_expr(expr: &GrammarExpr) -> bool {
@@ -1578,6 +1806,18 @@ mod tests {
     }
 
     #[test]
+    fn test_jsonify_regex_dot_only_rewrites_bare_dot() {
+        assert_eq!(
+            jsonify_regex_dot(r#".^\.[$]"#),
+            r#"[^\x00-\x1f"\\]^\.[$]"#
+        );
+        assert_eq!(
+            jsonify_regex_dot(r#"[.]\.."#),
+            r#"[.]\.[^\x00-\x1f"\\]"#
+        );
+    }
+
+    #[test]
     fn test_type_array_of_types() {
         let g = json_schema_to_grammar(r#"{"type": ["string", "null"]}"#).unwrap();
         assert!(!g.rules.is_empty());
@@ -1632,6 +1872,14 @@ mod tests {
     #[test]
     fn test_accepts_const_value() {
         assert!(accepts_sequence(r#"{"const": true}"#, &[b"true"]));
+    }
+
+    #[test]
+    fn test_accepts_date_format() {
+        assert!(accepts_sequence(
+            r#"{"type": "string", "format": "date"}"#,
+            &[b"\"2026-01-30\""]
+        ));
     }
 
     #[test]

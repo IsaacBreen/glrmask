@@ -133,7 +133,15 @@ fn parse_atom(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
     }
     match input[pos] {
         b'(' => {
-            let (expr, mut pos) = parse_alternation(input, pos + 1, utf8);
+            let mut inner_pos = pos + 1;
+            // Skip non-capturing group modifier (?:
+            if inner_pos + 1 < input.len()
+                && input[inner_pos] == b'?'
+                && input[inner_pos + 1] == b':'
+            {
+                inner_pos += 2;
+            }
+            let (expr, mut pos) = parse_alternation(input, inner_pos, utf8);
             if pos < input.len() && input[pos] == b')' {
                 pos += 1;
             }
@@ -298,5 +306,26 @@ fn hex_digit(b: u8) -> u8 {
         b'a'..=b'f' => 10 + (b - b'a'),
         b'A'..=b'F' => 10 + (b - b'A'),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_regex;
+    use crate::automata::regex::Expr;
+
+    #[test]
+    fn test_parse_non_capturing_group() {
+        let expr = parse_regex("(?:ab|c)d", false);
+        assert_eq!(
+            expr,
+            Expr::Seq(vec![
+                Expr::Choice(vec![
+                    Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec())]),
+                    Expr::U8Seq(b"c".to_vec()),
+                ]),
+                Expr::U8Seq(b"d".to_vec()),
+            ])
+        );
     }
 }
