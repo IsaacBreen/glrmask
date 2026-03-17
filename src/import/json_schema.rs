@@ -32,6 +32,40 @@ const JSON_KEY_COLON_REGEX: &str =
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
 const JSON_KEY_SEPARATOR: &[u8] = b": ";
+const UNTYPED_OBJECT_KEYWORD_KEYS: &[&str] = &[
+    "properties",
+    "required",
+    "additionalProperties",
+    "patternProperties",
+    "propertyNames",
+    "minProperties",
+    "maxProperties",
+];
+const UNTYPED_ARRAY_KEYWORD_KEYS: &[&str] = &[
+    "items",
+    "prefixItems",
+    "minItems",
+    "maxItems",
+];
+const UNTYPED_STRING_KEYWORD_KEYS: &[&str] = &[
+    "pattern",
+    "format",
+    "minLength",
+    "maxLength",
+];
+const UNTYPED_NUMBER_KEYWORD_KEYS: &[&str] = &[
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+];
+const UNTYPED_SCHEMA_APPLICABLE_TYPES: &[(&str, &[&str])] = &[
+    ("object", UNTYPED_OBJECT_KEYWORD_KEYS),
+    ("array", UNTYPED_ARRAY_KEYWORD_KEYS),
+    ("string", UNTYPED_STRING_KEYWORD_KEYS),
+    ("number", UNTYPED_NUMBER_KEYWORD_KEYS),
+];
 
 fn literal_expr(bytes: &[u8]) -> GrammarExpr {
     GrammarExpr::Literal(bytes.to_vec())
@@ -85,7 +119,7 @@ fn strip_regex_anchors(pattern: &str) -> &str {
 /// Replace bare `.` in a regex pattern with the JSON string character class,
 /// so that `.` does not match `"`, `\`, or control characters inside a JSON string.
 fn jsonify_regex_dot(pattern: &str) -> String {
-    let json_dot = r#"[^\x00-\x1f"\\]"#;
+    let json_dot = r#"(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#;
     let chars: Vec<char> = pattern.chars().collect();
     let mut out = String::with_capacity(pattern.len() * 2);
     let mut i = 0;
@@ -969,26 +1003,7 @@ impl SchemaCtx {
             return self.convert_type(type_name, object);
         }
 
-        if [
-            "properties",
-            "required",
-            "additionalProperties",
-            "patternProperties",
-            "propertyNames",
-            "minProperties",
-            "maxProperties",
-        ]
-        .iter()
-        .any(|key| object.contains_key(*key))
-        {
-            return self.build_object_expr(object);
-        }
-
-        if object.contains_key("prefixItems") || object.contains_key("items") {
-            return self.build_array_expr(object);
-        }
-
-        Ok(self.json_value_ref())
+        self.convert_untyped_schema(object)
     }
 
     fn convert_type(&mut self, type_name: &str, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
@@ -1002,6 +1017,40 @@ impl SchemaCtx {
             "null" => Ok(self.json_null_ref()),
             _ => Ok(self.json_value_ref()),
         }
+    }
+
+    fn base_expr_for_type(&self, type_name: &str) -> GrammarExpr {
+        match type_name {
+            "object" => self.json_object_ref(),
+            "array" => self.json_array_ref(),
+            "string" => self.json_string_ref(),
+            "number" => self.json_number_ref(),
+            "boolean" => self.json_bool_ref(),
+            "null" => self.json_null_ref(),
+            _ => self.json_value_ref(),
+        }
+    }
+
+    fn convert_untyped_schema(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
+        let mut options = Vec::new();
+        let mut saw_applicable_keywords = false;
+
+        for (type_name, keys) in UNTYPED_SCHEMA_APPLICABLE_TYPES {
+            if keys.iter().any(|key| schema.contains_key(*key)) {
+                options.push(self.convert_type(type_name, schema)?);
+                saw_applicable_keywords = true;
+            } else {
+                options.push(self.base_expr_for_type(type_name));
+            }
+        }
+
+        if !saw_applicable_keywords {
+            return Ok(self.json_value_ref());
+        }
+
+        options.push(self.json_bool_ref());
+        options.push(self.json_null_ref());
+        Ok(factor_common_affixes(options))
     }
 
     fn is_nonneg_schema(schema: &Map<String, Value>) -> bool {
@@ -1881,6 +1930,35 @@ mod tests {
     }
 
     #[test]
+    fn test_untyped_object_keywords_allow_non_object_values() {
+        let schema = r#"{
+            "type": "array",
+            "items": {
+                "properties": {"identifier": {"type": "string"}},
+                "required": ["identifier"],
+                "additionalProperties": false
+            }
+        }"#;
+        assert!(accepts_sequence(schema, &[b"[", b"460", b"]"]));
+    }
+
+    #[test]
+    fn test_untyped_object_keywords_still_allow_object_values() {
+        let schema = r#"{
+            "type": "array",
+            "items": {
+                "properties": {"identifier": {"type": "string"}},
+                "required": ["identifier"],
+                "additionalProperties": false
+            }
+        }"#;
+        assert!(accepts_sequence(
+            schema,
+            &[b"[", b"{\"identifier\": \"x\"}", b"]"]
+        ));
+    }
+
+    #[test]
     fn test_ref_schema() {
         let g = json_schema_to_grammar(r##"{
             "$defs": {"Point": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}, "required": ["x", "y"]}},
@@ -1921,12 +1999,20 @@ mod tests {
     fn test_jsonify_regex_dot_only_rewrites_bare_dot() {
         assert_eq!(
             jsonify_regex_dot(r#".^\.[$]"#),
-            r#"[^\x00-\x1f"\\]^\.[$]"#
+            r#"(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})^\.[$]"#
         );
         assert_eq!(
             jsonify_regex_dot(r#"[.]\.."#),
-            r#"[.]\.[^\x00-\x1f"\\]"#
+            r#"[.]\.(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#
         );
+    }
+
+    #[test]
+    fn test_pattern_dot_accepts_escaped_backslash() {
+        assert!(accepts_sequence(
+            r#"{"type": "string", "pattern": "^file:.+\\.km[lz]$"}"#,
+            &[b"\"file:\\\\foo.kml\""]
+        ));
     }
 
     #[test]
