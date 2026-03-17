@@ -1625,9 +1625,9 @@ impl SchemaCtx {
             };
         }
 
-        // Non-negative shortcut when only minimum >= 0 and no maximum
-        let nonneg = left.map_or(false, |l| l >= 0.0);
-        if nonneg && right.is_none() {
+        // Only the exact lower bound of 0 can safely use the generic non-negative rules.
+        let use_nonneg_shortcut = right.is_none() && left == Some(0.0) && left_inclusive;
+        if use_nonneg_shortcut {
             return if type_name == "integer" {
                 GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())
             } else {
@@ -1650,7 +1650,7 @@ impl SchemaCtx {
             Ok(regex) => GrammarExpr::RawRegex(regex),
             Err(_) => {
                 // Fallback to generic on error
-                if nonneg {
+                if use_nonneg_shortcut {
                     if type_name == "integer" {
                         GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())
                     } else {
@@ -2607,6 +2607,30 @@ mod tests {
         assert!(accepts_sequence(
             schema,
             &[b"{", b"\"foo3\"", b": ", b"1", b"}"]
+        ));
+    }
+
+    #[test]
+    fn test_minimum_constraints_do_not_fall_back_to_nonnegative() {
+        assert!(!accepts_sequence(
+            r#"{"type": "integer", "minimum": 10}"#,
+            &[b"0"]
+        ));
+        assert!(!accepts_sequence(
+            r#"{"type": "integer", "minimum": 10}"#,
+            &[b"5"]
+        ));
+        assert!(accepts_sequence(
+            r#"{"type": "integer", "minimum": 10}"#,
+            &[b"10"]
+        ));
+        assert!(!accepts_sequence(
+            r#"{"type": "number", "minimum": 10.5}"#,
+            &[b"10.4"]
+        ));
+        assert!(accepts_sequence(
+            r#"{"type": "number", "minimum": 10.5}"#,
+            &[b"10.5"]
         ));
     }
 
