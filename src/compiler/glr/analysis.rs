@@ -987,13 +987,18 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
 
         // Phase 2: Inline null productions (ε-elimination)
         *rules = inline_null_productions(rules, next_nt.get());
+        // The null-inlining pipeline can allocate fresh helper NTs internally,
+        // so the outer allocator must resync before later phases request IDs.
+        next_nt.set(max_nt_id(rules) + 1);
 
         // Phase 3: Right-recursion elimination
         eliminate_right_recursion(rules, &mut fresh_nt);
+        next_nt.set(max_nt_id(rules) + 1);
 
         // Phase 4: Hidden left-recursion elimination
-        let nullable = compute_nullable(rules, next_nt.get());
+        let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
         eliminate_hidden_left_recursion(rules, &nullable);
+        next_nt.set(max_nt_id(rules) + 1);
 
         // Dedup before fixed-point check
         dedup_rules(rules);
@@ -1006,6 +1011,7 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     // Final ε-elimination pass (right-recursion conversion may
     // re-introduce ε-rules for fresh tail nonterminals)
     *rules = inline_null_productions(rules, next_nt.get());
+    next_nt.set(max_nt_id(rules) + 1);
 
     // Remove unreachable productions
     *rules = remove_unreachable_rules(rules, start);

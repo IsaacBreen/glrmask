@@ -16,6 +16,7 @@ use crate::import::ast::GrammarExpr;
 use crate::import::json_schema::{json_schema_to_grammar, schema_to_named_grammar};
 use crate::runtime::Constraint;
 use crate::Vocab;
+use std::path::Path;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -234,6 +235,115 @@ fn test_schema_nested_objects() {
             r#"{"outer": {}}"#,
             r#"{"outer": {"inner": "value"}}"#,
         ],
+    );
+}
+
+#[test]
+fn test_schema_object_after_comma_requires_key_quote() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "id": {"type": "number"},
+            "size": {"type": "number"},
+            "value": {"type": "number"},
+            "lastSetValue": {"type": "number"}
+        }
+    }"#;
+    let vocab = byte_vocab();
+    let c = Constraint::from_json_schema(schema, &vocab)
+        .unwrap_or_else(|e| panic!("schema should compile: {}", e));
+
+    let mut s = c.start();
+    for byte in br#"{"id": 1, "# {
+        let mask = s.mask();
+        assert!(
+            token_allowed(&mask, *byte as usize),
+            "prefix byte {byte:?} should be allowed"
+        );
+        s.commit_token(*byte as u32).unwrap();
+    }
+
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, b'"' as usize),
+        "object member after comma+space should start with a quote"
+    );
+    assert!(
+        !token_allowed(&mask, b'1' as usize),
+        "object member after comma+space must not allow a digit"
+    );
+}
+
+#[test]
+fn test_o56012_after_comma_requires_key_quote() {
+    let fixture_path = Path::new(
+        "/Users/isaacbreen/Projects2/constraint-framework-analysis/data/sources/jsonschemabench/maskbench/data/Github_hard---o56012.json",
+    );
+    if !fixture_path.exists() {
+        return;
+    }
+
+    let fixture_text = std::fs::read_to_string(fixture_path)
+        .unwrap_or_else(|e| panic!("should read o56012 fixture: {e}"));
+    let fixture: serde_json::Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|e| panic!("should parse o56012 fixture: {e}"));
+    let schema = fixture
+        .get("schema")
+        .unwrap_or_else(|| panic!("fixture should contain schema"))
+        .to_string();
+    let example = concat!(
+        "{\"id\": 2, \"name\": \"RGB Light\", \"roomID\": 0, \"type\": \"rgb_driver\", ",
+        "\"remoteGatewayId\": 0, \"remoteDeviceID\": 0, \"properties\": {\"UIMessageSendTime\": ",
+        "\"2022-01-01 00:00:00\", \"associationMode\": \"0\", \"bScaler\": \"1\", ",
+        "\"buttonType\": \"0\", \"classConfigure\": \"0\", \"classGeneric\": \"0\", ",
+        "\"classSupport\": \"0\", \"classVersion\": \"0\", \"color\": \"#FFFFFF\", ",
+        "\"currentProgram\": \"0\", \"currentProgramID\": \"0\", \"dead\": \"0\", ",
+        "\"deviceControlType\": \"0\", \"deviceIcon\": \"0\", \"disabled\": \"0\", ",
+        "\"emailNotificationID\": \"0\", \"emailNotificationType\": \"0\", \"endPoint\": \"0\", ",
+        "\"favoriteProgram\": \"0\", \"gScaler\": \"1\", \"isBatteryOperated\": \"0\", ",
+        "\"isLight\": \"1\", \"lastColorSet\": \"#FFFFFF\", \"lastUsedPrograms\": \"0\", ",
+        "\"liliOffCommand\": \"0\", \"liliOnCommand\": \"0\", \"log\": \"0\", ",
+        "\"logTemp\": \"0\", \"meterSupport\": \"0\", \"mode\": \"0\", ",
+        "\"needConfigure\": \"0\", \"nodeID\": \"0\", \"parametersTemplate\": \"0\", ",
+        "\"parentID\": \"0\", \"pollingRetryError\": \"0\", \"pollingTime\": \"0\", ",
+        "\"pollingTimeNext\": \"0\", \"pollingTimeSec\": \"0\", \"productInfo\": \"0\", ",
+        "\"programsSortOrder\": \"0\", \"pushNotificationID\": \"0\", \"pushNotificationType\": \"0\", ",
+        "\"rScaler\": \"1\", \"rememberColor\": \"0\", \"requestNodeNeighborState\": \"0\", ",
+        "\"requestNodeNeighborStateTimeStemp\": \"0\", \"saveLogs\": \"0\", \"sensorSupport\": \"0\", ",
+        "\"showChildren\": \"0\", \"showEnergy\": \"0\", \"smsNotificationID\": \"0\", ",
+        "\"smsNotificationType\": \"0\", \"sortOrder\": \"0\", \"unit\": \"0\", ",
+        "\"unitMeter\": \"0\", \"unitSensor\": \"0\", \"useTemplate\": \"0\", ",
+        "\"userDescription\": \"0\", \"value\": \"0\", \"valueMeter\": \"0\", ",
+        "\"valueSensor\": \"0\", \"zwaveCompany\": \"0\", \"zwaveInfo\": \"0\", ",
+        "\"zwaveVersion\": \"0\", \"parameters\": [{\"id\": 1, \"size\": 1, \"value\": 1, ",
+        "\"lastSetValue\": 1}], \"associationView\": [{\"groupID\": 1, \"devices\": [1, 2, 3]}], ",
+        "\"associationSet\": [{\"groupID\": 1, \"devices\": [1, 2, 3]}]}, \"actions\": {\"firmwareUpdate\": 1, ",
+        "\"pollingTimeSec\": 1, \"requestNodeNeighborUpdate\": 0, \"resetMeter\": 0, \"setB\": 1, ",
+        "\"setColor\": 4, \"setG\": 1, \"setR\": 1, \"setValue\": 1, \"setW\": 1, ",
+        "\"silentSetColor\": 4, \"startProgram\": 1, \"turnOff\": 0, \"turnOn\": 0}, ",
+        "\"created\": 1643723400, \"modified\": 1643723400, \"sortOrder\": 0}"
+    );
+    let prefix_marker = "\"parameters\": [{\"id\": 1, ";
+    let prefix_end = example
+        .find(prefix_marker)
+        .unwrap_or_else(|| panic!("example should contain target prefix"))
+        + prefix_marker.len();
+
+    let vocab = byte_vocab();
+    let c = Constraint::from_json_schema(&schema, &vocab)
+        .unwrap_or_else(|e| panic!("schema should compile: {}", e));
+    let mut s = c.start();
+    for &byte in &example.as_bytes()[..prefix_end] {
+        let mask = s.mask();
+        assert!(token_allowed(&mask, byte as usize), "prefix byte {byte:?} should be allowed");
+        s.commit_token(byte as u32).unwrap();
+    }
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, b'"' as usize));
+    assert!(
+        !token_allowed(&mask, b'1' as usize),
+        "o56012 native path must not allow a digit after comma+space in parameters item"
     );
 }
 
