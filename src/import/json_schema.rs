@@ -19,6 +19,8 @@ const JSON_STRING_RULE: &str = "JSON_STRING";
 const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
 const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
+const JSON_NONNEG_INTEGER_RULE: &str = "JSON_NONNEG_INTEGER";
+const JSON_NONNEG_NUMBER_RULE: &str = "JSON_NONNEG_NUMBER";
 const JSON_BOOL_RULE: &str = "JSON_BOOL";
 const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "JSON_KEY_COLON";
@@ -701,6 +703,11 @@ impl SchemaCtx {
             JSON_NUMBER_RULE,
             regex_expr(r#"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#),
         );
+        self.insert_rule(JSON_NONNEG_INTEGER_RULE, regex_expr(r#"(0|[1-9][0-9]*)"#));
+        self.insert_rule(
+            JSON_NONNEG_NUMBER_RULE,
+            regex_expr(r#"(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#),
+        );
         self.insert_rule(
             JSON_BOOL_RULE,
             choice_or_single(vec![literal_expr(b"true"), literal_expr(b"false")]),
@@ -989,11 +996,34 @@ impl SchemaCtx {
             "object" => self.build_object_expr(schema),
             "array" => self.build_array_expr(schema),
             "string" => Ok(self.build_string_expr(schema)),
-            "integer" => Ok(self.json_integer_ref()),
-            "number" => Ok(self.json_number_ref()),
+            "integer" => Ok(self.build_numeric_ref(type_name, schema)),
+            "number" => Ok(self.build_numeric_ref(type_name, schema)),
             "boolean" => Ok(self.json_bool_ref()),
             "null" => Ok(self.json_null_ref()),
             _ => Ok(self.json_value_ref()),
+        }
+    }
+
+    fn is_nonneg_schema(schema: &Map<String, Value>) -> bool {
+        for key in ["minimum", "exclusiveMinimum"] {
+            if let Some(val) = schema.get(key) {
+                if let Some(n) = val.as_f64() {
+                    if n >= 0.0 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn build_numeric_ref(&self, type_name: &str, schema: &Map<String, Value>) -> GrammarExpr {
+        let nonneg = Self::is_nonneg_schema(schema);
+        match (type_name, nonneg) {
+            ("integer", true) => GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into()),
+            ("integer", false) => self.json_integer_ref(),
+            (_, true) => GrammarExpr::Ref(JSON_NONNEG_NUMBER_RULE.into()),
+            (_, false) => self.json_number_ref(),
         }
     }
 
