@@ -22,6 +22,11 @@ pub enum GrammarExpr {
     Optional(Box<GrammarExpr>),
     Repeat(Box<GrammarExpr>),
     RepeatOne(Box<GrammarExpr>),
+    RepeatRange {
+        expr: Box<GrammarExpr>,
+        min: usize,
+        max: usize,
+    },
     Literal(Vec<u8>),
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
@@ -62,6 +67,60 @@ struct Lowerer {
     nt_map: BTreeMap<String, NonterminalID>,
     anon_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepeatTreeShape {
+    Balanced,
+    Left,
+    Right,
+}
+
+fn repeat_tree_shape() -> RepeatTreeShape {
+    repeat_tree_shape_from_value(&std::env::var("GLRMASK_TREE_SHAPE").unwrap_or_default())
+}
+
+fn repeat_tree_shape_from_value(value: &str) -> RepeatTreeShape {
+    match value {
+        "left" => RepeatTreeShape::Left,
+        "right" => RepeatTreeShape::Right,
+        _ => RepeatTreeShape::Balanced,
+    }
+}
+
+fn highest_power_of_two_less_than(value: usize) -> usize {
+    debug_assert!(value > 1);
+    1usize << ((usize::BITS - 1) - (value - 1).leading_zeros())
+}
+
+fn exact_repeat_split(count: usize, shape: RepeatTreeShape) -> (usize, usize) {
+    debug_assert!(count > 1);
+    match shape {
+        RepeatTreeShape::Balanced => {
+            let left = count / 2;
+            (left, count - left)
+        }
+        RepeatTreeShape::Left => {
+            let left = highest_power_of_two_less_than(count);
+            (left, count - left)
+        }
+        RepeatTreeShape::Right => {
+            let right = highest_power_of_two_less_than(count);
+            (count - right, right)
+        }
+    }
+}
+
+fn range_repeat_split(min: usize, max: usize, shape: RepeatTreeShape) -> (usize, usize) {
+    debug_assert!(min < max);
+    let width = max - min + 1;
+    let left_width = match shape {
+        RepeatTreeShape::Balanced => width / 2,
+        RepeatTreeShape::Left => highest_power_of_two_less_than(width),
+        RepeatTreeShape::Right => width - highest_power_of_two_less_than(width),
+    };
+    let split = min + left_width - 1;
+    (split, width - left_width)
 }
 
 impl Lowerer {
@@ -120,6 +179,94 @@ impl Lowerer {
         id
     }
 
+    fn repeat_exact_nt(
+        &mut self,
+        item: &Symbol,
+        count: usize,
+        shape: RepeatTreeShape,
+        cache: &mut BTreeMap<usize, NonterminalID>,
+    ) -> NonterminalID {
+        if let Some(&nt) = cache.get(&count) {
+            return nt;
+        }
+
+        let (_, nt) = self.fresh_nt("repeat_exact");
+        cache.insert(count, nt);
+        match count {
+            0 => self.rules.push(Rule { lhs: nt, rhs: Vec::new() }),
+            1 => self.rules.push(Rule {
+                lhs: nt,
+                rhs: vec![item.clone()],
+            }),
+            _ => {
+                let (left, right) = exact_repeat_split(count, shape);
+                let left_nt = self.repeat_exact_nt(item, left, shape, cache);
+                let right_nt = self.repeat_exact_nt(item, right, shape, cache);
+                self.rules.push(Rule {
+                    lhs: nt,
+                    rhs: vec![Symbol::Nonterminal(left_nt), Symbol::Nonterminal(right_nt)],
+                });
+            }
+        }
+        nt
+    }
+
+    fn repeat_range_nt(
+        &mut self,
+        item: &Symbol,
+        min: usize,
+        max: usize,
+        shape: RepeatTreeShape,
+        exact_cache: &mut BTreeMap<usize, NonterminalID>,
+        range_cache: &mut BTreeMap<(usize, usize), NonterminalID>,
+    ) -> NonterminalID {
+        debug_assert!(min <= max);
+        if min == max {
+            return self.repeat_exact_nt(item, min, shape, exact_cache);
+        }
+        if let Some(&nt) = range_cache.get(&(min, max)) {
+            return nt;
+        }
+
+        let (_, nt) = self.fresh_nt("repeat_range");
+        range_cache.insert((min, max), nt);
+        let (split, _) = range_repeat_split(min, max, shape);
+        let left_nt =
+            self.repeat_range_nt(item, min, split, shape, exact_cache, range_cache);
+        let right_nt =
+            self.repeat_range_nt(item, split + 1, max, shape, exact_cache, range_cache);
+        self.rules.push(Rule {
+            lhs: nt,
+            rhs: vec![Symbol::Nonterminal(left_nt)],
+        });
+        self.rules.push(Rule {
+            lhs: nt,
+            rhs: vec![Symbol::Nonterminal(right_nt)],
+        });
+        nt
+    }
+
+    fn emit_repeat_range(
+        &mut self,
+        lhs: NonterminalID,
+        inner: &GrammarExpr,
+        min: usize,
+        max: usize,
+    ) -> Result<(), GlrMaskError> {
+        debug_assert!(min <= max);
+        let item = self.lower_expr_terminalish(inner)?;
+        let shape = repeat_tree_shape();
+        let mut exact_cache = BTreeMap::new();
+        let mut range_cache = BTreeMap::new();
+        let range_nt =
+            self.repeat_range_nt(&item, min, max, shape, &mut exact_cache, &mut range_cache);
+        self.rules.push(Rule {
+            lhs,
+            rhs: vec![Symbol::Nonterminal(range_nt)],
+        });
+        Ok(())
+    }
+
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
         fn emit(lowerer: &mut Lowerer, lhs: NonterminalID, expr: &GrammarExpr) -> Result<(), GlrMaskError> {
             match expr {
@@ -148,6 +295,9 @@ impl Lowerer {
                     let item = lowerer.lower_expr(inner);
                     lowerer.rules.push(Rule { lhs, rhs: vec![item.clone()] });
                     lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), item] });
+                }
+                GrammarExpr::RepeatRange { expr, min, max } => {
+                    lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
                 }
                 _ => {
                     let symbol = lowerer.lower_expr_terminalish(expr)?;
@@ -191,7 +341,8 @@ impl Lowerer {
             | GrammarExpr::Choice(_)
             | GrammarExpr::Optional(_)
             | GrammarExpr::Repeat(_)
-            | GrammarExpr::RepeatOne(_) => self.lower_expr(expr),
+            | GrammarExpr::RepeatOne(_)
+            | GrammarExpr::RepeatRange { .. } => self.lower_expr(expr),
         })
     }
 
@@ -262,6 +413,11 @@ fn grammar_expr_to_expr(
             expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 1,
             max: None,
+        },
+        GrammarExpr::RepeatRange { expr, min, max } => Expr::Repeat {
+            expr: Box::new(grammar_expr_to_expr(expr, terminal_bodies, terminal_expr_cache, visiting)?),
+            min: *min,
+            max: Some(*max),
         },
         GrammarExpr::Ref(name) => {
             // Look up in cache first
@@ -367,7 +523,8 @@ fn promote_expr_literals(
         }
         GrammarExpr::Optional(inner)
         | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => {
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => {
             promote_expr_literals(inner, threshold, new_rules, cache, counter);
         }
         _ => {}
@@ -445,6 +602,9 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                 lowerer.rules.push(Rule { lhs, rhs: vec![symbol.clone()] });
                 lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), symbol] });
             }
+            GrammarExpr::RepeatRange { expr, min, max } => {
+                lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
+            }
             _ => {
                 let symbol = lowerer.lower_expr_terminalish(&rule.expr)?;
                 lowerer.rules.push(Rule { lhs, rhs: vec![symbol] });
@@ -506,9 +666,43 @@ fn regex_escape_byte(b: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn nt(name: &str, expr: GrammarExpr) -> NamedRule {
         NamedRule { name: name.into(), expr, is_terminal: false }
+    }
+
+    fn derivable_terminal_counts(
+        grammar: &GrammarDef,
+        target_tid: TerminalID,
+        nonterminal: NonterminalID,
+        memo: &mut BTreeMap<NonterminalID, BTreeSet<usize>>,
+    ) -> BTreeSet<usize> {
+        if let Some(cached) = memo.get(&nonterminal) {
+            return cached.clone();
+        }
+
+        let mut result = BTreeSet::new();
+        for rule in grammar.rules.iter().filter(|rule| rule.lhs == nonterminal) {
+            let mut totals = BTreeSet::from([0usize]);
+            for symbol in &rule.rhs {
+                let counts = match symbol {
+                    Symbol::Terminal(tid) => BTreeSet::from([usize::from(*tid == target_tid)]),
+                    Symbol::Nonterminal(next) => derivable_terminal_counts(grammar, target_tid, *next, memo),
+                };
+                let mut next_totals = BTreeSet::new();
+                for left in &totals {
+                    for right in &counts {
+                        next_totals.insert(left + right);
+                    }
+                }
+                totals = next_totals;
+            }
+            result.extend(totals);
+        }
+
+        memo.insert(nonterminal, result.clone());
+        result
     }
 
     #[test]
@@ -621,6 +815,53 @@ mod tests {
         let gdef = lower(&g).unwrap();
         
         assert!(gdef.rules.len() >= 2);
+    }
+
+    #[test]
+    fn test_lower_repeat_range_derives_disjoint_counts() {
+        let g = NamedGrammar {
+            rules: vec![nt(
+                "start",
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(GrammarExpr::Literal(b"a".to_vec())),
+                    min: 3,
+                    max: 5,
+                },
+            )],
+            start: "start".into(),
+            ignore: None,
+        };
+        let gdef = lower(&g).unwrap();
+        let a_tid = gdef
+            .terminals
+            .iter()
+            .find_map(|terminal| match terminal {
+                Terminal::Literal { id, bytes } if bytes == b"a" => Some(*id),
+                _ => None,
+            })
+            .expect("lowered grammar should contain the literal terminal");
+
+        let mut memo = BTreeMap::new();
+        let counts = derivable_terminal_counts(&gdef, a_tid, gdef.start, &mut memo);
+        assert_eq!(counts, BTreeSet::from([3usize, 4, 5]));
+        assert!(
+            gdef.rules.iter().all(|rule| rule.rhs.len() <= 2),
+            "repeat-range lowering should stay binary and avoid long optional ladders"
+        );
+    }
+
+    #[test]
+    fn test_exact_repeat_split_respects_left_tree_shape() {
+        assert_eq!(repeat_tree_shape_from_value("left"), RepeatTreeShape::Left);
+        assert_eq!(exact_repeat_split(13, RepeatTreeShape::Left), (8, 5));
+        assert_eq!(range_repeat_split(3, 13, RepeatTreeShape::Left), (10, 3));
+    }
+
+    #[test]
+    fn test_exact_repeat_split_respects_right_tree_shape() {
+        assert_eq!(repeat_tree_shape_from_value("right"), RepeatTreeShape::Right);
+        assert_eq!(exact_repeat_split(13, RepeatTreeShape::Right), (5, 8));
+        assert_eq!(range_repeat_split(3, 13, RepeatTreeShape::Right), (5, 8));
     }
 
     #[test]

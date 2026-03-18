@@ -72,7 +72,20 @@ fn contains_literal(expr: &GrammarExpr, target: &[u8]) -> bool {
         GrammarExpr::Choice(options) => options.iter().any(|option| contains_literal(option, target)),
         GrammarExpr::Optional(inner)
         | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_literal(inner, target),
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => contains_literal(inner, target),
+        _ => false,
+    }
+}
+
+fn contains_repeat_range(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::RepeatRange { .. } => true,
+        GrammarExpr::Sequence(parts) => parts.iter().any(contains_repeat_range),
+        GrammarExpr::Choice(options) => options.iter().any(contains_repeat_range),
+        GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_repeat_range(inner),
         _ => false,
     }
 }
@@ -98,6 +111,23 @@ fn test_ebnf_ws_nullable() {
     assert!(
         token_allowed(&mask, b'}' as usize),
         "'}}' should be valid immediately after '{{' when WS is nullable"
+    );
+}
+
+#[test]
+fn test_bounded_array_uses_repeat_range_ast() {
+    let schema = r#"{
+        "type": "array",
+        "items": { "type": "integer" },
+        "minItems": 1,
+        "maxItems": 3
+    }"#;
+
+    let value: serde_json::Value = serde_json::from_str(schema).expect("schema JSON should parse");
+    let named = schema_to_named_grammar(&value).expect("schema should convert to named grammar");
+    assert!(
+        named.rules.iter().any(|rule| contains_repeat_range(&rule.expr)),
+        "bounded arrays should preserve a RepeatRange node instead of desugaring to an optional ladder"
     );
 }
 
@@ -586,7 +616,10 @@ fn test_conversion_enum() {
             GrammarExpr::Literal(bytes) => bytes == target,
             GrammarExpr::Sequence(parts) => parts.iter().any(|p| contains_literal(p, target)),
             GrammarExpr::Choice(options) => options.iter().any(|o| contains_literal(o, target)),
-            GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) | GrammarExpr::RepeatOne(inner) => {
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => {
                 contains_literal(inner, target)
             }
             _ => false,

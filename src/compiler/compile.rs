@@ -143,7 +143,7 @@ fn build_internal_token_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u
         .collect()
 }
 
-use crate::compiler::grammar::transforms::{expand_nullable_terminals, compact_unused_terminals, inline_single_use_nonterminals, compact_bounded_repeat_ladders, prepare_grammar_for_compile};
+use crate::compiler::grammar::transforms::{expand_nullable_terminals, compact_unused_terminals, inline_single_use_nonterminals, prepare_grammar_for_compile};
 
 
 fn compile_profile_enabled() -> bool {
@@ -2357,54 +2357,6 @@ mod tests {
 
         memo.insert(nonterminal, result.clone());
         result
-    }
-
-    #[test]
-    fn test_compact_bounded_repeat_ladders_rewrites_linear_family() {
-        let chunk_nt = 20;
-        let family = [30, 31, 32, 33, 34, 35, 36, 37];
-        let mut rules = vec![
-            Rule {
-                lhs: 0,
-                rhs: vec![Symbol::Nonterminal(1)],
-            },
-            Rule {
-                lhs: 1,
-                rhs: vec![Symbol::Nonterminal(family[0])],
-            },
-            Rule {
-                lhs: chunk_nt,
-                rhs: vec![Symbol::Terminal(0)],
-            },
-        ];
-        for (index, lhs) in family.iter().copied().enumerate() {
-            rules.push(Rule {
-                lhs,
-                rhs: vec![Symbol::Nonterminal(chunk_nt)],
-            });
-            let long_rhs = if index + 1 == family.len() {
-                vec![Symbol::Nonterminal(chunk_nt), Symbol::Nonterminal(chunk_nt)]
-            } else {
-                vec![Symbol::Nonterminal(chunk_nt), Symbol::Nonterminal(family[index + 1])]
-            };
-            rules.push(Rule { lhs, rhs: long_rhs });
-        }
-
-        let original_family_rule_count = rules.iter().filter(|rule| family.contains(&rule.lhs)).count();
-        let names = std::collections::BTreeMap::from([
-            (0, "start".to_string()),
-            (1, "root".to_string()),
-        ]);
-
-        compact_bounded_repeat_ladders(&mut rules, 0, &names);
-
-        let rewritten_family_rule_count = rules.iter().filter(|rule| family.contains(&rule.lhs)).count();
-        assert!(rewritten_family_rule_count < original_family_rule_count);
-        assert_eq!(rules.iter().filter(|rule| rule.lhs == family[0]).count(), 3);
-
-        let mut memo = std::collections::BTreeMap::new();
-        let counts = derivable_chunk_counts(&rules, family[0], chunk_nt, &mut memo);
-        assert_eq!(counts, (1..=family.len() + 1).collect::<std::collections::BTreeSet<_>>());
     }
 
 }

@@ -3082,21 +3082,8 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
         (1, None) => GrammarExpr::RepeatOne(Box::new(item)),
         _ => {
             let mut parts = Vec::new();
-            match max {
-                Some(max) => {
-                    for _ in 0..min {
-                        parts.push(item.clone());
-                    }
-                    for _ in min..max {
-                        parts.push(GrammarExpr::Optional(Box::new(item.clone())));
-                    }
-                }
-                None => {
-                    for _ in 0..min {
-                        parts.push(item.clone());
-                    }
-                    parts.push(GrammarExpr::Repeat(Box::new(item)));
-                }
+            for _ in 0..min {
+                parts.push(item.clone());
             }
             sequence_or_single(parts)
         }
@@ -3129,8 +3116,16 @@ mod tests {
             }
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => expr_has_split_separator(inner, left_bytes, right_bytes),
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => {
+                expr_has_split_separator(inner, left_bytes, right_bytes)
+            }
             _ => false,
+        (_, Some(max)) => GrammarExpr::RepeatRange {
+            expr: Box::new(item),
+            min,
+            max,
+        },
         }
     }
 
@@ -3141,7 +3136,8 @@ mod tests {
             GrammarExpr::Choice(options) => options.iter().any(|part| expr_has_literal(part, expected)),
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => expr_has_literal(inner, expected),
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => expr_has_literal(inner, expected),
             _ => false,
         }
     }
@@ -3149,6 +3145,7 @@ mod tests {
     fn expr_has_ref_then_literal(expr: &GrammarExpr, literal: &[u8]) -> bool {
         match expr {
             GrammarExpr::Sequence(parts) => {
+            parts.push(GrammarExpr::Repeat(Box::new(item)));
                 if parts.windows(2).any(|window| {
                     matches!(window[0], GrammarExpr::Ref(_))
                         && matches!(&window[1], GrammarExpr::Literal(bytes) if bytes == literal)
@@ -3160,7 +3157,10 @@ mod tests {
             GrammarExpr::Choice(options) => options.iter().any(|part| expr_has_ref_then_literal(part, literal)),
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => expr_has_ref_then_literal(inner, literal),
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => {
+                expr_has_ref_then_literal(inner, literal)
+            }
             _ => false,
         }
     }

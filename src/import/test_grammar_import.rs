@@ -14,9 +14,8 @@
 //!     - test_ebnf_parser_allows_wildcard_and_explicit_greedy_groups: needs wildcard groups
 //!     - test_grammar_definition_from_ebnf_wildcard_and_explicit_greedy_groups: needs GrammarDefinition
 //!
-//!   Lark (2):
+//!   Lark (1):
 //!     - test_lark_ignore_directive: NamedGrammar has no ignore_symbol_name field
-//!     - test_lark_repeat_bounded: GrammarExpr has no RepeatBounded variant (desugared)
 
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
 use crate::import::ebnf::parse_ebnf_to_named;
@@ -80,9 +79,9 @@ c ::= 'c'??";
 
 // ── Lark tests ───────────────────────────────────────────────────────────────
 
-/// Ported from `test_lark_repeat_bounded` (adapted to glrmask's desugared AST).
+/// Ported from `test_lark_repeat_bounded`.
 #[test]
-fn test_lark_repeat_bounded_desugars_to_optional_tail() {
+fn test_lark_repeat_bounded_preserves_range_node() {
     let lark = r#"
 start: STR_CHAR~3..5
 STR_CHAR: "a"
@@ -95,15 +94,11 @@ STR_CHAR: "a"
     assert_eq!(named.rules[1].name, "start");
     assert_eq!(
         named.rules[1].expr,
-        GrammarExpr::Sequence(vec![
-            GrammarExpr::Ref("STR_CHAR".into()),
-            GrammarExpr::Ref("STR_CHAR".into()),
-            GrammarExpr::Ref("STR_CHAR".into()),
-            GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
-                GrammarExpr::Ref("STR_CHAR".into()),
-                GrammarExpr::Optional(Box::new(GrammarExpr::Ref("STR_CHAR".into()))),
-            ]))),
-        ])
+        GrammarExpr::RepeatRange {
+            expr: Box::new(GrammarExpr::Ref("STR_CHAR".into())),
+            min: 3,
+            max: 5,
+        }
     );
 }
 

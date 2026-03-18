@@ -20,7 +20,8 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         }
         GrammarExpr::Optional(inner)
         | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_regex_features(inner),
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => contains_regex_features(inner),
     }
 }
 
@@ -125,6 +126,11 @@ impl ChoiceFactorer {
             GrammarExpr::RepeatOne(expr) => {
                 GrammarExpr::RepeatOne(Box::new(self.factor_expr(*expr, context_name)))
             }
+            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
+                expr: Box::new(self.factor_expr(*expr, context_name)),
+                min,
+                max,
+            },
             other => other,
         }
     }
@@ -219,7 +225,8 @@ impl ChoiceFactorer {
             }
             GrammarExpr::Optional(expr)
             | GrammarExpr::Repeat(expr)
-            | GrammarExpr::RepeatOne(expr) => self.collect_refs_impl(expr, refs),
+            | GrammarExpr::RepeatOne(expr)
+            | GrammarExpr::RepeatRange { expr, .. } => self.collect_refs_impl(expr, refs),
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
@@ -273,7 +280,10 @@ impl ChoiceFactorer {
         match expr {
             GrammarExpr::Sequence(parts) => parts.len() > 2,
             GrammarExpr::Choice(_) => true,
-            GrammarExpr::Optional(_) | GrammarExpr::Repeat(_) | GrammarExpr::RepeatOne(_) => true,
+            GrammarExpr::Optional(_)
+            | GrammarExpr::Repeat(_)
+            | GrammarExpr::RepeatOne(_)
+            | GrammarExpr::RepeatRange { .. } => true,
             _ => false,
         }
     }
@@ -341,7 +351,8 @@ impl ChoiceFactorer {
             }
             GrammarExpr::Optional(expr)
             | GrammarExpr::Repeat(expr)
-            | GrammarExpr::RepeatOne(expr) => Self::collect_refs_static(expr, refs),
+            | GrammarExpr::RepeatOne(expr)
+            | GrammarExpr::RepeatRange { expr, .. } => Self::collect_refs_static(expr, refs),
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)

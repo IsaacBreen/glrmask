@@ -291,32 +291,13 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn desugar_tilde(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
+fn bounded_repeat_expr(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
     let max = max.unwrap_or(min);
     assert!(max >= min, "tilde max must be >= min");
-
-    let mut parts: Vec<GrammarExpr> = Vec::with_capacity(max);
-    
-    for _ in 0..min {
-        parts.push(atom.clone());
-    }
-    
-    let extra = max - min;
-    if extra > 0 {
-        let mut tail = GrammarExpr::Optional(Box::new(atom.clone()));
-        for _ in 1..extra {
-            tail = GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
-                atom.clone(),
-                tail,
-            ])));
-        }
-        parts.push(tail);
-    }
-
-    match parts.len() {
-        0 => GrammarExpr::Sequence(vec![]),
-        1 => parts.into_iter().next().unwrap(),
-        _ => GrammarExpr::Sequence(parts),
+    GrammarExpr::RepeatRange {
+        expr: Box::new(atom),
+        min,
+        max,
     }
 }
 
@@ -498,6 +479,19 @@ fn expand_lark_expr(
             memo,
             visiting,
         )?)),
+        GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
+            expr: Box::new(expand_lark_expr(
+                expr,
+                in_terminal_rule,
+                rule_map,
+                terminal_names,
+                parser_names,
+                memo,
+                visiting,
+            )?),
+            min: *min,
+            max: *max,
+        },
         GrammarExpr::Literal(bytes) => GrammarExpr::Literal(bytes.clone()),
         GrammarExpr::CharClass { def, negate, utf8 } => GrammarExpr::CharClass {
             def: def.clone(),
@@ -549,7 +543,8 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
             }
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => {
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => {
                 validate_terminal_refs(inner, rule_name, terminal_names, rule_map)
             }
             _ => Ok(()),
@@ -883,7 +878,7 @@ impl Parser {
                 } else {
                     None
                 };
-                Ok(desugar_tilde(atom, min, max))
+                Ok(bounded_repeat_expr(atom, min, max))
             }
             _ => Ok(atom),
         }
