@@ -15,6 +15,7 @@ mod vocab;
 
 pub use error::{GlrMaskError, Result};
 pub use runtime::{
+    CommitDebugMetrics,
     Constraint,
     ConstraintState,
     ConstraintStateSnapshot,

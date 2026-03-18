@@ -49,6 +49,41 @@ fn test_ebnf_simple_literal() {
 }
 
 #[test]
+fn test_debug_commit_metrics_reports_parser_work_without_mutating_state() {
+    let vocab = make_vocab(&["a", "b"]);
+    let c = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
+    let mut s = c.start();
+
+    let mask_before = s.mask();
+    let metrics = s.debug_commit_token_metrics(0).unwrap();
+    let mask_after_debug = s.mask();
+
+    assert_eq!(mask_before, mask_after_debug, "debug commit metrics must not mutate state");
+    assert_eq!(metrics.bytes_len, 1);
+    assert_eq!(metrics.state_summary_before.tokenizer_state_count, 1);
+    assert_eq!(metrics.initial_tokenizer_states, 1);
+    assert_eq!(metrics.initial_exec_calls, 1);
+    assert_eq!(metrics.processing_exec_calls, 1);
+    assert_eq!(metrics.reused_initial_exec_results, 1);
+    assert_eq!(metrics.processing_matches_total, 1);
+    assert_eq!(metrics.processing_ignored_matches, 0);
+    assert_eq!(metrics.advance_stacks_calls, 1);
+    assert_eq!(metrics.advance_stacks_nonempty, 1);
+    assert_eq!(metrics.queue_offsets_processed, 1);
+    assert_eq!(metrics.queue_states_processed, 1);
+    assert_eq!(metrics.parser_final_pushes, 1);
+    assert!(metrics.fused_parser_states >= 1);
+    assert_eq!(
+        metrics.state_summary_after.tokenizer_state_count,
+        metrics.fused_parser_states,
+    );
+
+    s.commit_token(0).unwrap();
+    let mask_after_commit = s.mask();
+    assert!(token_allowed(&mask_after_commit, 1), "'b' should be allowed after committing 'a'");
+}
+
+#[test]
 fn test_ebnf_choice() {
     let vocab = make_vocab(&["x", "y", "z"]);
     let c = Constraint::from_ebnf(r#"start ::= "x" | "y""#, &vocab).unwrap();

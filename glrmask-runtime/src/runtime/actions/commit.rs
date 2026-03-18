@@ -1,28 +1,136 @@
 use std::collections::{BTreeMap, BTreeSet};
-use crate::runtime::state::ConstraintState;
+
 use crate::compiler::glr::parser::{advance_stacks, ParserGSS, TerminalsDisallowed};
+use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
+use crate::runtime::state::{ConstraintState, ConstraintStateSummary};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitDebugMetrics {
+    pub bytes_len: usize,
+    pub state_summary_before: ConstraintStateSummary,
+    pub state_summary_after: ConstraintStateSummary,
+    pub initial_tokenizer_states: usize,
+    pub initial_exec_calls: usize,
+    pub initial_exec_end_state_hits: usize,
+    pub initial_matches_total: usize,
+    pub initial_ignored_matches: usize,
+    pub initial_terminals_total: usize,
+    pub initial_terminals_map_entries: usize,
+    pub remapped_state_entries: usize,
+    pub parser_states_pruned: usize,
+    pub parser_states_retained_after_prune: usize,
+    pub queue_offsets_processed: usize,
+    pub queue_states_processed: usize,
+    pub queue_max_offsets_pending: usize,
+    pub queue_max_states_in_offset_bucket: usize,
+    pub processing_exec_calls: usize,
+    pub reused_initial_exec_results: usize,
+    pub processing_matches_total: usize,
+    pub processing_ignored_matches: usize,
+    pub advance_stacks_calls: usize,
+    pub advance_stacks_nonempty: usize,
+    pub future_group_checks: usize,
+    pub future_group_hits: usize,
+    pub future_group_updates: usize,
+    pub ignored_terminal_queue_pushes: usize,
+    pub ignored_terminal_queue_merges: usize,
+    pub ignored_terminal_final_pushes: usize,
+    pub ignored_terminal_final_merges: usize,
+    pub parser_queue_pushes: usize,
+    pub parser_queue_merges: usize,
+    pub parser_final_pushes: usize,
+    pub parser_final_merges: usize,
+    pub passthrough_end_state_pushes: usize,
+    pub passthrough_end_state_merges: usize,
+    pub fused_parser_states: usize,
+    pub initial_tokenizer_exec_ns: u64,
+    pub initial_apply_prune_ns: u64,
+    pub initial_remap_ns: u64,
+    pub processing_tokenizer_exec_ns: u64,
+    pub advance_stacks_ns: u64,
+    pub future_group_apply_ns: u64,
+    pub merge_ns: u64,
+    pub fuse_ns: u64,
+    pub total_ns: u64,
+}
+
+fn summarize_state_map(state: &BTreeMap<u32, ParserGSS>) -> ConstraintStateSummary {
+    let mut summary = ConstraintStateSummary {
+        tokenizer_state_count: state.len(),
+        ..ConstraintStateSummary::default()
+    };
+
+    for gss in state.values() {
+        if gss.is_empty() {
+            continue;
+        }
+
+        summary.nonempty_tokenizer_state_count += 1;
+        let gss_summary: LeveledGSSSummary = gss.summary();
+        summary.parser_top_values_total += gss_summary.top_values_count;
+        summary.parser_top_values_max = summary
+            .parser_top_values_max
+            .max(gss_summary.top_values_count);
+        summary.parser_unique_nodes_total += gss_summary.total_unique_nodes;
+        summary.parser_unique_nodes_max = summary
+            .parser_unique_nodes_max
+            .max(gss_summary.total_unique_nodes);
+        summary.parser_total_edges_total += gss_summary.total_edges;
+        summary.parser_accumulator_instances_total += gss_summary.accumulator_instances;
+        summary.parser_max_depth = summary.parser_max_depth.max(gss_summary.max_depth);
+    }
+
+    summary
+}
 
 fn commit_bytes_impl(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
+    mut metrics: Option<&mut CommitDebugMetrics>,
 ) {
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.bytes_len = bytes.len();
+    }
+
     if bytes.is_empty() {
         return;
     }
 
+    let t_total = metrics
+        .as_ref()
+        .map(|_| std::time::Instant::now());
     let ignore_terminal = constraint.ignore_terminal;
     let mut initial_exec_results = BTreeMap::new();
     let mut state_map = BTreeMap::new();
     let mut terminals_map = BTreeMap::<u32, Vec<u32>>::new();
+
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.initial_tokenizer_states = state.len();
+    }
+
     for &tokenizer_state in state.keys() {
+        let t_exec = metrics
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         let exec = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
+        if let (Some(metrics), Some(t_exec)) = (metrics.as_deref_mut(), t_exec) {
+            metrics.initial_exec_calls += 1;
+            metrics.initial_tokenizer_exec_ns += t_exec.elapsed().as_nanos() as u64;
+            metrics.initial_matches_total += exec.matches.len();
+            if exec.end_state.is_some() {
+                metrics.initial_exec_end_state_hits += 1;
+            }
+        }
         if let Some(end_state) = exec.end_state {
             state_map.insert(tokenizer_state, end_state);
         }
         for matched in &exec.matches {
             if Some(matched.id) == ignore_terminal {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.initial_ignored_matches += 1;
+                }
                 continue;
             }
             // TODO: expand via mutually_greedy_group() once greedy groups
@@ -31,11 +139,22 @@ fn commit_bytes_impl(
                 .entry(tokenizer_state)
                 .or_default()
                 .push(matched.id);
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.initial_terminals_total += 1;
+            }
         }
         initial_exec_results.insert(tokenizer_state, exec);
     }
 
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.initial_terminals_map_entries = terminals_map.len();
+        metrics.remapped_state_entries = state_map.len();
+    }
+
     for parser_state in state.values_mut() {
+        let t_prune = metrics
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         let mut gss = parser_state.apply_and_prune(|terminals_disallowed: &TerminalsDisallowed| {
             for (state_id, matched_terminals) in &terminals_map {
                 if let Some(disallowed) = terminals_disallowed.get(state_id) {
@@ -50,6 +169,13 @@ fn commit_bytes_impl(
             }
             Some(terminals_disallowed.clone())
         });
+        if let (Some(metrics), Some(t_prune)) = (metrics.as_deref_mut(), t_prune) {
+            metrics.initial_apply_prune_ns += t_prune.elapsed().as_nanos() as u64;
+        }
+
+        let t_remap = metrics
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         gss = gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
             let mut remapped = BTreeMap::new();
             for (old_state, new_state) in &state_map {
@@ -62,29 +188,70 @@ fn commit_bytes_impl(
             }
             remapped
         });
+        if let (Some(metrics), Some(t_remap)) = (metrics.as_deref_mut(), t_remap) {
+            metrics.initial_remap_ns += t_remap.elapsed().as_nanos() as u64;
+            if gss.is_empty() {
+                metrics.parser_states_pruned += 1;
+            }
+        }
         *parser_state = gss;
     }
 
     state.retain(|_, parser_state| !parser_state.is_empty());
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.parser_states_retained_after_prune = state.len();
+    }
 
     let mut new_overall_state: BTreeMap<u32, ParserGSS> = BTreeMap::new();
     let mut processing_queue: BTreeMap<usize, BTreeMap<u32, ParserGSS>> = BTreeMap::new();
 
     // Take ownership instead of cloning — state will be fully replaced below.
     processing_queue.insert(0, std::mem::take(state));
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.queue_max_offsets_pending = processing_queue.len();
+    }
 
     while let Some((offset, states_to_process)) = processing_queue.pop_first() {
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.queue_offsets_processed += 1;
+            metrics.queue_states_processed += states_to_process.len();
+            metrics.queue_max_states_in_offset_bucket = metrics
+                .queue_max_states_in_offset_bucket
+                .max(states_to_process.len());
+            metrics.queue_max_offsets_pending = metrics
+                .queue_max_offsets_pending
+                .max(processing_queue.len() + 1);
+        }
+
         for (tokenizer_state, gss_at_offset) in states_to_process {
-            let exec_result = if offset == 0 {
-                initial_exec_results.remove(&tokenizer_state).unwrap_or_else(|| {
+            let t_exec = metrics
+                .as_ref()
+                .map(|_| std::time::Instant::now());
+            let (exec_result, reused_initial_exec_result) = if offset == 0 {
+                match initial_exec_results.remove(&tokenizer_state) {
+                    Some(exec) => (exec, true),
+                    None => (
+                        constraint
+                            .tokenizer
+                            .execute_from_state(&bytes[offset..], tokenizer_state),
+                        false,
+                    ),
+                }
+            } else {
+                (
                     constraint
                         .tokenizer
-                        .execute_from_state(&bytes[offset..], tokenizer_state)
-                })
-            } else {
-                constraint
-                    .tokenizer
-                    .execute_from_state(&bytes[offset..], tokenizer_state)
+                        .execute_from_state(&bytes[offset..], tokenizer_state),
+                    false,
+                )
+            };
+            if let (Some(metrics), Some(t_exec)) = (metrics.as_deref_mut(), t_exec) {
+                metrics.processing_exec_calls += 1;
+                metrics.processing_tokenizer_exec_ns += t_exec.elapsed().as_nanos() as u64;
+                if reused_initial_exec_result {
+                    metrics.reused_initial_exec_results += 1;
+                }
+                metrics.processing_matches_total += exec_result.matches.len();
             };
 
             for matched in &exec_result.matches {
@@ -93,38 +260,93 @@ fn commit_bytes_impl(
                 if Some(matched.id) == ignore_terminal {
                     let next_tsid = constraint.tokenizer.initial_state();
                     if new_offset == bytes.len() {
+                        let t_merge = metrics
+                            .as_ref()
+                            .map(|_| std::time::Instant::now());
+                        let existed = new_overall_state.contains_key(&next_tsid);
                         new_overall_state
                             .entry(next_tsid)
                             .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
                             .or_insert_with(|| gss_at_offset.clone());
+                        if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
+                            metrics.processing_ignored_matches += 1;
+                            metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
+                            if existed {
+                                metrics.ignored_terminal_final_merges += 1;
+                            } else {
+                                metrics.ignored_terminal_final_pushes += 1;
+                            }
+                        }
                     } else {
+                        let t_merge = metrics
+                            .as_ref()
+                            .map(|_| std::time::Instant::now());
+                        let existed = processing_queue
+                            .get(&new_offset)
+                            .and_then(|states| states.get(&next_tsid))
+                            .is_some();
                         processing_queue
                             .entry(new_offset)
                             .or_default()
                             .entry(next_tsid)
                             .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
                             .or_insert_with(|| gss_at_offset.clone());
+                        if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
+                            metrics.processing_ignored_matches += 1;
+                            metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
+                            metrics.queue_max_offsets_pending = metrics
+                                .queue_max_offsets_pending
+                                .max(processing_queue.len());
+                            if existed {
+                                metrics.ignored_terminal_queue_merges += 1;
+                            } else {
+                                metrics.ignored_terminal_queue_pushes += 1;
+                            }
+                        }
                     }
                     continue;
                 }
 
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.advance_stacks_calls += 1;
+                }
+                let t_advance = metrics
+                    .as_ref()
+                    .map(|_| std::time::Instant::now());
                 let mut gss = advance_stacks(&constraint.table, &gss_at_offset, matched.id);
+                if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance) {
+                    metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
+                    if !gss.is_empty() {
+                        metrics.advance_stacks_nonempty += 1;
+                    }
+                }
                 if gss.is_empty() {
                     continue;
                 }
 
                 if let Some(end_state) = exec_result.end_state {
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.future_group_checks += 1;
+                    }
                     if constraint
                         .tokenizer
                         .dfa
                         .possible_future_group_ids(end_state)
                         .contains(matched.id as usize)
                     {
+                        let t_future = metrics
+                            .as_ref()
+                            .map(|_| std::time::Instant::now());
                         gss = gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
                             let mut updated = terminals_disallowed.clone();
                             updated.entry(end_state).or_default().insert(matched.id);
                             updated
                         });
+                        if let (Some(metrics), Some(t_future)) = (metrics.as_deref_mut(), t_future) {
+                            metrics.future_group_hits += 1;
+                            metrics.future_group_updates += 1;
+                            metrics.future_group_apply_ns += t_future.elapsed().as_nanos() as u64;
+                        }
                     }
                 }
 
@@ -134,34 +356,91 @@ fn commit_bytes_impl(
 
                 let next_tsid = constraint.tokenizer.initial_state();
                 if new_offset == bytes.len() {
+                    let t_merge = metrics
+                        .as_ref()
+                        .map(|_| std::time::Instant::now());
+                    let existed = new_overall_state.contains_key(&next_tsid);
                     new_overall_state
                         .entry(next_tsid)
                         .and_modify(|existing| *existing = existing.merge(&gss))
                         .or_insert(gss);
+                    if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
+                        metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
+                        if existed {
+                            metrics.parser_final_merges += 1;
+                        } else {
+                            metrics.parser_final_pushes += 1;
+                        }
+                    }
                 } else {
+                    let t_merge = metrics
+                        .as_ref()
+                        .map(|_| std::time::Instant::now());
+                    let existed = processing_queue
+                        .get(&new_offset)
+                        .and_then(|states| states.get(&next_tsid))
+                        .is_some();
                     processing_queue
                         .entry(new_offset)
                         .or_default()
                         .entry(next_tsid)
                         .and_modify(|existing| *existing = existing.merge(&gss))
                         .or_insert(gss);
+                    if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
+                        metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
+                        metrics.queue_max_offsets_pending = metrics
+                            .queue_max_offsets_pending
+                            .max(processing_queue.len());
+                        if existed {
+                            metrics.parser_queue_merges += 1;
+                        } else {
+                            metrics.parser_queue_pushes += 1;
+                        }
+                    }
                 }
             }
 
             if let Some(end_state) = exec_result.end_state {
+                let t_merge = metrics
+                    .as_ref()
+                    .map(|_| std::time::Instant::now());
+                let existed = new_overall_state.contains_key(&end_state);
                 new_overall_state
                     .entry(end_state)
                     .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
                     .or_insert(gss_at_offset);
+                if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
+                    metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
+                    if existed {
+                        metrics.passthrough_end_state_merges += 1;
+                    } else {
+                        metrics.passthrough_end_state_pushes += 1;
+                    }
+                }
             }
         }
     }
 
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.fused_parser_states = new_overall_state.len();
+    }
     for parser_state in new_overall_state.values_mut() {
+        let t_fuse = metrics
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         *parser_state = parser_state.fuse(Some(1));
+        if let (Some(metrics), Some(t_fuse)) = (metrics.as_deref_mut(), t_fuse) {
+            metrics.fuse_ns += t_fuse.elapsed().as_nanos() as u64;
+        }
     }
     new_overall_state.retain(|_, parser_state| !parser_state.is_empty());
     *state = new_overall_state;
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.state_summary_after = summarize_state_map(state);
+        if let Some(t_total) = t_total {
+            metrics.total_ns = t_total.elapsed().as_nanos() as u64;
+        }
+    }
 }
 
 impl<'a> ConstraintState<'a> {
@@ -184,12 +463,39 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_impl(self.constraint, &mut self.state, bytes);
+        commit_bytes_impl(self.constraint, &mut self.state, bytes, None);
         Ok(())
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) {
-        commit_bytes_impl(self.constraint, &mut self.state, bytes);
+        commit_bytes_impl(self.constraint, &mut self.state, bytes, None);
+    }
+
+    pub fn debug_commit_bytes_metrics(&self, bytes: &[u8]) -> CommitDebugMetrics {
+        let mut cloned_state = self.state.clone();
+        let mut metrics = CommitDebugMetrics {
+            bytes_len: bytes.len(),
+            state_summary_before: summarize_state_map(&cloned_state),
+            state_summary_after: summarize_state_map(&cloned_state),
+            ..CommitDebugMetrics::default()
+        };
+        commit_bytes_impl(self.constraint, &mut cloned_state, bytes, Some(&mut metrics));
+        if bytes.is_empty() {
+            metrics.state_summary_after = metrics.state_summary_before;
+        }
+        metrics
+    }
+
+    pub fn debug_commit_token_metrics(
+        &self,
+        token_id: u32,
+    ) -> Result<CommitDebugMetrics, String> {
+        let bytes = self.constraint.token_bytes
+            .get(&token_id)
+            .ok_or_else(|| {
+                format!("debug_commit_token_metrics: token_id {token_id} not in vocabulary")
+            })?;
+        Ok(self.debug_commit_bytes_metrics(bytes))
     }
 
     pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {

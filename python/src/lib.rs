@@ -55,6 +55,113 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     Ok(glrmask::Vocab::new(entries, None))
 }
 
+fn state_summary_to_dict<'py>(
+    py: Python<'py>,
+    summary: glrmask::ConstraintStateSummary,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("tokenizer_state_count", summary.tokenizer_state_count)?;
+    out.set_item(
+        "nonempty_tokenizer_state_count",
+        summary.nonempty_tokenizer_state_count,
+    )?;
+    out.set_item("parser_top_values_total", summary.parser_top_values_total)?;
+    out.set_item("parser_top_values_max", summary.parser_top_values_max)?;
+    out.set_item("parser_unique_nodes_total", summary.parser_unique_nodes_total)?;
+    out.set_item("parser_unique_nodes_max", summary.parser_unique_nodes_max)?;
+    out.set_item("parser_total_edges_total", summary.parser_total_edges_total)?;
+    out.set_item(
+        "parser_accumulator_instances_total",
+        summary.parser_accumulator_instances_total,
+    )?;
+    out.set_item("parser_max_depth", summary.parser_max_depth)?;
+    Ok(out)
+}
+
+fn commit_metrics_to_dict<'py>(
+    py: Python<'py>,
+    metrics: glrmask::CommitDebugMetrics,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("bytes_len", metrics.bytes_len)?;
+    out.set_item(
+        "state_summary_before",
+        state_summary_to_dict(py, metrics.state_summary_before)?,
+    )?;
+    out.set_item(
+        "state_summary_after",
+        state_summary_to_dict(py, metrics.state_summary_after)?,
+    )?;
+    out.set_item("initial_tokenizer_states", metrics.initial_tokenizer_states)?;
+    out.set_item("initial_exec_calls", metrics.initial_exec_calls)?;
+    out.set_item("initial_exec_end_state_hits", metrics.initial_exec_end_state_hits)?;
+    out.set_item("initial_matches_total", metrics.initial_matches_total)?;
+    out.set_item("initial_ignored_matches", metrics.initial_ignored_matches)?;
+    out.set_item("initial_terminals_total", metrics.initial_terminals_total)?;
+    out.set_item("initial_terminals_map_entries", metrics.initial_terminals_map_entries)?;
+    out.set_item("remapped_state_entries", metrics.remapped_state_entries)?;
+    out.set_item("parser_states_pruned", metrics.parser_states_pruned)?;
+    out.set_item(
+        "parser_states_retained_after_prune",
+        metrics.parser_states_retained_after_prune,
+    )?;
+    out.set_item("queue_offsets_processed", metrics.queue_offsets_processed)?;
+    out.set_item("queue_states_processed", metrics.queue_states_processed)?;
+    out.set_item("queue_max_offsets_pending", metrics.queue_max_offsets_pending)?;
+    out.set_item(
+        "queue_max_states_in_offset_bucket",
+        metrics.queue_max_states_in_offset_bucket,
+    )?;
+    out.set_item("processing_exec_calls", metrics.processing_exec_calls)?;
+    out.set_item("reused_initial_exec_results", metrics.reused_initial_exec_results)?;
+    out.set_item("processing_matches_total", metrics.processing_matches_total)?;
+    out.set_item("processing_ignored_matches", metrics.processing_ignored_matches)?;
+    out.set_item("advance_stacks_calls", metrics.advance_stacks_calls)?;
+    out.set_item("advance_stacks_nonempty", metrics.advance_stacks_nonempty)?;
+    out.set_item("future_group_checks", metrics.future_group_checks)?;
+    out.set_item("future_group_hits", metrics.future_group_hits)?;
+    out.set_item("future_group_updates", metrics.future_group_updates)?;
+    out.set_item(
+        "ignored_terminal_queue_pushes",
+        metrics.ignored_terminal_queue_pushes,
+    )?;
+    out.set_item(
+        "ignored_terminal_queue_merges",
+        metrics.ignored_terminal_queue_merges,
+    )?;
+    out.set_item(
+        "ignored_terminal_final_pushes",
+        metrics.ignored_terminal_final_pushes,
+    )?;
+    out.set_item(
+        "ignored_terminal_final_merges",
+        metrics.ignored_terminal_final_merges,
+    )?;
+    out.set_item("parser_queue_pushes", metrics.parser_queue_pushes)?;
+    out.set_item("parser_queue_merges", metrics.parser_queue_merges)?;
+    out.set_item("parser_final_pushes", metrics.parser_final_pushes)?;
+    out.set_item("parser_final_merges", metrics.parser_final_merges)?;
+    out.set_item(
+        "passthrough_end_state_pushes",
+        metrics.passthrough_end_state_pushes,
+    )?;
+    out.set_item(
+        "passthrough_end_state_merges",
+        metrics.passthrough_end_state_merges,
+    )?;
+    out.set_item("fused_parser_states", metrics.fused_parser_states)?;
+    out.set_item("initial_tokenizer_exec_ns", metrics.initial_tokenizer_exec_ns)?;
+    out.set_item("initial_apply_prune_ns", metrics.initial_apply_prune_ns)?;
+    out.set_item("initial_remap_ns", metrics.initial_remap_ns)?;
+    out.set_item("processing_tokenizer_exec_ns", metrics.processing_tokenizer_exec_ns)?;
+    out.set_item("advance_stacks_ns", metrics.advance_stacks_ns)?;
+    out.set_item("future_group_apply_ns", metrics.future_group_apply_ns)?;
+    out.set_item("merge_ns", metrics.merge_ns)?;
+    out.set_item("fuse_ns", metrics.fuse_ns)?;
+    out.set_item("total_ns", metrics.total_ns)?;
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // PyVocab
 // ---------------------------------------------------------------------------
@@ -188,22 +295,7 @@ impl PyConstraintState {
             .inner
             .with_dependent(|_owner, state| state.debug_mask_metrics());
 
-        let state_summary = PyDict::new(py);
-        state_summary.set_item("tokenizer_state_count", metrics.state_summary.tokenizer_state_count)?;
-        state_summary.set_item(
-            "nonempty_tokenizer_state_count",
-            metrics.state_summary.nonempty_tokenizer_state_count,
-        )?;
-        state_summary.set_item("parser_top_values_total", metrics.state_summary.parser_top_values_total)?;
-        state_summary.set_item("parser_top_values_max", metrics.state_summary.parser_top_values_max)?;
-        state_summary.set_item("parser_unique_nodes_total", metrics.state_summary.parser_unique_nodes_total)?;
-        state_summary.set_item("parser_unique_nodes_max", metrics.state_summary.parser_unique_nodes_max)?;
-        state_summary.set_item("parser_total_edges_total", metrics.state_summary.parser_total_edges_total)?;
-        state_summary.set_item(
-            "parser_accumulator_instances_total",
-            metrics.state_summary.parser_accumulator_instances_total,
-        )?;
-        state_summary.set_item("parser_max_depth", metrics.state_summary.parser_max_depth)?;
+        let state_summary = state_summary_to_dict(py, metrics.state_summary)?;
 
         let weight_ops = PyDict::new(py);
         let total_weight_op_calls = metrics.weight_ops.union_calls
@@ -264,6 +356,29 @@ impl PyConstraintState {
         out.set_item("total_ns", metrics.total_ns)?;
         out.set_item("internal_token_dense_words", metrics.internal_token_dense_words)?;
         Ok(out)
+    }
+
+    fn debug_commit_token_metrics<'py>(
+        &self,
+        py: Python<'py>,
+        token_id: u32,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let metrics = self
+            .inner
+            .with_dependent(|_owner, state| state.debug_commit_token_metrics(token_id))
+            .map_err(PyValueError::new_err)?;
+        commit_metrics_to_dict(py, metrics)
+    }
+
+    fn debug_commit_bytes_metrics<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let metrics = self
+            .inner
+            .with_dependent(|_owner, state| state.debug_commit_bytes_metrics(data));
+        commit_metrics_to_dict(py, metrics)
     }
 
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
