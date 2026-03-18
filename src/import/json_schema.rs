@@ -279,9 +279,11 @@ fn json_search_branch_fragment_impl(branch: &str, max_tail: Option<usize>) -> St
     };
     match (anchored_start, anchored_end) {
         (true, true) => inner,
-        (true, false) => format!("{}{}", inner, string_tail),
-        (false, true) => format!("{}{}", string_tail, inner),
-        (false, false) => format!("{}{}{}", string_tail, inner, string_tail),
+        // Wrap inner in (?:...) so that top-level alternation in the pattern
+        // (e.g. LATEX|MATHML) binds correctly with the string_tail suffix/prefix.
+        (true, false) => format!("(?:{}){}", inner, string_tail),
+        (false, true) => format!("{}(?:{})", string_tail, inner),
+        (false, false) => format!("{}(?:{}){}", string_tail, inner, string_tail),
     }
 }
 
