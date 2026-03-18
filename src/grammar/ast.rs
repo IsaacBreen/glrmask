@@ -83,8 +83,8 @@ fn repeat_tree_shape() -> RepeatTreeShape {
 fn repeat_tree_shape_from_value(value: &str) -> RepeatTreeShape {
     match value {
         "left" => RepeatTreeShape::Left,
-        "right" => RepeatTreeShape::Right,
-        _ => RepeatTreeShape::Balanced,
+        "balanced" => RepeatTreeShape::Balanced,
+        _ => RepeatTreeShape::Right,
     }
 }
 
