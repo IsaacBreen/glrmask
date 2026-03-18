@@ -78,23 +78,35 @@ fn parse_quantified(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
         b'*' => {
             expr = Expr::Repeat { expr: Box::new(expr), min: 0, max: None };
             pos += 1;
+            pos = consume_lazy_suffix(input, pos);
         }
         b'+' => {
             expr = Expr::Repeat { expr: Box::new(expr), min: 1, max: None };
             pos += 1;
+            pos = consume_lazy_suffix(input, pos);
         }
         b'?' => {
             expr = Expr::Repeat { expr: Box::new(expr), min: 0, max: Some(1) };
             pos += 1;
+            pos = consume_lazy_suffix(input, pos);
         }
         b'{' => {
             let (min, max, next) = parse_repetition_bounds(input, pos + 1);
             expr = Expr::Repeat { expr: Box::new(expr), min, max };
             pos = next;
+            pos = consume_lazy_suffix(input, pos);
         }
         _ => {}
     }
     (expr, pos)
+}
+
+fn consume_lazy_suffix(input: &[u8], pos: usize) -> usize {
+    if pos < input.len() && input[pos] == b'?' {
+        pos + 1
+    } else {
+        pos
+    }
 }
 
 fn parse_repetition_bounds(input: &[u8], pos: usize) -> (usize, Option<usize>, usize) {
@@ -361,5 +373,38 @@ mod tests {
     fn test_parse_negated_char_class_space_escape() {
         let expr = parse_regex(r#"[^\s]"#, false);
         assert_eq!(expr, Expr::U8Class(!U8Set::from_bytes(b" \t\r\n")));
+    }
+
+    #[test]
+    fn test_parse_lazy_quantifier_suffixes() {
+        let expr = parse_regex(r#"a.*?b.+?c??d{2,4}?e"#, false);
+        assert_eq!(
+            expr,
+            Expr::Seq(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::all())),
+                    min: 0,
+                    max: None,
+                },
+                Expr::U8Seq(b"b".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::all())),
+                    min: 1,
+                    max: None,
+                },
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"c".to_vec())),
+                    min: 0,
+                    max: Some(1),
+                },
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"d".to_vec())),
+                    min: 2,
+                    max: Some(4),
+                },
+                Expr::U8Seq(b"e".to_vec()),
+            ])
+        );
     }
 }
