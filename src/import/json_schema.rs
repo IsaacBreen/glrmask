@@ -1164,7 +1164,7 @@ impl SchemaCtx {
                     literal_expr(b"{"),
                     GrammarExpr::Ref(JSON_KV_RULE.into()),
                     repeat_expr(
-                        sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), GrammarExpr::Ref(JSON_KV_RULE.into())]),
+                        sequence_or_single(vec![self.json_item_separator_expr(), GrammarExpr::Ref(JSON_KV_RULE.into())]),
                         0,
                         None,
                     ),
@@ -1180,7 +1180,7 @@ impl SchemaCtx {
                     literal_expr(b"["),
                     self.json_value_ref(),
                     repeat_expr(
-                        sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), self.json_value_ref()]),
+                        sequence_or_single(vec![self.json_item_separator_expr(), self.json_value_ref()]),
                         0,
                         None,
                     ),
@@ -1951,6 +1951,14 @@ impl SchemaCtx {
         literal_expr(&bytes)
     }
 
+    fn json_key_separator_expr(&self) -> GrammarExpr {
+        literal_expr(JSON_KEY_SEPARATOR)
+    }
+
+    fn json_item_separator_expr(&self) -> GrammarExpr {
+        literal_expr(JSON_ITEM_SEPARATOR)
+    }
+
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
         let properties = schema.get("properties").and_then(Value::as_object);
         let required_list = schema
@@ -2144,7 +2152,7 @@ impl SchemaCtx {
             // complement_key_colon = complement_key ": "
             let complement_key_colon = sequence_or_single(vec![
                 complement_key,
-                literal_expr(JSON_KEY_SEPARATOR),
+                self.json_key_separator_expr(),
             ]);
 
             let term_nc = format!("{base_name}_ap_nc");
@@ -2165,7 +2173,7 @@ impl SchemaCtx {
                 term_c.clone(),
                 choice_or_single(vec![
                     sequence_or_single(vec![
-                        literal_expr(JSON_ITEM_SEPARATOR),
+                        self.json_item_separator_expr(),
                         complement_key_colon,
                         value_expr,
                         GrammarExpr::Ref(term_c.clone()),
@@ -2239,7 +2247,7 @@ impl SchemaCtx {
 
         let mut options = vec![sequence_or_single(vec![
             left_expr.clone(),
-            literal_expr(JSON_ITEM_SEPARATOR),
+            self.json_item_separator_expr(),
             right_expr.clone(),
         ])];
         if right_can_be_empty {
@@ -2296,7 +2304,7 @@ impl SchemaCtx {
             sequence_or_single(vec![
                 literal_expr(b"{"),
                 pair.clone(),
-                repeat_expr(sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), pair]), 0, None),
+                repeat_expr(sequence_or_single(vec![self.json_item_separator_expr(), pair]), 0, None),
                 literal_expr(b"}"),
             ]),
         ]))
@@ -2316,7 +2324,7 @@ impl SchemaCtx {
         ]);
         let unmatched_pair = sequence_or_single(vec![
             unmatched_key_expr,
-            literal_expr(JSON_KEY_SEPARATOR),
+            self.json_key_separator_expr(),
             unmatched_value_expr,
         ]);
         let pair = choice_or_single(vec![matched_pair, unmatched_pair]);
@@ -2325,7 +2333,7 @@ impl SchemaCtx {
             sequence_or_single(vec![
                 literal_expr(b"{"),
                 pair.clone(),
-                repeat_expr(sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), pair]), 0, None),
+                repeat_expr(sequence_or_single(vec![self.json_item_separator_expr(), pair]), 0, None),
                 literal_expr(b"}"),
             ]),
         ]))
@@ -2363,7 +2371,7 @@ impl SchemaCtx {
             let mut parts = vec![literal_expr(b"[")];
             for (index, item_schema) in prefix_items.iter().enumerate() {
                 if index > 0 {
-                    parts.push(literal_expr(JSON_ITEM_SEPARATOR));
+                    parts.push(self.json_item_separator_expr());
                 }
                 parts.push(self.convert_schema(item_schema)?);
             }
@@ -2371,7 +2379,7 @@ impl SchemaCtx {
             if extra_max.is_none() || extra_max.unwrap_or(0) > 0 || extra_min > 0 {
                 let extra_item_expr = self.extract_rule(extra_item_expr, "arr_item");
                 parts.push(repeat_expr(
-                    sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), extra_item_expr]),
+                    sequence_or_single(vec![self.json_item_separator_expr(), extra_item_expr]),
                     extra_min,
                     extra_max,
                 ));
@@ -2420,7 +2428,7 @@ impl SchemaCtx {
             literal_expr(b"["),
             item_expr.clone(),
             repeat_expr(
-                sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), item_expr]),
+                sequence_or_single(vec![self.json_item_separator_expr(), item_expr]),
                 min_items.saturating_sub(1),
                 max_items.map(|max_items| max_items.saturating_sub(1)),
             ),
@@ -2692,6 +2700,47 @@ fn sanitize_rule_name(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::Vocab;
+
+    fn expr_has_split_separator(expr: &GrammarExpr, left_bytes: &[u8], right_bytes: &[u8]) -> bool {
+        match expr {
+            GrammarExpr::Sequence(parts) => {
+                parts.windows(2).any(|window| {
+                    matches!(&window[0], GrammarExpr::Literal(bytes) if bytes == left_bytes)
+                        && matches!(&window[1], GrammarExpr::Literal(bytes) if bytes == right_bytes)
+                }) || parts.iter().any(|part| expr_has_split_separator(part, left_bytes, right_bytes))
+            }
+            GrammarExpr::Choice(options) => {
+                options.iter().any(|part| expr_has_split_separator(part, left_bytes, right_bytes))
+            }
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner) => expr_has_split_separator(inner, left_bytes, right_bytes),
+            _ => false,
+        }
+    }
+
+    fn expr_has_literal(expr: &GrammarExpr, expected: &[u8]) -> bool {
+        match expr {
+            GrammarExpr::Literal(bytes) => bytes == expected,
+            GrammarExpr::Sequence(parts) => parts.iter().any(|part| expr_has_literal(part, expected)),
+            GrammarExpr::Choice(options) => options.iter().any(|part| expr_has_literal(part, expected)),
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner) => expr_has_literal(inner, expected),
+            _ => false,
+        }
+    }
+
+    fn named_grammar_has_split_separator(grammar: &NamedGrammar, left_bytes: &[u8], right_bytes: &[u8]) -> bool {
+        grammar
+            .rules
+            .iter()
+            .any(|rule| expr_has_split_separator(&rule.expr, left_bytes, right_bytes))
+    }
+
+    fn named_grammar_has_literal(grammar: &NamedGrammar, expected: &[u8]) -> bool {
+        grammar.rules.iter().any(|rule| expr_has_literal(&rule.expr, expected))
+    }
 
     #[test]
     fn test_boolean_schema() {
@@ -3014,6 +3063,52 @@ mod tests {
         assert!(!accepts_sequence(schema, &[b"{\"mode1\": true}"]));
         assert!(accepts_sequence(schema, &[b"{\"mode1\": [\"a\", \"b\"]}"]));
         assert!(accepts_sequence(schema, &[b"{\"other\": true}"]));
+    }
+
+    #[test]
+    fn test_fixed_object_keys_pack_native_separator_literal() {
+        let schema: Value = serde_json::from_str(r#"{
+            "type": "object",
+            "properties": {
+                "opacity": {"type": "number"}
+            },
+            "additionalProperties": {"type": "string"}
+        }"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        assert!(named_grammar_has_literal(&grammar, b"\"opacity\": "));
+        assert!(!named_grammar_has_split_separator(&grammar, b":", b" "));
+    }
+
+    #[test]
+    fn test_pattern_object_paths_pack_native_separator_literal() {
+        let schema: Value = serde_json::from_str(r#"{
+            "type": "object",
+            "patternProperties": {
+                "^mode": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            }
+        }"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        assert!(named_grammar_has_literal(&grammar, b": "));
+        assert!(!named_grammar_has_split_separator(&grammar, b":", b" "));
+    }
+
+    #[test]
+    fn test_array_paths_pack_native_item_separator_literal() {
+        let schema: Value = serde_json::from_str(r#"{
+            "type": "array",
+            "prefixItems": [
+                {"type": "string"},
+                {"type": "number"}
+            ],
+            "minItems": 2,
+            "maxItems": 2
+        }"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        assert!(named_grammar_has_literal(&grammar, b", "));
+        assert!(!named_grammar_has_split_separator(&grammar, b",", b" "));
     }
 
     #[test]
