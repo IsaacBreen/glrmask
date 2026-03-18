@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use serde_json::{Map, Value};
 
 use crate::GlrMaskError;
+use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
 
@@ -232,6 +233,88 @@ fn json_search_pattern(pattern: &str) -> String {
         .map(json_search_branch_fragment)
         .collect::<Vec<_>>();
     format!("(?:{})", fragments.join("|"))
+}
+
+fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize, Option<usize>) {
+    use crate::automata::lexer::ast::Expr;
+
+    match expr {
+        Expr::U8Seq(bytes) => (bytes.len(), Some(bytes.len())),
+        Expr::U8Class(_) => (1, Some(1)),
+        Expr::Seq(parts) => {
+            let mut min_total = 0usize;
+            let mut max_total = Some(0usize);
+            for part in parts {
+                let (part_min, part_max) = regex_byte_length_bounds(part);
+                min_total = min_total.saturating_add(part_min);
+                max_total = match (max_total, part_max) {
+                    (Some(left), Some(right)) => Some(left.saturating_add(right)),
+                    _ => None,
+                };
+            }
+            (min_total, max_total)
+        }
+        Expr::Choice(options) => {
+            let mut min_total = usize::MAX;
+            let mut max_total = Some(0usize);
+            for option in options {
+                let (option_min, option_max) = regex_byte_length_bounds(option);
+                min_total = min_total.min(option_min);
+                max_total = match (max_total, option_max) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    _ => None,
+                };
+            }
+            if min_total == usize::MAX {
+                (0, Some(0))
+            } else {
+                (min_total, max_total)
+            }
+        }
+        Expr::Repeat { expr, min, max } => {
+            let (inner_min, inner_max) = regex_byte_length_bounds(expr);
+            let min_total = inner_min.saturating_mul(*min);
+            let max_total = match (inner_max, max) {
+                (Some(inner), Some(count)) => Some(inner.saturating_mul(*count)),
+                _ => None,
+            };
+            (min_total, max_total)
+        }
+        Expr::Shared(expr) => regex_byte_length_bounds(expr),
+        Expr::Epsilon => (0, Some(0)),
+    }
+}
+
+fn prune_pattern_branches_for_min_length(pattern: &str, min_len: usize) -> Option<String> {
+    if min_len == 0 {
+        return Some(pattern.to_string());
+    }
+
+    let branches = split_top_level_regex_branches(pattern);
+    let mut kept = Vec::with_capacity(branches.len());
+    for branch in &branches {
+        let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
+        if !(anchored_start && anchored_end) {
+            kept.push(*branch);
+            continue;
+        }
+
+        let inner = jsonify_regex_dot(core);
+        let expr = parse_regex(&inner, true);
+        let (_, max_bytes) = regex_byte_length_bounds(&expr);
+        if max_bytes.is_some_and(|bound| bound < min_len) {
+            continue;
+        }
+        kept.push(*branch);
+    }
+
+    if kept.is_empty() {
+        None
+    } else if kept.len() == branches.len() {
+        Some(pattern.to_string())
+    } else {
+        Some(kept.join("|"))
+    }
 }
 
 fn json_direct_ascii_bytes() -> BTreeSet<u8> {
@@ -2022,12 +2105,15 @@ impl SchemaCtx {
             .map(|value| value as usize);
 
         if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+            let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
+                return self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT");
+            };
             if min_len > 0 || max_len.is_some() {
-                if let Some(unit_pattern) = simple_repeated_single_char_pattern(pattern) {
+                if let Some(unit_pattern) = simple_repeated_single_char_pattern(&pattern) {
                     return self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len);
                 }
             }
-            return json_wrapped_pattern(pattern);
+            return json_wrapped_pattern(&pattern);
         }
 
         if let Some(format_name) = schema.get("format").and_then(Value::as_str) {

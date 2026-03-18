@@ -917,3 +917,28 @@ fn test_date_or_null_schema_rejects_empty_string_span_token() {
         "span token b' \"\"' must be rejected after '{{\"start_date\":' because empty string is not a valid date"
     );
 }
+
+#[test]
+fn test_pattern_with_min_length_rejects_empty_string_span_token() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 5000,
+                "pattern": "^$|(^(?:\\S+\\s+){0,99}\\S+$)"
+            }
+        }
+    }"#;
+    let vocab = Vocab::new(vec![(13538u32, b" \"\"".to_vec())], None);
+    let c = Constraint::from_json_schema(schema, &vocab)
+        .expect("pattern+minLength schema should compile");
+    let mut state = c.start();
+    state.commit_bytes(br#"{"question":"#);
+    let mask = state.mask();
+    assert!(
+        !token_allowed(&mask, 13538),
+        "span token b' \"\"' must be rejected after '{{\"question\":' because minLength=1 removes the pattern's empty-string branch"
+    );
+}
