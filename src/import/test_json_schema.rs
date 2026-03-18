@@ -894,3 +894,26 @@ fn test_pattern_length_constraints_bound_string_content() {
         "closing quote should remain invalid before minLength is reached"
     );
 }
+
+#[test]
+fn test_date_or_null_schema_rejects_empty_string_span_token() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "start_date": {
+                "type": ["string", "null"],
+                "format": "date"
+            }
+        }
+    }"#;
+    let vocab = Vocab::new(vec![(13538u32, b" \"\"".to_vec())], None);
+    let c = Constraint::from_json_schema(schema, &vocab)
+        .expect("date-or-null schema should compile");
+    let mut state = c.start();
+    state.commit_bytes(br#"{"start_date":"#);
+    let mask = state.mask();
+    assert!(
+        !token_allowed(&mask, 13538),
+        "span token b' \"\"' must be rejected after '{{\"start_date\":' because empty string is not a valid date"
+    );
+}

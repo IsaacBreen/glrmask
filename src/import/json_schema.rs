@@ -32,16 +32,6 @@ const JSON_KEY_COLON_REGEX: &str =
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
 const JSON_DIRECT_UTF8_PATTERN: &str =
     r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
-const STRICT_DATE_PATTERN: &str = concat!(
-    r#"(?:",
-    r#"(?:[0-9]{4}-(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01]))"#,
-    r#"|(?:[0-9]{4}-(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30))"#,
-    r#"|(?:[0-9]{4}-02-(?:0[1-9]|1[0-9]|2[0-8]))"#,
-    r#"|(?:(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29)"#,
-    r#")"#
-);
-const STRICT_DATE_TIME_SUFFIX_PATTERN: &str =
-    r#"[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
 const JSON_KEY_SEPARATOR: &[u8] = b": ";
 const UNTYPED_OBJECT_KEYWORD_KEYS: &[&str] = &[
@@ -123,11 +113,9 @@ fn empty_expr() -> GrammarExpr {
 
 fn json_format_pattern(format_name: &str) -> Option<&'static str> {
     Some(match format_name {
-        "date" => STRICT_DATE_PATTERN,
         "time" => {
             r#"(?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#
         }
-        "date-time" => r#"(?:[0-9]{4}-(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|[0-9]{4}-(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|[0-9]{4}-02-(?:0[1-9]|1[0-9]|2[0-8])|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29)[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#,
         "duration" => {
             r#"P(?:[0-9]+W|(?:[0-9]+Y)?(?:[0-9]+M)?(?:[0-9]+D)?(?:T(?:[0-9]+H)?(?:[0-9]+M)?(?:[0-9]+S)?)?)"#
         }
@@ -542,6 +530,95 @@ fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
     regex_expr(format!(r#""(?:{})": "#, inner))
+}
+
+fn quoted_expr(inner: GrammarExpr) -> GrammarExpr {
+    sequence_or_single(vec![literal_expr(b"\""), inner, literal_expr(b"\"")])
+}
+
+fn json_date_body_expr() -> GrammarExpr {
+    let year = regex_expr(r#"[0-9]{4}"#);
+    let leap_year = regex_expr(
+        r#"(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)"#,
+    );
+    let sep = literal_expr(b"-");
+    let month_31 = choice_or_single(
+        ["01", "03", "05", "07", "08", "10", "12"]
+            .into_iter()
+            .map(|month| literal_expr(month.as_bytes()))
+            .collect(),
+    );
+    let month_30 = choice_or_single(
+        ["04", "06", "09", "11"]
+            .into_iter()
+            .map(|month| literal_expr(month.as_bytes()))
+            .collect(),
+    );
+    let february = literal_expr(b"02");
+    let day_31 = regex_expr(r#"(?:0[1-9]|[12][0-9]|3[01])"#);
+    let day_30 = regex_expr(r#"(?:0[1-9]|[12][0-9]|30)"#);
+    let day_28 = regex_expr(r#"(?:0[1-9]|1[0-9]|2[0-8])"#);
+    let day_29 = literal_expr(b"29");
+
+    choice_or_single(vec![
+        sequence_or_single(vec![
+            year.clone(),
+            sep.clone(),
+            month_31,
+            sep.clone(),
+            day_31,
+        ]),
+        sequence_or_single(vec![
+            year.clone(),
+            sep.clone(),
+            month_30,
+            sep.clone(),
+            day_30,
+        ]),
+        sequence_or_single(vec![
+            year,
+            sep.clone(),
+            february.clone(),
+            sep.clone(),
+            day_28,
+        ]),
+        sequence_or_single(vec![leap_year, sep, february, literal_expr(b"-29")]),
+    ])
+}
+
+fn json_time_body_expr() -> GrammarExpr {
+    let hour = regex_expr(r#"(?:[01][0-9]|2[0-3])"#);
+    let minute = regex_expr(r#"[0-5][0-9]"#);
+    let second = regex_expr(r#"(?:[0-5][0-9]|60)"#);
+    let fraction = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
+        literal_expr(b"."),
+        regex_expr(r#"[0-9]+"#),
+    ])));
+    let offset = sequence_or_single(vec![
+        choice_or_single(vec![literal_expr(b"+"), literal_expr(b"-")]),
+        hour.clone(),
+        literal_expr(b":"),
+        minute.clone(),
+    ]);
+    let zone = choice_or_single(vec![literal_expr(b"Z"), literal_expr(b"z"), offset]);
+
+    sequence_or_single(vec![
+        hour,
+        literal_expr(b":"),
+        minute,
+        literal_expr(b":"),
+        second,
+        fraction,
+        zone,
+    ])
+}
+
+fn json_date_time_body_expr() -> GrammarExpr {
+    sequence_or_single(vec![
+        json_date_body_expr(),
+        choice_or_single(vec![literal_expr(b"T"), literal_expr(b"t")]),
+        json_time_body_expr(),
+    ])
 }
 
 fn simple_anchored_literal_pattern(pattern: &str) -> Option<(String, bool)> {
@@ -1954,8 +2031,8 @@ impl SchemaCtx {
         }
 
         if let Some(format_name) = schema.get("format").and_then(Value::as_str) {
-            if let Some(pattern) = json_format_pattern(format_name) {
-                return json_wrapped_fullmatch_pattern(pattern);
+            if let Some(expr) = self.build_format_string_expr(format_name) {
+                return expr;
             }
         }
         if min_len == 0 && max_len.is_none() {
@@ -2034,6 +2111,16 @@ impl SchemaCtx {
             ]),
             "JSON_STRING_BOUNDED_PATTERN",
         )
+    }
+
+    fn build_format_string_expr(&mut self, format_name: &str) -> Option<GrammarExpr> {
+        let expr = match format_name {
+            "date" => quoted_expr(json_date_body_expr()),
+            "time" => quoted_expr(json_time_body_expr()),
+            "date-time" => quoted_expr(json_date_time_body_expr()),
+            _ => return json_format_pattern(format_name).map(json_wrapped_fullmatch_pattern),
+        };
+        Some(self.extract_terminal_rule(expr, "JSON_FORMAT_STRING"))
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
