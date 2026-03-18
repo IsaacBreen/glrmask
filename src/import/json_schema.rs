@@ -1206,11 +1206,50 @@ impl SchemaCtx {
         token.replace("~1", "/").replace("~0", "~")
     }
 
+    fn find_local_anchor_target<'a>(node: &'a Value, ref_value: &str) -> Option<&'a Value> {
+        match node {
+            Value::Object(map) => {
+                if map.get("id").and_then(Value::as_str) == Some(ref_value)
+                    || map.get("$id").and_then(Value::as_str) == Some(ref_value)
+                {
+                    return Some(node);
+                }
+                if let Some(anchor_name) = ref_value.strip_prefix('#') {
+                    if map.get("$anchor").and_then(Value::as_str) == Some(anchor_name) {
+                        return Some(node);
+                    }
+                }
+                for value in map.values() {
+                    if let Some(target) = Self::find_local_anchor_target(value, ref_value) {
+                        return Some(target);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => items
+                .iter()
+                .find_map(|value| Self::find_local_anchor_target(value, ref_value)),
+            _ => None,
+        }
+    }
+
     fn resolve_local_ref(&self, ref_value: &str) -> Result<Value, GlrMaskError> {
-        if !ref_value.starts_with("#/") {
+        if !ref_value.starts_with('#') {
             return Err(GlrMaskError::GrammarParse(format!(
                 "unsupported $ref '{ref_value}'"
             )));
+        }
+
+        if ref_value == "#" {
+            return Ok(self.root_schema.clone());
+        }
+
+        if !ref_value.starts_with("#/") {
+            return Self::find_local_anchor_target(&self.root_schema, ref_value)
+                .cloned()
+                .ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!("unknown $ref target '{ref_value}'"))
+                });
         }
 
         let mut current = &self.root_schema;
@@ -2737,6 +2776,27 @@ mod tests {
         let schema = r#"{"type": "string", "format": "date-time"}"#;
         assert!(!accepts_sequence(schema, &[b"\"/2022-01-01T12:00:00Z\""]));
         assert!(accepts_sequence(schema, &[b"\"2022-01-01T12:00:00Z\""]));
+    }
+
+    #[test]
+    fn test_local_id_ref_preserves_target_type_constraints() {
+        let schema = r##"{
+            "$schema": "http://json-schema.org/draft-04/schema#",
+            "definitions": {
+                "jumpGateCapability": {
+                    "id": "#jumpGateCapability",
+                    "type": "object"
+                }
+            },
+            "type": "object",
+            "properties": {
+                "jumpGate": {
+                    "$ref": "#jumpGateCapability"
+                }
+            }
+        }"##;
+        assert!(!accepts_sequence(schema, &[b"{\"jumpGate\": true}"]));
+        assert!(accepts_sequence(schema, &[b"{\"jumpGate\": {}}"]));
     }
 
     #[test]
