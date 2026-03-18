@@ -536,6 +536,36 @@ fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     regex_expr(format!(r#""(?:{})": "#, inner))
 }
 
+fn simple_anchored_literal_pattern(pattern: &str) -> Option<(String, bool)> {
+    if !pattern.starts_with('^') {
+        return None;
+    }
+
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::new();
+    let mut i = 1usize;
+    let mut exact = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\' {
+            i += 1;
+            if i >= chars.len() {
+                return None;
+            }
+            out.push(chars[i]);
+        } else if ch == '$' && i == chars.len() - 1 {
+            exact = true;
+            break;
+        } else if matches!(ch, '.' | '^' | '$' | '*' | '+' | '?' | '{' | '}' | '[' | ']' | '|' | '(' | ')') {
+            return None;
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+    Some((out, exact))
+}
+
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
     serde_json::to_string(text)
         .unwrap_or_else(|_| format!("\"{}\"", text))
@@ -1998,15 +2028,48 @@ impl SchemaCtx {
         }
 
         if properties.is_none()
-            && matches!(additional_properties, Some(Value::Bool(false)))
             && pattern_properties.map(|patterns| patterns.len() == 1).unwrap_or(false)
         {
             let (pattern, value_schema) = pattern_properties
                 .and_then(|patterns| patterns.iter().next())
                 .ok_or_else(|| GlrMaskError::GrammarParse("invalid patternProperties".into()))?;
+            let match_all_pattern = pattern == "^.*$" || pattern == ".*";
             let property_names = serde_json::json!({"pattern": pattern});
             let value_expr = self.convert_schema(value_schema)?;
-            return self.build_pattern_named_object_expr(&property_names, value_expr);
+            if matches!(additional_properties, Some(Value::Bool(false))) || match_all_pattern {
+                return self.build_pattern_named_object_expr(&property_names, value_expr);
+            }
+
+            if let Some((literal_prefix, exact)) = simple_anchored_literal_pattern(pattern) {
+                if !literal_prefix.is_empty() {
+                    let unmatched_key_expr = if exact {
+                        let rule_prefix = self.fresh_rule_name("PP_KEY_EXACT");
+                        self.build_complement_key_expr(
+                            &[literal_prefix],
+                            &rule_prefix,
+                        )
+                    } else {
+                        let rule_prefix = self.fresh_rule_name("PP_KEY_PREFIX");
+                        self.build_excluding_prefix_key_expr(
+                            &literal_prefix,
+                            &rule_prefix,
+                        )
+                    };
+                    let additional_value_expr = match additional_properties {
+                        Some(Value::Object(map)) => self.convert_schema(&Value::Object(map.clone()))?,
+                        Some(Value::Bool(true)) | None => self.json_value_ref(),
+                        _ => return Ok(self.json_object_ref()),
+                    };
+                    return self.build_mixed_pattern_named_object_expr(
+                        &property_names,
+                        value_expr,
+                        unmatched_key_expr,
+                        additional_value_expr,
+                    );
+                }
+            }
+
+            return Ok(self.json_object_ref());
         }
 
         if let Some(property_names) = property_names {
@@ -2239,6 +2302,35 @@ impl SchemaCtx {
         ]))
     }
 
+    fn build_mixed_pattern_named_object_expr(
+        &mut self,
+        property_names: &Value,
+        matched_value_expr: GrammarExpr,
+        unmatched_key_expr: GrammarExpr,
+        unmatched_value_expr: GrammarExpr,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        let pattern = Self::property_name_pattern(property_names)?;
+        let matched_pair = sequence_or_single(vec![
+            json_wrapped_key_colon_pattern(pattern),
+            matched_value_expr,
+        ]);
+        let unmatched_pair = sequence_or_single(vec![
+            unmatched_key_expr,
+            literal_expr(JSON_KEY_SEPARATOR),
+            unmatched_value_expr,
+        ]);
+        let pair = choice_or_single(vec![matched_pair, unmatched_pair]);
+        Ok(choice_or_single(vec![
+            sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
+            sequence_or_single(vec![
+                literal_expr(b"{"),
+                pair.clone(),
+                repeat_expr(sequence_or_single(vec![literal_expr(JSON_ITEM_SEPARATOR), pair]), 0, None),
+                literal_expr(b"}"),
+            ]),
+        ]))
+    }
+
     fn build_array_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
         if let Some(prefix_items) = schema.get("prefixItems").and_then(Value::as_array) {
             let max_items_raw = schema.get("maxItems").and_then(Value::as_u64).map(|value| value as usize);
@@ -2377,6 +2469,17 @@ impl SchemaCtx {
         GrammarExpr::Ref(full_name)
     }
 
+    fn build_excluding_prefix_key_expr(&mut self, prefix_text: &str, prefix: &str) -> GrammarExpr {
+        let full_name = format!("{prefix}_FULL");
+        let full_expr = sequence_or_single(vec![
+            literal_expr(b"\""),
+            Self::build_prefix_complement_expr(prefix_text),
+            literal_expr(b"\""),
+        ]);
+        self.insert_rule(full_name.clone(), full_expr);
+        GrammarExpr::Ref(full_name)
+    }
+
     /// Recursively build trie complement as a single nested GrammarExpr (no named rules).
     fn build_complement_trie_expr(
         keys: &[String],
@@ -2445,6 +2548,48 @@ impl SchemaCtx {
         }
 
         choice_or_single(alts)
+    }
+
+    fn build_prefix_complement_expr(prefix_text: &str) -> GrammarExpr {
+        if prefix_text.is_empty() {
+            return regex_expr(r#"[^\x00-\xFF]"#);
+        }
+
+        let chars: Vec<char> = prefix_text.chars().collect();
+        Self::build_prefix_complement_from_chars(&chars)
+    }
+
+    fn build_prefix_complement_from_chars(chars: &[char]) -> GrammarExpr {
+        if chars.is_empty() {
+            return regex_expr(r#"[^\x00-\xFF]"#);
+        }
+
+        let next = chars[0] as u8;
+        let mut excluded_set = String::from(r#"\x00-\x1f"\\"#);
+        if matches!(next, b'-' | b']' | b'^' | b'\\') {
+            excluded_set.push('\\');
+        }
+        excluded_set.push(next as char);
+        let char_minus_regex = format!("[^{}]", excluded_set);
+        let string_content_regex = format!("({})*", JSON_STRING_CHAR_PATTERN);
+
+        let mut alts = vec![
+            sequence_or_single(vec![
+                regex_expr(&char_minus_regex),
+                regex_expr(&string_content_regex),
+            ]),
+            sequence_or_single(vec![
+                regex_expr(r#"\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#),
+                regex_expr(&string_content_regex),
+            ]),
+            sequence_or_single(vec![
+                literal_expr(&[next]),
+                Self::build_prefix_complement_from_chars(&chars[1..]),
+            ]),
+            empty_expr(),
+        ];
+
+        choice_or_single(std::mem::take(&mut alts))
     }
 
     fn is_trivial_expr(expr: &GrammarExpr) -> bool {
@@ -2834,6 +2979,41 @@ mod tests {
         assert!(!accepts_sequence(schema, &[b"{\"\": \"x\"}"]));
         assert!(!accepts_sequence(schema, &[b"{\"!\": \"x\"}"]));
         assert!(accepts_sequence(schema, &[b"{\"A\": \"x\"}"]));
+    }
+
+    #[test]
+    fn test_match_all_pattern_properties_constrain_values() {
+        let schema = r#"{
+            "type": "object",
+            "patternProperties": {
+                "^.*$": {
+                    "type": "object",
+                    "properties": {
+                        "destination": {"type": "string"},
+                        "mode": {"type": "string"}
+                    },
+                    "required": ["destination", "mode"]
+                }
+            }
+        }"#;
+        assert!(!accepts_sequence(schema, &[b"{\"instrument1\": true}"]));
+        assert!(accepts_sequence(schema, &[b"{\"instrument1\": {\"destination\": \"a\", \"mode\": \"b\"}}"]));
+    }
+
+    #[test]
+    fn test_prefix_pattern_properties_constrain_matching_values() {
+        let schema = r#"{
+            "type": "object",
+            "patternProperties": {
+                "^mode": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            }
+        }"#;
+        assert!(!accepts_sequence(schema, &[b"{\"mode1\": true}"]));
+        assert!(accepts_sequence(schema, &[b"{\"mode1\": [\"a\", \"b\"]}"]));
+        assert!(accepts_sequence(schema, &[b"{\"other\": true}"]));
     }
 
     #[test]
