@@ -17,6 +17,12 @@ pub struct ConstraintStateSummary {
     pub nonempty_tokenizer_state_count: usize,
     pub parser_top_values_total: usize,
     pub parser_top_values_max: usize,
+    pub parser_upperbranch_nodes_total: usize,
+    pub parser_upperbranch_nodes_max: usize,
+    pub parser_interface_nodes_total: usize,
+    pub parser_interface_nodes_max: usize,
+    pub parser_lower_nodes_total: usize,
+    pub parser_lower_nodes_max: usize,
     pub parser_unique_nodes_total: usize,
     pub parser_unique_nodes_max: usize,
     pub parser_total_edges_total: usize,
@@ -83,6 +89,18 @@ impl<'a> ConstraintState<'a> {
             summary.parser_top_values_max = summary
                 .parser_top_values_max
                 .max(gss_summary.top_values_count);
+            summary.parser_upperbranch_nodes_total += gss_summary.upperbranch_nodes;
+            summary.parser_upperbranch_nodes_max = summary
+                .parser_upperbranch_nodes_max
+                .max(gss_summary.upperbranch_nodes);
+            summary.parser_interface_nodes_total += gss_summary.interface_nodes;
+            summary.parser_interface_nodes_max = summary
+                .parser_interface_nodes_max
+                .max(gss_summary.interface_nodes);
+            summary.parser_lower_nodes_total += gss_summary.lower_nodes;
+            summary.parser_lower_nodes_max = summary
+                .parser_lower_nodes_max
+                .max(gss_summary.lower_nodes);
             summary.parser_unique_nodes_total += gss_summary.total_unique_nodes;
             summary.parser_unique_nodes_max = summary
                 .parser_unique_nodes_max

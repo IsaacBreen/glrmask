@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use super::analysis::EOF;
 use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
-use crate::ds::leveled_gss::{LeveledGSS, Merge};
+use crate::ds::leveled_gss::{LeveledGSS, LeveledGSSSummary, Merge};
 
 pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
 
@@ -21,6 +21,25 @@ impl Merge for TerminalsDisallowed {
 }
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AdvanceStacksDebugMetrics {
+    pub input_summary: LeveledGSSSummary,
+    pub output_summary: LeveledGSSSummary,
+    pub reduce_closure_iterations: usize,
+    pub frontier_states_total: usize,
+    pub frontier_states_max: usize,
+    pub reduce_rules_considered: usize,
+    pub popn_calls: usize,
+    pub popn_nonempty: usize,
+    pub goto_lookups: usize,
+    pub goto_hits: usize,
+    pub reductions_emitted: usize,
+    pub absorb_targets: usize,
+    pub shift_state_candidates: usize,
+    pub shift_targets_hit: usize,
+    pub shifted_results: usize,
+}
 
 #[allow(dead_code)]
 pub struct GLRParser {
@@ -270,9 +289,22 @@ pub(crate) fn valid_terminals_for_stack_vectors(
 }
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
+    advance_stacks_with_metrics(table, stack, token, None)
+}
+
+pub(crate) fn advance_stacks_with_metrics(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+    mut metrics: Option<&mut AdvanceStacksDebugMetrics>,
+) -> ParserGSS {
     // Reduce closure: iteratively apply all reduce actions on the GSS directly.
     let mut current = stack.clone();
     let mut processed = vec![false; table.num_states as usize];
+
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.input_summary = stack.summary();
+    }
 
     loop {
         let frontier = current.peek_values();
@@ -285,6 +317,12 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
             break;
         }
 
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.reduce_closure_iterations += 1;
+            metrics.frontier_states_total += new_states.len();
+            metrics.frontier_states_max = metrics.frontier_states_max.max(new_states.len());
+        }
+
         let mut any_reduced = false;
         let mut pending_bases_by_target = BTreeMap::<u32, ParserGSS>::new();
         for state in new_states {
@@ -294,14 +332,26 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
                 Some(Action::Split { reduces, .. }) => reduces.as_slice(),
                 _ => &[],
             };
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.reduce_rules_considered += reduce_rules.len();
+            }
             let subtree = current.isolate(Some(state));
             for &rule_id in reduce_rules {
                 let rule = &table.rules[rule_id as usize];
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.popn_calls += 1;
+                }
                 let popped = subtree.popn(rule.rhs.len() as isize);
                 if popped.is_empty() {
                     continue;
                 }
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.popn_nonempty += 1;
+                }
                 for goto_from in popped.peek_values() {
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.goto_lookups += 1;
+                    }
                     if let Some(target) = table.goto_target(goto_from, rule.lhs) {
                         let base = popped.isolate(Some(goto_from));
                         pending_bases_by_target
@@ -309,12 +359,19 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
                             .and_modify(|existing| *existing = existing.merge(&base))
                             .or_insert(base);
                         any_reduced = true;
+                        if let Some(metrics) = metrics.as_deref_mut() {
+                            metrics.goto_hits += 1;
+                            metrics.reductions_emitted += 1;
+                        }
                     }
                 }
             }
         }
         if !any_reduced {
             break;
+        }
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.absorb_targets += pending_bases_by_target.len();
         }
         for (target, base) in pending_bases_by_target {
             current = current.absorb_push(target, &base);
@@ -324,6 +381,9 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
     // Shift phase: for each state with a shift action, push the target.
     let mut shifted_results = Vec::new();
     for state in current.peek_values() {
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.shift_state_candidates += 1;
+        }
         let shift_target = match table.action(state, token) {
             Some(Action::Shift(target)) => Some(*target),
             Some(Action::Split { shift: Some(target), .. }) => Some(*target),
@@ -332,9 +392,17 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         if let Some(target) = shift_target {
             let subtree = current.isolate(Some(state));
             shifted_results.push(subtree.push(target));
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.shift_targets_hit += 1;
+                metrics.shifted_results += 1;
+            }
         }
     }
-    ParserGSS::merge_many(shifted_results)
+    let out = ParserGSS::merge_many(shifted_results);
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.output_summary = out.summary();
+    }
+    out
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {

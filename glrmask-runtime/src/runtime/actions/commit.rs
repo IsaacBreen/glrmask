@@ -1,6 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::compiler::glr::parser::{advance_stacks, ParserGSS, TerminalsDisallowed};
+use crate::compiler::glr::parser::{
+    AdvanceStacksDebugMetrics,
+    ParserGSS,
+    TerminalsDisallowed,
+    advance_stacks_with_metrics,
+};
 use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{ConstraintState, ConstraintStateSummary};
@@ -30,6 +35,44 @@ pub struct CommitDebugMetrics {
     pub processing_ignored_matches: usize,
     pub advance_stacks_calls: usize,
     pub advance_stacks_nonempty: usize,
+    pub advance_reduce_closure_iterations_total: usize,
+    pub advance_reduce_closure_iterations_max: usize,
+    pub advance_frontier_states_total: usize,
+    pub advance_frontier_states_max: usize,
+    pub advance_reduce_rules_considered: usize,
+    pub advance_popn_calls: usize,
+    pub advance_popn_nonempty: usize,
+    pub advance_goto_lookups: usize,
+    pub advance_goto_hits: usize,
+    pub advance_reductions_emitted: usize,
+    pub advance_absorb_targets: usize,
+    pub advance_shift_state_candidates: usize,
+    pub advance_shift_targets_hit: usize,
+    pub advance_shifted_results: usize,
+    pub advance_input_top_values_total: usize,
+    pub advance_input_top_values_max: usize,
+    pub advance_input_upperbranch_nodes_total: usize,
+    pub advance_input_upperbranch_nodes_max: usize,
+    pub advance_input_interface_nodes_total: usize,
+    pub advance_input_interface_nodes_max: usize,
+    pub advance_input_lower_nodes_total: usize,
+    pub advance_input_lower_nodes_max: usize,
+    pub advance_input_unique_nodes_total: usize,
+    pub advance_input_unique_nodes_max: usize,
+    pub advance_input_total_edges_total: usize,
+    pub advance_input_total_edges_max: usize,
+    pub advance_output_top_values_total: usize,
+    pub advance_output_top_values_max: usize,
+    pub advance_output_upperbranch_nodes_total: usize,
+    pub advance_output_upperbranch_nodes_max: usize,
+    pub advance_output_interface_nodes_total: usize,
+    pub advance_output_interface_nodes_max: usize,
+    pub advance_output_lower_nodes_total: usize,
+    pub advance_output_lower_nodes_max: usize,
+    pub advance_output_unique_nodes_total: usize,
+    pub advance_output_unique_nodes_max: usize,
+    pub advance_output_total_edges_total: usize,
+    pub advance_output_total_edges_max: usize,
     pub future_group_checks: usize,
     pub future_group_hits: usize,
     pub future_group_updates: usize,
@@ -72,6 +115,18 @@ fn summarize_state_map(state: &BTreeMap<u32, ParserGSS>) -> ConstraintStateSumma
         summary.parser_top_values_max = summary
             .parser_top_values_max
             .max(gss_summary.top_values_count);
+        summary.parser_upperbranch_nodes_total += gss_summary.upperbranch_nodes;
+        summary.parser_upperbranch_nodes_max = summary
+            .parser_upperbranch_nodes_max
+            .max(gss_summary.upperbranch_nodes);
+        summary.parser_interface_nodes_total += gss_summary.interface_nodes;
+        summary.parser_interface_nodes_max = summary
+            .parser_interface_nodes_max
+            .max(gss_summary.interface_nodes);
+        summary.parser_lower_nodes_total += gss_summary.lower_nodes;
+        summary.parser_lower_nodes_max = summary
+            .parser_lower_nodes_max
+            .max(gss_summary.lower_nodes);
         summary.parser_unique_nodes_total += gss_summary.total_unique_nodes;
         summary.parser_unique_nodes_max = summary
             .parser_unique_nodes_max
@@ -82,6 +137,80 @@ fn summarize_state_map(state: &BTreeMap<u32, ParserGSS>) -> ConstraintStateSumma
     }
 
     summary
+}
+
+fn accumulate_advance_stacks_metrics(
+    metrics: &mut CommitDebugMetrics,
+    advance_metrics: &AdvanceStacksDebugMetrics,
+) {
+    metrics.advance_reduce_closure_iterations_total += advance_metrics.reduce_closure_iterations;
+    metrics.advance_reduce_closure_iterations_max = metrics
+        .advance_reduce_closure_iterations_max
+        .max(advance_metrics.reduce_closure_iterations);
+    metrics.advance_frontier_states_total += advance_metrics.frontier_states_total;
+    metrics.advance_frontier_states_max = metrics
+        .advance_frontier_states_max
+        .max(advance_metrics.frontier_states_max);
+    metrics.advance_reduce_rules_considered += advance_metrics.reduce_rules_considered;
+    metrics.advance_popn_calls += advance_metrics.popn_calls;
+    metrics.advance_popn_nonempty += advance_metrics.popn_nonempty;
+    metrics.advance_goto_lookups += advance_metrics.goto_lookups;
+    metrics.advance_goto_hits += advance_metrics.goto_hits;
+    metrics.advance_reductions_emitted += advance_metrics.reductions_emitted;
+    metrics.advance_absorb_targets += advance_metrics.absorb_targets;
+    metrics.advance_shift_state_candidates += advance_metrics.shift_state_candidates;
+    metrics.advance_shift_targets_hit += advance_metrics.shift_targets_hit;
+    metrics.advance_shifted_results += advance_metrics.shifted_results;
+
+    metrics.advance_input_top_values_total += advance_metrics.input_summary.top_values_count;
+    metrics.advance_input_top_values_max = metrics
+        .advance_input_top_values_max
+        .max(advance_metrics.input_summary.top_values_count);
+    metrics.advance_input_upperbranch_nodes_total += advance_metrics.input_summary.upperbranch_nodes;
+    metrics.advance_input_upperbranch_nodes_max = metrics
+        .advance_input_upperbranch_nodes_max
+        .max(advance_metrics.input_summary.upperbranch_nodes);
+    metrics.advance_input_interface_nodes_total += advance_metrics.input_summary.interface_nodes;
+    metrics.advance_input_interface_nodes_max = metrics
+        .advance_input_interface_nodes_max
+        .max(advance_metrics.input_summary.interface_nodes);
+    metrics.advance_input_lower_nodes_total += advance_metrics.input_summary.lower_nodes;
+    metrics.advance_input_lower_nodes_max = metrics
+        .advance_input_lower_nodes_max
+        .max(advance_metrics.input_summary.lower_nodes);
+    metrics.advance_input_unique_nodes_total += advance_metrics.input_summary.total_unique_nodes;
+    metrics.advance_input_unique_nodes_max = metrics
+        .advance_input_unique_nodes_max
+        .max(advance_metrics.input_summary.total_unique_nodes);
+    metrics.advance_input_total_edges_total += advance_metrics.input_summary.total_edges;
+    metrics.advance_input_total_edges_max = metrics
+        .advance_input_total_edges_max
+        .max(advance_metrics.input_summary.total_edges);
+
+    metrics.advance_output_top_values_total += advance_metrics.output_summary.top_values_count;
+    metrics.advance_output_top_values_max = metrics
+        .advance_output_top_values_max
+        .max(advance_metrics.output_summary.top_values_count);
+    metrics.advance_output_upperbranch_nodes_total += advance_metrics.output_summary.upperbranch_nodes;
+    metrics.advance_output_upperbranch_nodes_max = metrics
+        .advance_output_upperbranch_nodes_max
+        .max(advance_metrics.output_summary.upperbranch_nodes);
+    metrics.advance_output_interface_nodes_total += advance_metrics.output_summary.interface_nodes;
+    metrics.advance_output_interface_nodes_max = metrics
+        .advance_output_interface_nodes_max
+        .max(advance_metrics.output_summary.interface_nodes);
+    metrics.advance_output_lower_nodes_total += advance_metrics.output_summary.lower_nodes;
+    metrics.advance_output_lower_nodes_max = metrics
+        .advance_output_lower_nodes_max
+        .max(advance_metrics.output_summary.lower_nodes);
+    metrics.advance_output_unique_nodes_total += advance_metrics.output_summary.total_unique_nodes;
+    metrics.advance_output_unique_nodes_max = metrics
+        .advance_output_unique_nodes_max
+        .max(advance_metrics.output_summary.total_unique_nodes);
+    metrics.advance_output_total_edges_total += advance_metrics.output_summary.total_edges;
+    metrics.advance_output_total_edges_max = metrics
+        .advance_output_total_edges_max
+        .max(advance_metrics.output_summary.total_edges);
 }
 
 fn commit_bytes_impl(
@@ -313,12 +442,19 @@ fn commit_bytes_impl(
                 let t_advance = metrics
                     .as_ref()
                     .map(|_| std::time::Instant::now());
-                let mut gss = advance_stacks(&constraint.table, &gss_at_offset, matched.id);
+                let mut advance_metrics = AdvanceStacksDebugMetrics::default();
+                let mut gss = advance_stacks_with_metrics(
+                    &constraint.table,
+                    &gss_at_offset,
+                    matched.id,
+                    metrics.as_deref_mut().map(|_| &mut advance_metrics),
+                );
                 if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance) {
                     metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
                     if !gss.is_empty() {
                         metrics.advance_stacks_nonempty += 1;
                     }
+                    accumulate_advance_stacks_metrics(metrics, &advance_metrics);
                 }
                 if gss.is_empty() {
                     continue;
