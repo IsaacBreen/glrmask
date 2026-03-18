@@ -295,6 +295,25 @@ fn regex_literal_bytes(bytes: &[u8]) -> String {
         .join("")
 }
 
+fn jsonified_literal_fragment(byte: u8) -> Option<String> {
+    let mut parts = Vec::new();
+    if json_direct_ascii_bytes().contains(&byte) {
+        parts.push(regex_literal_bytes(&[byte]));
+    }
+    parts.extend(json_escaped_byte_fragments(byte));
+    if parts.is_empty() {
+        return None;
+    }
+    if parts.len() == 1 {
+        return parts.into_iter().next();
+    }
+    Some(format!("(?:{})", parts.join("|")))
+}
+
+fn is_regex_metachar(byte: u8) -> bool {
+    matches!(byte, b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'*' | b'+' | b'?' | b'|' | b'^' | b'$' | b'\\')
+}
+
 fn hex_nibble_fragment(value: u8) -> String {
     match value {
         0..=9 => char::from(b'0' + value).to_string(),
@@ -485,6 +504,13 @@ fn jsonify_regex_dot(pattern: &str) -> String {
             out.push_str(json_dot);
             i += 1;
             continue;
+        }
+        if !is_regex_metachar(ch) {
+            if let Some(fragment) = jsonified_literal_fragment(ch) {
+                out.push_str(&fragment);
+                i += 1;
+                continue;
+            }
         }
         out.push(ch as char);
         i += 1;
@@ -2689,6 +2715,13 @@ mod tests {
         assert!(accepts_sequence(schema, &[b"\"xdeny\""]));
         assert!(accepts_sequence(schema, &[b"\"/deny\""]));
         assert!(!accepts_sequence(schema, &[b"\"xdenyx\""]));
+    }
+
+    #[test]
+    fn test_pattern_literal_slash_accepts_escaped_solidus() {
+        let schema = r#"{"type": "string", "pattern": "^/[^\\u0000]+$"}"#;
+        assert!(accepts_sequence(schema, &[b"\"/path\""]));
+        assert!(accepts_sequence(schema, &[b"\"\\/path\""]));
     }
 
     #[test]
