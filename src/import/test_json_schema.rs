@@ -891,7 +891,7 @@ fn test_pattern_length_constraints_bound_string_content() {
                 "type": "string",
                 "minLength": 12,
                 "maxLength": 12,
-                "pattern": "[0-9a-fA-F]+"
+                "pattern": "^[0-9a-fA-F]+$"
             },
             "secret": {
                 "type": "string",

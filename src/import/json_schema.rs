@@ -263,9 +263,20 @@ fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
 }
 
 fn json_search_branch_fragment(branch: &str) -> String {
+    json_search_branch_fragment_impl(branch, None)
+}
+
+fn json_search_branch_fragment_bounded(branch: &str, max_tail: usize) -> String {
+    json_search_branch_fragment_impl(branch, Some(max_tail))
+}
+
+fn json_search_branch_fragment_impl(branch: &str, max_tail: Option<usize>) -> String {
     let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
     let inner = jsonify_regex_dot(core);
-    let string_tail = format!(r#"(?:{})*"#, JSON_STRING_CHAR_PATTERN);
+    let string_tail = match max_tail {
+        Some(n) => format!(r#"(?:{}){{0,{}}}"#, JSON_STRING_CHAR_PATTERN, n),
+        None => format!(r#"(?:{})*"#, JSON_STRING_CHAR_PATTERN),
+    };
     match (anchored_start, anchored_end) {
         (true, true) => inner,
         (true, false) => format!("{}{}", inner, string_tail),
@@ -275,14 +286,23 @@ fn json_search_branch_fragment(branch: &str) -> String {
 }
 
 fn json_search_pattern(pattern: &str) -> String {
+    json_search_pattern_impl(pattern, None)
+}
+
+fn json_search_pattern_bounded(pattern: &str, max_tail: usize) -> String {
+    json_search_pattern_impl(pattern, Some(max_tail))
+}
+
+fn json_search_pattern_impl(pattern: &str, max_tail: Option<usize>) -> String {
     let branches = split_top_level_regex_branches(pattern);
+    let map_fn = |b| match max_tail {
+        Some(n) => json_search_branch_fragment_bounded(b, n),
+        None => json_search_branch_fragment(b),
+    };
     if branches.len() == 1 {
-        return json_search_branch_fragment(branches[0]);
+        return map_fn(branches[0]);
     }
-    let fragments = branches
-        .into_iter()
-        .map(json_search_branch_fragment)
-        .collect::<Vec<_>>();
+    let fragments = branches.into_iter().map(map_fn).collect::<Vec<_>>();
     format!("(?:{})", fragments.join("|"))
 }
 
@@ -656,6 +676,11 @@ fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
     regex_expr(format!(r#""(?:{})""#, inner))
 }
 
+fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
+    let inner = json_search_pattern_bounded(pattern, max_tail);
+    regex_expr(format!(r#""(?:{})""#, inner))
+}
+
 fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
     let inner = jsonify_regex_dot(pattern);
     regex_expr(format!(r#""(?:{})""#, inner))
@@ -786,18 +811,28 @@ fn simple_anchored_literal_pattern(pattern: &str) -> Option<(String, bool)> {
 }
 
 fn simple_repeated_single_char_pattern(pattern: &str) -> Option<String> {
-    let mut core = pattern;
-    if let Some(stripped) = core.strip_prefix('^') {
-        core = stripped;
-    }
-    if let Some(stripped) = core.strip_suffix('$') {
-        core = stripped;
-    }
+    // Only valid when the pattern is fully anchored (^...$), because JSON Schema
+    // `pattern` is a search pattern. Without both anchors the string may contain
+    // characters outside the char-class, so we must fall back to the general
+    // json_search_pattern path.
+    let core = pattern.strip_prefix('^')?.strip_suffix('$')?;
     let repeated = core.strip_suffix('+')?;
     if !(repeated.starts_with('[') && repeated.ends_with(']')) {
         return None;
     }
     Some(jsonify_regex_dot(repeated))
+}
+
+/// Returns `true` when every top-level branch of `pattern` starts with `^` and
+/// ends with `$` (after stripping a single outer group wrapper). For such
+/// patterns `json_wrapped_pattern` produces no `<string_tail>` padding, so the
+/// resulting regex stays compact and avoids DFA explosion.
+fn pattern_all_branches_anchored(pattern: &str) -> bool {
+    let branches = split_top_level_regex_branches(pattern);
+    branches.iter().all(|b| {
+        let (start, end, _) = strip_branch_outer_anchors(b);
+        start && end
+    })
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
@@ -2159,12 +2194,33 @@ impl SchemaCtx {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT");
             };
-            if min_len > 0 || max_len.is_some() {
-                if let Some(unit_pattern) = simple_repeated_single_char_pattern(&pattern) {
+            if let Some(unit_pattern) = simple_repeated_single_char_pattern(&pattern) {
+                if min_len > 0 || max_len.is_some() {
                     return self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len);
                 }
+                return json_wrapped_fullmatch_pattern(&format!("{}+", unit_pattern));
             }
-            return json_wrapped_pattern(&pattern);
+            if pattern_all_branches_anchored(&pattern) {
+                // Every branch is ^…$, so json_wrapped_pattern produces no
+                // <string_tail> padding — safe from DFA explosion. Length
+                // bounds are implicitly enforced by the anchored regex itself.
+                return json_wrapped_pattern(&pattern);
+            }
+            if min_len > 0 || max_len.is_some() {
+                // Unanchored pattern with length bounds. Use bounded search
+                // wrapping (string tails capped to maxLength) to keep the DFA
+                // compact. For very large maxLength values, fall through to the
+                // length-only path to avoid state explosion.
+                const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
+                if let Some(ml) = max_len {
+                    if ml <= MAX_BOUNDED_SEARCH_TAIL {
+                        return json_wrapped_pattern_bounded(&pattern, ml);
+                    }
+                }
+                // maxLength is too large or absent — drop pattern, use length only
+            } else {
+                return json_wrapped_pattern(&pattern);
+            }
         }
 
         if let Some(format_name) = schema.get("format").and_then(Value::as_str) {
