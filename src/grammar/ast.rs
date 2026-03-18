@@ -100,27 +100,23 @@ fn exact_repeat_split(count: usize, shape: RepeatTreeShape) -> (usize, usize) {
             let left = count / 2;
             (left, count - left)
         }
-        RepeatTreeShape::Left => {
-            let left = highest_power_of_two_less_than(count);
-            (left, count - left)
-        }
-        RepeatTreeShape::Right => {
-            let right = highest_power_of_two_less_than(count);
-            (count - right, right)
-        }
+        RepeatTreeShape::Left => (count - 1, 1),
+        RepeatTreeShape::Right => (1, count - 1),
     }
 }
 
 fn range_repeat_split(min: usize, max: usize, shape: RepeatTreeShape) -> (usize, usize) {
     debug_assert!(min < max);
     let width = max - min + 1;
-    let left_width = match shape {
-        RepeatTreeShape::Balanced => width / 2,
-        RepeatTreeShape::Left => highest_power_of_two_less_than(width),
-        RepeatTreeShape::Right => width - highest_power_of_two_less_than(width),
-    };
-    let split = min + left_width - 1;
-    (split, width - left_width)
+    match shape {
+        RepeatTreeShape::Balanced => {
+            let left_width = width / 2;
+            let split = min + left_width - 1;
+            (split, width - left_width)
+        }
+        RepeatTreeShape::Left => (max - 1, 1),
+        RepeatTreeShape::Right => (min, width - 1),
+    }
 }
 
 impl Lowerer {
@@ -853,15 +849,15 @@ mod tests {
     #[test]
     fn test_exact_repeat_split_respects_left_tree_shape() {
         assert_eq!(repeat_tree_shape_from_value("left"), RepeatTreeShape::Left);
-        assert_eq!(exact_repeat_split(13, RepeatTreeShape::Left), (8, 5));
-        assert_eq!(range_repeat_split(3, 13, RepeatTreeShape::Left), (10, 3));
+        assert_eq!(exact_repeat_split(13, RepeatTreeShape::Left), (12, 1));
+        assert_eq!(range_repeat_split(3, 13, RepeatTreeShape::Left), (12, 1));
     }
 
     #[test]
     fn test_exact_repeat_split_respects_right_tree_shape() {
         assert_eq!(repeat_tree_shape_from_value("right"), RepeatTreeShape::Right);
-        assert_eq!(exact_repeat_split(13, RepeatTreeShape::Right), (5, 8));
-        assert_eq!(range_repeat_split(3, 13, RepeatTreeShape::Right), (5, 8));
+        assert_eq!(exact_repeat_split(13, RepeatTreeShape::Right), (1, 12));
+        assert_eq!(range_repeat_split(3, 13, RepeatTreeShape::Right), (3, 10));
     }
 
     #[test]
