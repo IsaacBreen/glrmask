@@ -93,6 +93,9 @@ fn highest_power_of_two_less_than(value: usize) -> usize {
     1usize << ((usize::BITS - 1) - (value - 1).leading_zeros())
 }
 
+const RIGHT_REPEAT_RANGE_FRONT_BUCKET: usize = 128;
+const LEFT_REPEAT_RANGE_BACK_BUCKET: usize = 128;
+
 fn exact_repeat_split(count: usize, shape: RepeatTreeShape) -> (usize, usize) {
     debug_assert!(count > 1);
     match shape {
@@ -226,6 +229,59 @@ impl Lowerer {
 
         let (_, nt) = self.fresh_nt("repeat_range");
         range_cache.insert((min, max), nt);
+        match shape {
+            RepeatTreeShape::Right if (max - min + 1) > RIGHT_REPEAT_RANGE_FRONT_BUCKET => {
+                let cutoff = (min + RIGHT_REPEAT_RANGE_FRONT_BUCKET - 1).min(max);
+                for count in min..=cutoff {
+                    let exact_nt = self.repeat_exact_nt(item, count, shape, exact_cache);
+                    self.rules.push(Rule {
+                        lhs: nt,
+                        rhs: vec![Symbol::Nonterminal(exact_nt)],
+                    });
+                }
+                if cutoff < max {
+                    let tail_nt = self.repeat_range_nt(
+                        item,
+                        cutoff + 1,
+                        max,
+                        shape,
+                        exact_cache,
+                        range_cache,
+                    );
+                    self.rules.push(Rule {
+                        lhs: nt,
+                        rhs: vec![Symbol::Nonterminal(tail_nt)],
+                    });
+                }
+                return nt;
+            }
+            RepeatTreeShape::Left if (max - min + 1) > LEFT_REPEAT_RANGE_BACK_BUCKET => {
+                let cutoff = max.saturating_sub(LEFT_REPEAT_RANGE_BACK_BUCKET - 1).max(min);
+                if min < cutoff {
+                    let head_nt = self.repeat_range_nt(
+                        item,
+                        min,
+                        cutoff - 1,
+                        shape,
+                        exact_cache,
+                        range_cache,
+                    );
+                    self.rules.push(Rule {
+                        lhs: nt,
+                        rhs: vec![Symbol::Nonterminal(head_nt)],
+                    });
+                }
+                for count in cutoff..=max {
+                    let exact_nt = self.repeat_exact_nt(item, count, shape, exact_cache);
+                    self.rules.push(Rule {
+                        lhs: nt,
+                        rhs: vec![Symbol::Nonterminal(exact_nt)],
+                    });
+                }
+                return nt;
+            }
+            _ => {}
+        }
         let (split, _) = range_repeat_split(min, max, shape);
         let left_nt =
             self.repeat_range_nt(item, min, split, shape, exact_cache, range_cache);

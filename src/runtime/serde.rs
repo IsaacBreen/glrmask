@@ -69,6 +69,7 @@ impl Constraint {
         let mut constraint: Self = bincode::deserialize(bytes)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         constraint.build_buf_masks();
+        constraint.build_dense_token_bytes();
         constraint.build_dense_token_masks();
         constraint.build_fast_transitions();
         constraint.build_seed_dense_masks();

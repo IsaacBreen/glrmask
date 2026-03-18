@@ -1159,6 +1159,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         eos_token_id: vocab.eos_token_id,
         token_bytes,
         internal_token_bytes,
+        token_bytes_dense: Vec::new(),
         internal_token_buf_masks: Vec::new(),
         internal_token_dense_words: 0,
         weight_token_dense_masks: rustc_hash::FxHashMap::default(),
@@ -1177,6 +1178,14 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][compile] build_buf_masks_ms={:.3}",
+            ms(phase_started_at.elapsed()),
+        );
+    }
+    let phase_started_at = std::time::Instant::now();
+    constraint.build_dense_token_bytes();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][compile] build_dense_token_bytes_ms={:.3}",
             ms(phase_started_at.elapsed()),
         );
     }
@@ -1251,6 +1260,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         eos_token_id: vocab.eos_token_id,
         token_bytes: token_bytes.clone(),
         internal_token_bytes,
+        token_bytes_dense: Vec::new(),
         internal_token_buf_masks: Vec::new(),
         internal_token_dense_words: 0,
         weight_token_dense_masks: rustc_hash::FxHashMap::default(),
@@ -1259,6 +1269,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         dwa_fast_transitions: Vec::new(),
     };
     constraint.build_buf_masks();
+    constraint.build_dense_token_bytes();
     constraint.build_dense_token_masks();
     constraint.build_fast_transitions();
     constraint.build_seed_dense_masks();

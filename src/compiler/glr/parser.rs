@@ -317,12 +317,119 @@ pub(crate) fn advance_stacks_with_metrics(
     token: TerminalID,
     mut metrics: Option<&mut AdvanceStacksDebugMetrics>,
 ) -> ParserGSS {
-    if !stack_may_advance_on(table, stack, token) {
+    if let Some(state) = stack.single_exclusive_top_value() {
+        let out = match table.action(state, token) {
+            Some(Action::Shift(target)) => {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.input_summary = stack.summary();
+                    metrics.shift_state_candidates = 1;
+                    metrics.shift_targets_hit = 1;
+                    metrics.shifted_results = 1;
+                }
+                stack.push(*target)
+            }
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.input_summary = stack.summary();
+                    metrics.shift_state_candidates = 1;
+                    metrics.shift_targets_hit = 1;
+                    metrics.shifted_results = 1;
+                }
+                stack.push(*target)
+            }
+            Some(Action::Reduce(_))
+            | Some(Action::Accept)
+            | Some(Action::Split { .. }) => ParserGSS::empty(),
+            None => {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.input_summary = stack.summary();
+                    metrics.output_summary = LeveledGSSSummary::default();
+                }
+                return ParserGSS::empty();
+            }
+        };
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.output_summary = out.summary();
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+
+    let frontier = stack.peek_values();
+    if frontier.is_empty() {
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.input_summary = stack.summary();
             metrics.output_summary = LeveledGSSSummary::default();
         }
         return ParserGSS::empty();
+    }
+
+    let mut pure_shift_targets = Vec::new();
+    let mut pure_shift_only = true;
+    let mut any_action = false;
+    for state in frontier.iter().copied() {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
+                any_action = true;
+                pure_shift_targets.push((state, *target));
+            }
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => {
+                any_action = true;
+                pure_shift_targets.push((state, *target));
+            }
+            Some(Action::Reduce(_))
+            | Some(Action::Accept)
+            | Some(Action::Split { .. }) => {
+                any_action = true;
+                pure_shift_only = false;
+                break;
+            }
+            None => {}
+        }
+    }
+    if !any_action {
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.input_summary = stack.summary();
+            metrics.output_summary = LeveledGSSSummary::default();
+        }
+        return ParserGSS::empty();
+    }
+    if pure_shift_only && !pure_shift_targets.is_empty() {
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.input_summary = stack.summary();
+            metrics.shift_state_candidates = frontier.len();
+        }
+        let out = if pure_shift_targets.len() == 1 {
+            let (state, target) = pure_shift_targets[0];
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.shift_targets_hit = 1;
+                metrics.shifted_results = 1;
+            }
+            stack.isolate(Some(state)).push(target)
+        } else {
+            let mut shifted_results = Vec::with_capacity(pure_shift_targets.len());
+            for (state, target) in pure_shift_targets {
+                shifted_results.push(stack.isolate(Some(state)).push(target));
+            }
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.shift_targets_hit = shifted_results.len();
+                metrics.shifted_results = shifted_results.len();
+            }
+            ParserGSS::merge_many(shifted_results)
+        };
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.output_summary = out.summary();
+        }
+        return out;
     }
 
     // Reduce closure: iteratively apply all reduce actions on the GSS directly.
@@ -366,12 +473,34 @@ pub(crate) fn advance_stacks_with_metrics(
                 }
             }
             let subtree = current.isolate(Some(state));
+            let mut needed_rhs_lens: Vec<usize> = reduce_rules
+                .iter()
+                .map(|&rule_id| table.rules[rule_id as usize].rhs.len())
+                .collect();
+            needed_rhs_lens.sort_unstable();
+            needed_rhs_lens.dedup();
+
+            let mut popped_cache = BTreeMap::<usize, ParserGSS>::new();
+            let mut incremental_popped = subtree.clone();
+            let mut incremental_len = 0usize;
+            for rhs_len in needed_rhs_lens {
+                while incremental_len < rhs_len {
+                    incremental_popped = incremental_popped.pop();
+                    incremental_len += 1;
+                }
+                popped_cache.insert(rhs_len, incremental_popped.clone());
+            }
+            let mut base_cache = BTreeMap::<(usize, u32), ParserGSS>::new();
             for &rule_id in reduce_rules {
                 let rule = &table.rules[rule_id as usize];
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.popn_calls += 1;
                 }
-                let popped = subtree.popn(rule.rhs.len() as isize);
+                let rhs_len = rule.rhs.len();
+                let popped = popped_cache
+                    .get(&rhs_len)
+                    .cloned()
+                    .unwrap_or_else(|| subtree.popn(rhs_len as isize));
                 if popped.is_empty() {
                     continue;
                 }
@@ -383,7 +512,10 @@ pub(crate) fn advance_stacks_with_metrics(
                         metrics.goto_lookups += 1;
                     }
                     if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        let base = popped.isolate(Some(goto_from));
+                        let base = base_cache
+                            .entry((rhs_len, goto_from))
+                            .or_insert_with(|| popped.isolate(Some(goto_from)))
+                            .clone();
                         pending_bases_by_target
                             .entry(target)
                             .and_modify(|existing| *existing = existing.merge(&base))

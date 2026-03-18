@@ -148,6 +148,47 @@ fn summarize_state_map(state: &BTreeMap<u32, ParserGSS>) -> ConstraintStateSumma
     summary
 }
 
+fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
+    constraint
+        .token_bytes_dense
+        .get(token_id as usize)
+        .and_then(|bytes| bytes.as_deref())
+        .or_else(|| constraint.token_bytes.get(&token_id).map(Vec::as_slice))
+}
+
+enum ActionableTerminals {
+    SingleState(u32),
+    Many(FxHashSet<u32>),
+}
+
+impl ActionableTerminals {
+    fn from_gss(constraint: &Constraint, gss: &ParserGSS) -> Option<Self> {
+        if let Some(state_id) = gss.single_top_value() {
+            return Some(Self::SingleState(state_id));
+        }
+
+        let mut terminals = FxHashSet::default();
+        for state_id in gss.peek_values() {
+            if let Some(by_terminal) = constraint.table.action.get(state_id as usize) {
+                terminals.extend(by_terminal.keys().copied());
+            }
+        }
+
+        if terminals.is_empty() {
+            None
+        } else {
+            Some(Self::Many(terminals))
+        }
+    }
+
+    fn contains(&self, constraint: &Constraint, terminal: u32) -> bool {
+        match self {
+            Self::SingleState(state_id) => constraint.table.action(*state_id, terminal).is_some(),
+            Self::Many(terminals) => terminals.contains(&terminal),
+        }
+    }
+}
+
 fn accumulate_advance_stacks_metrics(
     metrics: &mut CommitDebugMetrics,
     advance_metrics: &AdvanceStacksDebugMetrics,
@@ -285,7 +326,8 @@ fn commit_bytes_impl(
         metrics.initial_tokenizer_states = state.len();
     }
 
-    for &tokenizer_state in state.keys() {
+    for (&tokenizer_state, parser_gss) in state.iter() {
+        let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
         let t_exec = metrics
             .as_ref()
             .map(|_| std::time::Instant::now());
@@ -306,6 +348,12 @@ fn commit_bytes_impl(
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.initial_ignored_matches += 1;
                 }
+                continue;
+            }
+            if actionable_terminals
+                .as_ref()
+                .is_some_and(|actionable| !actionable.contains(constraint, matched.id))
+            {
                 continue;
             }
             // TODO: expand via mutually_greedy_group() once greedy groups
@@ -329,10 +377,8 @@ fn commit_bytes_impl(
     }
 
     for parser_state in state.values_mut() {
-        let t_prune = metrics
-            .as_ref()
-            .map(|_| std::time::Instant::now());
-        let mut gss = parser_state.apply_and_prune(|terminals_disallowed: &TerminalsDisallowed| {
+        let t_transform = metrics.as_ref().map(|_| std::time::Instant::now());
+        let gss = parser_state.apply_and_prune(|terminals_disallowed: &TerminalsDisallowed| {
             for (state_id, matched_terminals) in &terminals_map {
                 if let Some(disallowed) = terminals_disallowed.get(state_id) {
                     if !matched_terminals.is_empty()
@@ -344,16 +390,7 @@ fn commit_bytes_impl(
                     }
                 }
             }
-            Some(terminals_disallowed.clone())
-        });
-        if let (Some(metrics), Some(t_prune)) = (metrics.as_deref_mut(), t_prune) {
-            metrics.initial_apply_prune_ns += t_prune.elapsed().as_nanos() as u64;
-        }
 
-        let t_remap = metrics
-            .as_ref()
-            .map(|_| std::time::Instant::now());
-        gss = gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
             let mut remapped = BTreeMap::new();
             for (old_state, new_state) in &state_map {
                 if let Some(disallowed) = terminals_disallowed.get(old_state) {
@@ -363,10 +400,10 @@ fn commit_bytes_impl(
                         .extend(disallowed.iter().copied());
                 }
             }
-            remapped
+            Some(remapped)
         });
-        if let (Some(metrics), Some(t_remap)) = (metrics.as_deref_mut(), t_remap) {
-            metrics.initial_remap_ns += t_remap.elapsed().as_nanos() as u64;
+        if let (Some(metrics), Some(t_transform)) = (metrics.as_deref_mut(), t_transform) {
+            metrics.initial_apply_prune_ns += t_transform.elapsed().as_nanos() as u64;
             if gss.is_empty() {
                 metrics.parser_states_pruned += 1;
             }
@@ -379,12 +416,17 @@ fn commit_bytes_impl(
         metrics.parser_states_retained_after_prune = state.len();
     }
 
-    let mut new_overall_state: BTreeMap<u32, ParserGSS> = BTreeMap::new();
-    let mut processing_queue: Vec<BTreeMap<u32, ParserGSS>> =
+    let mut pending_overall_state: BTreeMap<u32, Vec<ParserGSS>> = BTreeMap::new();
+    let mut processing_queue: Vec<BTreeMap<u32, Vec<ParserGSS>>> =
         (0..=bytes.len()).map(|_| BTreeMap::new()).collect();
+    let mut advance_result_cache = FxHashMap::<(usize, u32), ParserGSS>::default();
+    let mut interface_shape_advance_cache = FxHashMap::<(usize, u32), ParserGSS>::default();
 
     // Take ownership instead of cloning — state will be fully replaced below.
-    processing_queue[0] = std::mem::take(state);
+    processing_queue[0] = std::mem::take(state)
+        .into_iter()
+        .map(|(tsid, gss)| (tsid, vec![gss]))
+        .collect();
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.queue_max_offsets_pending = usize::from(!processing_queue[0].is_empty());
     }
@@ -396,28 +438,31 @@ fn commit_bytes_impl(
             continue;
         }
         let offset = next_offset;
-        let states_to_process = std::mem::take(&mut processing_queue[offset]);
+        let states_to_process = std::mem::take(&mut processing_queue[offset])
+            .into_iter()
+            .map(|(tsid, mut gss_list)| {
+                let gss = if gss_list.len() == 1 {
+                    gss_list.pop().expect("single entry")
+                } else {
+                    ParserGSS::merge_many(gss_list)
+                };
+                (tsid, gss)
+            });
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.queue_offsets_processed += 1;
-            metrics.queue_states_processed += states_to_process.len();
+            let state_count = states_to_process.len();
+            metrics.queue_states_processed += state_count;
             metrics.queue_max_states_in_offset_bucket = metrics
                 .queue_max_states_in_offset_bucket
-                .max(states_to_process.len());
+                .max(state_count);
             metrics.queue_max_offsets_pending = metrics
                 .queue_max_offsets_pending
                 .max(processing_queue[offset..].iter().filter(|bucket| !bucket.is_empty()).count());
         }
 
         for (tokenizer_state, gss_at_offset) in states_to_process {
-            let actionable_terminals = {
-                let mut terminals = FxHashSet::default();
-                for state_id in gss_at_offset.peek_values() {
-                    if let Some(by_terminal) = constraint.table.action.get(state_id as usize) {
-                        terminals.extend(by_terminal.keys().copied());
-                    }
-                }
-                terminals
-            };
+            let actionable_terminals =
+                ActionableTerminals::from_gss(constraint, &gss_at_offset);
             let t_exec = metrics
                 .as_ref()
                 .map(|_| std::time::Instant::now());
@@ -451,7 +496,9 @@ fn commit_bytes_impl(
             let mut terminal_result_cache = FxHashMap::<u32, ParserGSS>::default();
             for matched in &exec_result.matches {
                 if Some(matched.id) != ignore_terminal
-                    && !actionable_terminals.contains(&matched.id)
+                    && actionable_terminals
+                        .as_ref()
+                        .is_some_and(|actionable| !actionable.contains(constraint, matched.id))
                 {
                     continue;
                 }
@@ -469,11 +516,11 @@ fn commit_bytes_impl(
                         let t_merge = metrics
                             .as_ref()
                             .map(|_| std::time::Instant::now());
-                        let existed = new_overall_state.contains_key(&next_tsid);
-                        new_overall_state
+                        let existed = pending_overall_state.contains_key(&next_tsid);
+                        pending_overall_state
                             .entry(next_tsid)
-                            .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
-                            .or_insert_with(|| gss_at_offset.clone());
+                            .or_default()
+                            .push(gss_at_offset.clone());
                         if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                             metrics.processing_ignored_matches += 1;
                             metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
@@ -495,8 +542,8 @@ fn commit_bytes_impl(
                             .get_mut(new_offset)
                             .expect("new_offset within committed token length")
                             .entry(next_tsid)
-                            .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
-                            .or_insert_with(|| gss_at_offset.clone());
+                            .or_default()
+                            .push(gss_at_offset.clone());
                         if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                             metrics.processing_ignored_matches += 1;
                             metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
@@ -516,30 +563,88 @@ fn commit_bytes_impl(
                 let gss = if let Some(cached) = terminal_result_cache.get(&matched.id) {
                     cached.clone()
                 } else {
-                    if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
-                        terminal_result_cache.insert(matched.id, ParserGSS::empty());
-                        continue;
-                    }
-                    if let Some(metrics) = metrics.as_deref_mut() {
-                        metrics.advance_stacks_calls += 1;
-                    }
-                    let t_advance = metrics
-                        .as_ref()
-                        .map(|_| std::time::Instant::now());
-                    let mut advance_metrics = AdvanceStacksDebugMetrics::default();
-                    let mut gss = advance_stacks_with_metrics(
-                        &constraint.table,
-                        &gss_at_offset,
-                        matched.id,
-                        metrics.as_deref_mut().map(|_| &mut advance_metrics),
-                    );
-                    if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance) {
-                        metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
-                        if !gss.is_empty() {
-                            metrics.advance_stacks_nonempty += 1;
+                    let cache_key = (gss_at_offset.ptr_key(), matched.id);
+                    let mut gss = if let Some(cached) = advance_result_cache.get(&cache_key) {
+                        cached.clone()
+                    } else if let (Some(shape_key), Some(acc)) = (
+                        gss_at_offset.root_interface_shape_key(),
+                        gss_at_offset.root_interface_acc(),
+                    ) {
+                        if let Some(cached) =
+                            interface_shape_advance_cache.get(&(shape_key, matched.id))
+                        {
+                            if let Some(rewrapped) = cached.with_root_interface_acc(acc) {
+                                rewrapped
+                            } else {
+                                cached.clone()
+                            }
+                        } else {
+                            if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                                advance_result_cache.insert(cache_key, ParserGSS::empty());
+                                interface_shape_advance_cache
+                                    .insert((shape_key, matched.id), ParserGSS::empty());
+                                terminal_result_cache.insert(matched.id, ParserGSS::empty());
+                                continue;
+                            }
+                            if let Some(metrics) = metrics.as_deref_mut() {
+                                metrics.advance_stacks_calls += 1;
+                            }
+                            let t_advance = metrics
+                                .as_ref()
+                                .map(|_| std::time::Instant::now());
+                            let mut advance_metrics = AdvanceStacksDebugMetrics::default();
+                            let gss = advance_stacks_with_metrics(
+                                &constraint.table,
+                                &gss_at_offset,
+                                matched.id,
+                                metrics.as_deref_mut().map(|_| &mut advance_metrics),
+                            );
+                            if let (Some(metrics), Some(t_advance)) =
+                                (metrics.as_deref_mut(), t_advance)
+                            {
+                                metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
+                                if !gss.is_empty() {
+                                    metrics.advance_stacks_nonempty += 1;
+                                }
+                                accumulate_advance_stacks_metrics(metrics, &advance_metrics);
+                            }
+                            advance_result_cache.insert(cache_key, gss.clone());
+                            if gss.root_interface_shape_key().is_some() {
+                                interface_shape_advance_cache
+                                    .insert((shape_key, matched.id), gss.clone());
+                            }
+                            gss
                         }
-                        accumulate_advance_stacks_metrics(metrics, &advance_metrics);
-                    }
+                    } else {
+                        if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                            advance_result_cache.insert(cache_key, ParserGSS::empty());
+                            terminal_result_cache.insert(matched.id, ParserGSS::empty());
+                            continue;
+                        }
+                        if let Some(metrics) = metrics.as_deref_mut() {
+                            metrics.advance_stacks_calls += 1;
+                        }
+                        let t_advance = metrics
+                            .as_ref()
+                            .map(|_| std::time::Instant::now());
+                        let mut advance_metrics = AdvanceStacksDebugMetrics::default();
+                        let gss = advance_stacks_with_metrics(
+                            &constraint.table,
+                            &gss_at_offset,
+                            matched.id,
+                            metrics.as_deref_mut().map(|_| &mut advance_metrics),
+                        );
+                        if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance)
+                        {
+                            metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
+                            if !gss.is_empty() {
+                                metrics.advance_stacks_nonempty += 1;
+                            }
+                            accumulate_advance_stacks_metrics(metrics, &advance_metrics);
+                        }
+                        advance_result_cache.insert(cache_key, gss.clone());
+                        gss
+                    };
                     if !gss.is_empty() {
                         if let Some(end_state) = exec_result.end_state {
                             if let Some(metrics) = metrics.as_deref_mut() {
@@ -582,11 +687,11 @@ fn commit_bytes_impl(
                     let t_merge = metrics
                         .as_ref()
                         .map(|_| std::time::Instant::now());
-                    let existed = new_overall_state.contains_key(&next_tsid);
-                    new_overall_state
+                    let existed = pending_overall_state.contains_key(&next_tsid);
+                    pending_overall_state
                         .entry(next_tsid)
-                        .and_modify(|existing| *existing = existing.merge(&gss))
-                        .or_insert(gss);
+                        .or_default()
+                        .push(gss);
                     if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                         metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
                         if existed {
@@ -607,8 +712,8 @@ fn commit_bytes_impl(
                         .get_mut(new_offset)
                         .expect("new_offset within committed token length")
                         .entry(next_tsid)
-                        .and_modify(|existing| *existing = existing.merge(&gss))
-                        .or_insert(gss);
+                        .or_default()
+                        .push(gss);
                     if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                         metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
                         metrics.queue_max_offsets_pending = metrics
@@ -627,11 +732,11 @@ fn commit_bytes_impl(
                 let t_merge = metrics
                     .as_ref()
                     .map(|_| std::time::Instant::now());
-                let existed = new_overall_state.contains_key(&end_state);
-                new_overall_state
+                let existed = pending_overall_state.contains_key(&end_state);
+                pending_overall_state
                     .entry(end_state)
-                    .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
-                    .or_insert(gss_at_offset);
+                    .or_default()
+                    .push(gss_at_offset);
                 if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                     metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
                     if existed {
@@ -644,6 +749,17 @@ fn commit_bytes_impl(
         }
     }
 
+    let mut new_overall_state: BTreeMap<u32, ParserGSS> = pending_overall_state
+        .into_iter()
+        .map(|(tsid, mut gss_list)| {
+            let gss = if gss_list.len() == 1 {
+                gss_list.pop().expect("single entry")
+            } else {
+                ParserGSS::merge_many(gss_list)
+            };
+            (tsid, gss)
+        })
+        .collect();
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.fused_parser_states = new_overall_state.len();
     }
@@ -681,12 +797,12 @@ impl<'a> ConstraintState<'a> {
         &mut self,
         token_id: u32,
     ) -> Result<(), String> {
-        let bytes = self.constraint.token_bytes
-            .get(&token_id)
+        let constraint = self.constraint;
+        let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_impl(self.constraint, &mut self.state, bytes, None);
+        commit_bytes_impl(constraint, &mut self.state, bytes, None);
         Ok(())
     }
 
@@ -713,8 +829,7 @@ impl<'a> ConstraintState<'a> {
         &self,
         token_id: u32,
     ) -> Result<CommitDebugMetrics, String> {
-        let bytes = self.constraint.token_bytes
-            .get(&token_id)
+        let bytes = token_bytes_for_id(self.constraint, token_id)
             .ok_or_else(|| {
                 format!("debug_commit_token_metrics: token_id {token_id} not in vocabulary")
             })?;

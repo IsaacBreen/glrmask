@@ -50,6 +50,44 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
             Upper::Interface(interface) => interface.inner.children.keys().cloned().collect(),
         }
     }
+
+    fn single_child_key(&self) -> Option<T> {
+        match self {
+            Upper::Branch(branch) => {
+                if branch.children.len() == 1 {
+                    branch.children.keys().next().cloned()
+                } else {
+                    None
+                }
+            }
+            Upper::Interface(interface) => {
+                if interface.inner.children.len() == 1 {
+                    interface.inner.children.keys().next().cloned()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn single_child_key_without_empty(&self) -> Option<T> {
+        match self {
+            Upper::Branch(branch) => {
+                if branch.empty.is_none() && branch.children.len() == 1 {
+                    branch.children.keys().next().cloned()
+                } else {
+                    None
+                }
+            }
+            Upper::Interface(interface) => {
+                if !interface.inner.empty && interface.inner.children.len() == 1 {
+                    interface.inner.children.keys().next().cloned()
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1210,6 +1248,29 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::as_ptr(&self.inner) as usize
     }
 
+    pub fn root_interface_shape_key(&self) -> Option<usize> {
+        match &*self.inner {
+            Upper::Interface(interface) => Some(Arc::as_ptr(&interface.inner) as usize),
+            Upper::Branch(_) => None,
+        }
+    }
+
+    pub fn root_interface_acc(&self) -> Option<A> {
+        match &*self.inner {
+            Upper::Interface(interface) => Some(interface.acc.clone()),
+            Upper::Branch(_) => None,
+        }
+    }
+
+    pub fn with_root_interface_acc(&self, acc: A) -> Option<Self> {
+        match &*self.inner {
+            Upper::Interface(interface) => Some(Self {
+                inner: new_interface(interface.inner.clone(), acc),
+            }),
+            Upper::Branch(_) => None,
+        }
+    }
+
     #[cfg(test)]
     pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
         match (&*self.inner, &*other.inner) {
@@ -1539,6 +1600,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         if self.is_empty() {
             return self.clone();
         }
+        if let Some(fast) = self.popn_single_interface_path(n) {
+            return fast;
+        }
 
         let mut memo_upper: StdHashMap<(usize, isize), Arc<Upper<T, A>>> = StdHashMap::new();
         let mut memo_lower: StdHashMap<(usize, isize), Arc<Lower<T>>> = StdHashMap::new();
@@ -1636,6 +1700,34 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         let new_inner = popn_upper::<T, A>(&self.inner, n, &mut memo_upper, &mut memo_lower);
         LeveledGSS { inner: new_inner }
+    }
+
+    fn popn_single_interface_path(&self, n: isize) -> Option<Self> {
+        let Upper::Interface(interface) = &*self.inner else {
+            return None;
+        };
+
+        let mut current = interface.inner.clone();
+        let mut remaining = n;
+        while remaining > 0 {
+            if current.empty || current.children.len() != 1 {
+                return None;
+            }
+            let kids = current.children.values().next().expect("single child entry");
+            if kids.len() != 1 {
+                return None;
+            }
+            current = kids.values().next().expect("single child node").clone();
+            remaining -= 1;
+        }
+
+        if current.children.is_empty() && !current.empty {
+            Some(Self::empty())
+        } else {
+            Some(Self {
+                inner: new_interface(current, interface.acc.clone()),
+            })
+        }
     }
 
     #[cfg(test)]
@@ -2741,6 +2833,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn peek_values(&self) -> Vec<T> {
         self.inner.children_keys()
+    }
+
+    pub fn single_top_value(&self) -> Option<T> {
+        self.inner.single_child_key()
+    }
+
+    pub fn single_exclusive_top_value(&self) -> Option<T> {
+        self.inner.single_child_key_without_empty()
     }
 
     pub fn reduce_acc(&self) -> Option<A> {
@@ -4054,4 +4154,3 @@ mod tests {
         assert!(underflows.is_empty());
     }
 }
-

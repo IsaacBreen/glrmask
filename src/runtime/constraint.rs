@@ -41,6 +41,8 @@ pub struct Constraint {
     pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
     #[serde(default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
+    #[serde(skip)]
+    pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
 
     /// Precomputed bitmask fragments for each internal token.
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
@@ -79,6 +81,7 @@ impl Clone for Constraint {
             eos_token_id: self.eos_token_id,
             token_bytes: self.token_bytes.clone(),
             internal_token_bytes: self.internal_token_bytes.clone(),
+            token_bytes_dense: self.token_bytes_dense.clone(),
             internal_token_buf_masks: self.internal_token_buf_masks.clone(),
             internal_token_dense_words: self.internal_token_dense_words,
             weight_token_dense_masks: self.weight_token_dense_masks.clone(),
@@ -106,6 +109,18 @@ impl Constraint {
             }
             word_map.into_iter().collect()
         }).collect();
+    }
+
+    pub(crate) fn build_dense_token_bytes(&mut self) {
+        let Some(max_token_id) = self.token_bytes.keys().next_back().copied() else {
+            self.token_bytes_dense.clear();
+            return;
+        };
+        let mut dense = vec![None; max_token_id as usize + 1];
+        for (&token_id, bytes) in &self.token_bytes {
+            dense[token_id as usize] = Some(bytes.clone().into_boxed_slice());
+        }
+        self.token_bytes_dense = dense;
     }
 
     /// Build fast transition lookup tables from the DWA's BTreeMap transitions.
