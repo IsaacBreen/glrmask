@@ -5,6 +5,7 @@ use crate::compiler::glr::parser::{
     ParserGSS,
     TerminalsDisallowed,
     advance_stacks_with_metrics,
+    stack_may_advance_on,
 };
 use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
@@ -482,6 +483,9 @@ fn commit_bytes_impl(
 
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.advance_stacks_calls += 1;
+                }
+                if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                    continue;
                 }
                 let t_advance = metrics
                     .as_ref()

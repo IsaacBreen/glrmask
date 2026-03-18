@@ -299,12 +299,32 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
     advance_stacks_with_metrics(table, stack, token, None)
 }
 
+pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+    stack.peek_values().into_iter().any(|state| {
+        matches!(
+            table.action(state, token),
+            Some(Action::Shift(_))
+                | Some(Action::Reduce(_))
+                | Some(Action::Split { .. })
+                | Some(Action::Accept)
+        )
+    })
+}
+
 pub(crate) fn advance_stacks_with_metrics(
     table: &GLRTable,
     stack: &ParserGSS,
     token: TerminalID,
     mut metrics: Option<&mut AdvanceStacksDebugMetrics>,
 ) -> ParserGSS {
+    if !stack_may_advance_on(table, stack, token) {
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.input_summary = stack.summary();
+            metrics.output_summary = LeveledGSSSummary::default();
+        }
+        return ParserGSS::empty();
+    }
+
     // Reduce closure: iteratively apply all reduce actions on the GSS directly.
     let mut current = stack.clone();
     let mut processed = vec![false; table.num_states as usize];
