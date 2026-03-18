@@ -10,7 +10,7 @@ use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{ConstraintState, ConstraintStateSummary};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommitDebugMetrics {
     pub bytes_len: usize,
     pub state_summary_before: ConstraintStateSummary,
@@ -49,6 +49,13 @@ pub struct CommitDebugMetrics {
     pub advance_shift_state_candidates: usize,
     pub advance_shift_targets_hit: usize,
     pub advance_shifted_results: usize,
+    pub advance_reduce_rule_considered_counts: BTreeMap<u32, usize>,
+    pub advance_reduce_rule_emitted_counts: BTreeMap<u32, usize>,
+    pub advance_reduce_rhs_len_emitted_counts: BTreeMap<usize, usize>,
+    pub advance_reduce_lhs_emitted_counts: BTreeMap<u32, usize>,
+    pub advance_reduce_state_emitted_counts: BTreeMap<u32, usize>,
+    pub advance_goto_from_counts: BTreeMap<u32, usize>,
+    pub advance_goto_target_counts: BTreeMap<u32, usize>,
     pub advance_input_top_values_total: usize,
     pub advance_input_top_values_max: usize,
     pub advance_input_upperbranch_nodes_total: usize,
@@ -143,6 +150,15 @@ fn accumulate_advance_stacks_metrics(
     metrics: &mut CommitDebugMetrics,
     advance_metrics: &AdvanceStacksDebugMetrics,
 ) {
+    fn merge_counts<K: Ord + Copy>(
+        dst: &mut BTreeMap<K, usize>,
+        src: &BTreeMap<K, usize>,
+    ) {
+        for (&key, &count) in src {
+            *dst.entry(key).or_default() += count;
+        }
+    }
+
     metrics.advance_reduce_closure_iterations_total += advance_metrics.reduce_closure_iterations;
     metrics.advance_reduce_closure_iterations_max = metrics
         .advance_reduce_closure_iterations_max
@@ -161,6 +177,34 @@ fn accumulate_advance_stacks_metrics(
     metrics.advance_shift_state_candidates += advance_metrics.shift_state_candidates;
     metrics.advance_shift_targets_hit += advance_metrics.shift_targets_hit;
     metrics.advance_shifted_results += advance_metrics.shifted_results;
+    merge_counts(
+        &mut metrics.advance_reduce_rule_considered_counts,
+        &advance_metrics.reduce_rule_considered_counts,
+    );
+    merge_counts(
+        &mut metrics.advance_reduce_rule_emitted_counts,
+        &advance_metrics.reduce_rule_emitted_counts,
+    );
+    merge_counts(
+        &mut metrics.advance_reduce_rhs_len_emitted_counts,
+        &advance_metrics.reduce_rhs_len_emitted_counts,
+    );
+    merge_counts(
+        &mut metrics.advance_reduce_lhs_emitted_counts,
+        &advance_metrics.reduce_lhs_emitted_counts,
+    );
+    merge_counts(
+        &mut metrics.advance_reduce_state_emitted_counts,
+        &advance_metrics.reduce_state_emitted_counts,
+    );
+    merge_counts(
+        &mut metrics.advance_goto_from_counts,
+        &advance_metrics.goto_from_counts,
+    );
+    merge_counts(
+        &mut metrics.advance_goto_target_counts,
+        &advance_metrics.goto_target_counts,
+    );
 
     metrics.advance_input_top_values_total += advance_metrics.input_summary.top_values_count;
     metrics.advance_input_top_values_max = metrics

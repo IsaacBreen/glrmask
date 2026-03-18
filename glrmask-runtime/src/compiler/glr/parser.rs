@@ -22,7 +22,7 @@ impl Merge for TerminalsDisallowed {
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AdvanceStacksDebugMetrics {
     pub input_summary: LeveledGSSSummary,
     pub output_summary: LeveledGSSSummary,
@@ -39,6 +39,13 @@ pub(crate) struct AdvanceStacksDebugMetrics {
     pub shift_state_candidates: usize,
     pub shift_targets_hit: usize,
     pub shifted_results: usize,
+    pub reduce_rule_considered_counts: BTreeMap<u32, usize>,
+    pub reduce_rule_emitted_counts: BTreeMap<u32, usize>,
+    pub reduce_rhs_len_emitted_counts: BTreeMap<usize, usize>,
+    pub reduce_lhs_emitted_counts: BTreeMap<u32, usize>,
+    pub reduce_state_emitted_counts: BTreeMap<u32, usize>,
+    pub goto_from_counts: BTreeMap<u32, usize>,
+    pub goto_target_counts: BTreeMap<u32, usize>,
 }
 
 #[allow(dead_code)]
@@ -165,6 +172,9 @@ pub(crate) fn advance_stacks_with_metrics(
             };
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.reduce_rules_considered += reduce_rules.len();
+                for &rule_id in reduce_rules {
+                    *metrics.reduce_rule_considered_counts.entry(rule_id).or_default() += 1;
+                }
             }
             let subtree = current.isolate(Some(state));
             for &rule_id in reduce_rules {
@@ -193,6 +203,15 @@ pub(crate) fn advance_stacks_with_metrics(
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.goto_hits += 1;
                             metrics.reductions_emitted += 1;
+                            *metrics.reduce_rule_emitted_counts.entry(rule_id).or_default() += 1;
+                            *metrics
+                                .reduce_rhs_len_emitted_counts
+                                .entry(rule.rhs.len())
+                                .or_default() += 1;
+                            *metrics.reduce_lhs_emitted_counts.entry(rule.lhs).or_default() += 1;
+                            *metrics.reduce_state_emitted_counts.entry(state).or_default() += 1;
+                            *metrics.goto_from_counts.entry(goto_from).or_default() += 1;
+                            *metrics.goto_target_counts.entry(target).or_default() += 1;
                         }
                     }
                 }

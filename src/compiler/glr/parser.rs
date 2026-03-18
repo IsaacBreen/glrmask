@@ -22,7 +22,7 @@ impl Merge for TerminalsDisallowed {
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AdvanceStacksDebugMetrics {
     pub input_summary: LeveledGSSSummary,
     pub output_summary: LeveledGSSSummary,
@@ -39,6 +39,13 @@ pub(crate) struct AdvanceStacksDebugMetrics {
     pub shift_state_candidates: usize,
     pub shift_targets_hit: usize,
     pub shifted_results: usize,
+    pub reduce_rule_considered_counts: BTreeMap<u32, usize>,
+    pub reduce_rule_emitted_counts: BTreeMap<u32, usize>,
+    pub reduce_rhs_len_emitted_counts: BTreeMap<usize, usize>,
+    pub reduce_lhs_emitted_counts: BTreeMap<u32, usize>,
+    pub reduce_state_emitted_counts: BTreeMap<u32, usize>,
+    pub goto_from_counts: BTreeMap<u32, usize>,
+    pub goto_target_counts: BTreeMap<u32, usize>,
 }
 
 #[allow(dead_code)]
@@ -334,6 +341,9 @@ pub(crate) fn advance_stacks_with_metrics(
             };
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.reduce_rules_considered += reduce_rules.len();
+                for &rule_id in reduce_rules {
+                    *metrics.reduce_rule_considered_counts.entry(rule_id).or_default() += 1;
+                }
             }
             let subtree = current.isolate(Some(state));
             for &rule_id in reduce_rules {
@@ -362,6 +372,15 @@ pub(crate) fn advance_stacks_with_metrics(
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.goto_hits += 1;
                             metrics.reductions_emitted += 1;
+                            *metrics.reduce_rule_emitted_counts.entry(rule_id).or_default() += 1;
+                            *metrics
+                                .reduce_rhs_len_emitted_counts
+                                .entry(rule.rhs.len())
+                                .or_default() += 1;
+                            *metrics.reduce_lhs_emitted_counts.entry(rule.lhs).or_default() += 1;
+                            *metrics.reduce_state_emitted_counts.entry(state).or_default() += 1;
+                            *metrics.goto_from_counts.entry(goto_from).or_default() += 1;
+                            *metrics.goto_target_counts.entry(target).or_default() += 1;
                         }
                     }
                 }
@@ -751,5 +770,125 @@ mod tests {
         assert!(accepts(&parser, &[4]),          "\"other\" accepted");
         assert!(accepts(&parser, &[0, 1, 2, 4]), "\"if id then other\" accepted");
         assert!(!accepts(&parser, &[0, 1, 2]),   "\"if id then\" rejected (incomplete)");
+    }
+
+    #[test]
+    fn test_close_token_wrapper_family_causes_reduction_spike() {
+        const OPEN: u32 = 0;
+        const NUM: u32 = 1;
+        const COMMA: u32 = 2;
+        const CLOSE: u32 = 3;
+
+        const START: u32 = 0;
+        const BODY: u32 = 1;
+        const TAIL_ELEM: u32 = 2;
+        const TAIL_PACK: u32 = 3;
+        const FIRST_WRAP: u32 = 10;
+        const WRAPPER_COUNT: usize = 24;
+
+        let mut rules = vec![
+            Rule {
+                lhs: START,
+                rhs: vec![
+                    Symbol::Terminal(OPEN),
+                    Symbol::Terminal(NUM),
+                    Symbol::Nonterminal(BODY),
+                    Symbol::Terminal(CLOSE),
+                ],
+            },
+            Rule {
+                lhs: BODY,
+                rhs: vec![Symbol::Nonterminal(TAIL_PACK)],
+            },
+            Rule {
+                lhs: TAIL_ELEM,
+                rhs: vec![Symbol::Terminal(COMMA), Symbol::Terminal(NUM)],
+            },
+            Rule {
+                lhs: TAIL_PACK,
+                rhs: vec![Symbol::Nonterminal(TAIL_ELEM)],
+            },
+            Rule {
+                lhs: TAIL_PACK,
+                rhs: vec![
+                    Symbol::Nonterminal(TAIL_ELEM),
+                    Symbol::Nonterminal(TAIL_ELEM),
+                ],
+            },
+        ];
+
+        for i in 0..WRAPPER_COUNT {
+            let wrap_nt = FIRST_WRAP + i as u32;
+            rules.push(Rule {
+                lhs: wrap_nt,
+                rhs: vec![Symbol::Nonterminal(TAIL_PACK)],
+            });
+            rules.push(Rule {
+                lhs: BODY,
+                rhs: vec![Symbol::Nonterminal(wrap_nt)],
+            });
+        }
+
+        let gdef = make_grammar(
+            rules,
+            START,
+            vec![tdef(OPEN, "["), tdef(NUM, "n"), tdef(COMMA, ","), tdef(CLOSE, "]")],
+        );
+        let parser = build_parser(&gdef);
+
+        let mut current = GLRParser {
+            table: parser.table.clone(),
+            stack: parser.stack.clone(),
+        };
+        for &token in &[OPEN, NUM, COMMA, NUM, COMMA, NUM] {
+            let (next, progressed) = current.step(token);
+            assert!(progressed, "prefix token {token} should progress");
+            current = next;
+        }
+
+        let mut metrics = AdvanceStacksDebugMetrics::default();
+        let advanced =
+            advance_stacks_with_metrics(&current.table, &current.stack, CLOSE, Some(&mut metrics));
+
+        assert!(!advanced.is_empty(), "close token should remain parseable");
+        assert!(
+            metrics.reductions_emitted >= WRAPPER_COUNT * 2,
+            "expected wrapper family to trigger many reductions, got {}",
+            metrics.reductions_emitted
+        );
+        assert!(
+            metrics
+                .reduce_rhs_len_emitted_counts
+                .get(&1)
+                .copied()
+                .unwrap_or(0)
+                >= WRAPPER_COUNT * 2,
+            "expected unary wrapper reductions to dominate: {:?}",
+            metrics.reduce_rhs_len_emitted_counts
+        );
+        assert!(
+            metrics
+                .reduce_rhs_len_emitted_counts
+                .get(&2)
+                .copied()
+                .unwrap_or(0)
+                >= 1,
+            "expected the pair-packing rule to participate: {:?}",
+            metrics.reduce_rhs_len_emitted_counts
+        );
+
+        let wrapper_reductions: usize = (0..WRAPPER_COUNT)
+            .map(|i| {
+                metrics
+                    .reduce_lhs_emitted_counts
+                    .get(&(FIRST_WRAP + i as u32))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum();
+        assert!(
+            wrapper_reductions >= WRAPPER_COUNT,
+            "expected wrapper nonterminals to account for many reductions, got {wrapper_reductions}"
+        );
     }
 }

@@ -89,6 +89,20 @@ fn state_summary_to_dict<'py>(
     Ok(out)
 }
 
+fn counts_to_dict<'py, K>(
+    py: Python<'py>,
+    counts: &std::collections::BTreeMap<K, usize>,
+) -> PyResult<Bound<'py, PyDict>>
+where
+    K: pyo3::IntoPyObject<'py> + Copy,
+{
+    let out = PyDict::new(py);
+    for (&key, &value) in counts {
+        out.set_item(key, value)?;
+    }
+    Ok(out)
+}
+
 fn commit_metrics_to_dict<'py>(
     py: Python<'py>,
     metrics: glrmask_runtime::CommitDebugMetrics,
@@ -161,6 +175,34 @@ fn commit_metrics_to_dict<'py>(
     )?;
     out.set_item("advance_shift_targets_hit", metrics.advance_shift_targets_hit)?;
     out.set_item("advance_shifted_results", metrics.advance_shifted_results)?;
+    out.set_item(
+        "advance_reduce_rule_considered_counts",
+        counts_to_dict(py, &metrics.advance_reduce_rule_considered_counts)?,
+    )?;
+    out.set_item(
+        "advance_reduce_rule_emitted_counts",
+        counts_to_dict(py, &metrics.advance_reduce_rule_emitted_counts)?,
+    )?;
+    out.set_item(
+        "advance_reduce_rhs_len_emitted_counts",
+        counts_to_dict(py, &metrics.advance_reduce_rhs_len_emitted_counts)?,
+    )?;
+    out.set_item(
+        "advance_reduce_lhs_emitted_counts",
+        counts_to_dict(py, &metrics.advance_reduce_lhs_emitted_counts)?,
+    )?;
+    out.set_item(
+        "advance_reduce_state_emitted_counts",
+        counts_to_dict(py, &metrics.advance_reduce_state_emitted_counts)?,
+    )?;
+    out.set_item(
+        "advance_goto_from_counts",
+        counts_to_dict(py, &metrics.advance_goto_from_counts)?,
+    )?;
+    out.set_item(
+        "advance_goto_target_counts",
+        counts_to_dict(py, &metrics.advance_goto_target_counts)?,
+    )?;
     out.set_item(
         "advance_input_top_values_total",
         metrics.advance_input_top_values_total,
