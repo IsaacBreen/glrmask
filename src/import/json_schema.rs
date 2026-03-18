@@ -143,9 +143,99 @@ fn json_format_pattern(format_name: &str) -> Option<&'static str> {
     })
 }
 
-fn strip_regex_anchors(pattern: &str) -> &str {
-    let pattern = pattern.strip_prefix('^').unwrap_or(pattern);
-    pattern.strip_suffix('$').unwrap_or(pattern)
+fn split_top_level_regex_branches(pattern: &str) -> Vec<&str> {
+    let bytes = pattern.as_bytes();
+    let mut branches = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut paren_depth = 0usize;
+    let mut in_class = false;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match byte {
+            b'\\' => {
+                escaped = true;
+            }
+            b'[' if !in_class => {
+                in_class = true;
+            }
+            b']' if in_class => {
+                in_class = false;
+            }
+            b'(' if !in_class => {
+                paren_depth += 1;
+            }
+            b')' if !in_class && paren_depth > 0 => {
+                paren_depth -= 1;
+            }
+            b'|' if !in_class && paren_depth == 0 => {
+                branches.push(&pattern[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    branches.push(&pattern[start..]);
+    branches
+}
+
+fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
+    let anchored_start = branch.as_bytes().first().copied() == Some(b'^');
+    let mut end_index = branch.len();
+    let mut anchored_end = false;
+    if branch.as_bytes().last().copied() == Some(b'$') {
+        let mut backslashes = 0usize;
+        for byte in branch.as_bytes()[..branch.len().saturating_sub(1)]
+            .iter()
+            .rev()
+        {
+            if *byte == b'\\' {
+                backslashes += 1;
+            } else {
+                break;
+            }
+        }
+        if backslashes % 2 == 0 {
+            anchored_end = true;
+            end_index -= 1;
+        }
+    }
+
+    let start_index = if anchored_start { 1 } else { 0 };
+    (anchored_start, anchored_end, &branch[start_index..end_index])
+}
+
+fn json_search_branch_fragment(branch: &str) -> String {
+    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
+    let inner = jsonify_regex_dot(core);
+    let string_tail = format!(r#"(?:{})*"#, JSON_STRING_CHAR_PATTERN);
+    match (anchored_start, anchored_end) {
+        (true, true) => inner,
+        (true, false) => format!("{}{}", inner, string_tail),
+        (false, true) => format!("{}{}", string_tail, inner),
+        (false, false) => format!("{}{}{}", string_tail, inner, string_tail),
+    }
+}
+
+fn json_search_pattern(pattern: &str) -> String {
+    let branches = split_top_level_regex_branches(pattern);
+    if branches.len() == 1 {
+        return json_search_branch_fragment(branches[0]);
+    }
+    let fragments = branches
+        .into_iter()
+        .map(json_search_branch_fragment)
+        .collect::<Vec<_>>();
+    format!("(?:{})", fragments.join("|"))
 }
 
 fn json_direct_ascii_bytes() -> BTreeSet<u8> {
@@ -403,12 +493,12 @@ fn jsonify_regex_dot(pattern: &str) -> String {
 }
 
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
-    let inner = jsonify_regex_dot(strip_regex_anchors(pattern));
+    let inner = json_search_pattern(pattern);
     regex_expr(format!(r#""(?:{})""#, inner))
 }
 
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
-    let inner = jsonify_regex_dot(strip_regex_anchors(pattern));
+    let inner = json_search_pattern(pattern);
     regex_expr(format!(r#""(?:{})": "#, inner))
 }
 
@@ -2590,6 +2680,15 @@ mod tests {
         assert!(!accepts_sequence(schema, &[b"\"my-app:prod\x01\""]));
         assert!(!accepts_sequence(schema, &[b"\"my-app:prod\n\""]));
         assert!(accepts_sequence(schema, &[b"\"my-app:prod\\\"x\""]));
+    }
+
+    #[test]
+    fn test_pattern_uses_search_semantics_for_top_level_branches() {
+        let schema = r#"{"type": "string", "pattern": "^allow|deny$"}"#;
+        assert!(accepts_sequence(schema, &[b"\"allow\""]));
+        assert!(accepts_sequence(schema, &[b"\"xdeny\""]));
+        assert!(accepts_sequence(schema, &[b"\"/deny\""]));
+        assert!(!accepts_sequence(schema, &[b"\"xdenyx\""]));
     }
 
     #[test]
