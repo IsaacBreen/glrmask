@@ -478,6 +478,18 @@ impl PyConstraintState {
         Ok(())
     }
 
+    fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
+        let slice = bitmask.as_slice_mut().map_err(|e| {
+            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+        })?;
+        let buf: &mut [u32] = unsafe {
+            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
+        };
+        let t0 = std::time::Instant::now();
+        self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
+        Ok(t0.elapsed().as_nanos() as u64)
+    }
+
     fn debug_mask_metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let metrics = self
             .inner
@@ -575,6 +587,15 @@ impl PyConstraintState {
                 state.commit_token(token_id)
                     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
             })
+    }
+
+    fn commit_token_timed_ns(&mut self, token_id: u32) -> PyResult<u64> {
+        let t0 = std::time::Instant::now();
+        self.inner.with_dependent_mut(|_owner, state| {
+            state.commit_token(token_id)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+        })?;
+        Ok(t0.elapsed().as_nanos() as u64)
     }
 
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {

@@ -278,7 +278,7 @@ fn commit_bytes_impl(
     let ignore_terminal = constraint.ignore_terminal;
     let mut initial_exec_results = BTreeMap::new();
     let mut state_map = BTreeMap::new();
-    let mut terminals_map = BTreeMap::<u32, Vec<u32>>::new();
+    let mut terminals_map = BTreeMap::<u32, BTreeSet<u32>>::new();
 
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.initial_tokenizer_states = state.len();
@@ -309,12 +309,14 @@ fn commit_bytes_impl(
             }
             // TODO: expand via mutually_greedy_group() once greedy groups
             // are wired into glrmask (see sep1 compute_commit_maps).
-            terminals_map
+            let inserted = terminals_map
                 .entry(tokenizer_state)
                 .or_default()
-                .push(matched.id);
-            if let Some(metrics) = metrics.as_deref_mut() {
-                metrics.initial_terminals_total += 1;
+                .insert(matched.id);
+            if inserted {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.initial_terminals_total += 1;
+                }
             }
         }
         initial_exec_results.insert(tokenizer_state, exec);
@@ -398,6 +400,15 @@ fn commit_bytes_impl(
         }
 
         for (tokenizer_state, gss_at_offset) in states_to_process {
+            let actionable_terminals = {
+                let mut terminals = BTreeSet::new();
+                for state_id in gss_at_offset.peek_values() {
+                    if let Some(by_terminal) = constraint.table.action.get(state_id as usize) {
+                        terminals.extend(by_terminal.keys().copied());
+                    }
+                }
+                terminals
+            };
             let t_exec = metrics
                 .as_ref()
                 .map(|_| std::time::Instant::now());
@@ -425,10 +436,22 @@ fn commit_bytes_impl(
                 if reused_initial_exec_result {
                     metrics.reused_initial_exec_results += 1;
                 }
-                metrics.processing_matches_total += exec_result.matches.len();
             };
 
+            let mut seen_matches = BTreeSet::new();
+            let mut advance_cache = BTreeMap::<u32, ParserGSS>::new();
             for matched in &exec_result.matches {
+                if Some(matched.id) != ignore_terminal
+                    && !actionable_terminals.contains(&matched.id)
+                {
+                    continue;
+                }
+                if !seen_matches.insert((matched.width, matched.id)) {
+                    continue;
+                }
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.processing_matches_total += 1;
+                }
                 let new_offset = offset + matched.width;
 
                 if Some(matched.id) == ignore_terminal {
@@ -481,29 +504,36 @@ fn commit_bytes_impl(
                     continue;
                 }
 
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.advance_stacks_calls += 1;
-                }
-                if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
-                    continue;
-                }
-                let t_advance = metrics
-                    .as_ref()
-                    .map(|_| std::time::Instant::now());
-                let mut advance_metrics = AdvanceStacksDebugMetrics::default();
-                let mut gss = advance_stacks_with_metrics(
-                    &constraint.table,
-                    &gss_at_offset,
-                    matched.id,
-                    metrics.as_deref_mut().map(|_| &mut advance_metrics),
-                );
-                if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance) {
-                    metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
-                    if !gss.is_empty() {
-                        metrics.advance_stacks_nonempty += 1;
+                let mut gss = if let Some(cached) = advance_cache.get(&matched.id) {
+                    cached.clone()
+                } else {
+                    if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                        advance_cache.insert(matched.id, ParserGSS::empty());
+                        continue;
                     }
-                    accumulate_advance_stacks_metrics(metrics, &advance_metrics);
-                }
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.advance_stacks_calls += 1;
+                    }
+                    let t_advance = metrics
+                        .as_ref()
+                        .map(|_| std::time::Instant::now());
+                    let mut advance_metrics = AdvanceStacksDebugMetrics::default();
+                    let gss = advance_stacks_with_metrics(
+                        &constraint.table,
+                        &gss_at_offset,
+                        matched.id,
+                        metrics.as_deref_mut().map(|_| &mut advance_metrics),
+                    );
+                    if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance) {
+                        metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
+                        if !gss.is_empty() {
+                            metrics.advance_stacks_nonempty += 1;
+                        }
+                        accumulate_advance_stacks_metrics(metrics, &advance_metrics);
+                    }
+                    advance_cache.insert(matched.id, gss.clone());
+                    gss
+                };
                 if gss.is_empty() {
                     continue;
                 }
