@@ -751,3 +751,146 @@ fn test_prefix_items_default_to_required_like_cfa() {
     state.commit_token(2).unwrap();
     assert!(state.is_finished(), "[1,2] should finish successfully");
 }
+
+#[test]
+fn test_date_format_rejects_impossible_february_day_prefix() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "end_date": {
+                "type": ["string", "null"],
+                "format": "date"
+            }
+        }
+    }"#;
+    let vocab = byte_vocab();
+    let c = Constraint::from_json_schema(schema, &vocab).expect("date schema should compile");
+    let mut state = c.start();
+    for byte in br#"{"end_date": "2020-02-"# {
+        state.commit_token(*byte as u32).unwrap();
+    }
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, b'2' as usize),
+        "day prefix '2' should remain valid because 20-29 can still complete"
+    );
+    assert!(
+        !token_allowed(&mask, b'3' as usize),
+        "day prefix '3' should be rejected for February because only 30/31 remain"
+    );
+}
+
+#[test]
+fn test_false_schema_property_is_omitted_when_additional_properties_are_forbidden() {
+    let schema = r#"{
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "additionalProperties": false,
+            "paging": {
+                "type": "object",
+                "properties": {
+                    "uri": {"type": "string"}
+                },
+                "required": ["uri"]
+            },
+            "results": {}
+        },
+        "required": ["paging"]
+    }"#;
+    let vocab = byte_vocab();
+    let c = Constraint::from_json_schema(schema, &vocab).expect("false-subschema object should compile");
+    let mut state = c.start();
+    for byte in b"{\"" {
+        state.commit_token(*byte as u32).unwrap();
+    }
+    let mask = state.mask();
+    assert!(
+        !token_allowed(&mask, b'a' as usize),
+        "false-schema property should not contribute the impossible additionalProperties key"
+    );
+    assert!(
+        token_allowed(&mask, b'p' as usize),
+        "real declared keys should remain available"
+    );
+}
+
+#[test]
+fn test_required_only_untyped_object_allows_extra_keys_but_not_early_closure() {
+    let schema = r#"{
+        "type": "array",
+        "items": {
+            "host": {"type": "string"},
+            "port": {"type": "integer"},
+            "required": ["host", "port"]
+        }
+    }"#;
+    let vocab = byte_vocab();
+    let c = Constraint::from_json_schema(schema, &vocab).expect("required-only untyped object schema should compile");
+
+    let mut key_state = c.start();
+    for byte in b"[{\"" {
+        key_state.commit_token(*byte as u32).unwrap();
+    }
+    let key_mask = key_state.mask();
+    assert!(
+        token_allowed(&key_mask, b'!' as usize),
+        "free-form object keys should remain allowed before required keys are satisfied"
+    );
+
+    let mut value_state = c.start();
+    for byte in b"[{\"host\": \"\"" {
+        value_state.commit_token(*byte as u32).unwrap();
+    }
+    let value_mask = value_state.mask();
+    assert!(
+        !token_allowed(&value_mask, b'}' as usize),
+        "object closure should remain invalid until the required port key appears"
+    );
+}
+
+#[test]
+fn test_pattern_length_constraints_bound_string_content() {
+    let schema = r##"{
+        "type": "object",
+        "properties": {
+            "clientId": {
+                "type": "string",
+                "minLength": 12,
+                "maxLength": 12,
+                "pattern": "[0-9a-fA-F]+"
+            },
+            "secret": {
+                "type": "string",
+                "minLength": 30,
+                "pattern": "^[ !\"#$%&\\'()*+,\\-./0-9:;<=>?@A-Z\\[\\\\\\]\\^_`a-z{\\|}]+$"
+            }
+        }
+    }"##;
+    let vocab = byte_vocab();
+    let c = Constraint::from_json_schema(schema, &vocab).expect("pattern+length schema should compile");
+
+    let mut client_id_state = c.start();
+    for byte in br#"{"clientId": "0123456789ab"# {
+        client_id_state.commit_token(*byte as u32).unwrap();
+    }
+    let client_id_mask = client_id_state.mask();
+    assert!(
+        token_allowed(&client_id_mask, b'"' as usize),
+        "closing quote should be allowed once the fixed-length hex string is complete"
+    );
+    assert!(
+        !token_allowed(&client_id_mask, b'c' as usize),
+        "extra hex characters should be rejected once maxLength is reached"
+    );
+
+    let mut secret_state = c.start();
+    for byte in br#"{"secret": "abcdefghijklmnopqrstuvwxyz012"# {
+        secret_state.commit_token(*byte as u32).unwrap();
+    }
+    let secret_mask = secret_state.mask();
+    assert!(
+        !token_allowed(&secret_mask, b'"' as usize),
+        "closing quote should remain invalid before minLength is reached"
+    );
+}

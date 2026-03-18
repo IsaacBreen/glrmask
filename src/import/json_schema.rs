@@ -32,6 +32,16 @@ const JSON_KEY_COLON_REGEX: &str =
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
 const JSON_DIRECT_UTF8_PATTERN: &str =
     r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
+const STRICT_DATE_PATTERN: &str = concat!(
+    r#"(?:",
+    r#"(?:[0-9]{4}-(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01]))"#,
+    r#"|(?:[0-9]{4}-(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30))"#,
+    r#"|(?:[0-9]{4}-02-(?:0[1-9]|1[0-9]|2[0-8]))"#,
+    r#"|(?:(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29)"#,
+    r#")"#
+);
+const STRICT_DATE_TIME_SUFFIX_PATTERN: &str =
+    r#"[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
 const JSON_KEY_SEPARATOR: &[u8] = b": ";
 const UNTYPED_OBJECT_KEYWORD_KEYS: &[&str] = &[
@@ -113,13 +123,11 @@ fn empty_expr() -> GrammarExpr {
 
 fn json_format_pattern(format_name: &str) -> Option<&'static str> {
     Some(match format_name {
-        "date" => r#"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"#,
+        "date" => STRICT_DATE_PATTERN,
         "time" => {
             r#"(?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#
         }
-        "date-time" => {
-            r#"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#
-        }
+        "date-time" => r#"(?:[0-9]{4}-(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|[0-9]{4}-(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|[0-9]{4}-02-(?:0[1-9]|1[0-9]|2[0-8])|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29)[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#,
         "duration" => {
             r#"P(?:[0-9]+W|(?:[0-9]+Y)?(?:[0-9]+M)?(?:[0-9]+D)?(?:T(?:[0-9]+H)?(?:[0-9]+M)?(?:[0-9]+S)?)?)"#
         }
@@ -564,6 +572,21 @@ fn simple_anchored_literal_pattern(pattern: &str) -> Option<(String, bool)> {
         i += 1;
     }
     Some((out, exact))
+}
+
+fn simple_repeated_single_char_pattern(pattern: &str) -> Option<String> {
+    let mut core = pattern;
+    if let Some(stripped) = core.strip_prefix('^') {
+        core = stripped;
+    }
+    if let Some(stripped) = core.strip_suffix('$') {
+        core = stripped;
+    }
+    let repeated = core.strip_suffix('+')?;
+    if !(repeated.starts_with('[') && repeated.ends_with(']')) {
+        return None;
+    }
+    Some(jsonify_regex_dot(repeated))
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
@@ -1293,6 +1316,14 @@ impl SchemaCtx {
     }
 
     fn schema_for_intersection(&self, schema: &Value) -> Map<String, Value> {
+        if schema == &Value::Bool(false) {
+            let mut unsat = Map::new();
+            unsat.insert("not".into(), Value::Object(Map::new()));
+            return unsat;
+        }
+        if schema == &Value::Bool(true) {
+            return Map::new();
+        }
         let Some(object) = schema.as_object() else {
             return Map::new();
         };
@@ -1381,6 +1412,12 @@ impl SchemaCtx {
     }
 
     fn convert_schema(&mut self, schema: &Value) -> Result<GrammarExpr, GlrMaskError> {
+        if schema == &Value::Bool(false) {
+            return Err(unsat_schema_error());
+        }
+        if schema == &Value::Bool(true) {
+            return Ok(self.json_value_ref());
+        }
         let Some(object) = schema.as_object() else {
             return Ok(self.json_value_ref());
         };
@@ -1524,6 +1561,12 @@ impl SchemaCtx {
     }
 
     fn value_satisfies_schema(&self, value: &Value, schema: &Value) -> bool {
+        if schema == &Value::Bool(false) {
+            return false;
+        }
+        if schema == &Value::Bool(true) {
+            return true;
+        }
         let Some(object) = schema.as_object() else {
             return true;
         };
@@ -1732,6 +1775,12 @@ impl SchemaCtx {
     }
 
     fn is_certainly_unsatisfiable(&mut self, schema: &Value) -> bool {
+        if schema == &Value::Bool(false) {
+            return true;
+        }
+        if schema == &Value::Bool(true) {
+            return false;
+        }
         let Some(object) = schema.as_object() else {
             return false;
         };
@@ -1885,16 +1934,6 @@ impl SchemaCtx {
     }
 
     fn build_string_expr(&mut self, schema: &Map<String, Value>) -> GrammarExpr {
-        if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
-            return json_wrapped_pattern(pattern);
-        }
-
-        if let Some(format_name) = schema.get("format").and_then(Value::as_str) {
-            if let Some(pattern) = json_format_pattern(format_name) {
-                return json_wrapped_fullmatch_pattern(pattern);
-            }
-        }
-
         let min_len = schema
             .get("minLength")
             .and_then(Value::as_u64)
@@ -1904,6 +1943,21 @@ impl SchemaCtx {
             .get("maxLength")
             .and_then(Value::as_u64)
             .map(|value| value as usize);
+
+        if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+            if min_len > 0 || max_len.is_some() {
+                if let Some(unit_pattern) = simple_repeated_single_char_pattern(pattern) {
+                    return self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len);
+                }
+            }
+            return json_wrapped_pattern(pattern);
+        }
+
+        if let Some(format_name) = schema.get("format").and_then(Value::as_str) {
+            if let Some(pattern) = json_format_pattern(format_name) {
+                return json_wrapped_fullmatch_pattern(pattern);
+            }
+        }
         if min_len == 0 && max_len.is_none() {
             return self.json_string_ref();
         }
@@ -1937,6 +1991,48 @@ impl SchemaCtx {
                 literal_expr(b"\""),
             ]),
             "JSON_STRING_BOUNDED",
+        )
+    }
+
+    fn build_bounded_string_from_unit_regex(
+        &mut self,
+        unit_pattern: &str,
+        min_len: usize,
+        max_len: Option<usize>,
+    ) -> GrammarExpr {
+        let unit_expr = self.extract_terminal_rule(
+            regex_expr(unit_pattern.to_string()),
+            "JSON_STRING_PATTERN_CHAR",
+        );
+        let bounded_body = match max_len {
+            Some(max_len) if min_len == max_len => repeat_expr(unit_expr, min_len, Some(min_len)),
+            Some(max_len) => {
+                let mut parts = Vec::new();
+                if min_len > 0 {
+                    parts.push(repeat_expr(unit_expr.clone(), min_len, Some(min_len)));
+                }
+                if max_len > min_len {
+                    parts.push(repeat_expr(unit_expr, 0, Some(max_len - min_len)));
+                }
+                sequence_or_single(parts)
+            }
+            None => {
+                let mut parts = Vec::new();
+                if min_len > 0 {
+                    parts.push(repeat_expr(unit_expr.clone(), min_len, Some(min_len)));
+                }
+                parts.push(GrammarExpr::Repeat(Box::new(unit_expr)));
+                sequence_or_single(parts)
+            }
+        };
+
+        self.extract_terminal_rule(
+            sequence_or_single(vec![
+                literal_expr(b"\""),
+                bounded_body,
+                literal_expr(b"\""),
+            ]),
+            "JSON_STRING_BOUNDED_PATTERN",
         )
     }
 
@@ -2043,6 +2139,22 @@ impl SchemaCtx {
             );
         }
 
+        if !required_list.is_empty() && pattern_properties.is_none() && property_names.is_none() {
+            let mut additional_schema = match additional_properties {
+                Some(Value::Bool(false)) => None,
+                Some(Value::Object(map)) => Some(Value::Object(map.clone())),
+                _ => Some(serde_json::json!({})),
+            };
+            if additional_schema
+                .as_ref()
+                .map(|schema| self.is_certainly_unsatisfiable(schema))
+                .unwrap_or(false)
+            {
+                additional_schema = None;
+            }
+            return self.build_required_any_order_object_expr(&required_list, additional_schema);
+        }
+
         // No defined properties but typed additionalProperties — build an
         // AP-only object that constrains value types.
         if let Some(Value::Object(map)) = additional_properties {
@@ -2105,6 +2217,117 @@ impl SchemaCtx {
         }
 
         Ok(self.json_object_ref())
+    }
+
+    fn build_required_any_order_object_expr(
+        &mut self,
+        required_list: &[String],
+        additional_properties_schema: Option<Value>,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        let mut base_index = self.object_rule_counter;
+        let base_name = loop {
+            let candidate = format!("obj_req_any_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_nc_0")) {
+                break candidate;
+            }
+            base_index += 1;
+        };
+        self.object_rule_counter = base_index + 1;
+
+        let full_mask: Vec<usize> = (0..required_list.len()).collect();
+        let mut masks = Vec::<Vec<usize>>::new();
+        let mut mask_indices = HashMap::<Vec<usize>, usize>::new();
+        let mut pending = vec![full_mask.clone()];
+        while let Some(mask) = pending.pop() {
+            if mask_indices.contains_key(&mask) {
+                continue;
+            }
+            let index = masks.len();
+            mask_indices.insert(mask.clone(), index);
+            masks.push(mask.clone());
+            for &item in &mask {
+                let next_mask = mask
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != item)
+                    .collect::<Vec<_>>();
+                if !mask_indices.contains_key(&next_mask) {
+                    pending.push(next_mask);
+                }
+            }
+        }
+
+        let extra_pair_expr = if let Some(schema) = additional_properties_schema {
+            let extra_value_expr = self.convert_schema(&schema)?;
+            let ck_prefix = format!("{}_CK", base_name.to_uppercase());
+            let extra_key_expr = self.build_complement_key_expr(required_list, &ck_prefix);
+            Some(sequence_or_single(vec![
+                self.json_key_with_separator_expr(extra_key_expr, &format!("{ck_prefix}_KEY_COLON")),
+                extra_value_expr,
+            ]))
+        } else {
+            None
+        };
+
+        for mask in masks.clone() {
+            let mask_index = *mask_indices.get(&mask).unwrap();
+            let nc_name = format!("{base_name}_nc_{mask_index}");
+            let c_name = format!("{base_name}_c_{mask_index}");
+            let mut nc_alts = Vec::new();
+            let mut c_alts = Vec::new();
+
+            for &item in &mask {
+                let key = &required_list[item];
+                let pair_expr = sequence_or_single(vec![
+                    self.json_key_colon_literal(key),
+                    self.json_value_ref(),
+                ]);
+                let next_mask = mask
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != item)
+                    .collect::<Vec<_>>();
+                let next_index = *mask_indices.get(&next_mask).unwrap();
+                nc_alts.push(sequence_or_single(vec![
+                    pair_expr.clone(),
+                    GrammarExpr::Ref(format!("{base_name}_c_{next_index}")),
+                ]));
+                c_alts.push(sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    pair_expr,
+                    GrammarExpr::Ref(format!("{base_name}_c_{next_index}")),
+                ]));
+            }
+
+            if let Some(extra_pair_expr) = extra_pair_expr.clone() {
+                nc_alts.push(sequence_or_single(vec![
+                    extra_pair_expr.clone(),
+                    GrammarExpr::Ref(c_name.clone()),
+                ]));
+                c_alts.push(sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    extra_pair_expr,
+                    GrammarExpr::Ref(c_name.clone()),
+                ]));
+            }
+
+            if mask.is_empty() {
+                nc_alts.push(empty_expr());
+                c_alts.push(empty_expr());
+            }
+
+            self.insert_rule(nc_name, choice_or_single(nc_alts));
+            self.insert_rule(c_name, choice_or_single(c_alts));
+        }
+
+        Ok(sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(format!(
+                "{base_name}_nc_{}",
+                mask_indices.get(&full_mask).copied().unwrap_or(0)
+            )),
+            literal_expr(b"}"),
+        ]))
     }
 
     fn build_ordered_properties_object_expr(
