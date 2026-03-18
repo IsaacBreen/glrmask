@@ -975,3 +975,32 @@ fn test_pattern_with_min_length_rejects_empty_string_span_token() {
         "span token b' \"\"' must be rejected after '{{\"question\":' because minLength=1 removes the pattern's empty-string branch"
     );
 }
+
+#[test]
+fn test_group_wrapped_anchored_pattern_rejects_leading_space() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 5000,
+                "pattern": "^$|(^(?:\\S+\\s+){0,99}\\S+$)"
+            }
+        }
+    }"#;
+    let vocab = byte_vocab();
+    let c = Constraint::from_json_schema(schema, &vocab)
+        .expect("group-wrapped anchored pattern schema should compile");
+    let mut state = c.start();
+    state.commit_bytes(br#"{"question": ""#);
+    let mask = state.mask();
+    assert!(
+        !token_allowed(&mask, b' ' as usize),
+        "a leading space must be rejected after '{{\"question\": \"' because the anchored branch starts with \\S"
+    );
+    assert!(
+        token_allowed(&mask, b'W' as usize),
+        "a non-whitespace leading character should remain allowed after '{{\"question\": \"'"
+    );
+}

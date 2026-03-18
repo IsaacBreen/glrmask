@@ -185,7 +185,58 @@ fn split_top_level_regex_branches(pattern: &str) -> Vec<&str> {
     branches
 }
 
+fn strip_single_outer_group(branch: &str) -> Option<&str> {
+    let bytes = branch.as_bytes();
+    if bytes.first().copied() != Some(b'(') || bytes.last().copied() != Some(b')') {
+        return None;
+    }
+
+    let inner_start = match bytes.get(1).copied() {
+        Some(b'?') => {
+            if bytes.get(2).copied() == Some(b':') {
+                3
+            } else {
+                return None;
+            }
+        }
+        _ => 1,
+    };
+
+    let mut paren_depth = 0usize;
+    let mut in_class = false;
+    let mut escaped = false;
+    for (idx, byte) in bytes.iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'[' if !in_class => in_class = true,
+            b']' if in_class => in_class = false,
+            b'(' if !in_class => paren_depth += 1,
+            b')' if !in_class && paren_depth > 0 => {
+                paren_depth -= 1;
+                if paren_depth == 0 && idx != bytes.len() - 1 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if paren_depth != 0 || inner_start >= branch.len().saturating_sub(1) {
+        return None;
+    }
+    Some(&branch[inner_start..branch.len() - 1])
+}
+
 fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
+    let mut branch = branch;
+    while let Some(inner) = strip_single_outer_group(branch) {
+        branch = inner;
+    }
+
     let anchored_start = branch.as_bytes().first().copied() == Some(b'^');
     let mut end_index = branch.len();
     let mut anchored_end = false;
@@ -3080,11 +3131,17 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
     match (min, max) {
         (0, None) => GrammarExpr::Repeat(Box::new(item)),
         (1, None) => GrammarExpr::RepeatOne(Box::new(item)),
+        (_, Some(max)) => GrammarExpr::RepeatRange {
+            expr: Box::new(item),
+            min,
+            max,
+        },
         _ => {
             let mut parts = Vec::new();
             for _ in 0..min {
                 parts.push(item.clone());
             }
+            parts.push(GrammarExpr::Repeat(Box::new(item)));
             sequence_or_single(parts)
         }
     }
@@ -3121,11 +3178,6 @@ mod tests {
                 expr_has_split_separator(inner, left_bytes, right_bytes)
             }
             _ => false,
-        (_, Some(max)) => GrammarExpr::RepeatRange {
-            expr: Box::new(item),
-            min,
-            max,
-        },
         }
     }
 
@@ -3145,7 +3197,6 @@ mod tests {
     fn expr_has_ref_then_literal(expr: &GrammarExpr, literal: &[u8]) -> bool {
         match expr {
             GrammarExpr::Sequence(parts) => {
-            parts.push(GrammarExpr::Repeat(Box::new(item)));
                 if parts.windows(2).any(|window| {
                     matches!(window[0], GrammarExpr::Ref(_))
                         && matches!(&window[1], GrammarExpr::Literal(bytes) if bytes == literal)

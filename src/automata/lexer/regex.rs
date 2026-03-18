@@ -160,7 +160,7 @@ fn parse_atom(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
             (expr, pos)
         }
         b'[' => parse_char_class(input, pos, utf8),
-        b'\\' => parse_escape(input, pos),
+        b'\\' => parse_escape(input, pos, utf8),
         b'.' => (Expr::U8Class(U8Set::all()), pos + 1),
         byte => (Expr::U8Seq(vec![byte]), pos + 1),
     }
@@ -294,7 +294,7 @@ fn utf8_aware_negated_ascii_class(excluded: U8Set) -> Expr {
     Expr::Choice(choices)
 }
 
-fn parse_escape(input: &[u8], pos: usize) -> (Expr, usize) {
+fn parse_escape(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
     if pos + 1 >= input.len() {
         return (Expr::U8Seq(vec![b'\\']), pos + 1);
     }
@@ -306,7 +306,24 @@ fn parse_escape(input: &[u8], pos: usize) -> (Expr, usize) {
             Expr::U8Class(U8Set::from_predicate(|byte| byte.is_ascii_alphanumeric() || byte == b'_')),
             pos + 2,
         ),
+        b'D' => (negated_ascii_class(U8Set::from_range(b'0', b'9'), utf8), pos + 2),
+        b'S' => (negated_ascii_class(U8Set::from_bytes(b" \t\r\n"), utf8), pos + 2),
+        b'W' => (
+            negated_ascii_class(
+                U8Set::from_predicate(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+                utf8,
+            ),
+            pos + 2,
+        ),
         _ => (Expr::U8Seq(vec![parse_escape_byte(input, pos)]), pos + escape_len(input, pos)),
+    }
+}
+
+fn negated_ascii_class(excluded: U8Set, utf8: bool) -> Expr {
+    if utf8 {
+        utf8_aware_negated_ascii_class(excluded)
+    } else {
+        Expr::U8Class(!excluded)
     }
 }
 
@@ -367,6 +384,12 @@ mod tests {
     fn test_parse_char_class_space_escape() {
         let expr = parse_regex(r#"[\s]"#, false);
         assert_eq!(expr, Expr::U8Class(U8Set::from_bytes(b" \t\r\n")));
+    }
+
+    #[test]
+    fn test_parse_not_space_escape() {
+        let expr = parse_regex(r#"\S"#, false);
+        assert_eq!(expr, Expr::U8Class(!U8Set::from_bytes(b" \t\r\n")));
     }
 
     #[test]
