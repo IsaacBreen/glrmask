@@ -296,6 +296,9 @@ fn regex_literal_bytes(bytes: &[u8]) -> String {
 }
 
 fn jsonified_literal_fragment(byte: u8) -> Option<String> {
+    if byte != b'/' {
+        return None;
+    }
     let mut parts = Vec::new();
     if json_direct_ascii_bytes().contains(&byte) {
         parts.push(regex_literal_bytes(&[byte]));
@@ -520,6 +523,11 @@ fn jsonify_regex_dot(pattern: &str) -> String {
 
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
+    regex_expr(format!(r#""(?:{})""#, inner))
+}
+
+fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
+    let inner = jsonify_regex_dot(pattern);
     regex_expr(format!(r#""(?:{})""#, inner))
 }
 
@@ -1814,7 +1822,7 @@ impl SchemaCtx {
 
         if let Some(format_name) = schema.get("format").and_then(Value::as_str) {
             if let Some(pattern) = json_format_pattern(format_name) {
-                return json_wrapped_pattern(pattern);
+                return json_wrapped_fullmatch_pattern(pattern);
             }
         }
 
@@ -2722,6 +2730,13 @@ mod tests {
         let schema = r#"{"type": "string", "pattern": "^/[^\\u0000]+$"}"#;
         assert!(accepts_sequence(schema, &[b"\"/path\""]));
         assert!(accepts_sequence(schema, &[b"\"\\/path\""]));
+    }
+
+    #[test]
+    fn test_format_uses_full_string_semantics() {
+        let schema = r#"{"type": "string", "format": "date-time"}"#;
+        assert!(!accepts_sequence(schema, &[b"\"/2022-01-01T12:00:00Z\""]));
+        assert!(accepts_sequence(schema, &[b"\"2022-01-01T12:00:00Z\""]));
     }
 
     #[test]
