@@ -1070,7 +1070,7 @@ impl SchemaCtx {
                     ])
                 };
 
-                let rule = self.extract_rule(expr, &format!("json_string_char_exact_{count}"));
+                let rule = self.extract_rule(expr, &format!("JSON_STRING_CHAR_EXACT_{count}"));
                 if let GrammarExpr::Ref(rule_name) = &rule {
                     self.json_string_exact_cache.insert(count, rule_name.clone());
                 }
@@ -1104,7 +1104,7 @@ impl SchemaCtx {
                     ])
                 };
 
-                let rule = self.extract_rule(expr, &format!("json_string_char_upto_{max}"));
+                let rule = self.extract_rule(expr, &format!("JSON_STRING_CHAR_UPTO_{max}"));
                 if let GrammarExpr::Ref(rule_name) = &rule {
                     self.json_string_upto_cache.insert(max, rule_name.clone());
                 }
@@ -1930,11 +1930,14 @@ impl SchemaCtx {
             }
         };
 
-        sequence_or_single(vec![
-            literal_expr(b"\""),
-            bounded_body,
-            literal_expr(b"\""),
-        ])
+        self.extract_terminal_rule(
+            sequence_or_single(vec![
+                literal_expr(b"\""),
+                bounded_body,
+                literal_expr(b"\""),
+            ]),
+            "JSON_STRING_BOUNDED",
+        )
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
@@ -1957,6 +1960,23 @@ impl SchemaCtx {
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
         literal_expr(JSON_ITEM_SEPARATOR)
+    }
+
+    fn extract_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
+        if Self::is_trivial_expr(&expr) {
+            return expr;
+        }
+
+        let rule_name = self.fresh_rule_name(prefix);
+        self.insert_rule(rule_name.clone(), expr);
+        GrammarExpr::Ref(rule_name)
+    }
+
+    fn json_key_with_separator_expr(&mut self, key_expr: GrammarExpr, prefix: &str) -> GrammarExpr {
+        self.extract_terminal_rule(
+            sequence_or_single(vec![key_expr, self.json_key_separator_expr()]),
+            prefix,
+        )
     }
 
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
@@ -2150,10 +2170,10 @@ impl SchemaCtx {
             let complement_key = self.build_complement_key_expr(&known_keys, &ck_prefix);
 
             // complement_key_colon = complement_key ": "
-            let complement_key_colon = sequence_or_single(vec![
+            let complement_key_colon = self.json_key_with_separator_expr(
                 complement_key,
-                self.json_key_separator_expr(),
-            ]);
+                &format!("{ck_prefix}_KEY_COLON"),
+            );
 
             let term_nc = format!("{base_name}_ap_nc");
             let term_c = format!("{base_name}_ap_c");
@@ -2323,8 +2343,7 @@ impl SchemaCtx {
             matched_value_expr,
         ]);
         let unmatched_pair = sequence_or_single(vec![
-            unmatched_key_expr,
-            self.json_key_separator_expr(),
+            self.json_key_with_separator_expr(unmatched_key_expr, "PP_KEY_COLON"),
             unmatched_value_expr,
         ]);
         let pair = choice_or_single(vec![matched_pair, unmatched_pair]);
@@ -2731,6 +2750,25 @@ mod tests {
         }
     }
 
+    fn expr_has_ref_then_literal(expr: &GrammarExpr, literal: &[u8]) -> bool {
+        match expr {
+            GrammarExpr::Sequence(parts) => {
+                if parts.windows(2).any(|window| {
+                    matches!(window[0], GrammarExpr::Ref(_))
+                        && matches!(&window[1], GrammarExpr::Literal(bytes) if bytes == literal)
+                }) {
+                    return true;
+                }
+                parts.iter().any(|part| expr_has_ref_then_literal(part, literal))
+            }
+            GrammarExpr::Choice(options) => options.iter().any(|part| expr_has_ref_then_literal(part, literal)),
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner) => expr_has_ref_then_literal(inner, literal),
+            _ => false,
+        }
+    }
+
     fn named_grammar_has_split_separator(grammar: &NamedGrammar, left_bytes: &[u8], right_bytes: &[u8]) -> bool {
         grammar
             .rules
@@ -2740,6 +2778,14 @@ mod tests {
 
     fn named_grammar_has_literal(grammar: &NamedGrammar, expected: &[u8]) -> bool {
         grammar.rules.iter().any(|rule| expr_has_literal(&rule.expr, expected))
+    }
+
+    fn named_nonterminal_has_ref_then_literal(grammar: &NamedGrammar, literal: &[u8]) -> bool {
+        grammar
+            .rules
+            .iter()
+            .filter(|rule| !rule.is_terminal)
+            .any(|rule| expr_has_ref_then_literal(&rule.expr, literal))
     }
 
     #[test]
@@ -2943,6 +2989,20 @@ mod tests {
     }
 
     #[test]
+    fn test_bounded_string_stays_terminalized() {
+        let schema: Value = serde_json::from_str(r#"{"type": "string", "minLength": 1, "maxLength": 5}"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        let start_rule = grammar.rules.iter().find(|rule| rule.name == "start").unwrap();
+        match &start_rule.expr {
+            GrammarExpr::Ref(rule_name) => {
+                let target = grammar.rules.iter().find(|rule| rule.name == *rule_name).unwrap();
+                assert!(target.is_terminal, "expected bounded string start to reference a terminal rule");
+            }
+            other => panic!("expected bounded string start to be a terminal ref, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_jsonify_regex_dot_only_rewrites_bare_dot() {
         assert_eq!(
             jsonify_regex_dot(r#".^\.[$]"#),
@@ -3080,6 +3140,31 @@ mod tests {
     }
 
     #[test]
+    fn test_additional_properties_keys_stay_terminalized() {
+        let schema: Value = serde_json::from_str(r#"{
+            "type": "object",
+            "properties": {
+                "opacity": {"type": "number"}
+            },
+            "additionalProperties": {"type": "string"}
+        }"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        assert!(!named_nonterminal_has_ref_then_literal(&grammar, b": "));
+    }
+
+    #[test]
+    fn test_additional_properties_terminalized_keys_still_compile() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "opacity": {"type": "number"}
+            },
+            "additionalProperties": {"type": "string"}
+        }"#;
+        assert!(accepts_sequence(schema, &[b"{\"extra\": \"x\"}"]));
+    }
+
+    #[test]
     fn test_pattern_object_paths_pack_native_separator_literal() {
         let schema: Value = serde_json::from_str(r#"{
             "type": "object",
@@ -3093,6 +3178,37 @@ mod tests {
         let grammar = schema_to_named_grammar(&schema).unwrap();
         assert!(named_grammar_has_literal(&grammar, b": "));
         assert!(!named_grammar_has_split_separator(&grammar, b":", b" "));
+    }
+
+    #[test]
+    fn test_mixed_pattern_unmatched_keys_stay_terminalized() {
+        let schema: Value = serde_json::from_str(r#"{
+            "type": "object",
+            "patternProperties": {
+                "^mode": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            },
+            "additionalProperties": {"type": "string"}
+        }"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        assert!(!named_nonterminal_has_ref_then_literal(&grammar, b": "));
+    }
+
+    #[test]
+    fn test_mixed_pattern_terminalized_unmatched_keys_still_compile() {
+        let schema = r#"{
+            "type": "object",
+            "patternProperties": {
+                "^mode": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            },
+            "additionalProperties": {"type": "string"}
+        }"#;
+        assert!(accepts_sequence(schema, &[b"{\"other\": \"x\"}"]));
     }
 
     #[test]

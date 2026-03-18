@@ -4,6 +4,7 @@
 #![allow(unused_imports)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
@@ -194,27 +195,31 @@ impl Lowerer {
         })
     }
 
-    /// Lower an entire terminal rule body to a single Terminal::Expr.
-    /// The GrammarExpr must be fully expanded (no Ref nodes).
-    fn lower_terminal_rule(&mut self, name: &str, body: &GrammarExpr) -> Result<TerminalID, GlrMaskError> {
-        let expr = grammar_expr_to_expr(body)?;
+    /// Register a pre-resolved terminal Expr, deduplicating by value.
+    fn register_terminal_expr(&mut self, name: &str, expr: Expr) -> TerminalID {
         // Dedup by the Expr tree itself
         for (i, t) in self.terminals.iter().enumerate() {
             if let Terminal::Expr { expr: existing, .. } = t {
                 if *existing == expr {
-                    return Ok(i as TerminalID);
+                    return i as TerminalID;
                 }
             }
         }
         let id = self.terminals.len() as TerminalID;
         self.terminal_names.insert(id, name.to_string());
         self.terminals.push(Terminal::Expr { id, expr });
-        Ok(id)
+        id
     }
 }
 
-/// Convert a fully-expanded GrammarExpr (no Ref nodes) to an Expr tree.
-fn grammar_expr_to_expr(ge: &GrammarExpr) -> Result<Expr, GlrMaskError> {
+/// Convert a GrammarExpr to an Expr tree, resolving terminal Ref nodes
+/// via the `terminal_bodies` map and caching results in `terminal_expr_cache`.
+fn grammar_expr_to_expr(
+    ge: &GrammarExpr,
+    terminal_bodies: &HashMap<String, GrammarExpr>,
+    terminal_expr_cache: &mut HashMap<String, Arc<Expr>>,
+    visiting: &mut HashSet<String>,
+) -> Result<Expr, GlrMaskError> {
     Ok(match ge {
         GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes.clone()),
         GrammarExpr::CharClass { def, negate, utf8 } => {
@@ -228,7 +233,7 @@ fn grammar_expr_to_expr(ge: &GrammarExpr) -> Result<Expr, GlrMaskError> {
         GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true),
         GrammarExpr::AnyByte => Expr::U8Class(U8Set::from_range(0, 255)),
         GrammarExpr::Sequence(parts) => {
-            let exprs: Vec<Expr> = parts.iter().map(grammar_expr_to_expr).collect::<Result<_, _>>()?;
+            let exprs: Vec<Expr> = parts.iter().map(|p| grammar_expr_to_expr(p, terminal_bodies, terminal_expr_cache, visiting)).collect::<Result<_, _>>()?;
             if exprs.len() == 1 {
                 exprs.into_iter().next().unwrap()
             } else {
@@ -236,7 +241,7 @@ fn grammar_expr_to_expr(ge: &GrammarExpr) -> Result<Expr, GlrMaskError> {
             }
         }
         GrammarExpr::Choice(options) => {
-            let exprs: Vec<Expr> = options.iter().map(grammar_expr_to_expr).collect::<Result<_, _>>()?;
+            let exprs: Vec<Expr> = options.iter().map(|o| grammar_expr_to_expr(o, terminal_bodies, terminal_expr_cache, visiting)).collect::<Result<_, _>>()?;
             if exprs.len() == 1 {
                 exprs.into_iter().next().unwrap()
             } else {
@@ -244,24 +249,42 @@ fn grammar_expr_to_expr(ge: &GrammarExpr) -> Result<Expr, GlrMaskError> {
             }
         }
         GrammarExpr::Optional(inner) => Expr::Repeat {
-            expr: Box::new(grammar_expr_to_expr(inner)?),
+            expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 0,
             max: Some(1),
         },
         GrammarExpr::Repeat(inner) => Expr::Repeat {
-            expr: Box::new(grammar_expr_to_expr(inner)?),
+            expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 0,
             max: None,
         },
         GrammarExpr::RepeatOne(inner) => Expr::Repeat {
-            expr: Box::new(grammar_expr_to_expr(inner)?),
+            expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 1,
             max: None,
         },
         GrammarExpr::Ref(name) => {
-            return Err(GlrMaskError::GrammarParse(format!(
-                "unexpected Ref({name}) in terminal body — should have been expanded"
-            )));
+            // Look up in cache first
+            if let Some(cached) = terminal_expr_cache.get(name) {
+                return Ok(Expr::Shared(cached.clone()));
+            }
+            // Must be a terminal rule — look up its body and resolve it
+            if let Some(body) = terminal_bodies.get(name).cloned() {
+                if !visiting.insert(name.clone()) {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "cycle detected in terminal rule references: {name}"
+                    )));
+                }
+                let expr = grammar_expr_to_expr(&body, terminal_bodies, terminal_expr_cache, visiting)?;
+                let arc = Arc::new(expr);
+                terminal_expr_cache.insert(name.clone(), arc.clone());
+                visiting.remove(name);
+                Expr::Shared(arc)
+            } else {
+                return Err(GlrMaskError::GrammarParse(format!(
+                    "unresolved Ref({name}) in terminal body — not found in terminal rules"
+                )));
+            }
         }
     })
 }
@@ -358,13 +381,32 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         lowerer.nt_id(&rule.name);
     }
 
+    // Build a map of terminal rule bodies for resolving Ref nodes inside terminal exprs.
+    let terminal_bodies: HashMap<String, GrammarExpr> = grammar
+        .rules
+        .iter()
+        .filter(|r| r.is_terminal)
+        .map(|r| (r.name.clone(), r.expr.clone()))
+        .collect();
+    let mut terminal_expr_cache: HashMap<String, Arc<Expr>> = HashMap::new();
+
     for rule in &grammar.rules {
         let lhs = lowerer.nt_id(&rule.name);
 
         // Terminal rules: convert the entire body to a single Terminal::Expr.
-        // The body should be fully expanded (no Ref nodes).
+        // Refs to other terminal rules are resolved via Expr::Shared.
         if rule.is_terminal {
-            let tid = lowerer.lower_terminal_rule(&rule.name, &rule.expr)?;
+            let mut visiting = HashSet::new();
+            visiting.insert(rule.name.clone());
+            let expr = grammar_expr_to_expr(
+                &rule.expr,
+                &terminal_bodies,
+                &mut terminal_expr_cache,
+                &mut visiting,
+            )?;
+            let arc = Arc::new(expr.clone());
+            terminal_expr_cache.insert(rule.name.clone(), arc);
+            let tid = lowerer.register_terminal_expr(&rule.name, expr);
             lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Terminal(tid)] });
             continue;
         }
