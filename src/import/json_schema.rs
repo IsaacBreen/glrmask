@@ -1936,6 +1936,7 @@ impl SchemaCtx {
             .unwrap_or_default();
         let required_keys: BTreeSet<String> = required_list.iter().cloned().collect();
         let additional_properties = schema.get("additionalProperties");
+        let pattern_properties = schema.get("patternProperties").and_then(Value::as_object);
         let property_names = schema.get("propertyNames");
 
         let all_keys_required = properties
@@ -1996,8 +1997,20 @@ impl SchemaCtx {
             );
         }
 
+        if properties.is_none()
+            && matches!(additional_properties, Some(Value::Bool(false)))
+            && pattern_properties.map(|patterns| patterns.len() == 1).unwrap_or(false)
+        {
+            let (pattern, value_schema) = pattern_properties
+                .and_then(|patterns| patterns.iter().next())
+                .ok_or_else(|| GlrMaskError::GrammarParse("invalid patternProperties".into()))?;
+            let property_names = serde_json::json!({"pattern": pattern});
+            let value_expr = self.convert_schema(value_schema)?;
+            return self.build_pattern_named_object_expr(&property_names, value_expr);
+        }
+
         if let Some(property_names) = property_names {
-            return self.build_pattern_named_object_expr(property_names);
+            return self.build_pattern_named_object_expr(property_names, self.json_value_ref());
         }
 
         Ok(self.json_object_ref())
@@ -2183,7 +2196,7 @@ impl SchemaCtx {
         Ok((GrammarExpr::Ref(rule_name), left_can_be_empty && right_can_be_empty))
     }
 
-    fn build_pattern_named_object_expr(&mut self, property_names: &Value) -> Result<GrammarExpr, GlrMaskError> {
+    fn property_name_pattern<'a>(property_names: &'a Value) -> Result<&'a str, GlrMaskError> {
         let property_names = property_names.as_object().ok_or_else(|| {
             GlrMaskError::GrammarParse(
                 "propertyNames is not supported unless it is an object with a pattern".into(),
@@ -2202,10 +2215,18 @@ impl SchemaCtx {
                     "propertyNames is not supported unless it defines a string pattern".into(),
                 )
             })?;
+        Ok(pattern)
+    }
 
+    fn build_pattern_named_object_expr(
+        &mut self,
+        property_names: &Value,
+        value_expr: GrammarExpr,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        let pattern = Self::property_name_pattern(property_names)?;
         let pair = sequence_or_single(vec![
             json_wrapped_key_colon_pattern(pattern),
-            self.json_value_ref(),
+            value_expr,
         ]);
         Ok(choice_or_single(vec![
             sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
@@ -2797,6 +2818,22 @@ mod tests {
         }"##;
         assert!(!accepts_sequence(schema, &[b"{\"jumpGate\": true}"]));
         assert!(accepts_sequence(schema, &[b"{\"jumpGate\": {}}"]));
+    }
+
+    #[test]
+    fn test_single_pattern_properties_constrain_keys() {
+        let schema = r#"{
+            "type": "object",
+            "additionalProperties": false,
+            "patternProperties": {
+                "^[(a-z)|(A-Z)|(0-9)]+$": {
+                    "type": "string"
+                }
+            }
+        }"#;
+        assert!(!accepts_sequence(schema, &[b"{\"\": \"x\"}"]));
+        assert!(!accepts_sequence(schema, &[b"{\"!\": \"x\"}"]));
+        assert!(accepts_sequence(schema, &[b"{\"A\": \"x\"}"]));
     }
 
     #[test]
