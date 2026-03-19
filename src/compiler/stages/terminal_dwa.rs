@@ -1177,6 +1177,10 @@ fn terminal_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
 }
 
+fn print_terminal_nwa_enabled() -> bool {
+    std::env::var_os("GLRMASK_PRINT_TERMINAL_NWA").is_some()
+}
+
 fn log_terminal_profile(enabled: bool, phase: &str, started_at: std::time::Instant) {
     if enabled {
         eprintln!(
@@ -1211,16 +1215,18 @@ fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Ve
 }
 
 pub(crate) fn build_terminal_dwa(
+    grammar_def: &crate::compiler::grammar::model::GrammarDef,
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
-    build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal).0
+    build_terminal_dwa_with_report(grammar_def, grammar, tokenizer, vocab, id_map, ignore_terminal).0
 }
 
 pub(crate) fn build_terminal_dwa_with_report(
+    grammar_def: &crate::compiler::grammar::model::GrammarDef,
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -1330,6 +1336,44 @@ pub(crate) fn build_terminal_dwa_with_report(
             builder.profile_pending_ms.as_secs_f64() * 1000.0,
             builder.profile_flush_ms.as_secs_f64() * 1000.0,
         );
+    }
+
+    if print_terminal_nwa_enabled() {
+        let terminal_symbols: std::collections::BTreeMap<i32, String> = grammar_def
+            .terminals
+            .iter()
+            .map(|t| {
+                (
+                    t.id() as i32,
+                    format!("'{}'", grammar_def.terminal_display_name(t.id())),
+                )
+            })
+            .collect();
+        let tsid_names = std::collections::BTreeMap::new();
+        let mut token_names = std::collections::BTreeMap::new();
+
+        fn token_repr(bytes: &[u8]) -> String {
+            let mut escaped = String::with_capacity(bytes.len());
+            for &ch in bytes {
+                match ch {
+                    b'\\' => escaped.push_str("\\\\"),
+                    b'\'' => escaped.push_str("\\'"),
+                    b'\n' => escaped.push_str("\\n"),
+                    b'\r' => escaped.push_str("\\r"),
+                    b'\t' => escaped.push_str("\\t"),
+                    other if other.is_ascii() => escaped.push(other as char),
+                    other => escaped.push_str(&format!("\\x{:02x}", other)),
+                }
+            }
+            let truncated = if escaped.len() > 48 { format!("{}...", &escaped[..48]) } else { escaped };
+            format!("'\x1b[38;5;114m{}\x1b[0m'", truncated)
+        }
+
+        for (id, bytes) in &vocab.entries {
+            token_names.insert(*id, token_repr(bytes));
+        }
+        eprintln!("\n═══ TERMINAL NWA — after build (raw) ═══");
+        eprintln!("{}", nwa.display_with_all_maps(&terminal_symbols, &tsid_names, &token_names));
     }
 
     if should_collapse_always_allowed(vocab) {
@@ -1444,7 +1488,7 @@ mod tests {
             None,
         );
         let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
-        (build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None), id_map)
+        (build_terminal_dwa(&grammar, &glr_grammar, &tokenizer, &vocab, &id_map, None), id_map)
     }
 
     #[test]
@@ -1458,7 +1502,7 @@ mod tests {
         );
         let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
 
-        let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
+        let terminal_dwa = build_terminal_dwa(&grammar, &glr_grammar, &tokenizer, &vocab, &id_map, None);
 
         let a_weight = terminal_dwa.eval_word(&[0]);
         let original_tokens = expand_original_tokens(&a_weight, &id_map);
@@ -1516,6 +1560,7 @@ mod tests {
         let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
 
         let terminal_dwa = build_terminal_dwa(
+            &grammar,
             &glr_grammar,
             &tokenizer,
             &vocab,
@@ -1581,7 +1626,7 @@ mod tests {
             internal_to_originals: vec![vec![10, 20]],
         };
 
-        let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
+        let terminal_dwa = build_terminal_dwa(&grammar, &glr_grammar, &tokenizer, &vocab, &id_map, None);
 
         let a_weight = terminal_dwa.eval_word(&[0]);
         let a_original_tokens = expand_original_tokens(&a_weight, &id_map);
@@ -1680,7 +1725,7 @@ mod tests {
             None,
         );
         let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
-        let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
+        let terminal_dwa = build_terminal_dwa(&grammar, &glr_grammar, &tokenizer, &vocab, &id_map, None);
 
         let start_state = &terminal_dwa.states[terminal_dwa.start_state as usize];
         assert_eq!(
@@ -1714,7 +1759,7 @@ start: "a" X
             &tokenizer, &vocab, &std::collections::BTreeMap::new(), None,
         );
         let terminal_dwa = build_terminal_dwa(
-            &glr_grammar, &tokenizer, &vocab, &id_map, None,
+            &grammar, &glr_grammar, &tokenizer, &vocab, &id_map, None,
         );
         let start = &terminal_dwa.states[terminal_dwa.start_state as usize];
 

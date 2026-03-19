@@ -1008,6 +1008,7 @@ fn optimize_parser_default_transitions(
 }
 
 pub fn build_parser_dwa(
+    grammar_def: &crate::compiler::grammar::model::GrammarDef,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -1015,10 +1016,11 @@ pub fn build_parser_dwa(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
-    build_parser_dwa_with_report(table, grammar, tokenizer, vocab, id_map, ignore_terminal).0
+    build_parser_dwa_with_report(grammar_def, table, grammar, tokenizer, vocab, id_map, ignore_terminal).0
 }
 
 pub(crate) fn build_parser_dwa_with_report(
+    grammar_def: &crate::compiler::grammar::model::GrammarDef,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -1031,7 +1033,7 @@ pub(crate) fn build_parser_dwa_with_report(
     // templates depend on (table, grammar) only — no terminal_dwa
     #[cfg(feature = "rayon")]
     let ((terminal_dwa, terminal_build), (characterizations, templates)) = rayon::join(
-        || build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal),
+        || build_terminal_dwa_with_report(grammar_def, grammar, tokenizer, vocab, id_map, ignore_terminal),
         || {
             let characterizations = characterize_terminals(table, grammar);
             let templates = Templates::from_characterizations(&characterizations);
@@ -1040,7 +1042,7 @@ pub(crate) fn build_parser_dwa_with_report(
     );
     #[cfg(not(feature = "rayon"))]
     let ((terminal_dwa, terminal_build), (characterizations, templates)) = {
-        let td = build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal);
+        let td = build_terminal_dwa_with_report(grammar_def, grammar, tokenizer, vocab, id_map, ignore_terminal);
         let characterizations = characterize_terminals(table, grammar);
         let templates = Templates::from_characterizations(&characterizations);
         (td, (characterizations, templates))
@@ -1369,7 +1371,7 @@ mod tests {
         let table = GLRTable::build(&gg);
         let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
-        let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp, None);
+        let dwa = build_parser_dwa(&gdef, &table, &gg, &tok, &vocab, &vp, None);
         assert!(dwa.num_states() > 0);
     }
 
@@ -1380,7 +1382,7 @@ mod tests {
         let table = GLRTable::build(&gg);
         let (vocab, tok, vp) = make_vocab_and_preprocessing(&gdef);
 
-        let dwa = build_parser_dwa(&table, &gg, &tok, &vocab, &vp, None);
+        let dwa = build_parser_dwa(&gdef, &table, &gg, &tok, &vocab, &vp, None);
         assert!(dwa.num_states() > 0);
     }
 
