@@ -334,4 +334,13 @@ mod tests {
         assert!(!accepts(&regex, b"aaaaaaaa"));
         assert!(!accepts(&regex, b"aaaab"));
     }
+
+    #[test]
+    fn test_possible_final_matches_ab() {
+        let regex = build_regex(&[bytes(b"a"), bytes(b"b")]);
+        // Only initial state should have possible final matches
+        assert_eq!(regex.dfa.possible_future_group_ids(0).iter().collect::<Vec<_>>(), [0, 1]);
+        assert!(regex.dfa.possible_future_group_ids(1).is_empty());
+        assert!(regex.dfa.possible_future_group_ids(2).is_empty());
+    }
 }
