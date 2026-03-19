@@ -845,7 +845,7 @@ mod tests {
         let initial_states = vec![sep1_tok.initial_state_id()];
 
         let mut disallowed = BTreeMap::new();
-        let mut bitset = BitSet::new(4);
+        let mut bitset = BitSet::new(2);
         bitset.set(0);
         disallowed.insert(0u32, bitset);
 
