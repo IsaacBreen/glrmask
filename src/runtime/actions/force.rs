@@ -33,7 +33,6 @@ impl<'a> ConstraintState<'a> {
 
         // Try byte-level first.
         let forced_bytes = self.compute_forced_byte_prefix();
-        println!("Forced byte prefix: {:?}", String::from_utf8_lossy(&forced_bytes));
         let byte_level = self.tokenize_forced_with_stop(&forced_bytes);
         if !byte_level.is_empty() {
             return byte_level;
@@ -78,9 +77,7 @@ impl<'a> ConstraintState<'a> {
                 break;
             }
 
-            println!("constraint_state: {:?}", cursor.state);
             let mask = cursor.mask();
-            println!("Mask: {:?}", mask);
 
             // Check EOS: if the parse can complete here, stop forcing.
             if let Some(eos_id) = eos {
@@ -109,10 +106,8 @@ impl<'a> ConstraintState<'a> {
                     _ => ambiguous = true,
                 }
             });
-            println!("Forced byte: {:?}, ambiguous: {}, any_token: {}", forced_byte, ambiguous, any_token);
 
             if ambiguous || !any_token {
-                println!("Ambiguous or no tokens at this position, stopping forced byte prefix");
                 break;
             }
 

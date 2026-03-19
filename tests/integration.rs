@@ -2690,19 +2690,3 @@ fn test_simple_ab() {
     let forced = c.start().force();
     assert_eq!(forced, vec![2], "shared first byte forcing should still greedily choose 'ab'");
 }
-
-#[test]
-fn test_force_multi_byte_same_first_byte() {
-    let vocab = make_vocab(&["a", "b", "ab"]);
-    let c = Constraint::from_ebnf(
-        r#"
-        start ::= AB
-        AB ::= 'a' 'b'
-        "#,
-        &vocab,
-    )
-    .unwrap();
-
-    let forced = c.start().force();
-    assert_eq!(forced, vec![2], "shared first byte forcing should still greedily choose 'ab'");
-}
