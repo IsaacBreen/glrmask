@@ -1019,6 +1019,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     let exec = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state);
+                    println!("Executed tokenizer from state {} on input segment starting with byte {:02x} (pos {} out of {}) got end_state={:?} matches={:?}", tokenizer_state, segment_bytes[pos], pos, segment_bytes.len(), exec.end_state, exec.matches);
                     self.profile_exec_ms += exec_started.elapsed();
                     self.profile_tokenizer_execs += 1;
                     let exec_end_state = exec.end_state.map(|end_state| {
@@ -1033,6 +1034,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let t = std::time::Instant::now();
                         if child_node.has_token() {
                             for terminal_id in self.tokenizer.tokens_accessible_from_state(end_state) {
+                                println!("Adding leaf token for terminal_id={} at end_state={} from tokenizer_state={} pos={} out of {} bytes", terminal_id, end_state, tokenizer_state, pos, segment_bytes.len());
                                 self.add_leaf_token_from_sources(
                                     &source_nodes,
                                     terminal_id,
@@ -1051,6 +1053,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let next_pos = pos + matched.width;
 
                         if next_pos == segment_bytes.len() && child_node.has_token() {
+                            println!("Adding leaf token for matched terminal_id={} at tokenizer_state={} pos={} out of {} bytes", matched.id, tokenizer_state, next_pos, segment_bytes.len());
                             self.add_leaf_token_from_sources(
                                 &source_nodes,
                                 matched.id,
@@ -1313,6 +1316,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         profile_pending_ms: std::time::Duration::ZERO,
         profile_flush_ms: std::time::Duration::ZERO,
     };
+    println!("Tokenizer: {:#?}", tokenizer);
     builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
     let flush_t = std::time::Instant::now();
     builder.flush_transition_buffer();
@@ -1762,6 +1766,8 @@ start: "a" X
             &grammar, &glr_grammar, &tokenizer, &vocab, &id_map, None,
         );
         let start = &terminal_dwa.states[terminal_dwa.start_state as usize];
+
+        println!("Tokenizer: {:#?}", tokenizer);
 
         let a_id = grammar.terminals.iter().find_map(|t| match t {
             Terminal::Literal { id, bytes } if bytes == b"a" => Some(*id as i32),
