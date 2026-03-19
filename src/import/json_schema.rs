@@ -394,7 +394,7 @@ fn json_direct_ascii_bytes() -> BTreeSet<u8> {
     let mut out = BTreeSet::new();
     out.extend(0x20..=0x21);
     out.extend(0x23..=0x5B);
-    out.extend(0x5D..=0x7F);
+    out.extend(0x5D..=0x7E); // exclude DEL (0x7F)
     out
 }
 
@@ -633,8 +633,114 @@ fn jsonify_regex_char_class(input: &[u8], start: usize) -> Option<(String, usize
     Some((fragment, pos + 1))
 }
 
+/// Expand a regex shorthand escape class (`\s`, `\S`, `\d`, `\D`, `\w`, `\W`)
+/// into a JSON-string-safe regex fragment. Returns `None` for non-class escapes.
+///
+/// For positive classes (`\d`, `\s`, `\w`), uses `jsonified_char_class_fragment`
+/// for precise expansion. For negated classes (`\D`, `\S`, `\W`), produces a
+/// compact fragment that excludes `\\uXXXX` per-byte encodings of control chars
+/// to avoid DFA explosion when combined with bounded repetition like `{0,99}`.
+fn jsonify_shorthand_class(escape_char: u8) -> Option<String> {
+    match escape_char {
+        b'd' | b'w' => {
+            let matched = shorthand_class_bytes(escape_char);
+            jsonified_char_class_fragment(&matched, false)
+        }
+        b's' => {
+            // \s matches ASCII whitespace + NBSP (U+00A0 = \xC2\xA0).
+            // llguidance treats NBSP as whitespace, matching ECMA-262 behavior.
+            let matched = shorthand_class_bytes(b's');
+            let mut fragment = jsonified_char_class_fragment(&matched, false)?;
+            // Append NBSP as a 2-byte UTF-8 literal alternative
+            fragment = format!("(?:{}|\\xC2\\xA0)", fragment);
+            Some(fragment)
+        }
+        b'D' | b'W' => {
+            let excluded = shorthand_class_bytes(escape_char.to_ascii_lowercase());
+            Some(compact_negated_json_class(&excluded, false))
+        }
+        b'S' => {
+            let excluded = shorthand_class_bytes(b's');
+            Some(compact_negated_json_class(&excluded, true))
+        }
+        _ => None,
+    }
+}
+
+/// Returns the byte set for a lowercase shorthand class.
+fn shorthand_class_bytes(class: u8) -> BTreeSet<u8> {
+    let mut s = BTreeSet::new();
+    match class {
+        b'd' => { s.extend(b'0'..=b'9'); }
+        b's' => {
+            // ECMA-262 WhiteSpace + LineTerminator (ASCII subset):
+            // TAB (0x09), LF (0x0A), VT (0x0B), FF (0x0C), CR (0x0D), SPACE (0x20)
+            s.insert(0x09); s.insert(0x0A); s.insert(0x0B);
+            s.insert(0x0C); s.insert(0x0D); s.insert(0x20);
+        }
+        b'w' => { s.extend(b'0'..=b'9'); s.extend(b'A'..=b'Z'); s.insert(b'_'); s.extend(b'a'..=b'z'); }
+        _ => {}
+    }
+    s
+}
+
+/// Produce a compact JSON-string-safe regex fragment for a negated ASCII class.
+///
+/// Unlike `jsonified_char_class_fragment(_, true)`, this produces a compact
+/// fragment that avoids DFA explosion when combined with bounded repetition
+/// like `{0,99}`. It includes single-byte ASCII chars, named JSON escape
+/// sequences, and direct multi-byte UTF-8 patterns. It omits `\\uXXXX`
+/// encodings to keep the resulting DFA small.
+fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> String {
+    let direct_ascii_all = json_direct_ascii_bytes();
+    let mut parts = Vec::new();
+
+    // Direct ASCII bytes not in the excluded set
+    let direct_ascii: BTreeSet<u8> = direct_ascii_all.difference(excluded).copied().collect();
+    if !direct_ascii.is_empty() {
+        parts.push(regex_char_class_from_ranges(&compress_byte_set(&direct_ascii)));
+    }
+
+    // Named JSON escape sequences for chars not in the excluded set.
+    // Note: \/ (escaped forward slash) is omitted because / is already a
+    // direct ASCII byte. Including \/ would accept the escaped form \/ which
+    // some validators reject.
+    let named_escapes: &[(u8, &str)] = &[
+        (0x22, r#"\x5C\x22"#),  // \"
+        (0x5C, r#"\x5C\x5C"#),  // \\
+        (0x08, r#"\x5Cb"#),     // \b
+        (0x0C, r#"\x5Cf"#),     // \f
+        (0x0A, r#"\x5Cn"#),     // \n
+        (0x0D, r#"\x5Cr"#),     // \r
+        (0x09, r#"\x5Ct"#),     // \t
+    ];
+    for &(byte_val, escape_pattern) in named_escapes {
+        if !excluded.contains(&byte_val) {
+            parts.push(String::from(escape_pattern));
+        }
+    }
+
+    // Multi-byte UTF-8 character patterns.
+    if exclude_nbsp {
+        // For \S: exclude NBSP (U+00A0 = \xC2\xA0) from the 2-byte UTF-8 range.
+        // Split \xC2 continuation to skip \xA0, matching llguidance's behavior
+        // which treats NBSP as whitespace (\s).
+        let utf8_no_nbsp = r#"(?:\xC2[\x80-\x9F\xA1-\xBF]|[\xC3-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
+        parts.push(String::from(utf8_no_nbsp));
+    } else {
+        parts.push(String::from(JSON_DIRECT_UTF8_PATTERN));
+    }
+
+    if parts.len() == 1 {
+        return parts.into_iter().next().unwrap();
+    }
+    format!("(?:{})", parts.join("|"))
+}
+
 /// Replace bare `.` in a regex pattern with the JSON string character class,
 /// so that `.` does not match `"`, `\`, or control characters inside a JSON string.
+/// Also expands shorthand character classes (`\s`, `\S`, `\d`, `\D`, `\w`, `\W`)
+/// into JSON-string-safe equivalents.
 fn jsonify_regex_dot(pattern: &str) -> String {
     let json_dot = r#"(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#;
     let mut out = String::with_capacity(pattern.len() * 2);
@@ -643,6 +749,11 @@ fn jsonify_regex_dot(pattern: &str) -> String {
     while i < bytes.len() {
         let ch = bytes[i];
         if ch == b'\\' && i + 1 < bytes.len() {
+            if let Some(fragment) = jsonify_shorthand_class(bytes[i + 1]) {
+                out.push_str(&fragment);
+                i += 2;
+                continue;
+            }
             out.push(ch as char);
             out.push(bytes[i + 1] as char);
             i += 2;
