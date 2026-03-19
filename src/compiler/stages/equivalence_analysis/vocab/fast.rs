@@ -49,7 +49,6 @@ struct Dfa {
     possible_future_groups: Vec<SmallVec<[usize; 4]>>,
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
-    accept_hash: u64,
     /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
     self_loop_bytes: Vec<[u64; 4]>,
     disallowed_follows: Vec<BitSet>,
@@ -215,12 +214,6 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
         h.finish()
     };
 
-    let accept_hash = {
-        let mut h = new_hasher();
-        h.write_u8(3);
-        h.finish()
-    };
-
     // Precompute self-loop byte sets per state
     let self_loop_bytes: Vec<[u64; 4]> = (0..transitions.len())
         .map(|s| {
@@ -280,7 +273,6 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
         possible_future_groups,
         completion_hash,
         none_completion_hash,
-        accept_hash,
         self_loop_bytes,
         disallowed_follows: normalize_disallowed_follows(num_groups, disallowed_follows),
     }
@@ -614,11 +606,7 @@ fn hash_suffixes(
                 continue;
             }
             h.write_u64(gid as u64);
-            h.write_u64(if target == len {
-                dfa.accept_hash
-            } else {
-                scratch.dag.get(&target).map_or(0, |e| e.0)
-            });
+            h.write_u64(scratch.dag.get(&target).map_or(0, |e| e.0));
         }
         scratch.dag.get_mut(&pos).unwrap().0 = h.finish();
     }
@@ -660,11 +648,7 @@ fn token_signature(
                     let pv = scratch.match_positions[base + gid];
                     if pv != NONE && pv > 0 {
                         h.write_u64(gid as u64);
-                        h.write_u64(if pv as usize == token.len() {
-                            dfa.accept_hash
-                        } else {
-                            scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0)
-                        });
+                        h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0));
                     }
                 }
                 h.finish()
