@@ -3,6 +3,7 @@ use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::{Weight, WeightDebugStats, reset_weight_debug_stats, snapshot_weight_debug_stats};
 use crate::runtime::state::ConstraintStateSummary;
 use range_set_blaze::RangeSetBlaze;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -15,70 +16,73 @@ use std::sync::Arc;
 ///
 /// Uses `Arc<[u64]>` for cheap cloning (refcount bump instead of heap alloc),
 /// which is critical since `apply_and_prune` clones accumulators for memoization.
-#[derive(Clone)]
-struct DenseMaskAcc {
-    start: u32,
-    end: u32,
-    dense: Arc<[u64]>,
-}
-
-impl PartialEq for DenseMaskAcc {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.dense, &other.dense)
-            || (self.start == other.start
-                && self.end == other.end
-                && self.dense == other.dense)
-    }
-}
-impl Eq for DenseMaskAcc {}
-
-impl std::hash::Hash for DenseMaskAcc {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.start.hash(state);
-        self.end.hash(state);
-        self.dense.hash(state);
-    }
-}
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DenseMaskAcc(BTreeMap<u32, Arc<[u64]>>);
 
 impl DenseMaskAcc {
-    fn from_internal_tokens(start: u32, end: u32, tokens: &RangeSetBlaze<u32>, dense_words: usize) -> Self {
+    fn from_internal_tokens(
+        start: u32,
+        end: u32,
+        tokens: &RangeSetBlaze<u32>,
+        dense_words: usize,
+    ) -> Self {
+        if tokens.is_empty() || start > end {
+            return Self(BTreeMap::new());
+        }
         let mut dense = vec![0u64; dense_words];
-        // Iterate ranges for bulk word-level filling.
         for range in tokens.ranges() {
             let lo = *range.start() as usize;
             let hi = *range.end() as usize;
             let word_lo = lo / 64;
             let word_hi = hi / 64;
             if word_lo == word_hi {
-                // Single word: set bits [lo%64 .. hi%64].
                 if let Some(w) = dense.get_mut(word_lo) {
                     let mask = if hi % 64 == 63 { !0u64 } else { (1u64 << (hi % 64 + 1)) - 1 };
                     let mask = mask & !((1u64 << (lo % 64)) - 1);
                     *w |= mask;
                 }
             } else {
-                // First partial word.
                 if let Some(w) = dense.get_mut(word_lo) {
                     *w |= !((1u64 << (lo % 64)) - 1);
                 }
-                // Full middle words.
                 for wi in (word_lo + 1)..word_hi {
                     if let Some(w) = dense.get_mut(wi) {
                         *w = !0u64;
                     }
                 }
-                // Last partial word.
                 if let Some(w) = dense.get_mut(word_hi) {
                     let mask = if hi % 64 == 63 { !0u64 } else { (1u64 << (hi % 64 + 1)) - 1 };
                     *w |= mask;
                 }
             }
         }
-        Self { start, end, dense: dense.into() }
+        let dense: Arc<[u64]> = dense.into();
+        let mut map = BTreeMap::new();
+        for tsid in start..=end {
+            map.insert(tsid, Arc::clone(&dense));
+        }
+        Self(map)
     }
 
     fn is_empty(&self) -> bool {
-        self.dense.iter().all(|&w| w == 0)
+        self.0.is_empty()
+    }
+
+    fn dense_len(&self) -> usize {
+        self.0.values().next().map(|dense| dense.len()).unwrap_or(0)
+    }
+
+    fn dense_to_tokens(dense: &[u64]) -> RangeSetBlaze<u32> {
+        let mut tokens = RangeSetBlaze::new();
+        for (wi, &w) in dense.iter().enumerate() {
+            let mut bits = w;
+            while bits != 0 {
+                let b = bits.trailing_zeros() as u32;
+                tokens.insert((wi as u32) * 64 + b);
+                bits &= bits - 1;
+            }
+        }
+        tokens
     }
 
     /// Intersect this accumulator with a DWA weight using precomputed dense masks.
@@ -88,91 +92,64 @@ impl DenseMaskAcc {
         weight: &Weight,
         precomputed: &rustc_hash::FxHashMap<usize, Box<[u64]>>,
     ) -> Option<Self> {
-        // Fast path: single-TSID accumulator (start == end) — point lookup.
-        if self.start == self.end {
-            let token_set = weight.0.get(self.start)?;
+        if self.is_empty() {
+            return None;
+        }
+
+        let mut result = BTreeMap::new();
+
+        for (&tsid, dense) in &self.0 {
+            let Some(token_set) = weight.0.get(tsid) else {
+                continue;
+            };
             let key = Arc::as_ptr(token_set) as usize;
             if let Some(other_dense) = precomputed.get(&key) {
-                // Check emptiness before allocating.
-                if !self.dense.iter().zip(other_dense.iter()).any(|(&s, &o)| s & o != 0) {
-                    return None;
+                if !dense.iter().zip(other_dense.iter()).any(|(&s, &o)| s & o != 0) {
+                    continue;
                 }
-                let result: Arc<[u64]> = self.dense.iter()
+                let result_dense: Arc<[u64]> = dense
+                    .iter()
                     .zip(other_dense.iter())
                     .map(|(&s, &o)| s & o)
                     .collect();
-                return Some(Self { start: self.start, end: self.end, dense: result });
-            }
-            return self.intersect_with_weight_fallback(weight);
-        }
-
-        // General path: iterate entries.
-        let mut result = vec![0u64; self.dense.len()];
-        let mut any_nonzero = false;
-        let mut fallback_needed = false;
-
-        for (range, other_tokens) in weight.0.range_values() {
-            if self.end < *range.start() || *range.end() < self.start {
-                continue;
-            }
-            let key = Arc::as_ptr(other_tokens) as usize;
-            if let Some(other_dense) = precomputed.get(&key) {
-                for ((r, &s), &o) in result.iter_mut().zip(self.dense.iter()).zip(other_dense.iter()) {
-                    let v = s & o;
-                    *r |= v;
-                    if v != 0 { any_nonzero = true; }
-                }
+                result.insert(tsid, result_dense);
             } else {
-                fallback_needed = true;
-                break;
+                return self.intersect_with_weight_fallback(weight);
             }
         }
 
-        if fallback_needed {
-            return self.intersect_with_weight_fallback(weight);
-        }
-
-        if any_nonzero {
-            Some(Self { start: self.start, end: self.end, dense: result.into() })
-        } else {
+        if result.is_empty() {
             None
+        } else {
+            Some(Self(result))
         }
     }
 
     fn intersect_with_weight_fallback(&self, weight: &Weight) -> Option<Self> {
-        // Reconstruct a RangeSetBlaze from the dense bitmap, then do the intersection
-        // using the original path. This is slow but correct.
-        let mut tokens = RangeSetBlaze::new();
-        for (wi, &w) in self.dense.iter().enumerate() {
-            let mut bits = w;
-            while bits != 0 {
-                let b = bits.trailing_zeros() as u32;
-                tokens.insert((wi as u32) * 64 + b);
-                bits &= bits - 1;
+        let mut result = BTreeMap::new();
+        let dense_words = self.dense_len();
+
+        for (&tsid, dense) in &self.0 {
+            let tokens = Self::dense_to_tokens(dense);
+            if tokens.is_empty() {
+                continue;
             }
-        }
-        let result = weight.intersect_single_parts(self.start, self.end, &Arc::new(tokens));
-        if result.is_empty() {
-            return None;
-        }
-        // Convert result back to dense
-        if let Some((start, end, result_tokens)) = result.single_compact_entry_parts() {
-            let dense_words = self.dense.len();
-            Some(Self::from_internal_tokens(start, end, &result_tokens, dense_words))
-        } else {
-            // Multi-entry result — shouldn't happen in practice, but handle it
-            let dense_words = self.dense.len();
-            let mut dense = vec![0u64; dense_words];
-            for token_set in result.unique_token_sets() {
-                for t in token_set.iter() {
-                    let idx = t as usize / 64;
-                    let bit = t as usize % 64;
-                    if let Some(w) = dense.get_mut(idx) {
-                        *w |= 1u64 << bit;
-                    }
+            let result_weight = weight.intersect_single_parts(tsid, tsid, &Arc::new(tokens));
+            if result_weight.is_empty() {
+                continue;
+            }
+            if let Some((_, _, result_tokens)) = result_weight.single_compact_entry_parts() {
+                let result_dense = Self::from_internal_tokens(tsid, tsid, &result_tokens, dense_words);
+                if let Some(dense) = result_dense.0.get(&tsid) {
+                    result.insert(tsid, Arc::clone(dense));
                 }
             }
-            Some(Self { start: self.start, end: self.end, dense: dense.into() })
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(Self(result))
         }
     }
 
@@ -184,41 +161,22 @@ impl DenseMaskAcc {
         precomputed: &rustc_hash::FxHashMap<usize, Box<[u64]>>,
         buf: &mut [u32],
     ) {
-        // Fast path: single-TSID accumulator (start == end).
-        if self.start == self.end {
-            if let Some(token_set) = final_weight.0.get(self.start) {
-                let key = Arc::as_ptr(token_set) as usize;
-                if let Some(other_dense) = precomputed.get(&key) {
-                    constraint.or_dense_intersection_to_buf(&self.dense, other_dense, buf);
-                    return;
-                }
-            } else {
-                return; // TSID not in weight → no tokens
-            }
-        }
-
-        // General path: iterate entries.
-        for (range, other_tokens) in final_weight.0.range_values() {
-            if self.end < *range.start() || *range.end() < self.start {
+        for (&tsid, dense) in &self.0 {
+            let Some(token_set) = final_weight.0.get(tsid) else {
                 continue;
-            }
-            let key = Arc::as_ptr(other_tokens) as usize;
+            };
+            let key = Arc::as_ptr(token_set) as usize;
             if let Some(other_dense) = precomputed.get(&key) {
-                constraint.or_dense_intersection_to_buf(&self.dense, other_dense, buf);
+                constraint.or_dense_intersection_to_buf(dense, other_dense, buf);
             } else {
-                let mut tokens = RangeSetBlaze::new();
-                for (wi, &w) in self.dense.iter().enumerate() {
-                    let mut bits = w;
-                    while bits != 0 {
-                        let b = bits.trailing_zeros() as u32;
-                        tokens.insert((wi as u32) * 64 + b);
-                        bits &= bits - 1;
-                    }
-                }
+                let tokens = Self::dense_to_tokens(dense);
                 constraint.or_single_weight_intersection_to_buf(
-                    self.start, self.end, &Arc::new(tokens), final_weight, buf,
+                    tsid,
+                    tsid,
+                    &Arc::new(tokens),
+                    final_weight,
+                    buf,
                 );
-                return;
             }
         }
     }
@@ -229,16 +187,18 @@ impl DenseMaskAcc {
         constraint: &crate::runtime::constraint::Constraint,
         buf: &mut [u32],
     ) {
-        for (wi, &w) in self.dense.iter().enumerate() {
-            let mut bits = w;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                let internal_token = wi * 64 + bit;
-                let masks = &constraint.internal_token_buf_masks[internal_token];
-                for &(buf_word, mask) in masks {
-                    buf[buf_word as usize] |= mask;
+        for dense in self.0.values() {
+            for (wi, &w) in dense.iter().enumerate() {
+                let mut bits = w;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let internal_token = wi * 64 + bit;
+                    let masks = &constraint.internal_token_buf_masks[internal_token];
+                    for &(buf_word, mask) in masks {
+                        buf[buf_word as usize] |= mask;
+                    }
+                    bits &= bits - 1;
                 }
-                bits &= bits - 1;
             }
         }
     }
@@ -246,14 +206,22 @@ impl DenseMaskAcc {
 
 impl Merge for DenseMaskAcc {
     fn merge(&self, other: &Self) -> Self {
-        let start = self.start.min(other.start);
-        let end = self.end.max(other.end);
-        let dense: Arc<[u64]> = self.dense.iter()
-            .zip(other.dense.iter())
-            .map(|(&a, &b)| a | b)
-            .collect::<Vec<_>>()
-            .into();
-        Self { start, end, dense }
+        let mut merged = self.0.clone();
+        for (tsid, other_dense) in &other.0 {
+            merged
+                .entry(*tsid)
+                .and_modify(|dense| {
+                    let len = dense.len().max(other_dense.len());
+                    let mut combined = vec![0u64; len];
+                    for i in 0..len {
+                        combined[i] = dense.get(i).copied().unwrap_or(0)
+                            | other_dense.get(i).copied().unwrap_or(0);
+                    }
+                    *dense = combined.into();
+                })
+                .or_insert_with(|| other_dense.clone());
+        }
+        Self(merged)
     }
 }
 
@@ -369,11 +337,7 @@ impl<'a> ConstraintState<'a> {
                         return None;
                     }
                     let dense: Arc<[u64]> = Arc::from(&**universe);
-                    return Some(DenseMaskAcc {
-                        start: internal_tsid,
-                        end: internal_tsid,
-                        dense,
-                    });
+                    return Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense)])));
                 }
                 let mut dense: Vec<u64> = universe.to_vec();
                 for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed {
@@ -388,11 +352,7 @@ impl<'a> ConstraintState<'a> {
                 if dense.iter().all(|&w| w == 0) {
                     None
                 } else {
-                    Some(DenseMaskAcc {
-                        start: internal_tsid,
-                        end: internal_tsid,
-                        dense: dense.into(),
-                    })
+                    Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense.into())])))
                 }
             });
 
