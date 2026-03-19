@@ -732,8 +732,6 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     num_tsids: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
-    representative_initial_state: u32,
-    representative_state_by_original: &'tok [u32],
     self_loop_bytes: Vec<[u64; 4]>,
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     reachable_weight_cache: HashMap<usize, Weight>,
@@ -1022,12 +1020,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     println!("Executed tokenizer from state {} on input segment starting with byte {:02x} (pos {} out of {}) got end_state={:?} matches={:?}", tokenizer_state, segment_bytes[pos], pos, segment_bytes.len(), exec.end_state, exec.matches);
                     self.profile_exec_ms += exec_started.elapsed();
                     self.profile_tokenizer_execs += 1;
-                    let exec_end_state = exec.end_state.map(|end_state| {
-                        self.representative_state_by_original
-                            .get(end_state as usize)
-                            .copied()
-                            .unwrap_or(end_state)
-                    });
+                    let exec_end_state = exec.end_state;
                     let mut possible_matches_at_end = None;
 
                     if let Some(end_state) = exec_end_state {
@@ -1107,7 +1100,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let continuation_assoc = pending.entry(next_pos).or_default();
                         let destination = continuation_state(
                             continuation_assoc,
-                            self.representative_initial_state,
+                            self.tokenizer.initial_state_id(),
                             self.nwa,
                         );
                         self.profile_pending_ms += t.elapsed();
@@ -1258,12 +1251,7 @@ pub(crate) fn build_terminal_dwa_with_report(
             .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
             .collect::<Vec<_>>(),
     );
-    let representative_state_by_original = representative_original_ids(&id_map.tokenizer_states);
     let self_loop_bytes = build_self_loop_bytes(tokenizer);
-    let representative_initial_state = representative_state_by_original
-        .get(tokenizer.initial_state() as usize)
-        .copied()
-        .unwrap_or_else(|| tokenizer.initial_state());
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
     report.build_vocab_trie_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
@@ -1292,8 +1280,6 @@ pub(crate) fn build_terminal_dwa_with_report(
         num_tsids: id_map.num_tsids(),
         leaf_state,
         ignore_terminal,
-        representative_initial_state,
-        representative_state_by_original: &representative_state_by_original,
         self_loop_bytes,
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
