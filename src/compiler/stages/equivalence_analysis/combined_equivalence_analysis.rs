@@ -516,49 +516,22 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
-    // State equivalence reduction: groups initial states with identical tokenizer
-    // behavior. The cost is O(V×S) token walks (same as vocab analysis), so it's
-    // only beneficial when the reduction ratio is high (>50%). For most schemas
-    // the reduction ratio is low (10-20%), making it a net loss. Only enable for
-    // very large state counts where DFA/NWA cost dominates.
-    let state_reduction_threshold = std::env::var("STATE_EQUIV_THRESHOLD")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(5000);
+    // Step 1: State equivalence analysis — always run.
+    let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
+    let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+        regex,
+        &owned_tokens,
+        initial_states,
+    );
 
-    // Step 1: State equivalence analysis (if beneficial)
-    let (reduced_states, state_classes) = if initial_states.len() > state_reduction_threshold {
-        // Convert to owned tokens for state equivalence (cold path)
-        let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
-        let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
-            regex,
-            &owned_tokens,
-            initial_states,
-        );
+    let mut rep_set: BTreeSet<usize> = BTreeSet::new();
+    for &rep in &state_reps {
+        rep_set.insert(rep);
+    }
+    let reduced_states: Vec<usize> = rep_set.into_iter().collect();
 
-        // Build reduced state set
-        let mut rep_set: BTreeSet<usize> = BTreeSet::new();
-        for &rep in &state_reps {
-            rep_set.insert(rep);
-        }
-
-        let reduced: Vec<usize> = rep_set.into_iter().collect();
-
-        // Convert to StateEquivalenceResult format
-        let state_classes =
-            state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
-
-        (reduced, state_classes)
-    } else {
-        // No reduction needed - use all states as their own representatives
-        // Each state is its own equivalence class
-        let state_classes: StateEquivalenceResult = initial_states
-            .iter()
-            .map(|&s| std::iter::once(s).collect())
-            .collect();
-
-        (initial_states.to_vec(), state_classes)
-    };
+    let state_classes =
+        state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
 
     // Step 2: Vocab equivalence analysis on reduced states
     let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(

@@ -305,18 +305,32 @@ pub fn find_state_equivalence_classes(
     let reduced_states: Vec<usize> = rep_set.into_iter().collect();
 
     if reduced_states.len() == states.len() {
+        // kstep found no reductions — run full analysis on all states
         return find_state_equivalence_classes_token_based(regex, tokens, states);
     }
 
-    let reduced_mapping = find_state_equivalence_classes_token_based(regex, tokens, &reduced_states);
-    let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
-    for (i, &rep_state) in reduced_states.iter().enumerate() {
-        rep_to_final.insert(rep_state, reduced_mapping[i]);
+    // kstep merged some states. Hash collisions may cause false merges, so we
+    // must run token-based refinement within each group rather than just on
+    // representatives. Group states by their kstep representative, run
+    // token-based analysis per group, then combine results.
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, &rep) in pre_mapping.iter().enumerate() {
+        groups.entry(rep).or_default().push(i);
     }
 
     let mut mapping = vec![0usize; states.len()];
-    for (i, &pre_rep) in pre_mapping.iter().enumerate() {
-        mapping[i] = rep_to_final[&pre_rep];
+    for (_rep, member_indices) in &groups {
+        if member_indices.len() == 1 {
+            // Singleton group — representative is the state itself
+            mapping[member_indices[0]] = states[member_indices[0]];
+            continue;
+        }
+        // Run token-based analysis on the actual states in this group
+        let group_states: Vec<usize> = member_indices.iter().map(|&i| states[i]).collect();
+        let group_mapping = find_state_equivalence_classes_token_based(regex, tokens, &group_states);
+        for (j, &member_idx) in member_indices.iter().enumerate() {
+            mapping[member_idx] = group_mapping[j];
+        }
     }
 
     mapping
@@ -561,12 +575,36 @@ fn find_state_equivalence_classes_token_based(
         .unwrap_or(false);
     let batch_size = 5000usize;
 
-    let mut group_ids: Vec<usize> = vec![0usize; states.len()];
+    // Pre-partition by state labels (finalizers + possible futures) so that
+    // states with different finalizers are never grouped together. This is
+    // necessary because the pipeline uses these states as end-points: the
+    // terminal that matched to reach a state matters for parser actions.
+    let mut label_to_group: HashMap<(Vec<usize>, Vec<usize>), usize> = HashMap::new();
+    let mut num_initial_groups = 0usize;
+    let mut group_ids: Vec<usize> = Vec::with_capacity(states.len());
+    for &state_id in states {
+        let finalizers: Vec<usize> = dfa.states[state_id].finalizers.iter().copied().collect();
+        let futures: Vec<usize> = dfa.states[state_id].possible_future_group_ids.iter().copied().collect();
+        let key = (finalizers, futures);
+        let group = *label_to_group.entry(key).or_insert_with(|| {
+            let id = num_initial_groups;
+            num_initial_groups += 1;
+            id
+        });
+        group_ids.push(group);
+    }
     let mut next_group_ids: Vec<usize> = vec![0usize; states.len()];
-    let mut active_indices: Vec<usize> = (0..states.len()).collect();
+    // Only include states in non-singleton label groups as active
+    let mut group_sizes_init = vec![0usize; num_initial_groups];
+    for &gid in &group_ids {
+        group_sizes_init[gid] += 1;
+    }
+    let mut active_indices: Vec<usize> = (0..states.len())
+        .filter(|&i| group_sizes_init[group_ids[i]] > 1)
+        .collect();
     let mut active_flags: Vec<bool> = vec![false; states.len()];
     let mut active_hashes: Vec<u128> = vec![0u128; states.len()];
-    let mut prev_groups = 1usize;
+    let mut prev_groups = num_initial_groups;
     let mut stable_batches = 0usize;
     let mut tokens_tested;
 
