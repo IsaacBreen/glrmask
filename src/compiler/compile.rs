@@ -1087,9 +1087,10 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     let internal_token_entries = build_internal_token_entries(vocab, &id_map);
     let possible_matches =
-        crate::compiler::possible_matches::build_possible_matches_from_token_entries(
+        crate::compiler::possible_matches::build_possible_matches_from_token_entries_with_equiv(
             &tokenizer,
             &internal_token_entries,
+            Some(&id_map.tokenizer_states.internal_to_originals),
         );
     log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
 
@@ -1219,9 +1220,10 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     let internal_token_entries = build_internal_token_entries(vocab, &id_map);
     let possible_matches_by_state =
-        crate::compiler::possible_matches::build_possible_matches_from_token_entries(
+        crate::compiler::possible_matches::build_possible_matches_from_token_entries_with_equiv(
             &tokenizer,
             &internal_token_entries,
+            Some(&id_map.tokenizer_states.internal_to_originals),
         );
 
     let characterizations = characterize_terminals(&table, &glr_grammar);

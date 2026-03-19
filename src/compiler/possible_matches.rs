@@ -141,6 +141,17 @@ pub(crate) fn build_possible_matches_from_token_entries(
     tokenizer: &Tokenizer,
     token_entries: &[(u32, Vec<u8>)],
 ) -> PossibleMatchesByState {
+    build_possible_matches_from_token_entries_with_equiv(tokenizer, token_entries, None)
+}
+
+/// Like `build_possible_matches_from_token_entries`, but when `state_equiv_classes`
+/// is provided, computes for one representative per class and clones to the rest.
+/// This avoids redundant O(V) token walks for states with identical tokenizer behavior.
+pub(crate) fn build_possible_matches_from_token_entries_with_equiv(
+    tokenizer: &Tokenizer,
+    token_entries: &[(u32, Vec<u8>)],
+    state_equiv_classes: Option<&[Vec<u32>]>,
+) -> PossibleMatchesByState {
     let trie = VocabPrefixTree::build(
         &token_entries
             .iter()
@@ -150,12 +161,28 @@ pub(crate) fn build_possible_matches_from_token_entries(
 
     let mut computer = PossibleMatchesComputer::new(tokenizer);
     let mut possible_matches_by_state = BTreeMap::new();
-    for tokenizer_state in 0..tokenizer.num_states() {
-        let matches_for_state = computer.possible_matches_for_node(&trie.root, tokenizer_state);
-        possible_matches_by_state.insert(
-            tokenizer_state,
-            matches_for_state.as_ref().clone(),
-        );
+
+    if let Some(classes) = state_equiv_classes {
+        // Compute for one representative per class, clone to the rest
+        for class in classes {
+            if class.is_empty() {
+                continue;
+            }
+            let rep = class[0];
+            let matches_for_state = computer.possible_matches_for_node(&trie.root, rep);
+            let matches = matches_for_state.as_ref().clone();
+            for &state_id in class {
+                possible_matches_by_state.insert(state_id, matches.clone());
+            }
+        }
+    } else {
+        for tokenizer_state in 0..tokenizer.num_states() {
+            let matches_for_state = computer.possible_matches_for_node(&trie.root, tokenizer_state);
+            possible_matches_by_state.insert(
+                tokenizer_state,
+                matches_for_state.as_ref().clone(),
+            );
+        }
     }
 
     possible_matches_by_state
@@ -187,5 +214,23 @@ mod tests {
             start_matches.get(&1),
             Some(&RangeSetBlaze::from_iter([0u32..=0u32]))
         );
+    }
+
+    #[test]
+    fn test_possible_matches_with_equiv_matches_full_computation() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"ab")]);
+        let token_entries = vec![(0u32, b"a".to_vec()), (1u32, b"ab".to_vec())];
+
+        let full = build_possible_matches_from_token_entries(&tokenizer, &token_entries);
+        let classes: Vec<Vec<u32>> = (0..tokenizer.num_states())
+            .map(|state| vec![state as u32])
+            .collect();
+        let with_equiv = build_possible_matches_from_token_entries_with_equiv(
+            &tokenizer,
+            &token_entries,
+            Some(&classes),
+        );
+
+        assert_eq!(with_equiv, full);
     }
 }
