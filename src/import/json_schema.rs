@@ -3691,6 +3691,29 @@ mod tests {
     }
 
     #[test]
+    fn test_temp1() {
+        let schema = r##"{
+            "type": "object",
+            "properties": {
+                "jumpGate": {
+                    "type": "object"
+                }
+            }
+        }"##;
+        assert!(!accepts_sequence(schema, &[b"{\"jumpGate\": true}"]));
+        assert!(accepts_sequence(schema, &[b"{\"jumpGate\": {}}"]));
+    }
+
+    #[test]
+    fn test_temp2() {
+        let schema = r##"{
+            "type": "object",
+        }"##;
+        assert!(accepts_sequence(schema, &[b"true"]));
+        assert!(accepts_sequence(schema, &[b"{}"]));
+    }
+
+    #[test]
     fn test_single_pattern_properties_constrain_keys() {
         let schema = r#"{
             "type": "object",
