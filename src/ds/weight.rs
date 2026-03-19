@@ -6,16 +6,161 @@
 use range_set_blaze::{CheckSortedDisjoint, RangeMapBlaze, RangeSetBlaze, SortedDisjointMap};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use once_cell::sync::Lazy;
+use rustc_hash::FxHashMap;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug, Clone)]
 pub struct Weight(pub Arc<WeightMap>);
 
 type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
 type WeightMap = RangeMapBlaze<u32, SharedTokenSet>;
+
+#[derive(Default)]
+struct GlobalWeightInterner {
+    token_sets: FxHashMap<RangeSetBlaze<u32>, Weak<RangeSetBlaze<u32>>>,
+    weights: FxHashMap<u64, Vec<Weak<WeightMap>>>,
+    token_inserts_since_cleanup: usize,
+    weight_inserts_since_cleanup: usize,
+}
+
+const INTERNER_CLEANUP_INTERVAL: usize = 1024;
+
+static GLOBAL_WEIGHT_INTERNER: Lazy<Mutex<GlobalWeightInterner>> =
+    Lazy::new(|| Mutex::new(GlobalWeightInterner::default()));
+
+static EMPTY_RANGESET: Lazy<SharedTokenSet> = Lazy::new(|| Arc::new(RangeSetBlaze::new()));
+
+static EMPTY_WEIGHT: Lazy<Weight> = Lazy::new(|| Weight(Arc::new(WeightMap::new())));
+
+static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
+    let mut map = WeightMap::new();
+    map.extend_simple(std::iter::once((
+        WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL,
+        shared_rangeset(sentinel_token_set()),
+    )));
+    finalize_weight_map(map)
+});
+
+impl GlobalWeightInterner {
+    fn maybe_cleanup_token_sets(&mut self) {
+        if self.token_inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
+            return;
+        }
+        self.token_sets.retain(|_, weak| weak.strong_count() > 0);
+        self.token_inserts_since_cleanup = 0;
+    }
+
+    fn maybe_cleanup_weights(&mut self) {
+        if self.weight_inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
+            return;
+        }
+        self.weights.retain(|_, bucket| {
+            bucket.retain(|weak| weak.strong_count() > 0);
+            !bucket.is_empty()
+        });
+        self.weight_inserts_since_cleanup = 0;
+    }
+
+    fn clear_all(&mut self) {
+        self.token_sets.clear();
+        self.weights.clear();
+        self.token_inserts_since_cleanup = 0;
+        self.weight_inserts_since_cleanup = 0;
+    }
+
+    fn clear_stale(&mut self) {
+        self.token_sets.retain(|_, weak| weak.strong_count() > 0);
+        self.weights.retain(|_, bucket| {
+            bucket.retain(|weak| weak.strong_count() > 0);
+            !bucket.is_empty()
+        });
+        self.token_inserts_since_cleanup = 0;
+        self.weight_inserts_since_cleanup = 0;
+    }
+}
+
+fn intern_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
+    if tokens.is_empty() {
+        return Arc::clone(&EMPTY_RANGESET);
+    }
+
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    if let Some(existing) = interner.token_sets.get(&tokens).and_then(Weak::upgrade) {
+        return existing;
+    }
+
+    interner.maybe_cleanup_token_sets();
+    let key = tokens.clone();
+    let shared = Arc::new(tokens);
+    interner.token_sets.insert(key, Arc::downgrade(&shared));
+    interner.token_inserts_since_cleanup += 1;
+    shared
+}
+
+fn weight_map_fingerprint(map: &WeightMap) -> u64 {
+    use std::hash::Hasher;
+
+    let mut hasher = rustc_hash::FxHasher::default();
+    for (range, tokens) in map.range_values() {
+        hasher.write_u32(*range.start());
+        hasher.write_u32(*range.end());
+        hasher.write_usize(Arc::as_ptr(tokens) as usize);
+    }
+    hasher.finish()
+}
+
+fn weight_map_eq(left: &WeightMap, right: &WeightMap) -> bool {
+    let mut left_iter = left.range_values();
+    let mut right_iter = right.range_values();
+    loop {
+        match (left_iter.next(), right_iter.next()) {
+            (None, None) => return true,
+            (Some((left_range, left_tokens)), Some((right_range, right_tokens))) => {
+                if left_range != right_range {
+                    return false;
+                }
+                if !Arc::ptr_eq(left_tokens, right_tokens)
+                    && left_tokens.as_ref() != right_tokens.as_ref()
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn intern_weight_map(map: WeightMap) -> Arc<WeightMap> {
+    let fingerprint = weight_map_fingerprint(&map);
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    if let Some(bucket) = interner.weights.get_mut(&fingerprint) {
+        let mut idx = 0usize;
+        while idx < bucket.len() {
+            let Some(existing) = bucket[idx].upgrade() else {
+                bucket.swap_remove(idx);
+                continue;
+            };
+            if weight_map_eq(existing.as_ref(), &map) {
+                return existing;
+            }
+            idx += 1;
+        }
+    }
+
+    interner.maybe_cleanup_weights();
+    let shared = Arc::new(map);
+    interner
+        .weights
+        .entry(fingerprint)
+        .or_default()
+        .push(Arc::downgrade(&shared));
+    interner.weight_inserts_since_cleanup += 1;
+    shared
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum WeightOpKind {
@@ -36,7 +181,59 @@ pub struct WeightDebugStats {
     pub single_intersection_range_overlaps: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct WeightOpKey {
+    kind: WeightOpKind,
+    left: usize,
+    right: usize,
+}
+
+impl WeightOpKey {
+    fn new(kind: WeightOpKind, left: usize, right: usize) -> Self {
+        match kind {
+            WeightOpKind::Union | WeightOpKind::Intersection if left > right => Self {
+                kind,
+                left: right,
+                right: left,
+            },
+            _ => Self { kind, left, right },
+        }
+    }
+}
+
+/// Cached memo entry: stores the result AND weak references to both operands.
+/// The operand weak refs guard against the ABA problem: if either operand's
+/// Arc was dropped and a new Arc reuses the same address, the operand weak
+/// ref will fail to upgrade, and the stale entry is discarded.
+struct WeightOpMemoEntry {
+    result: Weak<WeightMap>,
+    left_operand: Weak<WeightMap>,
+    right_operand: Weak<WeightMap>,
+}
+
+#[derive(Default)]
+struct WeightOpMemo {
+    results: FxHashMap<WeightOpKey, WeightOpMemoEntry>,
+    inserts_since_cleanup: usize,
+}
+
+impl WeightOpMemo {
+    fn maybe_cleanup(&mut self) {
+        if self.inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
+            return;
+        }
+        self.results.retain(|_, entry| entry.result.strong_count() > 0);
+        self.inserts_since_cleanup = 0;
+    }
+
+    fn clear_all(&mut self) {
+        self.results.clear();
+        self.inserts_since_cleanup = 0;
+    }
+}
+
 thread_local! {
+    static WEIGHT_OP_MEMO: RefCell<WeightOpMemo> = RefCell::new(WeightOpMemo::default());
     static WEIGHT_DEBUG_STATS: RefCell<WeightDebugStats> = RefCell::new(WeightDebugStats::default());
 }
 
@@ -47,6 +244,17 @@ fn record_weight_debug_call(kind: WeightOpKind) {
             WeightOpKind::Union => stats.union_calls += 1,
             WeightOpKind::Intersection => stats.intersection_calls += 1,
             WeightOpKind::Difference => stats.difference_calls += 1,
+        }
+    });
+}
+
+fn record_weight_debug_memo_hit(kind: WeightOpKind) {
+    WEIGHT_DEBUG_STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        match kind {
+            WeightOpKind::Union => stats.union_memo_hits += 1,
+            WeightOpKind::Intersection => stats.intersection_memo_hits += 1,
+            WeightOpKind::Difference => stats.difference_memo_hits += 1,
         }
     });
 }
@@ -63,17 +271,28 @@ fn record_single_intersection_overlap() {
     });
 }
 
-/// No-op: this implementation does not use global weight interning.
-pub fn clear_all_weights() {}
+/// Clear the global interned-weight tables entirely.
+pub fn clear_all_weights() {
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    interner.clear_all();
+}
 
-/// No-op: this implementation does not use global weight interning.
-pub fn clear_stale_weights() {}
+/// Prune only dead entries from the global weight interner.
+pub fn clear_stale_weights() {
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    interner.clear_stale();
+}
 
-/// No-op: this implementation does not use memoized weight-operation caches.
-pub fn clear_weight_op_caches() {}
+/// Clear the current thread's weight-operation memo caches.
+pub fn clear_weight_op_caches() {
+    WEIGHT_OP_MEMO.with(|memo| memo.borrow_mut().clear_all());
+}
 
-/// Compatibility wrapper retaining the previous public API.
-pub fn clear_weight_caches() {}
+/// Compatibility wrapper retaining the previous behavior.
+pub fn clear_weight_caches() {
+    clear_weight_op_caches();
+    clear_all_weights();
+}
 
 pub(crate) fn reset_weight_debug_stats() {
     WEIGHT_DEBUG_STATS.with(|stats| {
@@ -85,11 +304,41 @@ pub(crate) fn snapshot_weight_debug_stats() -> WeightDebugStats {
     WEIGHT_DEBUG_STATS.with(|stats| *stats.borrow())
 }
 
+fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
+    let key = WeightOpKey::new(kind, left.ptr_key(), right.ptr_key());
+    WEIGHT_OP_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        let entry = memo.results.get(&key)?;
+        // Guard against ABA: if either operand's Arc was dropped and an address
+        // was reused, the weak operand refs will fail to upgrade.
+        if entry.left_operand.strong_count() == 0 || entry.right_operand.strong_count() == 0 {
+            memo.results.remove(&key);
+            return None;
+        }
+        let result = entry.result.upgrade()?;
+        Some(Weight(result))
+    })
+}
+
+fn store_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight, result: &Weight) {
+    let key = WeightOpKey::new(kind, left.ptr_key(), right.ptr_key());
+    WEIGHT_OP_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        memo.maybe_cleanup();
+        memo.results.insert(key, WeightOpMemoEntry {
+            result: Arc::downgrade(&result.0),
+            left_operand: Arc::downgrade(&left.0),
+            right_operand: Arc::downgrade(&right.0),
+        });
+        memo.inserts_since_cleanup += 1;
+    });
+}
+
 fn finalize_weight_map(map: WeightMap) -> Weight {
     if map.ranges().next().is_none() {
-        Weight::empty()
+        EMPTY_WEIGHT.clone()
     } else {
-        Weight(Arc::new(map))
+        Weight(intern_weight_map(map))
     }
 }
 
@@ -120,7 +369,7 @@ fn is_sentinel_token_set(tokens: &RangeSetBlaze<u32>) -> bool {
 }
 
 fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
-    Arc::new(tokens)
+    intern_rangeset(tokens)
 }
 
 fn rangeset_from_ranges<I>(ranges: I) -> RangeSetBlaze<u32>
@@ -174,12 +423,12 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
     let mut current_end = 0u32;
     let mut current_tokens = RangeSetBlaze::new();
 
-    let flush = |map: &mut WeightMap,
-                 current_start: &mut Option<u32>,
-                 current_end: &mut u32,
-                 current_tokens: &mut RangeSetBlaze<u32>| {
+    let mut flush = |map: &mut WeightMap,
+                     current_start: &mut Option<u32>,
+                     current_end: &mut u32,
+                     current_tokens: &mut RangeSetBlaze<u32>| {
         if let Some(start) = *current_start {
-            let tokens = std::mem::take(current_tokens);
+            let tokens = std::mem::replace(current_tokens, RangeSetBlaze::new());
             map.extend_simple(std::iter::once((start..=*current_end, shared_rangeset(tokens))));
         }
         *current_start = None;
@@ -544,7 +793,7 @@ fn range_map_entries(weight: &Weight) -> Vec<(std::ops::RangeInclusive<u32>, Ran
     weight
         .0
         .range_values()
-        .map(|(range, tokens)| (range, tokens.as_ref().clone()))
+    .map(|(range, tokens)| (range, tokens.as_ref().clone()))
         .collect()
 }
 
@@ -578,6 +827,7 @@ impl WeightBuilder {
                 match self.expanded.entry(tsid) {
                     std::collections::btree_map::Entry::Occupied(mut e) => {
                         let existing = e.get_mut();
+                        // Skip union if token sets are already identical
                         if existing != tokens_arc.as_ref() {
                             *existing |= tokens_arc.as_ref();
                         }
@@ -624,16 +874,11 @@ impl Weight {
     }
 
     pub fn empty() -> Self {
-        Weight(Arc::new(WeightMap::new()))
+        EMPTY_WEIGHT.clone()
     }
 
     pub fn all() -> Self {
-        let mut map = WeightMap::new();
-        map.extend_simple(std::iter::once((
-            WEIGHT_ALL_SENTINEL..=WEIGHT_ALL_SENTINEL,
-            shared_rangeset(sentinel_token_set()),
-        )));
-        Weight(Arc::new(map))
+        ALL_WEIGHT.clone()
     }
 
     pub fn from_compact_ranges<I, J>(entries: I) -> Self
@@ -736,8 +981,11 @@ impl Weight {
         if Arc::ptr_eq(&self.0, &other.0) {
             return self.clone();
         }
-
-        if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
+        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Union, self, other) {
+            record_weight_debug_memo_hit(WeightOpKind::Union);
+            return existing;
+        }
+        let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
             combine_single_entries(&left, &right, |left, right| match (left, right) {
                 (Some(left_tokens), Some(right_tokens)) => {
                     if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
@@ -761,12 +1009,15 @@ impl Weight {
                 (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
                 (None, None) => None,
             })
-        }
+        };
+        store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
+        result
     }
 
     pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
         let mut iter = weights.into_iter();
 
+        // Fast path: collect first non-empty weight
         let first = loop {
             match iter.next() {
                 None => return Self::empty(),
@@ -776,17 +1027,20 @@ impl Weight {
             }
         };
 
+        // Find second non-empty weight
         let second = loop {
             match iter.next() {
-                None => return first.clone(),
+                None => return first.clone(), // Only one non-empty weight
                 Some(w) if w.is_full() => return Self::all(),
                 Some(w) if w.is_empty() => continue,
                 Some(w) => break w,
             }
         };
 
+        // Two weights: use compact union
         let mut acc = first.union(second);
 
+        // Three or more: chain unions
         for weight in iter {
             if weight.is_full() {
                 return Self::all();
@@ -805,7 +1059,7 @@ impl Weight {
             return Self::empty();
         }
         if Arc::ptr_eq(&self.0, &other.0) {
-            return self.clone();
+            return self.clone(); // Same weight → intersection is itself
         }
         if self.is_full() {
             return other.clone();
@@ -813,8 +1067,11 @@ impl Weight {
         if other.is_full() {
             return self.clone();
         }
-
-        if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
+        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Intersection, self, other) {
+            record_weight_debug_memo_hit(WeightOpKind::Intersection);
+            return existing;
+        }
+        let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
             combine_single_entries(&left, &right, |left, right| match (left, right) {
                 (Some(left_tokens), Some(right_tokens)) => {
                     if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
@@ -832,7 +1089,9 @@ impl Weight {
             intersect_single_entry_with_weight(&single, self)
         } else {
             intersect_weights(self, other)
-        }
+        };
+        store_memoized_weight_op(WeightOpKind::Intersection, self, other, &result);
+        result
     }
 
     pub fn difference(&self, other: &Self) -> Self {
@@ -847,10 +1106,17 @@ impl Weight {
             return Self::empty();
         }
         if self.is_full() {
+            // Cannot compute all \ other without an explicit universe.
+            // Return all() as a safe over-approximation.  Callers that need
+            // exact complements should use the dedicated complement() method
+            // which returns empty() as a no-op sentinel instead.
             return Self::all();
         }
-
-        combine_compact_entries(self, other, |left, right| match (left, right) {
+        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Difference, self, other) {
+            record_weight_debug_memo_hit(WeightOpKind::Difference);
+            return existing;
+        }
+        let result = combine_compact_entries(self, other, |left, right| match (left, right) {
             (Some(left_tokens), Some(right_tokens)) => {
                 if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
                     None
@@ -861,7 +1127,9 @@ impl Weight {
             }
             (Some(left_tokens), None) => Some(Arc::clone(left_tokens)),
             _ => None,
-        })
+        });
+        store_memoized_weight_op(WeightOpKind::Difference, self, other, &result);
+        result
     }
 
     pub fn complement(&self) -> Self {
@@ -870,6 +1138,14 @@ impl Weight {
         } else if self.is_empty() {
             Self::all()
         } else {
+            // Cannot compute a proper per-TSID complement without an explicit
+            // token/TSID universe.  Returning empty() makes the determinization
+            // normalization step a no-op (target ∪ empty = target), which
+            // preserves correctness at the cost of potentially more DWA states
+            // (no subset collapsing via normalization).  The previous approach
+            // was `all().difference(self)` which always returned `all()` due to
+            // the sentinel representation, causing target subsets to collapse
+            // into `Weight::all()` and producing false positives.
             Self::empty()
         }
     }
@@ -980,7 +1256,7 @@ impl Weight {
             return true;
         }
         if Arc::ptr_eq(&self.0, &other.0) {
-            return false;
+            return false; // Same non-empty weight → not disjoint
         }
         if self.is_full() || other.is_full() {
             return false;
@@ -1016,6 +1292,7 @@ impl Weight {
         let mut other_iter = other.0.range_values();
         let mut self_current = self_iter.next();
         let mut other_current = other_iter.next();
+        // Track how far we've verified coverage of the current self entry
         let mut self_verified_up_to: Option<u32> = None;
 
         while let Some((self_range, self_tokens)) = &self_current {
@@ -1156,6 +1433,7 @@ impl std::hash::Hash for Weight {
 }
 
 impl std::fmt::Display for Weight {
+    
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_empty() {
             return write!(f, "∅");
@@ -1269,6 +1547,10 @@ impl<'de> Deserialize<'de> for Weight {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+
+    static WEIGHT_CACHE_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
     fn test_weight_empty() {
@@ -1415,18 +1697,140 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_weight_cache_apis_are_noops() {
-        clear_all_weights();
-        clear_stale_weights();
-        clear_weight_op_caches();
+    fn test_weight_map_interning_reuses_arc_for_equal_weights() {
+        let a = Weight::from_compact_ranges(vec![
+            (0..=2, vec![10..=12, 20..=21]),
+            (5..=5, vec![7..=9]),
+        ]);
+        let b = Weight::from_compact_ranges(vec![
+            (0..=2, vec![10..=12, 20..=21]),
+            (5..=5, vec![7..=9]),
+        ]);
+        assert_eq!(a, b);
+        assert_eq!(a.ptr_key(), b.ptr_key());
+    }
+
+    #[test]
+    fn test_weight_map_interning_reuses_arc_after_union() {
+        let left = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2])]);
+        let right = Weight::from_compact_ranges(vec![(2..=3, vec![3..=4])]);
+
+        let via_union = left.union(&right);
+        let direct = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2]), (2..=3, vec![3..=4])]);
+
+        assert_eq!(via_union, direct);
+        assert_eq!(via_union.ptr_key(), direct.ptr_key());
+    }
+
+    #[test]
+    fn test_weight_op_memo_discards_entries_when_operands_are_gone() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
         clear_weight_caches();
 
-        let a = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2])]);
-        let b = Weight::from_compact_ranges(vec![(2..=3, vec![3..=4])]);
-        let union = a.union(&b);
+        let stale_result = Weight::from_compact_ranges(vec![(0..=0, vec![7..=7])]);
+        let stale_operand_weaks = {
+            let left = Weight::from_compact_ranges(vec![(0..=0, vec![1..=1])]);
+            let right = Weight::from_compact_ranges(vec![(0..=0, vec![2..=2])]);
+            (
+                Arc::downgrade(&left.0),
+                Arc::downgrade(&right.0),
+            )
+        };
 
-        assert_eq!(union.tokens_for_tsid(0), rangeset_from_ranges([1..=2]));
-        assert_eq!(union.tokens_for_tsid(3), rangeset_from_ranges([3..=4]));
+        let live_left = Weight::from_compact_ranges(vec![(0..=0, vec![3..=3])]);
+        let live_right = Weight::from_compact_ranges(vec![(0..=0, vec![4..=4])]);
+        let lookup_key = WeightOpKey::new(WeightOpKind::Union, live_left.ptr_key(), live_right.ptr_key());
+
+        WEIGHT_OP_MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            memo.results.insert(
+                lookup_key,
+                WeightOpMemoEntry {
+                    result: Arc::downgrade(&stale_result.0),
+                    left_operand: stale_operand_weaks.0,
+                    right_operand: stale_operand_weaks.1,
+                },
+            );
+        });
+
+        assert!(lookup_memoized_weight_op(WeightOpKind::Union, &live_left, &live_right).is_none());
+
+        WEIGHT_OP_MEMO.with(|memo| {
+            assert!(!memo.borrow().results.contains_key(&lookup_key));
+        });
+    }
+
+    #[test]
+    fn test_clear_all_weights_breaks_future_intern_reuse() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
+        clear_weight_caches();
+
+        let first = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2])]);
+        let first_ptr = first.ptr_key();
+
+        clear_all_weights();
+
+        let second = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2])]);
+        assert_ne!(first_ptr, second.ptr_key());
+    }
+
+    #[test]
+    fn test_clear_stale_weights_prunes_dead_interner_entries() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
+        clear_weight_caches();
+
+        let stale_tokens = RangeSetBlaze::from_iter([1..=2]);
+        let fingerprint = {
+            let mut map = WeightMap::new();
+            map.extend_simple(std::iter::once((0..=1, Arc::new(stale_tokens.clone()))));
+            weight_map_fingerprint(&map)
+        };
+        let stale_token_weak = {
+            let shared = Arc::new(stale_tokens.clone());
+            let weak = Arc::downgrade(&shared);
+            drop(shared);
+            weak
+        };
+
+        let stale_weight_weak = {
+            let mut map = WeightMap::new();
+            map.extend_simple(std::iter::once((0..=1, Arc::new(stale_tokens.clone()))));
+            let shared = Arc::new(map);
+            let weak = Arc::downgrade(&shared);
+            let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+            interner.token_sets.insert(stale_tokens.clone(), stale_token_weak);
+            interner.weights.insert(fingerprint, vec![weak.clone()]);
+            drop(shared);
+            weak
+        };
+
+        assert_eq!(stale_weight_weak.strong_count(), 0);
+
+        clear_stale_weights();
+
+        let interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+        assert!(!interner.weights.contains_key(&fingerprint));
+        assert!(!interner.token_sets.contains_key(&stale_tokens));
+    }
+
+    #[test]
+    fn test_clear_weight_op_caches_empties_thread_local_memo() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
+        clear_weight_caches();
+
+        let left = Weight::from_compact_ranges(vec![(0..=0, vec![1..=1])]);
+        let right = Weight::from_compact_ranges(vec![(0..=0, vec![2..=2])]);
+        let _ = left.union(&right);
+
+        WEIGHT_OP_MEMO.with(|memo| {
+            assert!(!memo.borrow().results.is_empty());
+        });
+
+        clear_weight_op_caches();
+
+        WEIGHT_OP_MEMO.with(|memo| {
+            assert!(memo.borrow().results.is_empty());
+        });
     }
 
     #[test]
