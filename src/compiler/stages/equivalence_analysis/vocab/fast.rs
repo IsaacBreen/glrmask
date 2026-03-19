@@ -849,14 +849,9 @@ mod tests {
         let initial_states = vec![sep1_tok.initial_state_id()];
 
         let mut disallowed = BTreeMap::new();
-        // disallowed follows for ",": ","
         let mut bitset = BitSet::new(4);
         bitset.set(0);
         disallowed.insert(0u32, bitset);
-        // disallowed follows for Integer: "Integer"
-        bitset = BitSet::new(4);
-        bitset.set(1);
-        disallowed.insert(1u32, bitset);
 
         let classes = find_vocab_equivalence_classes_with_follow(
             &sep1_tok,
