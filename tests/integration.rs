@@ -2651,3 +2651,58 @@ fn test_equiv_mismatch_o56012_minimized() {
     // Should succeed without panic — both fast and reference agree.
     let _c = Constraint::from_lark(r#"start: "{" "}""#, &vocab).unwrap();
 }
+
+#[test]
+fn test_simple_ab() {
+    let vocab = make_vocab(&["a", "b", "ab"]);
+    let c = Constraint::from_ebnf(
+        r#"
+        start ::= AB
+        AB ::= 'a' 'b'
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"a");
+    let mask = s.mask();
+    assert!(!token_allowed(&mask, 0), "token 'a' should NOT be allowed");
+    assert!(token_allowed(&mask, 1), "token 'b' should be allowed");
+    assert!(!token_allowed(&mask, 2), "token 'ab' should NOT be allowed");
+
+
+    let forced = c.start().force();
+    assert_eq!(forced, vec![2], "shared first byte forcing should still greedily choose 'ab'");
+
+
+
+    let vocab = make_vocab(&["a", "b", "ab"]);
+    let c = Constraint::from_ebnf(
+        r#"
+        start ::= AB
+        AB ::= 'a' 'b'
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let forced = c.start().force();
+    assert_eq!(forced, vec![2], "shared first byte forcing should still greedily choose 'ab'");
+}
+
+#[test]
+fn test_force_multi_byte_same_first_byte() {
+    let vocab = make_vocab(&["a", "b", "ab"]);
+    let c = Constraint::from_ebnf(
+        r#"
+        start ::= AB
+        AB ::= 'a' 'b'
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let forced = c.start().force();
+    assert_eq!(forced, vec![2], "shared first byte forcing should still greedily choose 'ab'");
+}
