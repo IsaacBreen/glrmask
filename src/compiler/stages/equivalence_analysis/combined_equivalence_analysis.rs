@@ -516,36 +516,19 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
-    let need_reference_verify = env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV);
-    let need_reference_vocab = env_flag_enabled(REFERENCE_VOCAB_EQUIV_PRIMARY_ENV);
-    let need_reference_state = env_flag_enabled(REFERENCE_STATE_EQUIV_PRIMARY_ENV);
+    // State equivalence reduction: groups initial states with identical tokenizer
+    // behavior. The cost is O(V×S) token walks (same as vocab analysis), so it's
+    // only beneficial when the reduction ratio is high (>50%). For most schemas
+    // the reduction ratio is low (10-20%), making it a net loss. Only enable for
+    // very large state counts where DFA/NWA cost dominates.
+    let state_reduction_threshold = std::env::var("STATE_EQUIV_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(5000);
 
-    let reduced_states_from_classes = |classes: &StateEquivalenceResult| -> Vec<usize> {
-        classes
-            .iter()
-            .filter_map(|class| class.iter().next().copied())
-            .collect()
-    };
-
-    let primary_reference_result = if need_reference_vocab || need_reference_state {
-        Some(super::reference::find_equivalence_classes(
-            regex,
-            tokens,
-            initial_states,
-            disallowed_follows,
-            ignore_terminal.map(|t| t as usize),
-        ))
-    } else {
-        None
-    };
-
-    // Step 1: State equivalence analysis — always run unless reference state is primary.
-    let (reduced_states, state_classes) = if need_reference_state {
-        let ref_result = primary_reference_result.as_ref().unwrap();
-        let state_classes = ref_result.state_classes.clone();
-        let reduced_states = reduced_states_from_classes(&state_classes);
-        (reduced_states, state_classes)
-    } else {
+    // Step 1: State equivalence analysis (if beneficial)
+    let (reduced_states, state_classes) = if initial_states.len() > state_reduction_threshold {
+        // Convert to owned tokens for state equivalence (cold path)
         let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
         let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
             regex,
@@ -553,33 +536,39 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             initial_states,
         );
 
+        // Build reduced state set
         let mut rep_set: BTreeSet<usize> = BTreeSet::new();
         for &rep in &state_reps {
             rep_set.insert(rep);
         }
-        let reduced_states: Vec<usize> = rep_set.into_iter().collect();
 
+        let reduced: Vec<usize> = rep_set.into_iter().collect();
+
+        // Convert to StateEquivalenceResult format
         let state_classes =
             state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
-        (reduced_states, state_classes)
+
+        (reduced, state_classes)
+    } else {
+        // No reduction needed - use all states as their own representatives
+        // Each state is its own equivalence class
+        let state_classes: StateEquivalenceResult = initial_states
+            .iter()
+            .map(|&s| std::iter::once(s).collect())
+            .collect();
+
+        (initial_states.to_vec(), state_classes)
     };
 
     // Step 2: Vocab equivalence analysis on reduced states
-    let fast_vocab_classes = if need_reference_vocab {
-        None
-    } else {
-        Some(vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
-            regex,
-            tokens,
-            &reduced_states,
-            disallowed_follows,
-        ))
-    };
+    let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
+        regex,
+        tokens,
+        &reduced_states,
+        disallowed_follows,
+    );
 
     if env_flag_enabled(SLOW_VOCAB_EQUIV_VERIFICATION_ENV) {
-        let vocab_classes = fast_vocab_classes.as_ref().expect(
-            "slow vocab verification requires the fast vocab path to be active",
-        );
         let slow_vocab_classes = super::vocab::slow::find_vocab_equivalence_classes_with_follow(
             regex,
             tokens,
@@ -587,13 +576,10 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             disallowed_follows,
         );
         print_vocab_verification_stats("slow", &slow_vocab_classes);
-        verify_vocab_partition("slow", vocab_classes, &slow_vocab_classes);
+        verify_vocab_partition("slow", &vocab_classes, &slow_vocab_classes);
     }
 
     if env_flag_enabled(MEDIUM_VOCAB_EQUIV_VERIFICATION_ENV) {
-        let vocab_classes = fast_vocab_classes.as_ref().expect(
-            "medium vocab verification requires the fast vocab path to be active",
-        );
         let medium_vocab_classes = super::vocab::medium::find_vocab_equivalence_classes_with_follow(
             regex,
             tokens,
@@ -601,12 +587,16 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             disallowed_follows,
         );
         print_vocab_verification_stats("medium", &medium_vocab_classes);
-        verify_vocab_partition("medium", vocab_classes, &medium_vocab_classes);
+        verify_vocab_partition("medium", &vocab_classes, &medium_vocab_classes);
     }
 
     // --- Reference analysis ---
     // Run once if any reference env var is enabled, reuse the result.
-    let reference_result = if need_reference_verify {
+    let need_reference_verify = env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV);
+    let need_reference_vocab = env_flag_enabled(REFERENCE_VOCAB_EQUIV_PRIMARY_ENV);
+    let need_reference_state = env_flag_enabled(REFERENCE_STATE_EQUIV_PRIMARY_ENV);
+
+    let reference_result = if need_reference_verify || need_reference_vocab || need_reference_state {
         Some(super::reference::find_equivalence_classes(
             regex,
             tokens,
@@ -627,7 +617,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         );
         verify_vocab_partition_reference(
             regex,
-            fast_vocab_classes.as_ref().unwrap(),
+            &vocab_classes,
             &ref_result.vocab_classes,
             tokens,
             &reduced_states,
@@ -636,16 +626,18 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         );
     }
 
+    // Replace vocab classes if reference primary is requested
     let vocab_classes = if need_reference_vocab {
-        let ref_result = primary_reference_result.as_ref().unwrap();
+        let ref_result = reference_result.as_ref().unwrap();
         print_vocab_verification_stats("reference (primary)", &ref_result.vocab_classes);
         ref_result.vocab_classes.clone()
     } else {
-        fast_vocab_classes.unwrap()
+        vocab_classes
     };
 
+    // Replace state classes if reference state primary is requested
     let state_classes = if need_reference_state {
-        let ref_result = primary_reference_result.as_ref().unwrap();
+        let ref_result = reference_result.as_ref().unwrap();
         eprintln!(
             "[state equiv] reference (primary): {} classes",
             ref_result.state_classes.len()
