@@ -442,6 +442,22 @@ fn verify_vocab_partition_reference<S: AsRef<[u8]> + Sync>(
     }
 }
 
+fn verify_state_partition_reference(
+    fast_state_classes: &StateEquivalenceResult,
+    reference_state_classes: &StateEquivalenceResult,
+) {
+    let fast_state_classes: BTreeSet<Vec<_>> = fast_state_classes.iter().map(|class| class.iter().copied().collect()).collect();
+    let reference_state_classes: BTreeSet<Vec<_>> = reference_state_classes.iter().map(|class| class.iter().copied().collect()).collect();
+    assert!(
+        partition_is_at_least_as_fine(&fast_state_classes, &reference_state_classes),
+        "Fast state equivalence merged tokens that reference kept separate!\n\
+         Fast classes: {}\n\
+         Reference classes: {}",
+        fast_state_classes.len(),
+        reference_state_classes.len(),
+    );
+}
+
 fn print_vocab_verification_stats(label: &str, vocab_classes: &VocabEquivalenceResult) {
     eprintln!(
         "[vocab equiv verification] {label}: {} classes",
@@ -600,7 +616,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         Some(super::reference::find_equivalence_classes(
             regex,
             tokens,
-            &reduced_states,
+            &initial_states,
             disallowed_follows,
             ignore_terminal.map(|t| t as usize),
         ))
@@ -611,9 +627,9 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     if need_reference_verify {
         let ref_result = reference_result.as_ref().unwrap();
         print_vocab_verification_stats("reference", &ref_result.vocab_classes);
-        eprintln!(
-            "[state equiv verification] reference: {} classes",
-            ref_result.state_classes.len()
+        verify_state_partition_reference(
+            &state_classes,
+            &ref_result.state_classes,
         );
         verify_vocab_partition_reference(
             regex,
