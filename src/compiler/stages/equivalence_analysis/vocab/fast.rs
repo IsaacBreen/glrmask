@@ -837,15 +837,11 @@ mod tests {
     #[test]
     fn test_json_array_vocab_equivalence_with_follows() {
         let tokenizer = build_tokenizer_from_exprs(&[
-            bytes(b","),
-            // Integer
-            seq(vec![
-                opt(bytes(b"-")),
-                bytes(b"0"),
-            ]),
+            bytes(b"a"),
+            bytes(b"bc"),
         ]);
         let sep1_tok = Sep1Tokenizer::new(&tokenizer);
-        let tokens = vec![b",".to_vec(), b",-".to_vec()];
+        let tokens = vec![b"a".to_vec(), b"ab".to_vec()];
         let initial_states = vec![sep1_tok.initial_state_id()];
 
         let mut disallowed = BTreeMap::new();
