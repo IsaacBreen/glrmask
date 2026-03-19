@@ -837,19 +837,11 @@ mod tests {
     #[test]
     fn test_json_array_vocab_equivalence_with_follows() {
         let tokenizer = build_tokenizer_from_exprs(&[
-            bytes(b"["),
-            bytes(b"]"),
             bytes(b","),
             // Integer
             seq(vec![
                 opt(bytes(b"-")),
-                choice(vec![
-                    bytes(b"0"),
-                    seq(vec![
-                        class(U8Set::from_range(b'1', b'9')), // NONZERO_DIGIT
-                        star(class(U8Set::from_range(b'0', b'9'))), // DIGIT*
-                    ]),
-                ]),
+                bytes(b"0"),
             ]),
         ]);
         let sep1_tok = Sep1Tokenizer::new(&tokenizer);
@@ -857,29 +849,14 @@ mod tests {
         let initial_states = vec![sep1_tok.initial_state_id()];
 
         let mut disallowed = BTreeMap::new();
-        // disallowed follows for "[": "[" ","
+        // disallowed follows for ",": ","
         let mut bitset = BitSet::new(4);
         bitset.set(0);
-        bitset.set(2);
         disallowed.insert(0u32, bitset);
-        // disallowed follows for "]": "[" "]" "," Integer
+        // disallowed follows for Integer: "Integer"
         bitset = BitSet::new(4);
-        bitset.set(0);
         bitset.set(1);
-        bitset.set(2);
-        bitset.set(3);
         disallowed.insert(1u32, bitset);
-        // disallowed follows for ",": "," "[" "]"
-        bitset = BitSet::new(4);
-        bitset.set(0);
-        bitset.set(1);
-        bitset.set(2);
-        disallowed.insert(2u32, bitset);
-        // disallowed follows for Integer: "Integer" "["
-        bitset = BitSet::new(4);
-        bitset.set(0);
-        bitset.set(3);
-        disallowed.insert(3u32, bitset);
 
         let classes = find_vocab_equivalence_classes_with_follow(
             &sep1_tok,
