@@ -1698,6 +1698,8 @@ mod tests {
 
     #[test]
     fn test_weight_map_interning_reuses_arc_for_equal_weights() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
+
         let a = Weight::from_compact_ranges(vec![
             (0..=2, vec![10..=12, 20..=21]),
             (5..=5, vec![7..=9]),
@@ -1712,6 +1714,8 @@ mod tests {
 
     #[test]
     fn test_weight_map_interning_reuses_arc_after_union() {
+        let _guard = WEIGHT_CACHE_TEST_LOCK.lock().unwrap();
+
         let left = Weight::from_compact_ranges(vec![(0..=1, vec![1..=2])]);
         let right = Weight::from_compact_ranges(vec![(2..=3, vec![3..=4])]);
 
