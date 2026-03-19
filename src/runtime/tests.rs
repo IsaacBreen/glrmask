@@ -18,15 +18,10 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
 #[test]
 fn test_trivial() {
     let vocab = make_vocab(&["a"]);
-    let (c, d) = Constraint::from_ebnf_with_debug("start ::= 'a' 'b'", &vocab).unwrap();
-    println!("{:#?}", c.tokenizer);
-    println!("{}", d);
+    let c = Constraint::from_ebnf("start ::= 'a' 'b'", &vocab).unwrap();
 
     let mut s = c.start();
     s.commit_bytes(b"a");
-    for (tsid, gss) in &s.state {
-        println!("tsid: {}, gss: {:?}", tsid, gss.to_stacks());
-    }
     let mask = s.mask();
     assert!(!token_allowed(&mask, 0), "token 'a' should NOT be allowed");
 }

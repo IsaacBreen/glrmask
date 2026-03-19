@@ -1042,7 +1042,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     // Templates only need (table, grammar) — no dependency on terminal_dwa or id_map.
     #[cfg(feature = "rayon")]
     let ((mut terminal_dwa, terminal_build), (characterizations, templates)) = rayon::join(
-        || build_terminal_dwa_with_report(&normalized, &glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal),
+        || build_terminal_dwa_with_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal),
         || {
             let characterizations = characterize_terminals(&table, &glr_grammar);
             let templates = Templates::from_characterizations(&characterizations);
@@ -1051,7 +1051,7 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     );
     #[cfg(not(feature = "rayon"))]
     let ((mut terminal_dwa, terminal_build), (characterizations, templates)) = {
-        let td = build_terminal_dwa_with_report(&normalized, &glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal);
+        let td = build_terminal_dwa_with_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal);
         let characterizations = characterize_terminals(&table, &glr_grammar);
         let templates = Templates::from_characterizations(&characterizations);
         (td, (characterizations, templates))
@@ -1227,7 +1227,6 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     let characterizations = characterize_terminals(&table, &glr_grammar);
     let templates = Templates::from_characterizations(&characterizations);
     let terminal_dwa = build_terminal_dwa(
-        &normalized,
         &glr_grammar,
         &tokenizer,
         vocab,
