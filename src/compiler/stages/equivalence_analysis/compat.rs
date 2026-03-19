@@ -17,6 +17,8 @@
 //! code can be adapted with minimal changes.
 
 
+use std::collections::BTreeMap;
+
 use crate::automata::lexer::tokenizer::Tokenizer;
 
 pub type GroupID = usize;
@@ -103,46 +105,65 @@ impl Sep1Tokenizer {
         self.flat_dfa.start_state
     }
 
-    /// Run the DFA from a given state on input bytes, collecting all match positions.
-    ///
-    /// This is the sep1 equivalent of `Tokenizer::execute_from_state_nonzero`.
-    /// It walks the DFA byte-by-byte, recording (group_id, position) for every
-    /// finalizer hit along the way, and tracking the end state.
+    /// Run the DFA from a given state on input bytes using sep1-compatible execution semantics.
     pub fn execute_from_state_nonzero(&self, input: &[u8], start_state: usize) -> ExecuteResult {
         let dfa = &self.flat_dfa;
+        if start_state >= dfa.states.len() {
+            return ExecuteResult {
+                matches: Vec::new(),
+                end_state: None,
+            };
+        }
+
         let mut current = start_state;
-        let mut matches = Vec::new();
+        let mut match_positions: BTreeMap<usize, usize> = dfa.states[current]
+            .finalizers
+            .iter()
+            .copied()
+            .map(|group_id| (group_id, 0usize))
+            .collect();
 
         for (pos, &byte) in input.iter().enumerate() {
-            if current >= dfa.states.len() {
-                // Dead state
-                return ExecuteResult {
-                    matches,
-                    end_state: None,
-                };
-            }
             let next = dfa.states[current].transitions[byte as usize];
             if next == u32::MAX {
                 return ExecuteResult {
-                    matches,
+                    matches: collect_matches(&match_positions),
                     end_state: None,
                 };
             }
+
             current = next as usize;
-            // Check finalizers at this position (position is 1-indexed: byte count consumed)
+            let position = pos + 1;
             for &gid in &dfa.states[current].finalizers {
-                matches.push(ExecuteMatch {
-                    group_id: gid,
-                    position: pos + 1,
-                });
+                match_positions.insert(gid, position);
+            }
+
+            if dfa.states[current].possible_future_group_ids.is_empty() {
+                return ExecuteResult {
+                    matches: collect_matches(&match_positions),
+                    end_state: None,
+                };
             }
         }
 
         ExecuteResult {
-            matches,
-            end_state: Some(current),
+            matches: collect_matches(&match_positions),
+            end_state: (!state_is_done(&dfa.states[current])).then_some(current),
         }
     }
+}
+
+fn state_is_done(state: &FlatDfaState) -> bool {
+    state.transitions.iter().all(|&target| target == u32::MAX)
+}
+
+fn collect_matches(match_positions: &BTreeMap<usize, usize>) -> Vec<ExecuteMatch> {
+    match_positions
+        .iter()
+        .filter_map(|(&group_id, &position)| {
+            (position != 0).then_some(ExecuteMatch { group_id, position })
+        })
+        .collect()
 }
 
 /// Result of executing the DFA on input bytes.
@@ -155,4 +176,33 @@ pub struct ExecuteResult {
 pub struct ExecuteMatch {
     pub group_id: usize,
     pub position: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::lexer::ast::{bytes, plus};
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+
+    #[test]
+    fn test_execute_from_state_nonzero_deduplicates_group_matches() {
+        let tokenizer = build_tokenizer_from_exprs(&[plus(bytes(b"1"))]);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+
+        let result = sep1.execute_from_state_nonzero(b"11", sep1.initial_state_id());
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].group_id, 0);
+        assert_eq!(result.matches[0].position, 2);
+    }
+
+    #[test]
+    fn test_execute_from_state_nonzero_returns_none_for_sink_end_state() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a")]);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+
+        let result = sep1.execute_from_state_nonzero(b"a", sep1.initial_state_id());
+
+        assert_eq!(result.end_state, None);
+    }
 }
