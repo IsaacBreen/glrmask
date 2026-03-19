@@ -419,8 +419,6 @@ fn commit_bytes_impl(
     let mut pending_overall_state: BTreeMap<u32, Vec<ParserGSS>> = BTreeMap::new();
     let mut processing_queue: Vec<BTreeMap<u32, Vec<ParserGSS>>> =
         (0..=bytes.len()).map(|_| BTreeMap::new()).collect();
-    let mut advance_result_cache = FxHashMap::<(usize, u32), ParserGSS>::default();
-    let mut interface_shape_advance_cache = FxHashMap::<(usize, u32), ParserGSS>::default();
 
     // Take ownership instead of cloning — state will be fully replaced below.
     processing_queue[0] = std::mem::take(state)
@@ -563,88 +561,31 @@ fn commit_bytes_impl(
                 let gss = if let Some(cached) = terminal_result_cache.get(&matched.id) {
                     cached.clone()
                 } else {
-                    let cache_key = (gss_at_offset.ptr_key(), matched.id);
-                    let mut gss = if let Some(cached) = advance_result_cache.get(&cache_key) {
-                        cached.clone()
-                    } else if let (Some(shape_key), Some(acc)) = (
-                        gss_at_offset.root_interface_shape_key(),
-                        gss_at_offset.root_interface_acc(),
-                    ) {
-                        if let Some(cached) =
-                            interface_shape_advance_cache.get(&(shape_key, matched.id))
-                        {
-                            if let Some(rewrapped) = cached.with_root_interface_acc(acc) {
-                                rewrapped
-                            } else {
-                                cached.clone()
-                            }
-                        } else {
-                            if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
-                                advance_result_cache.insert(cache_key, ParserGSS::empty());
-                                interface_shape_advance_cache
-                                    .insert((shape_key, matched.id), ParserGSS::empty());
-                                terminal_result_cache.insert(matched.id, ParserGSS::empty());
-                                continue;
-                            }
-                            if let Some(metrics) = metrics.as_deref_mut() {
-                                metrics.advance_stacks_calls += 1;
-                            }
-                            let t_advance = metrics
-                                .as_ref()
-                                .map(|_| std::time::Instant::now());
-                            let mut advance_metrics = AdvanceStacksDebugMetrics::default();
-                            let gss = advance_stacks_with_metrics(
-                                &constraint.table,
-                                &gss_at_offset,
-                                matched.id,
-                                metrics.as_deref_mut().map(|_| &mut advance_metrics),
-                            );
-                            if let (Some(metrics), Some(t_advance)) =
-                                (metrics.as_deref_mut(), t_advance)
-                            {
-                                metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
-                                if !gss.is_empty() {
-                                    metrics.advance_stacks_nonempty += 1;
-                                }
-                                accumulate_advance_stacks_metrics(metrics, &advance_metrics);
-                            }
-                            advance_result_cache.insert(cache_key, gss.clone());
-                            if gss.root_interface_shape_key().is_some() {
-                                interface_shape_advance_cache
-                                    .insert((shape_key, matched.id), gss.clone());
-                            }
-                            gss
+                    if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                        terminal_result_cache.insert(matched.id, ParserGSS::empty());
+                        continue;
+                    }
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.advance_stacks_calls += 1;
+                    }
+                    let t_advance = metrics
+                        .as_ref()
+                        .map(|_| std::time::Instant::now());
+                    let mut advance_metrics = AdvanceStacksDebugMetrics::default();
+                    let mut gss = advance_stacks_with_metrics(
+                        &constraint.table,
+                        &gss_at_offset,
+                        matched.id,
+                        metrics.as_deref_mut().map(|_| &mut advance_metrics),
+                    );
+                    if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance)
+                    {
+                        metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
+                        if !gss.is_empty() {
+                            metrics.advance_stacks_nonempty += 1;
                         }
-                    } else {
-                        if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
-                            advance_result_cache.insert(cache_key, ParserGSS::empty());
-                            terminal_result_cache.insert(matched.id, ParserGSS::empty());
-                            continue;
-                        }
-                        if let Some(metrics) = metrics.as_deref_mut() {
-                            metrics.advance_stacks_calls += 1;
-                        }
-                        let t_advance = metrics
-                            .as_ref()
-                            .map(|_| std::time::Instant::now());
-                        let mut advance_metrics = AdvanceStacksDebugMetrics::default();
-                        let gss = advance_stacks_with_metrics(
-                            &constraint.table,
-                            &gss_at_offset,
-                            matched.id,
-                            metrics.as_deref_mut().map(|_| &mut advance_metrics),
-                        );
-                        if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance)
-                        {
-                            metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
-                            if !gss.is_empty() {
-                                metrics.advance_stacks_nonempty += 1;
-                            }
-                            accumulate_advance_stacks_metrics(metrics, &advance_metrics);
-                        }
-                        advance_result_cache.insert(cache_key, gss.clone());
-                        gss
-                    };
+                        accumulate_advance_stacks_metrics(metrics, &advance_metrics);
+                    }
                     if !gss.is_empty() {
                         if let Some(end_state) = exec_result.end_state {
                             if let Some(metrics) = metrics.as_deref_mut() {

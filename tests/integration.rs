@@ -295,6 +295,34 @@ fn test_json_schema_enum() {
     assert!(token_allowed(&mask, 0), "'\"' allowed for enum start");
 }
 
+#[test]
+fn test_json_schema_bare_object_accepts_compact_empty_object_token() {
+    let vocab = make_vocab(&["{}", "true"]);
+    let c = Constraint::from_json_schema(r#"{"type": "object"}"#, &vocab).unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'{{}}' should be allowed for bare object schema");
+    assert!(!token_allowed(&mask, 1), "'true' should not be allowed for bare object schema");
+
+    s.commit_token(0).unwrap();
+    assert!(s.is_finished(), "should accept after compact '{{}}' token");
+}
+
+#[test]
+fn test_ebnf_empty_object_accepts_compact_empty_object_token() {
+    let vocab = make_vocab(&["{}", "true"]);
+    let c = Constraint::from_ebnf(r#"start ::= "{" "}""#, &vocab).unwrap();
+    let mut s = c.start();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 0), "'{{}}' should be allowed for empty-object grammar");
+    assert!(!token_allowed(&mask, 1), "'true' should not be allowed for empty-object grammar");
+
+    s.commit_token(0).unwrap();
+    assert!(s.is_finished(), "should accept after compact '{{}}' token");
+}
+
 // ====================================================================
 // Error handling tests
 // ====================================================================

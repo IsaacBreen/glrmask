@@ -3707,10 +3707,35 @@ mod tests {
     #[test]
     fn test_temp2() {
         let schema = r##"{
-            "type": "object",
+            "type": "object"
         }"##;
         assert!(!accepts_sequence(schema, &[b"true"]));
         assert!(accepts_sequence(schema, &[b"{}"]));
+    }
+
+    #[test]
+    fn test_bare_object_schema_accepts_compact_empty_object_token() {
+        let schema = r##"{
+            "type": "object"
+        }"##;
+        assert!(accepts_sequence(schema, &[b"{}"]));
+    }
+
+    #[test]
+    fn test_bare_object_ebnf_accepts_compact_empty_object_token() {
+        let ebnf = r#"
+            start ::= json_object
+            json_object ::= "{" "}" | "{" json_kv json_object_tail "}"
+            json_object_tail ::= "," json_kv json_object_tail |
+            json_kv ::= json_string ":" json_value
+            json_array ::= "[" "]" | "[" json_value json_array_tail "]"
+            json_array_tail ::= "," json_value json_array_tail |
+            json_value ::= json_object | json_array | json_string | json_bool | json_null
+            json_string ::= '""'
+            json_bool ::= "true" | "false"
+            json_null ::= "null"
+        "#;
+        assert!(accepts_ebnf_sequence(ebnf, &[b"{}"]));
     }
 
     #[test]
@@ -3970,7 +3995,10 @@ mod tests {
         ));
     }
 
-    fn accepts_sequence(schema_json: &str, tokens: &[&[u8]]) -> bool {
+    fn accepts_compiled_sequence<F>(tokens: &[&[u8]], build: F) -> bool
+    where
+        F: FnOnce(&Vocab) -> crate::Result<crate::Constraint>,
+    {
         let entries: Vec<(u32, Vec<u8>)> = tokens
             .iter()
             .enumerate()
@@ -3978,7 +4006,7 @@ mod tests {
             .collect();
         let vocab = Vocab::new(entries, None);
 
-        let c = match crate::Constraint::from_json_schema(schema_json, &vocab) {
+        let c = match build(&vocab) {
             Ok(c) => c,
             Err(_) => return false,
         };
@@ -3994,6 +4022,16 @@ mod tests {
             state.commit_token(id).unwrap();
         }
         state.is_finished()
+    }
+
+    fn accepts_sequence(schema_json: &str, tokens: &[&[u8]]) -> bool {
+        accepts_compiled_sequence(tokens, |vocab| {
+            crate::Constraint::from_json_schema(schema_json, vocab)
+        })
+    }
+
+    fn accepts_ebnf_sequence(ebnf: &str, tokens: &[&[u8]]) -> bool {
+        accepts_compiled_sequence(tokens, |vocab| crate::Constraint::from_ebnf(ebnf, vocab))
     }
 
     #[test]
