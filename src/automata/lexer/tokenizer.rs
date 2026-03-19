@@ -104,6 +104,10 @@ impl Tokenizer {
             .collect()
     }
 
+    pub fn is_end(&self, state: u32) -> bool {
+        self.possible_future_terminals(state).is_empty()
+    }
+
     pub fn num_states(&self) -> u32 {
         self.dfa.num_states() as u32
     }
@@ -130,7 +134,7 @@ impl Tokenizer {
         }
 
         TokenizerExecResult {
-            end_state: Some(state),
+            end_state: (!self.is_end(state)).then_some(state),
             matches,
         }
     }
