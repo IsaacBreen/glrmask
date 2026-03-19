@@ -34,7 +34,6 @@ const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A
 const JSON_DIRECT_UTF8_PATTERN: &str =
     r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
-const JSON_ITEM_SEPARATOR_COMPACT: &[u8] = b",";
 const JSON_KEY_SEPARATOR: &[u8] = b": ";
 const UNTYPED_OBJECT_KEYWORD_KEYS: &[&str] = &[
     "properties",
@@ -2449,10 +2448,7 @@ impl SchemaCtx {
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
-        choice_or_single(vec![
-            literal_expr(JSON_ITEM_SEPARATOR),
-            literal_expr(JSON_ITEM_SEPARATOR_COMPACT),
-        ])
+        literal_expr(JSON_ITEM_SEPARATOR)
     }
 
     fn extract_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
