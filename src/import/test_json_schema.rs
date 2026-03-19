@@ -849,6 +849,85 @@ fn test_false_schema_property_is_omitted_when_additional_properties_are_forbidde
 }
 
 #[test]
+fn test_dotted_required_property_name_restricts_key_prefix() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "PersonController.personal": {
+                "type": "object",
+                "properties": {
+                    "model": {},
+                    "request": {}
+                },
+                "required": ["model", "request"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["PersonController.personal"],
+        "additionalProperties": false
+    }"#;
+    let vocab = byte_vocab();
+    let c = Constraint::from_json_schema(schema, &vocab).expect("dotted-key schema should compile");
+    let mut state = c.start();
+    for byte in b"{\"" {
+        state.commit_token(*byte as u32).unwrap();
+    }
+    let mask = state.mask();
+
+    assert!(
+        token_allowed(&mask, b'P' as usize),
+        "declared dotted key should remain available"
+    );
+    assert!(
+        !token_allowed(&mask, b'!' as usize),
+        "undeclared key prefixes should be rejected when additionalProperties is false"
+    );
+}
+
+#[test]
+fn test_dotted_required_property_name_restricts_token_vocab_prefix() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "PersonController.personal": {
+                "type": "object",
+                "properties": {
+                    "model": {},
+                    "request": {}
+                },
+                "required": ["model", "request"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["PersonController.personal"],
+        "additionalProperties": false
+    }"#;
+    let vocab = Vocab::new(
+        vec![
+            (1u32, b"{".to_vec()),
+            (2u32, b"\"".to_vec()),
+            (3u32, b"PersonController.personal".to_vec()),
+            (4u32, b"!".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_json_schema(schema, &vocab).expect("dotted-key schema should compile");
+    let mut state = c.start();
+    state.commit_token(1).unwrap();
+    state.commit_token(2).unwrap();
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 3),
+        "declared dotted key token should remain available"
+    );
+    assert!(
+        !token_allowed(&mask, 4),
+        "undeclared key token should be rejected when additionalProperties is false"
+    );
+}
+
+#[test]
 fn test_required_only_untyped_object_allows_extra_keys_but_not_early_closure() {
     let schema = r#"{
         "type": "array",
