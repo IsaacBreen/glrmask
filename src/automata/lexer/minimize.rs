@@ -501,22 +501,40 @@ impl DFA {
             }
         }
 
-        // Compute per-SCC futures (union of all finalizers in the SCC)
-        let mut scc_futures: Vec<BitSet> = (0..scc_count as usize)
+        // `possible_future_group_ids` is strict: it should include only
+        // groups reachable after consuming at least one more byte. That means
+        // an accepting sink state has no possible futures, while a cyclic SCC
+        // can include its own finalizers because they are reachable again via
+        // a non-empty path through the cycle.
+        let mut scc_finalizers: Vec<BitSet> = (0..scc_count as usize)
             .map(|_| BitSet::new(num_groups))
             .collect();
+        let mut scc_sizes = vec![0usize; scc_count as usize];
+        let mut scc_has_self_loop = vec![false; scc_count as usize];
         for (state_idx, state) in self.states().iter().enumerate() {
             let sid = scc_id[state_idx] as usize;
+            scc_sizes[sid] += 1;
             for bit in state.finalizers.iter() {
-                scc_futures[sid].set(bit);
+                scc_finalizers[sid].set(bit);
+            }
+            if state
+                .transitions
+                .iter()
+                .any(|(_, &target)| target as usize == state_idx)
+            {
+                scc_has_self_loop[sid] = true;
             }
         }
 
-        // Build DAG of SCCs and compute topological order
-        // Tarjan's produces SCCs in reverse topological order
-        // (sinks/leaves first), so scc_id=0 is a sink, scc_id=scc_count-1 is a source
-        // We process in order 0..scc_count (reverse topo = sinks first),
-        // propagating futures from successors to predecessors.
+        let mut scc_futures: Vec<BitSet> = (0..scc_count as usize)
+            .map(|_| BitSet::new(num_groups))
+            .collect();
+        for sid in 0..scc_count as usize {
+            let is_cyclic = scc_sizes[sid] > 1 || scc_has_self_loop[sid];
+            if is_cyclic {
+                scc_futures[sid].union_with(&scc_finalizers[sid]);
+            }
+        }
 
         // Build SCC adjacency (successor SCCs for each SCC)
         let mut scc_successors: Vec<Vec<u32>> = vec![vec![]; scc_count as usize];
@@ -535,29 +553,36 @@ impl DFA {
             succs.dedup();
         }
 
-        // Process in Tarjan order (scc 0 = sink, already has no successors to propagate from)
-        // For each SCC, union in all successor SCC futures
-        for sid in 0..scc_count as usize {
-            // Collect successor futures into this SCC's futures
-            // We need to avoid borrowing scc_futures mutably and immutably simultaneously
-            let successors: Vec<u32> = scc_successors[sid].clone();
-            for &succ_scc in &successors {
-                // Since Tarjan order processes sinks first, succ_scc < sid would mean
-                // succ_scc was processed before sid. But Tarjan gives reverse topo:
-                // SCC id 0 is a sink. If sid's successor has id < sid, it's already processed.
-                // For correctness, we need to process in reverse topological order where
-                // leaves are processed first. Tarjan's SCC ids go from sinks (0) upward.
-                // So we process 0, 1, 2, ... which IS reverse topo (sinks first).
-                // At SCC `sid`, all successors have id < sid (already computed).
-                let succ = succ_scc as usize;
-                let (left, right) = if sid < succ {
-                    let (a, b) = scc_futures.split_at_mut(succ);
-                    (&mut a[sid], &b[0])
-                } else {
-                    let (a, b) = scc_futures.split_at_mut(sid);
-                    (&mut b[0], &a[succ])
-                };
-                left.union_with(right);
+        let mut scc_predecessors: Vec<Vec<u32>> = vec![vec![]; scc_count as usize];
+        let mut remaining_successors = vec![0usize; scc_count as usize];
+        for (sid, successors) in scc_successors.iter().enumerate() {
+            remaining_successors[sid] = successors.len();
+            for &succ in successors {
+                scc_predecessors[succ as usize].push(sid as u32);
+            }
+        }
+
+        // Process SCCs from sinks upward so every predecessor sees fully
+        // computed successor futures.
+        let mut queue: VecDeque<u32> = remaining_successors
+            .iter()
+            .enumerate()
+            .filter_map(|(sid, &count)| (count == 0).then_some(sid as u32))
+            .collect();
+
+        while let Some(sid) = queue.pop_front() {
+            let sid = sid as usize;
+            let sid_finalizers = scc_finalizers[sid].clone();
+            let sid_futures = scc_futures[sid].clone();
+
+            for &pred in &scc_predecessors[sid] {
+                let pred = pred as usize;
+                scc_futures[pred].union_with(&sid_finalizers);
+                scc_futures[pred].union_with(&sid_futures);
+                remaining_successors[pred] -= 1;
+                if remaining_successors[pred] == 0 {
+                    queue.push_back(pred as u32);
+                }
             }
         }
 
