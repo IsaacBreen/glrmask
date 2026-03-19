@@ -7,8 +7,6 @@ mod constraint;
 mod debug;
 mod serde;
 mod state;
-mod tests;
-
 pub use actions::commit::CommitDebugMetrics;
 pub use actions::mask::MaskDebugMetrics;
 pub use constraint::Constraint;
