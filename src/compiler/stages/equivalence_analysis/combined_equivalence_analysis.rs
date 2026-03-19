@@ -608,7 +608,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
 
     // --- Reference analysis ---
     // Run once if any reference env var is enabled, reuse the result.
-    let need_reference_verify = env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV);
+    let need_reference_verify = env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV) || cfg!(test);
     let need_reference_vocab = env_flag_enabled(REFERENCE_VOCAB_EQUIV_PRIMARY_ENV);
     let need_reference_state = env_flag_enabled(REFERENCE_STATE_EQUIV_PRIMARY_ENV);
 
