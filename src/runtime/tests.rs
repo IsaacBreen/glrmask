@@ -19,6 +19,7 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
 fn test_trivial() {
     let vocab = make_vocab(&["a"]);
     let (c, d) = Constraint::from_ebnf_with_debug("start ::= 'a' 'b'", &vocab).unwrap();
+    println!("{:#?}", c.tokenizer);
     println!("{}", d);
 
     let mut s = c.start();
