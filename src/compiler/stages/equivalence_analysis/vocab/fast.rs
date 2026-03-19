@@ -753,11 +753,13 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::lexer::ast::{bytes, choice};
+    use crate::automata::lexer::ast::{bytes, choice, class};
     use crate::compiler::compile::build_tokenizer_from_exprs;
     use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
     use std::collections::BTreeMap;
     use std::path::Path;
+    use crate::automata::regex::{opt, seq, star};
+    use crate::ds::u8set::U8Set;
 
     fn build_gpt2_unicode_to_byte_map() -> BTreeMap<char, u8> {
         let mut byte_values: Vec<u32> = (b'!' as u32..=b'~' as u32).collect();
@@ -832,4 +834,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_json_array_vocab_equivalence_with_follows() {
+        let tokenizer = build_tokenizer_from_exprs(&[
+            bytes(b"["),
+            bytes(b"]"),
+            bytes(b","),
+            // Integer
+            seq(vec![
+                opt(bytes(b"-")),
+                choice(vec![
+                    bytes(b"0"),
+                    seq(vec![
+                        class(U8Set::from_range(b'1', b'9')), // NONZERO_DIGIT
+                        star(class(U8Set::from_range(b'0', b'9'))), // DIGIT*
+                    ]),
+                ]),
+            ]),
+        ]);
+        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
+        let tokens = vec![b",".to_vec(), b",-".to_vec()];
+        let initial_states = vec![sep1_tok.initial_state_id()];
+
+        let mut disallowed = BTreeMap::new();
+        // disallowed follows for "[": "[" ","
+        let mut bitset = BitSet::new(4);
+        bitset.set(0);
+        bitset.set(2);
+        disallowed.insert(0u32, bitset);
+        // disallowed follows for "]": "[" "]" "," Integer
+        bitset = BitSet::new(4);
+        bitset.set(0);
+        bitset.set(1);
+        bitset.set(2);
+        bitset.set(3);
+        disallowed.insert(1u32, bitset);
+        // disallowed follows for ",": "," "[" "]"
+        bitset = BitSet::new(4);
+        bitset.set(0);
+        bitset.set(1);
+        bitset.set(2);
+        disallowed.insert(2u32, bitset);
+        // disallowed follows for Integer: "Integer" "["
+        bitset = BitSet::new(4);
+        bitset.set(0);
+        bitset.set(3);
+        disallowed.insert(3u32, bitset);
+
+        let classes = find_vocab_equivalence_classes_with_follow(
+            &sep1_tok,
+            &tokens,
+            &initial_states,
+            &disallowed,
+        );
+
+        // Should be two classes
+        assert!(
+            classes.iter().any(|class| class == &vec![0]) && classes.iter().any(|class| class == &vec![1]),
+            "expected ',' and ',-' to be in separate classes, got {classes:?}"
+        );
+    }
 }
