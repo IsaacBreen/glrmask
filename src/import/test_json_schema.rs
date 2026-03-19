@@ -759,7 +759,7 @@ fn test_prefix_items_default_to_required_like_cfa() {
         vec![
             (0, b"[]".to_vec()),
             (1, b"[1]".to_vec()),
-            (2, b"[1,2]".to_vec()),
+            (2, b"[1, 2]".to_vec()),
         ],
         None,
     );
