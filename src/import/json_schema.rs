@@ -3709,7 +3709,7 @@ mod tests {
         let schema = r##"{
             "type": "object",
         }"##;
-        assert!(accepts_sequence(schema, &[b"true"]));
+        assert!(!accepts_sequence(schema, &[b"true"]));
         assert!(accepts_sequence(schema, &[b"{}"]));
     }
 
