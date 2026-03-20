@@ -1956,15 +1956,16 @@ impl SchemaCtx {
         }
 
         self.ref_compile_stack.insert(ref_value.to_string());
-        let expr = match self.resolve_local_ref(ref_value) {
+        let expr_result = match self.resolve_local_ref(ref_value) {
             Ok(target) => match self.convert_schema(&target) {
-                Ok(expr) => expr,
-                Err(err) if is_unsat_schema_error(&err) => never_expr(),
-                Err(_) => self.json_value_ref(),
+                Ok(expr) => Ok(expr),
+                Err(err) if is_unsat_schema_error(&err) => Ok(never_expr()),
+                Err(err) => Err(err),
             },
-            Err(_) => self.json_value_ref(),
+            Err(err) => Err(err),
         };
         self.ref_compile_stack.remove(ref_value);
+        let expr = expr_result?;
         self.insert_rule(rule_name, expr);
         Ok(())
     }
@@ -2041,9 +2042,27 @@ impl SchemaCtx {
 
             if let Some(options) = object.get("oneOf").and_then(Value::as_array) {
                 if !options.is_empty() {
-                    return Err(GlrMaskError::GrammarParse(
-                        "oneOf constraints are not supported. Enable 'coerce_one_of' option to approximate oneOf with anyOf".into(),
-                    ));
+                    let base_has_structural = has_structural_keywords(object);
+                    let options = if base_has_structural {
+                        let base: Map<String, Value> = object
+                            .iter()
+                            .filter(|(key, _)| key.as_str() != "anyOf" && key.as_str() != "oneOf")
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        options
+                            .iter()
+                            .map(|option| {
+                                let merged = Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)));
+                                self.convert_schema(&merged)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        options
+                            .iter()
+                            .map(|option| self.convert_schema(option))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    return Ok(factor_common_affixes(options));
                 }
             }
 
@@ -4032,9 +4051,113 @@ mod tests {
 
     #[test]
     fn test_oneof_schema() {
-        assert_schema_error_contains(r#"{
+        let schema = r#"{
             "oneOf": [{"type": "string"}, {"type": "integer"}]
-        }"#, "oneOf constraints are not supported");
+        }"#;
+        assert!(accepts_sequence(schema, &[b"\"value\""]));
+        assert!(accepts_sequence(schema, &[b"17"]));
+        assert!(!accepts_sequence(schema, &[b"true"]));
+    }
+
+    #[test]
+    fn test_ref_oneof_does_not_widen_to_json_value() {
+        let schema = r##"{
+            "$defs": {
+                "entry": {
+                    "additionalProperties": false,
+                    "properties": {
+                        "description": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}}
+                            ]
+                        },
+                        "type": {"enum": ["int", "str"]}
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "argument_specs": {
+                    "additionalProperties": {"$ref": "#/$defs/entry"}
+                }
+            },
+            "additionalProperties": false
+        }"##;
+
+        assert!(accepts_sequence(
+            schema,
+            &[
+                b"{",
+                b"\"argument_specs\"",
+                b": ",
+                b"{",
+                b"\"main\"",
+                b": ",
+                b"{",
+                b"\"type\"",
+                b": ",
+                b"\"int\"",
+                b"}",
+                b"}",
+                b"}",
+            ],
+        ));
+        assert!(!accepts_sequence(
+            schema,
+            &[
+                b"{",
+                b"\"argument_specs\"",
+                b": ",
+                b"{",
+                b"\"main\"",
+                b": ",
+                b"{",
+                b"\"type lure\"",
+                b": ",
+                b"0",
+                b"}",
+                b"}",
+                b"}",
+            ],
+        ));
+        assert!(!accepts_sequence(
+            schema,
+            &[
+                b"{",
+                b"\"argument_specs\"",
+                b": ",
+                b"{",
+                b"\"main\"",
+                b": ",
+                b"{",
+                b"\"type\"",
+                b": ",
+                b"\"int Garcia\"",
+                b"}",
+                b"}",
+                b"}",
+            ],
+        ));
+    }
+
+    #[test]
+    fn test_ref_compile_errors_do_not_fallback_to_json_value() {
+        assert_schema_error_contains(
+            r##"{
+                "$defs": {
+                    "bad": {
+                        "type": "array",
+                        "uniqueItems": true
+                    }
+                },
+                "type": "object",
+                "properties": {
+                    "items": {"$ref": "#/$defs/bad"}
+                }
+            }"##,
+            "Unimplemented keys",
+        );
     }
 
     #[test]
