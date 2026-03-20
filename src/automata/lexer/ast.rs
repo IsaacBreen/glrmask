@@ -87,6 +87,133 @@ impl Expr {
             Expr::Epsilon => true,
         }
     }
+
+    pub fn optimize(self) -> Self {
+        match self {
+            Expr::Seq(parts) => Expr::make_seq(parts.into_iter().map(Expr::optimize).collect()),
+            Expr::Choice(options) => {
+                Expr::make_choice(options.into_iter().map(Expr::optimize).collect())
+            }
+            Expr::Repeat { expr, min, max } => {
+                let child = expr.optimize();
+                match (min, max) {
+                    (0, Some(0)) => Expr::Epsilon,
+                    (1, Some(1)) => child,
+                    _ => Expr::Repeat {
+                        expr: Box::new(child),
+                        min,
+                        max,
+                    },
+                }
+            }
+            Expr::Shared(inner) => Expr::Shared(Arc::new(inner.as_ref().clone().optimize())),
+            leaf => leaf,
+        }
+    }
+
+    pub fn strip_prefix(&self, prefix: &Expr) -> Option<Expr> {
+        if self == prefix {
+            return Some(Expr::Epsilon);
+        }
+
+        match self {
+            Expr::Seq(exprs) => {
+                if exprs.is_empty() {
+                    return None;
+                }
+                if &exprs[0] == prefix {
+                    return Some(Expr::make_seq(exprs[1..].to_vec()));
+                }
+                None
+            }
+            Expr::Shared(inner) => inner.strip_prefix(prefix),
+            _ => None,
+        }
+    }
+
+    pub fn make_seq(exprs: Vec<Expr>) -> Expr {
+        let mut flat = Vec::with_capacity(exprs.len());
+        for expr in exprs {
+            match expr {
+                Expr::Seq(children) => flat.extend(children),
+                Expr::Epsilon => {}
+                other => flat.push(other),
+            }
+        }
+
+        if flat.is_empty() {
+            return Expr::Epsilon;
+        }
+
+        for expr in &mut flat {
+            if let Expr::U8Class(set) = expr {
+                if set.len() == 1 {
+                    let byte = set.iter().next().unwrap();
+                    *expr = Expr::U8Seq(vec![byte]);
+                }
+            }
+        }
+
+        let mut merged = Vec::with_capacity(flat.len());
+        for expr in flat {
+            match expr {
+                Expr::U8Seq(mut curr) => {
+                    if let Some(Expr::U8Seq(prev)) = merged.last_mut() {
+                        prev.append(&mut curr);
+                    } else {
+                        merged.push(Expr::U8Seq(curr));
+                    }
+                }
+                other => merged.push(other),
+            }
+        }
+
+        if merged.len() == 1 {
+            merged.pop().unwrap()
+        } else {
+            Expr::Seq(merged)
+        }
+    }
+
+    pub fn make_choice(exprs: Vec<Expr>) -> Expr {
+        let mut worklist = exprs;
+        let mut flat = Vec::with_capacity(worklist.len());
+        while let Some(expr) = worklist.pop() {
+            match expr {
+                Expr::Choice(children) => worklist.extend(children),
+                other => flat.push(other),
+            }
+        }
+
+        if flat.is_empty() {
+            return Expr::Choice(vec![]);
+        }
+        if flat.len() == 1 {
+            return flat.pop().unwrap();
+        }
+
+        let mut classes = U8Set::empty();
+        let mut complex = Vec::with_capacity(flat.len());
+        for expr in flat {
+            match expr {
+                Expr::U8Class(set) => classes |= set,
+                Expr::U8Seq(bytes) if bytes.len() == 1 => {
+                    classes.insert(bytes[0]);
+                }
+                other => complex.push(other),
+            }
+        }
+
+        if !classes.is_empty() {
+            complex.push(Expr::U8Class(classes));
+        }
+
+        if complex.len() == 1 {
+            complex.pop().unwrap()
+        } else {
+            Expr::Choice(complex)
+        }
+    }
 }
 
 impl From<&str> for Expr {

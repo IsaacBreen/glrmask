@@ -81,6 +81,16 @@ impl DFA {
         }
     }
 
+    pub(crate) fn set_transitions_from_sorted_entries(
+        &mut self,
+        state: u32,
+        entries: Vec<(u8, u32)>,
+    ) {
+        if let Some(entry) = self.states.get_mut(state as usize) {
+            entry.transitions = CharTransitions::from_sorted_entries(entries);
+        }
+    }
+
     pub(super) fn clear_finalizers_for_state(&mut self, state: u32) -> BitSet {
         if let Some(entry) = self.states.get_mut(state as usize) {
             std::mem::take(&mut entry.finalizers)

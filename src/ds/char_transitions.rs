@@ -20,6 +20,10 @@ impl<T> CharTransitions<T> {
         Self { entries: Vec::new() }
     }
 
+    pub fn from_sorted_entries(entries: Vec<(u8, T)>) -> Self {
+        Self { entries }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

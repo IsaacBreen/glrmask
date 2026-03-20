@@ -10,6 +10,7 @@ use std::collections::{BTreeSet, VecDeque};
 use rustc_hash::FxHashMap;
 
 use crate::ds::bitset::BitSet;
+use crate::ds::char_transitions::CharTransitions;
 
 use super::dfa::DFA;
 
@@ -36,9 +37,9 @@ impl DFA {
         let mut blocks: Vec<Vec<u32>> = Vec::new();
 
         {
-            let mut finalizer_to_block: FxHashMap<Vec<usize>, u32> = FxHashMap::default();
+            let mut finalizer_to_block: FxHashMap<BitSet, u32> = FxHashMap::default();
             for (state_idx, state) in working.states().iter().enumerate() {
-                let key: Vec<usize> = state.finalizers.iter().collect();
+                let key = state.finalizers.clone();
                 let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
                     let idx = blocks.len() as u32;
                     blocks.push(Vec::new());
@@ -188,9 +189,9 @@ impl DFA {
             partition = vec![0u32; n];
             blocks = Vec::new();
             {
-                let mut finalizer_to_block: FxHashMap<Vec<usize>, u32> = FxHashMap::default();
+                let mut finalizer_to_block: FxHashMap<BitSet, u32> = FxHashMap::default();
                 for (state_idx, state) in working.states().iter().enumerate() {
-                    let key: Vec<usize> = state.finalizers.iter().collect();
+                    let key = state.finalizers.clone();
                     let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
                         let idx = blocks.len() as u32;
                         blocks.push(Vec::new());
@@ -217,9 +218,9 @@ impl DFA {
         partition = vec![0u32; n];
         blocks = Vec::new();
         {
-            let mut finalizer_to_block: FxHashMap<Vec<usize>, u32> = FxHashMap::default();
+            let mut finalizer_to_block: FxHashMap<BitSet, u32> = FxHashMap::default();
             for (state_idx, state) in working.states().iter().enumerate() {
-                let key: Vec<usize> = state.finalizers.iter().collect();
+                let key = state.finalizers.clone();
                 let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
                     let idx = blocks.len() as u32;
                     blocks.push(Vec::new());
@@ -404,15 +405,16 @@ impl DFA {
         }
 
         let old_states = std::mem::take(self.states_mut());
-        let mut new_states = Vec::new();
+        let mut new_states = Vec::with_capacity(new_index as usize);
         for (old_index, state) in old_states.into_iter().enumerate() {
             if reachable[old_index] {
                 let mut new_state = state;
-                new_state.transitions = new_state
+                let entries: Vec<(u8, u32)> = new_state
                     .transitions
                     .iter()
                     .map(|(byte, &next)| (byte, state_mapping[next as usize]))
                     .collect();
+                new_state.transitions = CharTransitions::from_sorted_entries(entries);
                 new_states.push(new_state);
             }
         }
@@ -626,11 +628,12 @@ impl DFA {
             let new_id = result.add_state();
             let new_state = &mut result.states_mut()[new_id as usize];
             new_state.finalizers = old_state.finalizers.clone();
-            new_state.transitions = old_state
+            let entries: Vec<(u8, u32)> = old_state
                 .transitions
                 .iter()
                 .map(|(byte, &old_next)| (byte, state_mapping[old_next as usize]))
                 .collect();
+            new_state.transitions = CharTransitions::from_sorted_entries(entries);
         }
 
         result.recompute_possible_futures();

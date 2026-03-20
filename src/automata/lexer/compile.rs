@@ -14,6 +14,23 @@ use super::ast::Expr;
 use super::dfa::DFA;
 use super::nfa::NFA;
 
+fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
+    fn candidate_prefix(expr: &Expr) -> Option<&Expr> {
+        match expr {
+            Expr::Seq(parts) if !parts.is_empty() => Some(&parts[0]),
+            Expr::Shared(inner) => candidate_prefix(inner),
+            _ => None,
+        }
+    }
+
+    let prefix = candidate_prefix(exprs.first()?)?.clone();
+    let mut remainders = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        remainders.push(expr.strip_prefix(&prefix)?);
+    }
+    Some((prefix, remainders))
+}
+
 fn expr_accepts_empty(expr: &Expr) -> bool {
     match expr {
         Expr::U8Seq(bytes) => bytes.is_empty(),
@@ -328,8 +345,22 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
 ///
 /// Each expression's index becomes its group ID.
 pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
+    let optimized_exprs: Vec<Expr> = exprs.iter().cloned().map(Expr::optimize).collect();
     let mut nfa = NFA::new(1);
-    for (group_id, expr) in exprs.iter().enumerate() {
+
+    if let Some((prefix, remainders)) = common_prefix_factor(&optimized_exprs) {
+        let split = nfa.add_state();
+        compile_expr(&prefix, &mut nfa, 0, split);
+
+        for (group_id, remainder) in remainders.iter().enumerate() {
+            let accept = nfa.add_state();
+            compile_expr(remainder, &mut nfa, split, accept);
+            nfa.add_finalizer(accept, group_id as u32);
+        }
+        return nfa;
+    }
+
+    for (group_id, expr) in optimized_exprs.iter().enumerate() {
         let accept = nfa.add_state();
         compile_expr(expr, &mut nfa, 0, accept);
         nfa.add_finalizer(accept, group_id as u32);
