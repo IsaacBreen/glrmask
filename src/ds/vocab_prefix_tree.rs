@@ -4,7 +4,6 @@
 #![allow(unused_imports)]
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use range_set_blaze::RangeSetBlaze;
@@ -15,12 +14,41 @@ pub struct VocabPrefixTreeNode {
     has_token: bool,
     prefix: Box<[u8]>,
     prefix_length: usize,
-    children: BTreeMap<Vec<u8>, VocabPrefixTreeNode>,
+
+    // Packed child storage.
+    // Edge labels are implicit:
+    // child_edge_label = &child.prefix[self.prefix_length..]
+    children: Box<[VocabPrefixTreeNode]>,
+
     reachable_token_ids: RangeSetBlaze<usize>,
     subtree_bytes: [u64; 4],
 }
 
+#[derive(Clone)]
+pub struct VocabPrefixTreeChildIter<'a> {
+    parent_prefix_len: usize,
+    inner: std::slice::Iter<'a, VocabPrefixTreeNode>,
+}
+
+impl<'a> Iterator for VocabPrefixTreeChildIter<'a> {
+    type Item = (&'a [u8], &'a VocabPrefixTreeNode);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let child = self.inner.next()?;
+        Some((&child.prefix[self.parent_prefix_len..], child))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for VocabPrefixTreeChildIter<'_> {}
+
 impl VocabPrefixTreeNode {
+    #[inline]
     fn new(token_id: usize, prefix: Box<[u8]>, has_token: bool) -> Self {
         let prefix_length = prefix.len();
         Self {
@@ -28,42 +56,72 @@ impl VocabPrefixTreeNode {
             has_token,
             prefix,
             prefix_length,
-            children: BTreeMap::new(),
+            children: Box::new([]),
             reachable_token_ids: RangeSetBlaze::new(),
             subtree_bytes: [0u64; 4],
         }
     }
 
+    #[inline]
     pub fn token_id(&self) -> usize {
         self.token_id
     }
 
+    #[inline]
     pub fn has_token(&self) -> bool {
         self.has_token
     }
 
+    #[inline]
     pub fn prefix_length(&self) -> usize {
         self.prefix_length
     }
 
+    #[inline]
     pub fn prefix(&self) -> &[u8] {
         &self.prefix
     }
 
-    pub fn children(&self) -> &BTreeMap<Vec<u8>, VocabPrefixTreeNode> {
+    #[inline]
+    pub fn children(&self) -> &[VocabPrefixTreeNode] {
         &self.children
     }
 
-    pub fn iter_children(&self) -> std::collections::btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
-        self.children.iter()
+    #[inline]
+    pub fn iter_children(&self) -> VocabPrefixTreeChildIter<'_> {
+        VocabPrefixTreeChildIter {
+            parent_prefix_len: self.prefix_length,
+            inner: self.children.iter(),
+        }
     }
 
+    #[inline]
     pub fn reachable_token_ids(&self) -> &RangeSetBlaze<usize> {
         &self.reachable_token_ids
     }
 
+    #[inline]
     pub fn subtree_bytes(&self) -> &[u64; 4] {
         &self.subtree_bytes
+    }
+
+    #[inline]
+    fn child_edge_label<'a>(&'a self, child: &'a VocabPrefixTreeNode) -> &'a [u8] {
+        &child.prefix[self.prefix_length..]
+    }
+
+    #[inline]
+    fn child_key_byte(&self, child: &VocabPrefixTreeNode) -> u8 {
+        child.prefix[self.prefix_length]
+    }
+
+    #[inline]
+    fn find_child(&self, next_byte: u8) -> Option<&VocabPrefixTreeNode> {
+        let idx = self
+            .children
+            .binary_search_by_key(&next_byte, |child| self.child_key_byte(child))
+            .ok()?;
+        Some(&self.children[idx])
     }
 }
 
@@ -71,7 +129,8 @@ impl fmt::Debug for VocabPrefixTreeNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn format_bytes(bytes: &[u8]) -> String {
             const MAX_BYTES_DISPLAY: usize = 10;
-            let display_str = String::from_utf8_lossy(bytes.get(..MAX_BYTES_DISPLAY).unwrap_or(bytes));
+            let display_str =
+                String::from_utf8_lossy(bytes.get(..MAX_BYTES_DISPLAY).unwrap_or(bytes));
             if bytes.len() > MAX_BYTES_DISPLAY {
                 format!("{}...({} bytes)", display_str, bytes.len())
             } else {
@@ -79,16 +138,20 @@ impl fmt::Debug for VocabPrefixTreeNode {
             }
         }
 
+        let children_summary: Vec<String> = self
+            .iter_children()
+            .map(|(edge, _)| format_bytes(edge))
+            .collect();
+
         let mut debug_struct = f.debug_struct("VocabPrefixTreeNode");
         debug_struct.field("token_id", &self.token_id);
         debug_struct.field("has_token", &self.has_token);
         debug_struct.field("prefix_length", &self.prefix_length);
-        let reachable_summary = format!("{} items", self.reachable_token_ids.len());
-        debug_struct.field("reachable_token_ids", &reachable_summary);
-        let children_summary: BTreeMap<String, String> = self
-            .iter_children()
-            .map(|(k, _)| (format_bytes(k), "<VocabPrefixTreeNode ...>".to_string()))
-            .collect();
+        debug_struct.field("prefix", &format_bytes(&self.prefix));
+        debug_struct.field(
+            "reachable_token_ids",
+            &format!("{} items", self.reachable_token_ids.len()),
+        );
         debug_struct.field("children", &children_summary);
         debug_struct.finish()
     }
@@ -102,6 +165,7 @@ pub struct VocabPrefixTree {
 }
 
 impl VocabPrefixTree {
+    #[inline]
     pub fn new() -> Self {
         Self {
             root: VocabPrefixTreeNode::new(0, Vec::new().into_boxed_slice(), false),
@@ -114,270 +178,220 @@ impl VocabPrefixTree {
         Self::build_owned(tokens.iter().map(|(id, bytes)| (*id, bytes.clone())).collect())
     }
 
-    pub fn build_owned(tokens: Vec<(usize, Vec<u8>)>) -> Self {
+    pub fn build_owned(mut tokens: Vec<(usize, Vec<u8>)>) -> Self {
         let mut tree = Self::new();
         tree.max_token_id = tokens.iter().map(|(id, _)| *id).max().unwrap_or(0);
 
-        let mut nonempty: Vec<(usize, Box<[u8]>)> = Vec::with_capacity(tokens.len());
-        for (id, bytes) in tokens {
-            if bytes.is_empty() {
-                tree.root.token_id = id;
-                tree.root.has_token = true;
-                tree.has_empty_string_token = true;
-            } else {
-                nonempty.push((id, bytes.into_boxed_slice()));
-            }
-        }
-
-        if nonempty.is_empty() {
-            tree.recompute_reachable_ids_via_paths();
+        if tokens.is_empty() {
             return tree;
         }
 
-        nonempty.sort_by(|a, b| a.1.as_ref().cmp(b.1.as_ref()));
+        // Fast sort for large inputs.
+        tokens.sort_unstable_by(|a, b| a.1.as_slice().cmp(b.1.as_slice()));
 
-        let mut unique: Vec<(usize, Box<[u8]>)> = Vec::with_capacity(nonempty.len());
-        for (id, bytes) in nonempty.into_iter() {
-            if let Some((last_id, last_bytes)) = unique.last_mut() {
-                if last_bytes.as_ref() == bytes.as_ref() {
-                    *last_id = id;
-                    continue;
+        // In-place dedup by byte string.
+        let mut write = 0usize;
+        for read in 0..tokens.len() {
+            if write > 0 && tokens[write - 1].1 == tokens[read].1 {
+                tokens[write - 1].0 = tokens[read].0;
+            } else {
+                if write != read {
+                    tokens.swap(write, read);
                 }
+                write += 1;
             }
-            unique.push((id, bytes));
+        }
+        tokens.truncate(write);
+
+        // Handle empty token if present.
+        let mut start = 0usize;
+        if !tokens.is_empty() && tokens[0].1.is_empty() {
+            tree.root.token_id = tokens[0].0;
+            tree.root.has_token = true;
+            tree.has_empty_string_token = true;
+            tree.root.reachable_token_ids.insert(tokens[0].0);
+            start = 1;
         }
 
-        #[derive(Debug)]
-        struct TmpNode {
-            token_id: usize,
-            prefix: Box<[u8]>,
-            children: Vec<usize>,
+        if start == tokens.len() {
+            return tree;
         }
 
-        let mut nodes: Vec<TmpNode> = Vec::with_capacity(unique.len() + 1);
-        nodes.push(TmpNode {
-            token_id: tree.root.token_id,
-            prefix: Box::<[u8]>::from(&[][..]),
-            children: Vec::new(),
-        });
+        let entries = &tokens[start..];
+        let mut children = Vec::new();
+        let mut root_subtree_bytes = [0u64; 4];
 
-        let mut stack: Vec<usize> = Vec::with_capacity(256);
-        stack.push(0);
-        let mut prev_bytes: &[u8] = &[];
-
-        for (id, bytes) in unique.into_iter() {
-            let mut common = 0usize;
-            let maxl = prev_bytes.len().min(bytes.len());
-            while common < maxl && prev_bytes[common] == bytes[common] {
-                common += 1;
+        let mut i = 0usize;
+        while i < entries.len() {
+            let byte0 = entries[i].1[0];
+            let group_start = i;
+            i += 1;
+            while i < entries.len() && entries[i].1[0] == byte0 {
+                i += 1;
             }
 
-            while let Some(&top_idx) = stack.last() {
-                if nodes[top_idx].prefix.len() <= common {
-                    break;
-                }
-                stack.pop();
+            let child = Self::build_subtree(&entries[group_start..i], 0);
+
+            for token_id in child.reachable_token_ids.iter() {
+                tree.root.reachable_token_ids.insert(token_id);
             }
 
-            while let Some(&top_idx) = stack.last() {
-                let top_pref = nodes[top_idx].prefix.as_ref();
-                if bytes.starts_with(top_pref) {
-                    break;
-                }
-                stack.pop();
+            let edge = &child.prefix[..];
+            for &b in edge {
+                root_subtree_bytes[b as usize >> 6] |= 1u64 << (b & 63);
+            }
+            for j in 0..4 {
+                root_subtree_bytes[j] |= child.subtree_bytes[j];
             }
 
-            let parent_idx = *stack.last().unwrap_or(&0);
-            let cur_idx = nodes.len();
-            nodes.push(TmpNode {
-                token_id: id,
-                prefix: bytes,
-                children: Vec::new(),
-            });
-            nodes[parent_idx].children.push(cur_idx);
-            stack.push(cur_idx);
-            prev_bytes = nodes[cur_idx].prefix.as_ref();
+            children.push(child);
         }
 
-        fn finalize(
-            idx: usize,
-            nodes: &mut [TmpNode],
-            root_has_token: bool,
-        ) -> VocabPrefixTreeNode {
-            let token_id = nodes[idx].token_id;
-            let prefix = std::mem::take(&mut nodes[idx].prefix);
-            let mut out_node = VocabPrefixTreeNode {
-                token_id,
-                has_token: idx != 0 || root_has_token,
-                prefix,
-                prefix_length: 0,
-                children: BTreeMap::new(),
-                reachable_token_ids: RangeSetBlaze::new(),
-                subtree_bytes: [0u64; 4],
-            };
-            out_node.prefix_length = out_node.prefix.len();
-            let parent_prefix_len = out_node.prefix_length;
-            let child_indices = std::mem::take(&mut nodes[idx].children);
-            for child_idx in child_indices {
-                let child_node = finalize(child_idx, nodes, root_has_token);
-                let edge_label = child_node.prefix[parent_prefix_len..].to_vec();
-                out_node.children.insert(edge_label, child_node);
-            }
-            out_node
-        }
-
-        tree.root = finalize(0, &mut nodes, tree.has_empty_string_token);
-        tree.recompute_reachable_ids_via_paths();
+        tree.root.children = children.into_boxed_slice();
+        tree.root.subtree_bytes = root_subtree_bytes;
 
         tree
     }
 
-    fn recompute_reachable_ids_via_paths(&mut self) {
-        Self::clear_reachable_ids_recursive(&mut self.root);
-        let mut ancestor_stack: Vec<*mut VocabPrefixTreeNode> = Vec::new();
-        let root_ptr: *mut VocabPrefixTreeNode = &mut self.root;
-        unsafe {
-            Self::propagate_reachable_ids_dfs(root_ptr, &mut ancestor_stack);
+    #[inline]
+    fn lcp_len(a: &[u8], b: &[u8], from: usize) -> usize {
+        let max_len = a.len().min(b.len());
+        let mut i = from;
+        while i < max_len && a[i] == b[i] {
+            i += 1;
         }
-        Self::recompute_subtree_bytes_recursive(&mut self.root);
+        i
     }
 
-    unsafe fn propagate_reachable_ids_dfs(
-        node_ptr: *mut VocabPrefixTreeNode,
-        ancestors: &mut Vec<*mut VocabPrefixTreeNode>,
-    ) {
-        let has_token = unsafe { (*node_ptr).has_token };
+    fn build_subtree(entries: &[(usize, Vec<u8>)], parent_prefix_len: usize) -> VocabPrefixTreeNode {
+        debug_assert!(!entries.is_empty());
+
+        let first = entries.first().unwrap().1.as_slice();
+        let last = entries.last().unwrap().1.as_slice();
+
+        // For lexicographically sorted entries, the common prefix of first and last
+        // is the common prefix of the entire group.
+        let prefix_len = Self::lcp_len(first, last, parent_prefix_len);
+        let has_token = entries[0].1.len() == prefix_len;
+        let token_id = if has_token { entries[0].0 } else { 0 };
+        let prefix = first[..prefix_len].to_vec().into_boxed_slice();
+
+        let child_entries = if has_token { &entries[1..] } else { entries };
+        let mut children = Vec::new();
+
+        let mut i = 0usize;
+        while i < child_entries.len() {
+            let next_byte = child_entries[i].1[prefix_len];
+            let group_start = i;
+            i += 1;
+            while i < child_entries.len() && child_entries[i].1[prefix_len] == next_byte {
+                i += 1;
+            }
+            children.push(Self::build_subtree(
+                &child_entries[group_start..i],
+                prefix_len,
+            ));
+        }
+
+        let mut reachable_token_ids = RangeSetBlaze::new();
         if has_token {
-            unsafe {
-                (*node_ptr).reachable_token_ids.insert((*node_ptr).token_id);
-            }
-
-            let token_id = unsafe { (*node_ptr).token_id };
-            for &ancestor_ptr in ancestors.iter() {
-                unsafe {
-                    (*ancestor_ptr).reachable_token_ids.insert(token_id);
-                }
-            }
+            reachable_token_ids.insert(token_id);
         }
 
-        let mut child_ptrs: Vec<*mut VocabPrefixTreeNode> = Vec::new();
-        {
-            let current: &mut VocabPrefixTreeNode = unsafe { &mut *node_ptr };
-            for child in current.children.values_mut() {
-                child_ptrs.push(child as *mut VocabPrefixTreeNode);
-            }
-        }
-
-        ancestors.push(node_ptr);
-        for child_ptr in child_ptrs {
-            unsafe {
-                Self::propagate_reachable_ids_dfs(child_ptr, ancestors);
-            }
-        }
-        ancestors.pop();
-    }
-
-    fn clear_reachable_ids_recursive(node: &mut VocabPrefixTreeNode) {
-        node.reachable_token_ids = RangeSetBlaze::new();
-        for child in node.children.values_mut() {
-            Self::clear_reachable_ids_recursive(child);
-        }
-    }
-
-    fn recompute_subtree_bytes_recursive(node: &mut VocabPrefixTreeNode) -> [u64; 4] {
         let mut subtree_bytes = [0u64; 4];
-        for (edge_label, child) in node.children.iter_mut() {
-            for &byte in edge_label {
-                subtree_bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
+        for child in &children {
+            let edge = &child.prefix[prefix_len..];
+            for &b in edge {
+                subtree_bytes[b as usize >> 6] |= 1u64 << (b & 63);
             }
-            let child_bytes = Self::recompute_subtree_bytes_recursive(child);
-            for index in 0..4 {
-                subtree_bytes[index] |= child_bytes[index];
+            for j in 0..4 {
+                subtree_bytes[j] |= child.subtree_bytes[j];
+            }
+            for token_id in child.reachable_token_ids.iter() {
+                reachable_token_ids.insert(token_id);
             }
         }
-        node.subtree_bytes = subtree_bytes;
-        subtree_bytes
+
+        VocabPrefixTreeNode {
+            token_id,
+            has_token,
+            prefix,
+            prefix_length: prefix_len,
+            children: children.into_boxed_slice(),
+            reachable_token_ids,
+            subtree_bytes,
+        }
     }
 
+    #[inline]
     pub fn find_token(&self, bytes: &[u8]) -> Option<usize> {
         if bytes.is_empty() {
             return self.has_empty_string_token.then_some(self.root.token_id);
         }
 
-        let mut current_node = &self.root;
-        let mut remaining_bytes = bytes;
+        let mut current = &self.root;
+        let mut remaining = bytes;
 
         loop {
-            let mut found_match = false;
-            let first = remaining_bytes[0];
-            let lower_key = vec![first];
-            for (edge_label, child_node) in current_node.children.range(lower_key..) {
-                if edge_label.first().copied() != Some(first) {
-                    break;
-                }
-                if remaining_bytes.starts_with(edge_label) {
-                    remaining_bytes = &remaining_bytes[edge_label.len()..];
-                    current_node = child_node;
-                    found_match = true;
-                    break;
-                }
-            }
+            let child = current.find_child(remaining[0])?;
+            let edge = current.child_edge_label(child);
 
-            if !found_match {
+            if !remaining.starts_with(edge) {
                 return None;
             }
 
-            if remaining_bytes.is_empty() {
-                return Some(current_node.token_id);
+            remaining = &remaining[edge.len()..];
+            current = child;
+
+            if remaining.is_empty() {
+                return current.has_token.then_some(current.token_id);
             }
         }
     }
 
+    #[inline]
     pub fn find_longest_prefix_token<'s>(&'s self, bytes: &[u8]) -> Option<(usize, &'s [u8])> {
-        let mut longest_match_info: Option<(usize, &'s [u8])> = None;
-        let mut current_node: &'s VocabPrefixTreeNode = &self.root;
+        let mut best = None;
+
+        let mut current = &self.root;
+        let mut remaining = bytes;
 
         if self.has_empty_string_token {
-            longest_match_info = Some((self.root.token_id(), self.root.prefix()));
+            best = Some((self.root.token_id, self.root.prefix()));
         }
 
-        if bytes.is_empty() {
-            return longest_match_info;
-        }
+        while !remaining.is_empty() {
+            let Some(child) = current.find_child(remaining[0]) else {
+                break;
+            };
 
-        let mut remaining_bytes = bytes;
-        loop {
-            let mut found_match_in_children = false;
-            let first = remaining_bytes[0];
-            let lower_key = vec![first];
-            for (edge_label, child_node) in current_node.children.range(lower_key..) {
-                if edge_label.first().copied() != Some(first) {
-                    break;
-                }
-                if remaining_bytes.starts_with(edge_label) {
-                    current_node = child_node;
-                    remaining_bytes = &remaining_bytes[edge_label.len()..];
-                    longest_match_info = Some((current_node.token_id(), current_node.prefix()));
-                    found_match_in_children = true;
-                    break;
-                }
-            }
-
-            if !found_match_in_children || remaining_bytes.is_empty() {
+            let edge = current.child_edge_label(child);
+            if !remaining.starts_with(edge) {
                 break;
             }
+
+            remaining = &remaining[edge.len()..];
+            current = child;
+
+            if current.has_token {
+                best = Some((current.token_id, current.prefix()));
+            }
         }
-        longest_match_info
+
+        best
     }
 
+    #[inline]
     pub fn has_empty_string_token(&self) -> bool {
         self.has_empty_string_token
     }
 
-    pub fn root_children(&self) -> std::collections::btree_map::Iter<'_, Vec<u8>, VocabPrefixTreeNode> {
+    #[inline]
+    pub fn root_children(&self) -> VocabPrefixTreeChildIter<'_> {
         self.root.iter_children()
     }
 
+    #[inline]
     pub fn max_token_id(&self) -> usize {
         self.max_token_id
     }
@@ -424,5 +438,74 @@ mod tests {
         assert_eq!(tree.find_token(b"b"), Some(3));
         assert_eq!(tree.find_token(b"ac"), None);
         assert_eq!(tree.find_longest_prefix_token(b"abcd").map(|(id, _)| id), Some(2));
+    }
+
+    #[test]
+    fn internal_branch_nodes_are_not_tokens() {
+        let tree = VocabPrefixTree::build(&[
+            (10, b"abcd".to_vec()),
+            (11, b"abef".to_vec()),
+        ]);
+
+        assert_eq!(tree.find_token(b"ab"), None);
+        assert_eq!(tree.find_token(b"abcd"), Some(10));
+        assert_eq!(tree.find_token(b"abef"), Some(11));
+        assert_eq!(tree.find_longest_prefix_token(b"abzz"), None);
+    }
+
+    #[test]
+    fn empty_string_token_works() {
+        let tree = VocabPrefixTree::build(&[
+            (7, b"".to_vec()),
+            (8, b"a".to_vec()),
+            (9, b"abc".to_vec()),
+        ]);
+
+        assert!(tree.has_empty_string_token());
+        assert_eq!(tree.find_token(b""), Some(7));
+        assert_eq!(tree.find_longest_prefix_token(b"zzz").map(|(id, _)| id), Some(7));
+        assert_eq!(tree.find_longest_prefix_token(b"abcd").map(|(id, _)| id), Some(9));
+    }
+
+    #[test]
+    fn duplicate_tokens_are_deduped() {
+        let tree = VocabPrefixTree::build(&[
+            (1, b"abc".to_vec()),
+            (2, b"abc".to_vec()),
+            (3, b"abcd".to_vec()),
+        ]);
+
+        assert!(tree.find_token(b"abc").is_some());
+        assert_eq!(tree.find_token(b"abcd"), Some(3));
+    }
+
+    #[test]
+    fn root_stays_empty_prefix() {
+        let tree = VocabPrefixTree::build(&[
+            (1, b"abc".to_vec()),
+            (2, b"abd".to_vec()),
+        ]);
+
+        assert_eq!(tree.root.prefix(), b"");
+        assert_eq!(tree.root.prefix_length(), 0);
+    }
+
+    #[test]
+    fn iter_children_returns_edge_and_child() {
+        let tree = VocabPrefixTree::build(&[
+            (0, b"a".to_vec()),
+            (1, b"ab".to_vec()),
+            (2, b"b".to_vec()),
+        ]);
+
+        let root_children: Vec<(&[u8], usize)> = tree
+            .root
+            .iter_children()
+            .map(|(edge, child)| (edge, child.token_id()))
+            .collect();
+
+        assert_eq!(root_children.len(), 2);
+        assert_eq!(root_children[0].0, b"a");
+        assert_eq!(root_children[1].0, b"b");
     }
 }
