@@ -275,10 +275,19 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
     }
 
     let phase_started_at = std::time::Instant::now();
-    let nfa = build_regex_nfa(exprs);
+    let mut nfa = build_regex_nfa(exprs);
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][tokenizer] build_regex_nfa_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    nfa.condense_epsilon_sccs();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] condense_epsilon_sccs_ms={:.3}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0
         );
     }
