@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::ds::u8set::U8Set;
+use crate::compiler::compile::compile_profile_enabled;
 
 use super::ast::Expr;
 use super::dfa::DFA;
@@ -259,16 +260,58 @@ impl Expr {
 ///
 /// Each expression's index becomes its group ID in the resulting DFA.
 pub fn build_regex(exprs: &[Expr]) -> Regex {
+    let profile_enabled = compile_profile_enabled();
+
+    let phase_started_at = std::time::Instant::now();
     let group_sets: Vec<U8Set> = exprs
         .iter()
         .map(|expr| expr_u8set(expr))
         .collect();
-    let mut dfa = build_regex_nfa(exprs).to_dfa();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] compute_group_sets_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    let nfa = build_regex_nfa(exprs);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] build_regex_nfa_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    let mut dfa = nfa.to_dfa();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] determinize_regex_nfa_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     dfa.ensure_group_capacity(group_sets.len());
     for (group_id, set) in group_sets.into_iter().enumerate() {
         dfa.set_group_u8set(group_id as u32, set);
     }
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] assign_group_sets_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     let dfa = dfa.minimize();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] minimize_regex_dfa_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     Regex { dfa }
 }
 

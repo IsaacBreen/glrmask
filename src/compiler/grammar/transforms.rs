@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::compile::build_tokenizer;
+use crate::compiler::compile::compile_profile_enabled;
 use crate::compiler::glr::analysis::{merge_identical_nonterminals, normalize_grammar};
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
 use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
@@ -432,8 +433,41 @@ pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, 
 
     let mut normalized = grammar.clone();
 
-    expand_nullable_terminals(&mut normalized.rules, &nullable_terminals);
+    prepare_owned_grammar_for_compile_impl(&mut normalized, &nullable_terminals)
+}
+
+pub(crate) fn prepare_owned_grammar_for_compile(grammar: GrammarDef) -> (GrammarDef, Tokenizer) {
+    let nullable_terminals = nullable_terminals_for_grammar(&grammar);
+    let mut normalized = grammar;
+
+    prepare_owned_grammar_for_compile_impl(&mut normalized, &nullable_terminals)
+}
+
+fn prepare_owned_grammar_for_compile_impl(
+    normalized: &mut GrammarDef,
+    nullable_terminals: &std::collections::BTreeSet<TerminalID>,
+) -> (GrammarDef, Tokenizer) {
+    let profile_enabled = compile_profile_enabled();
+
+    let phase_started_at = std::time::Instant::now();
+    expand_nullable_terminals(&mut normalized.rules, nullable_terminals);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] expand_nullable_terminals_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     normalize_grammar(&mut normalized.rules, normalized.start);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] normalize_grammar_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     let protected_nonterminals = normalized
         .nonterminal_names
         .keys()
@@ -441,18 +475,71 @@ pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, 
         .chain(std::iter::once(normalized.start))
         .collect::<std::collections::BTreeSet<_>>();
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] inline_single_use_nonterminals_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] merge_identical_nonterminals_pass1_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
     let max_rhs_len = max_runtime_reduction_len_from_env();
-    bound_runtime_reduction_length(&mut normalized, max_rhs_len);
+    let phase_started_at = std::time::Instant::now();
+    bound_runtime_reduction_length(normalized, max_rhs_len);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] bound_runtime_reduction_length_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
-    compact_unused_terminals(&mut normalized);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] merge_identical_nonterminals_pass2_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    compact_unused_terminals(normalized);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] compact_unused_terminals_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
     // Build the real tokenizer only from the compacted live terminal set so
     // dead terminals never make it into downstream lexer/parser stages.
-    let mut tokenizer = build_tokenizer(&normalized);
-    let _ = tokenizer.drain_nullable_terminals();
+    let phase_started_at = std::time::Instant::now();
+    let mut tokenizer = build_tokenizer(normalized);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] build_tokenizer_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
-    (normalized, tokenizer)
+    let phase_started_at = std::time::Instant::now();
+    let _ = tokenizer.drain_nullable_terminals();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][prepare] drain_nullable_terminals_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    (std::mem::take(normalized), tokenizer)
 }
 
 #[cfg(test)]

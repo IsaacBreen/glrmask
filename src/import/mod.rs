@@ -18,12 +18,12 @@ mod test_json_schema;
 pub use crate::grammar::ast as grammar_expr;
 
 use crate::compiler::debug::CompileDebug;
-use crate::compiler::{compile, compile_with_debug};
+use crate::compiler::{compile, compile_owned, compile_with_debug};
 use crate::runtime::Constraint;
 
 fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
     let grammar = ebnf::parse_ebnf(ebnf)?;
-    Ok(compile(&grammar, vocab))
+    Ok(compile_owned(grammar, vocab))
 }
 
 fn from_ebnf_with_debug(
@@ -36,7 +36,7 @@ fn from_ebnf_with_debug(
 
 fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
     let grammar = lark::parse_lark(lark)?;
-    Ok(compile(&grammar, vocab))
+    Ok(compile_owned(grammar, vocab))
 }
 
 fn from_lark_with_debug(
@@ -49,7 +49,7 @@ fn from_lark_with_debug(
 
 fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
     let grammar = json_schema::json_schema_to_grammar(schema)?;
-    Ok(compile(&grammar, vocab))
+    Ok(compile_owned(grammar, vocab))
 }
 
 fn from_json_schema_with_debug(

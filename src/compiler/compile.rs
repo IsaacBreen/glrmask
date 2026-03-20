@@ -143,10 +143,10 @@ fn build_internal_token_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u
         .collect()
 }
 
-use crate::compiler::grammar::transforms::{expand_nullable_terminals, compact_unused_terminals, inline_single_use_nonterminals, prepare_grammar_for_compile};
+use crate::compiler::grammar::transforms::{expand_nullable_terminals, compact_unused_terminals, inline_single_use_nonterminals, prepare_grammar_for_compile, prepare_owned_grammar_for_compile};
 
 
-fn compile_profile_enabled() -> bool {
+pub(crate) fn compile_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
 }
 
@@ -983,15 +983,17 @@ fn log_compile_summary(
     );
 }
 
-pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    let profile_enabled = compile_profile_enabled();
-    let summary_enabled = compile_summary_enabled();
-    let compile_started_at = std::time::Instant::now();
-
-    let phase_started_at = std::time::Instant::now();
-    let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
-    let prepare_grammar_time = phase_started_at.elapsed();
-    log_compile_profile(profile_enabled, "prepare_grammar", phase_started_at);
+fn compile_prepared(
+    normalized: GrammarDef,
+    tokenizer: Tokenizer,
+    vocab: &Vocab,
+    profile_enabled: bool,
+    summary_enabled: bool,
+    compile_started_at: std::time::Instant,
+    prepare_grammar_time: std::time::Duration,
+) -> Constraint {
+    let normalized = normalized;
+    let tokenizer = tokenizer;
 
     let phase_started_at = std::time::Instant::now();
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
@@ -1038,8 +1040,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let collect_token_bytes_time = phase_started_at.elapsed();
     log_compile_profile(profile_enabled, "collect_token_bytes", phase_started_at);
 
-    // Overlap terminal-DWA construction with template compilation.
-    // Templates only need (table, grammar) — no dependency on terminal_dwa or id_map.
     #[cfg(feature = "rayon")]
     let ((mut terminal_dwa, mut possible_matches, terminal_build), (characterizations, templates)) = rayon::join(
         || build_terminal_dwa_with_possible_matches_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal),
@@ -1063,7 +1063,6 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         );
     }
 
-    // Compact: merge equivalent IDs and reorder for range adjacency
     let phase_started_at = std::time::Instant::now();
     let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
         &mut terminal_dwa,
@@ -1086,15 +1085,12 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         );
     }
 
-    // Build internal_token_bytes with the post-compact id_map and reuse the
-    // warmed possible-match cache from terminal-DWA construction.
     let phase_started_at = std::time::Instant::now();
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
 
     log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, vocab, &id_map);
 
-    // Use precomputed templates — avoid recomputing characterize_terminals + from_characterizations
     let (parser_dwa, parser_build) = build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
         &table,
         &glr_grammar,
@@ -1199,6 +1195,48 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     constraint.build_fast_transitions();
     constraint.build_seed_dense_masks();
     constraint
+}
+
+pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
+    let profile_enabled = compile_profile_enabled();
+    let summary_enabled = compile_summary_enabled();
+    let compile_started_at = std::time::Instant::now();
+
+    let phase_started_at = std::time::Instant::now();
+    let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
+    let prepare_grammar_time = phase_started_at.elapsed();
+    log_compile_profile(profile_enabled, "prepare_grammar", phase_started_at);
+
+    compile_prepared(
+        normalized,
+        tokenizer,
+        vocab,
+        profile_enabled,
+        summary_enabled,
+        compile_started_at,
+        prepare_grammar_time,
+    )
+}
+
+pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
+    let profile_enabled = compile_profile_enabled();
+    let summary_enabled = compile_summary_enabled();
+    let compile_started_at = std::time::Instant::now();
+
+    let phase_started_at = std::time::Instant::now();
+    let (normalized, tokenizer) = prepare_owned_grammar_for_compile(grammar);
+    let prepare_grammar_time = phase_started_at.elapsed();
+    log_compile_profile(profile_enabled, "prepare_grammar", phase_started_at);
+
+    compile_prepared(
+        normalized,
+        tokenizer,
+        vocab,
+        profile_enabled,
+        summary_enabled,
+        compile_started_at,
+        prepare_grammar_time,
+    )
 }
 
 pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {

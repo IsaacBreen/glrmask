@@ -284,16 +284,16 @@ pub fn find_state_equivalence_classes_kstep(
 /// # Returns
 /// A vector where `result[i]` is the representative state for `states[i]`.
 /// States with the same representative are equivalent.
-pub fn find_state_equivalence_classes(
+pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     regex: &Sep1Tokenizer,
-    tokens: &[Vec<u8>],
+    tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
     if states.is_empty() {
         return Vec::new();
     }
 
-    let k = tokens.iter().map(|t| t.len()).max().unwrap_or(0);
+    let k = tokens.iter().map(|t| t.as_ref().len()).max().unwrap_or(0);
     let pre_mapping = find_state_equivalence_classes_kstep(regex, states, k);
 
     let use_exact_token_refinement = std::env::var("SEP1_EXACT_TOKEN_EQUIV")
@@ -308,6 +308,8 @@ pub fn find_state_equivalence_classes(
         return pre_mapping;
     }
 
+    let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
+
     use std::collections::HashMap;
 
     let mut rep_set: BTreeSet<usize> = BTreeSet::new();
@@ -317,10 +319,10 @@ pub fn find_state_equivalence_classes(
     let reduced_states: Vec<usize> = rep_set.into_iter().collect();
 
     if reduced_states.len() == states.len() {
-        return find_state_equivalence_classes_token_based(regex, tokens, states);
+        return find_state_equivalence_classes_token_based(regex, &owned_tokens, states);
     }
 
-    let reduced_mapping = find_state_equivalence_classes_token_based(regex, tokens, &reduced_states);
+    let reduced_mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, &reduced_states);
     let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
     for (i, &rep_state) in reduced_states.iter().enumerate() {
         rep_to_final.insert(rep_state, reduced_mapping[i]);
