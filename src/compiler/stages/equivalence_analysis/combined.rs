@@ -55,9 +55,11 @@ fn analyze_equivalences_sep1(
     let max_token_id = vocab.max_token_id();
     let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
+    let mut token_lengths: Vec<usize> = Vec::with_capacity(vocab.len());
     for (&tid, bytes) in &vocab.entries {
         token_ids.push(tid);
         token_bytes.push(bytes.as_slice());
+        token_lengths.push(bytes.len());
     }
 
     // All DFA states as initial states
@@ -98,12 +100,20 @@ fn analyze_equivalences_sep1(
 
     for class in &result.vocab_classes {
         let internal_id = vocab_internal_to_originals.len() as u32;
-        let mut originals: Vec<u32> = class.iter().map(|&idx| token_ids[idx]).collect();
-        // Sort so the shortest token (by byte length) comes first.
-        // This makes it the representative, which downstream code picks via .first().
-        originals.sort_by_key(|&tid| {
-            vocab.entries.get(&tid).map_or(usize::MAX, |b| b.len())
-        });
+        let mut originals: Vec<u32> = Vec::with_capacity(class.len());
+        let mut shortest_pos = 0usize;
+        let mut shortest_len = usize::MAX;
+        for (pos, &idx) in class.iter().enumerate() {
+            let length = token_lengths[idx];
+            if length < shortest_len {
+                shortest_len = length;
+                shortest_pos = pos;
+            }
+            originals.push(token_ids[idx]);
+        }
+        if shortest_pos != 0 {
+            originals.swap(0, shortest_pos);
+        }
         for &tid in &originals {
             vocab_original_to_internal[tid as usize] = internal_id;
         }
