@@ -526,8 +526,8 @@ fn hash_suffixes(
 
     for si in 0..scratch.dirty_groups.len() {
         let base = si * dfa.num_groups;
-        let dirty = scratch.dirty_groups[si].clone();
-        for gid in dirty {
+        for dirty_idx in 0..scratch.dirty_groups[si].len() {
+            let gid = scratch.dirty_groups[si][dirty_idx];
             let pv = scratch.match_positions[base + gid];
             if pv != NONE && pv > 0 {
                 intersect_node_disallowed(scratch, pv as usize, dfa.disallowed_for(gid));
@@ -724,9 +724,10 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
 
         // Assign class IDs: first sub-group of each old class keeps the old ID
         let mut new_active = Vec::with_capacity(active_indices.len());
-        let mut seen_classes: HashMap<usize, ()> = HashMap::new();
+        let mut seen_classes = vec![false; next_class_id.max(1)];
         for ((old_class, _), tokens) in refinement {
-            let class_id = if seen_classes.insert(old_class, ()).is_none() {
+            let class_id = if !seen_classes[old_class] {
+                seen_classes[old_class] = true;
                 old_class
             } else {
                 let id = next_class_id;
@@ -743,11 +744,11 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         active_indices = new_active;
     }
 
-    let mut groups: HashMap<usize, Vec<usize>> = HashMap::with_capacity(next_class_id);
+    let mut groups = vec![Vec::new(); next_class_id.max(1)];
     for (ti, &cid) in partition.iter().enumerate() {
-        groups.entry(cid).or_default().push(ti);
+        groups[cid].push(ti);
     }
-    groups.into_values().collect()
+    groups.into_iter().filter(|group| !group.is_empty()).collect()
 }
 
 #[cfg(test)]
