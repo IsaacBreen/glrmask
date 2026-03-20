@@ -218,6 +218,51 @@ fn is_known_keyword(draft: JsonSchemaDraft, keyword: &str) -> bool {
     }
 }
 
+fn normalize_numeric_bounds(schema: &Map<String, Value>) -> (Option<f64>, bool, Option<f64>, bool) {
+    let minimum = schema.get("minimum").and_then(Value::as_f64);
+    let maximum = schema.get("maximum").and_then(Value::as_f64);
+    let exclusive_minimum = schema.get("exclusiveMinimum");
+    let exclusive_maximum = schema.get("exclusiveMaximum");
+
+    let mut left = minimum;
+    let mut left_inclusive = true;
+    match exclusive_minimum {
+        Some(Value::Bool(true)) => {
+            left = minimum;
+            left_inclusive = false;
+        }
+        Some(value) => {
+            if let Some(exclusive_minimum) = value.as_f64() {
+                if left.is_none() || exclusive_minimum >= left.unwrap() {
+                    left = Some(exclusive_minimum);
+                    left_inclusive = false;
+                }
+            }
+        }
+        None => {}
+    }
+
+    let mut right = maximum;
+    let mut right_inclusive = true;
+    match exclusive_maximum {
+        Some(Value::Bool(true)) => {
+            right = maximum;
+            right_inclusive = false;
+        }
+        Some(value) => {
+            if let Some(exclusive_maximum) = value.as_f64() {
+                if right.is_none() || exclusive_maximum <= right.unwrap() {
+                    right = Some(exclusive_maximum);
+                    right_inclusive = false;
+                }
+            }
+        }
+        None => {}
+    }
+
+    (left, left_inclusive, right, right_inclusive)
+}
+
 fn type_allows_value(type_name: &str, value: &Value) -> bool {
     match type_name {
         "object" => value.is_object(),
@@ -2216,18 +2261,15 @@ impl SchemaCtx {
         }
 
         if let Some(items) = value.as_array() {
-            if let Some(min_items) = object.get("minItems").and_then(Value::as_u64) {
-                if items.len() < min_items as usize {
-                    return false;
-                }
+            let (prefix_items, items_schema, min_items, max_items) = self.normalize_array_keywords(object);
+            if items.len() < min_items {
+                return false;
             }
-            if let Some(max_items) = object.get("maxItems").and_then(Value::as_u64) {
-                if items.len() > max_items as usize {
-                    return false;
-                }
+            if max_items.map(|max| items.len() > max).unwrap_or(false) {
+                return false;
             }
 
-            if let Some(prefix_items) = object.get("prefixItems").and_then(Value::as_array) {
+            if !prefix_items.is_empty() {
                 for (index, subschema) in prefix_items.iter().enumerate() {
                     if let Some(item) = items.get(index) {
                         if !self.value_satisfies_schema(item, subschema) {
@@ -2235,14 +2277,21 @@ impl SchemaCtx {
                         }
                     }
                 }
-                if let Some(item_schema) = object.get("items") {
+                if matches!(items_schema, Some(Value::Bool(false))) && items.len() > prefix_items.len() {
+                    return false;
+                }
+                if let Some(item_schema) = items_schema.as_ref() {
                     for item in items.iter().skip(prefix_items.len()) {
                         if !self.value_satisfies_schema(item, item_schema) {
                             return false;
                         }
                     }
                 }
-            } else if let Some(item_schema) = object.get("items") {
+            } else if matches!(items_schema, Some(Value::Bool(false))) {
+                if !items.is_empty() {
+                    return false;
+                }
+            } else if let Some(item_schema) = items_schema.as_ref() {
                 for item in items {
                     if !self.value_satisfies_schema(item, item_schema) {
                         return false;
@@ -2255,25 +2304,18 @@ impl SchemaCtx {
             if value.is_boolean() {
                 return true;
             }
-            if let Some(minimum) = object.get("minimum").and_then(Value::as_f64) {
-                if number < minimum {
-                    return false;
-                }
+            let (left, left_inclusive, right, right_inclusive) = normalize_numeric_bounds(object);
+            if left
+                .map(|bound| number < bound || (!left_inclusive && number <= bound))
+                .unwrap_or(false)
+            {
+                return false;
             }
-            if let Some(exclusive_minimum) = object.get("exclusiveMinimum").and_then(Value::as_f64) {
-                if number <= exclusive_minimum {
-                    return false;
-                }
-            }
-            if let Some(maximum) = object.get("maximum").and_then(Value::as_f64) {
-                if number > maximum {
-                    return false;
-                }
-            }
-            if let Some(exclusive_maximum) = object.get("exclusiveMaximum").and_then(Value::as_f64) {
-                if number >= exclusive_maximum {
-                    return false;
-                }
+            if right
+                .map(|bound| number > bound || (!right_inclusive && number >= bound))
+                .unwrap_or(false)
+            {
+                return false;
             }
             if let Some(multiple_of) = object.get("multipleOf").and_then(Value::as_f64) {
                 if multiple_of != 0.0 {
@@ -2368,35 +2410,7 @@ impl SchemaCtx {
     }
 
     fn build_numeric_ref(&mut self, type_name: &str, schema: &Map<String, Value>) -> GrammarExpr {
-        let minimum = schema.get("minimum").and_then(Value::as_f64);
-        let exclusive_minimum = schema.get("exclusiveMinimum").and_then(Value::as_f64);
-        let maximum = schema.get("maximum").and_then(Value::as_f64);
-        let exclusive_maximum = schema.get("exclusiveMaximum").and_then(Value::as_f64);
-
-        // Determine effective bounds
-        let mut left: Option<f64> = None;
-        let mut left_inclusive = true;
-        if let Some(m) = minimum {
-            left = Some(m);
-        }
-        if let Some(em) = exclusive_minimum {
-            if left.is_none() || em >= left.unwrap() {
-                left = Some(em);
-                left_inclusive = false;
-            }
-        }
-
-        let mut right: Option<f64> = None;
-        let mut right_inclusive = true;
-        if let Some(m) = maximum {
-            right = Some(m);
-        }
-        if let Some(em) = exclusive_maximum {
-            if right.is_none() || em <= right.unwrap() {
-                right = Some(em);
-                right_inclusive = false;
-            }
-        }
+        let (left, left_inclusive, right, right_inclusive) = normalize_numeric_bounds(schema);
 
         let has_bounds = left.is_some() || right.is_some();
         if !has_bounds {
@@ -2649,14 +2663,10 @@ impl SchemaCtx {
         let min_properties = schema.get("minProperties").and_then(Value::as_u64);
         let max_properties = schema.get("maxProperties").and_then(Value::as_u64);
         if min_properties.is_some() || max_properties.is_some() {
-            if properties.is_none() || !all_keys_required || !no_additional {
-                return Err(GlrMaskError::GrammarParse(
-                    "min/maxProperties only supported when all keys listed in properties are required"
-                        .into(),
-                ));
-            }
-            let fixed_count = properties.map(|properties| properties.len()).unwrap_or(0) as u64;
-            if min_properties.map(|min| fixed_count < min).unwrap_or(false)
+            let fixed_count = required_keys.len() as u64;
+            if min_properties
+                .map(|min| fixed_count < min && properties.is_some() && all_keys_required && no_additional)
+                .unwrap_or(false)
                 || max_properties.map(|max| fixed_count > max).unwrap_or(false)
             {
                 return Err(GlrMaskError::GrammarParse(
@@ -2667,6 +2677,25 @@ impl SchemaCtx {
         }
 
         if let Some(properties) = properties {
+            if min_properties.is_some() || max_properties.is_some() {
+                if let Some(expr) = self.build_min_max_properties_special_case(
+                    properties,
+                    &required_list,
+                    &required_keys,
+                    min_properties,
+                    max_properties,
+                    pattern_properties,
+                    additional_properties,
+                )? {
+                    return Ok(expr);
+                }
+                if !all_keys_required || !no_additional {
+                    return Err(GlrMaskError::GrammarParse(
+                        "min/maxProperties only supported when all keys listed in properties are required"
+                            .into(),
+                    ));
+                }
+            }
             let mut additional_schema = match additional_properties {
                 Some(Value::Bool(false)) => None,
                 Some(Value::Object(map)) => Some(Value::Object(map.clone())),
@@ -2876,6 +2905,190 @@ impl SchemaCtx {
             )),
             literal_expr(b"}"),
         ]))
+    }
+
+    fn build_optional_array_sequence(
+        &mut self,
+        items: &[(GrammarExpr, bool)],
+        prefixed: bool,
+        cache: &mut HashMap<(usize, bool), GrammarExpr>,
+        index: usize,
+    ) -> GrammarExpr {
+        if let Some(expr) = cache.get(&(index, prefixed)) {
+            return expr.clone();
+        }
+        if index >= items.len() {
+            let result = empty_expr();
+            cache.insert((index, prefixed), result.clone());
+            return result;
+        }
+
+        let (item_expr, required) = &items[index];
+        let rest_prefixed = self.build_optional_array_sequence(items, true, cache, index + 1);
+        let result = match (prefixed, *required) {
+            (true, true) => sequence_or_single(vec![
+                self.json_item_separator_expr(),
+                item_expr.clone(),
+                rest_prefixed,
+            ]),
+            (true, false) => choice_or_single(vec![
+                sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    item_expr.clone(),
+                    rest_prefixed.clone(),
+                ]),
+                rest_prefixed,
+            ]),
+            (false, true) => sequence_or_single(vec![item_expr.clone(), rest_prefixed]),
+            (false, false) => {
+                let rest_unprefixed =
+                    self.build_optional_array_sequence(items, false, cache, index + 1);
+                choice_or_single(vec![
+                    sequence_or_single(vec![item_expr.clone(), rest_prefixed]),
+                    rest_unprefixed,
+                ])
+            }
+        };
+        cache.insert((index, prefixed), result.clone());
+        result
+    }
+
+    fn normalize_array_keywords(
+        &self,
+        schema: &Map<String, Value>,
+    ) -> (Vec<Value>, Option<Value>, usize, Option<usize>) {
+        let prefix_items = schema.get("prefixItems");
+        let items = schema.get("items");
+        let additional_items = schema.get("additionalItems");
+
+        let (effective_prefix_items, effective_items) = if self.current_draft()
+            <= JsonSchemaDraft::Draft201909
+            || additional_items.is_some()
+            || matches!(items, Some(Value::Array(_)))
+        {
+            match items {
+                Some(Value::Array(values)) => (values.clone(), additional_items.cloned()),
+                _ => (Vec::new(), items.cloned()),
+            }
+        } else {
+            (
+                prefix_items
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+                items.cloned(),
+            )
+        };
+
+        let min_items = schema
+            .get("minItems")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(0);
+        let max_items = schema
+            .get("maxItems")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize);
+        (effective_prefix_items, effective_items, min_items, max_items)
+    }
+
+    fn build_min_max_properties_special_case(
+        &mut self,
+        properties: &Map<String, Value>,
+        required_list: &[String],
+        required_keys: &BTreeSet<String>,
+        min_properties: Option<u64>,
+        max_properties: Option<u64>,
+        pattern_properties: Option<&Map<String, Value>>,
+        additional_properties: Option<&Value>,
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if properties.is_empty() {
+            return Ok(None);
+        }
+        if pattern_properties.map(|patterns| !patterns.is_empty()).unwrap_or(false) {
+            return Ok(None);
+        }
+
+        let closed_object = matches!(additional_properties, Some(Value::Bool(false)))
+            || additional_properties
+                .map(|schema| self.is_certainly_unsatisfiable(schema))
+                .unwrap_or(false);
+        if !closed_object {
+            return Ok(None);
+        }
+
+        let fixed_required_count = required_keys.len() as u64;
+        let residual_min = min_properties
+            .map(|min| min.saturating_sub(fixed_required_count))
+            .unwrap_or(0);
+        let residual_max = max_properties.map(|max| max.saturating_sub(fixed_required_count));
+        let optional_keys = properties
+            .keys()
+            .filter(|key| !required_keys.contains(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if optional_keys.is_empty() || (residual_min == 0 && residual_max.is_none()) {
+            return Ok(None);
+        }
+
+        let supports_exactly_or_at_most_one = residual_min <= 1 && residual_max == Some(1);
+        let supports_at_least_one = residual_min == 1 && residual_max.is_none();
+        if !(supports_exactly_or_at_most_one || supports_at_least_one) {
+            return Ok(None);
+        }
+
+        let mut options = Vec::new();
+        if supports_exactly_or_at_most_one {
+            for optional_key in &optional_keys {
+                let allowed_properties = properties
+                    .iter()
+                    .filter(|(key, _)| required_keys.contains(*key) || *key == optional_key)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Map<_, _>>();
+                let option_required = required_list
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(optional_key.clone()))
+                    .collect::<Vec<_>>();
+                let option_required_keys = option_required.iter().cloned().collect::<BTreeSet<_>>();
+                options.push(self.build_ordered_properties_object_expr(
+                    &allowed_properties,
+                    &option_required,
+                    &option_required_keys,
+                    None,
+                )?);
+            }
+            if residual_min == 0 {
+                let required_only = properties
+                    .iter()
+                    .filter(|(key, _)| required_keys.contains(*key))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Map<_, _>>();
+                options.push(self.build_ordered_properties_object_expr(
+                    &required_only,
+                    required_list,
+                    required_keys,
+                    None,
+                )?);
+            }
+            return Ok(Some(choice_or_single(options)));
+        }
+
+        for optional_key in &optional_keys {
+            let option_required = required_list
+                .iter()
+                .cloned()
+                .chain(std::iter::once(optional_key.clone()))
+                .collect::<Vec<_>>();
+            let option_required_keys = option_required.iter().cloned().collect::<BTreeSet<_>>();
+            options.push(self.build_ordered_properties_object_expr(
+                properties,
+                &option_required,
+                &option_required_keys,
+                None,
+            )?);
+        }
+        Ok(Some(choice_or_single(options)))
     }
 
     fn build_ordered_properties_object_expr(
@@ -3130,73 +3343,132 @@ impl SchemaCtx {
     }
 
     fn build_array_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
-        if let Some(prefix_items) = schema.get("prefixItems").and_then(Value::as_array) {
-            let max_items_raw = schema.get("maxItems").and_then(Value::as_u64).map(|value| value as usize);
-            if max_items_raw
-                .map(|max_items| max_items < prefix_items.len())
-                .unwrap_or(false)
-            {
-                return Ok(self.json_array_ref());
-            }
+        let (prefix_items, items_schema, min_items, max_items) = self.normalize_array_keywords(schema);
 
-            let extra_item_expr = match schema.get("items") {
-                Some(Value::Object(_)) => self.convert_schema(schema.get("items").unwrap())?,
-                _ => self.json_value_ref(),
+        if max_items.map(|max| min_items > max).unwrap_or(false) {
+            return Err(unsat_schema_error());
+        }
+
+        if !prefix_items.is_empty() {
+            let additional_item_expr = match items_schema {
+                Some(Value::Bool(false)) => None,
+                Some(Value::Bool(true)) | None => Some(self.json_value_ref()),
+                Some(ref value) => match self.convert_schema(value) {
+                    Ok(expr) => Some(expr),
+                    Err(err) if is_unsat_schema_error(&err) => {
+                        if prefix_items.len() >= min_items {
+                            None
+                        } else {
+                            return Err(unsat_schema_error());
+                        }
+                    }
+                    Err(err) => return Err(err),
+                },
             };
 
-            let min_items = schema
-                .get("minItems")
-                .and_then(Value::as_u64)
-                .map(|value| value as usize)
-                .unwrap_or(prefix_items.len());
-            let max_items = max_items_raw;
-            let extra_min = min_items.saturating_sub(prefix_items.len());
-            let extra_max = max_items.map(|max_items| max_items.saturating_sub(prefix_items.len()));
-            let (extra_min, extra_max) = Self::clamp_repeat(extra_min, extra_max);
+            let mut required_items = Vec::<GrammarExpr>::new();
+            let mut optional_items = Vec::<GrammarExpr>::new();
+            let mut effective_max_items = max_items;
+            let n_to_add = effective_max_items.unwrap_or(prefix_items.len().max(min_items));
 
-            if prefix_items.is_empty() {
-                return Ok(self.build_repeated_array(extra_item_expr, extra_min, extra_max));
+            for index in 0..n_to_add {
+                let item_expr = if index < prefix_items.len() {
+                    match self.convert_schema(&prefix_items[index]) {
+                        Ok(expr) => expr,
+                        Err(err) if is_unsat_schema_error(&err) => {
+                            if index >= min_items {
+                                effective_max_items = Some(index);
+                                break;
+                            }
+                            return Err(unsat_schema_error());
+                        }
+                        Err(err) => return Err(err),
+                    }
+                } else if let Some(expr) = additional_item_expr.clone() {
+                    expr
+                } else {
+                    break;
+                };
+                if index < min_items {
+                    required_items.push(item_expr);
+                } else {
+                    optional_items.push(item_expr);
+                }
+            }
+
+            if effective_max_items.is_none() {
+                if let Some(expr) = additional_item_expr {
+                    let tail_item = self.extract_rule(expr, "arr_item");
+                    let tail = sequence_or_single(vec![
+                        tail_item.clone(),
+                        repeat_expr(
+                            sequence_or_single(vec![self.json_item_separator_expr(), tail_item]),
+                            0,
+                            None,
+                        ),
+                    ]);
+                    optional_items.push(tail);
+                }
             }
 
             let mut parts = vec![literal_expr(b"[")];
-            for (index, item_schema) in prefix_items.iter().enumerate() {
-                if index > 0 {
+            if !required_items.is_empty() {
+                parts.push(required_items[0].clone());
+                for item in required_items.iter().skip(1) {
                     parts.push(self.json_item_separator_expr());
+                    parts.push(item.clone());
                 }
-                parts.push(self.convert_schema(item_schema)?);
             }
 
-            if extra_max.is_none() || extra_max.unwrap_or(0) > 0 || extra_min > 0 {
-                let extra_item_expr = self.extract_rule(extra_item_expr, "arr_item");
-                parts.push(repeat_expr(
-                    sequence_or_single(vec![self.json_item_separator_expr(), extra_item_expr]),
-                    extra_min,
-                    extra_max,
-                ));
+            if !optional_items.is_empty() {
+                let mut tail = empty_expr();
+                for item in optional_items.iter().skip(1).rev() {
+                    tail = choice_or_single(vec![
+                        sequence_or_single(vec![
+                            self.json_item_separator_expr(),
+                            item.clone(),
+                            tail,
+                        ]),
+                        empty_expr(),
+                    ]);
+                }
+                let optional_head = sequence_or_single(vec![optional_items[0].clone(), tail]);
+                if !required_items.is_empty() {
+                    parts.push(choice_or_single(vec![
+                        sequence_or_single(vec![self.json_item_separator_expr(), optional_head]),
+                        empty_expr(),
+                    ]));
+                } else {
+                    parts.push(choice_or_single(vec![optional_head, empty_expr()]));
+                }
             }
+
             parts.push(literal_expr(b"]"));
             return Ok(sequence_or_single(parts));
         }
 
-        let min_items = schema.get("minItems").and_then(Value::as_u64).map(|value| value as usize);
-        let max_items = schema.get("maxItems").and_then(Value::as_u64).map(|value| value as usize);
-        if let Some(item_schema) = schema.get("items") {
-            if item_schema.is_object() {
-                let item_expr = self.convert_schema(item_schema)?;
-                return Ok(self.build_repeated_array(
-                    item_expr,
-                    min_items.unwrap_or(0),
-                    max_items,
-                ));
+        match items_schema {
+            Some(Value::Bool(false)) => {
+                if min_items > 0 {
+                    return Err(unsat_schema_error());
+                }
+                return Ok(sequence_or_single(vec![literal_expr(b"["), literal_expr(b"]")]));
             }
+            Some(Value::Bool(true)) | None => {
+                if schema.contains_key("minItems") || schema.contains_key("maxItems") {
+                    return Ok(self.build_repeated_array(self.json_value_ref(), min_items, max_items));
+                }
+                return Ok(self.json_array_ref());
+            }
+            Some(ref item_schema) if item_schema.is_object() => {
+                let item_expr = self.convert_schema(item_schema)?;
+                return Ok(self.build_repeated_array(item_expr, min_items, max_items));
+            }
+            Some(_) => {}
         }
 
-        if min_items.is_some() || max_items.is_some() {
-            return Ok(self.build_repeated_array(
-                self.json_value_ref(),
-                min_items.unwrap_or(0),
-                max_items,
-            ));
+        if schema.contains_key("minItems") || schema.contains_key("maxItems") {
+            return Ok(self.build_repeated_array(self.json_value_ref(), min_items, max_items));
         }
 
         Ok(self.json_array_ref())
@@ -3685,6 +3957,82 @@ mod tests {
             "prefixItems": [{"type": "string"}, {"type": "integer"}]
         }"#).unwrap();
         assert!(!g.rules.is_empty());
+    }
+
+    #[test]
+    fn test_prefix_items_follow_llguidance_optional_tuple_semantics() {
+        let schema = r#"{
+            "type": "array",
+            "prefixItems": [{"type": "string"}, {"type": "integer"}]
+        }"#;
+        assert!(accepts_sequence(schema, &[b"[]"]));
+        assert!(accepts_sequence(schema, &[b"[\"x\"]"]));
+        assert!(!accepts_sequence(schema, &[b"[1]"]));
+        assert!(!accepts_sequence(schema, &[b"[\"x\", \"y\"]"]));
+    }
+
+    #[test]
+    fn test_items_false_matches_llguidance_array_closure() {
+        let schema = r#"{
+            "type": "array",
+            "items": false
+        }"#;
+        assert!(accepts_sequence(schema, &[b"[]"]));
+        assert!(!accepts_sequence(schema, &[b"[0]"]));
+    }
+
+    #[test]
+    fn test_old_draft_items_array_uses_additional_items() {
+        let schema = r#"{
+            "$schema": "http://json-schema.org/draft-04/schema#",
+            "type": "array",
+            "items": [{"type": "string"}, {"type": "integer"}],
+            "additionalItems": false
+        }"#;
+        assert!(accepts_sequence(schema, &[b"[]"]));
+        assert!(accepts_sequence(schema, &[b"[\"x\", 1]"]));
+        assert!(!accepts_sequence(schema, &[b"[\"x\", 1, true]"]));
+    }
+
+    #[test]
+    fn test_draft4_boolean_exclusive_bounds_match_llguidance() {
+        let schema = r#"{
+            "$schema": "http://json-schema.org/draft-04/schema#",
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": true
+        }"#;
+        assert!(!accepts_sequence(schema, &[b"0"]));
+        assert!(accepts_sequence(schema, &[b"0.1"]));
+    }
+
+    #[test]
+    fn test_min_max_properties_special_cases_match_llguidance() {
+        let exactly_one = r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "minProperties": 1,
+            "maxProperties": 1,
+            "additionalProperties": false
+        }"#;
+        assert!(accepts_sequence(exactly_one, &[b"{\"a\": \"x\"}"]));
+        assert!(!accepts_sequence(exactly_one, &[b"{}"]));
+        assert!(!accepts_sequence(exactly_one, &[b"{\"a\": \"x\", \"b\": \"y\"}"]));
+
+        let at_least_one = r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+        }"#;
+        assert!(!accepts_sequence(at_least_one, &[b"{}"]));
+        assert!(accepts_sequence(at_least_one, &[b"{\"a\": \"x\", \"b\": \"y\"}"]));
     }
 
     #[test]
