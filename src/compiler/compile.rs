@@ -119,11 +119,10 @@ fn decode_literal_pattern(pattern: &str) -> Vec<u8> {
 fn build_internal_token_bytes(vocab: &Vocab, id_map: &InternalIdMap) -> BTreeMap<u32, Vec<u8>> {
     id_map
         .vocab_tokens
-        .internal_to_originals
+        .representative_original_ids
         .iter()
         .enumerate()
-        .filter_map(|(internal_token_id, original_ids)| {
-            let representative = *original_ids.first()?;
+        .filter_map(|(internal_token_id, &representative)| {
             let bytes = vocab.entries.get(&representative)?.clone();
             Some((internal_token_id as u32, bytes))
         })
@@ -364,10 +363,10 @@ fn sample_weight_tokens(
     let mut candidates: Vec<(Vec<u8>, u32)> = Vec::new();
     for internal_id in internal_ids {
         let originals = match id_map.vocab_tokens.internal_to_originals.get(internal_id as usize) {
-            Some(ids) => ids.as_slice(),
+            Some(ids) => ids,
             None => continue,
         };
-        for &original_id in originals {
+        for original_id in originals.iter() {
             if let Some(bytes) = vocab.entries.get(&original_id) {
                 if seen_bytes.insert(bytes.clone()) {
                     candidates.push((bytes.clone(), original_id));
@@ -1148,9 +1147,9 @@ fn compile_prepared(
         ignore_terminal: normalized.ignore_terminal,
         possible_matches,
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
-        internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
+        internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals_vecs(),
         original_token_to_internal: id_map.vocab_tokens.original_to_internal.clone(),
-        internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals.clone(),
+        internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals_vecs(),
         eos_token_id: vocab.eos_token_id,
         token_bytes,
         internal_token_bytes,
@@ -1291,9 +1290,9 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         ignore_terminal: normalized.ignore_terminal,
         possible_matches: possible_matches_by_state.clone(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
-        internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals.clone(),
+        internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals_vecs(),
         original_token_to_internal: id_map.vocab_tokens.original_to_internal.clone(),
-        internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals.clone(),
+        internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals_vecs(),
         eos_token_id: vocab.eos_token_id,
         token_bytes: token_bytes.clone(),
         internal_token_bytes,

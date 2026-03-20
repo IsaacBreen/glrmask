@@ -1,6 +1,8 @@
 
 use std::collections::BTreeMap;
 
+use range_set_blaze::RangeSetBlaze;
+
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
@@ -76,7 +78,8 @@ fn analyze_equivalences_sep1(
     // Convert state equivalence classes to ManyToOneIdMap
     let num_dfa_states = tokenizer.num_states() as usize;
     let mut state_original_to_internal = vec![u32::MAX; num_dfa_states];
-    let mut state_internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut state_internal_to_originals: Vec<RangeSetBlaze<u32>> = Vec::new();
+    let mut state_representative_original_ids = Vec::new();
 
     for class in &result.state_classes {
         let internal_id = state_internal_to_originals.len() as u32;
@@ -84,45 +87,58 @@ fn analyze_equivalences_sep1(
         for &s in &originals {
             state_original_to_internal[s as usize] = internal_id;
         }
-        state_internal_to_originals.push(originals);
+        state_representative_original_ids.push(*originals.first().expect("state class must be non-empty"));
+        state_internal_to_originals.push(RangeSetBlaze::from_iter(originals.iter().copied()));
     }
 
     let state_map = ManyToOneIdMap {
         original_to_internal: state_original_to_internal,
         internal_to_originals: state_internal_to_originals,
+        representative_original_ids: state_representative_original_ids,
     };
 
     // Convert vocab equivalence classes to ManyToOneIdMap
     // The sep1 result uses indices into our token_bytes array, but we need
     // to map back to original token IDs.
-    let mut vocab_original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
-    let mut vocab_internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut ordered_vocab_classes: Vec<(usize, Vec<u32>)> = result
+        .vocab_classes
+        .iter()
+        .map(|class| {
+            let mut indices: Vec<usize> = class.iter().copied().collect();
+            indices.sort_unstable_by(|&left, &right| {
+                token_bytes[left]
+                    .cmp(&token_bytes[right])
+                    .then_with(|| token_ids[left].cmp(&token_ids[right]))
+            });
+            let representative_idx = *indices.first().expect("vocab class must be non-empty");
+            let originals = indices.into_iter().map(|idx| token_ids[idx]).collect();
+            (representative_idx, originals)
+        })
+        .collect();
+    ordered_vocab_classes.sort_unstable_by(|(left_rep_idx, _), (right_rep_idx, _)| {
+        token_bytes[*left_rep_idx]
+            .cmp(&token_bytes[*right_rep_idx])
+            .then_with(|| token_ids[*left_rep_idx].cmp(&token_ids[*right_rep_idx]))
+    });
 
-    for class in &result.vocab_classes {
-        let internal_id = vocab_internal_to_originals.len() as u32;
-        let mut originals: Vec<u32> = Vec::with_capacity(class.len());
-        let mut shortest_pos = 0usize;
-        let mut shortest_len = usize::MAX;
-        for (pos, &idx) in class.iter().enumerate() {
-            let length = token_lengths[idx];
-            if length < shortest_len {
-                shortest_len = length;
-                shortest_pos = pos;
-            }
-            originals.push(token_ids[idx]);
-        }
-        if shortest_pos != 0 {
-            originals.swap(0, shortest_pos);
-        }
+    let mut vocab_original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
+    let mut vocab_internal_to_originals: Vec<RangeSetBlaze<u32>> =
+        Vec::with_capacity(ordered_vocab_classes.len());
+    let mut vocab_representative_original_ids = Vec::with_capacity(ordered_vocab_classes.len());
+
+    for (internal_id, (_, originals)) in ordered_vocab_classes.into_iter().enumerate() {
+        let representative = *originals.first().expect("vocab class must be non-empty");
         for &tid in &originals {
-            vocab_original_to_internal[tid as usize] = internal_id;
+            vocab_original_to_internal[tid as usize] = internal_id as u32;
         }
-        vocab_internal_to_originals.push(originals);
+        vocab_representative_original_ids.push(representative);
+        vocab_internal_to_originals.push(RangeSetBlaze::from_iter(originals.into_iter()));
     }
 
     let vocab_map = ManyToOneIdMap {
         original_to_internal: vocab_original_to_internal,
         internal_to_originals: vocab_internal_to_originals,
+        representative_original_ids: vocab_representative_original_ids,
     };
 
     InternalIdMap {
@@ -232,7 +248,7 @@ mod tests {
             let classes = &id_map.vocab_tokens.internal_to_originals;
             // Print for debugging
             for (i, class) in classes.iter().enumerate() {
-                let content: Vec<&str> = class.iter().map(|&idx| vocab_strs[idx as usize]).collect();
+                let content: Vec<&str> = class.iter().map(|idx| vocab_strs[idx as usize]).collect();
                 println!("  Class {}: {:?}", i, content);
             }
             // Combined state+vocab equivalence analysis groups tokens by their
@@ -258,7 +274,7 @@ mod tests {
             ];
             let mut expected_sorted: Vec<Vec<usize>> = expected.iter().map(|c| { let mut v = c.clone(); v.sort(); v }).collect();
             expected_sorted.sort();
-            let mut actual_sorted: Vec<Vec<usize>> = classes.iter().map(|c| { let mut v: Vec<usize> = c.iter().map(|&id| id as usize).collect(); v.sort(); v }).collect();
+            let mut actual_sorted: Vec<Vec<usize>> = classes.iter().map(|c| { let mut v: Vec<usize> = c.iter().map(|id| id as usize).collect(); v.sort(); v }).collect();
             actual_sorted.sort();
             assert_eq!(actual_sorted, expected_sorted,
                 "Equivalence classes don't match expected!\n\
@@ -279,13 +295,13 @@ mod tests {
             let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
             let classes = &id_map.vocab_tokens.internal_to_originals;
             for (i, class) in classes.iter().enumerate() {
-                let content: Vec<&str> = class.iter().map(|&idx| vocab_strs[idx as usize]).collect();
+                let content: Vec<&str> = class.iter().map(|idx| vocab_strs[idx as usize]).collect();
                 println!("  Class {}: {:?}", i, content);
             }
             let expected: Vec<Vec<usize>> = vec![vec![0], vec![1]];
             let mut expected_sorted: Vec<Vec<usize>> = expected.iter().map(|c| { let mut v = c.clone(); v.sort(); v }).collect();
             expected_sorted.sort();
-            let mut actual_sorted: Vec<Vec<usize>> = classes.iter().map(|c| { let mut v: Vec<usize> = c.iter().map(|&id| id as usize).collect(); v.sort(); v }).collect();
+            let mut actual_sorted: Vec<Vec<usize>> = classes.iter().map(|c| { let mut v: Vec<usize> = c.iter().map(|id| id as usize).collect(); v.sort(); v }).collect();
             actual_sorted.sort();
             assert_eq!(actual_sorted, expected_sorted,
                 "Equivalence classes don't match expected!\n\
@@ -340,7 +356,7 @@ mod tests {
             println!();
             println!("Vocab classes:");
             for (i, class) in full_map.vocab_tokens.internal_to_originals.iter().enumerate() {
-                let content: Vec<&str> = class.iter().map(|&idx| vocab_strs[idx as usize]).collect();
+                let content: Vec<&str> = class.iter().map(|idx| vocab_strs[idx as usize]).collect();
                 println!("  Class {}: {:?}", i, content);
             }
         }

@@ -287,6 +287,9 @@ fn permute_rangeset(set: &RangeSetBlaze<u32>, perm: &[u32]) -> RangeSetBlaze<u32
 
 /// Update a `ManyToOneIdMap` after a (possibly many-to-one) permutation.
 fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: usize) {
+    let old_internal_to_originals = std::mem::take(&mut id_map.internal_to_originals);
+    let old_representatives = std::mem::take(&mut id_map.representative_original_ids);
+
     for internal in &mut id_map.original_to_internal {
         if *internal != u32::MAX {
             if let Some(&new_id) = perm.get(*internal as usize) {
@@ -295,13 +298,22 @@ fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: us
         }
     }
 
-    let mut new_internal_to_originals = vec![Vec::new(); new_count];
-    for (original, &internal) in id_map.original_to_internal.iter().enumerate() {
-        if internal != u32::MAX && (internal as usize) < new_count {
-            new_internal_to_originals[internal as usize].push(original as u32);
+    let mut new_internal_to_originals = vec![RangeSetBlaze::new(); new_count];
+    let mut new_representatives = vec![u32::MAX; new_count];
+    for (old_internal, originals) in old_internal_to_originals.into_iter().enumerate() {
+        let Some(&new_internal) = perm.get(old_internal) else {
+            continue;
+        };
+        if (new_internal as usize) >= new_count {
+            continue;
+        }
+        new_internal_to_originals[new_internal as usize] |= originals;
+        if new_representatives[new_internal as usize] == u32::MAX {
+            new_representatives[new_internal as usize] = old_representatives[old_internal];
         }
     }
     id_map.internal_to_originals = new_internal_to_originals;
+    id_map.representative_original_ids = new_representatives;
 }
 
 /// Count total ranges across all unique weights in the DWA.

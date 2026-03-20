@@ -139,6 +139,11 @@ fn format_id_summary(ids: &[u32]) -> String {
     format!("count={} [{}]", ids.len(), span_text)
 }
 
+fn format_id_summary_set(ids: &range_set_blaze::RangeSetBlaze<u32>) -> String {
+    let values: Vec<u32> = ids.iter().collect();
+    format_id_summary(&values)
+}
+
 fn sample_token_reprs(token_ids: &[u32], vocab_by_id: &BTreeMap<u32, &[u8]>) -> Option<String> {
     let samples: Vec<String> = token_ids
         .iter()
@@ -150,6 +155,14 @@ fn sample_token_reprs(token_ids: &[u32], vocab_by_id: &BTreeMap<u32, &[u8]>) -> 
     } else {
         Some(samples.join(", "))
     }
+}
+
+fn sample_token_reprs_set(
+    token_ids: &range_set_blaze::RangeSetBlaze<u32>,
+    vocab_by_id: &BTreeMap<u32, &[u8]>,
+) -> Option<String> {
+    let values: Vec<u32> = token_ids.iter().collect();
+    sample_token_reprs(&values, vocab_by_id)
 }
 
 impl std::fmt::Display for CompileDebug {
@@ -296,13 +309,13 @@ impl std::fmt::Display for CompileDebug {
 
         writeln!(f, "\n═══ TOKENIZER STATE ID MAPPING ({}) ═══", self.id_map.tokenizer_states.num_internal_ids())?;
         for (internal, dfa_states) in self.id_map.tokenizer_states.internal_to_originals.iter().enumerate() {
-            writeln!(f, "  TSID {internal} ↔ DFA states {}", format_id_summary(dfa_states))?;
+            writeln!(f, "  TSID {internal} ↔ DFA states {}", format_id_summary_set(dfa_states))?;
         }
 
         writeln!(f, "\n═══ VOCAB TOKEN ID MAPPING ({}) ═══", self.id_map.vocab_tokens.num_internal_ids())?;
         for (internal, token_ids) in self.id_map.vocab_tokens.internal_to_originals.iter().enumerate() {
-            write!(f, "  token-class {internal} ↔ original token IDs {}", format_id_summary(token_ids))?;
-            if let Some(samples) = sample_token_reprs(token_ids, &vocab_by_id) {
+            write!(f, "  token-class {internal} ↔ original token IDs {}", format_id_summary_set(token_ids))?;
+            if let Some(samples) = sample_token_reprs_set(token_ids, &vocab_by_id) {
                 write!(f, " sample=[{samples}]")?;
             }
             writeln!(f)?;
