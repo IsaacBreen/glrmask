@@ -23,6 +23,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::time::{Duration, Instant};
 
 use crate::ds::bitset::BitSet;
+use crate::ds::u8set::U8Set;
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
@@ -70,7 +71,7 @@ struct Dfa {
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
     /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
-    self_loop_bytes: Vec<[u64; 4]>,
+    self_loop_bytes: Vec<U8Set>,
     /// Precomputed hash for suffix DAG at end-of-token (empty suffix).
     empty_suffix_hash: u64,
     disallowed_follows: Vec<BitSet>,
@@ -210,12 +211,12 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
     };
 
     // Precompute self-loop byte sets per state
-    let self_loop_bytes: Vec<[u64; 4]> = (0..transitions.len())
+    let self_loop_bytes: Vec<U8Set> = (0..transitions.len())
         .map(|s| {
-            let mut bits = [0u64; 4];
+            let mut bits = U8Set::empty();
             for b in 0..=255u8 {
                 if transitions[s][b as usize] == s as u32 {
-                    bits[b as usize >> 6] |= 1u64 << (b & 63);
+                    bits.insert(b);
                 }
             }
             bits
@@ -326,7 +327,7 @@ struct TrieNode {
     children: SmallVec<[(u8, u32); 4]>,
     token_idx: u32, // u32::MAX if not a token endpoint
     /// Bitset of all bytes reachable from descendant edges of this node.
-    subtree_bytes: [u64; 4],
+    subtree_bytes: U8Set,
 }
 
 struct VocabTrie {
@@ -341,7 +342,7 @@ impl VocabTrie {
         nodes.push(TrieNode {
             children: SmallVec::new(),
             token_idx: u32::MAX,
-            subtree_bytes: [0u64; 4],
+            subtree_bytes: U8Set::empty(),
         });
 
         // Flat lookup tables for root (depth 0) and depth-1 nodes to avoid linear search
@@ -365,7 +366,7 @@ impl VocabTrie {
                 nodes.push(TrieNode {
                     children: SmallVec::new(),
                     token_idx: u32::MAX,
-                    subtree_bytes: [0u64; 4],
+                    subtree_bytes: U8Set::empty(),
                 });
                 root_children[b0] = new_idx;
                 new_idx
@@ -385,7 +386,7 @@ impl VocabTrie {
                 nodes.push(TrieNode {
                     children: SmallVec::new(),
                     token_idx: u32::MAX,
-                    subtree_bytes: [0u64; 4],
+                    subtree_bytes: U8Set::empty(),
                 });
                 d1_children[b0][b1] = new_idx;
                 new_idx
@@ -408,7 +409,7 @@ impl VocabTrie {
                         nodes.push(TrieNode {
                             children: SmallVec::new(),
                             token_idx: u32::MAX,
-                            subtree_bytes: [0u64; 4],
+                            subtree_bytes: U8Set::empty(),
                         });
                         nodes[cur as usize].children.insert(p, (byte, new_idx));
                         new_idx
@@ -438,16 +439,14 @@ impl VocabTrie {
         // Depth 2+ children are already sorted (inserted via binary_search)
 
         // Compute subtree byte sets (post-order)
-        fn compute_subtree_bytes(nodes: &mut [TrieNode], idx: u32) -> [u64; 4] {
-            let mut bits = [0u64; 4];
+        fn compute_subtree_bytes(nodes: &mut [TrieNode], idx: u32) -> U8Set {
+            let mut bits = U8Set::empty();
             let num_children = nodes[idx as usize].children.len();
             for i in 0..num_children {
                 let (byte, child_idx) = nodes[idx as usize].children[i];
-                bits[byte as usize >> 6] |= 1u64 << (byte & 63);
+                bits.insert(byte);
                 let child_bits = compute_subtree_bytes(nodes, child_idx);
-                for j in 0..4 {
-                    bits[j] |= child_bits[j];
-                }
+                bits |= child_bits;
             }
             nodes[idx as usize].subtree_bytes = bits;
             bits
@@ -671,12 +670,6 @@ impl Scratch {
 
 // ---- Core: recursive trie walk with inline signature computation ----
 
-/// Check if bitset `a` is a subset of bitset `b` (a ⊆ b).
-#[inline]
-fn u8set_is_subset(a: &[u64; 4], b: &[u64; 4]) -> bool {
-    (a[0] & !b[0]) == 0 && (a[1] & !b[1]) == 0 && (a[2] & !b[2]) == 0 && (a[3] & !b[3]) == 0
-}
-
 /// Assign the same hash to all tokens in a trie subtree.
 fn assign_hash_to_subtree(
     trie: &VocabTrie,
@@ -812,22 +805,19 @@ fn walk_trie<S: AsRef<[u8]>>(
         // reachable from the child subtree, then all tokens in the subtree will
         // end in the same states and can potentially share one signature.
         let child_node = &trie.nodes[child as usize];
-        if child_node.subtree_bytes != [0u64; 4] {
+        if !child_node.subtree_bytes.is_empty() {
             // Intersect self_loop_bytes across all alive states at child depth
-            let mut sl_inter = [!0u64; 4];
+            let mut sl_inter = U8Set::all();
             let mut any_alive = false;
             for si in 0..ni {
                 let cs = states[cd * ni + si];
                 if cs != NONE {
                     any_alive = true;
-                    let sl = &dfa.self_loop_bytes[cs as usize];
-                    for i in 0..4 {
-                        sl_inter[i] &= sl[i];
-                    }
+                    sl_inter &= dfa.self_loop_bytes[cs as usize];
                 }
             }
 
-            if any_alive && u8set_is_subset(&child_node.subtree_bytes, &sl_inter) {
+            if any_alive && child_node.subtree_bytes.is_subset(&sl_inter) {
                 // All alive states self-loop on all descendant bytes.
                 // Check if bulk-assign is safe: every mp > 0 must be for a group
                 // where the current state has a greedy finalizer (so mp advances

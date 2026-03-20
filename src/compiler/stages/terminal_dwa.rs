@@ -1211,26 +1211,16 @@ fn log_terminal_profile(enabled: bool, phase: &str, started_at: std::time::Insta
     }
 }
 
-fn representative_original_ids(map: &crate::compiler::stages::equivalence_analysis::ManyToOneIdMap) -> Vec<u32> {
-    map.original_to_internal
-        .iter()
-        .enumerate()
-        .map(|(original_id, _)| {
-            map.representative_original_id_for_original(original_id as u32)
-                .unwrap_or(original_id as u32)
-        })
-        .collect()
-}
-
 fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
-    vocab
-        .entries
-        .iter()
-        .filter_map(|(&original_token_id, bytes)| {
-            id_map
-                .vocab_tokens
-                .internal_id_for_original(original_token_id)
-                .map(|internal_token_id| (internal_token_id, bytes.clone()))
+    id_map
+        .vocab_tokens
+        .iter_representative_ids()
+        .enumerate()
+        .filter_map(|(internal_token_id, representative)| {
+            vocab
+                .entries
+                .get(&representative)
+                .map(|bytes| (internal_token_id as u32, bytes.clone()))
         })
         .collect()
 }
@@ -1495,8 +1485,8 @@ mod tests {
     fn expand_original_tokens(weight: &Weight, id_map: &InternalIdMap) -> BTreeSet<u32> {
         let mut original_tokens = BTreeSet::new();
         for internal_token_id in weight.token_union().iter() {
-            if let Some(original_ids) = id_map.vocab_tokens.internal_to_originals.get(internal_token_id as usize) {
-                original_tokens.extend(original_ids.iter().copied());
+            if let Some(original_ids) = id_map.vocab_tokens.original_ids_for_internal(internal_token_id) {
+                original_tokens.extend(original_ids.iter());
             } else {
                 original_tokens.insert(internal_token_id);
             }
@@ -1631,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn test_terminal_dwa_supports_distinct_bytes_for_same_internal_token() {
+    fn test_terminal_dwa_uses_representative_bytes_for_internal_token() {
         let grammar = GrammarDef {
             rules: vec![
                 Rule {
@@ -1666,7 +1656,8 @@ mod tests {
         original_to_internal[20] = 0;
         id_map.vocab_tokens = ManyToOneIdMap {
             original_to_internal,
-            internal_to_originals: vec![vec![10, 20]],
+            internal_to_originals: vec![RangeSetBlaze::from_iter([10u32..=10u32, 20u32..=20u32])],
+            representative_original_ids: vec![10],
         };
 
         let terminal_dwa = build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None);
@@ -1681,8 +1672,8 @@ mod tests {
         let b_weight = terminal_dwa.eval_word(&[1]);
         let b_original_tokens = expand_original_tokens(&b_weight, &id_map);
         assert!(
-            b_original_tokens.contains(&10) && b_original_tokens.contains(&20),
-            "merged internal token should stay reachable on terminal 'b'"
+            !b_original_tokens.contains(&10) && !b_original_tokens.contains(&20),
+            "non-representative bytes should not create additional terminal paths"
         );
     }
 

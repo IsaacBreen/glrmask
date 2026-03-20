@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
 
 use crate::ds::bitset::BitSet;
+use crate::ds::u8set::U8Set;
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
@@ -50,7 +51,7 @@ struct Dfa {
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
     /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
-    self_loop_bytes: Vec<[u64; 4]>,
+    self_loop_bytes: Vec<U8Set>,
     disallowed_follows: Vec<BitSet>,
 }
 
@@ -215,12 +216,12 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
     };
 
     // Precompute self-loop byte sets per state
-    let self_loop_bytes: Vec<[u64; 4]> = (0..transitions.len())
+    let self_loop_bytes: Vec<U8Set> = (0..transitions.len())
         .map(|s| {
-            let mut bits = [0u64; 4];
+            let mut bits = U8Set::empty();
             for b in 0..=255u8 {
                 if transitions[s][b as usize] == s as u32 {
-                    bits[b as usize >> 6] |= 1u64 << (b & 63);
+                    bits.insert(b);
                 }
             }
             bits
@@ -403,18 +404,14 @@ fn run_batch(
             // greedy match positions advance to token_length and we can stop.
             if pos + 1 < len {
                 // Intersect self_loop_bytes for all active states
-                let mut sl = [!0u64; 4];
+                let mut sl = U8Set::all();
                 for idx in 0..active_len {
                     let i = scratch.active_indices[idx];
                     let s = scratch.current_states[i];
-                    for k in 0..4 {
-                        sl[k] &= dfa.self_loop_bytes[s][k];
-                    }
+                    sl &= dfa.self_loop_bytes[s];
                 }
                 // Check if all remaining bytes are in the intersection
-                let all_self_loop = slice[pos + 1..].iter().all(|&b| {
-                    sl[b as usize >> 6] & (1u64 << (b & 63)) != 0
-                });
+                let all_self_loop = slice[pos + 1..].iter().all(|&b| sl.contains(b));
                 if all_self_loop {
                     let token_len = len as u32;
                     for idx in 0..active_len {
