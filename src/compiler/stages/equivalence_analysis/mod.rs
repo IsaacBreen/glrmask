@@ -36,6 +36,12 @@ impl ManyToOneIdMap {
             .and_then(|internal_id| self.representative_original_id_for_internal(internal_id))
     }
 
+    pub fn iter_representative_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.internal_to_originals
+            .iter()
+            .map(|original_ids| original_ids.first().unwrap().clone())
+    }
+
     pub fn max_original_id(&self) -> u32 {
         self.original_to_internal
             .len()
