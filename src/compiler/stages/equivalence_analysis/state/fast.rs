@@ -289,14 +289,26 @@ pub fn find_state_equivalence_classes(
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
-    use std::collections::HashMap;
-
     if states.is_empty() {
         return Vec::new();
     }
 
     let k = tokens.iter().map(|t| t.len()).max().unwrap_or(0);
     let pre_mapping = find_state_equivalence_classes_kstep(regex, states, k);
+
+    let use_exact_token_refinement = std::env::var("SEP1_EXACT_TOKEN_EQUIV")
+        .ok()
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false);
+
+    if !use_exact_token_refinement {
+        return pre_mapping;
+    }
+
+    use std::collections::HashMap;
 
     let mut rep_set: BTreeSet<usize> = BTreeSet::new();
     for &rep in &pre_mapping {
@@ -327,107 +339,6 @@ fn find_state_equivalence_classes_token_based(
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
-    let parse_env_flag = |name: &str| -> Option<bool> {
-        std::env::var(name).ok().map(|value| {
-            let trimmed = value.trim();
-            !(trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("false"))
-        })
-    };
-
-    let use_exact_token_refinement = parse_env_flag("SEP1_EXACT_TOKEN_EQUIV").unwrap_or(false);
-
-    if use_exact_token_refinement {
-        use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        struct FlatNodeSignature {
-            end_futures: Option<Vec<usize>>,
-            edges: Vec<(usize, usize)>,
-        }
-
-        type FlatTokenSignature = Vec<(usize, FlatNodeSignature)>;
-        type StateSignature = Vec<FlatTokenSignature>;
-
-        fn compute_flat_token_signature(
-            regex: &Sep1Tokenizer,
-            token: &[u8],
-            start_state: usize,
-        ) -> FlatTokenSignature {
-            let mut flat: BTreeMap<usize, FlatNodeSignature> = BTreeMap::new();
-            let mut queue: VecDeque<usize> = VecDeque::new();
-            let mut visited: HashSet<usize> = HashSet::new();
-
-            queue.push_back(0);
-            visited.insert(0);
-
-            while let Some(pos) = queue.pop_front() {
-                let slice = if pos <= token.len() {
-                    &token[pos..]
-                } else {
-                    &[]
-                };
-
-                let exec_start = if pos == 0 {
-                    start_state
-                } else {
-                    regex.initial_state_id()
-                };
-                let result = regex.execute_from_state_nonzero(slice, exec_start);
-
-                let mut edge_map: BTreeMap<usize, usize> = BTreeMap::new();
-                for m in result.matches {
-                    let target_pos = pos + m.position;
-                    if edge_map.insert(m.group_id, target_pos).is_some() {
-                        panic!(
-                            "Multiple edges for group ID {} at token position {}",
-                            m.group_id, pos
-                        );
-                    }
-                    if visited.insert(target_pos) {
-                        queue.push_back(target_pos);
-                    }
-                }
-
-                let end_futures = result.end_state.map(|state_idx| {
-                    regex.dfa().states[state_idx]
-                        .possible_future_group_ids
-                        .iter()
-                        .copied()
-                        .collect::<Vec<_>>()
-                });
-
-                flat.insert(
-                    pos,
-                    FlatNodeSignature {
-                        end_futures,
-                        edges: edge_map.into_iter().collect(),
-                    },
-                );
-            }
-
-            flat.into_iter().collect()
-        }
-
-        let signatures: Vec<StateSignature> = states
-            .par_iter()
-            .map(|&state| {
-                tokens
-                    .iter()
-                    .map(|token| compute_flat_token_signature(regex, token, state))
-                    .collect()
-            })
-            .collect();
-
-        let mut sig_to_rep: HashMap<StateSignature, usize> = HashMap::new();
-        let mut mapping: Vec<usize> = Vec::with_capacity(states.len());
-        for (idx, sig) in signatures.into_iter().enumerate() {
-            let rep = *sig_to_rep.entry(sig).or_insert(states[idx]);
-            mapping.push(rep);
-        }
-
-        return mapping;
-    }
-
     use std::collections::HashMap;
 
     let dfa = regex.dfa();

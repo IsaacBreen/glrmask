@@ -27,7 +27,7 @@ use crate::compiler::stages::parser_dwa::{
 };
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
+use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_possible_matches_report, build_terminal_dwa_with_report};
 use crate::compiler::stages::terminal_dwa::compute_ever_allowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
@@ -1041,8 +1041,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     // Overlap terminal-DWA construction with template compilation.
     // Templates only need (table, grammar) — no dependency on terminal_dwa or id_map.
     #[cfg(feature = "rayon")]
-    let ((mut terminal_dwa, terminal_build), (characterizations, templates)) = rayon::join(
-        || build_terminal_dwa_with_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal),
+    let ((mut terminal_dwa, mut possible_matches, terminal_build), (characterizations, templates)) = rayon::join(
+        || build_terminal_dwa_with_possible_matches_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal),
         || {
             let characterizations = characterize_terminals(&table, &glr_grammar);
             let templates = Templates::from_characterizations(&characterizations);
@@ -1050,8 +1050,8 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         },
     );
     #[cfg(not(feature = "rayon"))]
-    let ((mut terminal_dwa, terminal_build), (characterizations, templates)) = {
-        let td = build_terminal_dwa_with_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal);
+    let ((mut terminal_dwa, mut possible_matches, terminal_build), (characterizations, templates)) = {
+        let td = build_terminal_dwa_with_possible_matches_report(&glr_grammar, &tokenizer, vocab, &id_map, normalized.ignore_terminal);
         let characterizations = characterize_terminals(&table, &glr_grammar);
         let templates = Templates::from_characterizations(&characterizations);
         (td, (characterizations, templates))
@@ -1069,6 +1069,10 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         &mut terminal_dwa,
         &mut id_map,
     );
+    crate::compiler::possible_matches::permute_possible_matches_in_place(
+        &mut possible_matches,
+        &compact_report.token_perm,
+    );
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][compile] compact_terminal_ms={:.3} tsids={}→{} tokens={}→{} ranges={}→{}",
@@ -1082,15 +1086,10 @@ pub fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
         );
     }
 
-    // Build internal_token_bytes and possible_matches with post-compact id_map
+    // Build internal_token_bytes with the post-compact id_map and reuse the
+    // warmed possible-match cache from terminal-DWA construction.
     let phase_started_at = std::time::Instant::now();
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
-    let internal_token_entries = build_internal_token_entries(vocab, &id_map);
-    let possible_matches =
-        crate::compiler::possible_matches::build_possible_matches_from_token_entries(
-            &tokenizer,
-            &internal_token_entries,
-        );
     log_compile_profile(profile_enabled, "build_possible_matches", phase_started_at);
 
     log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, vocab, &id_map);
@@ -1219,9 +1218,9 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
     let internal_token_entries = build_internal_token_entries(vocab, &id_map);
     let possible_matches_by_state =
-        crate::compiler::possible_matches::build_possible_matches_from_token_entries(
+        crate::compiler::possible_matches::build_possible_matches_from_owned_token_entries(
             &tokenizer,
-            &internal_token_entries,
+            internal_token_entries,
         );
 
     let characterizations = characterize_terminals(&table, &glr_grammar);

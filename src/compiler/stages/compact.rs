@@ -24,6 +24,7 @@ pub struct CompactReport {
     pub new_num_tokens: u32,
     pub old_ranges: usize,
     pub new_ranges: usize,
+    pub token_perm: Vec<u32>,
 }
 
 /// Merge equivalent IDs and reorder both dimensions of every weight in `dwa`,
@@ -65,6 +66,7 @@ pub fn compact_dwa_dimensions(
         new_num_tokens: new_num_tokens as u32,
         old_ranges,
         new_ranges,
+        token_perm,
     }
 }
 

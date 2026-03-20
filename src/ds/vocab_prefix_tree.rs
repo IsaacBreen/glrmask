@@ -111,17 +111,21 @@ impl VocabPrefixTree {
     }
 
     pub fn build(tokens: &[(usize, Vec<u8>)]) -> Self {
+        Self::build_owned(tokens.iter().map(|(id, bytes)| (*id, bytes.clone())).collect())
+    }
+
+    pub fn build_owned(tokens: Vec<(usize, Vec<u8>)>) -> Self {
         let mut tree = Self::new();
         tree.max_token_id = tokens.iter().map(|(id, _)| *id).max().unwrap_or(0);
 
         let mut nonempty: Vec<(usize, Box<[u8]>)> = Vec::with_capacity(tokens.len());
         for (id, bytes) in tokens {
             if bytes.is_empty() {
-                tree.root.token_id = *id;
+                tree.root.token_id = id;
                 tree.root.has_token = true;
                 tree.has_empty_string_token = true;
             } else {
-                nonempty.push((*id, bytes.clone().into_boxed_slice()));
+                nonempty.push((id, bytes.into_boxed_slice()));
             }
         }
 

@@ -92,6 +92,16 @@ impl Tokenizer {
             .collect()
     }
 
+    pub(crate) fn matched_terminals_iter(
+        &self,
+        state: u32,
+    ) -> impl Iterator<Item = TerminalID> + '_ {
+        self.dfa
+            .finalizers(state)
+            .iter()
+            .map(|terminal| terminal as TerminalID)
+    }
+
     pub fn all_matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         self.matched_terminals(state)
     }

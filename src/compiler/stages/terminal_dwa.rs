@@ -17,7 +17,7 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::analysis::EOF;
 use crate::compiler::grammar::model::Symbol;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::possible_matches::PossibleMatchesComputer;
+use crate::compiler::possible_matches::{PossibleMatchesByState, PossibleMatchesComputer, collect_possible_matches_by_state};
 
 /// NWA state identifier (index into `NWA.states`).
 type NwaState = u32;
@@ -1210,7 +1210,24 @@ pub(crate) fn build_terminal_dwa(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
-    build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal).0
+    build_terminal_dwa_with_possible_matches_report(grammar, tokenizer, vocab, id_map, ignore_terminal).0
+}
+
+pub(crate) fn build_terminal_dwa_with_possible_matches_report(
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
+) -> (DWA, PossibleMatchesByState, TerminalDwaBuildReport) {
+    let (dwa, possible_matches, report) = build_terminal_dwa_impl(
+        grammar,
+        tokenizer,
+        vocab,
+        id_map,
+        ignore_terminal,
+    );
+    (dwa, possible_matches, report)
 }
 
 pub(crate) fn build_terminal_dwa_with_report(
@@ -1220,6 +1237,23 @@ pub(crate) fn build_terminal_dwa_with_report(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> (DWA, TerminalDwaBuildReport) {
+    let (dwa, _possible_matches, report) = build_terminal_dwa_impl(
+        grammar,
+        tokenizer,
+        vocab,
+        id_map,
+        ignore_terminal,
+    );
+    (dwa, report)
+}
+
+fn build_terminal_dwa_impl(
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
+) -> (DWA, PossibleMatchesByState, TerminalDwaBuildReport) {
     let profile_enabled = terminal_profile_enabled();
     let total_started_at = std::time::Instant::now();
     let mut report = TerminalDwaBuildReport {
@@ -1236,11 +1270,11 @@ pub(crate) fn build_terminal_dwa_with_report(
 
     let phase_started_at = std::time::Instant::now();
     let internal_vocab = internal_vocab_entries(vocab, id_map);
-    let vocab_tree = VocabPrefixTree::build(
-        &internal_vocab
-            .iter()
-            .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
-            .collect::<Vec<_>>(),
+    let vocab_tree = VocabPrefixTree::build_owned(
+        internal_vocab
+            .into_iter()
+            .map(|(token_id, bytes)| (token_id as usize, bytes))
+            .collect(),
     );
     let self_loop_bytes = build_self_loop_bytes(tokenizer);
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
@@ -1297,24 +1331,60 @@ pub(crate) fn build_terminal_dwa_with_report(
     let flush_t = std::time::Instant::now();
     builder.flush_transition_buffer();
     builder.profile_flush_ms = flush_t.elapsed();
+    let builder_profile = (
+        builder.profile_trie_calls,
+        builder.profile_assoc_clones,
+        builder.profile_tokenizer_execs,
+        builder.profile_exec_ms,
+        builder.profile_weight_ms,
+        builder.profile_weight_compute_ms,
+        builder.profile_weight_compute_calls,
+        builder.profile_match_ms,
+        builder.profile_assoc_clone_ms,
+        builder.profile_leaf_ms,
+        builder.profile_merge_ms,
+        builder.profile_pending_ms,
+        builder.profile_flush_ms,
+    );
+    drop(builder);
+    let possible_matches_by_state = collect_possible_matches_by_state(
+        tokenizer,
+        &vocab_tree.root,
+        &mut possible_matches,
+    );
     report.build_nwa_from_trie_time = phase_started_at.elapsed();
     if profile_enabled {
+        let (
+            profile_trie_calls,
+            profile_assoc_clones,
+            profile_tokenizer_execs,
+            profile_exec_ms,
+            profile_weight_ms,
+            profile_weight_compute_ms,
+            profile_weight_compute_calls,
+            profile_match_ms,
+            profile_assoc_clone_ms,
+            profile_leaf_ms,
+            profile_merge_ms,
+            profile_pending_ms,
+            profile_flush_ms,
+        ) = builder_profile;
         eprintln!(
             "[glrmask/profile][terminal_dwa] build_nwa_from_trie_ms={:.3} trie_calls={} assoc_clones={} tokenizer_execs={} exec_ms={:.3} weight_ms={:.3} weight_compute_ms={:.3} weight_compute_calls={} match_ms={:.3} assoc_clone_ms={:.3} leaf_ms={:.3} merge_ms={:.3} pending_ms={:.3} flush_ms={:.3}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
-            builder.profile_trie_calls,
-            builder.profile_assoc_clones,
-            builder.profile_tokenizer_execs,
-            builder.profile_exec_ms.as_secs_f64() * 1000.0,
-            builder.profile_weight_ms.as_secs_f64() * 1000.0,
-            builder.profile_weight_compute_ms.as_secs_f64() * 1000.0,
-            builder.profile_weight_compute_calls,
-            builder.profile_match_ms.as_secs_f64() * 1000.0,
-            builder.profile_assoc_clone_ms.as_secs_f64() * 1000.0,
-            builder.profile_leaf_ms.as_secs_f64() * 1000.0,
-            builder.profile_merge_ms.as_secs_f64() * 1000.0,
-            builder.profile_pending_ms.as_secs_f64() * 1000.0,
-            builder.profile_flush_ms.as_secs_f64() * 1000.0,
+            profile_trie_calls,
+            profile_assoc_clones,
+            profile_tokenizer_execs,
+            profile_exec_ms.as_secs_f64() * 1000.0,
+            profile_weight_ms.as_secs_f64() * 1000.0,
+            profile_weight_compute_ms.as_secs_f64() * 1000.0,
+            profile_weight_compute_calls,
+            profile_match_ms.as_secs_f64() * 1000.0,
+            profile_assoc_clone_ms.as_secs_f64() * 1000.0,
+            profile_leaf_ms.as_secs_f64() * 1000.0,
+            profile_merge_ms.as_secs_f64() * 1000.0,
+            profile_pending_ms.as_secs_f64() * 1000.0,
+            profile_flush_ms.as_secs_f64() * 1000.0,
         );
     }
 
@@ -1378,7 +1448,7 @@ pub(crate) fn build_terminal_dwa_with_report(
         );
     }
 
-    (dwa, report)
+    (dwa, possible_matches_by_state, report)
 }
 
 #[cfg(test)]
