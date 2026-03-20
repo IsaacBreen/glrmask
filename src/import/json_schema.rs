@@ -27,10 +27,10 @@ const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "JSON_KEY_COLON";
 
 const JSON_STRING_REGEX: &str =
-    r#""([^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
 const JSON_KEY_COLON_REGEX: &str =
-    r#""([^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
-const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
+const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
 const JSON_DIRECT_UTF8_PATTERN: &str =
     r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
@@ -742,7 +742,7 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> St
 /// Also expands shorthand character classes (`\s`, `\S`, `\d`, `\D`, `\w`, `\W`)
 /// into JSON-string-safe equivalents.
 fn jsonify_regex_dot(pattern: &str) -> String {
-    let json_dot = r#"(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#;
+    let json_dot = r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#;
     let mut out = String::with_capacity(pattern.len() * 2);
     let bytes = pattern.as_bytes();
     let mut i = 0;
@@ -3149,7 +3149,7 @@ impl SchemaCtx {
         let excluded_bytes: Vec<u8> = by_first.keys().map(|&c| c as u8).collect();
         if !excluded_bytes.is_empty() {
             let mut excluded_set = String::new();
-            excluded_set.push_str(r#"\x00-\x1f"\\"#);  // always excluded in JSON strings
+            excluded_set.push_str(r#"\x00-\x1f\x7f"\\"#);  // always excluded in JSON strings
             for &b in &excluded_bytes {
                 if b == b'-' || b == b']' || b == b'^' || b == b'\\' {
                     excluded_set.push('\\');
@@ -3208,7 +3208,7 @@ impl SchemaCtx {
         }
 
         let next = chars[0] as u8;
-        let mut excluded_set = String::from(r#"\x00-\x1f"\\"#);
+        let mut excluded_set = String::from(r#"\x00-\x1f\x7f"\\"#);
         if matches!(next, b'-' | b']' | b'^' | b'\\') {
             excluded_set.push('\\');
         }
@@ -3622,11 +3622,11 @@ mod tests {
     fn test_jsonify_regex_dot_only_rewrites_bare_dot() {
         assert_eq!(
             jsonify_regex_dot(r#".^\.[$]"#),
-            r#"(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})^\.[\x24]"#
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})^\.[\x24]"#
         );
         assert_eq!(
             jsonify_regex_dot(r#"[.]\.."#),
-            r#"[\x2E]\.(?:[^\x00-\x1f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#
+            r#"[\x2E]\.(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#
         );
     }
 
@@ -3643,6 +3643,7 @@ mod tests {
         let schema = r#"{"type": "string", "pattern": "^[^:\\s]+:[^:\\s]+(:[^\\s]+)?$"}"#;
         assert!(!accepts_sequence(schema, &[b"\"my-app:prod\x01\""]));
         assert!(!accepts_sequence(schema, &[b"\"my-app:prod\n\""]));
+        assert!(!accepts_sequence(schema, &[b"\"my-app:prod\x7f\""]));
         assert!(accepts_sequence(schema, &[b"\"my-app:prod\\\"x\""]));
     }
 
