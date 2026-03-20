@@ -1,7 +1,9 @@
 //! NOTE: lexer NFA → DFA determinization is intentionally deferred until the
 //! sep1-style DFA rewrite.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use rustc_hash::FxHashMap;
 
 use crate::ds::bitset::BitSet;
 
@@ -99,7 +101,7 @@ impl NFA {
         let mut transition_generation = 0u32;
         let mut transition_marks = vec![0u32; 256 * self.states.len().max(1)];
 
-        let mut subset_map = HashMap::<Vec<u32>, u32>::new();
+        let mut subset_map = FxHashMap::<Vec<u32>, u32>::default();
         let mut worklist = VecDeque::new();
 
         let start_key = single_closures[0].clone();
