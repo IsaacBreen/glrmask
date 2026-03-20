@@ -71,6 +71,63 @@ const UNTYPED_SCHEMA_APPLICABLE_TYPES: &[(&str, &[&str])] = &[
 ];
 const UNSAT_SCHEMA_ERROR: &str = "__unsat_schema__";
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+enum JsonSchemaDraft {
+    Draft4,
+    Draft6,
+    Draft7,
+    Draft201909,
+    Draft202012,
+}
+
+const DEFAULT_JSON_SCHEMA_DRAFT: JsonSchemaDraft = JsonSchemaDraft::Draft202012;
+const IMPLEMENTED_JSON_SCHEMA_KEYWORDS: &[&str] = &[
+    "anyOf",
+    "oneOf",
+    "allOf",
+    "$ref",
+    "const",
+    "enum",
+    "type",
+    "items",
+    "additionalItems",
+    "prefixItems",
+    "minItems",
+    "maxItems",
+    "properties",
+    "additionalProperties",
+    "patternProperties",
+    "required",
+    "minProperties",
+    "maxProperties",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "format",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+];
+const META_AND_ANNOTATION_KEYWORDS: &[&str] = &[
+    "$anchor",
+    "$defs",
+    "definitions",
+    "$schema",
+    "$id",
+    "id",
+    "$comment",
+    "title",
+    "description",
+    "default",
+    "readOnly",
+    "writeOnly",
+    "examples",
+    "contentMediaType",
+    "contentEncoding",
+];
+
 fn literal_expr(bytes: &[u8]) -> GrammarExpr {
     GrammarExpr::Literal(bytes.to_vec())
 }
@@ -89,6 +146,76 @@ fn unsat_schema_error() -> GlrMaskError {
 
 fn is_unsat_schema_error(err: &GlrMaskError) -> bool {
     matches!(err, GlrMaskError::GrammarParse(message) if message == UNSAT_SCHEMA_ERROR)
+}
+
+fn detect_draft(
+    schema: &Map<String, Value>,
+    current: JsonSchemaDraft,
+) -> Result<JsonSchemaDraft, GlrMaskError> {
+    let Some(raw) = schema.get("$schema").and_then(Value::as_str) else {
+        return Ok(current);
+    };
+    match raw.trim_end_matches('#') {
+        "https://json-schema.org/draft/2020-12/schema" => Ok(JsonSchemaDraft::Draft202012),
+        "https://json-schema.org/draft/2019-09/schema" => Ok(JsonSchemaDraft::Draft201909),
+        "http://json-schema.org/draft-07/schema" => Ok(JsonSchemaDraft::Draft7),
+        "http://json-schema.org/draft-06/schema" => Ok(JsonSchemaDraft::Draft6),
+        "http://json-schema.org/draft-04/schema" => Ok(JsonSchemaDraft::Draft4),
+        value => Err(GlrMaskError::GrammarParse(format!("Unknown specification: {value}"))),
+    }
+}
+
+fn is_known_keyword(draft: JsonSchemaDraft, keyword: &str) -> bool {
+    match keyword {
+        "$ref"
+        | "$schema"
+        | "additionalItems"
+        | "additionalProperties"
+        | "allOf"
+        | "anyOf"
+        | "dependencies"
+        | "enum"
+        | "exclusiveMaximum"
+        | "exclusiveMinimum"
+        | "format"
+        | "items"
+        | "maxItems"
+        | "maxLength"
+        | "maxProperties"
+        | "maximum"
+        | "minItems"
+        | "minLength"
+        | "minProperties"
+        | "minimum"
+        | "multipleOf"
+        | "not"
+        | "oneOf"
+        | "pattern"
+        | "patternProperties"
+        | "properties"
+        | "required"
+        | "type"
+        | "uniqueItems" => true,
+        "id" => draft == JsonSchemaDraft::Draft4,
+        "$id" | "const" | "contains" | "propertyNames" => draft >= JsonSchemaDraft::Draft6,
+        "contentEncoding" | "contentMediaType" => {
+            matches!(draft, JsonSchemaDraft::Draft6 | JsonSchemaDraft::Draft7)
+        }
+        "else" | "if" | "then" => draft >= JsonSchemaDraft::Draft7,
+        "$anchor"
+        | "$defs"
+        | "$recursiveAnchor"
+        | "$recursiveRef"
+        | "dependentRequired"
+        | "dependentSchemas"
+        | "maxContains"
+        | "minContains"
+        | "prefixItems"
+        | "unevaluatedItems"
+        | "unevaluatedProperties" => draft >= JsonSchemaDraft::Draft201909,
+        "$dynamicAnchor" | "$dynamicRef" => draft == JsonSchemaDraft::Draft202012,
+        _ => false,
+    }
 }
 
 fn type_allows_value(type_name: &str, value: &Value) -> bool {
@@ -129,13 +256,14 @@ fn json_format_pattern(format_name: &str) -> Option<&'static str> {
         "ipv4" => {
             r#"(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)"#
         }
+        "ipv6" => {
+            r#"(?:(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4})|(?:::(?:[0-9a-fA-F]{1,4}:){0,5}(?:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}))|(?:(?:[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){0,4}(?:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}))|(?:((?:[0-9a-fA-F]{1,4}:){0,1}[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){0,3}(?:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}))|(?:((?:[0-9a-fA-F]{1,4}:){0,2}[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:){0,2}(?:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}))|(?:((?:[0-9a-fA-F]{1,4}:){0,3}[0-9a-fA-F]{1,4})?::[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}))|(?:((?:[0-9a-fA-F]{1,4}:){0,4}[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}))|(?:((?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}))|(?:((?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})?::)"#
+        }
         "uuid" => r#"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
         "uri" => {
             r#"[a-zA-Z][a-zA-Z0-9+\-.]*:(?://(?:[a-zA-Z0-9\-._~%!$&'()*+,;=:]*@)?[a-zA-Z0-9\-._~%!$&'()*+,;=\[\]]+(?::[0-9]*)?)?[a-zA-Z0-9\-._~%!$&'()*+,;=:@/]*(?:\?[a-zA-Z0-9\-._~%!$&'()*+,;=:@/?]*)?(?:#[a-zA-Z0-9\-._~%!$&'()*+,;=:@/?]*)?"#
         }
-        "uri-reference" => {
-            r#"(?:[a-zA-Z][a-zA-Z0-9+\-.]*:(?://(?:[a-zA-Z0-9\-._~%!$&'()*+,;=:]*@)?[a-zA-Z0-9\-._~%!$&'()*+,;=\[\]]+(?::[0-9]*)?)?[a-zA-Z0-9\-._~%!$&'()*+,;=:@/]*)?[a-zA-Z0-9\-._~%!$&'()*+,;=:@/]*(?:\?[a-zA-Z0-9\-._~%!$&'()*+,;=:@/?]*)?(?:#[a-zA-Z0-9\-._~%!$&'()*+,;=:@/?]*)?"#
-        }
+        "unknown" => r#"(?s:.*)"#,
         _ => return None,
     })
 }
@@ -1366,6 +1494,7 @@ struct SchemaCtx {
     expr_dedup_cache: HashMap<String, String>,
     json_string_exact_cache: HashMap<usize, String>,
     json_string_upto_cache: HashMap<usize, String>,
+    draft_stack: Vec<JsonSchemaDraft>,
 }
 
 impl SchemaCtx {
@@ -1383,9 +1512,45 @@ impl SchemaCtx {
             expr_dedup_cache: HashMap::new(),
             json_string_exact_cache: HashMap::new(),
             json_string_upto_cache: HashMap::new(),
+            draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
         };
         ctx.ensure_base_rules();
         ctx
+    }
+
+    fn current_draft(&self) -> JsonSchemaDraft {
+        *self.draft_stack.last().unwrap_or(&DEFAULT_JSON_SCHEMA_DRAFT)
+    }
+
+    fn validate_llguidance_keyword_compatibility(
+        &self,
+        schema: &Map<String, Value>,
+        draft: JsonSchemaDraft,
+    ) -> Result<(), GlrMaskError> {
+        if schema
+            .keys()
+            .all(|key| META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str()) || !is_known_keyword(draft, key))
+        {
+            return Ok(());
+        }
+
+        let mut unimplemented = schema
+            .keys()
+            .filter(|key| {
+                is_known_keyword(draft, key)
+                    && !IMPLEMENTED_JSON_SCHEMA_KEYWORDS.contains(&key.as_str())
+                    && !META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unimplemented.is_empty() {
+            unimplemented.sort();
+            return Err(GlrMaskError::GrammarParse(format!(
+                "Unimplemented keys: {:?}",
+                unimplemented
+            )));
+        }
+        Ok(())
     }
 
     fn insert_rule(&mut self, name: impl Into<String>, expr: GrammarExpr) -> String {
@@ -1781,106 +1946,96 @@ impl SchemaCtx {
             return Ok(self.json_value_ref());
         };
 
-        if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-            return self.convert_ref(reference);
-        }
+        let draft = detect_draft(object, self.current_draft())?;
+        self.draft_stack.push(draft);
+        let result = (|| {
+            self.validate_llguidance_keyword_compatibility(object, draft)?;
 
-        if matches!(object.get("not"), Some(Value::Object(inner)) if inner.is_empty()) {
-            return Err(unsat_schema_error());
-        }
-
-        if let Some(expr) = self.convert_finite_value_schema(object)? {
-            return Ok(expr);
-        }
-
-        if let Some(value) = object.get("const") {
-            return Ok(self.json_literal(value));
-        }
-
-        if let Some(values) = object.get("enum").and_then(Value::as_array) {
-            if !values.is_empty() {
-                return Ok(choice_or_single(values.iter().map(|value| self.json_literal(value)).collect()));
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                return self.convert_ref(reference);
             }
-        }
 
-        if let Some(options) = object.get("anyOf").and_then(Value::as_array) {
-            if !options.is_empty() {
-                let base_has_structural = has_structural_keywords(object);
-                let options = if base_has_structural {
-                    let base: Map<String, Value> = object
-                        .iter()
-                        .filter(|(key, _)| key.as_str() != "anyOf" && key.as_str() != "oneOf")
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    options
-                        .iter()
-                        .map(|option| {
-                            let merged = Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)));
-                            self.convert_schema(&merged)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
-                    options
-                        .iter()
-                        .map(|option| self.convert_schema(option))
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-                return Ok(factor_common_affixes(options));
+            if matches!(object.get("not"), Some(Value::Object(inner)) if inner.is_empty()) {
+                return Err(unsat_schema_error());
             }
-        }
 
-        if let Some(options) = object.get("oneOf").and_then(Value::as_array) {
-            if !options.is_empty() {
-                let base_has_structural = has_structural_keywords(object);
-                let options = if base_has_structural {
-                    let base: Map<String, Value> = object
-                        .iter()
-                        .filter(|(key, _)| key.as_str() != "anyOf" && key.as_str() != "oneOf")
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    options
-                        .iter()
-                        .map(|option| {
-                            let merged = Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)));
-                            self.convert_schema(&merged)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
-                    options
-                        .iter()
-                        .map(|option| self.convert_schema(option))
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-                return Ok(factor_common_affixes(options));
+            if let Some(expr) = self.convert_finite_value_schema(object)? {
+                return Ok(expr);
             }
-        }
 
-        if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
-            if !all_of.is_empty() {
-                let base = object
+            if let Some(value) = object.get("const") {
+                return Ok(self.json_literal(value));
+            }
+
+            if let Some(values) = object.get("enum").and_then(Value::as_array) {
+                if !values.is_empty() {
+                    return Ok(choice_or_single(values.iter().map(|value| self.json_literal(value)).collect()));
+                }
+            }
+
+            if let Some(options) = object.get("anyOf").and_then(Value::as_array) {
+                if !options.is_empty() {
+                    let base_has_structural = has_structural_keywords(object);
+                    let options = if base_has_structural {
+                        let base: Map<String, Value> = object
+                            .iter()
+                            .filter(|(key, _)| key.as_str() != "anyOf" && key.as_str() != "oneOf")
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        options
+                            .iter()
+                            .map(|option| {
+                                let merged = Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)));
+                                self.convert_schema(&merged)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        options
+                            .iter()
+                            .map(|option| self.convert_schema(option))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    return Ok(factor_common_affixes(options));
+                }
+            }
+
+            if let Some(options) = object.get("oneOf").and_then(Value::as_array) {
+                if !options.is_empty() {
+                    return Err(GlrMaskError::GrammarParse(
+                        "oneOf constraints are not supported. Enable 'coerce_one_of' option to approximate oneOf with anyOf".into(),
+                    ));
+                }
+            }
+
+            if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
+                if !all_of.is_empty() {
+                    let base = object
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "allOf")
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect::<Map<String, Value>>();
+                    let merged = self.merge_resolved_subschemas(&base, all_of);
+                    return self.convert_schema(&Value::Object(merged));
+                }
+            }
+
+            if let Some(type_values) = object.get("type").and_then(Value::as_array) {
+                let options = type_values
                     .iter()
-                    .filter(|(key, _)| key.as_str() != "allOf")
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect::<Map<String, Value>>();
-                let merged = self.merge_resolved_subschemas(&base, all_of);
-                return self.convert_schema(&Value::Object(merged));
+                    .filter_map(Value::as_str)
+                    .map(|type_name| self.convert_type(type_name, object))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(choice_or_single(options));
             }
-        }
 
-        if let Some(type_values) = object.get("type").and_then(Value::as_array) {
-            let options = type_values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|type_name| self.convert_type(type_name, object))
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok(choice_or_single(options));
-        }
+            if let Some(type_name) = object.get("type").and_then(Value::as_str) {
+                return self.convert_type(type_name, object);
+            }
 
-        if let Some(type_name) = object.get("type").and_then(Value::as_str) {
-            return self.convert_type(type_name, object);
-        }
-
-        self.convert_untyped_schema(object)
+            self.convert_untyped_schema(object)
+        })();
+        self.draft_stack.pop();
+        result
     }
 
     fn convert_finite_value_schema(
@@ -2156,7 +2311,7 @@ impl SchemaCtx {
         match type_name {
             "object" => self.build_object_expr(schema),
             "array" => self.build_array_expr(schema),
-            "string" => Ok(self.build_string_expr(schema)),
+            "string" => self.build_string_expr(schema),
             "integer" => Ok(self.build_numeric_ref(type_name, schema)),
             "number" => Ok(self.build_numeric_ref(type_name, schema)),
             "boolean" => Ok(self.json_bool_ref()),
@@ -2292,7 +2447,7 @@ impl SchemaCtx {
         }
     }
 
-    fn build_string_expr(&mut self, schema: &Map<String, Value>) -> GrammarExpr {
+    fn build_string_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
         let min_len = schema
             .get("minLength")
             .and_then(Value::as_u64)
@@ -2305,19 +2460,19 @@ impl SchemaCtx {
 
         if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
-                return self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT");
+                return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
             if let Some(unit_pattern) = simple_repeated_single_char_pattern(&pattern) {
                 if min_len > 0 || max_len.is_some() {
-                    return self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len);
+                    return Ok(self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len));
                 }
-                return json_wrapped_fullmatch_pattern(&format!("{}+", unit_pattern));
+                return Ok(json_wrapped_fullmatch_pattern(&format!("{}+", unit_pattern)));
             }
             if pattern_all_branches_anchored(&pattern) {
                 // Every branch is ^…$, so json_wrapped_pattern produces no
                 // <string_tail> padding — safe from DFA explosion. Length
                 // bounds are implicitly enforced by the anchored regex itself.
-                return json_wrapped_pattern(&pattern);
+                return Ok(json_wrapped_pattern(&pattern));
             }
             if min_len > 0 || max_len.is_some() {
                 // Unanchored pattern with length bounds. Use bounded search
@@ -2327,22 +2482,20 @@ impl SchemaCtx {
                 const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
-                        return json_wrapped_pattern_bounded(&pattern, ml);
+                        return Ok(json_wrapped_pattern_bounded(&pattern, ml));
                     }
                 }
                 // maxLength is too large or absent — drop pattern, use length only
             } else {
-                return json_wrapped_pattern(&pattern);
+                return Ok(json_wrapped_pattern(&pattern));
             }
         }
 
         if let Some(format_name) = schema.get("format").and_then(Value::as_str) {
-            if let Some(expr) = self.build_format_string_expr(format_name) {
-                return expr;
-            }
+            return self.build_format_string_expr(format_name);
         }
         if min_len == 0 && max_len.is_none() {
-            return self.json_string_ref();
+            return Ok(self.json_string_ref());
         }
 
         let bounded_body = match max_len {
@@ -2367,14 +2520,14 @@ impl SchemaCtx {
             }
         };
 
-        self.extract_terminal_rule(
+        Ok(self.extract_terminal_rule(
             sequence_or_single(vec![
                 literal_expr(b"\""),
                 bounded_body,
                 literal_expr(b"\""),
             ]),
             "JSON_STRING_BOUNDED",
-        )
+        ))
     }
 
     fn build_bounded_string_from_unit_regex(
@@ -2419,14 +2572,16 @@ impl SchemaCtx {
         )
     }
 
-    fn build_format_string_expr(&mut self, format_name: &str) -> Option<GrammarExpr> {
+    fn build_format_string_expr(&mut self, format_name: &str) -> Result<GrammarExpr, GlrMaskError> {
         let expr = match format_name {
             "date" => quoted_expr(json_date_body_expr()),
             "time" => quoted_expr(json_time_body_expr()),
             "date-time" => quoted_expr(json_date_time_body_expr()),
-            _ => return json_format_pattern(format_name).map(json_wrapped_fullmatch_pattern),
+            _ => json_format_pattern(format_name)
+                .map(json_wrapped_fullmatch_pattern)
+                .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}")))?,
         };
-        Some(self.extract_terminal_rule(expr, "JSON_FORMAT_STRING"))
+        Ok(self.extract_terminal_rule(expr, "JSON_FORMAT_STRING"))
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
@@ -3329,6 +3484,19 @@ mod tests {
     use super::*;
     use crate::Vocab;
 
+    fn assert_schema_error_contains(schema: &str, expected: &str) {
+        match json_schema_to_grammar(schema) {
+            Ok(_) => panic!("expected schema to fail with {expected:?}"),
+            Err(GlrMaskError::GrammarParse(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "expected error containing {expected:?}, got {message:?}"
+                );
+            }
+            Err(other) => panic!("expected GrammarParse error, got {other:?}"),
+        }
+    }
+
     fn expr_has_split_separator(expr: &GrammarExpr, left_bytes: &[u8], right_bytes: &[u8]) -> bool {
         match expr {
             GrammarExpr::Sequence(parts) => {
@@ -3521,10 +3689,9 @@ mod tests {
 
     #[test]
     fn test_oneof_schema() {
-        let g = json_schema_to_grammar(r#"{
+        assert_schema_error_contains(r#"{
             "oneOf": [{"type": "string"}, {"type": "integer"}]
-        }"#).unwrap();
-        assert!(!g.rules.is_empty());
+        }"#, "oneOf constraints are not supported");
     }
 
     #[test]
@@ -3668,6 +3835,39 @@ mod tests {
         let schema = r#"{"type": "string", "format": "date-time"}"#;
         assert!(!accepts_sequence(schema, &[b"\"/2022-01-01T12:00:00Z\""]));
         assert!(accepts_sequence(schema, &[b"\"2022-01-01T12:00:00Z\""]));
+    }
+
+    #[test]
+    fn test_property_names_is_rejected_like_llguidance() {
+        assert_schema_error_contains(
+            r#"{
+                "type": "object",
+                "propertyNames": {"pattern": "^[a-z]+$"}
+            }"#,
+            "Unimplemented keys",
+        );
+    }
+
+    #[test]
+    fn test_known_unimplemented_keyword_is_rejected() {
+        assert_schema_error_contains(
+            r#"{
+                "type": "array",
+                "uniqueItems": true
+            }"#,
+            "Unimplemented keys",
+        );
+    }
+
+    #[test]
+    fn test_unknown_format_is_rejected_like_llguidance() {
+        assert_schema_error_contains(
+            r#"{
+                "type": "string",
+                "format": "uri-reference"
+            }"#,
+            "Unknown format",
+        );
     }
 
     #[test]
