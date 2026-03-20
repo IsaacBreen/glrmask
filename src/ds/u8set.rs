@@ -56,6 +56,13 @@ impl U8Set {
         set
     }
 
+    pub fn from_words(words: [u64; 4]) -> Self {
+        Self {
+            lo: words[0] as u128 | ((words[1] as u128) << 64),
+            hi: words[2] as u128 | ((words[3] as u128) << 64),
+        }
+    }
+
     pub fn from_range(lo: u8, hi: u8) -> Self {
         let mut set = Self::empty();
         for b in lo..=hi {

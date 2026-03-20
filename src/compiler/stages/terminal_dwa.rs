@@ -34,6 +34,7 @@ use crate::compiler::stages::profile_stats::{
     collect_weighted_dwa_stats,
     collect_weighted_nwa_stats,
 };
+use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
 
@@ -702,22 +703,17 @@ fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     )
 }
 
-#[inline]
-fn u8set_is_subset(a: &[u64; 4], b: &[u64; 4]) -> bool {
-    (a[0] & !b[0]) == 0 && (a[1] & !b[1]) == 0 && (a[2] & !b[2]) == 0 && (a[3] & !b[3]) == 0
-}
-
-fn build_self_loop_bytes(tokenizer: &Tokenizer) -> Vec<[u64; 4]> {
+fn build_self_loop_bytes(tokenizer: &Tokenizer) -> Vec<U8Set> {
     tokenizer
         .dfa
         .states()
         .iter()
         .enumerate()
         .map(|(state_id, state)| {
-            let mut bytes = [0u64; 4];
+            let mut bytes = U8Set::empty();
             for (byte, &target) in state.transitions.iter() {
                 if target == state_id as u32 {
-                    bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
+                    bytes.insert(byte);
                 }
             }
             bytes
@@ -787,8 +783,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     num_tsids: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
-    self_loop_bytes: Vec<[u64; 4]>,
-    accessible_terminals_by_state: Vec<Vec<TerminalID>>,
+    self_loop_bytes: Vec<U8Set>,
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
@@ -917,7 +912,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
-        u8set_is_subset(node.subtree_bytes(), &self.self_loop_bytes[tokenizer_state as usize])
+        U8Set::from_words(*node.subtree_bytes())
+            .is_subset(&self.self_loop_bytes[tokenizer_state as usize])
     }
 
     fn emit_self_loop_leaf_only_subtree(
@@ -930,8 +926,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             accessible.remove(node.token_id() as usize);
         }
         for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
-            let accessible_terminals = self.accessible_terminals_by_state[tokenizer_state as usize].clone();
-            for terminal_id in accessible_terminals {
+            for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
                 self.add_leaf_token_set_from_sources(
                     source_nodes,
                     terminal_id,
@@ -1082,8 +1077,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if let Some(end_state) = exec_end_state {
                         let t = std::time::Instant::now();
                         if child_node.has_token() {
-                            let accessible_terminals = self.accessible_terminals_by_state[end_state as usize].clone();
-                            for terminal_id in accessible_terminals {
+                            for terminal_id in self.tokenizer.possible_future_terminals_iter(end_state) {
                                 self.add_leaf_token_from_sources(
                                     &source_nodes,
                                     terminal_id,
@@ -1315,9 +1309,6 @@ fn build_terminal_dwa_impl(
             .collect(),
     );
     let self_loop_bytes = build_self_loop_bytes(tokenizer);
-    let accessible_terminals_by_state: Vec<Vec<TerminalID>> = (0..tokenizer.num_states())
-        .map(|state| tokenizer.tokens_accessible_from_state(state).into_iter().collect())
-        .collect();
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
     report.build_vocab_trie_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
@@ -1347,7 +1338,6 @@ fn build_terminal_dwa_impl(
         leaf_state,
         ignore_terminal,
         self_loop_bytes,
-        accessible_terminals_by_state,
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),

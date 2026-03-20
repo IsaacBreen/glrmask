@@ -37,7 +37,6 @@ fn merge_possible_match_maps(into: &mut PossibleMatchMap, other: &PossibleMatchM
 
 pub(crate) struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
-    matched_terminals_by_state: Vec<Vec<TerminalID>>,
     cache: FxHashMap<(usize, u32), Rc<PossibleMatchMap>>,
     reachable_cache: FxHashMap<usize, Rc<RangeSetBlaze<u32>>>,
 }
@@ -46,9 +45,6 @@ impl<'a> PossibleMatchesComputer<'a> {
     pub(crate) fn new(tokenizer: &'a Tokenizer) -> Self {
         Self {
             tokenizer,
-            matched_terminals_by_state: (0..tokenizer.num_states())
-                .map(|state| tokenizer.matched_terminals_iter(state).collect())
-                .collect(),
             cache: FxHashMap::default(),
             reachable_cache: FxHashMap::default(),
         }
@@ -82,7 +78,7 @@ impl<'a> PossibleMatchesComputer<'a> {
         // into child segments, so the recursive part only adds longer continuations.
         if node.has_token() {
             let token_id = node.token_id() as u32;
-            for &terminal in &self.matched_terminals_by_state[tokenizer_state as usize] {
+            for terminal in self.tokenizer.matched_terminals_iter(tokenizer_state) {
                 result.entry(terminal).or_default().insert(token_id);
             }
         }
@@ -98,7 +94,7 @@ impl<'a> PossibleMatchesComputer<'a> {
                     break;
                 };
                 state = next_state;
-                for &matched in &self.matched_terminals_by_state[state as usize] {
+                for matched in self.tokenizer.matched_terminals_iter(state) {
                     let existing = result.entry(matched).or_default();
                     merge_token_ids(existing, reachable.as_ref());
                 }

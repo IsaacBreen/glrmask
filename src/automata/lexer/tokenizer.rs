@@ -102,16 +102,22 @@ impl Tokenizer {
             .map(|terminal| terminal as TerminalID)
     }
 
+    pub(crate) fn possible_future_terminals_iter(
+        &self,
+        state: u32,
+    ) -> impl Iterator<Item = TerminalID> + '_ {
+        self.dfa
+            .possible_future_group_ids(state)
+            .iter()
+            .map(|terminal| terminal as TerminalID)
+    }
+
     pub fn all_matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         self.matched_terminals(state)
     }
 
     pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
-        self.dfa
-            .possible_future_group_ids(state)
-            .iter()
-            .map(|terminal| terminal as TerminalID)
-            .collect()
+        self.possible_future_terminals_iter(state).collect()
     }
 
     pub fn is_end(&self, state: u32) -> bool {
