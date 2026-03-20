@@ -733,6 +733,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
     self_loop_bytes: Vec<[u64; 4]>,
+    accessible_terminals_by_state: Vec<Vec<TerminalID>>,
     leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
@@ -874,7 +875,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             accessible.remove(node.token_id() as usize);
         }
         for (&tokenizer_state, source_nodes) in assoc_by_state {
-            let accessible_terminals = self.tokenizer.tokens_accessible_from_state(tokenizer_state);
+            let accessible_terminals = self.accessible_terminals_by_state[tokenizer_state as usize].clone();
             for terminal_id in accessible_terminals {
                 self.add_leaf_token_set_from_sources(
                     source_nodes,
@@ -1025,7 +1026,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if let Some(end_state) = exec_end_state {
                         let t = std::time::Instant::now();
                         if child_node.has_token() {
-                            for terminal_id in self.tokenizer.tokens_accessible_from_state(end_state) {
+                            let accessible_terminals = self.accessible_terminals_by_state[end_state as usize].clone();
+                            for terminal_id in accessible_terminals {
                                 self.add_leaf_token_from_sources(
                                     &source_nodes,
                                     terminal_id,
@@ -1277,6 +1279,9 @@ fn build_terminal_dwa_impl(
             .collect(),
     );
     let self_loop_bytes = build_self_loop_bytes(tokenizer);
+    let accessible_terminals_by_state: Vec<Vec<TerminalID>> = (0..tokenizer.num_states())
+        .map(|state| tokenizer.tokens_accessible_from_state(state).into_iter().collect())
+        .collect();
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
     report.build_vocab_trie_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
@@ -1306,6 +1311,7 @@ fn build_terminal_dwa_impl(
         leaf_state,
         ignore_terminal,
         self_loop_bytes,
+        accessible_terminals_by_state,
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),
