@@ -531,8 +531,6 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
-    // State equivalence reduction always runs so downstream vocab and parser
-    // stages can consistently benefit from the reduced representative set.
     let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
         regex,
         tokens,

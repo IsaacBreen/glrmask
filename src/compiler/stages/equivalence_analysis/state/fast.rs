@@ -64,6 +64,13 @@ fn hash_state_label(finalizers: &[usize], possible_futures: &[usize]) -> u64 {
     mix_u64(finalizer_hash.wrapping_add(future_hash))
 }
 
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
 /// Find state equivalence classes using k-step inductive hashing.
 ///
 /// # Proof (k-equivalence implies vocab-equivalence)
@@ -112,6 +119,11 @@ fn hash_state_label(finalizers: &[usize], possible_futures: &[usize]) -> u64 {
 /// unlikely; the algorithm is a safe refinement that may over-split but will not
 /// under-split absent collisions.
 ///
+/// The refinement is monotone: once two analyzed states are separated, they never
+/// merge again. This lets us safely short-circuit to the identity mapping when the
+/// remaining possible savings become negligible, since deeper refinement can only
+/// split states further.
+///
 /// # Arguments
 /// * `regex` - The tokenizer DFA
 /// * `states` - List of state IDs to analyze
@@ -125,7 +137,7 @@ pub fn find_state_equivalence_classes_kstep(
     states: &[usize],
     k: usize,
 ) -> Vec<usize> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     if states.is_empty() {
         return Vec::new();
@@ -146,6 +158,7 @@ pub fn find_state_equivalence_classes_kstep(
         .collect();
 
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
+    let identity_max_saved_percent = env_usize("STATE_EQUIV_IDENTITY_MAX_SAVED_PERCENT", 2);
     let mut class_reps: Vec<usize> = Vec::new();
     let mut use_trans_class_cache = false;
 
@@ -213,6 +226,12 @@ pub fn find_state_equivalence_classes_kstep(
         .map(|&h| mix_u64(h ^ 0x9E37_79B9_7F4A_7C15))
         .collect();
     let mut buf_b: Vec<u64> = vec![0u64; dfa.states.len()];
+    let mut unique_hashes: HashSet<u64> = HashSet::with_capacity(dfa.states.len());
+    let mut analyzed_hashes: HashSet<u64> = HashSet::with_capacity(states.len());
+    unique_hashes.extend(buf_a.iter().copied());
+    let mut prev_total_class_count = unique_hashes.len();
+    unique_hashes.clear();
+    let mut depth_completed = 0usize;
 
     // Iteratively refine hashes for depths 1..=k.
     for iter in 0..k {
@@ -254,9 +273,58 @@ pub fn find_state_equivalence_classes_kstep(
                 *out = h;
             });
         }
+
+        depth_completed = iter + 1;
+
+        unique_hashes.extend(dst.iter().copied());
+        let total_class_count = unique_hashes.len();
+        unique_hashes.clear();
+
+        analyzed_hashes.extend(states.iter().map(|&state_id| dst[state_id]));
+        let analyzed_class_count = analyzed_hashes.len();
+        analyzed_hashes.clear();
+        let saved_states = states.len().saturating_sub(analyzed_class_count);
+
+        if saved_states == 0 {
+            if profile_equivalence {
+                eprintln!(
+                    "[state equiv] depth={} reached all-singleton analyzed states; using identity",
+                    depth_completed,
+                );
+            }
+            return states.to_vec();
+        }
+
+        if identity_max_saved_percent > 0
+            && saved_states.saturating_mul(100)
+                <= states.len().saturating_mul(identity_max_saved_percent)
+        {
+            if profile_equivalence {
+                eprintln!(
+                    "[state equiv] depth={} remaining_savings={} of {} states (<= {}%); using identity",
+                    depth_completed,
+                    saved_states,
+                    states.len(),
+                    identity_max_saved_percent,
+                );
+            }
+            return states.to_vec();
+        }
+
+        if total_class_count == prev_total_class_count {
+            if profile_equivalence {
+                eprintln!(
+                    "[state equiv] k-step partition stabilized at depth={} with {} total classes",
+                    depth_completed,
+                    total_class_count,
+                );
+            }
+            break;
+        }
+        prev_total_class_count = total_class_count;
     }
 
-    let hashes = if k % 2 == 0 { &buf_a } else { &buf_b };
+    let hashes = if depth_completed % 2 == 0 { &buf_a } else { &buf_b };
 
     // Group analyzed states by hash_k and pick representatives.
     let mut hash_to_rep: HashMap<u64, usize> = HashMap::new();
@@ -295,18 +363,6 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
 
     let k = tokens.iter().map(|t| t.as_ref().len()).max().unwrap_or(0);
     let pre_mapping = find_state_equivalence_classes_kstep(regex, states, k);
-
-    let use_exact_token_refinement = std::env::var("SEP1_EXACT_TOKEN_EQUIV")
-        .ok()
-        .map(|value| {
-            let trimmed = value.trim();
-            trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
-        })
-        .unwrap_or(false);
-
-    if !use_exact_token_refinement {
-        return pre_mapping;
-    }
 
     let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
 
