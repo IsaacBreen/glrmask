@@ -3,13 +3,15 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde_json::{Map, Value};
-use crate::automata::compile::Regex;
 use crate::GlrMaskError;
+use crate::automata::lexer::ast::Expr as LexerExpr;
+use crate::automata::lexer::dfa::DFA as LexerDfa;
 use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::grammar_def::GrammarDef;
+use crate::ds::bitset::BitSet;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
 
 const JSON_VALUE_RULE: &str = "json_value";
@@ -487,6 +489,7 @@ fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize,
     match expr {
         Expr::U8Seq(bytes) => (bytes.len(), Some(bytes.len())),
         Expr::U8Class(_) => (1, Some(1)),
+        Expr::Dfa(_) => (0, None),
         Expr::Seq(parts) => {
             let mut min_total = 0usize;
             let mut max_total = Some(0usize);
@@ -2711,11 +2714,176 @@ impl SchemaCtx {
     }
 
     fn schema_pattern_matches_key(pattern: &str, key: &str) -> Result<bool, GlrMaskError> {
-        Regex::new(pattern)
-            .map(|re| re.is_match(key))
-            .map_err(|err| {
-                GlrMaskError::GrammarParse(format!("invalid regex pattern '{pattern}': {err}"))
-            })
+        let regex = parse_regex(&json_search_pattern(pattern), true).build();
+        let mut state = 0u32;
+        for &byte in key.as_bytes() {
+            let Some(next) = regex.step(state, byte) else {
+                return Ok(false);
+            };
+            state = next;
+        }
+        Ok(regex.dfa.finalizers(state).contains(0))
+    }
+
+    fn json_key_colon_literal_bytes(text: &str) -> Vec<u8> {
+        let mut bytes = json_string_literal_bytes(text);
+        bytes.extend_from_slice(JSON_KEY_SEPARATOR);
+        bytes
+    }
+
+    fn scoped_key_colon_dfa(property_names: Option<&Value>) -> Result<LexerDfa, GlrMaskError> {
+        let pattern = if let Some(property_names) = property_names {
+            let inner = json_search_pattern(Self::property_name_pattern(property_names)?);
+            format!(r#""(?:{})": "#, inner)
+        } else {
+            JSON_KEY_COLON_REGEX.to_string()
+        };
+        Ok(parse_regex(&pattern, true).build().dfa)
+    }
+
+    fn pattern_key_colon_dfa(pattern: &str) -> LexerDfa {
+        let inner = json_search_pattern(pattern);
+        parse_regex(&format!(r#""(?:{})": "#, inner), true).build().dfa
+    }
+
+    fn literal_key_colon_union_dfa(keys: &BTreeSet<String>) -> Option<LexerDfa> {
+        if keys.is_empty() {
+            return None;
+        }
+        let exprs = keys
+            .iter()
+            .map(|key| LexerExpr::U8Seq(Self::json_key_colon_literal_bytes(key)))
+            .collect::<Vec<_>>();
+        let expr = if exprs.len() == 1 {
+            exprs.into_iter().next().unwrap()
+        } else {
+            LexerExpr::Choice(exprs)
+        };
+        Some(expr.build().dfa)
+    }
+
+    fn dfa_accepts_any(dfa: &LexerDfa) -> bool {
+        dfa.states().iter().any(|state| !state.finalizers.is_empty())
+    }
+
+    fn subtract_lexer_dfa(left: &LexerDfa, right: &LexerDfa) -> LexerDfa {
+        let start = (0u32, Some(0u32));
+        let mut state_ids = HashMap::<(u32, Option<u32>), usize>::new();
+        let mut worklist = VecDeque::<(u32, Option<u32>)>::new();
+        let mut transitions = Vec::<Vec<(u8, u32)>>::new();
+        let mut accepting = Vec::<bool>::new();
+
+        state_ids.insert(start, 0);
+        worklist.push_back(start);
+        transitions.push(Vec::new());
+        accepting.push(false);
+
+        while let Some((left_state_id, right_state_id)) = worklist.pop_front() {
+            let result_state_id = state_ids[&(left_state_id, right_state_id)];
+            let left_state = &left.states()[left_state_id as usize];
+            let right_accepting = right_state_id
+                .map(|state_id| !right.states()[state_id as usize].finalizers.is_empty())
+                .unwrap_or(false);
+            accepting[result_state_id] = !left_state.finalizers.is_empty() && !right_accepting;
+
+            let mut entries = Vec::new();
+            for (byte, &left_next) in left_state.transitions.iter() {
+                let right_next = right_state_id.and_then(|state_id| right.step(state_id, byte));
+                let next = (left_next, right_next);
+                let next_result_state_id = if let Some(&existing) = state_ids.get(&next) {
+                    existing
+                } else {
+                    let new_state_id = state_ids.len();
+                    state_ids.insert(next, new_state_id);
+                    worklist.push_back(next);
+                    transitions.push(Vec::new());
+                    accepting.push(false);
+                    new_state_id
+                };
+                entries.push((byte, next_result_state_id as u32));
+            }
+            transitions[result_state_id] = entries;
+        }
+
+        let mut dfa = LexerDfa::new(transitions.len());
+        dfa.ensure_group_capacity(1);
+        for (state_id, entries) in transitions.into_iter().enumerate() {
+            dfa.set_transitions_from_sorted_entries(state_id as u32, entries);
+            let mut finalizers = BitSet::new(1);
+            if accepting[state_id] {
+                finalizers.set(0);
+            }
+            dfa.overwrite_state_metadata(state_id as u32, finalizers, BitSet::new(1));
+        }
+        let start_u8set = dfa.get_u8set(0);
+        dfa.set_group_u8set(0, start_u8set);
+        dfa.minimize()
+    }
+
+    fn intersect_lexer_dfa(left: &LexerDfa, right: &LexerDfa) -> LexerDfa {
+        let start = (0u32, 0u32);
+        let mut state_ids = HashMap::<(u32, u32), usize>::new();
+        let mut worklist = VecDeque::<(u32, u32)>::new();
+        let mut transitions = Vec::<Vec<(u8, u32)>>::new();
+        let mut accepting = Vec::<bool>::new();
+
+        state_ids.insert(start, 0);
+        worklist.push_back(start);
+        transitions.push(Vec::new());
+        accepting.push(false);
+
+        while let Some((left_state_id, right_state_id)) = worklist.pop_front() {
+            let result_state_id = state_ids[&(left_state_id, right_state_id)];
+            let left_state = &left.states()[left_state_id as usize];
+            let right_state = &right.states()[right_state_id as usize];
+            accepting[result_state_id] =
+                !left_state.finalizers.is_empty() && !right_state.finalizers.is_empty();
+
+            let mut entries = Vec::new();
+            for (byte, &left_next) in left_state.transitions.iter() {
+                let Some(right_next) = right.step(right_state_id, byte) else {
+                    continue;
+                };
+                let next = (left_next, right_next);
+                let next_result_state_id = if let Some(&existing) = state_ids.get(&next) {
+                    existing
+                } else {
+                    let new_state_id = state_ids.len();
+                    state_ids.insert(next, new_state_id);
+                    worklist.push_back(next);
+                    transitions.push(Vec::new());
+                    accepting.push(false);
+                    new_state_id
+                };
+                entries.push((byte, next_result_state_id as u32));
+            }
+            transitions[result_state_id] = entries;
+        }
+
+        let mut dfa = LexerDfa::new(transitions.len());
+        dfa.ensure_group_capacity(1);
+        for (state_id, entries) in transitions.into_iter().enumerate() {
+            dfa.set_transitions_from_sorted_entries(state_id as u32, entries);
+            let mut finalizers = BitSet::new(1);
+            if accepting[state_id] {
+                finalizers.set(0);
+            }
+            dfa.overwrite_state_metadata(state_id as u32, finalizers, BitSet::new(1));
+        }
+        let start_u8set = dfa.get_u8set(0);
+        dfa.set_group_u8set(0, start_u8set);
+        dfa.minimize()
+    }
+
+    fn build_lexer_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
+        if !Self::dfa_accepts_any(dfa) {
+            return never_expr();
+        }
+
+        self.extract_terminal_rule(
+            GrammarExpr::TerminalExpr(LexerExpr::Dfa(dfa.clone())),
+            prefix,
+        )
     }
 
     fn build_excluding_key_colon_expr(
@@ -2733,29 +2901,6 @@ impl SchemaCtx {
             }
         };
         self.extract_terminal_rule(expr, prefix)
-    }
-
-    fn build_intersecting_key_colon_expr(
-        &mut self,
-        left: GrammarExpr,
-        right: GrammarExpr,
-        prefix: &str,
-    ) -> GrammarExpr {
-        // A ∩ B  ==  A \ (A \ B)
-        let left_minus_right = self.extract_terminal_rule(
-            GrammarExpr::Exclude {
-                expr: Box::new(left.clone()),
-                exclude: Box::new(right),
-            },
-            &format!("{prefix}_DIFF"),
-        );
-        self.extract_terminal_rule(
-            GrammarExpr::Exclude {
-                expr: Box::new(left),
-                exclude: Box::new(left_minus_right),
-            },
-            prefix,
-        )
     }
 
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
@@ -2818,6 +2963,36 @@ impl SchemaCtx {
                     ));
                 }
             }
+
+            let pattern_property_entries = pattern_properties
+                .map(|pp| {
+                    pp.iter()
+                        .map(|(pattern, subschema)| (pattern.clone(), subschema.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            let mut additional_schema = match additional_properties {
+                Some(Value::Bool(false)) => None,
+                Some(Value::Object(map)) => Some(Value::Object(map.clone())),
+                _ => Some(serde_json::json!({})),
+            };
+            if additional_schema
+                .as_ref()
+                .map(|schema| self.is_certainly_unsatisfiable(schema))
+                .unwrap_or(false)
+            {
+                additional_schema = None;
+            }
+
+            return self.build_ordered_properties_object_expr(
+                properties,
+                &required_list,
+                &required_keys,
+                &pattern_property_entries,
+                additional_schema,
+                property_names,
+            );
         }
 
         let mut additional_schema = match additional_properties {
@@ -2833,6 +3008,10 @@ impl SchemaCtx {
             additional_schema = None;
         }
 
+        if !required_list.is_empty() && pattern_properties.is_none() && property_names.is_none() {
+            return self.build_required_any_order_object_expr(&required_list, additional_schema);
+        }
+
         let pattern_property_entries = pattern_properties
             .map(|pp| {
                 pp.iter()
@@ -2842,10 +3021,55 @@ impl SchemaCtx {
             .unwrap_or_default();
 
         let empty_props = Map::new();
-        let effective_properties = properties.unwrap_or(&empty_props);
+
+        if pattern_properties.is_none() {
+            if let Some(Value::Object(map)) = additional_properties {
+                return self.build_ordered_properties_object_expr(
+                    &empty_props,
+                    &[],
+                    &BTreeSet::new(),
+                    &[],
+                    Some(Value::Object(map.clone())),
+                    property_names,
+                );
+            }
+
+            if let Some(property_names) = property_names {
+                return self.build_pattern_named_object_expr(property_names, self.json_value_ref());
+            }
+
+            return Ok(self.json_object_ref());
+        }
+
+        if property_names.is_none()
+            && pattern_properties.map(|patterns| patterns.len() == 1).unwrap_or(false)
+        {
+            let (pattern, value_schema) = pattern_properties
+                .and_then(|patterns| patterns.iter().next())
+                .ok_or_else(|| GlrMaskError::GrammarParse("invalid patternProperties".into()))?;
+            let match_all_pattern = pattern == "^.*$" || pattern == ".*";
+            let matched_property_names = serde_json::json!({"pattern": pattern});
+            let value_expr = self.convert_schema(value_schema)?;
+            if matches!(additional_properties, Some(Value::Bool(false))) || match_all_pattern {
+                return self.build_pattern_named_object_expr(&matched_property_names, value_expr);
+            }
+
+            let additional_value_expr = match additional_properties {
+                Some(Value::Object(map)) => self.convert_schema(&Value::Object(map.clone()))?,
+                Some(Value::Bool(true)) | None => self.json_value_ref(),
+                _ => return Ok(self.json_object_ref()),
+            };
+            let unmatched_key_colon_expr = self.scoped_key_colon_expr(property_names)?;
+            return self.build_mixed_pattern_named_object_expr(
+                &matched_property_names,
+                value_expr,
+                unmatched_key_colon_expr,
+                additional_value_expr,
+            );
+        }
 
         self.build_ordered_properties_object_expr(
-            effective_properties,
+            &empty_props,
             &required_list,
             &required_keys,
             &pattern_property_entries,
@@ -2895,9 +3119,16 @@ impl SchemaCtx {
         let extra_pair_expr = if let Some(schema) = additional_properties_schema {
             let extra_value_expr = self.convert_schema(&schema)?;
             let ck_prefix = format!("{}_CK", base_name.to_uppercase());
-            let extra_key_expr = self.build_complement_key_expr(required_list, &ck_prefix);
+            let extra_key_expr = self.build_excluding_key_colon_expr(
+                self.json_key_colon_ref(),
+                required_list
+                    .iter()
+                    .map(|key| self.json_key_colon_literal(key))
+                    .collect(),
+                &format!("{ck_prefix}_KEY_COLON"),
+            );
             Some(sequence_or_single(vec![
-                self.json_key_with_separator_expr(extra_key_expr, &format!("{ck_prefix}_KEY_COLON")),
+                extra_key_expr,
                 extra_value_expr,
             ]))
         } else {
@@ -3272,23 +3503,11 @@ impl SchemaCtx {
         };
         self.object_rule_counter = base_index + 1;
 
-        let base_key_colon_expr = self.scoped_key_colon_expr(property_names)?;
-        let fixed_key_colon_exprs = fixed_literal_keys
+        let base_key_colon_dfa = Self::scoped_key_colon_dfa(property_names)?;
+        let fixed_key_union_dfa = Self::literal_key_colon_union_dfa(&fixed_literal_keys);
+        let pattern_key_colon_dfas = pattern_properties
             .iter()
-            .map(|key| self.json_key_colon_literal(key))
-            .collect::<Vec<_>>();
-
-        let scoped_pattern_key_colon_exprs = pattern_properties
-            .iter()
-            .enumerate()
-            .map(|(idx, (pattern, _))| {
-                let raw_pattern_expr = json_wrapped_key_colon_pattern(pattern);
-                self.build_intersecting_key_colon_expr(
-                    base_key_colon_expr.clone(),
-                    raw_pattern_expr,
-                    &format!("{}_PP_KEY_{idx}", base_name.to_uppercase()),
-                )
-            })
+            .map(|(pattern, _)| Self::pattern_key_colon_dfa(pattern))
             .collect::<Vec<_>>();
 
         let mut free_pair_exprs = Vec::<GrammarExpr>::new();
@@ -3304,31 +3523,39 @@ impl SchemaCtx {
             );
 
             for (subset_idx, subset) in subsets.into_iter().enumerate() {
-                let mut key_expr = base_key_colon_expr.clone();
+                let mut key_dfa = base_key_colon_dfa.clone();
                 for pattern_idx in &subset {
-                    key_expr = self.build_intersecting_key_colon_expr(
-                        key_expr,
-                        scoped_pattern_key_colon_exprs[*pattern_idx].clone(),
-                        &format!(
-                            "{}_PP_SUBSET_{}_I{}",
-                            base_name.to_uppercase(),
-                            subset_idx,
-                            pattern_idx
-                        ),
-                    );
+                    key_dfa = Self::intersect_lexer_dfa(&key_dfa, &pattern_key_colon_dfas[*pattern_idx]);
+                    if !Self::dfa_accepts_any(&key_dfa) {
+                        break;
+                    }
+                }
+                if !Self::dfa_accepts_any(&key_dfa) {
+                    continue;
                 }
 
-                let subset_members: HashSet<usize> = subset.iter().copied().collect();
-                let mut excluded = fixed_key_colon_exprs.clone();
-                for (pattern_idx, pattern_expr) in scoped_pattern_key_colon_exprs.iter().enumerate() {
-                    if !subset_members.contains(&pattern_idx) {
-                        excluded.push(pattern_expr.clone());
+                if let Some(fixed_key_union_dfa) = &fixed_key_union_dfa {
+                    key_dfa = Self::subtract_lexer_dfa(&key_dfa, fixed_key_union_dfa);
+                    if !Self::dfa_accepts_any(&key_dfa) {
+                        continue;
                     }
                 }
 
-                let key_expr = self.build_excluding_key_colon_expr(
-                    key_expr,
-                    excluded,
+                let subset_members: HashSet<usize> = subset.iter().copied().collect();
+                for (pattern_idx, pattern_dfa) in pattern_key_colon_dfas.iter().enumerate() {
+                    if !subset_members.contains(&pattern_idx) {
+                        key_dfa = Self::subtract_lexer_dfa(&key_dfa, pattern_dfa);
+                        if !Self::dfa_accepts_any(&key_dfa) {
+                            break;
+                        }
+                    }
+                }
+                if !Self::dfa_accepts_any(&key_dfa) {
+                    continue;
+                }
+
+                let key_expr = self.build_lexer_dfa_expr(
+                    &key_dfa,
                     &format!("{}_PP_SUBSET_{}_KEY", base_name.to_uppercase(), subset_idx),
                 );
 
@@ -3349,20 +3576,29 @@ impl SchemaCtx {
         }
 
         if let Some(schema) = additional_properties_schema {
-            let mut excluded = fixed_key_colon_exprs.clone();
-            excluded.extend(scoped_pattern_key_colon_exprs.iter().cloned());
+            let mut additional_key_dfa = base_key_colon_dfa.clone();
+            if let Some(fixed_key_union_dfa) = &fixed_key_union_dfa {
+                additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, fixed_key_union_dfa);
+            }
+            for pattern_dfa in &pattern_key_colon_dfas {
+                additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, pattern_dfa);
+                if !Self::dfa_accepts_any(&additional_key_dfa) {
+                    break;
+                }
+            }
 
-            let additional_key_expr = self.build_excluding_key_colon_expr(
-                base_key_colon_expr,
-                excluded,
-                &format!("{}_AP_KEY", base_name.to_uppercase()),
-            );
+            if Self::dfa_accepts_any(&additional_key_dfa) {
+                let additional_key_expr = self.build_lexer_dfa_expr(
+                    &additional_key_dfa,
+                    &format!("{}_AP_KEY", base_name.to_uppercase()),
+                );
 
-            let additional_value_expr = self.convert_schema(&schema)?;
-            free_pair_exprs.push(sequence_or_single(vec![
-                additional_key_expr,
-                additional_value_expr,
-            ]));
+                let additional_value_expr = self.convert_schema(&schema)?;
+                free_pair_exprs.push(sequence_or_single(vec![
+                    additional_key_expr,
+                    additional_value_expr,
+                ]));
+            }
         }
 
         let (term_nc, term_c) = if free_pair_exprs.is_empty() {
@@ -3372,14 +3608,7 @@ impl SchemaCtx {
             self.insert_rule(term_c.clone(), empty_expr());
             (term_nc, term_c)
         } else {
-            let pair_expr = if free_pair_exprs.len() == 1 {
-                free_pair_exprs.pop().unwrap()
-            } else {
-                self.extract_terminal_rule(
-                    choice_or_single(free_pair_exprs),
-                    &format!("{}_FREE_PAIR", base_name.to_uppercase()),
-                )
-            };
+            let pair_expr = choice_or_single(free_pair_exprs);
 
             let term_nc = format!("{base_name}_ap_nc");
             let term_c = format!("{base_name}_ap_c");
@@ -3527,16 +3756,21 @@ impl SchemaCtx {
         &mut self,
         property_names: &Value,
         matched_value_expr: GrammarExpr,
-        unmatched_key_expr: GrammarExpr,
+        unmatched_key_colon_expr: GrammarExpr,
         unmatched_value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
+        let matched_key_colon_expr = json_wrapped_key_colon_pattern(pattern);
         let matched_pair = sequence_or_single(vec![
-            json_wrapped_key_colon_pattern(pattern),
+            matched_key_colon_expr.clone(),
             matched_value_expr,
         ]);
         let unmatched_pair = sequence_or_single(vec![
-            self.json_key_with_separator_expr(unmatched_key_expr, "PP_KEY_COLON"),
+            self.build_excluding_key_colon_expr(
+                unmatched_key_colon_expr,
+                vec![matched_key_colon_expr],
+                "PP_KEY_COLON",
+            ),
             unmatched_value_expr,
         ]);
         let pair = choice_or_single(vec![matched_pair, unmatched_pair]);

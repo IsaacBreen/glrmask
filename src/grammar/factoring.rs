@@ -13,7 +13,10 @@ use super::ast::{GrammarExpr, NamedGrammar, NamedRule};
 
 fn contains_regex_features(expr: &GrammarExpr) -> bool {
     match expr {
-        GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte => true,
+        GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::TerminalExpr(_)
+        | GrammarExpr::AnyByte => true,
         GrammarExpr::Literal(_) | GrammarExpr::Ref(_) => false,
         GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
             exprs.iter().any(contains_regex_features)
@@ -241,6 +244,7 @@ impl ChoiceFactorer {
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::TerminalExpr(_)
             | GrammarExpr::AnyByte => {}
         }
     }
@@ -372,6 +376,7 @@ impl ChoiceFactorer {
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::TerminalExpr(_)
             | GrammarExpr::AnyByte => {}
         }
     }

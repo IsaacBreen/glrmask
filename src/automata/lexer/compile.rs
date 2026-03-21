@@ -37,7 +37,7 @@ fn expr_contains_exclude(expr: &Expr) -> bool {
         Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_contains_exclude),
         Expr::Repeat { expr, .. } => expr_contains_exclude(expr),
         Expr::Shared(inner) => expr_contains_exclude(inner),
-        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
     }
 }
 
@@ -107,6 +107,7 @@ fn expr_accepts_empty(expr: &Expr) -> bool {
     match expr {
         Expr::U8Seq(bytes) => bytes.is_empty(),
         Expr::U8Class(_) => false,
+        Expr::Dfa(dfa) => !dfa.finalizers(0).is_empty(),
         Expr::Seq(parts) => parts.iter().all(expr_accepts_empty),
         Expr::Choice(options) => options.iter().any(expr_accepts_empty),
         Expr::Exclude { expr, exclude } => expr_accepts_empty(expr) && !expr_accepts_empty(exclude),
@@ -120,6 +121,7 @@ fn expr_u8set(expr: &Expr) -> U8Set {
     match expr {
         Expr::U8Seq(bytes) => U8Set::from_bytes(bytes),
         Expr::U8Class(set) => *set,
+        Expr::Dfa(dfa) => dfa.get_u8set(0),
         Expr::Seq(parts) | Expr::Choice(parts) => parts
             .iter()
             .fold(U8Set::empty(), |acc, part| acc | expr_u8set(part)),
@@ -241,6 +243,23 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
         }
         Expr::U8Class(set) => {
             nfa.add_u8set_transition(start, *set, end);
+        }
+        Expr::Dfa(dfa) => {
+            let mut state_map = Vec::with_capacity(dfa.num_states());
+            for _ in 0..dfa.num_states() {
+                state_map.push(nfa.add_state());
+            }
+            nfa.add_epsilon(start, state_map[0]);
+
+            for (state_id, state) in dfa.states().iter().enumerate() {
+                let mapped_state = state_map[state_id];
+                for (byte, &target) in state.transitions.iter() {
+                    nfa.add_transition(mapped_state, byte, state_map[target as usize]);
+                }
+                if !state.finalizers.is_empty() {
+                    nfa.add_epsilon(mapped_state, end);
+                }
+            }
         }
         Expr::Seq(parts) => {
             let mut state = start;

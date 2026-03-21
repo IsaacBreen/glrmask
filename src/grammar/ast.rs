@@ -19,6 +19,7 @@ pub enum GrammarExpr {
     Ref(String),
     Sequence(Vec<GrammarExpr>),
     Choice(Vec<GrammarExpr>),
+    TerminalExpr(Expr),
     Exclude {
         expr: Box<GrammarExpr>,
         exclude: Box<GrammarExpr>,
@@ -390,6 +391,9 @@ impl Lowerer {
                 // assume utf8 true for raw regex from lark/ebnf
                 Symbol::Terminal(self.terminal_id(pattern, pattern, true))
             }
+            GrammarExpr::TerminalExpr(expr) => {
+                Symbol::Terminal(self.register_terminal_expr("<expr>", expr.clone()))
+            }
             GrammarExpr::Exclude { .. } => {
                 return Err(GlrMaskError::GrammarParse(
                     "GrammarExpr::Exclude must be extracted into a terminal rule before lowering"
@@ -445,6 +449,7 @@ fn grammar_expr_to_expr(
         }
         GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true),
         GrammarExpr::AnyByte => Expr::U8Class(U8Set::from_range(0, 255)),
+        GrammarExpr::TerminalExpr(expr) => expr.clone(),
         GrammarExpr::Sequence(parts) => {
             let exprs: Vec<Expr> = parts.iter().map(|p| grammar_expr_to_expr(p, terminal_bodies, terminal_expr_cache, visiting)).collect::<Result<_, _>>()?;
             if exprs.len() == 1 {

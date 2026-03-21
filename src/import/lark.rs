@@ -519,6 +519,7 @@ fn expand_lark_expr(
             utf8: *utf8,
         },
         GrammarExpr::RawRegex(pattern) => GrammarExpr::RawRegex(pattern.clone()),
+        GrammarExpr::TerminalExpr(expr) => GrammarExpr::TerminalExpr(expr.clone()),
         GrammarExpr::AnyByte => GrammarExpr::AnyByte,
     })
 }

@@ -20,14 +20,14 @@ use crate::ds::u8set::U8Set;
 pub type GroupId = u32;
 pub const DEAD: u32 = u32::MAX;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DFAState {
     pub transitions: CharTransitions<u32>,
     pub finalizers: BitSet,
     possible_future_group_ids: BitSet,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DFA {
     states: Vec<DFAState>,
     group_id_to_u8set: Vec<U8Set>,
@@ -56,7 +56,7 @@ impl DFA {
         id
     }
 
-    pub(super) fn ensure_group_capacity(&mut self, num_groups: usize) {
+    pub(crate) fn ensure_group_capacity(&mut self, num_groups: usize) {
         if self.group_id_to_u8set.len() < num_groups {
             self.group_id_to_u8set.resize(num_groups, U8Set::empty());
         }
@@ -113,7 +113,7 @@ impl DFA {
         }
     }
 
-    pub(super) fn set_group_u8set(&mut self, group_id: GroupId, set: U8Set) {
+    pub(crate) fn set_group_u8set(&mut self, group_id: GroupId, set: U8Set) {
         if let Some(entry) = self.group_id_to_u8set.get_mut(group_id as usize) {
             *entry = set;
         }

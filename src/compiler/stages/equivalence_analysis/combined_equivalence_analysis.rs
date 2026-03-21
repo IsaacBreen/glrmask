@@ -531,11 +531,16 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
-    let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
-        regex,
-        tokens,
-        initial_states,
-    );
+    let has_disallowed_follows = disallowed_follows.values().any(|bits| !bits.is_empty());
+    let state_reps = if has_disallowed_follows {
+        initial_states.to_vec()
+    } else {
+        state_equivalence_analysis::find_state_equivalence_classes(
+            regex,
+            tokens,
+            initial_states,
+        )
+    };
 
     let mut rep_set: BTreeSet<usize> = BTreeSet::new();
     for &rep in &state_reps {
