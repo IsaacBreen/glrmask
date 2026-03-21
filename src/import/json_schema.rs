@@ -1438,6 +1438,23 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
         }
     }
 
+    // ── enum ──────────────────────────────────────────────────────────────────
+    let enum1 = s1.get("enum").and_then(Value::as_array);
+    let enum2 = s2.get("enum").and_then(Value::as_array);
+    match (enum1, enum2) {
+        (Some(left), Some(right)) => {
+            let inter: Vec<Value> = left.iter().filter(|v| right.contains(v)).cloned().collect();
+            merged.insert("enum".into(), Value::Array(inter));
+        }
+        (Some(values), None) => {
+            merged.insert("enum".into(), Value::Array(values.clone()));
+        }
+        (None, Some(values)) => {
+            merged.insert("enum".into(), Value::Array(values.clone()));
+        }
+        (None, None) => {}
+    }
+
     let handled: HashSet<&'static str> = [
         "type",
         "properties",
@@ -1453,6 +1470,7 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
         "maxLength",
         "maxItems",
         "maxProperties",
+        "enum",
     ]
     .into_iter()
     .collect();
@@ -2715,18 +2733,30 @@ impl SchemaCtx {
                 Some(Value::Object(map)) => Some(Value::Object(map.clone())),
                 _ => Some(serde_json::json!({})),
             };
+            let mut additional_key_colon_expr = None;
+            if additional_schema.is_none() {
+                if let Some(pp) = pattern_properties {
+                    if pp.len() == 1 {
+                        let (pattern, value_schema) = pp.iter().next().unwrap();
+                        additional_key_colon_expr = Some(json_wrapped_key_colon_pattern(pattern));
+                        additional_schema = Some(value_schema.clone());
+                    }
+                }
+            }
             if additional_schema
                 .as_ref()
                 .map(|schema| self.is_certainly_unsatisfiable(schema))
                 .unwrap_or(false)
             {
                 additional_schema = None;
+                additional_key_colon_expr = None;
             }
             return self.build_ordered_properties_object_expr(
                 properties,
                 &required_list,
                 &required_keys,
                 additional_schema,
+                additional_key_colon_expr,
             );
         }
 
@@ -2755,6 +2785,7 @@ impl SchemaCtx {
                 &[],
                 &BTreeSet::new(),
                 Some(Value::Object(map.clone())),
+                None,
             );
         }
 
@@ -3070,6 +3101,7 @@ impl SchemaCtx {
                     &option_required,
                     &option_required_keys,
                     None,
+                    None,
                 )?);
             }
             if residual_min == 0 {
@@ -3082,6 +3114,7 @@ impl SchemaCtx {
                     &required_only,
                     required_list,
                     required_keys,
+                    None,
                     None,
                 )?);
             }
@@ -3100,6 +3133,7 @@ impl SchemaCtx {
                 &option_required,
                 &option_required_keys,
                 None,
+                None,
             )?);
         }
         Ok(Some(choice_or_single(options)))
@@ -3111,6 +3145,7 @@ impl SchemaCtx {
         required_list: &[String],
         required_keys: &BTreeSet<String>,
         additional_properties_schema: Option<Value>,
+        additional_key_colon_expr: Option<GrammarExpr>,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let mut ordered = Vec::new();
         let mut known_property_keys: Vec<String> = properties.keys().cloned().collect();
@@ -3160,18 +3195,22 @@ impl SchemaCtx {
         self.object_rule_counter = base_index + 1;
 
         let (term_nc, term_c) = if let Some(schema) = additional_properties_schema {
-            // Collect known property keys for complement trie
-            let known_keys = known_property_keys;
-
-            // Build complement key that excludes known property names
             let ck_prefix = format!("{}_CK", base_name.to_uppercase());
-            let complement_key = self.build_complement_key_expr(&known_keys, &ck_prefix);
-
-            // complement_key_colon = complement_key ": "
-            let complement_key_colon = self.json_key_with_separator_expr(
-                complement_key,
-                &format!("{ck_prefix}_KEY_COLON"),
-            );
+            let ap_key_colon = if let Some(key_colon_expr) = additional_key_colon_expr {
+                // Use the caller-supplied key+colon expression (e.g. pattern key
+                // from patternProperties) instead of the complement key.
+                key_colon_expr
+            } else {
+                // Collect known property keys for complement trie
+                let known_keys = known_property_keys;
+                // Build complement key that excludes known property names
+                let complement_key = self.build_complement_key_expr(&known_keys, &ck_prefix);
+                // complement_key_colon = complement_key ": "
+                self.json_key_with_separator_expr(
+                    complement_key,
+                    &format!("{ck_prefix}_KEY_COLON"),
+                )
+            };
 
             let term_nc = format!("{base_name}_ap_nc");
             let term_c = format!("{base_name}_ap_c");
@@ -3180,7 +3219,7 @@ impl SchemaCtx {
                 term_nc.clone(),
                 choice_or_single(vec![
                     sequence_or_single(vec![
-                        complement_key_colon.clone(),
+                        ap_key_colon.clone(),
                         value_expr.clone(),
                         GrammarExpr::Ref(term_c.clone()),
                     ]),
@@ -3192,7 +3231,7 @@ impl SchemaCtx {
                 choice_or_single(vec![
                     sequence_or_single(vec![
                         self.json_item_separator_expr(),
-                        complement_key_colon,
+                        ap_key_colon,
                         value_expr,
                         GrammarExpr::Ref(term_c.clone()),
                     ]),
@@ -4753,5 +4792,48 @@ mod tests {
         let schema = r#"{"type":"array"}"#;
         let g = json_schema_to_grammar(schema).unwrap();
         assert!(!g.rules.is_empty());
+    }
+
+    #[test]
+    fn test_anyof_enum_intersection_constrains_branches() {
+        // When merging base enum [A,B,C] with branch enum [A], result should be [A] not [A,B,C].
+        let schema = r##"{
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["A", "B", "C"]},
+                "value": {"type": "integer"}
+            },
+            "anyOf": [
+                {"properties": {"kind": {"enum": ["A"]}, "data": {"type": "string"}}},
+                {"properties": {"kind": {"enum": ["B"]}, "data": {"type": "number"}}}
+            ],
+            "required": ["kind"]
+        }"##;
+        // kind=A with string data should be accepted
+        assert!(accepts_sequence(schema, &[br#"{"kind": "A", "data": "x"}"#]));
+        // kind=C should NOT be accepted (not in any anyOf branch)
+        assert!(!accepts_sequence(schema, &[br#"{"kind": "C"}"#]));
+    }
+
+    #[test]
+    fn test_properties_plus_pattern_properties_allows_pattern_keys() {
+        // When properties + patternProperties + additionalProperties: false,
+        // keys matching the pattern should be accepted.
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "default": {"type": "string"}
+            },
+            "patternProperties": {
+                "^[1-5][0-9]{2}$": {"type": "string"}
+            },
+            "additionalProperties": false
+        }"#;
+        // Explicit property should work
+        assert!(accepts_sequence(schema, &[br#"{"default": "err.html"}"#]));
+        // Pattern-matching key should work
+        assert!(accepts_sequence(schema, &[br#"{"default": "err.html", "500": "server_error.html"}"#]));
+        // Non-matching key should be rejected
+        assert!(!accepts_sequence(schema, &[br#"{"default": "err.html", "abc": "x"}"#]));
     }
 }
