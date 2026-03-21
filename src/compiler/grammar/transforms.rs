@@ -531,7 +531,7 @@ fn prepare_owned_grammar_for_compile_impl(
     }
 
     let phase_started_at = std::time::Instant::now();
-    let _ = tokenizer.drain_nullable_terminals();
+    let _ = tokenizer.isolate_start_state_and_drain_nullable_terminals();
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][prepare] drain_nullable_terminals_ms={:.3}",

@@ -43,7 +43,7 @@ impl Tokenizer {
     /// inspecting start-state finalizers, remove them from the DFA, and return
     /// the set.  After this call the tokenizer no longer reports those
     /// terminals as matched at state 0.
-    pub fn drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
+    pub fn isolate_start_state_and_drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
         self.isolate_start_state();
         let nullable = self.dfa.clear_finalizers_for_state(self.start_state()).iter().map(|terminal| terminal as TerminalID).collect();
         nullable

@@ -1865,7 +1865,7 @@ mod tests {
             "terminal 0 should be a start-state finalizer before drain"
         );
 
-        let nullable = tok.drain_nullable_terminals();
+        let nullable = tok.isolate_start_state_and_drain_nullable_terminals();
         assert_eq!(nullable, std::collections::BTreeSet::from([0u32]));
 
         // After drain: terminal 0 should NOT match at start state.
