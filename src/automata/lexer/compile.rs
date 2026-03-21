@@ -152,7 +152,7 @@ fn compile_repeat_power_cps(
 
     let start = if copies == 1 {
         let start = nfa.add_state();
-        compile_expr(expr, nfa, start, end);
+        append_compiled_expr(expr, nfa, start, end);
         start
     } else {
         let half = copies / 2;
@@ -224,7 +224,39 @@ fn compile_repeat_upto_cps(
     split
 }
 
-fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
+fn graft_nfa_fragment(target: &mut NFA, fragment: NFA, start: u32, end: u32) {
+    debug_assert!(fragment.num_states() >= 2);
+
+    let mut state_map = Vec::with_capacity(fragment.num_states());
+    state_map.push(start);
+    state_map.push(end);
+    for _ in 2..fragment.num_states() {
+        state_map.push(target.add_state());
+    }
+
+    for (state_id, state) in fragment.states.into_iter().enumerate() {
+        let mapped_state = state_map[state_id];
+        for (set, next) in state.transitions {
+            target.add_u8set_transition(mapped_state, set, state_map[next as usize]);
+        }
+        for next in state.epsilon_transitions {
+            target.add_epsilon(mapped_state, state_map[next as usize]);
+        }
+        for finalizer in state.finalizers {
+            target.add_finalizer(mapped_state, finalizer);
+        }
+    }
+}
+
+fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
+    graft_nfa_fragment(nfa, compile_expr(expr), start, end);
+}
+
+fn compile_expr(expr: &Expr) -> NFA {
+    let mut nfa = NFA::new(2);
+    let start = 0u32;
+    let end = 1u32;
+
     match expr {
         Expr::U8Seq(bytes) => {
             let mut state = start;
@@ -269,7 +301,7 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
                 } else {
                     nfa.add_state()
                 };
-                compile_expr(part, nfa, state, next);
+                append_compiled_expr(part, &mut nfa, state, next);
                 state = next;
             }
             if parts.is_empty() {
@@ -281,7 +313,7 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
                 nfa.add_epsilon(start, end);
             }
             for option in options {
-                compile_expr(option, nfa, start, end);
+                append_compiled_expr(option, &mut nfa, start, end);
             }
         }
         Expr::Exclude { .. } => {
@@ -291,7 +323,7 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
             match max {
                 Some(max) => {
                     if *max < *min {
-                        return;
+                        return nfa;
                     }
 
                     let optional = max - min;
@@ -300,20 +332,20 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
                     let tail_start = compile_repeat_upto_cps(
                         expr,
                         optional,
-                        nfa,
+                        &mut nfa,
                         end,
                         &mut power_cache,
                         &mut upto_cache,
                     );
                     let repeat_start =
-                        compile_repeat_exact_cps(expr, *min, nfa, tail_start, &mut power_cache);
+                        compile_repeat_exact_cps(expr, *min, &mut nfa, tail_start, &mut power_cache);
                     nfa.add_epsilon(start, repeat_start);
                 }
                 None => {
                     let mut current = start;
                     for _ in 0..*min {
                         let next = nfa.add_state();
-                        compile_expr(expr, nfa, current, next);
+                        append_compiled_expr(expr, &mut nfa, current, next);
                         current = next;
                     }
 
@@ -331,7 +363,7 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
 
                     nfa.add_epsilon(current, end);
                     let loop_state = nfa.add_state();
-                    compile_expr(expr, nfa, current, loop_state);
+                    append_compiled_expr(expr, &mut nfa, current, loop_state);
                     nfa.add_epsilon(loop_state, current);
                     if expr_accepts_empty(expr) {
                         nfa.add_epsilon(loop_state, end);
@@ -339,9 +371,11 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
                 }
             }
         }
-        Expr::Shared(inner) => compile_expr(inner, nfa, start, end),
+        Expr::Shared(inner) => return compile_expr(inner),
         Expr::Epsilon => nfa.add_epsilon(start, end),
     }
+
+    nfa
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,11 +499,11 @@ pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
 
     if let Some((prefix, remainders)) = common_prefix_factor(&optimized_exprs) {
         let split = nfa.add_state();
-        compile_expr(&prefix, &mut nfa, 0, split);
+        append_compiled_expr(&prefix, &mut nfa, 0, split);
 
         for (group_id, remainder) in remainders.iter().enumerate() {
             let accept = nfa.add_state();
-            compile_expr(remainder, &mut nfa, split, accept);
+            append_compiled_expr(remainder, &mut nfa, split, accept);
             nfa.add_finalizer(accept, group_id as u32);
         }
         return nfa;
@@ -477,7 +511,7 @@ pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
 
     for (group_id, expr) in optimized_exprs.iter().enumerate() {
         let accept = nfa.add_state();
-        compile_expr(expr, &mut nfa, 0, accept);
+        append_compiled_expr(expr, &mut nfa, 0, accept);
         nfa.add_finalizer(accept, group_id as u32);
     }
     nfa
