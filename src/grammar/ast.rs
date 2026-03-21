@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::GlrMaskError;
@@ -47,7 +47,6 @@ pub struct NamedGrammar {
     /// Name of the terminal rule whose body should be used as the ignore pattern.
     /// Set by Lark's `%ignore` directive.
     pub ignore: Option<String>,
-    pub terminal_excludes: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl NamedGrammar {
@@ -68,14 +67,6 @@ struct Lowerer {
     nt_map: BTreeMap<String, NonterminalID>,
     anon_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
-    named_terminal_map: HashMap<TerminalRuleIdentity, TerminalID>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TerminalRuleIdentity {
-    expr: Expr,
-    excluded_names: Vec<String>,
-    is_ignore: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +131,6 @@ impl Lowerer {
             nt_map: BTreeMap::new(),
             anon_counter: 0,
             terminal_names: BTreeMap::new(),
-            named_terminal_map: HashMap::new(),
         }
     }
 
@@ -409,25 +399,18 @@ impl Lowerer {
     }
 
     /// Register a pre-resolved terminal Expr, deduplicating by value.
-    fn register_terminal_expr(
-        &mut self,
-        name: &str,
-        expr: Expr,
-        excluded_names: &BTreeSet<String>,
-        is_ignore: bool,
-    ) -> TerminalID {
-        let identity = TerminalRuleIdentity {
-            expr: expr.clone(),
-            excluded_names: excluded_names.iter().cloned().collect(),
-            is_ignore,
-        };
-        if let Some(&id) = self.named_terminal_map.get(&identity) {
-            return id;
+    fn register_terminal_expr(&mut self, name: &str, expr: Expr) -> TerminalID {
+        // Dedup by the Expr tree itself
+        for (i, t) in self.terminals.iter().enumerate() {
+            if let Terminal::Expr { expr: existing, .. } = t {
+                if *existing == expr {
+                    return i as TerminalID;
+                }
+            }
         }
         let id = self.terminals.len() as TerminalID;
         self.terminal_names.insert(id, name.to_string());
         self.terminals.push(Terminal::Expr { id, expr });
-        self.named_terminal_map.insert(identity, id);
         id
     }
 }
@@ -614,9 +597,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         .filter(|r| r.is_terminal)
         .map(|r| (r.name.clone(), r.expr.clone()))
         .collect();
-    let terminal_rule_names: HashSet<String> = terminal_bodies.keys().cloned().collect();
     let mut terminal_expr_cache: HashMap<String, Arc<Expr>> = HashMap::new();
-    let mut terminal_rule_to_tid = BTreeMap::<String, TerminalID>::new();
 
     for rule in &grammar.rules {
         let lhs = lowerer.nt_id(&rule.name);
@@ -634,26 +615,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             )?;
             let arc = Arc::new(expr.clone());
             terminal_expr_cache.insert(rule.name.clone(), arc);
-            let excluded_names = grammar
-                .terminal_excludes
-                .get(&rule.name)
-                .cloned()
-                .unwrap_or_default();
-            for excluded_name in &excluded_names {
-                if !terminal_rule_names.contains(excluded_name) {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "terminal exclusion {} -> {} references an unknown terminal rule",
-                        rule.name, excluded_name
-                    )));
-                }
-            }
-            let tid = lowerer.register_terminal_expr(
-                &rule.name,
-                expr,
-                &excluded_names,
-                grammar.ignore.as_deref() == Some(rule.name.as_str()),
-            );
-            terminal_rule_to_tid.insert(rule.name.clone(), tid);
+            let tid = lowerer.register_terminal_expr(&rule.name, expr);
             lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Terminal(tid)] });
             continue;
         }
@@ -711,29 +673,16 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         .collect();
 
     let ignore_terminal = if let Some(ref ignore_name) = grammar.ignore {
-        terminal_rule_to_tid.get(ignore_name).copied()
+        // Find the terminal created for the ignore rule.
+        // The ignore rule has is_terminal=true, so it was lowered above
+        // as NT → Terminal. The terminal has the ignore name in terminal_names.
+        let tid = lowerer.terminal_names.iter()
+            .find(|(_, name)| *name == ignore_name)
+            .map(|(&id, _)| id);
+        tid
     } else {
         None
     };
-
-    let mut excludes = BTreeMap::<TerminalID, BTreeSet<TerminalID>>::new();
-    for (rule_name, excluded_names) in &grammar.terminal_excludes {
-        let Some(&terminal_id) = terminal_rule_to_tid.get(rule_name) else {
-            return Err(GlrMaskError::GrammarParse(format!(
-                "terminal exclusions may only be attached to terminal rules: {rule_name}"
-            )));
-        };
-        let entry = excludes.entry(terminal_id).or_default();
-        for excluded_name in excluded_names {
-            let Some(&excluded_id) = terminal_rule_to_tid.get(excluded_name) else {
-                return Err(GlrMaskError::GrammarParse(format!(
-                    "terminal exclusion {} -> {} references a non-terminal rule",
-                    rule_name, excluded_name
-                )));
-            };
-            entry.insert(excluded_id);
-        }
-    }
 
     Ok(GrammarDef {
         rules: lowerer.rules,
@@ -741,7 +690,6 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         terminals: lowerer.terminals,
         nonterminal_names,
         terminal_names: lowerer.terminal_names,
-        excludes,
         ignore_terminal,
     })
 }
@@ -821,7 +769,6 @@ mod tests {
             )],
             start: "start".into(),
             ignore: None,
-            terminal_excludes: BTreeMap::new(),
         };
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0);
@@ -841,7 +788,6 @@ mod tests {
             )],
             start: "start".into(),
             ignore: None,
-            terminal_excludes: BTreeMap::new(),
         };
         let gdef = lower(&g).unwrap();
         
@@ -858,7 +804,6 @@ mod tests {
             )],
             start: "start".into(),
             ignore: None,
-            terminal_excludes: BTreeMap::new(),
         };
         let gdef = lower(&g).unwrap();
         
@@ -879,7 +824,6 @@ mod tests {
             )],
             start: "start".into(),
             ignore: None,
-            terminal_excludes: BTreeMap::new(),
         };
         let gdef = lower(&g).unwrap();
 
@@ -919,7 +863,6 @@ mod tests {
             )],
             start: "start".into(),
             ignore: None,
-            terminal_excludes: BTreeMap::new(),
         };
         let gdef = lower(&g).unwrap();
         
@@ -939,7 +882,6 @@ mod tests {
             )],
             start: "start".into(),
             ignore: None,
-            terminal_excludes: BTreeMap::new(),
         };
         let gdef = lower(&g).unwrap();
         let a_tid = gdef
@@ -995,7 +937,6 @@ mod tests {
             ],
             start: "start".into(),
             ignore: None,
-            terminal_excludes: BTreeMap::new(),
         };
         let gdef = lower(&g).unwrap();
         assert_eq!(gdef.start, 0); 
@@ -1020,7 +961,6 @@ mod tests {
             ],
             start: "start".into(),
             ignore: None,
-            terminal_excludes: BTreeMap::new(),
         };
 
         let gdef = lower(&g).unwrap();

@@ -133,64 +133,27 @@ fn nullable_terminals_for_grammar(grammar: &GrammarDef) -> std::collections::BTr
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum TerminalIdentity {
-    Literal {
-        bytes: Vec<u8>,
-        is_ignore: bool,
-        excludes: Vec<TerminalID>,
-    },
-    Pattern {
-        pattern: String,
-        utf8: bool,
-        is_ignore: bool,
-        excludes: Vec<TerminalID>,
-    },
-    Expr {
-        expr: Expr,
-        is_ignore: bool,
-        excludes: Vec<TerminalID>,
-    },
+    Literal { bytes: Vec<u8>, is_ignore: bool },
+    Pattern { pattern: String, utf8: bool, is_ignore: bool },
+    Expr { expr: Expr, is_ignore: bool },
 }
 
-fn terminal_identity(grammar: &GrammarDef, terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
-    let excludes = grammar
-        .excludes
-        .get(&terminal.id())
-        .map(|excluded| excluded.iter().copied().collect())
-        .unwrap_or_default();
+fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
     match terminal {
         Terminal::Literal { bytes, .. } => TerminalIdentity::Literal {
             bytes: bytes.clone(),
             is_ignore,
-            excludes,
         },
         Terminal::Pattern { pattern, utf8, .. } => TerminalIdentity::Pattern {
             pattern: pattern.clone(),
             utf8: *utf8,
             is_ignore,
-            excludes,
         },
         Terminal::Expr { expr, .. } => TerminalIdentity::Expr {
             expr: expr.clone(),
             is_ignore,
-            excludes,
         },
     }
-}
-
-fn remap_terminal_excludes(
-    excludes: &std::collections::BTreeMap<TerminalID, std::collections::BTreeSet<TerminalID>>,
-    remap: &std::collections::BTreeMap<TerminalID, TerminalID>,
-) -> std::collections::BTreeMap<TerminalID, std::collections::BTreeSet<TerminalID>> {
-    let mut remapped = std::collections::BTreeMap::<TerminalID, std::collections::BTreeSet<TerminalID>>::new();
-    for (source, excluded) in excludes {
-        let Some(&mapped_source) = remap.get(source) else {
-            continue;
-        };
-        let entry = remapped.entry(mapped_source).or_default();
-        entry.extend(excluded.iter().filter_map(|target| remap.get(target).copied()));
-    }
-    remapped.retain(|_, excluded| !excluded.is_empty());
-    remapped
 }
 
 /// Remove terminals that are no longer referenced by any normalized rule,
@@ -208,10 +171,6 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     if let Some(ignore_terminal) = grammar.ignore_terminal {
         used.insert(ignore_terminal);
     }
-    for (&terminal_id, excluded_terminals) in &grammar.excludes {
-        used.insert(terminal_id);
-        used.extend(excluded_terminals.iter().copied());
-    }
 
     let mut remap = std::collections::BTreeMap::<TerminalID, TerminalID>::new();
     let mut compacted = Vec::with_capacity(used.len());
@@ -222,7 +181,7 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
             panic!("terminal id {} referenced by a rule but missing from grammar.terminals", old_id)
         });
         let is_ignore = grammar.ignore_terminal == Some(old_id);
-        let identity = terminal_identity(grammar, terminal, is_ignore);
+        let identity = terminal_identity(terminal, is_ignore);
         if let Some(&existing_id) = canonical_ids.get(&identity) {
             remap.insert(old_id, existing_id);
             continue;
@@ -246,7 +205,6 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     grammar.terminals = compacted;
     grammar.ignore_terminal = grammar.ignore_terminal.and_then(|old_id| remap.get(&old_id).copied());
     grammar.terminal_names = remap_terminal_names(&grammar.terminal_names, &remap);
-    grammar.excludes = remap_terminal_excludes(&grammar.excludes, &remap);
 }
 
 fn remap_terminal_names(

@@ -9,8 +9,6 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use serde::{Deserialize, Serialize};
 
 use crate::ds::char_transitions::CharTransitions;
@@ -188,39 +186,5 @@ impl DFA {
                 }
             }
         }
-    }
-
-    pub(crate) fn apply_group_exclusions(
-        &mut self,
-        excludes: &BTreeMap<GroupId, BTreeSet<GroupId>>,
-    ) -> bool {
-        let mut changed = false;
-        for state in &mut self.states {
-            if state.finalizers.count_ones() < 2 {
-                continue;
-            }
-
-            let mut to_clear = Vec::new();
-            for (&group_id, blocked_by) in excludes {
-                let group_index = group_id as usize;
-                if !state.finalizers.contains(group_index) {
-                    continue;
-                }
-                if blocked_by
-                    .iter()
-                    .any(|blocked_by_id| state.finalizers.contains(*blocked_by_id as usize))
-                {
-                    to_clear.push(group_index);
-                }
-            }
-
-            for group_index in to_clear {
-                if state.finalizers.contains(group_index) {
-                    state.finalizers.clear(group_index);
-                    changed = true;
-                }
-            }
-        }
-        changed
     }
 }

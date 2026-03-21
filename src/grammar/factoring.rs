@@ -32,7 +32,6 @@ pub fn factor_named_grammar(grammar: NamedGrammar) -> NamedGrammar {
         rules,
         start: grammar.start,
         ignore: grammar.ignore,
-        terminal_excludes: grammar.terminal_excludes,
     }
 }
 

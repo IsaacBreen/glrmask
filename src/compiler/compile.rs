@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::regex::parse_regex;
-use crate::automata::lexer::compile::{build_regex, build_regex_grouped};
+use crate::automata::lexer::compile::build_regex;
 use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
@@ -67,46 +67,20 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 /// Each terminal is compiled through the NFA→DFA pipeline via [`build_regex`].
 /// The group index matches the terminal ID (guaranteed by construction).
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
-    validate_terminal_exclusions(grammar);
-
-    let mut expr_groups = Vec::<Expr>::new();
-    let mut terminal_groups = Vec::<Vec<TerminalID>>::new();
-    let mut expr_group_index = HashMap::<Expr, usize>::new();
-
-    for terminal in &grammar.terminals {
-        let expr = match terminal {
+    let exprs: Vec<Expr> = grammar
+        .terminals
+        .iter()
+        .map(|terminal| match terminal {
             Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
             Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
             Terminal::Expr { expr, .. } => expr.clone(),
-        };
-
-        if let Some(&group_index) = expr_group_index.get(&expr) {
-            terminal_groups[group_index].push(terminal.id());
-        } else {
-            let group_index = expr_groups.len();
-            expr_group_index.insert(expr.clone(), group_index);
-            expr_groups.push(expr);
-            terminal_groups.push(vec![terminal.id()]);
-        }
-    }
-
-    let has_duplicate_exprs = terminal_groups.iter().any(|group| group.len() > 1);
-    let regex = if has_duplicate_exprs {
-        build_regex_grouped(&expr_groups, &terminal_groups, grammar.num_terminals() as usize)
-    } else {
-        build_regex(&expr_groups)
-    };
-
-    let mut tokenizer = Tokenizer {
+        })
+        .collect();
+    let regex = build_regex(&exprs);
+    Tokenizer {
         dfa: regex.dfa,
         num_terminals: grammar.num_terminals(),
-    };
-
-    if !grammar.excludes.is_empty() && tokenizer.dfa.apply_group_exclusions(&grammar.excludes) {
-        tokenizer.dfa = tokenizer.dfa.minimize();
     }
-
-    tokenizer
 }
 
 /// Build a [`Tokenizer`] from a slice of regex expressions.
@@ -118,36 +92,6 @@ pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: num,
-    }
-}
-
-fn validate_terminal_exclusions(grammar: &GrammarDef) {
-    let num_terminals = grammar.num_terminals();
-    for (&terminal_id, excluded) in &grammar.excludes {
-        assert!(
-            terminal_id < num_terminals,
-            "terminal exclusion source {terminal_id} is out of range for {} terminals",
-            num_terminals
-        );
-        assert!(
-            !excluded.contains(&terminal_id),
-            "terminal {terminal_id} may not exclude itself"
-        );
-        for &excluded_terminal in excluded {
-            assert!(
-                excluded_terminal < num_terminals,
-                "terminal exclusion target {excluded_terminal} is out of range for {} terminals",
-                num_terminals
-            );
-            assert!(
-                !grammar
-                    .excludes
-                    .get(&excluded_terminal)
-                    .map(|other| other.contains(&terminal_id))
-                    .unwrap_or(false),
-                "mutual terminal exclusions are not allowed: {terminal_id} <-> {excluded_terminal}"
-            );
-        }
     }
 }
 
@@ -2063,38 +2007,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_unused_terminals_remaps_excludes() {
-        let mut grammar = GrammarDef {
-            rules: vec![Rule {
-                lhs: 0,
-                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
-            }],
-            start: 0,
-            terminals: vec![
-                Terminal::Literal {
-                    id: 0,
-                    bytes: b"a".to_vec(),
-                },
-                Terminal::Literal {
-                    id: 1,
-                    bytes: b"dead".to_vec(),
-                },
-                Terminal::Pattern {
-                    id: 2,
-                    pattern: ".".to_string(),
-                    utf8: false,
-                },
-            ],
-            excludes: BTreeMap::from([(2, std::collections::BTreeSet::from([0]))]),
-            ..Default::default()
-        };
-
-        compact_unused_terminals(&mut grammar);
-
-        assert_eq!(grammar.excludes, BTreeMap::from([(1, std::collections::BTreeSet::from([0]))]));
-    }
-
-    #[test]
     fn test_compact_unused_terminals_merges_identical_terminals() {
         // Terminals 0 and 2 are identical ("a"), terminal 1 is different ("b").
         // After compacting, terminals 0 and 2 should map to the same new ID.
@@ -2111,7 +2023,6 @@ mod tests {
             ],
             nonterminal_names: BTreeMap::new(),
             terminal_names: BTreeMap::new(),
-            excludes: BTreeMap::new(),
             ignore_terminal: None,
         };
         compact_unused_terminals(&mut grammar);
@@ -2122,62 +2033,6 @@ mod tests {
         assert_eq!(grammar.rules[0].rhs, vec![Symbol::Terminal(0), Symbol::Terminal(1)]);
         // Rule 2: T2 → merged "a" (id 0)
         assert_eq!(grammar.rules[1].rhs, vec![Symbol::Terminal(0)]);
-    }
-
-    #[test]
-    fn test_build_tokenizer_applies_same_length_exclusions() {
-        let grammar = GrammarDef {
-            rules: vec![],
-            start: 0,
-            terminals: vec![
-                Terminal::Literal {
-                    id: 0,
-                    bytes: b"a".to_vec(),
-                },
-                Terminal::Pattern {
-                    id: 1,
-                    pattern: ".".to_string(),
-                    utf8: false,
-                },
-            ],
-            excludes: BTreeMap::from([(1, std::collections::BTreeSet::from([0]))]),
-            ..Default::default()
-        };
-
-        let tokenizer = build_tokenizer(&grammar);
-
-        let a_state = tokenizer.run(b"a");
-        assert_eq!(tokenizer.matched_terminals(a_state), std::collections::BTreeSet::from([0]));
-
-        let b_state = tokenizer.run(b"b");
-        assert_eq!(tokenizer.matched_terminals(b_state), std::collections::BTreeSet::from([1]));
-    }
-
-    #[test]
-    #[should_panic(expected = "mutual terminal exclusions are not allowed")]
-    fn test_build_tokenizer_rejects_mutual_exclusions() {
-        let grammar = GrammarDef {
-            rules: vec![],
-            start: 0,
-            terminals: vec![
-                Terminal::Literal {
-                    id: 0,
-                    bytes: b"a".to_vec(),
-                },
-                Terminal::Pattern {
-                    id: 1,
-                    pattern: ".".to_string(),
-                    utf8: false,
-                },
-            ],
-            excludes: BTreeMap::from([
-                (0, std::collections::BTreeSet::from([1])),
-                (1, std::collections::BTreeSet::from([0])),
-            ]),
-            ..Default::default()
-        };
-
-        let _ = build_tokenizer(&grammar);
     }
 
     #[test]
@@ -2369,7 +2224,6 @@ mod tests {
                 (1, "DEAD".to_string()),
                 (2, "B".to_string()),
             ]),
-            excludes: BTreeMap::new(),
             ignore_terminal: None,
         };
 

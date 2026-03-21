@@ -1528,8 +1528,7 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         })
         .map(|s| s.to_string())
         .collect();
-    let terminal_excludes = std::mem::take(&mut ctx.terminal_excludes);
-    let rules = std::mem::take(&mut ctx.rules).into_iter().map(|(name, expr)| {
+    let rules = ctx.rules.into_iter().map(|(name, expr)| {
         let is_terminal = terminal_names.contains(&name);
         NamedRule { name, expr, is_terminal }
     }).collect();
@@ -1537,7 +1536,6 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         rules,
         start: "start".into(),
         ignore: None,
-        terminal_excludes,
     })
 }
 
@@ -1546,7 +1544,6 @@ struct SchemaCtx {
     rules: Vec<(String, GrammarExpr)>,
     rule_indices: HashMap<String, usize>,
     used_rule_names: HashSet<String>,
-    terminal_excludes: std::collections::BTreeMap<String, BTreeSet<String>>,
     ref_rule_names: HashMap<String, String>,
     ref_compile_stack: HashSet<String>,
     object_rule_counter: usize,
@@ -1565,7 +1562,6 @@ impl SchemaCtx {
             rules: Vec::new(),
             rule_indices: HashMap::new(),
             used_rule_names: HashSet::new(),
-            terminal_excludes: std::collections::BTreeMap::new(),
             ref_rule_names: HashMap::new(),
             ref_compile_stack: HashSet::new(),
             object_rule_counter: 0,
@@ -1625,19 +1621,6 @@ impl SchemaCtx {
             self.rules.push((name.clone(), expr));
         }
         name
-    }
-
-    fn insert_terminal_exclusion(
-        &mut self,
-        terminal_name: impl Into<String>,
-        excluded_terminal_name: impl Into<String>,
-    ) {
-        let terminal_name = terminal_name.into();
-        let excluded_terminal_name = excluded_terminal_name.into();
-        self.terminal_excludes
-            .entry(terminal_name)
-            .or_default()
-            .insert(excluded_terminal_name);
     }
 
     fn fresh_rule_name(&mut self, prefix: &str) -> String {
@@ -2669,33 +2652,6 @@ impl SchemaCtx {
         literal_expr(JSON_ITEM_SEPARATOR)
     }
 
-    fn extract_named_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> String {
-        let rule_name = self.fresh_rule_name(prefix);
-        self.insert_rule(rule_name.clone(), expr);
-        rule_name
-    }
-
-    fn build_literal_key_colon_terminal(&mut self, key: &str, prefix: &str) -> String {
-        self.extract_named_terminal_rule(self.json_key_colon_literal(key), prefix)
-    }
-
-    fn build_pattern_key_colon_terminal(&mut self, pattern: &str, prefix: &str) -> String {
-        self.extract_named_terminal_rule(json_wrapped_key_colon_pattern(pattern), prefix)
-    }
-
-    fn build_scoped_key_colon_terminal(
-        &mut self,
-        property_names: Option<&Value>,
-        prefix: &str,
-    ) -> Result<String, GlrMaskError> {
-        let expr = if let Some(property_names) = property_names {
-            json_wrapped_key_colon_pattern(Self::property_name_pattern(property_names)?)
-        } else {
-            self.json_key_colon_ref()
-        };
-        Ok(self.extract_named_terminal_rule(expr, prefix))
-    }
-
     fn extract_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
         if Self::is_trivial_expr(&expr) {
             return expr;
@@ -2772,35 +2728,35 @@ impl SchemaCtx {
                     ));
                 }
             }
-            let mut pattern_property_pairs = Vec::new();
-            if let Some(pp) = pattern_properties {
-                if pp.len() == 1 {
-                    let (pattern, value_schema) = pp.iter().next().unwrap();
-                    pattern_property_pairs.push((
-                        self.build_pattern_key_colon_terminal(pattern, "PP_KEY_COLON"),
-                        value_schema.clone(),
-                    ));
-                }
-            }
             let mut additional_schema = match additional_properties {
                 Some(Value::Bool(false)) => None,
                 Some(Value::Object(map)) => Some(Value::Object(map.clone())),
                 _ => Some(serde_json::json!({})),
             };
+            let mut additional_key_colon_expr = None;
+            if additional_schema.is_none() {
+                if let Some(pp) = pattern_properties {
+                    if pp.len() == 1 {
+                        let (pattern, value_schema) = pp.iter().next().unwrap();
+                        additional_key_colon_expr = Some(json_wrapped_key_colon_pattern(pattern));
+                        additional_schema = Some(value_schema.clone());
+                    }
+                }
+            }
             if additional_schema
                 .as_ref()
                 .map(|schema| self.is_certainly_unsatisfiable(schema))
                 .unwrap_or(false)
             {
                 additional_schema = None;
+                additional_key_colon_expr = None;
             }
             return self.build_ordered_properties_object_expr(
                 properties,
                 &required_list,
                 &required_keys,
-                pattern_property_pairs,
                 additional_schema,
-                property_names,
+                additional_key_colon_expr,
             );
         }
 
@@ -2822,18 +2778,15 @@ impl SchemaCtx {
 
         // No defined properties but typed additionalProperties — build an
         // AP-only object that constrains value types.
-        if pattern_properties.is_none() {
-            if let Some(Value::Object(map)) = additional_properties {
+        if let Some(Value::Object(map)) = additional_properties {
             let empty_props = serde_json::Map::new();
             return self.build_ordered_properties_object_expr(
                 &empty_props,
                 &[],
                 &BTreeSet::new(),
-                Vec::new(),
                 Some(Value::Object(map.clone())),
-                property_names,
+                None,
             );
-            }
         }
 
         if properties.is_none()
@@ -2843,27 +2796,42 @@ impl SchemaCtx {
                 .and_then(|patterns| patterns.iter().next())
                 .ok_or_else(|| GlrMaskError::GrammarParse("invalid patternProperties".into()))?;
             let match_all_pattern = pattern == "^.*$" || pattern == ".*";
-            let matched_property_names = serde_json::json!({"pattern": pattern});
+            let property_names = serde_json::json!({"pattern": pattern});
             let value_expr = self.convert_schema(value_schema)?;
             if matches!(additional_properties, Some(Value::Bool(false))) || match_all_pattern {
-                return self.build_pattern_named_object_expr(&matched_property_names, value_expr);
+                return self.build_pattern_named_object_expr(&property_names, value_expr);
             }
 
-            let unmatched_key_terminal = self.build_scoped_key_colon_terminal(
-                property_names,
-                "PP_AP_KEY_COLON",
-            )?;
-            let additional_value_expr = match additional_properties {
-                Some(Value::Object(map)) => self.convert_schema(&Value::Object(map.clone()))?,
-                Some(Value::Bool(true)) | None => self.json_value_ref(),
-                _ => return Ok(self.json_object_ref()),
-            };
-            return self.build_mixed_pattern_named_object_expr(
-                &matched_property_names,
-                value_expr,
-                unmatched_key_terminal,
-                additional_value_expr,
-            );
+            if let Some((literal_prefix, exact)) = simple_anchored_literal_pattern(pattern) {
+                if !literal_prefix.is_empty() {
+                    let unmatched_key_expr = if exact {
+                        let rule_prefix = self.fresh_rule_name("PP_KEY_EXACT");
+                        self.build_complement_key_expr(
+                            &[literal_prefix],
+                            &rule_prefix,
+                        )
+                    } else {
+                        let rule_prefix = self.fresh_rule_name("PP_KEY_PREFIX");
+                        self.build_excluding_prefix_key_expr(
+                            &literal_prefix,
+                            &rule_prefix,
+                        )
+                    };
+                    let additional_value_expr = match additional_properties {
+                        Some(Value::Object(map)) => self.convert_schema(&Value::Object(map.clone()))?,
+                        Some(Value::Bool(true)) | None => self.json_value_ref(),
+                        _ => return Ok(self.json_object_ref()),
+                    };
+                    return self.build_mixed_pattern_named_object_expr(
+                        &property_names,
+                        value_expr,
+                        unmatched_key_expr,
+                        additional_value_expr,
+                    );
+                }
+            }
+
+            return Ok(self.json_object_ref());
         }
 
         if let Some(property_names) = property_names {
@@ -2887,16 +2855,6 @@ impl SchemaCtx {
             base_index += 1;
         };
         self.object_rule_counter = base_index + 1;
-
-        let required_key_terminals: Vec<String> = required_list
-            .iter()
-            .map(|key| {
-                self.build_literal_key_colon_terminal(
-                    key,
-                    &format!("{}_REQ_KEY_COLON", base_name.to_uppercase()),
-                )
-            })
-            .collect();
 
         let full_mask: Vec<usize> = (0..required_list.len()).collect();
         let mut masks = Vec::<Vec<usize>>::new();
@@ -2923,18 +2881,10 @@ impl SchemaCtx {
 
         let extra_pair_expr = if let Some(schema) = additional_properties_schema {
             let extra_value_expr = self.convert_schema(&schema)?;
-            let extra_key_terminal = self.build_scoped_key_colon_terminal(
-                None,
-                &format!("{}_CK_KEY_COLON", base_name.to_uppercase()),
-            )?;
-            for required_key_terminal in &required_key_terminals {
-                self.insert_terminal_exclusion(
-                    extra_key_terminal.clone(),
-                    required_key_terminal.clone(),
-                );
-            }
+            let ck_prefix = format!("{}_CK", base_name.to_uppercase());
+            let extra_key_expr = self.build_complement_key_expr(required_list, &ck_prefix);
             Some(sequence_or_single(vec![
-                GrammarExpr::Ref(extra_key_terminal),
+                self.json_key_with_separator_expr(extra_key_expr, &format!("{ck_prefix}_KEY_COLON")),
                 extra_value_expr,
             ]))
         } else {
@@ -2949,8 +2899,9 @@ impl SchemaCtx {
             let mut c_alts = Vec::new();
 
             for &item in &mask {
+                let key = &required_list[item];
                 let pair_expr = sequence_or_single(vec![
-                    GrammarExpr::Ref(required_key_terminals[item].clone()),
+                    self.json_key_colon_literal(key),
                     self.json_value_ref(),
                 ]);
                 let next_mask = mask
@@ -3149,7 +3100,6 @@ impl SchemaCtx {
                     &allowed_properties,
                     &option_required,
                     &option_required_keys,
-                    Vec::new(),
                     None,
                     None,
                 )?);
@@ -3164,7 +3114,6 @@ impl SchemaCtx {
                     &required_only,
                     required_list,
                     required_keys,
-                    Vec::new(),
                     None,
                     None,
                 )?);
@@ -3183,7 +3132,6 @@ impl SchemaCtx {
                 properties,
                 &option_required,
                 &option_required_keys,
-                Vec::new(),
                 None,
                 None,
             )?);
@@ -3196,23 +3144,17 @@ impl SchemaCtx {
         properties: &Map<String, Value>,
         required_list: &[String],
         required_keys: &BTreeSet<String>,
-        pattern_property_pairs: Vec<(String, Value)>,
         additional_properties_schema: Option<Value>,
-        additional_property_names: Option<&Value>,
+        additional_key_colon_expr: Option<GrammarExpr>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        let mut key_terminals = std::collections::BTreeMap::<String, String>::new();
-        for key in properties.keys() {
-            key_terminals
-                .entry(key.clone())
-                .or_insert_with(|| self.build_literal_key_colon_terminal(key, "OBJ_KEY_COLON"));
-        }
-        for key in required_list {
-            key_terminals
-                .entry(key.clone())
-                .or_insert_with(|| self.build_literal_key_colon_terminal(key, "OBJ_KEY_COLON"));
-        }
-
         let mut ordered = Vec::new();
+        let mut known_property_keys: Vec<String> = properties.keys().cloned().collect();
+        known_property_keys.extend(
+            required_list
+                .iter()
+                .filter(|key| !properties.contains_key(*key))
+                .cloned(),
+        );
         for (key, subschema) in properties {
             if self.is_certainly_unsatisfiable(subschema) {
                 if required_keys.contains(key) {
@@ -3220,69 +3162,25 @@ impl SchemaCtx {
                 }
                 continue;
             }
-            ordered.push((
-                key.clone(),
-                subschema.clone(),
-                required_keys.contains(key),
-                key_terminals
-                    .get(key)
-                    .cloned()
-                    .expect("explicit property key terminal should exist"),
-            ));
+            ordered.push((key.clone(), subschema.clone(), required_keys.contains(key)));
         }
         for key in required_list {
             if !properties.contains_key(key) {
-                ordered.push((
-                    key.clone(),
-                    serde_json::json!({}),
-                    true,
-                    key_terminals
-                        .get(key)
-                        .cloned()
-                        .expect("required property key terminal should exist"),
-                ));
+                ordered.push((key.clone(), serde_json::json!({}), true));
             }
         }
 
-        let mut extra_pair_exprs = Vec::new();
-        for (key_terminal_name, schema) in pattern_property_pairs.iter().cloned() {
-            if self.is_certainly_unsatisfiable(&schema) {
-                continue;
-            }
-            let value_expr = self.convert_schema(&schema)?;
-            extra_pair_exprs.push(sequence_or_single(vec![
-                GrammarExpr::Ref(key_terminal_name),
-                value_expr,
-            ]));
-        }
+        let additional_properties_schema = if additional_properties_schema
+            .as_ref()
+            .map(|schema| self.is_certainly_unsatisfiable(schema))
+            .unwrap_or(false)
+        {
+            None
+        } else {
+            additional_properties_schema
+        };
 
-        if let Some(schema) = additional_properties_schema {
-            if !self.is_certainly_unsatisfiable(&schema) {
-                let additional_key_terminal = self.build_scoped_key_colon_terminal(
-                    additional_property_names,
-                    "AP_KEY_COLON",
-                )?;
-                for key_terminal_name in key_terminals.values() {
-                    self.insert_terminal_exclusion(
-                        additional_key_terminal.clone(),
-                        key_terminal_name.clone(),
-                    );
-                }
-                for (key_terminal_name, _schema) in &pattern_property_pairs {
-                    self.insert_terminal_exclusion(
-                        additional_key_terminal.clone(),
-                        key_terminal_name.clone(),
-                    );
-                }
-                let value_expr = self.convert_schema(&schema)?;
-                extra_pair_exprs.push(sequence_or_single(vec![
-                    GrammarExpr::Ref(additional_key_terminal),
-                    value_expr,
-                ]));
-            }
-        }
-
-        if ordered.is_empty() && extra_pair_exprs.is_empty() {
+        if ordered.is_empty() && additional_properties_schema.is_none() {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
@@ -3296,49 +3194,56 @@ impl SchemaCtx {
         };
         self.object_rule_counter = base_index + 1;
 
-        let (term_nc, term_c) = if extra_pair_exprs.is_empty() {
-            let term_nc = format!("{base_name}_{}_nc", ordered.len());
-            let term_c = format!("{base_name}_{}_c", ordered.len());
-            self.insert_rule(term_nc.clone(), empty_expr());
-            self.insert_rule(term_c.clone(), empty_expr());
-            (term_nc, term_c)
-        } else {
+        let (term_nc, term_c) = if let Some(schema) = additional_properties_schema {
+            let ck_prefix = format!("{}_CK", base_name.to_uppercase());
+            let ap_key_colon = if let Some(key_colon_expr) = additional_key_colon_expr {
+                // Use the caller-supplied key+colon expression (e.g. pattern key
+                // from patternProperties) instead of the complement key.
+                key_colon_expr
+            } else {
+                // Collect known property keys for complement trie
+                let known_keys = known_property_keys;
+                // Build complement key that excludes known property names
+                let complement_key = self.build_complement_key_expr(&known_keys, &ck_prefix);
+                // complement_key_colon = complement_key ": "
+                self.json_key_with_separator_expr(
+                    complement_key,
+                    &format!("{ck_prefix}_KEY_COLON"),
+                )
+            };
+
             let term_nc = format!("{base_name}_ap_nc");
             let term_c = format!("{base_name}_ap_c");
+            let value_expr = self.convert_schema(&schema)?;
             self.insert_rule(
                 term_nc.clone(),
                 choice_or_single(vec![
-                    choice_or_single(
-                        extra_pair_exprs
-                            .iter()
-                            .cloned()
-                            .map(|pair_expr| {
-                                sequence_or_single(vec![pair_expr, GrammarExpr::Ref(term_c.clone())])
-                            })
-                            .collect(),
-                    ),
+                    sequence_or_single(vec![
+                        ap_key_colon.clone(),
+                        value_expr.clone(),
+                        GrammarExpr::Ref(term_c.clone()),
+                    ]),
                     empty_expr(),
                 ]),
             );
             self.insert_rule(
                 term_c.clone(),
                 choice_or_single(vec![
-                    choice_or_single(
-                        extra_pair_exprs
-                            .iter()
-                            .cloned()
-                            .map(|pair_expr| {
-                                sequence_or_single(vec![
-                                    self.json_item_separator_expr(),
-                                    pair_expr,
-                                    GrammarExpr::Ref(term_c.clone()),
-                                ])
-                            })
-                            .collect(),
-                    ),
+                    sequence_or_single(vec![
+                        self.json_item_separator_expr(),
+                        ap_key_colon,
+                        value_expr,
+                        GrammarExpr::Ref(term_c.clone()),
+                    ]),
                     empty_expr(),
                 ]),
             );
+            (term_nc, term_c)
+        } else {
+            let term_nc = format!("{base_name}_{}_nc", ordered.len());
+            let term_c = format!("{base_name}_{}_c", ordered.len());
+            self.insert_rule(term_nc.clone(), empty_expr());
+            self.insert_rule(term_c.clone(), empty_expr());
             (term_nc, term_c)
         };
 
@@ -3375,16 +3280,13 @@ impl SchemaCtx {
     fn build_object_tree(
         &mut self,
         base_name: &str,
-        items: &[(String, Value, bool, String)],
+        items: &[(String, Value, bool)],
         counter: &mut usize,
     ) -> Result<(GrammarExpr, bool), GlrMaskError> {
         if items.len() == 1 {
-            let (_key, subschema, is_required, key_terminal_name) = &items[0];
+            let (key, subschema, is_required) = &items[0];
             let value_expr = self.convert_schema(subschema)?;
-            let kv_expr = sequence_or_single(vec![
-                GrammarExpr::Ref(key_terminal_name.clone()),
-                value_expr,
-            ]);
+            let kv_expr = sequence_or_single(vec![self.json_key_colon_literal(key), value_expr]);
             if *is_required {
                 return Ok((kv_expr, false));
             }
@@ -3469,21 +3371,16 @@ impl SchemaCtx {
         &mut self,
         property_names: &Value,
         matched_value_expr: GrammarExpr,
-        unmatched_key_terminal: String,
+        unmatched_key_expr: GrammarExpr,
         unmatched_value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
-        let matched_key_terminal = self.build_pattern_key_colon_terminal(pattern, "PP_KEY_COLON");
-        self.insert_terminal_exclusion(
-            unmatched_key_terminal.clone(),
-            matched_key_terminal.clone(),
-        );
         let matched_pair = sequence_or_single(vec![
-            GrammarExpr::Ref(matched_key_terminal),
+            json_wrapped_key_colon_pattern(pattern),
             matched_value_expr,
         ]);
         let unmatched_pair = sequence_or_single(vec![
-            GrammarExpr::Ref(unmatched_key_terminal),
+            self.json_key_with_separator_expr(unmatched_key_expr, "PP_KEY_COLON"),
             unmatched_value_expr,
         ]);
         let pair = choice_or_single(vec![matched_pair, unmatched_pair]);
@@ -4599,49 +4496,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pattern_properties_take_precedence_over_additional_properties() {
-        let schema = r#"{
-            "type": "object",
-            "patternProperties": {
-                "^mode": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                }
-            },
-            "additionalProperties": {"type": "string"}
-        }"#;
-        assert!(accepts_sequence(schema, &[b"{\"mode1\": [\"a\"]}"]));
-        assert!(!accepts_sequence(schema, &[b"{\"mode1\": \"a\"}"]));
-        assert!(accepts_sequence(schema, &[b"{\"other\": \"a\"}"]));
-        assert!(!accepts_sequence(schema, &[b"{\"other\": [\"a\"]}"]));
-    }
-
-    #[test]
-    fn test_properties_and_pattern_properties_do_not_fall_through_to_additional_properties() {
-        let schema = r#"{
-            "type": "object",
-            "properties": {
-                "default": {"type": "string"}
-            },
-            "patternProperties": {
-                "^mode": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                }
-            },
-            "additionalProperties": {"type": "string"}
-        }"#;
-        assert!(accepts_sequence(
-            schema,
-            &[b"{\"default\": \"x\", \"mode1\": [\"a\"], \"other\": \"y\"}"]
-        ));
-        assert!(!accepts_sequence(
-            schema,
-            &[b"{\"default\": \"x\", \"mode1\": \"y\"}"]
-        ));
-    }
-
-    #[test]
     fn test_fixed_object_keys_pack_native_separator_literal() {
         let schema: Value = serde_json::from_str(r#"{
             "type": "object",
@@ -4692,8 +4546,8 @@ mod tests {
             }
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
+        assert!(named_grammar_has_literal(&grammar, b": "));
         assert!(!named_grammar_has_split_separator(&grammar, b":", b" "));
-        assert!(!named_nonterminal_has_ref_then_literal(&grammar, b": "));
     }
 
     #[test]
