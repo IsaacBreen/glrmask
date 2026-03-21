@@ -4529,8 +4529,7 @@ mod tests {
                     "properties": {
                         "destination": {"type": "string"},
                         "mode": {"type": "string"}
-                    },
-                    "required": ["destination", "mode"]
+                    }
                 }
             }
         }"#;
