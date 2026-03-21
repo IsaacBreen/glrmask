@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::analysis::{EOF, AnalyzedGrammar};
+use super::analysis::{AnalyzedGrammar, EOF};
 use crate::compiler::grammar_def::{NonterminalID, Rule, Symbol, TerminalID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -36,15 +36,14 @@ pub struct GLRTable {
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         let use_lr1 = std::env::var("GLRMASK_LR1").unwrap_or_else(|_| "1".to_string()) != "0";
-        let mut table = if use_lr1 {
+
+        if use_lr1 {
             let (item_sets, transitions) = build_lr1_item_sets(grammar);
-            build_lr1_table(grammar, &item_sets, &transitions)
+            build_ielr_table(grammar, &item_sets, &transitions)
         } else {
             let (item_sets, transitions) = build_lr0_item_sets(grammar);
             build_slr1_table(grammar, &item_sets, &transitions)
-        };
-        table.merge_identical_rows();
-        table
+        }
     }
 
     pub fn action(&self, state: u32, terminal: TerminalID) -> Option<&Action> {
@@ -57,89 +56,6 @@ impl GLRTable {
         self.goto
             .get(state as usize)
             .and_then(|by_nt| by_nt.get(&nt).copied())
-    }
-
-    /// Merge states with identical (action, goto) rows.
-    /// Iterates until no more merges are possible, since remapping targets
-    /// can reveal new equivalences.
-    fn merge_identical_rows(&mut self) {
-        fn remap_action(action: &mut Action, mapping: &[u32]) {
-            match action {
-                Action::Shift(target) => *target = mapping[*target as usize],
-                Action::Split { shift, .. } => {
-                    if let Some(target) = shift {
-                        *target = mapping[*target as usize];
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        loop {
-            // Build signature -> first representative state
-            let mut sig_to_rep: FxHashMap<String, u32> = FxHashMap::default();
-            let mut remap: Vec<u32> = (0..self.num_states).collect();
-            let mut changed = false;
-
-            for state in 0..self.num_states as usize {
-                let sig = format!(
-                    "{:?}|{:?}",
-                    self.action[state], self.goto[state]
-                );
-                let rep = *sig_to_rep.entry(sig).or_insert(state as u32);
-                if rep != state as u32 {
-                    remap[state] = rep;
-                    changed = true;
-                }
-            }
-
-            if !changed {
-                break;
-            }
-
-            // Build old_to_new: compose remap (merge) with sequential renumbering
-            let mut new_id = 0u32;
-            let mut rep_to_new: FxHashMap<u32, u32> = FxHashMap::default();
-            let mut kept: Vec<u32> = Vec::new();
-            for state in 0..self.num_states as usize {
-                if remap[state] == state as u32 {
-                    rep_to_new.insert(state as u32, new_id);
-                    kept.push(state as u32);
-                    new_id += 1;
-                }
-            }
-            let mapping: Vec<u32> = (0..self.num_states as usize)
-                .map(|s| rep_to_new[&remap[s]])
-                .collect();
-
-            // Extract representative rows and remap all state references
-            let new_action: Vec<_> = kept
-                .iter()
-                .map(|&s| {
-                    self.action[s as usize]
-                        .iter()
-                        .map(|(&tid, action)| {
-                            let mut a = action.clone();
-                            remap_action(&mut a, &mapping);
-                            (tid, a)
-                        })
-                        .collect()
-                })
-                .collect();
-            let new_goto: Vec<_> = kept
-                .iter()
-                .map(|&s| {
-                    self.goto[s as usize]
-                        .iter()
-                        .map(|(&nt, &target)| (nt, mapping[target as usize]))
-                        .collect()
-                })
-                .collect();
-
-            self.action = new_action;
-            self.goto = new_goto;
-            self.num_states = kept.len() as u32;
-        }
     }
 }
 
@@ -166,7 +82,6 @@ fn closure(items: &BTreeSet<Item>, rules: &[Rule]) -> BTreeSet<Item> {
 
     while let Some(item) = queue.pop_front() {
         if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-            
             for (i, r) in rules.iter().enumerate() {
                 if r.lhs == *nt {
                     let new_item = Item::new(i as u32, 0);
@@ -190,12 +105,14 @@ fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<It
     closure(&kernel, rules)
 }
 
-fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
+fn build_lr0_item_sets(
+    grammar: &AnalyzedGrammar,
+) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
     let rules = &grammar.rules;
 
     let initial = {
         let mut s = BTreeSet::new();
-        s.insert(Item::new(0, 0)); 
+        s.insert(Item::new(0, 0));
         closure(&s, rules)
     };
 
@@ -208,7 +125,6 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
     queue.push_back(0);
 
     while let Some(sid) = queue.pop_front() {
-        
         let symbols: BTreeSet<Symbol> = item_sets[sid as usize]
             .iter()
             .filter_map(|item| item.next_symbol(rules).cloned())
@@ -239,50 +155,50 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
     (item_sets, transitions)
 }
 
+#[derive(Default)]
+struct PendingAction {
+    shift: Option<u32>,
+    reduces: Vec<u32>,
+    accept: bool,
+}
+
+impl PendingAction {
+    fn push_shift(&mut self, target: u32) {
+        match self.shift {
+            Some(existing) => debug_assert_eq!(existing, target),
+            None => self.shift = Some(target),
+        }
+    }
+
+    fn push_reduce(&mut self, rule_id: u32) {
+        self.reduces.push(rule_id);
+    }
+
+    fn push_accept(&mut self) {
+        self.accept = true;
+    }
+
+    fn finish(mut self) -> Action {
+        self.reduces.sort_unstable();
+        self.reduces.dedup();
+        match (self.shift, self.reduces.len(), self.accept) {
+            (Some(target), 0, false) => Action::Shift(target),
+            (None, 1, false) => Action::Reduce(self.reduces[0]),
+            (None, 0, true) => Action::Accept,
+            (shift, _, accept) => Action::Split {
+                shift,
+                reduces: self.reduces,
+                accept,
+            },
+        }
+    }
+}
+
 fn build_slr1_table(
     grammar: &AnalyzedGrammar,
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GLRTable {
-    #[derive(Default)]
-    struct PendingAction {
-        shift: Option<u32>,
-        reduces: Vec<u32>,
-        accept: bool,
-    }
-
-    impl PendingAction {
-        fn push_shift(&mut self, target: u32) {
-            match self.shift {
-                Some(existing) => debug_assert_eq!(existing, target),
-                None => self.shift = Some(target),
-            }
-        }
-
-        fn push_reduce(&mut self, rule_id: u32) {
-            self.reduces.push(rule_id);
-        }
-
-        fn push_accept(&mut self) {
-            self.accept = true;
-        }
-
-        fn finish(mut self) -> Action {
-            self.reduces.sort_unstable();
-            self.reduces.dedup();
-            match (self.shift, self.reduces.len(), self.accept) {
-                (Some(target), 0, false) => Action::Shift(target),
-                (None, 1, false) => Action::Reduce(self.reduces[0]),
-                (None, 0, true) => Action::Accept,
-                (shift, _, accept) => Action::Split {
-                    shift,
-                    reduces: self.reduces,
-                    accept,
-                },
-            }
-        }
-    }
-
     let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
         .take(item_sets.len())
         .collect::<Vec<_>>();
@@ -344,7 +260,7 @@ fn build_slr1_table(
 }
 
 // ---------------------------------------------------------------------------
-// LR(1) item set construction
+// Canonical LR(1) construction.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -356,7 +272,11 @@ struct LR1Item {
 
 impl LR1Item {
     fn new(rule: u32, dot: u32, lookahead: TerminalID) -> Self {
-        Self { rule, dot, lookahead }
+        Self {
+            rule,
+            dot,
+            lookahead,
+        }
     }
 
     fn next_symbol<'a>(&self, rules: &'a [Rule]) -> Option<&'a Symbol> {
@@ -365,7 +285,7 @@ impl LR1Item {
     }
 }
 
-/// Compute FIRST set for a sequence of symbols followed by a lookahead terminal.
+/// Compute FIRST for a sequence followed by an inherited lookahead terminal.
 fn first_of_sequence(
     symbols: &[Symbol],
     lookahead: TerminalID,
@@ -374,6 +294,7 @@ fn first_of_sequence(
 ) -> BTreeSet<TerminalID> {
     let mut result = BTreeSet::new();
     let mut all_nullable = true;
+
     for sym in symbols {
         match sym {
             Symbol::Terminal(t) => {
@@ -390,16 +311,15 @@ fn first_of_sequence(
             }
         }
     }
+
     if all_nullable {
         result.insert(lookahead);
     }
+
     result
 }
 
-fn lr1_closure(
-    items: &BTreeSet<LR1Item>,
-    grammar: &AnalyzedGrammar,
-) -> BTreeSet<LR1Item> {
+fn lr1_closure(items: &BTreeSet<LR1Item>, grammar: &AnalyzedGrammar) -> BTreeSet<LR1Item> {
     let rules = &grammar.rules;
     let mut result = items.clone();
     let mut queue: VecDeque<LR1Item> = items.iter().copied().collect();
@@ -408,8 +328,8 @@ fn lr1_closure(
         if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
             let rhs = &rules[item.rule as usize].rhs;
             let beta = &rhs[(item.dot as usize + 1)..];
-
-            let lookaheads = first_of_sequence(beta, item.lookahead, &grammar.first, &grammar.nullable);
+            let lookaheads =
+                first_of_sequence(beta, item.lookahead, &grammar.first, &grammar.nullable);
 
             for (i, r) in rules.iter().enumerate() {
                 if r.lhs == *nt {
@@ -423,6 +343,7 @@ fn lr1_closure(
             }
         }
     }
+
     result
 }
 
@@ -496,45 +417,6 @@ fn build_lr1_table(
     item_sets: &[BTreeSet<LR1Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GLRTable {
-    #[derive(Default)]
-    struct PendingAction {
-        shift: Option<u32>,
-        reduces: Vec<u32>,
-        accept: bool,
-    }
-
-    impl PendingAction {
-        fn push_shift(&mut self, target: u32) {
-            match self.shift {
-                Some(existing) => debug_assert_eq!(existing, target),
-                None => self.shift = Some(target),
-            }
-        }
-
-        fn push_reduce(&mut self, rule_id: u32) {
-            self.reduces.push(rule_id);
-        }
-
-        fn push_accept(&mut self) {
-            self.accept = true;
-        }
-
-        fn finish(mut self) -> Action {
-            self.reduces.sort_unstable();
-            self.reduces.dedup();
-            match (self.shift, self.reduces.len(), self.accept) {
-                (Some(target), 0, false) => Action::Shift(target),
-                (None, 1, false) => Action::Reduce(self.reduces[0]),
-                (None, 0, true) => Action::Accept,
-                (shift, _, accept) => Action::Split {
-                    shift,
-                    reduces: self.reduces,
-                    accept,
-                },
-            }
-        }
-    }
-
     let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
         .take(item_sets.len())
         .collect::<Vec<_>>();
@@ -562,11 +444,13 @@ fn build_lr1_table(
             }
 
             if item.rule == 0 {
-                pending[state_id].entry(item.lookahead).or_default().push_accept();
+                pending[state_id]
+                    .entry(item.lookahead)
+                    .or_default()
+                    .push_accept();
                 continue;
             }
 
-            // LR(1): reduce only on the item's specific lookahead
             pending[state_id]
                 .entry(item.lookahead)
                 .or_default()
@@ -594,15 +478,196 @@ fn build_lr1_table(
     }
 }
 
+// ---------------------------------------------------------------------------
+// IELR-style merge.
+//
+// We first build the canonical LR(1) automaton, then merge only states that
+// share the same LR(0) core (isocores). The merge is computed by partition
+// refinement over action/goto behaviour, using the current partition IDs of
+// successor states inside the signature. This preserves the key IELR invariant
+// that states from different LR(0) cores are never collapsed together.
+// ---------------------------------------------------------------------------
+
+fn lr1_core_key(items: &BTreeSet<LR1Item>) -> Vec<Item> {
+    let mut core = BTreeSet::new();
+    for item in items {
+        core.insert(Item::new(item.rule, item.dot));
+    }
+    core.into_iter().collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ActionSig {
+    Shift(u32),
+    Reduce(u32),
+    Split {
+        shift: Option<u32>,
+        reduces: Vec<u32>,
+        accept: bool,
+    },
+    Accept,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RowSignature {
+    core_class: u32,
+    action: Vec<(TerminalID, ActionSig)>,
+    goto: Vec<(NonterminalID, u32)>,
+}
+
+fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
+    match action {
+        Action::Shift(target) => ActionSig::Shift(partition[*target as usize]),
+        Action::Reduce(rule) => ActionSig::Reduce(*rule),
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => ActionSig::Split {
+            shift: shift.map(|target| partition[target as usize]),
+            reduces: reduces.clone(),
+            accept: *accept,
+        },
+        Action::Accept => ActionSig::Accept,
+    }
+}
+
+fn core_classes(core_keys: &[Vec<Item>]) -> Vec<u32> {
+    let mut class_of = vec![0; core_keys.len()];
+    let mut key_to_class: FxHashMap<Vec<Item>, u32> = FxHashMap::default();
+    let mut next = 0u32;
+
+    for (state, key) in core_keys.iter().enumerate() {
+        let class = *key_to_class.entry(key.clone()).or_insert_with(|| {
+            let id = next;
+            next += 1;
+            id
+        });
+        class_of[state] = class;
+    }
+
+    class_of
+}
+
+fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
+    let nstates = table.num_states as usize;
+    let core_class_of = core_classes(core_keys);
+    let mut partition = core_class_of.clone();
+
+    loop {
+        let mut sig_to_part: FxHashMap<RowSignature, u32> = FxHashMap::default();
+        let mut next_partition = vec![0u32; nstates];
+        let mut next_id = 0u32;
+
+        for state in 0..nstates {
+            let action = table.action[state]
+                .iter()
+                .map(|(&terminal, action)| {
+                    (terminal, remap_action_to_partition(action, &partition))
+                })
+                .collect();
+            let goto = table.goto[state]
+                .iter()
+                .map(|(&nt, &target)| (nt, partition[target as usize]))
+                .collect();
+            let signature = RowSignature {
+                core_class: core_class_of[state],
+                action,
+                goto,
+            };
+
+            let class = *sig_to_part.entry(signature).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            next_partition[state] = class;
+        }
+
+        if next_partition == partition {
+            return partition;
+        }
+        partition = next_partition;
+    }
+}
+
+fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTable {
+    let partition = refine_same_core_partition(&table, core_keys);
+    let nstates = table.num_states as usize;
+    let ngroups = partition.iter().copied().max().map(|x| x + 1).unwrap_or(0) as usize;
+
+    let mut representatives = vec![u32::MAX; ngroups];
+    for state in 0..nstates {
+        let group = partition[state] as usize;
+        if representatives[group] == u32::MAX {
+            representatives[group] = state as u32;
+        }
+    }
+
+    let action = representatives
+        .iter()
+        .map(|&rep| {
+            table.action[rep as usize]
+                .iter()
+                .map(|(&terminal, action)| {
+                    let merged_action = match action {
+                        Action::Shift(target) => Action::Shift(partition[*target as usize]),
+                        Action::Reduce(rule) => Action::Reduce(*rule),
+                        Action::Split {
+                            shift,
+                            reduces,
+                            accept,
+                        } => Action::Split {
+                            shift: shift.map(|target| partition[target as usize]),
+                            reduces: reduces.clone(),
+                            accept: *accept,
+                        },
+                        Action::Accept => Action::Accept,
+                    };
+                    (terminal, merged_action)
+                })
+                .collect()
+        })
+        .collect();
+
+    let goto = representatives
+        .iter()
+        .map(|&rep| {
+            table.goto[rep as usize]
+                .iter()
+                .map(|(&nt, &target)| (nt, partition[target as usize]))
+                .collect()
+        })
+        .collect();
+
+    GLRTable {
+        action,
+        goto,
+        num_states: ngroups as u32,
+        num_terminals: table.num_terminals,
+        num_rules: table.num_rules,
+        rules: table.rules,
+    }
+}
+
+fn build_ielr_table(
+    grammar: &AnalyzedGrammar,
+    item_sets: &[BTreeSet<LR1Item>],
+    transitions: &[BTreeMap<Symbol, u32>],
+) -> GLRTable {
+    let canonical = build_lr1_table(grammar, item_sets, transitions);
+    let core_keys = item_sets.iter().map(lr1_core_key).collect::<Vec<_>>();
+    merge_same_core_lr1_states(canonical, &core_keys)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar_def::GrammarDef;
     use crate::compiler::grammar_def::tests::*;
+    use crate::compiler::grammar_def::GrammarDef;
 
     #[test]
     fn test_table_simple_ab() {
-        
         let gdef = simple_ab_grammar();
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
@@ -622,18 +687,16 @@ mod tests {
 
     #[test]
     fn test_table_choice() {
-        
         let gdef = choice_grammar();
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
 
-        assert!(table.action(0, 0).is_some()); 
-        assert!(table.action(0, 1).is_some()); 
+        assert!(table.action(0, 0).is_some());
+        assert!(table.action(0, 1).is_some());
     }
 
     #[test]
     fn test_table_accept() {
-        
         let gdef = GrammarDef {
             rules: vec![Rule {
                 lhs: 0,
@@ -660,7 +723,6 @@ mod tests {
 
     #[test]
     fn test_table_two_nt() {
-        
         let gdef = two_nt_grammar();
         let gg = AnalyzedGrammar::from_grammar_def(&gdef);
         let table = GLRTable::build(&gg);
@@ -670,10 +732,8 @@ mod tests {
 
     #[test]
     fn test_table_ambiguous() {
-        
         let gdef = GrammarDef {
             rules: vec![
-                
                 Rule {
                     lhs: 0,
                     rhs: vec![
