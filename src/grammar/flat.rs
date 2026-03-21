@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,8 @@ pub struct GrammarDef {
     pub nonterminal_names: BTreeMap<NonterminalID, String>,
     #[serde(default)]
     pub terminal_names: BTreeMap<TerminalID, String>,
+    #[serde(default)]
+    pub excludes: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
     #[serde(default)]
     pub ignore_terminal: Option<TerminalID>,
 }

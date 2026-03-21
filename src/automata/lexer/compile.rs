@@ -14,6 +14,58 @@ use super::ast::Expr;
 use super::dfa::DFA;
 use super::nfa::NFA;
 
+fn expand_grouped_dfa(
+    dfa: DFA,
+    terminal_groups: &[Vec<u32>],
+    total_terminals: usize,
+) -> DFA {
+    let is_identity = terminal_groups.len() == total_terminals
+        && terminal_groups
+            .iter()
+            .enumerate()
+            .all(|(index, group)| group.len() == 1 && group[0] as usize == index);
+    if is_identity {
+        return dfa;
+    }
+
+    let mut expanded = DFA::new(dfa.num_states());
+    expanded.ensure_group_capacity(total_terminals);
+
+    for (state_index, state) in dfa.states().iter().enumerate() {
+        let transitions = state
+            .transitions
+            .iter()
+            .map(|(byte, &target)| (byte, target))
+            .collect();
+        expanded.set_transitions_from_sorted_entries(state_index as u32, transitions);
+
+        let mut finalizers = crate::ds::bitset::BitSet::new(total_terminals);
+        for group_id in state.finalizers.iter() {
+            for &terminal_id in &terminal_groups[group_id] {
+                finalizers.set(terminal_id as usize);
+            }
+        }
+
+        let mut future = crate::ds::bitset::BitSet::new(total_terminals);
+        for group_id in dfa.possible_future_group_ids(state_index as u32).iter() {
+            for &terminal_id in &terminal_groups[group_id] {
+                future.set(terminal_id as usize);
+            }
+        }
+
+        expanded.overwrite_state_metadata(state_index as u32, finalizers, future);
+    }
+
+    for (group_id, terminal_ids) in terminal_groups.iter().enumerate() {
+        let u8set = dfa.group_id_to_u8set(group_id as u32).clone();
+        for &terminal_id in terminal_ids {
+            expanded.set_group_u8set(terminal_id, u8set);
+        }
+    }
+
+    expanded
+}
+
 fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
     fn candidate_prefix(expr: &Expr) -> Option<&Expr> {
         match expr {
@@ -338,6 +390,75 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
             phase_started_at.elapsed().as_secs_f64() * 1000.0
         );
     }
+    Regex { dfa }
+}
+
+pub(crate) fn build_regex_grouped(
+    exprs: &[Expr],
+    terminal_groups: &[Vec<u32>],
+    total_terminals: usize,
+) -> Regex {
+    assert_eq!(exprs.len(), terminal_groups.len());
+
+    let profile_enabled = compile_profile_enabled();
+
+    let phase_started_at = std::time::Instant::now();
+    let group_sets: Vec<U8Set> = exprs.iter().map(|expr| expr_u8set(expr)).collect();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] compute_group_sets_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    let mut nfa = build_regex_nfa(exprs);
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] build_regex_nfa_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    nfa.condense_epsilon_sccs();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] condense_epsilon_sccs_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    let mut dfa = nfa.to_dfa();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] determinize_regex_nfa_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    dfa.ensure_group_capacity(group_sets.len());
+    for (group_id, set) in group_sets.into_iter().enumerate() {
+        dfa.set_group_u8set(group_id as u32, set);
+    }
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] assign_group_sets_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let phase_started_at = std::time::Instant::now();
+    let dfa = expand_grouped_dfa(dfa, terminal_groups, total_terminals).minimize();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] minimize_regex_dfa_ms={:.3}",
+            phase_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
     Regex { dfa }
 }
 

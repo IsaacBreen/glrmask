@@ -624,6 +624,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         rules,
         start: output_start,
         ignore: grammar.ignore,
+        terminal_excludes: grammar.terminal_excludes,
     })
 }
 
@@ -744,7 +745,12 @@ impl Parser {
             Some(name)
         };
 
-        Ok(NamedGrammar { rules, start, ignore })
+        Ok(NamedGrammar {
+            rules,
+            start,
+            ignore,
+            terminal_excludes: std::collections::BTreeMap::new(),
+        })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {

@@ -263,7 +263,12 @@ impl Parser {
             .first()
             .map(|r| r.name.clone())
             .ok_or_else(|| GlrMaskError::GrammarParse("empty grammar".into()))?;
-        Ok(NamedGrammar { rules, start, ignore: None })
+        Ok(NamedGrammar {
+            rules,
+            start,
+            ignore: None,
+            terminal_excludes: std::collections::BTreeMap::new(),
+        })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
