@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
 use crate::compiler::grammar_def::TerminalID;
+use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
 pub use super::regex::parse_regex;
@@ -116,8 +117,8 @@ impl Tokenizer {
         self.matched_terminals(state)
     }
 
-    pub fn possible_future_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
-        self.possible_future_terminals_iter(state).collect()
+    pub fn possible_future_terminals(&self, state: u32) -> &BitSet {
+        self.dfa.possible_future_group_ids(state)
     }
 
     pub fn is_end(&self, state: u32) -> bool {
