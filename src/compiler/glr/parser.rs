@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use super::analysis::EOF;
 use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
+use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, LeveledGSSSummary, Merge};
 
 pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
@@ -308,6 +309,34 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
                 | Some(Action::Split { .. })
                 | Some(Action::Accept)
         )
+    })
+}
+
+/// Returns true if any terminal in the given bitset may advance the parser stack,
+/// or if the parser has a Reduce/Accept action on EOF (since reductions may
+/// transition to states that can then shift on future terminals).
+pub(crate) fn stack_may_advance_on_any(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    terminals: &BitSet,
+) -> bool {
+    use crate::compiler::glr::analysis::EOF;
+    stack.peek_values().into_iter().any(|state| {
+        if let Some(actions_for_state) = table.action.get(state as usize) {
+            actions_for_state.keys().any(|&terminal| {
+                let relevant = terminals.contains(terminal as usize) || terminal == EOF;
+                relevant
+                    && matches!(
+                        actions_for_state.get(&terminal),
+                        Some(Action::Shift(_))
+                            | Some(Action::Reduce(_))
+                            | Some(Action::Split { .. })
+                            | Some(Action::Accept)
+                    )
+            })
+        } else {
+            false
+        }
     })
 }
 

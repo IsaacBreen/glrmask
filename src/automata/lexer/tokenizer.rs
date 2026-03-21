@@ -177,7 +177,7 @@ impl Tokenizer {
         self.initial_state()
     }
 
-    pub fn tokens_accessible_from_state(&self, state: u32) -> BTreeSet<TerminalID> {
+    pub fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
         self.possible_future_terminals(state)
     }
 

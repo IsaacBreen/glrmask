@@ -35,7 +35,7 @@ pub struct GLRTable {
 
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
-        let use_lr1 = std::env::var("GLRMASK_LR1").unwrap_or_default() == "1";
+        let use_lr1 = std::env::var("GLRMASK_LR1").unwrap_or_else(|_| "1".to_string()) != "0";
         let mut table = if use_lr1 {
             let (item_sets, transitions) = build_lr1_item_sets(grammar);
             build_lr1_table(grammar, &item_sets, &transitions)

@@ -114,7 +114,7 @@ impl<'a> ConstraintState<'a> {
             match forced_byte {
                 Some(b) => {
                     bytes.push(b);
-                    cursor.commit_bytes(&[b]);
+                    let _ = cursor.commit_bytes(&[b]);
                     if cursor.state.is_empty() {
                         bytes.pop(); // last byte killed the state
                         break;
@@ -513,10 +513,10 @@ mod tests {
         .unwrap();
 
         let mut s = c.start();
-        s.commit_bytes(b"a");
+        s.commit_bytes(b"a").unwrap();
         assert!(!s.is_complete(), "after only 'a' the parse should not be complete");
 
-        s.commit_bytes(b"b");
+        s.commit_bytes(b"b").unwrap();
         let mask = s.mask();
         assert!(s.is_complete(), "after byte-committing 'ab' the shorter branch should be complete");
         assert!(is_token_set(&mask, 3), "EOS must be visible in the mask after completing 'ab' byte by byte");
@@ -676,7 +676,7 @@ mod tests {
         .unwrap();
 
         let mut s = c.start();
-        s.commit_bytes(b"ab");
+        s.commit_bytes(b"ab").unwrap();
         let prefix = s.compute_forced_byte_prefix();
         assert_eq!(prefix, b"cde", "after committing 'ab' the remaining suffix should still be forced");
     }
@@ -694,7 +694,7 @@ mod tests {
         .unwrap();
 
         let mut s = c.start();
-        s.commit_bytes(b"ab");
+        s.commit_bytes(b"ab").unwrap();
         let prefix = s.compute_forced_byte_prefix();
         assert!(prefix.is_empty(), "complete parses should have no further forced prefix");
     }

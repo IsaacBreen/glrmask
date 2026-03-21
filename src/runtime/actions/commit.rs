@@ -6,6 +6,7 @@ use crate::compiler::glr::parser::{
     TerminalsDisallowed,
     advance_stacks_with_metrics,
     stack_may_advance_on,
+    stack_may_advance_on_any,
 };
 use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
@@ -305,13 +306,13 @@ fn commit_bytes_impl(
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
     mut metrics: Option<&mut CommitDebugMetrics>,
-) {
+) -> Result<(), String> {
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.bytes_len = bytes.len();
     }
 
     if bytes.is_empty() {
-        return;
+        return Ok(());
     }
 
     let t_total = metrics
@@ -714,6 +715,19 @@ fn commit_bytes_impl(
         }
     }
     new_overall_state.retain(|_, parser_state| !parser_state.is_empty());
+
+    // Prune entries whose parser stacks cannot advance on any
+    // terminal reachable from the corresponding tokenizer state.
+    new_overall_state.retain(|&tsid, gss| {
+        let future_terminals = constraint.tokenizer.possible_future_terminals(tsid);
+        if future_terminals.is_empty() {
+            // Tokenizer is at end — no future terminals, but the entry
+            // may still hold accept states.  Keep it.
+            return true;
+        }
+        stack_may_advance_on_any(&constraint.table, gss, future_terminals)
+    });
+
     *state = new_overall_state;
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.state_summary_after = summarize_state_map(state);
@@ -721,6 +735,11 @@ fn commit_bytes_impl(
             metrics.total_ns = t_total.elapsed().as_nanos() as u64;
         }
     }
+
+    if state.is_empty() {
+        return Err("commit rejected: no valid parser states remain".to_string());
+    }
+    Ok(())
 }
 
 impl<'a> ConstraintState<'a> {
@@ -743,12 +762,11 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_impl(constraint, &mut self.state, bytes, None);
-        Ok(())
+        commit_bytes_impl(constraint, &mut self.state, bytes, None)
     }
 
-    pub fn commit_bytes(&mut self, bytes: &[u8]) {
-        commit_bytes_impl(self.constraint, &mut self.state, bytes, None);
+    pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        commit_bytes_impl(self.constraint, &mut self.state, bytes, None)
     }
 
     pub fn debug_commit_bytes_metrics(&self, bytes: &[u8]) -> CommitDebugMetrics {
@@ -759,7 +777,7 @@ impl<'a> ConstraintState<'a> {
             state_summary_after: summarize_state_map(&cloned_state),
             ..CommitDebugMetrics::default()
         };
-        commit_bytes_impl(self.constraint, &mut cloned_state, bytes, Some(&mut metrics));
+        let _ = commit_bytes_impl(self.constraint, &mut cloned_state, bytes, Some(&mut metrics));
         if bytes.is_empty() {
             metrics.state_summary_after = metrics.state_summary_before;
         }
@@ -785,6 +803,6 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn process_bytes_raw(&mut self, bytes: &[u8]) {
-        self.commit_bytes(bytes)
+        let _ = self.commit_bytes(bytes);
     }
 }

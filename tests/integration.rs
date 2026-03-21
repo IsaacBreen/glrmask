@@ -625,14 +625,14 @@ fn test_plan_api_commit_bytes() {
     let c = Constraint::from_ebnf(r#"start ::= "x" "y""#, &vocab).unwrap();
     let mut s = c.start();
 
-    // commit_bytes is infallible and processes raw bytes directly.
-    s.commit_bytes(b"x");
+    // commit_bytes processes raw bytes directly.
+    s.commit_bytes(b"x").unwrap();
     let mask = s.mask();
     // After "x", only "y" (token 1) is allowed.
     assert!((mask[0] >> 0) & 1 == 0, "token 0 ('x') must not be set after 'x'");
     assert!((mask[0] >> 1) & 1 == 1, "token 1 ('y') must be set after 'x'");
 
-    s.commit_bytes(b"y");
+    s.commit_bytes(b"y").unwrap();
     assert!(s.is_finished());
 }
 
@@ -646,7 +646,7 @@ fn test_plan_api_commit_tokens() {
     let c = Constraint::from_ebnf(r#"start ::= "a" "b" "c""#, &vocab).unwrap();
     let mut s = c.start();
 
-    s.commit_tokens(&[0, 1, 2]);
+    s.commit_tokens(&[0, 1, 2]).unwrap();
     assert!(s.is_finished());
 }
 
@@ -667,7 +667,7 @@ fn test_plan_api_force_deterministic() {
 
     // Committing the forced tokens reaches the finished state.
     let mut s2 = c.start();
-    s2.commit_tokens(&forced);
+    s2.commit_tokens(&forced).unwrap();
     assert!(s2.is_finished());
 }
 
@@ -1277,7 +1277,7 @@ fn test_ported_js_like_mask_after_commit_bytes() {
     let mut s = c.start();
 
     // Advance the parser by raw bytes "a" — completes the 'a' branch of first x.
-    s.commit_bytes(b"a");
+    s.commit_bytes(b"a").unwrap();
 
     let mask = s.mask();
     // From here ';'? (opt) then second x then '$'.
@@ -1308,7 +1308,7 @@ fn test_ported_js_like_mask_minimized() {
     .unwrap();
     let mut s = c.start();
 
-    s.commit_bytes(b"X"); // first unary_expression 'X' branch
+    s.commit_bytes(b"X").unwrap(); // first unary_expression 'X' branch
 
     let mask = s.mask();
     // After 'X': need ';'? (opt) then second unary_expression ('!' or 'X') then '$'.
@@ -1389,7 +1389,7 @@ fn test_ported_right_recursive_item_bug() {
     .unwrap();
     let mut s = c.start();
 
-    s.commit_bytes(b"{1:2,3:4,5:6");
+    s.commit_bytes(b"{1:2,3:4,5:6").unwrap();
 
     let mask = s.mask();
     assert!(
@@ -1697,7 +1697,7 @@ fn test_ported_span_token_in_mask() {
     let vocab = Vocab::new(vec![(0u32, b":a".to_vec())], None);
     let c = Constraint::from_lark(lark, &vocab).unwrap();
     let mut s = c.start();
-    s.commit_bytes(b"a");
+    s.commit_bytes(b"a").unwrap();
     let mask = s.mask();
     assert!(token_allowed(&mask, 0), "span token ':a' must be in mask after commit_bytes('a')");
 }
@@ -1731,7 +1731,7 @@ QUOTE: "\""
 
     // Test via commit_bytes() path
     let mut s2 = c.start();
-    s2.commit_bytes(b"{\"");
+    s2.commit_bytes(b"{\"").unwrap();
     let mask2 = s2.mask();
     assert!(token_allowed(&mask2, 1), "span token must be in mask after commit_bytes(b'{{\\\"')");
 }
@@ -1748,7 +1748,7 @@ string ::= '"' '"'"#,
     )
     .unwrap();
     let mut s = c.start();
-    s.commit_bytes(b"\"");
+    s.commit_bytes(b"\"").unwrap();
     let mask = s.mask();
     assert!(
         token_allowed(&mask, 0),
@@ -1879,7 +1879,7 @@ I ::= 'i'"#,
     );
 
     let mut s2 = c.start();
-    s2.commit_bytes(b"i");
+    s2.commit_bytes(b"i").unwrap();
     let mask2 = s2.mask();
     // After "i": grammar satisfied (e = t = I). '+' would extend via e ::= e '+' | t.
     // Old system: {0}. New system: {} if completability-checks that 'i+' cannot be completed
@@ -2362,7 +2362,7 @@ fn test_ported_nullable_string_property_allows_quote_comma_quote_boundary_token(
 
     let prefix = b"{\"affiliation\":\"Example Store\",\"couponCode\":\"SUMMER";
     let mut s = c.start();
-    s.commit_bytes(prefix);
+    s.commit_bytes(prefix).unwrap();
 
     let mask = s.mask();
     assert!(
@@ -2379,7 +2379,7 @@ fn test_ported_nullable_string_helper_rule_variant() {
 
     let prefix = b"{\"affiliation\":\"Example Store\",\"couponCode\":\"SUMMER";
     let mut s = c.start();
-    s.commit_bytes(prefix);
+    s.commit_bytes(prefix).unwrap();
 
     let mask = s.mask();
     assert!(
@@ -2396,7 +2396,7 @@ fn test_ported_nullable_string_no_alternation_works() {
 
     let prefix = b"{\"affiliation\":\"Example Store\",\"couponCode\":\"SUMMER";
     let mut s = c.start();
-    s.commit_bytes(prefix);
+    s.commit_bytes(prefix).unwrap();
 
     let mask = s.mask();
     assert!(
@@ -2421,7 +2421,7 @@ fn test_ported_github_easy_o63377_false_positive_a() {
     .unwrap();
 
     let mut s = c.start();
-    s.commit_bytes(b"aa");
+    s.commit_bytes(b"aa").unwrap();
 
     let mask = s.mask();
     assert!(

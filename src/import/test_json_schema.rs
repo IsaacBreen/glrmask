@@ -1022,7 +1022,7 @@ fn test_date_or_null_schema_rejects_empty_string_span_token() {
     let c = Constraint::from_json_schema(schema, &vocab)
         .expect("date-or-null schema should compile");
     let mut state = c.start();
-    state.commit_bytes(br#"{"start_date":"#);
+    state.commit_bytes(br#"{"start_date":"#).unwrap();
     let mask = state.mask();
     assert!(
         !token_allowed(&mask, 13538),
@@ -1047,7 +1047,7 @@ fn test_pattern_with_min_length_rejects_empty_string_span_token() {
     let c = Constraint::from_json_schema(schema, &vocab)
         .expect("pattern+minLength schema should compile");
     let mut state = c.start();
-    state.commit_bytes(br#"{"question":"#);
+    state.commit_bytes(br#"{"question":"#).unwrap();
     let mask = state.mask();
     assert!(
         !token_allowed(&mask, 13538),
@@ -1072,7 +1072,7 @@ fn test_group_wrapped_anchored_pattern_rejects_leading_space() {
     let c = Constraint::from_json_schema(schema, &vocab)
         .expect("group-wrapped anchored pattern schema should compile");
     let mut state = c.start();
-    state.commit_bytes(br#"{"question": ""#);
+    state.commit_bytes(br#"{"question": ""#).unwrap();
     let mask = state.mask();
     assert!(
         !token_allowed(&mask, b' ' as usize),

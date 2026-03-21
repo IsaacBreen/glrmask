@@ -606,9 +606,12 @@ impl PyConstraintState {
             })
     }
 
-    fn commit_bytes(&mut self, data: &[u8]) {
+    fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| state.commit_bytes(data));
+            .with_dependent_mut(|_owner, state| {
+                state.commit_bytes(data)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+            })
     }
 
     fn force(&self) -> Vec<u32> {
