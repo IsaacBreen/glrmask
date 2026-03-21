@@ -19,6 +19,10 @@ pub enum GrammarExpr {
     Ref(String),
     Sequence(Vec<GrammarExpr>),
     Choice(Vec<GrammarExpr>),
+    Exclude {
+        expr: Box<GrammarExpr>,
+        exclude: Box<GrammarExpr>,
+    },
     Optional(Box<GrammarExpr>),
     Repeat(Box<GrammarExpr>),
     RepeatOne(Box<GrammarExpr>),
@@ -386,6 +390,12 @@ impl Lowerer {
                 // assume utf8 true for raw regex from lark/ebnf
                 Symbol::Terminal(self.terminal_id(pattern, pattern, true))
             }
+            GrammarExpr::Exclude { .. } => {
+                return Err(GlrMaskError::GrammarParse(
+                    "GrammarExpr::Exclude must be extracted into a terminal rule before lowering"
+                        .into(),
+                ));
+            }
             GrammarExpr::AnyByte => {
                 Symbol::Terminal(self.terminal_id(".", ".", false))
             }
@@ -451,6 +461,10 @@ fn grammar_expr_to_expr(
                 Expr::Choice(exprs)
             }
         }
+        GrammarExpr::Exclude { expr, exclude } => Expr::Exclude {
+            expr: Box::new(grammar_expr_to_expr(expr, terminal_bodies, terminal_expr_cache, visiting)?),
+            exclude: Box::new(grammar_expr_to_expr(exclude, terminal_bodies, terminal_expr_cache, visiting)?),
+        },
         GrammarExpr::Optional(inner) => Expr::Repeat {
             expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 0,
@@ -567,6 +581,10 @@ fn promote_expr_literals(
             for option in options.iter_mut() {
                 promote_expr_literals(option, threshold, new_rules, cache, counter);
             }
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            promote_expr_literals(expr, threshold, new_rules, cache, counter);
+            promote_expr_literals(exclude, threshold, new_rules, cache, counter);
         }
         GrammarExpr::Sequence(parts) => {
             for part in parts.iter_mut() {
@@ -722,6 +740,10 @@ mod tests {
 
     fn nt(name: &str, expr: GrammarExpr) -> NamedRule {
         NamedRule { name: name.into(), expr, is_terminal: false }
+    }
+
+    fn term(name: &str, expr: GrammarExpr) -> NamedRule {
+        NamedRule { name: name.into(), expr, is_terminal: true }
     }
 
     fn derivable_terminal_counts(
@@ -981,5 +1003,38 @@ mod tests {
             .collect();
         assert!(terminal_names.contains(&"term1"));
         assert!(terminal_names.contains(&"term2"));
+    }
+
+    #[test]
+    fn test_lower_terminal_exclude_rule_to_expr_exclude() {
+        let g = NamedGrammar {
+            rules: vec![
+                nt("start", GrammarExpr::Ref("ANY_BUT_A".into())),
+                term(
+                    "ANY_BUT_A",
+                    GrammarExpr::Exclude {
+                        expr: Box::new(GrammarExpr::AnyByte),
+                        exclude: Box::new(GrammarExpr::Literal(b"a".to_vec())),
+                    },
+                ),
+            ],
+            start: "start".into(),
+            ignore: None,
+        };
+
+        let gdef = lower(&g).unwrap();
+        let terminal = gdef
+            .terminals
+            .iter()
+            .find(|terminal| gdef.terminal_display_name(terminal.id()) == "ANY_BUT_A")
+            .expect("lowered terminal should exist");
+
+        assert!(matches!(
+            terminal,
+            Terminal::Expr {
+                expr: Expr::Exclude { .. },
+                ..
+            }
+        ));
     }
 }

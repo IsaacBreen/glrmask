@@ -9,6 +9,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::ds::char_transitions::CharTransitions;
@@ -186,5 +188,75 @@ impl DFA {
                 }
             }
         }
+    }
+
+    pub(crate) fn apply_group_exclusions(
+        &mut self,
+        excludes: &BTreeMap<GroupId, BTreeSet<GroupId>>,
+    ) -> bool {
+        let mut changed = false;
+        for state in &mut self.states {
+            if state.finalizers.count_ones() < 2 {
+                continue;
+            }
+
+            let mut to_clear = Vec::new();
+            for (&group_id, blocked_by) in excludes {
+                let group_index = group_id as usize;
+                if !state.finalizers.contains(group_index) {
+                    continue;
+                }
+                if blocked_by
+                    .iter()
+                    .any(|blocked_by_id| state.finalizers.contains(*blocked_by_id as usize))
+                {
+                    to_clear.push(group_index);
+                }
+            }
+
+            for group_index in to_clear {
+                if state.finalizers.contains(group_index) {
+                    state.finalizers.clear(group_index);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn project_groups(&self, num_groups: usize) -> DFA {
+        let mut projected = DFA::new(self.num_states());
+        projected.ensure_group_capacity(num_groups);
+
+        for (state_index, state) in self.states.iter().enumerate() {
+            let transitions = state
+                .transitions
+                .iter()
+                .map(|(byte, &target)| (byte, target))
+                .collect();
+            projected.set_transitions_from_sorted_entries(state_index as u32, transitions);
+
+            let mut finalizers = BitSet::new(num_groups);
+            for group_id in state.finalizers.iter().filter(|group_id| *group_id < num_groups) {
+                finalizers.set(group_id);
+            }
+
+            let mut future = BitSet::new(num_groups);
+            for group_id in state
+                .possible_future_group_ids
+                .iter()
+                .filter(|group_id| *group_id < num_groups)
+            {
+                future.set(group_id);
+            }
+
+            projected.overwrite_state_metadata(state_index as u32, finalizers, future);
+        }
+
+        for group_id in 0..num_groups {
+            projected.set_group_u8set(group_id as u32, self.group_id_to_u8set[group_id]);
+        }
+
+        projected
     }
 }

@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,12 +31,85 @@ fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
     Some((prefix, remainders))
 }
 
+fn expr_contains_exclude(expr: &Expr) -> bool {
+    match expr {
+        Expr::Exclude { .. } => true,
+        Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_contains_exclude),
+        Expr::Repeat { expr, .. } => expr_contains_exclude(expr),
+        Expr::Shared(inner) => expr_contains_exclude(inner),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
+    }
+}
+
+fn split_top_level_exclusions(expr: &Expr) -> (Expr, Vec<Expr>) {
+    match expr {
+        Expr::Exclude { expr, exclude } => {
+            let (base, mut excluded) = split_top_level_exclusions(expr);
+            excluded.push((**exclude).clone());
+            (base, excluded)
+        }
+        Expr::Shared(inner) if matches!(inner.as_ref(), Expr::Exclude { .. }) => {
+            split_top_level_exclusions(inner.as_ref())
+        }
+        _ => (expr.clone(), Vec::new()),
+    }
+}
+
+struct ExclusionCompilePlan {
+    compiled_exprs: Vec<Expr>,
+    exclusions: BTreeMap<u32, BTreeSet<u32>>,
+    visible_groups: usize,
+}
+
+fn build_exclusion_compile_plan(exprs: &[Expr]) -> ExclusionCompilePlan {
+    let visible_groups = exprs.len();
+    let mut compiled_exprs = Vec::with_capacity(visible_groups);
+    let mut deferred_exclusions = Vec::<Vec<Expr>>::with_capacity(visible_groups);
+
+    for expr in exprs {
+        let (base, excluded) = split_top_level_exclusions(expr);
+        assert!(
+            !expr_contains_exclude(&base),
+            "Expr::Exclude is currently only supported at the top level of a terminal expression"
+        );
+        for excluded_expr in &excluded {
+            assert!(
+                !expr_contains_exclude(excluded_expr),
+                "nested Expr::Exclude inside an exclusion branch is not supported"
+            );
+        }
+        compiled_exprs.push(base);
+        deferred_exclusions.push(excluded);
+    }
+
+    let mut exclusions = BTreeMap::<u32, BTreeSet<u32>>::new();
+    let mut next_group = visible_groups as u32;
+    for (group_id, excluded_exprs) in deferred_exclusions.into_iter().enumerate() {
+        if excluded_exprs.is_empty() {
+            continue;
+        }
+        let entry = exclusions.entry(group_id as u32).or_default();
+        for excluded_expr in excluded_exprs {
+            compiled_exprs.push(excluded_expr);
+            entry.insert(next_group);
+            next_group += 1;
+        }
+    }
+
+    ExclusionCompilePlan {
+        compiled_exprs,
+        exclusions,
+        visible_groups,
+    }
+}
+
 fn expr_accepts_empty(expr: &Expr) -> bool {
     match expr {
         Expr::U8Seq(bytes) => bytes.is_empty(),
         Expr::U8Class(_) => false,
         Expr::Seq(parts) => parts.iter().all(expr_accepts_empty),
         Expr::Choice(options) => options.iter().any(expr_accepts_empty),
+        Expr::Exclude { expr, exclude } => expr_accepts_empty(expr) && !expr_accepts_empty(exclude),
         Expr::Repeat { expr: _, min, .. } => *min == 0,
         Expr::Shared(inner) => expr_accepts_empty(inner),
         Expr::Epsilon => true,
@@ -50,6 +123,7 @@ fn expr_u8set(expr: &Expr) -> U8Set {
         Expr::Seq(parts) | Expr::Choice(parts) => parts
             .iter()
             .fold(U8Set::empty(), |acc, part| acc | expr_u8set(part)),
+        Expr::Exclude { expr, .. } => expr_u8set(expr),
         Expr::Repeat { expr, .. } => expr_u8set(expr),
         Expr::Shared(inner) => expr_u8set(inner),
         Expr::Epsilon => U8Set::empty(),
@@ -191,6 +265,9 @@ fn compile_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
                 compile_expr(option, nfa, start, end);
             }
         }
+        Expr::Exclude { .. } => {
+            unreachable!("nested Expr::Exclude must be lowered before NFA compilation")
+        }
         Expr::Repeat { expr, min, max } => {
             match max {
                 Some(max) => {
@@ -277,10 +354,12 @@ impl Expr {
 ///
 /// Each expression's index becomes its group ID in the resulting DFA.
 pub fn build_regex(exprs: &[Expr]) -> Regex {
+    let plan = build_exclusion_compile_plan(exprs);
     let profile_enabled = compile_profile_enabled();
 
     let phase_started_at = std::time::Instant::now();
-    let group_sets: Vec<U8Set> = exprs
+    let group_sets: Vec<U8Set> = plan
+        .compiled_exprs
         .iter()
         .map(|expr| expr_u8set(expr))
         .collect();
@@ -292,7 +371,7 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
     }
 
     let phase_started_at = std::time::Instant::now();
-    let mut nfa = build_regex_nfa(exprs);
+    let mut nfa = build_regex_nfa(&plan.compiled_exprs);
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][tokenizer] build_regex_nfa_ms={:.3}",
@@ -329,6 +408,23 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
             phase_started_at.elapsed().as_secs_f64() * 1000.0
         );
     }
+
+    if !plan.exclusions.is_empty() {
+        let phase_started_at = std::time::Instant::now();
+        let _ = dfa.apply_group_exclusions(&plan.exclusions);
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][tokenizer] apply_exclusions_ms={:.3}",
+                phase_started_at.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    let mut dfa = if plan.visible_groups < plan.compiled_exprs.len() {
+        dfa.project_groups(plan.visible_groups)
+    } else {
+        dfa
+    };
 
     let phase_started_at = std::time::Instant::now();
     let dfa = dfa.minimize();
@@ -371,7 +467,7 @@ pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::regex::{byte, bytes, choice, repeat};
+    use crate::automata::regex::{byte, bytes, choice, class, exclude, repeat};
 
     fn accepts(regex: &Regex, input: &[u8]) -> bool {
         let mut state = 0;
@@ -425,5 +521,25 @@ mod tests {
         assert_eq!(regex.dfa.possible_future_group_ids(0).iter().collect::<Vec<_>>(), [0, 1]);
         assert!(regex.dfa.possible_future_group_ids(1).is_empty());
         assert!(regex.dfa.possible_future_group_ids(2).is_empty());
+    }
+
+    #[test]
+    fn test_top_level_exclude_blocks_same_length_match() {
+        let regex = build_regex(&[exclude(class(U8Set::from_range(0, 255)), byte(b'a'))]);
+
+        assert!(!accepts(&regex, b"a"));
+        assert!(accepts(&regex, b"b"));
+    }
+
+    #[test]
+    fn test_top_level_exclude_chain_blocks_multiple_literals() {
+        let regex = build_regex(&[exclude(
+            exclude(class(U8Set::from_range(0, 255)), byte(b'a')),
+            byte(b'b'),
+        )]);
+
+        assert!(!accepts(&regex, b"a"));
+        assert!(!accepts(&regex, b"b"));
+        assert!(accepts(&regex, b"c"));
     }
 }

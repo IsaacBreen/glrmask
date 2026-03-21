@@ -22,6 +22,10 @@ pub enum Expr {
     U8Class(U8Set),
     Seq(Vec<Expr>),
     Choice(Vec<Expr>),
+    Exclude {
+        expr: Box<Expr>,
+        exclude: Box<Expr>,
+    },
     Repeat {
         expr: Box<Expr>,
         min: usize,
@@ -49,6 +53,13 @@ pub fn seq(exprs: Vec<Expr>) -> Expr {
 
 pub fn choice(exprs: Vec<Expr>) -> Expr {
     Expr::Choice(exprs)
+}
+
+pub fn exclude(expr: impl Into<Expr>, excluded: impl Into<Expr>) -> Expr {
+    Expr::Exclude {
+        expr: Box::new(expr.into()),
+        exclude: Box::new(excluded.into()),
+    }
 }
 
 pub fn repeat(expr: impl Into<Expr>, min: usize, max: Option<usize>) -> Expr {
@@ -82,6 +93,7 @@ impl Expr {
             Expr::U8Class(_) => false,
             Expr::Seq(parts) => parts.iter().all(Expr::is_nullable),
             Expr::Choice(options) => options.iter().any(Expr::is_nullable),
+            Expr::Exclude { expr, exclude } => expr.is_nullable() && !exclude.is_nullable(),
             Expr::Repeat { expr, min, .. } => *min == 0 || expr.is_nullable(),
             Expr::Shared(expr) => expr.is_nullable(),
             Expr::Epsilon => true,
@@ -94,6 +106,10 @@ impl Expr {
             Expr::Choice(options) => {
                 Expr::make_choice(options.into_iter().map(Expr::optimize).collect())
             }
+            Expr::Exclude { expr, exclude } => Expr::Exclude {
+                expr: Box::new(expr.optimize()),
+                exclude: Box::new(exclude.optimize()),
+            },
             Expr::Repeat { expr, min, max } => {
                 let child = expr.optimize();
                 match (min, max) {
@@ -126,6 +142,7 @@ impl Expr {
                 }
                 None
             }
+            Expr::Exclude { .. } => None,
             Expr::Shared(inner) => inner.strip_prefix(prefix),
             _ => None,
         }

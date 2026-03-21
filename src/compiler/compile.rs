@@ -250,6 +250,13 @@ fn expr_to_fixed_bytes(expr: &Expr) -> Option<Vec<u8>> {
             }
             Some(result)
         }
+        Expr::Exclude { expr, exclude } => {
+            let base = expr_to_fixed_bytes(expr)?;
+            match expr_to_fixed_bytes(exclude) {
+                Some(blocked) if blocked == base => None,
+                _ => Some(base),
+            }
+        }
         _ => None,
     }
 }
@@ -1496,6 +1503,33 @@ mod tests {
             .flat_map(|token_ids| token_ids.iter())
             .collect();
         assert_eq!(original_matches, std::collections::BTreeSet::from([10, 20]));
+    }
+
+    #[test]
+    fn test_build_tokenizer_projects_hidden_exclusion_groups() {
+        let grammar = GrammarDef {
+            rules: vec![],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Expr {
+                    id: 1,
+                    expr: Expr::Exclude {
+                        expr: Box::new(Expr::U8Class(crate::ds::u8set::U8Set::from_range(0, 255))),
+                        exclude: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+
+        let tokenizer = build_tokenizer(&grammar);
+
+        assert_eq!(tokenizer.matched_terminals(tokenizer.run(b"a")), std::collections::BTreeSet::from([0]));
+        assert_eq!(tokenizer.matched_terminals(tokenizer.run(b"b")), std::collections::BTreeSet::from([1]));
     }
 
     #[test]

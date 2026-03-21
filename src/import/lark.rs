@@ -452,6 +452,26 @@ fn expand_lark_expr(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(expand_lark_expr(
+                expr,
+                in_terminal_rule,
+                rule_map,
+                terminal_names,
+                parser_names,
+                memo,
+                visiting,
+            )?),
+            exclude: Box::new(expand_lark_expr(
+                exclude,
+                in_terminal_rule,
+                rule_map,
+                terminal_names,
+                parser_names,
+                memo,
+                visiting,
+            )?),
+        },
         GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(expand_lark_expr(
             inner,
             in_terminal_rule,
@@ -540,6 +560,10 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
                     validate_terminal_refs(p, rule_name, terminal_names, rule_map)?;
                 }
                 Ok(())
+            }
+            GrammarExpr::Exclude { expr, exclude } => {
+                validate_terminal_refs(expr, rule_name, terminal_names, rule_map)?;
+                validate_terminal_refs(exclude, rule_name, terminal_names, rule_map)
             }
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)

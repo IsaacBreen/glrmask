@@ -18,6 +18,9 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
             exprs.iter().any(contains_regex_features)
         }
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_regex_features(expr) || contains_regex_features(exclude)
+        }
         GrammarExpr::Optional(inner)
         | GrammarExpr::Repeat(inner)
         | GrammarExpr::RepeatOne(inner)
@@ -117,6 +120,10 @@ impl ChoiceFactorer {
                     .map(|expr| self.factor_expr(expr, context_name))
                     .collect(),
             ),
+            GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+                expr: Box::new(self.factor_expr(*expr, context_name)),
+                exclude: Box::new(self.factor_expr(*exclude, context_name)),
+            },
             GrammarExpr::Optional(expr) => {
                 GrammarExpr::Optional(Box::new(self.factor_expr(*expr, context_name)))
             }
@@ -223,6 +230,10 @@ impl ChoiceFactorer {
                     self.collect_refs_impl(expr, refs);
                 }
             }
+            GrammarExpr::Exclude { expr, exclude } => {
+                self.collect_refs_impl(expr, refs);
+                self.collect_refs_impl(exclude, refs);
+            }
             GrammarExpr::Optional(expr)
             | GrammarExpr::Repeat(expr)
             | GrammarExpr::RepeatOne(expr)
@@ -280,6 +291,7 @@ impl ChoiceFactorer {
         match expr {
             GrammarExpr::Sequence(parts) => parts.len() > 2,
             GrammarExpr::Choice(_) => true,
+            GrammarExpr::Exclude { .. } => true,
             GrammarExpr::Optional(_)
             | GrammarExpr::Repeat(_)
             | GrammarExpr::RepeatOne(_)
@@ -348,6 +360,10 @@ impl ChoiceFactorer {
                 for expr in exprs {
                     Self::collect_refs_static(expr, refs);
                 }
+            }
+            GrammarExpr::Exclude { expr, exclude } => {
+                Self::collect_refs_static(expr, refs);
+                Self::collect_refs_static(exclude, refs);
             }
             GrammarExpr::Optional(expr)
             | GrammarExpr::Repeat(expr)

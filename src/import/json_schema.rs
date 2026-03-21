@@ -517,6 +517,7 @@ fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize,
                 (min_total, max_total)
             }
         }
+        Expr::Exclude { expr, .. } => regex_byte_length_bounds(expr),
         Expr::Repeat { expr, min, max } => {
             let (inner_min, inner_max) = regex_byte_length_bounds(expr);
             let min_total = inner_min.saturating_mul(*min);
@@ -2669,6 +2670,34 @@ impl SchemaCtx {
         )
     }
 
+    fn scoped_key_colon_expr(
+        &self,
+        property_names: Option<&Value>,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        if let Some(property_names) = property_names {
+            Ok(json_wrapped_key_colon_pattern(Self::property_name_pattern(property_names)?))
+        } else {
+            Ok(self.json_key_colon_ref())
+        }
+    }
+
+    fn build_excluding_key_colon_expr(
+        &mut self,
+        base_key_colon_expr: GrammarExpr,
+        excluded_key_colon_exprs: Vec<GrammarExpr>,
+        prefix: &str,
+    ) -> GrammarExpr {
+        let expr = if excluded_key_colon_exprs.is_empty() {
+            base_key_colon_expr
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(base_key_colon_expr),
+                exclude: Box::new(choice_or_single(excluded_key_colon_exprs)),
+            }
+        };
+        self.extract_terminal_rule(expr, prefix)
+    }
+
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
         let properties = schema.get("properties").and_then(Value::as_object);
         let required_list = schema
@@ -2728,35 +2757,35 @@ impl SchemaCtx {
                     ));
                 }
             }
+            let mut pattern_property_pairs = Vec::new();
+            if let Some(pp) = pattern_properties {
+                if pp.len() == 1 {
+                    let (pattern, value_schema) = pp.iter().next().unwrap();
+                    pattern_property_pairs.push((
+                        json_wrapped_key_colon_pattern(pattern),
+                        value_schema.clone(),
+                    ));
+                }
+            }
             let mut additional_schema = match additional_properties {
                 Some(Value::Bool(false)) => None,
                 Some(Value::Object(map)) => Some(Value::Object(map.clone())),
                 _ => Some(serde_json::json!({})),
             };
-            let mut additional_key_colon_expr = None;
-            if additional_schema.is_none() {
-                if let Some(pp) = pattern_properties {
-                    if pp.len() == 1 {
-                        let (pattern, value_schema) = pp.iter().next().unwrap();
-                        additional_key_colon_expr = Some(json_wrapped_key_colon_pattern(pattern));
-                        additional_schema = Some(value_schema.clone());
-                    }
-                }
-            }
             if additional_schema
                 .as_ref()
                 .map(|schema| self.is_certainly_unsatisfiable(schema))
                 .unwrap_or(false)
             {
                 additional_schema = None;
-                additional_key_colon_expr = None;
             }
             return self.build_ordered_properties_object_expr(
                 properties,
                 &required_list,
                 &required_keys,
+                pattern_property_pairs,
                 additional_schema,
-                additional_key_colon_expr,
+                property_names,
             );
         }
 
@@ -2778,15 +2807,18 @@ impl SchemaCtx {
 
         // No defined properties but typed additionalProperties — build an
         // AP-only object that constrains value types.
-        if let Some(Value::Object(map)) = additional_properties {
-            let empty_props = serde_json::Map::new();
-            return self.build_ordered_properties_object_expr(
-                &empty_props,
-                &[],
-                &BTreeSet::new(),
-                Some(Value::Object(map.clone())),
-                None,
-            );
+        if pattern_properties.is_none() {
+            if let Some(Value::Object(map)) = additional_properties {
+                let empty_props = serde_json::Map::new();
+                return self.build_ordered_properties_object_expr(
+                    &empty_props,
+                    &[],
+                    &BTreeSet::new(),
+                    Vec::new(),
+                    Some(Value::Object(map.clone())),
+                    property_names,
+                );
+            }
         }
 
         if properties.is_none()
@@ -2796,42 +2828,23 @@ impl SchemaCtx {
                 .and_then(|patterns| patterns.iter().next())
                 .ok_or_else(|| GlrMaskError::GrammarParse("invalid patternProperties".into()))?;
             let match_all_pattern = pattern == "^.*$" || pattern == ".*";
-            let property_names = serde_json::json!({"pattern": pattern});
+            let matched_property_names = serde_json::json!({"pattern": pattern});
             let value_expr = self.convert_schema(value_schema)?;
             if matches!(additional_properties, Some(Value::Bool(false))) || match_all_pattern {
-                return self.build_pattern_named_object_expr(&property_names, value_expr);
+                return self.build_pattern_named_object_expr(&matched_property_names, value_expr);
             }
 
-            if let Some((literal_prefix, exact)) = simple_anchored_literal_pattern(pattern) {
-                if !literal_prefix.is_empty() {
-                    let unmatched_key_expr = if exact {
-                        let rule_prefix = self.fresh_rule_name("PP_KEY_EXACT");
-                        self.build_complement_key_expr(
-                            &[literal_prefix],
-                            &rule_prefix,
-                        )
-                    } else {
-                        let rule_prefix = self.fresh_rule_name("PP_KEY_PREFIX");
-                        self.build_excluding_prefix_key_expr(
-                            &literal_prefix,
-                            &rule_prefix,
-                        )
-                    };
-                    let additional_value_expr = match additional_properties {
-                        Some(Value::Object(map)) => self.convert_schema(&Value::Object(map.clone()))?,
-                        Some(Value::Bool(true)) | None => self.json_value_ref(),
-                        _ => return Ok(self.json_object_ref()),
-                    };
-                    return self.build_mixed_pattern_named_object_expr(
-                        &property_names,
-                        value_expr,
-                        unmatched_key_expr,
-                        additional_value_expr,
-                    );
-                }
-            }
-
-            return Ok(self.json_object_ref());
+            let additional_value_expr = match additional_properties {
+                Some(Value::Object(map)) => self.convert_schema(&Value::Object(map.clone()))?,
+                Some(Value::Bool(true)) | None => self.json_value_ref(),
+                _ => return Ok(self.json_object_ref()),
+            };
+            return self.build_mixed_pattern_named_object_expr(
+                &matched_property_names,
+                value_expr,
+                self.scoped_key_colon_expr(property_names)?,
+                additional_value_expr,
+            );
         }
 
         if let Some(property_names) = property_names {
@@ -2882,9 +2895,16 @@ impl SchemaCtx {
         let extra_pair_expr = if let Some(schema) = additional_properties_schema {
             let extra_value_expr = self.convert_schema(&schema)?;
             let ck_prefix = format!("{}_CK", base_name.to_uppercase());
-            let extra_key_expr = self.build_complement_key_expr(required_list, &ck_prefix);
+            let extra_key_expr = self.build_excluding_key_colon_expr(
+                self.json_key_colon_ref(),
+                required_list
+                    .iter()
+                    .map(|key| self.json_key_colon_literal(key))
+                    .collect(),
+                &format!("{ck_prefix}_KEY_COLON"),
+            );
             Some(sequence_or_single(vec![
-                self.json_key_with_separator_expr(extra_key_expr, &format!("{ck_prefix}_KEY_COLON")),
+                extra_key_expr,
                 extra_value_expr,
             ]))
         } else {
@@ -3100,6 +3120,7 @@ impl SchemaCtx {
                     &allowed_properties,
                     &option_required,
                     &option_required_keys,
+                    Vec::new(),
                     None,
                     None,
                 )?);
@@ -3114,6 +3135,7 @@ impl SchemaCtx {
                     &required_only,
                     required_list,
                     required_keys,
+                    Vec::new(),
                     None,
                     None,
                 )?);
@@ -3132,6 +3154,7 @@ impl SchemaCtx {
                 properties,
                 &option_required,
                 &option_required_keys,
+                Vec::new(),
                 None,
                 None,
             )?);
@@ -3144,16 +3167,20 @@ impl SchemaCtx {
         properties: &Map<String, Value>,
         required_list: &[String],
         required_keys: &BTreeSet<String>,
+        pattern_property_pairs: Vec<(GrammarExpr, Value)>,
         additional_properties_schema: Option<Value>,
-        additional_key_colon_expr: Option<GrammarExpr>,
+        additional_property_names: Option<&Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let mut ordered = Vec::new();
-        let mut known_property_keys: Vec<String> = properties.keys().cloned().collect();
-        known_property_keys.extend(
+        let mut known_key_colon_exprs = properties
+            .keys()
+            .map(|key| self.json_key_colon_literal(key))
+            .collect::<Vec<_>>();
+        known_key_colon_exprs.extend(
             required_list
                 .iter()
                 .filter(|key| !properties.contains_key(*key))
-                .cloned(),
+                .map(|key| self.json_key_colon_literal(key)),
         );
         for (key, subschema) in properties {
             if self.is_certainly_unsatisfiable(subschema) {
@@ -3180,7 +3207,30 @@ impl SchemaCtx {
             additional_properties_schema
         };
 
-        if ordered.is_empty() && additional_properties_schema.is_none() {
+        let mut extra_pair_exprs = Vec::new();
+        let mut pattern_key_colon_exprs = Vec::new();
+        for (key_colon_expr, schema) in pattern_property_pairs.iter().cloned() {
+            if self.is_certainly_unsatisfiable(&schema) {
+                continue;
+            }
+            pattern_key_colon_exprs.push(key_colon_expr.clone());
+            let value_expr = self.convert_schema(&schema)?;
+            extra_pair_exprs.push(sequence_or_single(vec![key_colon_expr, value_expr]));
+        }
+
+        if let Some(schema) = additional_properties_schema {
+            let mut excluded_key_colon_exprs = known_key_colon_exprs;
+            excluded_key_colon_exprs.extend(pattern_key_colon_exprs.iter().cloned());
+            let additional_key_colon = self.build_excluding_key_colon_expr(
+                self.scoped_key_colon_expr(additional_property_names)?,
+                excluded_key_colon_exprs,
+                "AP_KEY_COLON",
+            );
+            let value_expr = self.convert_schema(&schema)?;
+            extra_pair_exprs.push(sequence_or_single(vec![additional_key_colon, value_expr]));
+        }
+
+        if ordered.is_empty() && extra_pair_exprs.is_empty() {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
@@ -3194,56 +3244,49 @@ impl SchemaCtx {
         };
         self.object_rule_counter = base_index + 1;
 
-        let (term_nc, term_c) = if let Some(schema) = additional_properties_schema {
-            let ck_prefix = format!("{}_CK", base_name.to_uppercase());
-            let ap_key_colon = if let Some(key_colon_expr) = additional_key_colon_expr {
-                // Use the caller-supplied key+colon expression (e.g. pattern key
-                // from patternProperties) instead of the complement key.
-                key_colon_expr
-            } else {
-                // Collect known property keys for complement trie
-                let known_keys = known_property_keys;
-                // Build complement key that excludes known property names
-                let complement_key = self.build_complement_key_expr(&known_keys, &ck_prefix);
-                // complement_key_colon = complement_key ": "
-                self.json_key_with_separator_expr(
-                    complement_key,
-                    &format!("{ck_prefix}_KEY_COLON"),
-                )
-            };
-
+        let (term_nc, term_c) = if extra_pair_exprs.is_empty() {
+            let term_nc = format!("{base_name}_{}_nc", ordered.len());
+            let term_c = format!("{base_name}_{}_c", ordered.len());
+            self.insert_rule(term_nc.clone(), empty_expr());
+            self.insert_rule(term_c.clone(), empty_expr());
+            (term_nc, term_c)
+        } else {
             let term_nc = format!("{base_name}_ap_nc");
             let term_c = format!("{base_name}_ap_c");
-            let value_expr = self.convert_schema(&schema)?;
             self.insert_rule(
                 term_nc.clone(),
                 choice_or_single(vec![
-                    sequence_or_single(vec![
-                        ap_key_colon.clone(),
-                        value_expr.clone(),
-                        GrammarExpr::Ref(term_c.clone()),
-                    ]),
+                    choice_or_single(
+                        extra_pair_exprs
+                            .iter()
+                            .cloned()
+                            .map(|pair_expr| {
+                                sequence_or_single(vec![pair_expr, GrammarExpr::Ref(term_c.clone())])
+                            })
+                            .collect(),
+                    ),
                     empty_expr(),
                 ]),
             );
             self.insert_rule(
                 term_c.clone(),
                 choice_or_single(vec![
-                    sequence_or_single(vec![
-                        self.json_item_separator_expr(),
-                        ap_key_colon,
-                        value_expr,
-                        GrammarExpr::Ref(term_c.clone()),
-                    ]),
+                    choice_or_single(
+                        extra_pair_exprs
+                            .iter()
+                            .cloned()
+                            .map(|pair_expr| {
+                                sequence_or_single(vec![
+                                    self.json_item_separator_expr(),
+                                    pair_expr,
+                                    GrammarExpr::Ref(term_c.clone()),
+                                ])
+                            })
+                            .collect(),
+                    ),
                     empty_expr(),
                 ]),
             );
-            (term_nc, term_c)
-        } else {
-            let term_nc = format!("{base_name}_{}_nc", ordered.len());
-            let term_c = format!("{base_name}_{}_c", ordered.len());
-            self.insert_rule(term_nc.clone(), empty_expr());
-            self.insert_rule(term_c.clone(), empty_expr());
             (term_nc, term_c)
         };
 
@@ -3371,16 +3414,21 @@ impl SchemaCtx {
         &mut self,
         property_names: &Value,
         matched_value_expr: GrammarExpr,
-        unmatched_key_expr: GrammarExpr,
+        unmatched_key_colon_expr: GrammarExpr,
         unmatched_value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
+        let matched_key_colon_expr = json_wrapped_key_colon_pattern(pattern);
         let matched_pair = sequence_or_single(vec![
-            json_wrapped_key_colon_pattern(pattern),
+            matched_key_colon_expr.clone(),
             matched_value_expr,
         ]);
         let unmatched_pair = sequence_or_single(vec![
-            self.json_key_with_separator_expr(unmatched_key_expr, "PP_KEY_COLON"),
+            self.build_excluding_key_colon_expr(
+                unmatched_key_colon_expr,
+                vec![matched_key_colon_expr],
+                "PP_KEY_COLON",
+            ),
             unmatched_value_expr,
         ]);
         let pair = choice_or_single(vec![matched_pair, unmatched_pair]);
@@ -3833,6 +3881,10 @@ mod tests {
             GrammarExpr::Choice(options) => {
                 options.iter().any(|part| expr_has_split_separator(part, left_bytes, right_bytes))
             }
+            GrammarExpr::Exclude { expr, exclude } => {
+                expr_has_split_separator(expr, left_bytes, right_bytes)
+                    || expr_has_split_separator(exclude, left_bytes, right_bytes)
+            }
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)
             | GrammarExpr::RepeatOne(inner)
@@ -3848,6 +3900,9 @@ mod tests {
             GrammarExpr::Literal(bytes) => bytes == expected,
             GrammarExpr::Sequence(parts) => parts.iter().any(|part| expr_has_literal(part, expected)),
             GrammarExpr::Choice(options) => options.iter().any(|part| expr_has_literal(part, expected)),
+            GrammarExpr::Exclude { expr, exclude } => {
+                expr_has_literal(expr, expected) || expr_has_literal(exclude, expected)
+            }
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)
             | GrammarExpr::RepeatOne(inner)
@@ -3868,6 +3923,10 @@ mod tests {
                 parts.iter().any(|part| expr_has_ref_then_literal(part, literal))
             }
             GrammarExpr::Choice(options) => options.iter().any(|part| expr_has_ref_then_literal(part, literal)),
+            GrammarExpr::Exclude { expr, exclude } => {
+                expr_has_ref_then_literal(expr, literal)
+                    || expr_has_ref_then_literal(exclude, literal)
+            }
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)
             | GrammarExpr::RepeatOne(inner)
@@ -4546,8 +4605,8 @@ mod tests {
             }
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert!(named_grammar_has_literal(&grammar, b": "));
         assert!(!named_grammar_has_split_separator(&grammar, b":", b" "));
+        assert!(!named_nonterminal_has_ref_then_literal(&grammar, b": "));
     }
 
     #[test]
@@ -4579,6 +4638,49 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#;
         assert!(accepts_sequence(schema, &[b"{\"other\": \"x\"}"]));
+    }
+
+    #[test]
+    fn test_pattern_properties_take_precedence_over_additional_properties() {
+        let schema = r#"{
+            "type": "object",
+            "patternProperties": {
+                "^mode": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            },
+            "additionalProperties": {"type": "string"}
+        }"#;
+        assert!(accepts_sequence(schema, &[b"{\"mode1\": [\"a\"]}"]));
+        assert!(!accepts_sequence(schema, &[b"{\"mode1\": \"a\"}"]));
+        assert!(accepts_sequence(schema, &[b"{\"other\": \"a\"}"]));
+        assert!(!accepts_sequence(schema, &[b"{\"other\": [\"a\"]}"]));
+    }
+
+    #[test]
+    fn test_properties_and_pattern_properties_do_not_fall_through_to_additional_properties() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "default": {"type": "string"}
+            },
+            "patternProperties": {
+                "^mode": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            },
+            "additionalProperties": {"type": "string"}
+        }"#;
+        assert!(accepts_sequence(
+            schema,
+            &[b"{\"default\": \"x\", \"mode1\": [\"a\"], \"other\": \"y\"}"]
+        ));
+        assert!(!accepts_sequence(
+            schema,
+            &[b"{\"default\": \"x\", \"mode1\": \"y\"}"]
+        ));
     }
 
     #[test]

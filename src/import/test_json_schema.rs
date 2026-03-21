@@ -70,6 +70,9 @@ fn contains_literal(expr: &GrammarExpr, target: &[u8]) -> bool {
         GrammarExpr::Literal(bytes) => bytes == target,
         GrammarExpr::Sequence(parts) => parts.iter().any(|part| contains_literal(part, target)),
         GrammarExpr::Choice(options) => options.iter().any(|option| contains_literal(option, target)),
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_literal(expr, target) || contains_literal(exclude, target)
+        }
         GrammarExpr::Optional(inner)
         | GrammarExpr::Repeat(inner)
         | GrammarExpr::RepeatOne(inner)
@@ -83,6 +86,9 @@ fn contains_repeat_range(expr: &GrammarExpr) -> bool {
         GrammarExpr::RepeatRange { .. } => true,
         GrammarExpr::Sequence(parts) => parts.iter().any(contains_repeat_range),
         GrammarExpr::Choice(options) => options.iter().any(contains_repeat_range),
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_repeat_range(expr) || contains_repeat_range(exclude)
+        }
         GrammarExpr::Optional(inner)
         | GrammarExpr::Repeat(inner)
         | GrammarExpr::RepeatOne(inner) => contains_repeat_range(inner),
