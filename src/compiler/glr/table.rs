@@ -38,7 +38,7 @@ impl GLRTable {
         let use_lr1 = std::env::var("GLRMASK_LR1").unwrap_or_else(|_| "1".to_string()) != "0";
         let mut table = if use_lr1 {
             let (item_sets, transitions) = build_lr1_item_sets(grammar);
-            build_lr1_table(grammar, &item_sets, &transitions)
+            build_ielr_table(grammar, &item_sets, &transitions)
         } else {
             let (item_sets, transitions) = build_lr0_item_sets(grammar);
             build_slr1_table(grammar, &item_sets, &transitions)
@@ -166,7 +166,6 @@ fn closure(items: &BTreeSet<Item>, rules: &[Rule]) -> BTreeSet<Item> {
 
     while let Some(item) = queue.pop_front() {
         if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-            
             for (i, r) in rules.iter().enumerate() {
                 if r.lhs == *nt {
                     let new_item = Item::new(i as u32, 0);
@@ -239,50 +238,50 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
     (item_sets, transitions)
 }
 
+#[derive(Default)]
+struct PendingAction {
+    shift: Option<u32>,
+    reduces: Vec<u32>,
+    accept: bool,
+}
+
+impl PendingAction {
+    fn push_shift(&mut self, target: u32) {
+        match self.shift {
+            Some(existing) => debug_assert_eq!(existing, target),
+            None => self.shift = Some(target),
+        }
+    }
+
+    fn push_reduce(&mut self, rule_id: u32) {
+        self.reduces.push(rule_id);
+    }
+
+    fn push_accept(&mut self) {
+        self.accept = true;
+    }
+
+    fn finish(mut self) -> Action {
+        self.reduces.sort_unstable();
+        self.reduces.dedup();
+        match (self.shift, self.reduces.len(), self.accept) {
+            (Some(target), 0, false) => Action::Shift(target),
+            (None, 1, false) => Action::Reduce(self.reduces[0]),
+            (None, 0, true) => Action::Accept,
+            (shift, _, accept) => Action::Split {
+                shift,
+                reduces: self.reduces,
+                accept,
+            },
+        }
+    }
+}
+
 fn build_slr1_table(
     grammar: &AnalyzedGrammar,
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GLRTable {
-    #[derive(Default)]
-    struct PendingAction {
-        shift: Option<u32>,
-        reduces: Vec<u32>,
-        accept: bool,
-    }
-
-    impl PendingAction {
-        fn push_shift(&mut self, target: u32) {
-            match self.shift {
-                Some(existing) => debug_assert_eq!(existing, target),
-                None => self.shift = Some(target),
-            }
-        }
-
-        fn push_reduce(&mut self, rule_id: u32) {
-            self.reduces.push(rule_id);
-        }
-
-        fn push_accept(&mut self) {
-            self.accept = true;
-        }
-
-        fn finish(mut self) -> Action {
-            self.reduces.sort_unstable();
-            self.reduces.dedup();
-            match (self.shift, self.reduces.len(), self.accept) {
-                (Some(target), 0, false) => Action::Shift(target),
-                (None, 1, false) => Action::Reduce(self.reduces[0]),
-                (None, 0, true) => Action::Accept,
-                (shift, _, accept) => Action::Split {
-                    shift,
-                    reduces: self.reduces,
-                    accept,
-                },
-            }
-        }
-    }
-
     let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
         .take(item_sets.len())
         .collect::<Vec<_>>();
@@ -496,45 +495,6 @@ fn build_lr1_table(
     item_sets: &[BTreeSet<LR1Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GLRTable {
-    #[derive(Default)]
-    struct PendingAction {
-        shift: Option<u32>,
-        reduces: Vec<u32>,
-        accept: bool,
-    }
-
-    impl PendingAction {
-        fn push_shift(&mut self, target: u32) {
-            match self.shift {
-                Some(existing) => debug_assert_eq!(existing, target),
-                None => self.shift = Some(target),
-            }
-        }
-
-        fn push_reduce(&mut self, rule_id: u32) {
-            self.reduces.push(rule_id);
-        }
-
-        fn push_accept(&mut self) {
-            self.accept = true;
-        }
-
-        fn finish(mut self) -> Action {
-            self.reduces.sort_unstable();
-            self.reduces.dedup();
-            match (self.shift, self.reduces.len(), self.accept) {
-                (Some(target), 0, false) => Action::Shift(target),
-                (None, 1, false) => Action::Reduce(self.reduces[0]),
-                (None, 0, true) => Action::Accept,
-                (shift, _, accept) => Action::Split {
-                    shift,
-                    reduces: self.reduces,
-                    accept,
-                },
-            }
-        }
-    }
-
     let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
         .take(item_sets.len())
         .collect::<Vec<_>>();
@@ -566,7 +526,6 @@ fn build_lr1_table(
                 continue;
             }
 
-            // LR(1): reduce only on the item's specific lookahead
             pending[state_id]
                 .entry(item.lookahead)
                 .or_default()
@@ -592,6 +551,181 @@ fn build_lr1_table(
         num_rules: grammar.rules.len() as u32,
         rules: grammar.rules.clone(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// IELR-style merge
+// ---------------------------------------------------------------------------
+
+fn lr1_core_key(items: &BTreeSet<LR1Item>) -> Vec<Item> {
+    let mut core = BTreeSet::new();
+    for item in items {
+        core.insert(Item::new(item.rule, item.dot));
+    }
+    core.into_iter().collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ActionSig {
+    Shift(u32),
+    Reduce(u32),
+    Split {
+        shift: Option<u32>,
+        reduces: Vec<u32>,
+        accept: bool,
+    },
+    Accept,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RowSignature {
+    core_class: u32,
+    action: Vec<(TerminalID, ActionSig)>,
+    goto: Vec<(NonterminalID, u32)>,
+}
+
+fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
+    match action {
+        Action::Shift(target) => ActionSig::Shift(partition[*target as usize]),
+        Action::Reduce(rule) => ActionSig::Reduce(*rule),
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => ActionSig::Split {
+            shift: shift.map(|target| partition[target as usize]),
+            reduces: reduces.clone(),
+            accept: *accept,
+        },
+        Action::Accept => ActionSig::Accept,
+    }
+}
+
+fn core_classes(core_keys: &[Vec<Item>]) -> Vec<u32> {
+    let mut class_of = vec![0; core_keys.len()];
+    let mut key_to_class: FxHashMap<Vec<Item>, u32> = FxHashMap::default();
+    let mut next = 0u32;
+
+    for (state, key) in core_keys.iter().enumerate() {
+        let class = *key_to_class.entry(key.clone()).or_insert_with(|| {
+            let id = next;
+            next += 1;
+            id
+        });
+        class_of[state] = class;
+    }
+
+    class_of
+}
+
+fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
+    let nstates = table.num_states as usize;
+    let core_class_of = core_classes(core_keys);
+    let mut partition = core_class_of.clone();
+
+    loop {
+        let mut sig_to_part: FxHashMap<RowSignature, u32> = FxHashMap::default();
+        let mut next_partition = vec![0u32; nstates];
+        let mut next_id = 0u32;
+
+        for state in 0..nstates {
+            let action = table.action[state]
+                .iter()
+                .map(|(&terminal, action)| {
+                    (terminal, remap_action_to_partition(action, &partition))
+                })
+                .collect();
+            let goto = table.goto[state]
+                .iter()
+                .map(|(&nt, &target)| (nt, partition[target as usize]))
+                .collect();
+            let signature = RowSignature {
+                core_class: core_class_of[state],
+                action,
+                goto,
+            };
+
+            let class = *sig_to_part.entry(signature).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            next_partition[state] = class;
+        }
+
+        if next_partition == partition {
+            return partition;
+        }
+        partition = next_partition;
+    }
+}
+
+fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTable {
+    let partition = refine_same_core_partition(&table, core_keys);
+    let nstates = table.num_states as usize;
+    let ngroups = partition.iter().copied().max().map(|x| x + 1).unwrap_or(0) as usize;
+
+    let mut representatives = vec![u32::MAX; ngroups];
+    for state in 0..nstates {
+        let group = partition[state] as usize;
+        if representatives[group] == u32::MAX {
+            representatives[group] = state as u32;
+        }
+    }
+
+    let action = representatives
+        .iter()
+        .map(|&rep| {
+            table.action[rep as usize]
+                .iter()
+                .map(|(&terminal, action)| {
+                    let merged_action = match action {
+                        Action::Shift(target) => Action::Shift(partition[*target as usize]),
+                        Action::Reduce(rule) => Action::Reduce(*rule),
+                        Action::Split {
+                            shift,
+                            reduces,
+                            accept,
+                        } => Action::Split {
+                            shift: shift.map(|target| partition[target as usize]),
+                            reduces: reduces.clone(),
+                            accept: *accept,
+                        },
+                        Action::Accept => Action::Accept,
+                    };
+                    (terminal, merged_action)
+                })
+                .collect()
+        })
+        .collect();
+    let goto = representatives
+        .iter()
+        .map(|&rep| {
+            table.goto[rep as usize]
+                .iter()
+                .map(|(&nt, &target)| (nt, partition[target as usize]))
+                .collect()
+        })
+        .collect();
+
+    GLRTable {
+        action,
+        goto,
+        num_states: ngroups as u32,
+        num_terminals: table.num_terminals,
+        num_rules: table.num_rules,
+        rules: table.rules,
+    }
+}
+
+fn build_ielr_table(
+    grammar: &AnalyzedGrammar,
+    item_sets: &[BTreeSet<LR1Item>],
+    transitions: &[BTreeMap<Symbol, u32>],
+) -> GLRTable {
+    let canonical = build_lr1_table(grammar, item_sets, transitions);
+    let core_keys = item_sets.iter().map(lr1_core_key).collect::<Vec<_>>();
+    merge_same_core_lr1_states(canonical, &core_keys)
 }
 
 #[cfg(test)]
