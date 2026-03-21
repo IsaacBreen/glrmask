@@ -4555,6 +4555,22 @@ mod tests {
     }
 
     #[test]
+    fn test_exact_pattern_property_is_not_bypassed_by_additional_properties() {
+        let schema = r#"{
+            "type": "object",
+            "patternProperties": {
+                "^flag$": {
+                    "type": "string",
+                    "enum": ["ok"]
+                }
+            }
+        }"#;
+        assert!(accepts_sequence(schema, &[b"{\"flag\": \"ok\"}"]));
+        assert!(!accepts_sequence(schema, &[b"{\"flag\": \"nope\"}"]));
+        assert!(accepts_sequence(schema, &[b"{\"any\": \"thing\"}"]));
+    }
+
+    #[test]
     fn test_fixed_object_keys_pack_native_separator_literal() {
         let schema: Value = serde_json::from_str(r#"{
             "type": "object",
