@@ -84,9 +84,9 @@ pub fn compact_dwa_dimensions(
     // Step 3  — token dimension: merge + reorder
     let token_profiles = build_token_profiles(&weight_refs, num_tokens);
     let (token_perm, new_num_tokens) = merge_sort_perm(&token_profiles);
+    let merged_unique_token_sets = collect_merged_unique_token_sets(&unique_weights, &token_perm);
     let token_perm = optimize_token_order_locally(
-        &unique_weights,
-        &tsid_perm,
+        &merged_unique_token_sets,
         token_perm,
         new_num_tokens,
     );
@@ -367,43 +367,63 @@ fn unique_storage_better(candidate: UniqueStorageCounts, current: UniqueStorageC
                     && candidate.weight_ranges < current.weight_ranges)))
 }
 
-fn swap_adjacent_group_ids(token_perm: &[u32], left_group: u32) -> Vec<u32> {
-    let right_group = left_group + 1;
-    token_perm
-        .iter()
-        .map(|&group| {
-            if group == left_group {
-                right_group
-            } else if group == right_group {
-                left_group
-            } else {
-                group
+fn collect_merged_unique_token_sets(weights: &[Weight], merge_token_perm: &[u32]) -> Vec<RangeSetBlaze<u32>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut unique_sets = Vec::new();
+    for weight in weights {
+        for (_, token_set) in weight.0.range_values() {
+            let merged = permute_rangeset(token_set, merge_token_perm);
+            let key = rangeset_key(&merged);
+            if seen.insert(key) {
+                unique_sets.push(merged);
             }
-        })
-        .collect()
+        }
+    }
+    unique_sets
+}
+
+fn count_token_ranges_after_group_permutation(
+    merged_unique_token_sets: &[RangeSetBlaze<u32>],
+    group_positions: &[u32],
+) -> usize {
+    merged_unique_token_sets
+        .iter()
+        .map(|token_set| permute_rangeset(token_set, group_positions).ranges().count())
+        .sum()
 }
 
 fn optimize_token_order_locally(
-    weights: &[Weight],
-    tsid_perm: &[u32],
+    merged_unique_token_sets: &[RangeSetBlaze<u32>],
     initial_token_perm: Vec<u32>,
     new_num_tokens: usize,
 ) -> Vec<u32> {
-    if new_num_tokens < 2 {
+    if new_num_tokens < 2 || merged_unique_token_sets.is_empty() {
         return initial_token_perm;
     }
 
-    let mut current_perm = initial_token_perm;
-    let mut current_storage = score_permuted_weights(weights, tsid_perm, &current_perm);
+    let mut layout: Vec<u32> = (0..new_num_tokens as u32).collect();
+    let mut group_positions = layout.clone();
+    let mut current_token_ranges =
+        count_token_ranges_after_group_permutation(merged_unique_token_sets, &group_positions);
 
     for _ in 0..TOKEN_ORDER_LOCAL_SEARCH_PASSES {
         let mut improved = false;
-        for left_group in 0..(new_num_tokens - 1) {
-            let candidate_perm = swap_adjacent_group_ids(&current_perm, left_group as u32);
-            let candidate_storage = score_permuted_weights(weights, tsid_perm, &candidate_perm);
-            if unique_storage_better(candidate_storage, current_storage) {
-                current_perm = candidate_perm;
-                current_storage = candidate_storage;
+        for left_pos in 0..(new_num_tokens - 1) {
+            let right_pos = left_pos + 1;
+            let left_group = layout[left_pos] as usize;
+            let right_group = layout[right_pos] as usize;
+
+            let mut candidate_positions = group_positions.clone();
+            candidate_positions[left_group] = right_pos as u32;
+            candidate_positions[right_group] = left_pos as u32;
+            let candidate_token_ranges = count_token_ranges_after_group_permutation(
+                merged_unique_token_sets,
+                &candidate_positions,
+            );
+            if candidate_token_ranges < current_token_ranges {
+                group_positions = candidate_positions;
+                layout.swap(left_pos, right_pos);
+                current_token_ranges = candidate_token_ranges;
                 improved = true;
             }
         }
@@ -412,7 +432,10 @@ fn optimize_token_order_locally(
         }
     }
 
-    current_perm
+    initial_token_perm
+        .into_iter()
+        .map(|group| group_positions[group as usize])
+        .collect()
 }
 
 /// Apply tsid and token permutations (possibly many-to-one) to every weight.
@@ -676,12 +699,12 @@ mod tests {
             Weight::from_uniform(0..=0, RangeSetBlaze::from_iter([0..=0, 2..=2])),
             Weight::from_uniform(0..=0, RangeSetBlaze::from_iter([1..=1])),
         ];
-        let tsid_perm = vec![0];
         let initial_token_perm = vec![0, 1, 2];
+        let merged_unique_token_sets = collect_merged_unique_token_sets(&weights, &initial_token_perm);
 
-        let baseline = score_permuted_weights(&weights, &tsid_perm, &initial_token_perm);
-        let optimized = optimize_token_order_locally(&weights, &tsid_perm, initial_token_perm, 3);
-        let improved = score_permuted_weights(&weights, &tsid_perm, &optimized);
+        let baseline = score_permuted_weights(&weights, &[0], &initial_token_perm);
+        let optimized = optimize_token_order_locally(&merged_unique_token_sets, initial_token_perm, 3);
+        let improved = score_permuted_weights(&weights, &[0], &optimized);
 
         assert!(unique_storage_better(improved, baseline));
         assert_eq!(improved.weight_ranges, baseline.weight_ranges);
