@@ -35,8 +35,7 @@ impl DFA {
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
     pub fn minimize(&self) -> DFA {
-        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LEXER_MINIMIZE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LEXER_MINIMIZE").is_some();
         let mut profile = profile_enabled.then(LexerMinimizeProfile::default);
 
         if self.states().is_empty() {

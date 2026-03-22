@@ -196,8 +196,7 @@ fn compute_reachable_groups(nfa: &NFA, group_count: usize) -> Vec<BitSet> {
 
 impl NFA {
     pub fn to_dfa(&self) -> DFA {
-        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LEXER_DETERMINIZE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LEXER_DETERMINIZE").is_some();
         let mut profile = profile_enabled.then(LexerDeterminizeProfile::default);
 
         let group_count = self

@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::ds::u8set::U8Set;
-use crate::compiler::compile::compile_profile_enabled;
 
 use super::ast::Expr;
 use super::dfa::DFA;
@@ -410,6 +409,10 @@ fn log_tokenizer_profile(
     }
 }
 
+fn tokenizer_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_TOKENIZER").is_some()
+}
+
 /// Compile multiple expressions into a single multi-group [`Regex`].
 ///
 /// Each expression's index becomes its group ID in the resulting DFA.
@@ -419,7 +422,7 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
 
 pub fn build_regex_with_profile_label(exprs: &[Expr], profile_label: &str) -> Regex {
     let plan = build_exclusion_compile_plan(exprs);
-    let profile_enabled = compile_profile_enabled();
+    let profile_enabled = tokenizer_profile_enabled();
 
     let phase_started_at = std::time::Instant::now();
     let group_sets: Vec<U8Set> = plan
