@@ -19,6 +19,8 @@ use super::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 
 // ── public entry point ──────────────────────────────────────────────────────
 
+const TOKEN_ORDER_LOCAL_SEARCH_PASSES: usize = 1;
+
 pub struct CompactReport {
     pub old_num_tsids: u32,
     pub new_num_tsids: u32,
@@ -82,6 +84,12 @@ pub fn compact_dwa_dimensions(
     // Step 3  — token dimension: merge + reorder
     let token_profiles = build_token_profiles(&weight_refs, num_tokens);
     let (token_perm, new_num_tokens) = merge_sort_perm(&token_profiles);
+    let token_perm = optimize_token_order_locally(
+        &unique_weights,
+        &tsid_perm,
+        token_perm,
+        new_num_tokens,
+    );
 
     // Step 4  — apply permutations to every weight in the DWA
     apply_permutations_to_dwa(dwa, &unique_weights, &tsid_perm, &token_perm);
@@ -351,6 +359,62 @@ where
     (perm, new_count)
 }
 
+fn unique_storage_better(candidate: UniqueStorageCounts, current: UniqueStorageCounts) -> bool {
+    candidate.total_ranges() < current.total_ranges()
+        || (candidate.total_ranges() == current.total_ranges()
+            && (candidate.token_ranges < current.token_ranges
+                || (candidate.token_ranges == current.token_ranges
+                    && candidate.weight_ranges < current.weight_ranges)))
+}
+
+fn swap_adjacent_group_ids(token_perm: &[u32], left_group: u32) -> Vec<u32> {
+    let right_group = left_group + 1;
+    token_perm
+        .iter()
+        .map(|&group| {
+            if group == left_group {
+                right_group
+            } else if group == right_group {
+                left_group
+            } else {
+                group
+            }
+        })
+        .collect()
+}
+
+fn optimize_token_order_locally(
+    weights: &[Weight],
+    tsid_perm: &[u32],
+    initial_token_perm: Vec<u32>,
+    new_num_tokens: usize,
+) -> Vec<u32> {
+    if new_num_tokens < 2 {
+        return initial_token_perm;
+    }
+
+    let mut current_perm = initial_token_perm;
+    let mut current_storage = score_permuted_weights(weights, tsid_perm, &current_perm);
+
+    for _ in 0..TOKEN_ORDER_LOCAL_SEARCH_PASSES {
+        let mut improved = false;
+        for left_group in 0..(new_num_tokens - 1) {
+            let candidate_perm = swap_adjacent_group_ids(&current_perm, left_group as u32);
+            let candidate_storage = score_permuted_weights(weights, tsid_perm, &candidate_perm);
+            if unique_storage_better(candidate_storage, current_storage) {
+                current_perm = candidate_perm;
+                current_storage = candidate_storage;
+                improved = true;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+
+    current_perm
+}
+
 /// Apply tsid and token permutations (possibly many-to-one) to every weight.
 fn apply_permutations_to_dwa(
     dwa: &mut DWA,
@@ -604,5 +668,23 @@ mod tests {
         let permuted_b = permute_weight(&weight, &[0, 1, 2], &[0, 1]);
 
         assert!(Arc::ptr_eq(&permuted_a.0, &permuted_b.0));
+    }
+
+    #[test]
+    fn local_token_order_search_reduces_unique_token_ranges() {
+        let weights = vec![
+            Weight::from_uniform(0..=0, RangeSetBlaze::from_iter([0..=0, 2..=2])),
+            Weight::from_uniform(0..=0, RangeSetBlaze::from_iter([1..=1])),
+        ];
+        let tsid_perm = vec![0];
+        let initial_token_perm = vec![0, 1, 2];
+
+        let baseline = score_permuted_weights(&weights, &tsid_perm, &initial_token_perm);
+        let optimized = optimize_token_order_locally(&weights, &tsid_perm, initial_token_perm, 3);
+        let improved = score_permuted_weights(&weights, &tsid_perm, &optimized);
+
+        assert!(unique_storage_better(improved, baseline));
+        assert_eq!(improved.weight_ranges, baseline.weight_ranges);
+        assert!(improved.token_ranges < baseline.token_ranges);
     }
 }
