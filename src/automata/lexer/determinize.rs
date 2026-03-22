@@ -15,6 +15,7 @@ use super::nfa::{CompactNFA, NFA};
 struct LexerDeterminizeProfile {
     num_nfa_states: usize,
     num_classes: usize,
+    distinct_transition_sets: usize,
     precomputed_closures: usize,
     subsets_processed: usize,
     subset_state_total: usize,
@@ -219,6 +220,7 @@ impl NFA {
 
         let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
+        let mut remapped_set_cache: FxHashMap<U8Set, U8Set> = FxHashMap::default();
         let remapped_transitions: Vec<Vec<(U8Set, u32)>> = self
             .states
             .iter()
@@ -227,10 +229,13 @@ impl NFA {
                     .transitions
                     .iter()
                     .map(|(set, target)| {
-                        let mut class_set = U8Set::empty();
-                        for byte in set.iter() {
-                            class_set.insert(class_map[byte as usize]);
-                        }
+                        let class_set = *remapped_set_cache.entry(*set).or_insert_with(|| {
+                            let mut class_set = U8Set::empty();
+                            for byte in set.iter() {
+                                class_set.insert(class_map[byte as usize]);
+                            }
+                            class_set
+                        });
                         (class_set, *target)
                     })
                     .collect()
@@ -238,6 +243,7 @@ impl NFA {
             .collect();
         if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
             profile.num_classes = num_classes;
+            profile.distinct_transition_sets = remapped_set_cache.len();
             profile.class_remap_ms = started_at.elapsed();
         }
 
@@ -505,9 +511,10 @@ impl NFA {
 
         if let Some(profile) = profile {
             eprintln!(
-                "[glrmask/profile][lexer_determinize] nfa_states={} classes={} dfa_states={} precomputed_closures={} subsets={} avg_subset_states={:.2} fast_singleton_hits={} reachable_groups_ms={:.3} class_remap_ms={:.3} closure_precompute_ms={:.3} subset_construction_ms={:.3}",
+                "[glrmask/profile][lexer_determinize] nfa_states={} classes={} distinct_transition_sets={} dfa_states={} precomputed_closures={} subsets={} avg_subset_states={:.2} fast_singleton_hits={} reachable_groups_ms={:.3} class_remap_ms={:.3} closure_precompute_ms={:.3} subset_construction_ms={:.3}",
                 profile.num_nfa_states,
                 profile.num_classes,
+                profile.distinct_transition_sets,
                 subset_map.len(),
                 profile.precomputed_closures,
                 profile.subsets_processed,

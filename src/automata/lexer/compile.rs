@@ -249,14 +249,6 @@ fn graft_nfa_fragment(target: &mut NFA, fragment: NFA, start: u32, end: u32) {
 }
 
 fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
-    graft_nfa_fragment(nfa, compile_expr(expr), start, end);
-}
-
-fn compile_expr(expr: &Expr) -> NFA {
-    let mut nfa = NFA::new(2);
-    let start = 0u32;
-    let end = 1u32;
-
     match expr {
         Expr::U8Seq(bytes) => {
             let mut state = start;
@@ -301,7 +293,7 @@ fn compile_expr(expr: &Expr) -> NFA {
                 } else {
                     nfa.add_state()
                 };
-                append_compiled_expr(part, &mut nfa, state, next);
+                append_compiled_expr(part, nfa, state, next);
                 state = next;
             }
             if parts.is_empty() {
@@ -313,7 +305,7 @@ fn compile_expr(expr: &Expr) -> NFA {
                 nfa.add_epsilon(start, end);
             }
             for option in options {
-                append_compiled_expr(option, &mut nfa, start, end);
+                append_compiled_expr(option, nfa, start, end);
             }
         }
         Expr::Exclude { .. } => {
@@ -323,7 +315,7 @@ fn compile_expr(expr: &Expr) -> NFA {
             match max {
                 Some(max) => {
                     if *max < *min {
-                        return nfa;
+                        return;
                     }
 
                     let optional = max - min;
@@ -332,29 +324,23 @@ fn compile_expr(expr: &Expr) -> NFA {
                     let tail_start = compile_repeat_upto_cps(
                         expr,
                         optional,
-                        &mut nfa,
+                        nfa,
                         end,
                         &mut power_cache,
                         &mut upto_cache,
                     );
                     let repeat_start =
-                        compile_repeat_exact_cps(expr, *min, &mut nfa, tail_start, &mut power_cache);
+                        compile_repeat_exact_cps(expr, *min, nfa, tail_start, &mut power_cache);
                     nfa.add_epsilon(start, repeat_start);
                 }
                 None => {
                     let mut current = start;
                     for _ in 0..*min {
                         let next = nfa.add_state();
-                        append_compiled_expr(expr, &mut nfa, current, next);
+                        append_compiled_expr(expr, nfa, current, next);
                         current = next;
                     }
 
-                    // When min=0, current is still the shared `start` state.
-                    // The loop-back edge (loop_state → current) must NOT point
-                    // at state 0 (the NFA initial state), because that would
-                    // make every terminal reachable from inside the loop,
-                    // polluting `possible_future_group_ids`.  Insert a fresh
-                    // intermediate so the loop is self-contained.
                     if current == start {
                         let fresh = nfa.add_state();
                         nfa.add_epsilon(start, fresh);
@@ -363,7 +349,7 @@ fn compile_expr(expr: &Expr) -> NFA {
 
                     nfa.add_epsilon(current, end);
                     let loop_state = nfa.add_state();
-                    append_compiled_expr(expr, &mut nfa, current, loop_state);
+                    append_compiled_expr(expr, nfa, current, loop_state);
                     nfa.add_epsilon(loop_state, current);
                     if expr_accepts_empty(expr) {
                         nfa.add_epsilon(loop_state, end);
@@ -371,9 +357,14 @@ fn compile_expr(expr: &Expr) -> NFA {
                 }
             }
         }
-        Expr::Shared(inner) => return compile_expr(inner),
+        Expr::Shared(inner) => append_compiled_expr(inner, nfa, start, end),
         Expr::Epsilon => nfa.add_epsilon(start, end),
     }
+}
+
+fn compile_expr(expr: &Expr) -> NFA {
+    let mut nfa = NFA::new(2);
+    append_compiled_expr(expr, &mut nfa, 0, 1);
 
     nfa
 }
