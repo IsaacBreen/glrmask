@@ -5,11 +5,27 @@
 //! all strings up to that length, using the same public signature as the main
 //! state-equivalence pass so it can slot cleanly into the pipeline.
 
-use ahash::RandomState;
+use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
+use once_cell::sync::Lazy;
 use rayon::prelude::*;
+use std::hash::{BuildHasher, Hash, Hasher};
 
 use super::super::compat::Sep1Tokenizer;
+use crate::ds::u8set::U8Set;
+
+const HASH_SEED1: u64 = 0x9e37_79b9_7f4a_7c15;
+const HASH_SEED2: u64 = 0xc2b2_ae3d_27d4_eb4f;
+const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
+const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
+
+static HASH_RANDOM_STATE: Lazy<RandomState> =
+    Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
+
+#[inline(always)]
+fn new_hasher() -> AHasher {
+    HASH_RANDOM_STATE.build_hasher()
+}
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -47,12 +63,18 @@ fn hash_state_label(finalizers: &[usize], possible_futures: &[usize]) -> u64 {
 }
 
 #[inline(always)]
-fn hash_transition_list(transitions: &[(u8, usize)], prev_hashes: &[u64]) -> u64 {
+fn hash_u8set(labels: &U8Set) -> u64 {
+    let mut hash = new_hasher();
+    hash.write_u8(1);
+    labels.hash(&mut hash);
+    hash.finish()
+}
+
+#[inline(always)]
+fn hash_transition_list(transitions: &[(U8Set, usize)], prev_hashes: &[u64]) -> u64 {
     let mut hash = mix_u64((transitions.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
-    for &(byte, target) in transitions {
-        let edge_hash = mix_u64(
-            (((byte as u64) << 32) | byte as u64) ^ prev_hashes[target].rotate_left(17),
-        );
+    for &(labels, target) in transitions {
+        let edge_hash = mix_u64(hash_u8set(&labels) ^ prev_hashes[target].rotate_left(17));
         hash = mix_u64(hash ^ edge_hash.wrapping_add(0x517C_C1B7_2722_0A95));
     }
     hash
@@ -137,9 +159,9 @@ fn build_subset_mapping(states: &[usize], class_ids: &[usize], total_class_count
 /// Define a labeled unfolding hash by depth. Let the state label be
 /// L(q) = (F(q), P(q)) and let L(BOT) be a unique dead label. Define
 /// hash_0(q) = H(L(q)) and for d >= 1,
-/// hash_d(q) = H(hash_{d-1}(q), [ (b, hash_{d-1}(delta(q,b))) ]),
-/// where the list is taken in byte order and delta(q,b)=BOT if the transition is
-/// missing. Here H is a fixed
+/// hash_d(q) = H(hash_{d-1}(q), [ (B, hash_{d-1}(delta(q,B))) ]),
+/// where each `B` is the byte set reaching the same successor, the list is taken in
+/// a deterministic order, and delta(q,b)=BOT if the transition is missing. Here H is a fixed
 /// collision-resistant mixing function (128-bit). Two states are k-equivalent iff
 /// hash_k is equal.
 ///
@@ -184,23 +206,35 @@ fn find_state_equivalence_classes_kstep(
 
     let dfa = regex.dfa();
 
-    let transitions: Vec<Vec<(u8, usize)>> = dfa
+    let transitions: Vec<Vec<(U8Set, usize)>> = dfa
         .states
         .iter()
         .map(|state| {
-            state.transitions
-                .iter()
-                .enumerate()
-                .filter(|(_, target)| **target != u32::MAX)
-                .map(|(byte, &target)| (byte as u8, target as usize))
-                .collect()
+            let mut labels_by_target: HashMap<usize, U8Set, RandomState> =
+                HashMap::with_capacity_and_hasher(8, RandomState::new());
+            for (byte, &target) in state.transitions.iter().enumerate() {
+                if target == u32::MAX {
+                    continue;
+                }
+                labels_by_target
+                    .entry(target as usize)
+                    .or_insert_with(U8Set::empty)
+                    .insert(byte as u8);
+            }
+
+            let mut grouped: Vec<(U8Set, usize)> = labels_by_target
+                .into_iter()
+                .map(|(target, labels)| (labels, target))
+                .collect();
+            grouped.sort_unstable_by_key(|&(_, target)| target);
+            grouped
         })
         .collect();
 
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
     let identity_max_saved_percent = env_usize("STATE_EQUIV_IDENTITY_MAX_SAVED_PERCENT", 2);
     let (transition_pattern_for_state, transition_pattern_reps, use_trans_class_cache) = {
-        let mut trans_pattern_to_class: HashMap<Vec<(u8, usize)>, usize, RandomState> =
+        let mut trans_pattern_to_class: HashMap<Vec<(U8Set, usize)>, usize, RandomState> =
             HashMap::with_capacity_and_hasher(transitions.len(), RandomState::new());
         let mut transition_pattern_for_state = vec![0usize; transitions.len()];
         let mut transition_pattern_reps = Vec::new();
