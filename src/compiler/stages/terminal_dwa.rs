@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use range_set_blaze::RangeSetBlaze;
+use smallvec::SmallVec;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -23,6 +24,7 @@ use crate::compiler::possible_matches::{PossibleMatchesByState, PossibleMatchesC
 type NwaState = u32;
 /// Tokenizer state identifier.
 type TokenizerState = u32;
+type LeafTokenIds = SmallVec<[u32; 8]>;
 use crate::compiler::compile::compute_disallowed_follows;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::equivalence_analysis::reference::{
@@ -776,10 +778,11 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
     self_loop_bytes: Vec<U8Set>,
-    leaf_token_ids_buffer: Vec<Vec<Vec<u32>>>,
+    leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
-    leaf_weight_cache: HashMap<Vec<u32>, Weight>,
+    leaf_weight_cache_raw: HashMap<LeafTokenIds, Weight>,
+    leaf_weight_cache_canonical: HashMap<LeafTokenIds, Weight>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
     profile_enabled: bool,
@@ -807,7 +810,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let labels = &mut self.leaf_token_ids_buffer[source_idx];
         let label_idx = label as usize;
         if label_idx >= labels.len() {
-            labels.resize_with(label_idx + 1, Vec::new);
+            labels.resize_with(label_idx + 1, SmallVec::new);
         }
         labels[label_idx].push(internal_token_id);
     }
@@ -820,7 +823,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let labels = &mut self.leaf_token_ids_buffer[source_idx];
         let label_idx = label as usize;
         if label_idx >= labels.len() {
-            labels.resize_with(label_idx + 1, Vec::new);
+            labels.resize_with(label_idx + 1, SmallVec::new);
         }
         for token_id in token_ids.iter() {
             let internal_token_id = token_id as u32;
@@ -854,15 +857,27 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         Weight::from_uniform(0..=self.num_tsids - 1, tokens)
     }
 
-    fn cached_leaf_weight(&mut self, token_ids: Vec<u32>) -> Weight {
-        if let Some(weight) = self.leaf_weight_cache.get(&token_ids) {
-            return weight.clone();
+    fn cached_leaf_weight(&mut self, token_ids: LeafTokenIds) -> (Weight, bool) {
+        if let Some(weight) = self.leaf_weight_cache_raw.get(&token_ids) {
+            return (weight.clone(), false);
         }
 
-        let tokens = RangeSetBlaze::from_iter(token_ids.iter().copied().map(|id| id..=id));
+        let mut canonical_token_ids = token_ids.clone();
+        canonical_token_ids.sort_unstable();
+        canonical_token_ids.dedup();
+
+        if let Some(weight) = self.leaf_weight_cache_canonical.get(&canonical_token_ids) {
+            let weight = weight.clone();
+            self.leaf_weight_cache_raw.insert(token_ids, weight.clone());
+            return (weight, false);
+        }
+
+        let tokens = RangeSetBlaze::from_iter(canonical_token_ids.iter().copied().map(|id| id..=id));
         let weight = Weight::from_uniform(0..=self.num_tsids - 1, tokens);
-        self.leaf_weight_cache.insert(token_ids, weight.clone());
-        weight
+        self.leaf_weight_cache_canonical
+            .insert(canonical_token_ids, weight.clone());
+        self.leaf_weight_cache_raw.insert(token_ids, weight.clone());
+        (weight, true)
     }
 
     fn add_leaf_token_from_sources(
@@ -958,17 +973,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .into_iter()
             .enumerate()
         {
-            for (label_idx, mut token_ids) in labels_vec.into_iter().enumerate() {
+            for (label_idx, token_ids) in labels_vec.into_iter().enumerate() {
                 if token_ids.is_empty() {
                     continue;
                 }
                 leaf_entries += 1;
-                token_ids.sort_unstable();
-                token_ids.dedup();
-                if !self.leaf_weight_cache.contains_key(&token_ids) {
+                let (weight, cache_miss) = self.cached_leaf_weight(token_ids);
+                if cache_miss {
                     leaf_cache_misses += 1;
                 }
-                let weight = self.cached_leaf_weight(token_ids);
                 self.transition_buffer
                     .entry((from as u32, label_idx as i32, self.leaf_state))
                     .and_modify(|existing| *existing = existing.union(&weight))
@@ -1323,7 +1336,8 @@ fn build_terminal_dwa_impl(
         leaf_token_ids_buffer: Vec::new(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),
-        leaf_weight_cache: HashMap::new(),
+        leaf_weight_cache_raw: HashMap::new(),
+        leaf_weight_cache_canonical: HashMap::new(),
         transition_buffer: BTreeMap::new(),
         epsilon_buffer: BTreeMap::new(),
         profile_enabled,
