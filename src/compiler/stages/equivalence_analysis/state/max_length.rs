@@ -46,6 +46,18 @@ fn hash_state_label(finalizers: &[usize], possible_futures: &[usize]) -> u64 {
     mix_u64(finalizer_hash.wrapping_add(future_hash))
 }
 
+#[inline(always)]
+fn hash_transition_list(transitions: &[(u8, usize)], prev_hashes: &[u64]) -> u64 {
+    let mut hash = mix_u64((transitions.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
+    for &(byte, target) in transitions {
+        let edge_hash = mix_u64(
+            (((byte as u64) << 32) | byte as u64) ^ prev_hashes[target].rotate_left(17),
+        );
+        hash = mix_u64(hash ^ edge_hash.wrapping_add(0x517C_C1B7_2722_0A95));
+    }
+    hash
+}
+
 fn assign_hash_classes(hashes: &[u64], class_ids: &mut [usize]) -> usize {
     let mut hash_to_class: HashMap<u64, usize, RandomState> =
         HashMap::with_capacity_and_hasher(hashes.len(), RandomState::new());
@@ -125,8 +137,9 @@ fn build_subset_mapping(states: &[usize], class_ids: &[usize], total_class_count
 /// Define a labeled unfolding hash by depth. Let the state label be
 /// L(q) = (F(q), P(q)) and let L(BOT) be a unique dead label. Define
 /// hash_0(q) = H(L(q)) and for d >= 1,
-/// hash_d(q) = H(L(q), { (b, hash_{d-1}(delta(q,b))) : b in Sigma }),
-/// where delta(q,b)=BOT if the transition is missing. Here H is a fixed
+/// hash_d(q) = H(hash_{d-1}(q), [ (b, hash_{d-1}(delta(q,b))) ]),
+/// where the list is taken in byte order and delta(q,b)=BOT if the transition is
+/// missing. Here H is a fixed
 /// collision-resistant mixing function (128-bit). Two states are k-equivalent iff
 /// hash_k is equal.
 ///
@@ -138,11 +151,12 @@ fn build_subset_mapping(states: &[usize], class_ids: &[usize], total_class_count
 /// Proof. By induction on d.
 /// - Base d=0: hash_0 equality implies L(q1)=L(q2), so the empty string has identical
 ///   finalizers and identical P(q).
-/// - Inductive step: assume the claim for d-1. Equality of hash_d implies equal root
-///   labels and equal mapping from each byte b to the child hash hash_{d-1}(delta(q,b)).
-///   Thus for any w = b w', the next states after b are (d-1)-equivalent, so by
-///   induction their suffix runs match label-by-label and have identical end-state
-///   futures. Prefix labels also match, so the full run matches for all positions.
+/// - Inductive step: assume the claim for d-1. Equality of hash_d implies equal
+///   hash_{d-1} roots and equal mapping from each byte b to the child hash
+///   hash_{d-1}(delta(q,b)). Thus for any w = b w', the next states after b are
+///   (d-1)-equivalent, so by induction their suffix runs match label-by-label and
+///   have identical end-state futures. The equal root hash_{d-1} also preserves the
+///   depth-(d-1) prefix behavior at the current state.
 /// QED.
 ///
 /// Corollary. For every w with |w| <= d, all occurrences of each group g are at the
@@ -227,28 +241,10 @@ fn find_state_equivalence_classes_kstep(
         }
     };
 
-    let label_hashes: Vec<u64> = dfa
+    let mut buf_a: Vec<u64> = dfa
         .states
         .iter()
         .map(|state| hash_state_label(&state.finalizers, &state.possible_future_group_ids))
-        .collect();
-    let base_hashes: Vec<u64> = label_hashes
-        .iter()
-        .map(|&hash| mix_u64(hash ^ 0xC0DE_C0DE_C0DE_C0DE))
-        .collect();
-
-    let dead_hash = mix_u64(0xDEAD_BEEF_DEAD_BEEF);
-    let mut dead_byte_mix: Vec<u64> = vec![0u64; 256];
-    let mut dead_base_sum: u64 = 0;
-    for byte in 0u8..=255u8 {
-        let contrib = mix_u64(dead_hash ^ (((byte as u64) << 1) | 1));
-        dead_byte_mix[byte as usize] = contrib;
-        dead_base_sum = dead_base_sum.wrapping_add(contrib);
-    }
-
-    let mut buf_a: Vec<u64> = label_hashes
-        .iter()
-        .map(|&hash| mix_u64(hash ^ 0x9E37_79B9_7F4A_7C15))
         .collect();
     let mut buf_b: Vec<u64> = vec![0u64; dfa.states.len()];
     let mut class_ids_a = vec![0usize; dfa.states.len()];
@@ -267,32 +263,24 @@ fn find_state_equivalence_classes_kstep(
             (&buf_b, &mut buf_a, &mut class_ids_a)
         };
 
-        let compute_trans_sum = |idx: usize, prev_hashes: &[u64]| -> u64 {
-            let mut trans_sum = dead_base_sum;
-            for &(byte, target) in &transitions[idx] {
-                let byte_idx = byte as usize;
-                trans_sum = trans_sum.wrapping_sub(dead_byte_mix[byte_idx]);
-                let next_hash = prev_hashes[target];
-                let contrib = mix_u64(next_hash ^ (((byte as u64) << 1) | 1));
-                trans_sum = trans_sum.wrapping_add(contrib);
-            }
-            trans_sum
+        let compute_transition_hash = |idx: usize, prev_hashes: &[u64]| -> u64 {
+            hash_transition_list(&transitions[idx], prev_hashes)
         };
 
         if use_trans_class_cache {
-            let trans_sum_per_class: Vec<u64> = (0..transition_pattern_reps.len())
+            let transition_hash_per_class: Vec<u64> = (0..transition_pattern_reps.len())
                 .into_par_iter()
-                .map(|class_id| compute_trans_sum(transition_pattern_reps[class_id], src_hashes))
+                .map(|class_id| compute_transition_hash(transition_pattern_reps[class_id], src_hashes))
                 .collect();
 
             dst_hashes.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let trans_sum = trans_sum_per_class[transition_pattern_for_state[idx]];
-                *out = base_hashes[idx].wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
+                let transition_hash = transition_hash_per_class[transition_pattern_for_state[idx]];
+                *out = mix_u64(src_hashes[idx] ^ transition_hash);
             });
         } else {
             dst_hashes.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let trans_sum = compute_trans_sum(idx, src_hashes);
-                *out = base_hashes[idx].wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
+                let transition_hash = compute_transition_hash(idx, src_hashes);
+                *out = mix_u64(src_hashes[idx] ^ transition_hash);
             });
         }
 
