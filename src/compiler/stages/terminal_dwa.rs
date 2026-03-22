@@ -578,14 +578,6 @@ fn collapse_always_allowed(
     changed
 }
 
-fn should_collapse_always_allowed(vocab: &Vocab) -> bool {
-    // This collapse is a compile-time optimization only. On very large LLM
-    // vocabularies it can become pathologically expensive because it performs
-    // repeated `Weight` set algebra over large token-ID domains. Keep it for
-    // small/medium vocabs where it helps, and skip it for huge vocabularies.
-    vocab.entries.len() <= 8_192
-}
-
 /// Subtract a disallowed-follow DFA from a weighted NWA.
 ///
 /// Computes the product NWA × DFA where the result keeps only paths that the
@@ -1410,19 +1402,12 @@ fn build_terminal_dwa_impl(
         );
     }
 
-    if should_collapse_always_allowed(vocab) {
-        let phase_started_at = std::time::Instant::now();
-        let always_allowed_by_label = compute_always_allowed_follows(grammar);
-        let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
-        report.collapse_always_allowed_applied = true;
-        report.collapse_always_allowed_time = phase_started_at.elapsed();
-        log_terminal_profile(profile_enabled, "collapse_always_allowed", phase_started_at);
-    } else if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][terminal_dwa] collapse_always_allowed_skipped=1 vocab_entries={} threshold=8192",
-            vocab.entries.len(),
-        );
-    }
+    let phase_started_at = std::time::Instant::now();
+    let always_allowed_by_label = compute_always_allowed_follows(grammar);
+    let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    report.collapse_always_allowed_applied = true;
+    report.collapse_always_allowed_time = phase_started_at.elapsed();
+    log_terminal_profile(profile_enabled, "collapse_always_allowed", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     {
