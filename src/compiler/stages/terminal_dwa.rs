@@ -795,6 +795,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     profile_weight_compute_calls: usize,
     profile_match_ms: std::time::Duration,
     profile_assoc_clone_ms: std::time::Duration,
+    profile_self_loop_leaf_only_ms: std::time::Duration,
     profile_leaf_ms: std::time::Duration,
     profile_merge_ms: std::time::Duration,
     profile_pending_ms: std::time::Duration,
@@ -813,6 +814,19 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             labels.resize_with(label_idx + 1, SmallVec::new);
         }
         labels[label_idx].push(internal_token_id);
+    }
+
+    fn buffer_leaf_token_ids(&mut self, source: u32, label: TerminalID, internal_token_ids: &[u32]) {
+        let source_idx = source as usize;
+        if source_idx >= self.leaf_token_ids_buffer.len() {
+            self.leaf_token_ids_buffer.resize_with(source_idx + 1, Vec::new);
+        }
+        let labels = &mut self.leaf_token_ids_buffer[source_idx];
+        let label_idx = label as usize;
+        if label_idx >= labels.len() {
+            labels.resize_with(label_idx + 1, SmallVec::new);
+        }
+        labels[label_idx].extend_from_slice(internal_token_ids);
     }
 
     fn buffer_leaf_token_id_set(&mut self, source: u32, label: TerminalID, token_ids: &RangeSetBlaze<usize>) {
@@ -928,19 +942,28 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         assoc_by_state: &AssocByState,
     ) {
+        let started_at = std::time::Instant::now();
         let mut accessible = node.reachable_token_ids().clone();
         if node.has_token() {
             accessible.remove(node.token_id() as usize);
         }
+        let accessible_token_ids: LeafTokenIds = accessible.iter().map(|token_id| token_id as u32).collect();
         for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
             for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
-                self.add_leaf_token_set_from_sources(
-                    source_nodes,
-                    terminal_id,
-                    &accessible,
-                );
+                if self.ignore_terminal == Some(terminal_id) {
+                    self.add_leaf_token_set_from_sources(
+                        source_nodes,
+                        terminal_id,
+                        &accessible,
+                    );
+                } else {
+                    for &source in source_nodes {
+                        self.buffer_leaf_token_ids(source, terminal_id, &accessible_token_ids);
+                    }
+                }
             }
         }
+        self.profile_self_loop_leaf_only_ms += started_at.elapsed();
     }
 
     fn add_match_from_sources(
@@ -1350,6 +1373,7 @@ fn build_terminal_dwa_impl(
         profile_weight_compute_calls: 0,
         profile_match_ms: std::time::Duration::ZERO,
         profile_assoc_clone_ms: std::time::Duration::ZERO,
+        profile_self_loop_leaf_only_ms: std::time::Duration::ZERO,
         profile_leaf_ms: std::time::Duration::ZERO,
         profile_merge_ms: std::time::Duration::ZERO,
         profile_pending_ms: std::time::Duration::ZERO,
@@ -1369,17 +1393,25 @@ fn build_terminal_dwa_impl(
         builder.profile_weight_compute_calls,
         builder.profile_match_ms,
         builder.profile_assoc_clone_ms,
+        builder.profile_self_loop_leaf_only_ms,
         builder.profile_leaf_ms,
         builder.profile_merge_ms,
         builder.profile_pending_ms,
         builder.profile_flush_ms,
     );
     drop(builder);
+    let possible_matches_started_at = std::time::Instant::now();
     let possible_matches_by_state = collect_possible_matches_by_state(
         tokenizer,
         &vocab_tree.root,
         &mut possible_matches,
     );
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa] collect_possible_matches_ms={:.3}",
+            possible_matches_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     report.build_nwa_from_trie_time = phase_started_at.elapsed();
     if profile_enabled {
         let (
@@ -1392,13 +1424,14 @@ fn build_terminal_dwa_impl(
             profile_weight_compute_calls,
             profile_match_ms,
             profile_assoc_clone_ms,
+            profile_self_loop_leaf_only_ms,
             profile_leaf_ms,
             profile_merge_ms,
             profile_pending_ms,
             profile_flush_ms,
         ) = builder_profile;
         eprintln!(
-            "[glrmask/profile][terminal_dwa] build_nwa_from_trie_ms={:.3} trie_calls={} assoc_clones={} tokenizer_execs={} exec_ms={:.3} weight_ms={:.3} weight_compute_ms={:.3} weight_compute_calls={} match_ms={:.3} assoc_clone_ms={:.3} leaf_ms={:.3} merge_ms={:.3} pending_ms={:.3} flush_ms={:.3}",
+            "[glrmask/profile][terminal_dwa] build_nwa_from_trie_ms={:.3} trie_calls={} assoc_clones={} tokenizer_execs={} exec_ms={:.3} weight_ms={:.3} weight_compute_ms={:.3} weight_compute_calls={} match_ms={:.3} assoc_clone_ms={:.3} self_loop_leaf_only_ms={:.3} leaf_ms={:.3} merge_ms={:.3} pending_ms={:.3} flush_ms={:.3}",
             phase_started_at.elapsed().as_secs_f64() * 1000.0,
             profile_trie_calls,
             profile_assoc_clones,
@@ -1409,6 +1442,7 @@ fn build_terminal_dwa_impl(
             profile_weight_compute_calls,
             profile_match_ms.as_secs_f64() * 1000.0,
             profile_assoc_clone_ms.as_secs_f64() * 1000.0,
+            profile_self_loop_leaf_only_ms.as_secs_f64() * 1000.0,
             profile_leaf_ms.as_secs_f64() * 1000.0,
             profile_merge_ms.as_secs_f64() * 1000.0,
             profile_pending_ms.as_secs_f64() * 1000.0,
