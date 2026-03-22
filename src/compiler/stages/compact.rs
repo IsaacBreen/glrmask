@@ -13,7 +13,7 @@ use rand::rngs::StdRng;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 use crate::automata::weighted_u32::dwa::DWA;
-use crate::ds::weight::Weight;
+use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 
 use super::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 
@@ -26,23 +26,35 @@ pub struct CompactReport {
     pub new_num_tokens: u32,
     pub old_ranges: usize,
     pub new_ranges: usize,
-    pub old_outer_ranges: usize,
-    pub new_outer_ranges: usize,
-    pub old_token_ranges: usize,
-    pub new_token_ranges: usize,
+    pub old_weight_ranges: usize,
+    pub new_weight_ranges: usize,
+    pub old_unique_token_ranges: usize,
+    pub new_unique_token_ranges: usize,
     pub token_perm: Vec<u32>,
 }
 
 pub struct StochasticCompactProbeReport {
     pub baseline_ranges: usize,
     pub best_ranges: usize,
-    pub baseline_outer_ranges: usize,
-    pub best_outer_ranges: usize,
+    pub baseline_weight_ranges: usize,
+    pub best_weight_ranges: usize,
     pub baseline_token_ranges: usize,
     pub best_token_ranges: usize,
     pub iterations: usize,
     pub best_iteration: usize,
     pub seed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct UniqueStorageCounts {
+    weight_ranges: usize,
+    token_ranges: usize,
+}
+
+impl UniqueStorageCounts {
+    fn total_ranges(self) -> usize {
+        self.weight_ranges + self.token_ranges
+    }
 }
 
 /// Merge equivalent IDs and reorder both dimensions of every weight in `dwa`,
@@ -54,8 +66,8 @@ pub fn compact_dwa_dimensions(
     let num_tsids = id_map.num_tsids();
     let num_tokens = id_map.num_internal_tokens();
 
-    let (old_outer_ranges, old_token_ranges) = count_total_range_components(dwa);
-    let old_ranges = old_outer_ranges + old_token_ranges;
+    let old_storage = count_unique_storage(dwa);
+    let old_ranges = old_storage.total_ranges();
 
     // Step 1  — collect unique weights (by Arc pointer)
     let unique_weights = collect_unique_weights(dwa);
@@ -78,8 +90,8 @@ pub fn compact_dwa_dimensions(
     apply_perm_to_id_map(&mut id_map.tokenizer_states, &tsid_perm, new_num_tsids);
     apply_perm_to_id_map(&mut id_map.vocab_tokens, &token_perm, new_num_tokens);
 
-    let (new_outer_ranges, new_token_ranges) = count_total_range_components(dwa);
-    let new_ranges = new_outer_ranges + new_token_ranges;
+    let new_storage = count_unique_storage(dwa);
+    let new_ranges = new_storage.total_ranges();
 
     CompactReport {
         old_num_tsids: num_tsids,
@@ -88,10 +100,10 @@ pub fn compact_dwa_dimensions(
         new_num_tokens: new_num_tokens as u32,
         old_ranges,
         new_ranges,
-        old_outer_ranges,
-        new_outer_ranges,
-        old_token_ranges,
-        new_token_ranges,
+        old_weight_ranges: old_storage.weight_ranges,
+        new_weight_ranges: new_storage.weight_ranges,
+        old_unique_token_ranges: old_storage.token_ranges,
+        new_unique_token_ranges: new_storage.token_ranges,
         token_perm,
     }
 }
@@ -108,16 +120,13 @@ pub fn probe_stochastic_token_reordering(
     let mut rng = StdRng::seed_from_u64(seed);
 
     let mut current_perm: Vec<u32> = (0..num_tokens).collect();
-    let (baseline_outer_ranges, baseline_token_ranges) =
-        score_permuted_weights(&unique_weights, &tsid_perm, &current_perm);
-    let baseline_ranges = baseline_outer_ranges + baseline_token_ranges;
+    let baseline_storage = score_permuted_weights(&unique_weights, &tsid_perm, &current_perm);
+    let baseline_ranges = baseline_storage.total_ranges();
 
-    let mut current_outer_ranges = baseline_outer_ranges;
-    let mut current_token_ranges = baseline_token_ranges;
+    let mut current_storage = baseline_storage;
     let mut current_ranges = baseline_ranges;
 
-    let mut best_outer_ranges = baseline_outer_ranges;
-    let mut best_token_ranges = baseline_token_ranges;
+    let mut best_storage = baseline_storage;
     let mut best_ranges = baseline_ranges;
     let mut best_iteration = 0usize;
 
@@ -125,19 +134,17 @@ pub fn probe_stochastic_token_reordering(
     for iteration in 1..=iterations {
         let mut candidate_perm = current_perm.clone();
         apply_random_token_move(&mut candidate_perm, &mut rng);
-        let (candidate_outer_ranges, candidate_token_ranges) =
-            score_permuted_weights(&unique_weights, &tsid_perm, &candidate_perm);
-        let candidate_ranges = candidate_outer_ranges + candidate_token_ranges;
+        let candidate_storage = score_permuted_weights(&unique_weights, &tsid_perm, &candidate_perm);
+        let candidate_ranges = candidate_storage.total_ranges();
 
         let better_than_best = candidate_ranges < best_ranges
             || (candidate_ranges == best_ranges
-                && (candidate_token_ranges < best_token_ranges
-                    || (candidate_token_ranges == best_token_ranges
-                        && candidate_outer_ranges < best_outer_ranges)));
+                && (candidate_storage.token_ranges < best_storage.token_ranges
+                    || (candidate_storage.token_ranges == best_storage.token_ranges
+                        && candidate_storage.weight_ranges < best_storage.weight_ranges)));
         if better_than_best {
             best_ranges = candidate_ranges;
-            best_outer_ranges = candidate_outer_ranges;
-            best_token_ranges = candidate_token_ranges;
+            best_storage = candidate_storage;
             best_iteration = iteration;
         }
 
@@ -152,21 +159,20 @@ pub fn probe_stochastic_token_reordering(
         if accept {
             current_perm = candidate_perm;
             current_ranges = candidate_ranges;
-            current_outer_ranges = candidate_outer_ranges;
-            current_token_ranges = candidate_token_ranges;
+            current_storage = candidate_storage;
         }
 
-        let _ = (current_outer_ranges, current_token_ranges);
+        let _ = current_storage;
         temperature *= 0.995;
     }
 
     StochasticCompactProbeReport {
         baseline_ranges,
         best_ranges,
-        baseline_outer_ranges,
-        best_outer_ranges,
-        baseline_token_ranges,
-        best_token_ranges,
+        baseline_weight_ranges: baseline_storage.weight_ranges,
+        best_weight_ranges: best_storage.weight_ranges,
+        baseline_token_ranges: baseline_storage.token_ranges,
+        best_token_ranges: best_storage.token_ranges,
         iterations,
         best_iteration,
         seed,
@@ -413,16 +419,12 @@ fn score_permuted_weights(
     weights: &[Weight],
     tsid_perm: &[u32],
     token_perm: &[u32],
-) -> (usize, usize) {
-    let mut outer_total = 0;
-    let mut token_total = 0;
-    for weight in weights {
-        let permuted = permute_weight(weight, tsid_perm, token_perm);
-        let (outer, token) = count_weight_range_components(&permuted);
-        outer_total += outer;
-        token_total += token;
-    }
-    (outer_total, token_total)
+) -> UniqueStorageCounts {
+    let permuted: Vec<_> = weights
+        .iter()
+        .map(|weight| permute_weight(weight, tsid_perm, token_perm))
+        .collect();
+    count_unique_storage_for_weights(&permuted)
 }
 
 /// Create a new Weight from `w` with permuted (possibly many-to-one) coords.
@@ -460,42 +462,32 @@ fn permute_weight(w: &Weight, tsid_perm: &[u32], token_perm: &[u32]) -> Weight {
         return Weight::empty();
     }
 
-    let mut canonical_token_sets: HashMap<Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>> = HashMap::new();
-    let mut ordered_pairs: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = tokens_by_new_tsid
-        .into_iter()
-        .map(|(tsid, tokens)| {
-            let key = rangeset_key(&tokens);
-            let shared = canonical_token_sets
-                .entry(key)
-                .or_insert_with(|| Arc::new(tokens))
-                .clone();
-            (tsid, shared)
-        })
-        .collect();
-
+    let mut ordered_pairs: Vec<(u32, RangeSetBlaze<u32>)> = tokens_by_new_tsid.into_iter().collect();
     ordered_pairs.sort_unstable_by_key(|(tsid, _)| *tsid);
 
-    // Merge consecutive tsids with the same token set into ranges
-    let mut map = RangeMapBlaze::<u32, Arc<RangeSetBlaze<u32>>>::new();
-    let mut run_start = ordered_pairs[0].0;
-    let mut run_end = ordered_pairs[0].0;
-    let mut run_ts = Arc::clone(&ordered_pairs[0].1);
+    // Merge consecutive tsids with the same token set and rebuild through the
+    // shared weight/token-set interner so unique-storage accounting is real.
+    let mut map = RangeMapBlaze::new();
+    let mut pairs = ordered_pairs.into_iter();
+    let (mut run_start, mut run_tokens) = pairs.next().unwrap();
+    let mut run_end = run_start;
 
-    for &(tsid, ref ts) in &ordered_pairs[1..] {
-        if tsid == run_end + 1
-            && (Arc::ptr_eq(&run_ts, ts) || run_ts.as_ref() == ts.as_ref())
-        {
+    for (tsid, tokens) in pairs {
+        if tsid == run_end + 1 && tokens == run_tokens {
             run_end = tsid;
         } else {
-            map.extend_simple(std::iter::once((run_start..=run_end, Arc::clone(&run_ts))));
+            map.extend_simple(std::iter::once((
+                run_start..=run_end,
+                shared_rangeset(std::mem::take(&mut run_tokens)),
+            )));
             run_start = tsid;
             run_end = tsid;
-            run_ts = Arc::clone(ts);
+            run_tokens = tokens;
         }
     }
-    map.extend_simple(std::iter::once((run_start..=run_end, run_ts)));
+    map.extend_simple(std::iter::once((run_start..=run_end, shared_rangeset(run_tokens))));
 
-    Weight(Arc::new(map))
+    finalize_weight_map(map)
 }
 
 /// Map each element in `set` through the permutation (may be many-to-one).
@@ -559,48 +551,23 @@ fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: us
     id_map.representative_original_ids = new_representatives;
 }
 
-/// Count total ranges across all unique weights in the DWA.
-fn count_total_ranges(dwa: &DWA) -> usize {
-    let (outer, token) = count_total_range_components(dwa);
-    outer + token
+fn count_unique_storage(dwa: &DWA) -> UniqueStorageCounts {
+    let unique_weights = collect_unique_weights(dwa);
+    count_unique_storage_for_weights(&unique_weights)
 }
 
-fn count_total_range_components(dwa: &DWA) -> (usize, usize) {
-    let mut seen = std::collections::HashSet::new();
-    let mut outer_total = 0;
-    let mut token_total = 0;
-    for state in &dwa.states {
-        for (_, (_, w)) in &state.transitions {
-            if seen.insert(Arc::as_ptr(&w.0) as usize) {
-                let (outer, token) = count_weight_range_components(w);
-                outer_total += outer;
-                token_total += token;
-            }
-        }
-        if let Some(fw) = &state.final_weight {
-            if seen.insert(Arc::as_ptr(&fw.0) as usize) {
-                let (outer, token) = count_weight_range_components(fw);
-                outer_total += outer;
-                token_total += token;
+fn count_unique_storage_for_weights(weights: &[Weight]) -> UniqueStorageCounts {
+    let mut seen_token_sets = std::collections::HashSet::new();
+    let mut storage = UniqueStorageCounts::default();
+    for weight in weights {
+        storage.weight_ranges += weight.num_ranges();
+        for (_, token_set) in weight.0.range_values() {
+            if seen_token_sets.insert(Arc::as_ptr(token_set) as usize) {
+                storage.token_ranges += token_set.ranges().count();
             }
         }
     }
-    (outer_total, token_total)
-}
-
-fn count_weight_ranges(w: &Weight) -> usize {
-    let (outer, token) = count_weight_range_components(w);
-    outer + token
-}
-
-fn count_weight_range_components(w: &Weight) -> (usize, usize) {
-    let mut outer = 0;
-    let mut token = 0;
-    for (_, token_set) in w.0.range_values() {
-        outer += 1;
-        token += token_set.ranges().count();
-    }
-    (outer, token)
+    storage
 }
 
 #[cfg(test)]
@@ -623,5 +590,19 @@ mod tests {
         assert_eq!(permuted.tokens_for_tsid(1), RangeSetBlaze::from_iter([1..=1]));
         assert!(permuted.tokens_for_tsid(2).is_empty());
         assert!(permuted.tokens_for_tsid(3).is_empty());
+    }
+
+    #[test]
+    fn permute_weight_reuses_interned_weight_storage() {
+        let weight = Weight::from_compact_ranges([
+            (0..=0, [0..=0]),
+            (1..=1, [1..=1]),
+            (2..=2, [0..=0]),
+        ]);
+
+        let permuted_a = permute_weight(&weight, &[0, 1, 2], &[0, 1]);
+        let permuted_b = permute_weight(&weight, &[0, 1, 2], &[0, 1]);
+
+        assert!(Arc::ptr_eq(&permuted_a.0, &permuted_b.0));
     }
 }

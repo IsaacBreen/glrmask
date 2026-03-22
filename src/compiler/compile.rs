@@ -1113,11 +1113,11 @@ fn compile_prepared(
             compact_report.new_ranges,
         );
         eprintln!(
-            "[glrmask/profile][compile] compact_terminal_breakdown outer={}→{} token_ranges={}→{}",
-            compact_report.old_outer_ranges,
-            compact_report.new_outer_ranges,
-            compact_report.old_token_ranges,
-            compact_report.new_token_ranges,
+            "[glrmask/profile][compile] compact_terminal_unique_storage weight_ranges={}→{} token_ranges={}→{}",
+            compact_report.old_weight_ranges,
+            compact_report.new_weight_ranges,
+            compact_report.old_unique_token_ranges,
+            compact_report.new_unique_token_ranges,
         );
         if compact_diag_env_flag_enabled("GLRMASK_COMPACT_STOCHASTIC_DIAGNOSTIC") {
             let iterations = compact_diag_env_usize("GLRMASK_COMPACT_STOCHASTIC_ITERS", 500);
@@ -1130,12 +1130,12 @@ fn compile_prepared(
                 seed,
             );
             eprintln!(
-                "[glrmask/profile][compile] compact_terminal_stochastic best_ranges={} (outer={} token_ranges={}) baseline_ranges={} (outer={} token_ranges={}) iterations={} best_iteration={} seed={}",
+                "[glrmask/profile][compile] compact_terminal_stochastic best_ranges={} (weight_ranges={} token_ranges={}) baseline_ranges={} (weight_ranges={} token_ranges={}) iterations={} best_iteration={} seed={}",
                 probe.best_ranges,
-                probe.best_outer_ranges,
+                probe.best_weight_ranges,
                 probe.best_token_ranges,
                 probe.baseline_ranges,
-                probe.baseline_outer_ranges,
+                probe.baseline_weight_ranges,
                 probe.baseline_token_ranges,
                 probe.iterations,
                 probe.best_iteration,

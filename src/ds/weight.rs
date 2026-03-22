@@ -334,7 +334,7 @@ fn store_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight, r
     });
 }
 
-fn finalize_weight_map(map: WeightMap) -> Weight {
+pub(crate) fn finalize_weight_map(map: WeightMap) -> Weight {
     if map.ranges().next().is_none() {
         EMPTY_WEIGHT.clone()
     } else {
@@ -368,7 +368,7 @@ fn is_sentinel_token_set(tokens: &RangeSetBlaze<u32>) -> bool {
         && *range.end() == WEIGHT_ALL_SENTINEL
 }
 
-fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
+pub(crate) fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
     intern_rangeset(tokens)
 }
 
