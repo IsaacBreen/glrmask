@@ -259,7 +259,7 @@ impl NFA {
         let precompute_threshold: u32 = std::env::var("DFA_EPS_PRECOMPUTE_THRESHOLD")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(4);
+            .unwrap_or(1);
 
         let mut high_degree_closures: Vec<Option<Vec<u32>>> = vec![None; num_nfa_states];
         let mut visited = vec![false; num_nfa_states];
