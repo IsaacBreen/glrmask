@@ -816,19 +816,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         labels[label_idx].push(internal_token_id);
     }
 
-    fn buffer_leaf_token_ids(&mut self, source: u32, label: TerminalID, internal_token_ids: &[u32]) {
-        let source_idx = source as usize;
-        if source_idx >= self.leaf_token_ids_buffer.len() {
-            self.leaf_token_ids_buffer.resize_with(source_idx + 1, Vec::new);
-        }
-        let labels = &mut self.leaf_token_ids_buffer[source_idx];
-        let label_idx = label as usize;
-        if label_idx >= labels.len() {
-            labels.resize_with(label_idx + 1, SmallVec::new);
-        }
-        labels[label_idx].extend_from_slice(internal_token_ids);
-    }
-
     fn buffer_leaf_token_id_set(&mut self, source: u32, label: TerminalID, token_ids: &RangeSetBlaze<usize>) {
         let source_idx = source as usize;
         if source_idx >= self.leaf_token_ids_buffer.len() {
@@ -947,20 +934,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         if node.has_token() {
             accessible.remove(node.token_id() as usize);
         }
-        let accessible_token_ids: LeafTokenIds = accessible.iter().map(|token_id| token_id as u32).collect();
+        if accessible.is_empty() {
+            self.profile_self_loop_leaf_only_ms += started_at.elapsed();
+            return;
+        }
+        let accessible_weight = self.token_set_weight_fast(&accessible);
         for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
             for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
-                if self.ignore_terminal == Some(terminal_id) {
-                    self.add_leaf_token_set_from_sources(
-                        source_nodes,
-                        terminal_id,
-                        &accessible,
-                    );
-                } else {
-                    for &source in source_nodes {
-                        self.buffer_leaf_token_ids(source, terminal_id, &accessible_token_ids);
-                    }
-                }
+                self.add_match_from_sources(source_nodes, terminal_id, self.leaf_state, &accessible_weight);
             }
         }
         self.profile_self_loop_leaf_only_ms += started_at.elapsed();
