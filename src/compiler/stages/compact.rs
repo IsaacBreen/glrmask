@@ -75,39 +75,61 @@ pub fn compact_dwa_dimensions(
 
     // Step 1  — collect unique weights (by Arc pointer)
     let unique_weights = collect_unique_weights(dwa);
-    let weight_refs: Vec<&Weight> = unique_weights.iter().collect();
 
-    // Step 2  — tsid dimension: merge + reorder
-    let tsid_merge_profiles = build_tsid_profiles(&weight_refs, num_tsids as usize);
-    let tsid_order_profiles = build_tsid_order_profiles(&weight_refs, num_tsids as usize);
-    let (tsid_perm, new_num_tsids) =
-        merge_sort_perm_with_group_order(&tsid_merge_profiles, &tsid_order_profiles);
+    // Step 2 — merge TSIDs to a fixed point before reordering.
+    let mut merged_weights = unique_weights.clone();
+    let mut tsid_merge_perm = identity_perm(num_tsids as usize);
+    let mut current_num_tsids = num_tsids as usize;
 
-    // Step 3  — token dimension: merge + reorder
-    let token_profiles = build_token_profiles(&weight_refs, num_tokens);
-    let (token_perm, new_num_tokens) = merge_sort_perm(&token_profiles);
+    loop {
+        let weight_refs: Vec<&Weight> = merged_weights.iter().collect();
+        let tsid_profiles = build_tsid_profiles(&weight_refs, current_num_tsids);
+        let (tsid_step_perm, next_num_tsids) = merge_sort_perm(&tsid_profiles);
+        if next_num_tsids == current_num_tsids {
+            break;
+        }
+
+        merged_weights = apply_permutations_to_weight_set(
+            &merged_weights,
+            &tsid_step_perm,
+            &identity_perm(num_tokens as usize),
+        );
+        tsid_merge_perm = compose_perm(&tsid_merge_perm, &tsid_step_perm);
+        current_num_tsids = next_num_tsids;
+    }
+
+    let weight_refs: Vec<&Weight> = merged_weights.iter().collect();
+
+    // Step 3 — reorder only the surviving IDs.
+    let tsid_order_profiles = build_tsid_order_profiles(&weight_refs, current_num_tsids);
+    let (tsid_order_perm, ordered_num_tsids) = merge_sort_perm(&tsid_order_profiles);
+    let tsid_perm = compose_perm(&tsid_merge_perm, &tsid_order_perm);
+
+    let original_weight_refs: Vec<&Weight> = unique_weights.iter().collect();
+    let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
+    let (token_perm, ordered_num_tokens) = merge_sort_perm(&token_profiles);
     let merged_unique_token_sets = collect_merged_unique_token_sets(&unique_weights, &token_perm);
     let token_perm = optimize_token_order_locally(
         &merged_unique_token_sets,
         token_perm,
-        new_num_tokens,
+        ordered_num_tokens,
     );
 
     // Step 4  — apply permutations to every weight in the DWA
     apply_permutations_to_dwa(dwa, &unique_weights, &tsid_perm, &token_perm);
 
     // Step 5  — update id_map so the runtime still maps correctly
-    apply_perm_to_id_map(&mut id_map.tokenizer_states, &tsid_perm, new_num_tsids);
-    apply_perm_to_id_map(&mut id_map.vocab_tokens, &token_perm, new_num_tokens);
+    apply_perm_to_id_map(&mut id_map.tokenizer_states, &tsid_perm, ordered_num_tsids);
+    apply_perm_to_id_map(&mut id_map.vocab_tokens, &token_perm, ordered_num_tokens);
 
     let new_storage = count_unique_storage(dwa);
     let new_ranges = new_storage.total_ranges();
 
     CompactReport {
         old_num_tsids: num_tsids,
-        new_num_tsids: new_num_tsids as u32,
+        new_num_tsids: ordered_num_tsids as u32,
         old_num_tokens: num_tokens,
-        new_num_tokens: new_num_tokens as u32,
+        new_num_tokens: ordered_num_tokens as u32,
         old_ranges,
         new_ranges,
         old_weight_ranges: old_storage.weight_ranges,
@@ -212,6 +234,38 @@ fn collect_unique_weights(dwa: &DWA) -> Vec<Weight> {
     unique
 }
 
+fn dedup_weights(weights: Vec<Weight>) -> Vec<Weight> {
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    for weight in weights {
+        if seen.insert(Arc::as_ptr(&weight.0) as usize) {
+            unique.push(weight);
+        }
+    }
+    unique
+}
+
+fn identity_perm(size: usize) -> Vec<u32> {
+    (0..size as u32).collect()
+}
+
+fn compose_perm(left: &[u32], right: &[u32]) -> Vec<u32> {
+    left.iter().map(|&mid| right[mid as usize]).collect()
+}
+
+fn apply_permutations_to_weight_set(
+    weights: &[Weight],
+    tsid_perm: &[u32],
+    token_perm: &[u32],
+) -> Vec<Weight> {
+    dedup_weights(
+        weights
+            .iter()
+            .map(|weight| permute_weight(weight, tsid_perm, token_perm))
+            .collect(),
+    )
+}
+
 fn rangeset_key(set: &RangeSetBlaze<u32>) -> Vec<(u32, u32)> {
     set.ranges()
         .map(|range| (*range.start(), *range.end()))
@@ -220,19 +274,7 @@ fn rangeset_key(set: &RangeSetBlaze<u32>) -> Vec<(u32, u32)> {
 
 /// For each tsid, list the (weight, entry) context indices where it appears.
 fn build_tsid_profiles(weights: &[&Weight], num_tsids: usize) -> Vec<Vec<u32>> {
-    let mut profiles = vec![Vec::new(); num_tsids];
-    let mut ctx = 0u32;
-    for w in weights {
-        for (tsid_range, _token_set) in w.0.range_values() {
-            for tsid in *tsid_range.start()..=*tsid_range.end() {
-                if (tsid as usize) < num_tsids {
-                    profiles[tsid as usize].push(ctx);
-                }
-            }
-            ctx += 1;
-        }
-    }
-    profiles
+    build_tsid_order_profiles(weights, num_tsids)
 }
 
 /// For ordering only: treat repeated equal token sets within the same weight as
@@ -757,6 +799,23 @@ mod tests {
         assert_eq!(permuted.tokens_for_tsid(1), RangeSetBlaze::from_iter([1..=1]));
         assert!(permuted.tokens_for_tsid(2).is_empty());
         assert!(permuted.tokens_for_tsid(3).is_empty());
+    }
+
+    #[test]
+    fn tsid_merge_profiles_collapse_repeated_equal_token_sets() {
+        let weight = Weight::from_compact_ranges([
+            (0..=0, [0..=0]),
+            (1..=1, [1..=1]),
+            (2..=2, [0..=0]),
+        ]);
+        let weights = vec![&weight];
+
+        let profiles = build_tsid_profiles(&weights, 3);
+        let (perm, new_count) = merge_sort_perm(&profiles);
+
+        assert_eq!(new_count, 2);
+        assert_eq!(perm[0], perm[2]);
+        assert_ne!(perm[0], perm[1]);
     }
 
     #[test]
