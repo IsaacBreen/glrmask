@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::regex::parse_regex;
-use crate::automata::lexer::compile::build_regex;
+use crate::automata::lexer::compile::build_regex_with_profile_label;
 use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
@@ -76,7 +76,7 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
             Terminal::Expr { expr, .. } => expr.clone(),
         })
         .collect();
-    let regex = build_regex(&exprs);
+    let regex = build_regex_with_profile_label(&exprs, "grammar");
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: grammar.num_terminals(),
@@ -88,7 +88,7 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
 /// Each expression's index becomes its `TerminalID`.
 pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
     let num = exprs.len() as u32;
-    let regex = build_regex(exprs);
+    let regex = build_regex_with_profile_label(exprs, "exprs");
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: num,

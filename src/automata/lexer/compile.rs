@@ -403,10 +403,30 @@ impl Expr {
     }
 }
 
+fn log_tokenizer_profile(
+    enabled: bool,
+    profile_label: &str,
+    phase: &str,
+    started_at: std::time::Instant,
+) {
+    if enabled {
+        eprintln!(
+            "[glrmask/profile][tokenizer] label={} {}_ms={:.3}",
+            profile_label,
+            phase,
+            started_at.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 /// Compile multiple expressions into a single multi-group [`Regex`].
 ///
 /// Each expression's index becomes its group ID in the resulting DFA.
 pub fn build_regex(exprs: &[Expr]) -> Regex {
+    build_regex_with_profile_label(exprs, "default")
+}
+
+pub fn build_regex_with_profile_label(exprs: &[Expr], profile_label: &str) -> Regex {
     let plan = build_exclusion_compile_plan(exprs);
     let profile_enabled = compile_profile_enabled();
 
@@ -416,61 +436,31 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
         .iter()
         .map(|expr| expr_u8set(expr))
         .collect();
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][tokenizer] compute_group_sets_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    log_tokenizer_profile(profile_enabled, profile_label, "compute_group_sets", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     let mut nfa = build_regex_nfa(&plan.compiled_exprs);
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][tokenizer] build_regex_nfa_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    log_tokenizer_profile(profile_enabled, profile_label, "build_regex_nfa", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     nfa.condense_epsilon_sccs();
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][tokenizer] condense_epsilon_sccs_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    log_tokenizer_profile(profile_enabled, profile_label, "condense_epsilon_sccs", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     let mut dfa = nfa.to_dfa();
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][tokenizer] determinize_regex_nfa_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    log_tokenizer_profile(profile_enabled, profile_label, "determinize_regex_nfa", phase_started_at);
 
     let phase_started_at = std::time::Instant::now();
     dfa.ensure_group_capacity(group_sets.len());
     for (group_id, set) in group_sets.into_iter().enumerate() {
         dfa.set_group_u8set(group_id as u32, set);
     }
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][tokenizer] assign_group_sets_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    log_tokenizer_profile(profile_enabled, profile_label, "assign_group_sets", phase_started_at);
 
     if !plan.exclusions.is_empty() {
         let phase_started_at = std::time::Instant::now();
         let _ = dfa.apply_group_exclusions(&plan.exclusions);
-        if profile_enabled {
-            eprintln!(
-                "[glrmask/profile][tokenizer] apply_exclusions_ms={:.3}",
-                phase_started_at.elapsed().as_secs_f64() * 1000.0
-            );
-        }
+        log_tokenizer_profile(profile_enabled, profile_label, "apply_exclusions", phase_started_at);
     }
 
     let mut dfa = if plan.visible_groups < plan.compiled_exprs.len() {
@@ -481,12 +471,7 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
 
     let phase_started_at = std::time::Instant::now();
     let dfa = dfa.minimize();
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][tokenizer] minimize_regex_dfa_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    log_tokenizer_profile(profile_enabled, profile_label, "minimize_regex_dfa", phase_started_at);
     Regex { dfa }
 }
 

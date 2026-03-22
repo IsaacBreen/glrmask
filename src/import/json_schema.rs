@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use serde_json::{Map, Value};
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr as LexerExpr;
+use crate::automata::lexer::compile::build_regex_with_profile_label;
 use crate::automata::lexer::dfa::DFA as LexerDfa;
 use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::grammar_def::GrammarDef;
@@ -2714,7 +2715,10 @@ impl SchemaCtx {
     }
 
     fn schema_pattern_matches_key(pattern: &str, key: &str) -> Result<bool, GlrMaskError> {
-        let regex = parse_regex(&json_search_pattern(pattern), true).build();
+        let regex = build_regex_with_profile_label(
+            &[parse_regex(&json_search_pattern(pattern), true)],
+            "json_schema_pattern_match",
+        );
         let mut state = 0u32;
         for &byte in key.as_bytes() {
             let Some(next) = regex.step(state, byte) else {
@@ -2738,12 +2742,18 @@ impl SchemaCtx {
         } else {
             JSON_KEY_COLON_REGEX.to_string()
         };
-        Ok(parse_regex(&pattern, true).build().dfa)
+        Ok(build_regex_with_profile_label(
+            &[parse_regex(&pattern, true)],
+            "json_schema_scoped_key_colon",
+        ).dfa)
     }
 
     fn pattern_key_colon_dfa(pattern: &str) -> LexerDfa {
         let inner = json_search_pattern(pattern);
-        parse_regex(&format!(r#""(?:{})": "#, inner), true).build().dfa
+        build_regex_with_profile_label(
+            &[parse_regex(&format!(r#""(?:{})": "#, inner), true)],
+            "json_schema_pattern_key_colon",
+        ).dfa
     }
 
     fn literal_key_colon_union_dfa(keys: &BTreeSet<String>) -> Option<LexerDfa> {
@@ -2759,7 +2769,10 @@ impl SchemaCtx {
         } else {
             LexerExpr::Choice(exprs)
         };
-        Some(expr.build().dfa)
+        Some(build_regex_with_profile_label(
+            &[expr],
+            "json_schema_literal_key_union",
+        ).dfa)
     }
 
     fn dfa_accepts_any(dfa: &LexerDfa) -> bool {
