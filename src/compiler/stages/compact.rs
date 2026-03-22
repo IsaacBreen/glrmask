@@ -61,6 +61,54 @@ impl UniqueStorageCounts {
     }
 }
 
+struct TokenOrderScorer {
+    num_groups: usize,
+    total_token_memberships: usize,
+    pair_weights: Vec<u32>,
+}
+
+impl TokenOrderScorer {
+    fn new(merged_unique_token_sets: &[RangeSetBlaze<u32>], num_groups: usize) -> Self {
+        let mut pair_weights = vec![0u32; num_groups * num_groups];
+        let mut total_token_memberships = 0usize;
+
+        for token_set in merged_unique_token_sets {
+            let groups: Vec<usize> = token_set
+                .ranges()
+                .flat_map(|range| *range.start()..=*range.end())
+                .map(|group| group as usize)
+                .collect();
+
+            total_token_memberships += groups.len();
+            for left_idx in 0..groups.len() {
+                let left = groups[left_idx];
+                for &right in &groups[(left_idx + 1)..] {
+                    pair_weights[left * num_groups + right] += 1;
+                    pair_weights[right * num_groups + left] += 1;
+                }
+            }
+        }
+
+        Self {
+            num_groups,
+            total_token_memberships,
+            pair_weights,
+        }
+    }
+
+    fn score_layout(&self, layout: &[u32]) -> usize {
+        debug_assert_eq!(layout.len(), self.num_groups);
+
+        let adjacency_bonus: usize = layout
+            .windows(2)
+            .map(|edge| {
+                self.pair_weights[edge[0] as usize * self.num_groups + edge[1] as usize] as usize
+            })
+            .sum();
+        self.total_token_memberships.saturating_sub(adjacency_bonus)
+    }
+}
+
 /// Merge equivalent IDs and reorder both dimensions of every weight in `dwa`,
 /// updating `id_map` to match.
 pub fn compact_dwa_dimensions(
@@ -138,12 +186,12 @@ pub fn probe_stochastic_token_reordering(
     let identity_token_perm: Vec<u32> = (0..num_tokens).collect();
     let merged_unique_token_sets =
         collect_merged_unique_token_sets(&unique_weights, &identity_token_perm);
+    let scorer = TokenOrderScorer::new(&merged_unique_token_sets, num_tokens as usize);
     let baseline_storage = count_unique_storage_for_weights(&unique_weights);
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let mut current_perm: Vec<u32> = (0..num_tokens).collect();
-    let baseline_token_ranges =
-        count_token_ranges_after_group_permutation(&merged_unique_token_sets, &current_perm);
+    let mut current_layout: Vec<u32> = (0..num_tokens).collect();
+    let baseline_token_ranges = scorer.score_layout(&current_layout);
     let baseline_ranges = baseline_storage.weight_ranges + baseline_token_ranges;
 
     let mut current_token_ranges = baseline_token_ranges;
@@ -155,10 +203,9 @@ pub fn probe_stochastic_token_reordering(
 
     let mut temperature = 8.0f64;
     for iteration in 1..=iterations {
-        let mut candidate_perm = current_perm.clone();
-        apply_random_token_move(&mut candidate_perm, &mut rng);
-        let candidate_token_ranges =
-            count_token_ranges_after_group_permutation(&merged_unique_token_sets, &candidate_perm);
+        let mut candidate_layout = current_layout.clone();
+        apply_random_token_move(&mut candidate_layout, &mut rng);
+        let candidate_token_ranges = scorer.score_layout(&candidate_layout);
         let candidate_ranges = baseline_storage.weight_ranges + candidate_token_ranges;
 
         let better_than_best = candidate_ranges < best_ranges
@@ -179,7 +226,7 @@ pub fn probe_stochastic_token_reordering(
         };
 
         if accept {
-            current_perm = candidate_perm;
+            current_layout = candidate_layout;
             current_ranges = candidate_ranges;
             current_token_ranges = candidate_token_ranges;
         }
@@ -416,7 +463,7 @@ fn collect_merged_unique_token_sets(weights: &[Weight], merge_token_perm: &[u32]
     unique_sets
 }
 
-fn count_token_ranges_after_group_permutation(
+fn count_token_ranges_after_group_permutation_exact(
     merged_unique_token_sets: &[RangeSetBlaze<u32>],
     group_positions: &[u32],
 ) -> usize {
@@ -435,30 +482,22 @@ fn layout_to_group_positions(layout: &[u32]) -> Vec<u32> {
 }
 
 fn run_adjacent_swap_passes(
-    merged_unique_token_sets: &[RangeSetBlaze<u32>],
+    scorer: &TokenOrderScorer,
     layout: &mut Vec<u32>,
-    group_positions: &mut Vec<u32>,
     current_token_ranges: &mut usize,
 ) {
     for _ in 0..TOKEN_ORDER_LOCAL_SEARCH_PASSES {
         let mut improved = false;
         for left_pos in 0..(layout.len() - 1) {
             let right_pos = left_pos + 1;
-            let left_group = layout[left_pos] as usize;
-            let right_group = layout[right_pos] as usize;
 
-            let mut candidate_positions = group_positions.clone();
-            candidate_positions[left_group] = right_pos as u32;
-            candidate_positions[right_group] = left_pos as u32;
-            let candidate_token_ranges = count_token_ranges_after_group_permutation(
-                merged_unique_token_sets,
-                &candidate_positions,
-            );
+            layout.swap(left_pos, right_pos);
+            let candidate_token_ranges = scorer.score_layout(layout);
             if candidate_token_ranges < *current_token_ranges {
-                *group_positions = candidate_positions;
-                layout.swap(left_pos, right_pos);
                 *current_token_ranges = candidate_token_ranges;
                 improved = true;
+            } else {
+                layout.swap(left_pos, right_pos);
             }
         }
         if !improved {
@@ -468,32 +507,28 @@ fn run_adjacent_swap_passes(
 }
 
 fn finish_token_order_with_seeded_search(
-    merged_unique_token_sets: &[RangeSetBlaze<u32>],
-    initial_group_positions: Vec<u32>,
+    scorer: &TokenOrderScorer,
+    initial_layout: Vec<u32>,
 ) -> Vec<u32> {
-    if TOKEN_ORDER_FINISH_ITERS == 0 || merged_unique_token_sets.is_empty() {
-        return initial_group_positions;
+    if TOKEN_ORDER_FINISH_ITERS == 0 || initial_layout.len() < 2 {
+        return initial_layout;
     }
 
     let mut rng = StdRng::seed_from_u64(TOKEN_ORDER_FINISH_SEED);
-    let mut current_positions = initial_group_positions.clone();
-    let mut current_token_ranges =
-        count_token_ranges_after_group_permutation(merged_unique_token_sets, &current_positions);
-    let mut best_positions = current_positions.clone();
+    let mut current_layout = initial_layout.clone();
+    let mut current_token_ranges = scorer.score_layout(&current_layout);
+    let mut best_layout = current_layout.clone();
     let mut best_token_ranges = current_token_ranges;
 
     let mut temperature = 8.0f64;
     for _ in 0..TOKEN_ORDER_FINISH_ITERS {
-        let mut candidate_positions = current_positions.clone();
-        apply_random_token_move(&mut candidate_positions, &mut rng);
-        let candidate_token_ranges = count_token_ranges_after_group_permutation(
-            merged_unique_token_sets,
-            &candidate_positions,
-        );
+        let mut candidate_layout = current_layout.clone();
+        apply_random_token_move(&mut candidate_layout, &mut rng);
+        let candidate_token_ranges = scorer.score_layout(&candidate_layout);
 
         if candidate_token_ranges < best_token_ranges {
             best_token_ranges = candidate_token_ranges;
-            best_positions = candidate_positions.clone();
+            best_layout = candidate_layout.clone();
         }
 
         let delta = candidate_token_ranges as i64 - current_token_ranges as i64;
@@ -505,14 +540,14 @@ fn finish_token_order_with_seeded_search(
         };
 
         if accept {
-            current_positions = candidate_positions;
+            current_layout = candidate_layout;
             current_token_ranges = candidate_token_ranges;
         }
 
         temperature *= 0.995;
     }
 
-    best_positions
+    best_layout
 }
 
 fn optimize_token_order_locally(
@@ -524,22 +559,18 @@ fn optimize_token_order_locally(
         return initial_token_perm;
     }
 
+    let scorer = TokenOrderScorer::new(merged_unique_token_sets, new_num_tokens);
     let mut layout: Vec<u32> = (0..new_num_tokens as u32).collect();
-    let mut group_positions = layout.clone();
-    let mut current_token_ranges =
-        count_token_ranges_after_group_permutation(merged_unique_token_sets, &group_positions);
+    let mut current_token_ranges = scorer.score_layout(&layout);
 
     run_adjacent_swap_passes(
-        merged_unique_token_sets,
+        &scorer,
         &mut layout,
-        &mut group_positions,
         &mut current_token_ranges,
     );
 
-    group_positions = finish_token_order_with_seeded_search(
-        merged_unique_token_sets,
-        group_positions,
-    );
+    layout = finish_token_order_with_seeded_search(&scorer, layout);
+    let group_positions = layout_to_group_positions(&layout);
 
     initial_token_perm
         .into_iter()
@@ -817,6 +848,26 @@ mod tests {
         let permuted_b = permute_weight(&weight, &[0, 1, 2], &[0, 1]);
 
         assert!(Arc::ptr_eq(&permuted_a.0, &permuted_b.0));
+    }
+
+    #[test]
+    fn token_order_scorer_matches_exact_range_count() {
+        let merged_unique_token_sets = vec![
+            RangeSetBlaze::from_iter([0..=0, 2..=2]),
+            RangeSetBlaze::from_iter([0..=1, 3..=3]),
+            RangeSetBlaze::from_iter([1..=2]),
+        ];
+        let scorer = TokenOrderScorer::new(&merged_unique_token_sets, 4);
+        let layout = vec![2, 0, 3, 1];
+        let group_positions = layout_to_group_positions(&layout);
+
+        assert_eq!(
+            scorer.score_layout(&layout),
+            count_token_ranges_after_group_permutation_exact(
+                &merged_unique_token_sets,
+                &group_positions,
+            ),
+        );
     }
 
     #[test]
