@@ -1089,6 +1089,13 @@ fn compile_prepared(
             compact_report.old_ranges,
             compact_report.new_ranges,
         );
+        eprintln!(
+            "[glrmask/profile][compile] compact_terminal_breakdown outer={}→{} token_ranges={}→{}",
+            compact_report.old_outer_ranges,
+            compact_report.new_outer_ranges,
+            compact_report.old_token_ranges,
+            compact_report.new_token_ranges,
+        );
     }
 
     let phase_started_at = std::time::Instant::now();

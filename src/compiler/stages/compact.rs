@@ -24,6 +24,10 @@ pub struct CompactReport {
     pub new_num_tokens: u32,
     pub old_ranges: usize,
     pub new_ranges: usize,
+    pub old_outer_ranges: usize,
+    pub new_outer_ranges: usize,
+    pub old_token_ranges: usize,
+    pub new_token_ranges: usize,
     pub token_perm: Vec<u32>,
 }
 
@@ -36,7 +40,8 @@ pub fn compact_dwa_dimensions(
     let num_tsids = id_map.num_tsids();
     let num_tokens = id_map.num_internal_tokens();
 
-    let old_ranges = count_total_ranges(dwa);
+    let (old_outer_ranges, old_token_ranges) = count_total_range_components(dwa);
+    let old_ranges = old_outer_ranges + old_token_ranges;
 
     // Step 1  — collect unique weights (by Arc pointer)
     let unique_weights = collect_unique_weights(dwa);
@@ -59,7 +64,8 @@ pub fn compact_dwa_dimensions(
     apply_perm_to_id_map(&mut id_map.tokenizer_states, &tsid_perm, new_num_tsids);
     apply_perm_to_id_map(&mut id_map.vocab_tokens, &token_perm, new_num_tokens);
 
-    let new_ranges = count_total_ranges(dwa);
+    let (new_outer_ranges, new_token_ranges) = count_total_range_components(dwa);
+    let new_ranges = new_outer_ranges + new_token_ranges;
 
     CompactReport {
         old_num_tsids: num_tsids,
@@ -68,6 +74,10 @@ pub fn compact_dwa_dimensions(
         new_num_tokens: new_num_tokens as u32,
         old_ranges,
         new_ranges,
+        old_outer_ranges,
+        new_outer_ranges,
+        old_token_ranges,
+        new_token_ranges,
         token_perm,
     }
 }
@@ -410,30 +420,46 @@ fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: us
 
 /// Count total ranges across all unique weights in the DWA.
 fn count_total_ranges(dwa: &DWA) -> usize {
+    let (outer, token) = count_total_range_components(dwa);
+    outer + token
+}
+
+fn count_total_range_components(dwa: &DWA) -> (usize, usize) {
     let mut seen = std::collections::HashSet::new();
-    let mut total = 0;
+    let mut outer_total = 0;
+    let mut token_total = 0;
     for state in &dwa.states {
         for (_, (_, w)) in &state.transitions {
             if seen.insert(Arc::as_ptr(&w.0) as usize) {
-                total += count_weight_ranges(w);
+                let (outer, token) = count_weight_range_components(w);
+                outer_total += outer;
+                token_total += token;
             }
         }
         if let Some(fw) = &state.final_weight {
             if seen.insert(Arc::as_ptr(&fw.0) as usize) {
-                total += count_weight_ranges(fw);
+                let (outer, token) = count_weight_range_components(fw);
+                outer_total += outer;
+                token_total += token;
             }
         }
     }
-    total
+    (outer_total, token_total)
 }
 
 fn count_weight_ranges(w: &Weight) -> usize {
-    let mut n = 0;
+    let (outer, token) = count_weight_range_components(w);
+    outer + token
+}
+
+fn count_weight_range_components(w: &Weight) -> (usize, usize) {
+    let mut outer = 0;
+    let mut token = 0;
     for (_, token_set) in w.0.range_values() {
-        n += 1;
-        n += token_set.ranges().count();
+        outer += 1;
+        token += token_set.ranges().count();
     }
-    n
+    (outer, token)
 }
 
 #[cfg(test)]
