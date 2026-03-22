@@ -1,5 +1,7 @@
 //! sep1-style lexer NFA → DFA determinization, adapted to glrmask's leaner DFA types.
 
+use std::collections::VecDeque;
+
 use rustc_hash::FxHashMap;
 
 use crate::ds::bitset::BitSet;
@@ -8,6 +10,20 @@ use crate::ds::u8set::U8Set;
 
 use super::dfa::DFA;
 use super::nfa::{CompactNFA, NFA};
+
+#[derive(Default)]
+struct LexerDeterminizeProfile {
+    num_nfa_states: usize,
+    num_classes: usize,
+    precomputed_closures: usize,
+    subsets_processed: usize,
+    subset_state_total: usize,
+    fast_singleton_hits: usize,
+    reachable_groups_ms: std::time::Duration,
+    class_remap_ms: std::time::Duration,
+    closure_precompute_ms: std::time::Duration,
+    subset_construction_ms: std::time::Duration,
+}
 
 fn sparse_to_sorted_vec(set: &SparseStateSet) -> Vec<u32> {
     let mut states = Vec::new();
@@ -42,8 +58,147 @@ fn compute_subset_metadata(
     (finalizers, future)
 }
 
+fn compute_reachable_groups(nfa: &NFA, group_count: usize) -> Vec<BitSet> {
+    let num_states = nfa.states.len();
+    if num_states == 0 {
+        return Vec::new();
+    }
+
+    let adj: Vec<Vec<usize>> = nfa
+        .states
+        .iter()
+        .map(|state| {
+            let mut targets: Vec<usize> = state
+                .epsilon_transitions
+                .iter()
+                .map(|&target| target as usize)
+                .collect();
+            targets.extend(state.transitions.iter().map(|(_, target)| *target as usize));
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        })
+        .collect();
+
+    let mut scc_id = vec![u32::MAX; num_states];
+    let mut scc_count: u32 = 0;
+    let mut index_counter: u32 = 0;
+    let mut stack: Vec<usize> = Vec::new();
+    let mut on_stack = vec![false; num_states];
+    let mut lowlink = vec![0u32; num_states];
+    let mut disc = vec![u32::MAX; num_states];
+    let mut dfs_stack: Vec<(usize, usize)> = Vec::new();
+
+    for root in 0..num_states {
+        if disc[root] != u32::MAX {
+            continue;
+        }
+
+        dfs_stack.push((root, 0));
+        disc[root] = index_counter;
+        lowlink[root] = index_counter;
+        index_counter += 1;
+        stack.push(root);
+        on_stack[root] = true;
+
+        while let Some(&mut (state, ref mut child_index)) = dfs_stack.last_mut() {
+            if *child_index < adj[state].len() {
+                let next = adj[state][*child_index];
+                *child_index += 1;
+                if disc[next] == u32::MAX {
+                    disc[next] = index_counter;
+                    lowlink[next] = index_counter;
+                    index_counter += 1;
+                    stack.push(next);
+                    on_stack[next] = true;
+                    dfs_stack.push((next, 0));
+                } else if on_stack[next] {
+                    lowlink[state] = lowlink[state].min(disc[next]);
+                }
+            } else {
+                if lowlink[state] == disc[state] {
+                    while let Some(member) = stack.pop() {
+                        on_stack[member] = false;
+                        scc_id[member] = scc_count;
+                        if member == state {
+                            break;
+                        }
+                    }
+                    scc_count += 1;
+                }
+                dfs_stack.pop();
+                if let Some(&mut (parent, _)) = dfs_stack.last_mut() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[state]);
+                }
+            }
+        }
+    }
+
+    let mut scc_reachable: Vec<BitSet> = (0..scc_count as usize)
+        .map(|_| BitSet::new(group_count))
+        .collect();
+    for (state_idx, state) in nfa.states.iter().enumerate() {
+        let sid = scc_id[state_idx] as usize;
+        for &group in &state.finalizers {
+            scc_reachable[sid].set(group as usize);
+        }
+    }
+
+    let mut scc_successors: Vec<Vec<u32>> = vec![Vec::new(); scc_count as usize];
+    for (state_idx, targets) in adj.iter().enumerate() {
+        let src_scc = scc_id[state_idx];
+        for &target in targets {
+            let dst_scc = scc_id[target];
+            if src_scc != dst_scc {
+                scc_successors[src_scc as usize].push(dst_scc);
+            }
+        }
+    }
+    for successors in &mut scc_successors {
+        successors.sort_unstable();
+        successors.dedup();
+    }
+
+    let mut scc_predecessors: Vec<Vec<u32>> = vec![Vec::new(); scc_count as usize];
+    let mut remaining_successors = vec![0usize; scc_count as usize];
+    for (sid, successors) in scc_successors.iter().enumerate() {
+        remaining_successors[sid] = successors.len();
+        for &succ in successors {
+            scc_predecessors[succ as usize].push(sid as u32);
+        }
+    }
+
+    let mut queue: VecDeque<u32> = remaining_successors
+        .iter()
+        .enumerate()
+        .filter_map(|(sid, &count)| (count == 0).then_some(sid as u32))
+        .collect();
+
+    while let Some(sid) = queue.pop_front() {
+        let sid = sid as usize;
+        let sid_reachable = scc_reachable[sid].clone();
+
+        for &pred in &scc_predecessors[sid] {
+            let pred = pred as usize;
+            scc_reachable[pred].union_with(&sid_reachable);
+            remaining_successors[pred] -= 1;
+            if remaining_successors[pred] == 0 {
+                queue.push_back(pred as u32);
+            }
+        }
+    }
+
+    (0..num_states)
+        .map(|state_idx| scc_reachable[scc_id[state_idx] as usize].clone())
+        .collect()
+}
+
 impl NFA {
     pub fn to_dfa(&self) -> DFA {
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LEXER_DETERMINIZE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let mut profile = profile_enabled.then(LexerDeterminizeProfile::default);
+
         let group_count = self
             .states
             .iter()
@@ -52,33 +207,17 @@ impl NFA {
             .map(|group| *group as usize + 1)
             .unwrap_or(0);
 
-        let mut reachable_groups: Vec<BitSet> = (0..self.states.len())
-            .map(|_| BitSet::new(group_count))
-            .collect();
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for state_id in (0..self.states.len()).rev() {
-                let mut next = reachable_groups[state_id].clone();
-                for &group in &self.states[state_id].finalizers {
-                    next.set(group as usize);
-                }
-                for &next_state in &self.states[state_id].epsilon_transitions {
-                    next.union_with(&reachable_groups[next_state as usize]);
-                }
-                for (_, next_state) in &self.states[state_id].transitions {
-                    next.union_with(&reachable_groups[*next_state as usize]);
-                }
-                if next != reachable_groups[state_id] {
-                    reachable_groups[state_id] = next;
-                    changed = true;
-                }
-            }
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
+        let reachable_groups = compute_reachable_groups(self, group_count);
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+            profile.num_nfa_states = self.states.len();
+            profile.reachable_groups_ms = started_at.elapsed();
         }
 
         let mut dfa = DFA::new(1);
         dfa.ensure_group_capacity(group_count);
 
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
         let remapped_transitions: Vec<Vec<(U8Set, u32)>> = self
             .states
@@ -97,7 +236,12 @@ impl NFA {
                     .collect()
             })
             .collect();
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+            profile.num_classes = num_classes;
+            profile.class_remap_ms = started_at.elapsed();
+        }
 
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let compact_nfa = self.build_compact_nfa();
         let num_nfa_states = self.states.len();
         let mut stack: Vec<usize> = Vec::with_capacity(num_nfa_states);
@@ -182,6 +326,12 @@ impl NFA {
 
             high_degree_closures[state] = Some(sparse_to_sorted_vec(&temp_set));
         }
+        if let Some(profile) = profile.as_mut() {
+            profile.precomputed_closures = high_degree_closures
+                .iter()
+                .filter(|closure| closure.is_some())
+                .count();
+        }
 
         let mut start_closure = SparseStateSet::new(num_nfa_states);
         start_closure.insert(self.start_state as usize);
@@ -199,6 +349,9 @@ impl NFA {
                     }
                 }
             }
+        }
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+            profile.closure_precompute_ms = started_at.elapsed();
         }
 
         let start_key = CompressedStateSet::from_sparse(&start_closure);
@@ -220,7 +373,12 @@ impl NFA {
         let mut scratch_closure = CompressedStateSet::new();
         let mut sort_scratch = Vec::with_capacity(1024);
 
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         while let Some(current_set) = worklist.pop() {
+            if let Some(profile) = profile.as_mut() {
+                profile.subsets_processed += 1;
+                profile.subset_state_total += current_set.len();
+            }
             let current_dfa_state = subset_map[&current_set];
 
             for state in current_set.iter() {
@@ -249,6 +407,9 @@ impl NFA {
                         let state = word_idx * 64 + bit;
                         if out_degree[state] == 0 && high_degree_closures[state].is_none() {
                             fast_singleton_state = Some(state);
+                            if let Some(profile) = profile.as_mut() {
+                                profile.fast_singleton_hits += 1;
+                            }
                         }
                     }
                 }
@@ -337,6 +498,30 @@ impl NFA {
                 transition_targets[idx].clear();
             }
             used_classes.clear();
+        }
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+            profile.subset_construction_ms = started_at.elapsed();
+        }
+
+        if let Some(profile) = profile {
+            eprintln!(
+                "[glrmask/profile][lexer_determinize] nfa_states={} classes={} dfa_states={} precomputed_closures={} subsets={} avg_subset_states={:.2} fast_singleton_hits={} reachable_groups_ms={:.3} class_remap_ms={:.3} closure_precompute_ms={:.3} subset_construction_ms={:.3}",
+                profile.num_nfa_states,
+                profile.num_classes,
+                subset_map.len(),
+                profile.precomputed_closures,
+                profile.subsets_processed,
+                if profile.subsets_processed == 0 {
+                    0.0
+                } else {
+                    profile.subset_state_total as f64 / profile.subsets_processed as f64
+                },
+                profile.fast_singleton_hits,
+                profile.reachable_groups_ms.as_secs_f64() * 1000.0,
+                profile.class_remap_ms.as_secs_f64() * 1000.0,
+                profile.closure_precompute_ms.as_secs_f64() * 1000.0,
+                profile.subset_construction_ms.as_secs_f64() * 1000.0,
+            );
         }
 
         dfa
