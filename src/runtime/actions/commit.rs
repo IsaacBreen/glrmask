@@ -417,14 +417,13 @@ fn commit_bytes_impl(
         metrics.parser_states_retained_after_prune = state.len();
     }
 
-    let mut pending_overall_state = FxHashMap::<u32, Vec<ParserGSS>>::default();
-    let mut processing_queue: Vec<FxHashMap<u32, Vec<ParserGSS>>> =
+    let mut pending_overall_state = FxHashMap::<u32, ParserGSS>::default();
+    let mut processing_queue: Vec<FxHashMap<u32, ParserGSS>> =
         (0..=bytes.len()).map(|_| FxHashMap::default()).collect();
 
     // Take ownership instead of cloning — state will be fully replaced below.
     processing_queue[0] = std::mem::take(state)
         .into_iter()
-        .map(|(tsid, gss)| (tsid, vec![gss]))
         .collect();
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.queue_max_offsets_pending = usize::from(!processing_queue[0].is_empty());
@@ -437,16 +436,7 @@ fn commit_bytes_impl(
             continue;
         }
         let offset = next_offset;
-        let states_to_process = std::mem::take(&mut processing_queue[offset])
-            .into_iter()
-            .map(|(tsid, mut gss_list)| {
-                let gss = if gss_list.len() == 1 {
-                    gss_list.pop().expect("single entry")
-                } else {
-                    ParserGSS::merge_many(gss_list)
-                };
-                (tsid, gss)
-            });
+        let states_to_process = std::mem::take(&mut processing_queue[offset]);
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.queue_offsets_processed += 1;
             let state_count = states_to_process.len();
@@ -518,8 +508,8 @@ fn commit_bytes_impl(
                         let existed = pending_overall_state.contains_key(&next_tsid);
                         pending_overall_state
                             .entry(next_tsid)
-                            .or_default()
-                            .push(gss_at_offset.clone());
+                            .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
+                            .or_insert_with(|| gss_at_offset.clone());
                         if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                             metrics.processing_ignored_matches += 1;
                             metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
@@ -541,8 +531,8 @@ fn commit_bytes_impl(
                             .get_mut(new_offset)
                             .expect("new_offset within committed token length")
                             .entry(next_tsid)
-                            .or_default()
-                            .push(gss_at_offset.clone());
+                            .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
+                            .or_insert_with(|| gss_at_offset.clone());
                         if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                             metrics.processing_ignored_matches += 1;
                             metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
@@ -632,8 +622,8 @@ fn commit_bytes_impl(
                     let existed = pending_overall_state.contains_key(&next_tsid);
                     pending_overall_state
                         .entry(next_tsid)
-                        .or_default()
-                        .push(gss);
+                        .and_modify(|existing| *existing = existing.merge(&gss))
+                        .or_insert(gss);
                     if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                         metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
                         if existed {
@@ -654,8 +644,8 @@ fn commit_bytes_impl(
                         .get_mut(new_offset)
                         .expect("new_offset within committed token length")
                         .entry(next_tsid)
-                        .or_default()
-                        .push(gss);
+                        .and_modify(|existing| *existing = existing.merge(&gss))
+                        .or_insert(gss);
                     if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                         metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
                         metrics.queue_max_offsets_pending = metrics
@@ -677,8 +667,8 @@ fn commit_bytes_impl(
                 let existed = pending_overall_state.contains_key(&end_state);
                 pending_overall_state
                     .entry(end_state)
-                    .or_default()
-                    .push(gss_at_offset);
+                    .and_modify(|existing| *existing = existing.merge(&gss_at_offset))
+                    .or_insert(gss_at_offset);
                 if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                     metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
                     if existed {
@@ -691,17 +681,7 @@ fn commit_bytes_impl(
         }
     }
 
-    let mut new_overall_state: BTreeMap<u32, ParserGSS> = pending_overall_state
-        .into_iter()
-        .map(|(tsid, mut gss_list)| {
-            let gss = if gss_list.len() == 1 {
-                gss_list.pop().expect("single entry")
-            } else {
-                ParserGSS::merge_many(gss_list)
-            };
-            (tsid, gss)
-        })
-        .collect();
+    let mut new_overall_state: BTreeMap<u32, ParserGSS> = pending_overall_state.into_iter().collect();
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.fused_parser_states = new_overall_state.len();
     }
