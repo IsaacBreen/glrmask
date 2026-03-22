@@ -174,6 +174,29 @@ fn ms(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+fn compact_diag_env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn compact_diag_env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn compact_diag_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -1096,6 +1119,29 @@ fn compile_prepared(
             compact_report.old_token_ranges,
             compact_report.new_token_ranges,
         );
+        if compact_diag_env_flag_enabled("GLRMASK_COMPACT_STOCHASTIC_DIAGNOSTIC") {
+            let iterations = compact_diag_env_usize("GLRMASK_COMPACT_STOCHASTIC_ITERS", 500);
+            let seed = compact_diag_env_u64("GLRMASK_COMPACT_STOCHASTIC_SEED", 7);
+            let probe = crate::compiler::stages::compact::probe_stochastic_token_reordering(
+                &terminal_dwa,
+                id_map.num_tsids(),
+                id_map.num_internal_tokens(),
+                iterations,
+                seed,
+            );
+            eprintln!(
+                "[glrmask/profile][compile] compact_terminal_stochastic best_ranges={} (outer={} token_ranges={}) baseline_ranges={} (outer={} token_ranges={}) iterations={} best_iteration={} seed={}",
+                probe.best_ranges,
+                probe.best_outer_ranges,
+                probe.best_token_ranges,
+                probe.baseline_ranges,
+                probe.baseline_outer_ranges,
+                probe.baseline_token_ranges,
+                probe.iterations,
+                probe.best_iteration,
+                probe.seed,
+            );
+        }
     }
 
     let phase_started_at = std::time::Instant::now();

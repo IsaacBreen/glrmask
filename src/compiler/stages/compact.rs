@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 use crate::automata::weighted_u32::dwa::DWA;
@@ -29,6 +31,18 @@ pub struct CompactReport {
     pub old_token_ranges: usize,
     pub new_token_ranges: usize,
     pub token_perm: Vec<u32>,
+}
+
+pub struct StochasticCompactProbeReport {
+    pub baseline_ranges: usize,
+    pub best_ranges: usize,
+    pub baseline_outer_ranges: usize,
+    pub best_outer_ranges: usize,
+    pub baseline_token_ranges: usize,
+    pub best_token_ranges: usize,
+    pub iterations: usize,
+    pub best_iteration: usize,
+    pub seed: u64,
 }
 
 /// Merge equivalent IDs and reorder both dimensions of every weight in `dwa`,
@@ -79,6 +93,83 @@ pub fn compact_dwa_dimensions(
         old_token_ranges,
         new_token_ranges,
         token_perm,
+    }
+}
+
+pub fn probe_stochastic_token_reordering(
+    dwa: &DWA,
+    num_tsids: u32,
+    num_tokens: u32,
+    iterations: usize,
+    seed: u64,
+) -> StochasticCompactProbeReport {
+    let unique_weights = collect_unique_weights(dwa);
+    let tsid_perm: Vec<u32> = (0..num_tsids).collect();
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let mut current_perm: Vec<u32> = (0..num_tokens).collect();
+    let (baseline_outer_ranges, baseline_token_ranges) =
+        score_permuted_weights(&unique_weights, &tsid_perm, &current_perm);
+    let baseline_ranges = baseline_outer_ranges + baseline_token_ranges;
+
+    let mut current_outer_ranges = baseline_outer_ranges;
+    let mut current_token_ranges = baseline_token_ranges;
+    let mut current_ranges = baseline_ranges;
+
+    let mut best_outer_ranges = baseline_outer_ranges;
+    let mut best_token_ranges = baseline_token_ranges;
+    let mut best_ranges = baseline_ranges;
+    let mut best_iteration = 0usize;
+
+    let mut temperature = 8.0f64;
+    for iteration in 1..=iterations {
+        let mut candidate_perm = current_perm.clone();
+        apply_random_token_move(&mut candidate_perm, &mut rng);
+        let (candidate_outer_ranges, candidate_token_ranges) =
+            score_permuted_weights(&unique_weights, &tsid_perm, &candidate_perm);
+        let candidate_ranges = candidate_outer_ranges + candidate_token_ranges;
+
+        let better_than_best = candidate_ranges < best_ranges
+            || (candidate_ranges == best_ranges
+                && (candidate_token_ranges < best_token_ranges
+                    || (candidate_token_ranges == best_token_ranges
+                        && candidate_outer_ranges < best_outer_ranges)));
+        if better_than_best {
+            best_ranges = candidate_ranges;
+            best_outer_ranges = candidate_outer_ranges;
+            best_token_ranges = candidate_token_ranges;
+            best_iteration = iteration;
+        }
+
+        let delta = candidate_ranges as i64 - current_ranges as i64;
+        let accept = if delta <= 0 {
+            true
+        } else {
+            let probability = (-(delta as f64) / temperature.max(0.1)).exp().clamp(0.0, 1.0);
+            rng.gen_bool(probability)
+        };
+
+        if accept {
+            current_perm = candidate_perm;
+            current_ranges = candidate_ranges;
+            current_outer_ranges = candidate_outer_ranges;
+            current_token_ranges = candidate_token_ranges;
+        }
+
+        let _ = (current_outer_ranges, current_token_ranges);
+        temperature *= 0.995;
+    }
+
+    StochasticCompactProbeReport {
+        baseline_ranges,
+        best_ranges,
+        baseline_outer_ranges,
+        best_outer_ranges,
+        baseline_token_ranges,
+        best_token_ranges,
+        iterations,
+        best_iteration,
+        seed,
     }
 }
 
@@ -282,6 +373,56 @@ fn apply_permutations_to_dwa(
             }
         }
     }
+}
+
+fn apply_random_token_move(perm: &mut [u32], rng: &mut StdRng) {
+    if perm.len() < 2 {
+        return;
+    }
+
+    match rng.gen_range(0..3) {
+        0 => {
+            let left = rng.gen_range(0..perm.len());
+            let mut right = rng.gen_range(0..perm.len());
+            if left == right {
+                right = (right + 1) % perm.len();
+            }
+            perm.swap(left, right);
+        }
+        1 => {
+            let left = rng.gen_range(0..perm.len() - 1);
+            perm.swap(left, left + 1);
+        }
+        _ => {
+            let from = rng.gen_range(0..perm.len());
+            let to = rng.gen_range(0..perm.len());
+            if from != to {
+                let value = perm[from];
+                if from < to {
+                    perm.copy_within((from + 1)..=to, from);
+                } else {
+                    perm.copy_within(to..from, to + 1);
+                }
+                perm[to] = value;
+            }
+        }
+    }
+}
+
+fn score_permuted_weights(
+    weights: &[Weight],
+    tsid_perm: &[u32],
+    token_perm: &[u32],
+) -> (usize, usize) {
+    let mut outer_total = 0;
+    let mut token_total = 0;
+    for weight in weights {
+        let permuted = permute_weight(weight, tsid_perm, token_perm);
+        let (outer, token) = count_weight_range_components(&permuted);
+        outer_total += outer;
+        token_total += token;
+    }
+    (outer_total, token_total)
 }
 
 /// Create a new Weight from `w` with permuted (possibly many-to-one) coords.
