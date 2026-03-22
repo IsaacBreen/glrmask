@@ -19,7 +19,9 @@ use super::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 
 // ── public entry point ──────────────────────────────────────────────────────
 
-const TOKEN_ORDER_LOCAL_SEARCH_PASSES: usize = 1;
+const TOKEN_ORDER_LOCAL_SEARCH_PASSES: usize = 3;
+const TOKEN_ORDER_FINISH_ITERS: usize = 20000;
+const TOKEN_ORDER_FINISH_SEED: u64 = 7;
 
 pub struct CompactReport {
     pub old_num_tsids: u32,
@@ -124,17 +126,21 @@ pub fn probe_stochastic_token_reordering(
     seed: u64,
 ) -> StochasticCompactProbeReport {
     let unique_weights = collect_unique_weights(dwa);
-    let tsid_perm: Vec<u32> = (0..num_tsids).collect();
+    let identity_token_perm: Vec<u32> = (0..num_tokens).collect();
+    let merged_unique_token_sets =
+        collect_merged_unique_token_sets(&unique_weights, &identity_token_perm);
+    let baseline_storage = count_unique_storage_for_weights(&unique_weights);
     let mut rng = StdRng::seed_from_u64(seed);
 
     let mut current_perm: Vec<u32> = (0..num_tokens).collect();
-    let baseline_storage = score_permuted_weights(&unique_weights, &tsid_perm, &current_perm);
-    let baseline_ranges = baseline_storage.total_ranges();
+    let baseline_token_ranges =
+        count_token_ranges_after_group_permutation(&merged_unique_token_sets, &current_perm);
+    let baseline_ranges = baseline_storage.weight_ranges + baseline_token_ranges;
 
-    let mut current_storage = baseline_storage;
+    let mut current_token_ranges = baseline_token_ranges;
     let mut current_ranges = baseline_ranges;
 
-    let mut best_storage = baseline_storage;
+    let mut best_token_ranges = baseline_token_ranges;
     let mut best_ranges = baseline_ranges;
     let mut best_iteration = 0usize;
 
@@ -142,17 +148,16 @@ pub fn probe_stochastic_token_reordering(
     for iteration in 1..=iterations {
         let mut candidate_perm = current_perm.clone();
         apply_random_token_move(&mut candidate_perm, &mut rng);
-        let candidate_storage = score_permuted_weights(&unique_weights, &tsid_perm, &candidate_perm);
-        let candidate_ranges = candidate_storage.total_ranges();
+        let candidate_token_ranges =
+            count_token_ranges_after_group_permutation(&merged_unique_token_sets, &candidate_perm);
+        let candidate_ranges = baseline_storage.weight_ranges + candidate_token_ranges;
 
         let better_than_best = candidate_ranges < best_ranges
             || (candidate_ranges == best_ranges
-                && (candidate_storage.token_ranges < best_storage.token_ranges
-                    || (candidate_storage.token_ranges == best_storage.token_ranges
-                        && candidate_storage.weight_ranges < best_storage.weight_ranges)));
+                && candidate_token_ranges < best_token_ranges);
         if better_than_best {
             best_ranges = candidate_ranges;
-            best_storage = candidate_storage;
+            best_token_ranges = candidate_token_ranges;
             best_iteration = iteration;
         }
 
@@ -167,10 +172,10 @@ pub fn probe_stochastic_token_reordering(
         if accept {
             current_perm = candidate_perm;
             current_ranges = candidate_ranges;
-            current_storage = candidate_storage;
+            current_token_ranges = candidate_token_ranges;
         }
 
-        let _ = current_storage;
+        let _ = current_token_ranges;
         temperature *= 0.995;
     }
 
@@ -178,9 +183,9 @@ pub fn probe_stochastic_token_reordering(
         baseline_ranges,
         best_ranges,
         baseline_weight_ranges: baseline_storage.weight_ranges,
-        best_weight_ranges: best_storage.weight_ranges,
-        baseline_token_ranges: baseline_storage.token_ranges,
-        best_token_ranges: best_storage.token_ranges,
+        best_weight_ranges: baseline_storage.weight_ranges,
+        baseline_token_ranges,
+        best_token_ranges,
         iterations,
         best_iteration,
         seed,
@@ -392,6 +397,95 @@ fn count_token_ranges_after_group_permutation(
         .sum()
 }
 
+fn layout_to_group_positions(layout: &[u32]) -> Vec<u32> {
+    let mut group_positions = vec![0u32; layout.len()];
+    for (position, &group) in layout.iter().enumerate() {
+        group_positions[group as usize] = position as u32;
+    }
+    group_positions
+}
+
+fn run_adjacent_swap_passes(
+    merged_unique_token_sets: &[RangeSetBlaze<u32>],
+    layout: &mut Vec<u32>,
+    group_positions: &mut Vec<u32>,
+    current_token_ranges: &mut usize,
+) {
+    for _ in 0..TOKEN_ORDER_LOCAL_SEARCH_PASSES {
+        let mut improved = false;
+        for left_pos in 0..(layout.len() - 1) {
+            let right_pos = left_pos + 1;
+            let left_group = layout[left_pos] as usize;
+            let right_group = layout[right_pos] as usize;
+
+            let mut candidate_positions = group_positions.clone();
+            candidate_positions[left_group] = right_pos as u32;
+            candidate_positions[right_group] = left_pos as u32;
+            let candidate_token_ranges = count_token_ranges_after_group_permutation(
+                merged_unique_token_sets,
+                &candidate_positions,
+            );
+            if candidate_token_ranges < *current_token_ranges {
+                *group_positions = candidate_positions;
+                layout.swap(left_pos, right_pos);
+                *current_token_ranges = candidate_token_ranges;
+                improved = true;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+fn finish_token_order_with_seeded_search(
+    merged_unique_token_sets: &[RangeSetBlaze<u32>],
+    initial_group_positions: Vec<u32>,
+) -> Vec<u32> {
+    if TOKEN_ORDER_FINISH_ITERS == 0 || merged_unique_token_sets.is_empty() {
+        return initial_group_positions;
+    }
+
+    let mut rng = StdRng::seed_from_u64(TOKEN_ORDER_FINISH_SEED);
+    let mut current_positions = initial_group_positions.clone();
+    let mut current_token_ranges =
+        count_token_ranges_after_group_permutation(merged_unique_token_sets, &current_positions);
+    let mut best_positions = current_positions.clone();
+    let mut best_token_ranges = current_token_ranges;
+
+    let mut temperature = 8.0f64;
+    for _ in 0..TOKEN_ORDER_FINISH_ITERS {
+        let mut candidate_positions = current_positions.clone();
+        apply_random_token_move(&mut candidate_positions, &mut rng);
+        let candidate_token_ranges = count_token_ranges_after_group_permutation(
+            merged_unique_token_sets,
+            &candidate_positions,
+        );
+
+        if candidate_token_ranges < best_token_ranges {
+            best_token_ranges = candidate_token_ranges;
+            best_positions = candidate_positions.clone();
+        }
+
+        let delta = candidate_token_ranges as i64 - current_token_ranges as i64;
+        let accept = if delta <= 0 {
+            true
+        } else {
+            let probability = (-(delta as f64) / temperature.max(0.1)).exp().clamp(0.0, 1.0);
+            rng.gen_bool(probability)
+        };
+
+        if accept {
+            current_positions = candidate_positions;
+            current_token_ranges = candidate_token_ranges;
+        }
+
+        temperature *= 0.995;
+    }
+
+    best_positions
+}
+
 fn optimize_token_order_locally(
     merged_unique_token_sets: &[RangeSetBlaze<u32>],
     initial_token_perm: Vec<u32>,
@@ -406,31 +500,17 @@ fn optimize_token_order_locally(
     let mut current_token_ranges =
         count_token_ranges_after_group_permutation(merged_unique_token_sets, &group_positions);
 
-    for _ in 0..TOKEN_ORDER_LOCAL_SEARCH_PASSES {
-        let mut improved = false;
-        for left_pos in 0..(new_num_tokens - 1) {
-            let right_pos = left_pos + 1;
-            let left_group = layout[left_pos] as usize;
-            let right_group = layout[right_pos] as usize;
+    run_adjacent_swap_passes(
+        merged_unique_token_sets,
+        &mut layout,
+        &mut group_positions,
+        &mut current_token_ranges,
+    );
 
-            let mut candidate_positions = group_positions.clone();
-            candidate_positions[left_group] = right_pos as u32;
-            candidate_positions[right_group] = left_pos as u32;
-            let candidate_token_ranges = count_token_ranges_after_group_permutation(
-                merged_unique_token_sets,
-                &candidate_positions,
-            );
-            if candidate_token_ranges < current_token_ranges {
-                group_positions = candidate_positions;
-                layout.swap(left_pos, right_pos);
-                current_token_ranges = candidate_token_ranges;
-                improved = true;
-            }
-        }
-        if !improved {
-            break;
-        }
-    }
+    group_positions = finish_token_order_with_seeded_search(
+        merged_unique_token_sets,
+        group_positions,
+    );
 
     initial_token_perm
         .into_iter()
