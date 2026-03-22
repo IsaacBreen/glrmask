@@ -5,9 +5,18 @@
 //! all strings up to that length, using the same public signature as the main
 //! state-equivalence pass so it can slot cleanly into the pipeline.
 
+use ahash::RandomState;
+use hashbrown::HashMap;
 use rayon::prelude::*;
 
 use super::super::compat::Sep1Tokenizer;
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
 
 #[inline(always)]
 fn mix_u64(mut x: u64) -> u64 {
@@ -37,11 +46,65 @@ fn hash_state_label(finalizers: &[usize], possible_futures: &[usize]) -> u64 {
     mix_u64(finalizer_hash.wrapping_add(future_hash))
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(default)
+fn assign_hash_classes(hashes: &[u64], class_ids: &mut [usize]) -> usize {
+    let mut hash_to_class: HashMap<u64, usize, RandomState> =
+        HashMap::with_capacity_and_hasher(hashes.len(), RandomState::new());
+    let mut total_class_count = 0usize;
+
+    for (idx, &hash) in hashes.iter().enumerate() {
+        let class_id = match hash_to_class.get(&hash) {
+            Some(&existing) => existing,
+            None => {
+                let new_id = total_class_count;
+                hash_to_class.insert(hash, new_id);
+                total_class_count += 1;
+                new_id
+            }
+        };
+        class_ids[idx] = class_id;
+    }
+
+    total_class_count
+}
+
+fn count_subset_classes(
+    states: &[usize],
+    class_ids: &[usize],
+    seen: &mut [u32],
+    epoch: &mut u32,
+) -> usize {
+    *epoch = epoch.wrapping_add(1);
+    if *epoch == 0 {
+        seen.fill(0);
+        *epoch = 1;
+    }
+    let current_epoch = *epoch;
+
+    let mut count = 0usize;
+    for &state_id in states {
+        let class_id = class_ids[state_id];
+        if seen[class_id] != current_epoch {
+            seen[class_id] = current_epoch;
+            count += 1;
+        }
+    }
+    count
+}
+
+fn build_subset_mapping(states: &[usize], class_ids: &[usize], total_class_count: usize) -> Vec<usize> {
+    let mut rep_for_class = vec![usize::MAX; total_class_count];
+    let mut mapping = vec![0usize; states.len()];
+
+    for (idx, &state_id) in states.iter().enumerate() {
+        let class_id = class_ids[state_id];
+        let rep = &mut rep_for_class[class_id];
+        if *rep == usize::MAX {
+            *rep = state_id;
+        }
+        mapping[idx] = *rep;
+    }
+
+    mapping
 }
 
 /// Find state equivalence classes using k-step inductive hashing.
@@ -101,8 +164,6 @@ fn find_state_equivalence_classes_kstep(
     states: &[usize],
     k: usize,
 ) -> Vec<usize> {
-    use std::collections::{HashMap, HashSet};
-
     if states.is_empty() {
         return Vec::new();
     }
@@ -124,28 +185,26 @@ fn find_state_equivalence_classes_kstep(
 
     let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
     let identity_max_saved_percent = env_usize("STATE_EQUIV_IDENTITY_MAX_SAVED_PERCENT", 2);
-    let mut class_reps: Vec<usize> = Vec::new();
-    let mut use_trans_class_cache = false;
-
-    let mut class_for_state: Vec<usize>;
-    {
-        let mut trans_pattern_to_class: HashMap<Vec<(u8, usize)>, usize> = HashMap::new();
-        class_for_state = vec![0usize; transitions.len()];
+    let (transition_pattern_for_state, transition_pattern_reps, use_trans_class_cache) = {
+        let mut trans_pattern_to_class: HashMap<Vec<(u8, usize)>, usize, RandomState> =
+            HashMap::with_capacity_and_hasher(transitions.len(), RandomState::new());
+        let mut transition_pattern_for_state = vec![0usize; transitions.len()];
+        let mut transition_pattern_reps = Vec::new();
 
         for (idx, trans) in transitions.iter().enumerate() {
-            let class_id = match trans_pattern_to_class.get(trans) {
+            let class_id = match trans_pattern_to_class.get(trans.as_slice()) {
                 Some(&existing) => existing,
                 None => {
-                    let new_id = class_reps.len();
+                    let new_id = transition_pattern_reps.len();
                     trans_pattern_to_class.insert(trans.clone(), new_id);
-                    class_reps.push(idx);
+                    transition_pattern_reps.push(idx);
                     new_id
                 }
             };
-            class_for_state[idx] = class_id;
+            transition_pattern_for_state[idx] = class_id;
         }
 
-        let num_classes = class_reps.len();
+        let num_classes = transition_pattern_reps.len();
         let num_states = transitions.len();
         let shared = num_states.saturating_sub(num_classes);
         if profile_equivalence {
@@ -158,21 +217,24 @@ fn find_state_equivalence_classes_kstep(
         }
 
         if num_states > 0 && shared * 2 >= num_states {
-            use_trans_class_cache = true;
+            (
+                transition_pattern_for_state,
+                transition_pattern_reps,
+                true,
+            )
         } else {
-            class_for_state.clear();
-            class_reps.clear();
+            (Vec::new(), Vec::new(), false)
         }
-    }
+    };
 
     let label_hashes: Vec<u64> = dfa
         .states
         .iter()
-        .map(|state| {
-            let finalizers: Vec<usize> = state.finalizers.iter().copied().collect();
-            let futures: Vec<usize> = state.possible_future_group_ids.iter().copied().collect();
-            hash_state_label(&finalizers, &futures)
-        })
+        .map(|state| hash_state_label(&state.finalizers, &state.possible_future_group_ids))
+        .collect();
+    let base_hashes: Vec<u64> = label_hashes
+        .iter()
+        .map(|&hash| mix_u64(hash ^ 0xC0DE_C0DE_C0DE_C0DE))
         .collect();
 
     let dead_hash = mix_u64(0xDEAD_BEEF_DEAD_BEEF);
@@ -189,18 +251,20 @@ fn find_state_equivalence_classes_kstep(
         .map(|&hash| mix_u64(hash ^ 0x9E37_79B9_7F4A_7C15))
         .collect();
     let mut buf_b: Vec<u64> = vec![0u64; dfa.states.len()];
-    let mut unique_hashes: HashSet<u64> = HashSet::with_capacity(dfa.states.len());
-    let mut analyzed_hashes: HashSet<u64> = HashSet::with_capacity(states.len());
-    unique_hashes.extend(buf_a.iter().copied());
-    let mut prev_total_class_count = unique_hashes.len();
-    unique_hashes.clear();
+    let mut class_ids_a = vec![0usize; dfa.states.len()];
+    let mut class_ids_b = vec![0usize; dfa.states.len()];
+    let states_cover_all = states.len() == dfa.states.len() && states.iter().copied().eq(0..dfa.states.len());
+    let mut analyzed_seen = vec![0u32; dfa.states.len().max(1)];
+    let mut analyzed_seen_epoch = 0u32;
+    let mut prev_total_class_count = assign_hash_classes(&buf_a, &mut class_ids_a);
+    let mut final_total_class_count = prev_total_class_count;
     let mut depth_completed = 0usize;
 
     for iter in 0..k {
-        let (src, dst) = if iter % 2 == 0 {
-            (&buf_a, &mut buf_b)
+        let (src_hashes, dst_hashes, dst_class_ids) = if iter % 2 == 0 {
+            (&buf_a, &mut buf_b, &mut class_ids_b)
         } else {
-            (&buf_b, &mut buf_a)
+            (&buf_b, &mut buf_a, &mut class_ids_a)
         };
 
         let compute_trans_sum = |idx: usize, prev_hashes: &[u64]| -> u64 {
@@ -216,35 +280,36 @@ fn find_state_equivalence_classes_kstep(
         };
 
         if use_trans_class_cache {
-            let trans_sum_per_class: Vec<u64> = (0..class_reps.len())
+            let trans_sum_per_class: Vec<u64> = (0..transition_pattern_reps.len())
                 .into_par_iter()
-                .map(|class_id| compute_trans_sum(class_reps[class_id], src))
+                .map(|class_id| compute_trans_sum(transition_pattern_reps[class_id], src_hashes))
                 .collect();
 
-            dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let trans_sum = trans_sum_per_class[class_for_state[idx]];
-                let mut hash = mix_u64(label_hashes[idx] ^ 0xC0DE_C0DE_C0DE_C0DE);
-                hash = hash.wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
-                *out = hash;
+            dst_hashes.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let trans_sum = trans_sum_per_class[transition_pattern_for_state[idx]];
+                *out = base_hashes[idx].wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
             });
         } else {
-            dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let trans_sum = compute_trans_sum(idx, src);
-                let mut hash = mix_u64(label_hashes[idx] ^ 0xC0DE_C0DE_C0DE_C0DE);
-                hash = hash.wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
-                *out = hash;
+            dst_hashes.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let trans_sum = compute_trans_sum(idx, src_hashes);
+                *out = base_hashes[idx].wrapping_add(mix_u64(trans_sum ^ 0xA5A5_A5A5_5A5A_5A5A));
             });
         }
 
+        final_total_class_count = assign_hash_classes(dst_hashes, dst_class_ids);
+
         depth_completed = iter + 1;
 
-        unique_hashes.extend(dst.iter().copied());
-        let total_class_count = unique_hashes.len();
-        unique_hashes.clear();
-
-        analyzed_hashes.extend(states.iter().map(|&state_id| dst[state_id]));
-        let analyzed_class_count = analyzed_hashes.len();
-        analyzed_hashes.clear();
+        let analyzed_class_count = if states_cover_all {
+            final_total_class_count
+        } else {
+            count_subset_classes(
+                states,
+                dst_class_ids,
+                &mut analyzed_seen,
+                &mut analyzed_seen_epoch,
+            )
+        };
         let saved_states = states.len().saturating_sub(analyzed_class_count);
 
         if saved_states == 0 {
@@ -273,30 +338,26 @@ fn find_state_equivalence_classes_kstep(
             return states.to_vec();
         }
 
-        if total_class_count == prev_total_class_count {
+        if final_total_class_count == prev_total_class_count {
             if profile_equivalence {
                 eprintln!(
                     "[state equiv] k-step partition stabilized at depth={} with {} total classes",
                     depth_completed,
-                    total_class_count,
+                    final_total_class_count,
                 );
             }
             break;
         }
-        prev_total_class_count = total_class_count;
+        prev_total_class_count = final_total_class_count;
     }
 
-    let hashes = if depth_completed % 2 == 0 { &buf_a } else { &buf_b };
+    let final_class_ids = if depth_completed == 0 || depth_completed % 2 == 0 {
+        &class_ids_a
+    } else {
+        &class_ids_b
+    };
 
-    let mut hash_to_rep: HashMap<u64, usize> = HashMap::new();
-    let mut mapping = vec![0usize; states.len()];
-    for (idx, &state_id) in states.iter().enumerate() {
-        let hash = hashes[state_id];
-        let rep = *hash_to_rep.entry(hash).or_insert(state_id);
-        mapping[idx] = rep;
-    }
-
-    mapping
+    build_subset_mapping(states, final_class_ids, final_total_class_count)
 }
 
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
