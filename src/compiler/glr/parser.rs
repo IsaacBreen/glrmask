@@ -5,6 +5,7 @@ use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, LeveledGSSSummary, Merge};
+use rustc_hash::FxHashMap;
 
 pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
 
@@ -487,7 +488,7 @@ pub(crate) fn advance_stacks_with_metrics(
         }
 
         let mut any_reduced = false;
-        let mut pending_bases_by_target = BTreeMap::<u32, ParserGSS>::new();
+        let mut pending_bases_by_target = FxHashMap::<u32, ParserGSS>::default();
         for state in new_states {
             processed[state as usize] = true;
             let reduce_rules: &[u32] = match table.action(state, token) {
@@ -509,7 +510,7 @@ pub(crate) fn advance_stacks_with_metrics(
             needed_rhs_lens.sort_unstable();
             needed_rhs_lens.dedup();
 
-            let mut popped_cache = BTreeMap::<usize, ParserGSS>::new();
+            let mut popped_cache = FxHashMap::<usize, ParserGSS>::default();
             let mut incremental_popped = subtree.clone();
             let mut incremental_len = 0usize;
             for rhs_len in needed_rhs_lens {
@@ -519,7 +520,7 @@ pub(crate) fn advance_stacks_with_metrics(
                 }
                 popped_cache.insert(rhs_len, incremental_popped.clone());
             }
-            let mut base_cache = BTreeMap::<(usize, u32), ParserGSS>::new();
+            let mut base_cache = FxHashMap::<(usize, u32), ParserGSS>::default();
             for &rule_id in reduce_rules {
                 let rule = &table.rules[rule_id as usize];
                 if let Some(metrics) = metrics.as_deref_mut() {

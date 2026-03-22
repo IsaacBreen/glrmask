@@ -3,6 +3,7 @@ use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::{Weight, WeightDebugStats, reset_weight_debug_stats, snapshot_weight_debug_stats};
 use crate::runtime::state::ConstraintStateSummary;
 use range_set_blaze::RangeSetBlaze;
+use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -312,8 +313,9 @@ impl<'a> ConstraintState<'a> {
         let t_total = if timed { Some(std::time::Instant::now()) } else { None };
         let t_seed_start = if timed { Some(std::time::Instant::now()) } else { None };
 
-        // Flat queue: (depth, dwa_state, gss). Processed highest-depth-first.
-        let mut queue: Vec<(isize, u32, DenseMaskGSS)> = Vec::with_capacity(32);
+        // Depth buckets let us pop the deepest frontier without rescanning or
+        // linearly searching for matching (depth, state) entries on enqueue.
+        let mut queue: BTreeMap<isize, FxHashMap<u32, DenseMaskGSS>> = BTreeMap::new();
 
         let start_state = parser_dwa.start_state;
         let start_dwa_state = &parser_dwa.states[start_state as usize];
@@ -410,11 +412,12 @@ impl<'a> ConstraintState<'a> {
                         continue;
                     }
                     let new_depth = pruned.max_depth();
-                    if let Some(pos) = queue.iter().position(|(d, s, _)| *d == new_depth && *s == *target) {
-                        queue[pos].2 = queue[pos].2.merge(&pruned);
-                    } else {
-                        queue.push((new_depth, *target, pruned));
-                    }
+                    queue
+                        .entry(new_depth)
+                        .or_default()
+                        .entry(*target)
+                        .and_modify(|existing| *existing = existing.merge(&pruned))
+                        .or_insert(pruned);
                 }
             }
         }
@@ -424,21 +427,9 @@ impl<'a> ConstraintState<'a> {
             metrics.seed_ns = t.elapsed().as_nanos() as u64;
         }
         let t_bfs_loop = if timed { Some(std::time::Instant::now()) } else { None };
-        while !queue.is_empty() {
+        while let Some((max_depth, states_at_depth)) = queue.pop_last() {
             let t_pop = if timed { Some(std::time::Instant::now()) } else { None };
-            // Find max depth.
-            let max_depth = queue.iter().map(|(d, _, _)| *d).max().unwrap();
-            // Extract all items at max depth.
-            let mut items: Vec<(u32, DenseMaskGSS)> = Vec::new();
-            let mut i = 0;
-            while i < queue.len() {
-                if queue[i].0 == max_depth {
-                    let (_, wa_state, gss) = queue.swap_remove(i);
-                    items.push((wa_state, gss));
-                } else {
-                    i += 1;
-                }
-            }
+            let items: Vec<(u32, DenseMaskGSS)> = states_at_depth.into_iter().collect();
             if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_pop) {
                 metrics.queue_pop_ns += t.elapsed().as_nanos() as u64;
                 metrics.queue_depth_buckets_processed += 1;
@@ -537,11 +528,12 @@ impl<'a> ConstraintState<'a> {
                             metrics.transition_intersect_ns += te.duration_since(ti).as_nanos() as u64;
                         }
                         let new_depth = pruned.max_depth();
-                        if let Some(pos) = queue.iter().position(|(d, s, _)| *d == new_depth && *s == *target) {
-                            queue[pos].2 = queue[pos].2.merge(&pruned);
-                        } else {
-                            queue.push((new_depth, *target, pruned));
-                        }
+                        queue
+                            .entry(new_depth)
+                            .or_default()
+                            .entry(*target)
+                            .and_modify(|existing| *existing = existing.merge(&pruned))
+                            .or_insert(pruned);
                         if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_enq) {
                             metrics.transitions_enqueued += 1;
                             if is_default {

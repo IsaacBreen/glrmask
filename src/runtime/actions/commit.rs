@@ -319,9 +319,9 @@ fn commit_bytes_impl(
         .as_ref()
         .map(|_| std::time::Instant::now());
     let ignore_terminal = constraint.ignore_terminal;
-    let mut initial_exec_results = BTreeMap::new();
-    let mut state_map = BTreeMap::new();
-    let mut terminals_map = BTreeMap::<u32, BTreeSet<u32>>::new();
+    let mut initial_exec_results = FxHashMap::default();
+    let mut state_map = FxHashMap::default();
+    let mut terminals_map = FxHashMap::<u32, FxHashSet<u32>>::default();
 
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.initial_tokenizer_states = state.len();
@@ -417,9 +417,9 @@ fn commit_bytes_impl(
         metrics.parser_states_retained_after_prune = state.len();
     }
 
-    let mut pending_overall_state: BTreeMap<u32, Vec<ParserGSS>> = BTreeMap::new();
-    let mut processing_queue: Vec<BTreeMap<u32, Vec<ParserGSS>>> =
-        (0..=bytes.len()).map(|_| BTreeMap::new()).collect();
+    let mut pending_overall_state = FxHashMap::<u32, Vec<ParserGSS>>::default();
+    let mut processing_queue: Vec<FxHashMap<u32, Vec<ParserGSS>>> =
+        (0..=bytes.len()).map(|_| FxHashMap::default()).collect();
 
     // Take ownership instead of cloning — state will be fully replaced below.
     processing_queue[0] = std::mem::take(state)
