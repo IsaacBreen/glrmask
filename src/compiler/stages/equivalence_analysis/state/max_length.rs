@@ -1,38 +1,12 @@
 //! Max-length bounded state equivalence prepass.
 //!
-//! This pass ignores the actual token contents and uses only the maximum token
-//! length. It groups states that have identical bounded-depth path behavior for
-//! all strings up to that length, using the same public signature as the main
-//! state-equivalence pass so it can slot cleanly into the pipeline.
+//! Depth 0 hashes each state's own label data plus its outgoing label layout.
+//! Each later depth only mixes in the previous hashes of that state's unique
+//! outgoing destinations.
 
-use ahash::{AHasher, RandomState};
-use hashbrown::HashMap;
-use once_cell::sync::Lazy;
-use rayon::prelude::*;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::collections::HashMap;
 
-use super::super::compat::Sep1Tokenizer;
-use crate::ds::u8set::U8Set;
-
-const HASH_SEED1: u64 = 0x9e37_79b9_7f4a_7c15;
-const HASH_SEED2: u64 = 0xc2b2_ae3d_27d4_eb4f;
-const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
-const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
-
-static HASH_RANDOM_STATE: Lazy<RandomState> =
-    Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
-
-#[inline(always)]
-fn new_hasher() -> AHasher {
-    HASH_RANDOM_STATE.build_hasher()
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(default)
-}
+use super::super::compat::{FlatDfaState, Sep1Tokenizer};
 
 #[inline(always)]
 fn mix_u64(mut x: u64) -> u64 {
@@ -46,155 +20,75 @@ fn mix_u64(mut x: u64) -> u64 {
 
 #[inline(always)]
 fn hash_sorted_set(values: &[usize], tag: u64) -> u64 {
-    let mut h = mix_u64((values.len() as u64) ^ tag);
+    let mut hash = mix_u64((values.len() as u64) ^ tag);
     for &value in values {
-        h = h.wrapping_add(mix_u64((value as u64) ^ tag.rotate_left(17)));
-    }
-    h
-}
-
-#[inline(always)]
-fn hash_state_label(finalizers: &[usize], possible_futures: &[usize]) -> u64 {
-    const FINALIZER_TAG: u64 = 0xF11A_F11A_F11A_F11A;
-    const FUTURE_TAG: u64 = 0xF0C7_F0C7_F0C7_F0C7;
-    let finalizer_hash = hash_sorted_set(finalizers, FINALIZER_TAG);
-    let future_hash = hash_sorted_set(possible_futures, FUTURE_TAG);
-    mix_u64(finalizer_hash.wrapping_add(future_hash))
-}
-
-#[inline(always)]
-fn hash_u8set(labels: &U8Set) -> u64 {
-    let mut hash = new_hasher();
-    hash.write_u8(1);
-    labels.hash(&mut hash);
-    hash.finish()
-}
-
-#[inline(always)]
-fn hash_transition_list(transitions: &[(U8Set, usize)], prev_hashes: &[u64]) -> u64 {
-    let mut hash = mix_u64((transitions.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
-    for &(labels, target) in transitions {
-        let edge_hash = mix_u64(hash_u8set(&labels) ^ prev_hashes[target].rotate_left(17));
-        hash = mix_u64(hash ^ edge_hash.wrapping_add(0x517C_C1B7_2722_0A95));
+        hash = hash.wrapping_add(mix_u64((value as u64) ^ tag.rotate_left(17)));
     }
     hash
 }
 
-fn assign_hash_classes(hashes: &[u64], class_ids: &mut [usize]) -> usize {
-    let mut hash_to_class: HashMap<u64, usize, RandomState> =
-        HashMap::with_capacity_and_hasher(hashes.len(), RandomState::new());
-    let mut total_class_count = 0usize;
-
-    for (idx, &hash) in hashes.iter().enumerate() {
-        let class_id = match hash_to_class.get(&hash) {
-            Some(&existing) => existing,
-            None => {
-                let new_id = total_class_count;
-                hash_to_class.insert(hash, new_id);
-                total_class_count += 1;
-                new_id
-            }
-        };
-        class_ids[idx] = class_id;
-    }
-
-    total_class_count
+#[inline(always)]
+fn hash_state_label(state: &FlatDfaState) -> u64 {
+    let finalizers = hash_sorted_set(&state.finalizers, 0xF11A_F11A_F11A_F11A);
+    let futures = hash_sorted_set(&state.possible_future_group_ids, 0xF0C7_F0C7_F0C7_F0C7);
+    mix_u64(finalizers.wrapping_add(futures))
 }
 
-fn count_subset_classes(
-    states: &[usize],
-    class_ids: &[usize],
-    seen: &mut [u32],
-    epoch: &mut u32,
-) -> usize {
-    *epoch = epoch.wrapping_add(1);
-    if *epoch == 0 {
-        seen.fill(0);
-        *epoch = 1;
+#[inline(always)]
+fn hash_transition_labels(label_hashes: &[u64]) -> u64 {
+    let mut hash = mix_u64((label_hashes.len() as u64) ^ 0x7F4A_7C15_9E37_79B9);
+    for &label_hash in label_hashes {
+        hash = mix_u64(hash ^ label_hash.wrapping_add(0xA24B_AED4_963E_E407));
     }
-    let current_epoch = *epoch;
+    hash
+}
 
-    let mut count = 0usize;
+#[inline(always)]
+fn hash_transition_targets(targets: &[usize], prev_hashes: &[u64]) -> u64 {
+    let mut hash = mix_u64((targets.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
+    for &target in targets {
+        hash = mix_u64(hash ^ prev_hashes[target].rotate_left(17));
+    }
+    hash
+}
+
+fn build_state_shape(state: &FlatDfaState) -> (Vec<usize>, u64) {
+    let mut targets: Vec<usize> = Vec::new();
+    let mut label_hashes: Vec<u64> = Vec::new();
+    let mut index_by_target: HashMap<usize, usize> = HashMap::new();
+
+    for (byte, &target) in state.transitions.iter().enumerate() {
+        if target == u32::MAX {
+            continue;
+        }
+
+        let byte_hash = mix_u64((byte as u64) ^ 0xD6E8_FD93_5E6C_A271);
+        let target = target as usize;
+
+        if let Some(&index) = index_by_target.get(&target) {
+            label_hashes[index] = label_hashes[index].wrapping_add(byte_hash);
+        } else {
+            index_by_target.insert(target, targets.len());
+            targets.push(target);
+            label_hashes.push(byte_hash);
+        }
+    }
+
+    (targets, hash_transition_labels(&label_hashes))
+}
+
+fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
+    let mut rep_for_hash = HashMap::new();
+    let mut mapping = Vec::with_capacity(states.len());
+
     for &state_id in states {
-        let class_id = class_ids[state_id];
-        if seen[class_id] != current_epoch {
-            seen[class_id] = current_epoch;
-            count += 1;
-        }
-    }
-    count
-}
-
-fn build_subset_mapping(states: &[usize], class_ids: &[usize], total_class_count: usize) -> Vec<usize> {
-    let mut rep_for_class = vec![usize::MAX; total_class_count];
-    let mut mapping = vec![0usize; states.len()];
-
-    for (idx, &state_id) in states.iter().enumerate() {
-        let class_id = class_ids[state_id];
-        let rep = &mut rep_for_class[class_id];
-        if *rep == usize::MAX {
-            *rep = state_id;
-        }
-        mapping[idx] = *rep;
+        let rep = *rep_for_hash.entry(hashes[state_id]).or_insert(state_id);
+        mapping.push(rep);
     }
 
     mapping
 }
 
-/// Find state equivalence classes using k-step inductive hashing.
-///
-/// # Proof (k-equivalence implies vocab-equivalence)
-///
-/// Let the DFA be D = (Q, Sigma, delta), with finalizers F(q) subset G and possible
-/// futures P(q) subset G for each state q. For a state q and a string w in Sigma*,
-/// define the run rho(q, w) = q_0, q_1, ..., q_|w| with q_0 = q and
-/// q_{i+1} = delta(q_i, w_{i+1}) when the transition exists. If a transition is
-/// missing, the run enters a distinguished dead state BOT and stays there for all
-/// remaining input. For each group g in G, define the set of match positions
-/// Occ(q, w, g) = { i | 0 <= i <= |w| and g in F(q_i) }.
-/// The greedy match position is max Occ(q, w, g) and the non-greedy match position
-/// is min Occ(q, w, g) (when the set is non-empty). The end-state semantic identity
-/// for w is P(q_|w|) (or P(BOT) for dead).
-///
-/// Define a labeled unfolding hash by depth. Let the state label be
-/// L(q) = (F(q), P(q)) and let L(BOT) be a unique dead label. Define
-/// hash_0(q) = H(L(q)) and for d >= 1,
-/// hash_d(q) = H(hash_{d-1}(q), [ (B, hash_{d-1}(delta(q,B))) ]),
-/// where each `B` is the byte set reaching the same successor, the list is taken in
-/// a deterministic order, and delta(q,b)=BOT if the transition is missing. Here H is a fixed
-/// collision-resistant mixing function (128-bit). Two states are k-equivalent iff
-/// hash_k is equal.
-///
-/// Lemma (Depth-d behavioral equivalence). If hash_d(q1)=hash_d(q2), then for every
-/// string w with |w| <= d, the runs rho(q1,w) and rho(q2,w) visit states with
-/// identical labels at every position, and their end-state possible futures are
-/// identical.
-///
-/// Proof. By induction on d.
-/// - Base d=0: hash_0 equality implies L(q1)=L(q2), so the empty string has identical
-///   finalizers and identical P(q).
-/// - Inductive step: assume the claim for d-1. Equality of hash_d implies equal
-///   hash_{d-1} roots and equal mapping from each byte b to the child hash
-///   hash_{d-1}(delta(q,b)). Thus for any w = b w', the next states after b are
-///   (d-1)-equivalent, so by induction their suffix runs match label-by-label and
-///   have identical end-state futures. The equal root hash_{d-1} also preserves the
-///   depth-(d-1) prefix behavior at the current state.
-/// QED.
-///
-/// Corollary. For every w with |w| <= d, all occurrences of each group g are at the
-/// same positions in both runs, hence greedy (max) and non-greedy (min) choices are
-/// identical, and P(q_|w|) is identical. Therefore k-equivalence implies identical
-/// behavior for all strings of length <= k.
-///
-/// Since every vocabulary token has length <= k by construction, hash_k equality
-/// implies vocabulary-state-equivalence. Hash collisions are possible but extremely
-/// unlikely; the algorithm is a safe refinement that may over-split but will not
-/// under-split absent collisions.
-///
-/// The refinement is monotone: once two analyzed states are separated, they never
-/// merge again. This lets us safely short-circuit to the identity mapping when the
-/// remaining possible savings become negligible, since deeper refinement can only
-/// split states further.
 fn find_state_equivalence_classes_kstep(
     regex: &Sep1Tokenizer,
     states: &[usize],
@@ -205,181 +99,27 @@ fn find_state_equivalence_classes_kstep(
     }
 
     let dfa = regex.dfa();
+    let mut outgoing_targets = Vec::with_capacity(dfa.states.len());
+    let mut prev_hashes = Vec::with_capacity(dfa.states.len());
 
-    let transitions: Vec<Vec<(U8Set, usize)>> = dfa
-        .states
-        .iter()
-        .map(|state| {
-            let mut labels_by_target: HashMap<usize, U8Set, RandomState> =
-                HashMap::with_capacity_and_hasher(8, RandomState::new());
-            for (byte, &target) in state.transitions.iter().enumerate() {
-                if target == u32::MAX {
-                    continue;
-                }
-                labels_by_target
-                    .entry(target as usize)
-                    .or_insert_with(U8Set::empty)
-                    .insert(byte as u8);
-            }
-
-            let mut grouped: Vec<(U8Set, usize)> = labels_by_target
-                .into_iter()
-                .map(|(target, labels)| (labels, target))
-                .collect();
-            grouped.sort_unstable_by_key(|&(_, target)| target);
-            grouped
-        })
-        .collect();
-
-    let profile_equivalence = std::env::var("PROFILE_EQUIVALENCE").is_ok();
-    let identity_max_saved_percent = env_usize("STATE_EQUIV_IDENTITY_MAX_SAVED_PERCENT", 2);
-    let (transition_pattern_for_state, transition_pattern_reps, use_trans_class_cache) = {
-        let mut trans_pattern_to_class: HashMap<Vec<(U8Set, usize)>, usize, RandomState> =
-            HashMap::with_capacity_and_hasher(transitions.len(), RandomState::new());
-        let mut transition_pattern_for_state = vec![0usize; transitions.len()];
-        let mut transition_pattern_reps = Vec::new();
-
-        for (idx, trans) in transitions.iter().enumerate() {
-            let class_id = match trans_pattern_to_class.get(trans.as_slice()) {
-                Some(&existing) => existing,
-                None => {
-                    let new_id = transition_pattern_reps.len();
-                    trans_pattern_to_class.insert(trans.clone(), new_id);
-                    transition_pattern_reps.push(idx);
-                    new_id
-                }
-            };
-            transition_pattern_for_state[idx] = class_id;
-        }
-
-        let num_classes = transition_pattern_reps.len();
-        let num_states = transitions.len();
-        let shared = num_states.saturating_sub(num_classes);
-        if profile_equivalence {
-            eprintln!(
-                "DFA transition classes: {} classes for {} states ({} shared)",
-                num_classes,
-                num_states,
-                shared
-            );
-        }
-
-        if num_states > 0 && shared * 2 >= num_states {
-            (
-                transition_pattern_for_state,
-                transition_pattern_reps,
-                true,
-            )
-        } else {
-            (Vec::new(), Vec::new(), false)
-        }
-    };
-
-    let mut buf_a: Vec<u64> = dfa
-        .states
-        .iter()
-        .map(|state| hash_state_label(&state.finalizers, &state.possible_future_group_ids))
-        .collect();
-    let mut buf_b: Vec<u64> = vec![0u64; dfa.states.len()];
-    let mut class_ids_a = vec![0usize; dfa.states.len()];
-    let mut class_ids_b = vec![0usize; dfa.states.len()];
-    let states_cover_all = states.len() == dfa.states.len() && states.iter().copied().eq(0..dfa.states.len());
-    let mut analyzed_seen = vec![0u32; dfa.states.len().max(1)];
-    let mut analyzed_seen_epoch = 0u32;
-    let mut prev_total_class_count = assign_hash_classes(&buf_a, &mut class_ids_a);
-    let mut final_total_class_count = prev_total_class_count;
-    let mut depth_completed = 0usize;
-
-    for iter in 0..k {
-        let (src_hashes, dst_hashes, dst_class_ids) = if iter % 2 == 0 {
-            (&buf_a, &mut buf_b, &mut class_ids_b)
-        } else {
-            (&buf_b, &mut buf_a, &mut class_ids_a)
-        };
-
-        let compute_transition_hash = |idx: usize, prev_hashes: &[u64]| -> u64 {
-            hash_transition_list(&transitions[idx], prev_hashes)
-        };
-
-        if use_trans_class_cache {
-            let transition_hash_per_class: Vec<u64> = (0..transition_pattern_reps.len())
-                .into_par_iter()
-                .map(|class_id| compute_transition_hash(transition_pattern_reps[class_id], src_hashes))
-                .collect();
-
-            dst_hashes.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let transition_hash = transition_hash_per_class[transition_pattern_for_state[idx]];
-                *out = mix_u64(src_hashes[idx] ^ transition_hash);
-            });
-        } else {
-            dst_hashes.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let transition_hash = compute_transition_hash(idx, src_hashes);
-                *out = mix_u64(src_hashes[idx] ^ transition_hash);
-            });
-        }
-
-        final_total_class_count = assign_hash_classes(dst_hashes, dst_class_ids);
-
-        depth_completed = iter + 1;
-
-        let analyzed_class_count = if states_cover_all {
-            final_total_class_count
-        } else {
-            count_subset_classes(
-                states,
-                dst_class_ids,
-                &mut analyzed_seen,
-                &mut analyzed_seen_epoch,
-            )
-        };
-        let saved_states = states.len().saturating_sub(analyzed_class_count);
-
-        if saved_states == 0 {
-            if profile_equivalence {
-                eprintln!(
-                    "[state equiv] depth={} reached all-singleton analyzed states; using identity",
-                    depth_completed,
-                );
-            }
-            return states.to_vec();
-        }
-
-        if identity_max_saved_percent > 0
-            && saved_states.saturating_mul(100)
-                <= states.len().saturating_mul(identity_max_saved_percent)
-        {
-            if profile_equivalence {
-                eprintln!(
-                    "[state equiv] depth={} remaining_savings={} of {} states (<= {}%); using identity",
-                    depth_completed,
-                    saved_states,
-                    states.len(),
-                    identity_max_saved_percent,
-                );
-            }
-            return states.to_vec();
-        }
-
-        if final_total_class_count == prev_total_class_count {
-            if profile_equivalence {
-                eprintln!(
-                    "[state equiv] k-step partition stabilized at depth={} with {} total classes",
-                    depth_completed,
-                    final_total_class_count,
-                );
-            }
-            break;
-        }
-        prev_total_class_count = final_total_class_count;
+    for state in &dfa.states {
+        let (targets, transition_label_hash) = build_state_shape(state);
+        outgoing_targets.push(targets);
+        prev_hashes.push(mix_u64(hash_state_label(state) ^ transition_label_hash));
     }
 
-    let final_class_ids = if depth_completed == 0 || depth_completed % 2 == 0 {
-        &class_ids_a
-    } else {
-        &class_ids_b
-    };
+    let mut next_hashes = vec![0u64; dfa.states.len()];
+    for _ in 0..k {
+        for state_id in 0..dfa.states.len() {
+            next_hashes[state_id] = mix_u64(
+                prev_hashes[state_id]
+                    ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
+            );
+        }
+        std::mem::swap(&mut prev_hashes, &mut next_hashes);
+    }
 
-    build_subset_mapping(states, final_class_ids, final_total_class_count)
+    build_subset_mapping(states, &prev_hashes)
 }
 
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
