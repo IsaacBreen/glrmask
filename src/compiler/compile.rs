@@ -899,6 +899,8 @@ fn log_compile_summary(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
+    precompact_num_tsids: u32,
+    precompact_num_internal_tokens: u32,
     prepare_grammar_time: std::time::Duration,
     analyze_grammar_time: std::time::Duration,
     build_glr_table_time: std::time::Duration,
@@ -922,11 +924,11 @@ fn log_compile_summary(
     eprintln!(
         "[glrmask/profile][summary] state_eq orig={} classes={} ratio={:.2}x | vocab_eq orig={} classes={} ratio={:.2}x",
         tokenizer.num_states(),
-        id_map.tokenizer_states.num_internal_ids(),
-        reduction_ratio(tokenizer.num_states() as usize, id_map.tokenizer_states.num_internal_ids() as usize),
+        precompact_num_tsids,
+        reduction_ratio(tokenizer.num_states() as usize, precompact_num_tsids as usize),
         vocab.entries.len(),
-        id_map.vocab_tokens.num_internal_ids(),
-        reduction_ratio(vocab.entries.len(), id_map.vocab_tokens.num_internal_ids() as usize),
+        precompact_num_internal_tokens,
+        reduction_ratio(vocab.entries.len(), precompact_num_internal_tokens as usize),
     );
     eprintln!(
         "[glrmask/profile][summary] terminal_nwa states={} start={} final={} eps={} labeled={} total={}",
@@ -1051,16 +1053,18 @@ fn compile_prepared(
         InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, normalized.ignore_terminal)
     };
     let build_internal_id_map_time = phase_started_at.elapsed();
+    let precompact_num_tsids = id_map.num_tsids();
+    let precompact_num_internal_tokens = id_map.num_internal_tokens();
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][compile] build_internal_id_map_ms={:.3} states={}→{}_tsids ({:.1}x) vocab={}→{}_classes ({:.1}x)",
             ms(build_internal_id_map_time),
             tokenizer.num_states(),
-            id_map.num_tsids(),
-            tokenizer.num_states() as f64 / id_map.num_tsids().max(1) as f64,
+            precompact_num_tsids,
+            tokenizer.num_states() as f64 / precompact_num_tsids.max(1) as f64,
             vocab.entries.len(),
-            id_map.num_internal_tokens(),
-            vocab.entries.len() as f64 / id_map.num_internal_tokens().max(1) as f64,
+            precompact_num_internal_tokens,
+            vocab.entries.len() as f64 / precompact_num_internal_tokens.max(1) as f64,
         );
     }
 
@@ -1188,6 +1192,8 @@ fn compile_prepared(
             &tokenizer,
             vocab,
             &id_map,
+            precompact_num_tsids,
+            precompact_num_internal_tokens,
             prepare_grammar_time,
             analyze_grammar_time,
             build_glr_table_time,

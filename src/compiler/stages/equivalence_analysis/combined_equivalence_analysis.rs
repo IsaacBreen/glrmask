@@ -531,16 +531,15 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
-    let has_disallowed_follows = disallowed_follows.values().any(|bits| !bits.is_empty());
-    let state_reps = if has_disallowed_follows {
-        initial_states.to_vec()
-    } else {
-        state_equivalence_analysis::find_state_equivalence_classes(
-            regex,
-            tokens,
-            initial_states,
-        )
-    };
+    // State equivalence remains a safe reduction even with disallowed follows:
+    // the unrestricted tokenizer behavior that this pass hashes is a refinement
+    // of any follow-constrained behavior, so later follow filtering can split
+    // classes further but cannot invalidate these merges.
+    let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+        regex,
+        tokens,
+        initial_states,
+    );
 
     let mut rep_set: BTreeSet<usize> = BTreeSet::new();
     for &rep in &state_reps {
@@ -641,5 +640,47 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     CombinedEquivalenceResult {
         vocab_classes,
         state_classes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::automata::lexer::ast::{bytes, star};
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+    use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+    use crate::compiler::stages::equivalence_analysis::reference::find_equivalence_classes;
+    use crate::compiler::stages::equivalence_analysis::state::fast as fast_state_equivalence;
+    use crate::ds::bitset::BitSet;
+
+    use super::verify_state_partition_reference;
+
+    #[test]
+    fn unrestricted_state_partition_refines_disallowed_follow_reference() {
+        let exprs = [bytes(b"a"), star(bytes(b"b")), bytes(b"c")];
+        let tokenizer = build_tokenizer_from_exprs(&exprs);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+
+        let tokens: Vec<Vec<u8>> = vec![
+            b"c".to_vec(),
+            b"ca".to_vec(),
+            b"cba".to_vec(),
+            b"bb".to_vec(),
+        ];
+        let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+
+        let mut disallowed = BTreeMap::new();
+        let mut bits = BitSet::new(3);
+        bits.set(1);
+        disallowed.insert(2u32, bits);
+
+        let fast_mapping =
+            fast_state_equivalence::find_state_equivalence_classes(&sep1, &tokens, &states);
+        let fast_classes =
+            fast_state_equivalence::mapping_to_equivalence_classes(&states, &fast_mapping);
+        let reference = find_equivalence_classes(&sep1, &tokens, &states, &disallowed, None);
+
+        verify_state_partition_reference(&fast_classes, &reference.state_classes);
     }
 }
