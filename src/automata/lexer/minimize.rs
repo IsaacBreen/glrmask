@@ -293,6 +293,7 @@ impl DFA {
         let mut sources_to_clear: Vec<u32> = Vec::with_capacity(n.min(10000));
         let mut touched_blocks: Vec<u32> = Vec::with_capacity(1024);
         let mut block_touched = vec![false; blocks.len()];
+        let mut block_sources: Vec<Vec<u32>> = vec![Vec::new(); blocks.len()];
         let mut input_sources: Vec<Vec<u32>> = vec![Vec::new(); 256];
         let mut touched_inputs: Vec<u8> = Vec::with_capacity(64);
 
@@ -337,6 +338,7 @@ impl DFA {
                             block_touched[block_id] = true;
                             touched_blocks.push(block_id as u32);
                         }
+                        block_sources[block_id].push(src);
                     }
                 }
                 bucket.clear();
@@ -351,12 +353,7 @@ impl DFA {
                         continue;
                     }
 
-                    let mut source_count = 0usize;
-                    for &state in &blocks[block_idx] {
-                        if source_set[state as usize] {
-                            source_count += 1;
-                        }
-                    }
+                    let source_count = block_sources[block_idx].len();
 
                     if source_count == 0 || source_count == block_len {
                         continue;
@@ -365,22 +362,25 @@ impl DFA {
                     let new_block_idx = blocks.len();
                     let move_sources = source_count <= block_len - source_count;
 
-                    let mut new_block = Vec::with_capacity(if move_sources {
-                        source_count
-                    } else {
-                        block_len - source_count
-                    });
-                    let mut remaining =
-                        Vec::with_capacity(block_len - new_block.capacity());
+                    let old_block = std::mem::take(&mut blocks[block_idx]);
 
-                    for &state in &blocks[block_idx] {
-                        let is_source = source_set[state as usize];
-                        if move_sources == is_source {
-                            new_block.push(state);
-                        } else {
-                            remaining.push(state);
+                    let (remaining, new_block) = if move_sources {
+                        let mut remaining = Vec::with_capacity(block_len - source_count);
+                        for state in old_block {
+                            if !source_set[state as usize] {
+                                remaining.push(state);
+                            }
                         }
-                    }
+                        (remaining, std::mem::take(&mut block_sources[block_idx]))
+                    } else {
+                        let mut new_block = Vec::with_capacity(block_len - source_count);
+                        for state in old_block {
+                            if !source_set[state as usize] {
+                                new_block.push(state);
+                            }
+                        }
+                        (std::mem::take(&mut block_sources[block_idx]), new_block)
+                    };
 
                     for &state in &new_block {
                         partition[state as usize] = new_block_idx as u32;
@@ -391,6 +391,7 @@ impl DFA {
 
                     in_worklist.push(false);
                     block_touched.push(false);
+                    block_sources.push(Vec::new());
 
                     if in_worklist[block_idx] {
                         in_worklist[new_block_idx] = true;
@@ -411,6 +412,7 @@ impl DFA {
                 for &block_id in &touched_blocks {
                     if (block_id as usize) < block_touched.len() {
                         block_touched[block_id as usize] = false;
+                        block_sources[block_id as usize].clear();
                     }
                 }
                 touched_blocks.clear();
