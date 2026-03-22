@@ -43,8 +43,10 @@ pub fn compact_dwa_dimensions(
     let weight_refs: Vec<&Weight> = unique_weights.iter().collect();
 
     // Step 2  — tsid dimension: merge + reorder
-    let tsid_profiles = build_tsid_profiles(&weight_refs, num_tsids as usize);
-    let (tsid_perm, new_num_tsids) = merge_sort_perm(&tsid_profiles);
+    let tsid_merge_profiles = build_tsid_profiles(&weight_refs, num_tsids as usize);
+    let tsid_order_profiles = build_tsid_order_profiles(&weight_refs, num_tsids as usize);
+    let (tsid_perm, new_num_tsids) =
+        merge_sort_perm_with_group_order(&tsid_merge_profiles, &tsid_order_profiles);
 
     // Step 3  — token dimension: merge + reorder
     let token_profiles = build_token_profiles(&weight_refs, num_tokens);
@@ -90,6 +92,12 @@ fn collect_unique_weights(dwa: &DWA) -> Vec<Weight> {
     unique
 }
 
+fn rangeset_key(set: &RangeSetBlaze<u32>) -> Vec<(u32, u32)> {
+    set.ranges()
+        .map(|range| (*range.start(), *range.end()))
+        .collect()
+}
+
 /// For each tsid, list the (weight, entry) context indices where it appears.
 fn build_tsid_profiles(weights: &[&Weight], num_tsids: usize) -> Vec<Vec<u32>> {
     let mut profiles = vec![Vec::new(); num_tsids];
@@ -102,6 +110,31 @@ fn build_tsid_profiles(weights: &[&Weight], num_tsids: usize) -> Vec<Vec<u32>> {
                 }
             }
             ctx += 1;
+        }
+    }
+    profiles
+}
+
+/// For ordering only: treat repeated equal token sets within the same weight as
+/// the same context so semantically similar TSIDs can become adjacent even when
+/// they must remain distinct IDs.
+fn build_tsid_order_profiles(weights: &[&Weight], num_tsids: usize) -> Vec<Vec<u32>> {
+    let mut profiles = vec![Vec::new(); num_tsids];
+    let mut ctx = 0u32;
+    for w in weights {
+        let mut contexts_by_token_set: HashMap<Vec<(u32, u32)>, u32> = HashMap::new();
+        for (tsid_range, token_set) in w.0.range_values() {
+            let key = rangeset_key(token_set);
+            let token_set_ctx = *contexts_by_token_set.entry(key).or_insert_with(|| {
+                let current = ctx;
+                ctx += 1;
+                current
+            });
+            for tsid in *tsid_range.start()..=*tsid_range.end() {
+                if (tsid as usize) < num_tsids {
+                    profiles[tsid as usize].push(token_set_ctx);
+                }
+            }
         }
     }
     profiles
@@ -168,6 +201,49 @@ fn merge_sort_perm<P: Ord + std::hash::Hash + Eq>(profiles: &[P]) -> (Vec<u32>, 
     (perm, new_count)
 }
 
+fn merge_sort_perm_with_group_order<Pm, Po>(merge_profiles: &[Pm], order_profiles: &[Po]) -> (Vec<u32>, usize)
+where
+    Pm: Ord + std::hash::Hash + Eq,
+    Po: Ord,
+{
+    let n = merge_profiles.len();
+    if n == 0 {
+        return (vec![], 0);
+    }
+    assert_eq!(merge_profiles.len(), order_profiles.len());
+
+    let mut sorted_indices: Vec<usize> = (0..n).collect();
+    sorted_indices.sort_by(|&a, &b| merge_profiles[a].cmp(&merge_profiles[b]));
+
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut current_group = vec![sorted_indices[0]];
+    for &idx in &sorted_indices[1..] {
+        if merge_profiles[idx] == merge_profiles[current_group[0]] {
+            current_group.push(idx);
+        } else {
+            groups.push(std::mem::take(&mut current_group));
+            current_group.push(idx);
+        }
+    }
+    groups.push(current_group);
+
+    groups.sort_by(|left, right| {
+        order_profiles[left[0]]
+            .cmp(&order_profiles[right[0]])
+            .then_with(|| merge_profiles[left[0]].cmp(&merge_profiles[right[0]]))
+    });
+
+    let new_count = groups.len();
+    let mut perm = vec![0u32; n];
+    for (new_id, group) in groups.iter().enumerate() {
+        for &old_id in group {
+            perm[old_id] = new_id as u32;
+        }
+    }
+
+    (perm, new_count)
+}
+
 /// Apply tsid and token permutations (possibly many-to-one) to every weight.
 fn apply_permutations_to_dwa(
     dwa: &mut DWA,
@@ -207,41 +283,57 @@ fn permute_weight(w: &Weight, tsid_perm: &[u32], token_perm: &[u32]) -> Weight {
         return Weight::all();
     }
 
-    let mut ts_cache: HashMap<usize, Arc<RangeSetBlaze<u32>>> = HashMap::new();
-    let mut pairs: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+    let mut permuted_token_cache: HashMap<usize, RangeSetBlaze<u32>> = HashMap::new();
+    let mut tokens_by_new_tsid: std::collections::BTreeMap<u32, RangeSetBlaze<u32>> =
+        std::collections::BTreeMap::new();
 
     for (tsid_range, token_set) in w.0.range_values() {
         let ts_ptr = Arc::as_ptr(token_set) as usize;
-        let new_ts = ts_cache
+        let new_ts = permuted_token_cache
             .entry(ts_ptr)
-            .or_insert_with(|| Arc::new(permute_rangeset(token_set, token_perm)));
+            .or_insert_with(|| permute_rangeset(token_set, token_perm))
+            .clone();
 
         for tsid in *tsid_range.start()..=*tsid_range.end() {
             if (tsid as usize) < tsid_perm.len() {
-                pairs.push((tsid_perm[tsid as usize], Arc::clone(new_ts)));
+                let new_tsid = tsid_perm[tsid as usize];
+                tokens_by_new_tsid
+                    .entry(new_tsid)
+                    .and_modify(|existing| *existing |= new_ts.clone())
+                    .or_insert_with(|| new_ts.clone());
             }
         }
     }
 
-    pairs.sort_unstable_by_key(|(t, _)| *t);
-
-    if pairs.is_empty() {
+    if tokens_by_new_tsid.is_empty() {
         return Weight::empty();
     }
 
-    // Deduplicate: merged tsids may produce duplicate (new_tsid, token_set) pairs.
-    // Since merged tsids share the same token_set (same profile → same entries),
-    // duplicates will have the same token_set Arc.
-    pairs.dedup_by(|b, a| a.0 == b.0);
+    let mut canonical_token_sets: HashMap<Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>> = HashMap::new();
+    let mut ordered_pairs: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = tokens_by_new_tsid
+        .into_iter()
+        .map(|(tsid, tokens)| {
+            let key = rangeset_key(&tokens);
+            let shared = canonical_token_sets
+                .entry(key)
+                .or_insert_with(|| Arc::new(tokens))
+                .clone();
+            (tsid, shared)
+        })
+        .collect();
 
-    // Merge consecutive tsids with the same token_set Arc into ranges
+    ordered_pairs.sort_unstable_by_key(|(tsid, _)| *tsid);
+
+    // Merge consecutive tsids with the same token set into ranges
     let mut map = RangeMapBlaze::<u32, Arc<RangeSetBlaze<u32>>>::new();
-    let mut run_start = pairs[0].0;
-    let mut run_end = pairs[0].0;
-    let mut run_ts = Arc::clone(&pairs[0].1);
+    let mut run_start = ordered_pairs[0].0;
+    let mut run_end = ordered_pairs[0].0;
+    let mut run_ts = Arc::clone(&ordered_pairs[0].1);
 
-    for &(tsid, ref ts) in &pairs[1..] {
-        if tsid == run_end + 1 && Arc::ptr_eq(&run_ts, ts) {
+    for &(tsid, ref ts) in &ordered_pairs[1..] {
+        if tsid == run_end + 1
+            && (Arc::ptr_eq(&run_ts, ts) || run_ts.as_ref() == ts.as_ref())
+        {
             run_end = tsid;
         } else {
             map.extend_simple(std::iter::once((run_start..=run_end, Arc::clone(&run_ts))));
@@ -342,4 +434,27 @@ fn count_weight_ranges(w: &Weight) -> usize {
         n += token_set.ranges().count();
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ds::weight::Weight;
+
+    #[test]
+    fn permute_weight_unions_duplicate_new_tsids() {
+        let weight = Weight::from_compact_ranges([
+            (0..=0, [0..=0]),
+            (1..=1, [1..=1]),
+            (2..=2, [0..=0]),
+            (3..=3, [1..=1]),
+        ]);
+
+        let permuted = permute_weight(&weight, &[0, 1, 0, 1], &[0, 1]);
+
+        assert_eq!(permuted.tokens_for_tsid(0), RangeSetBlaze::from_iter([0..=0]));
+        assert_eq!(permuted.tokens_for_tsid(1), RangeSetBlaze::from_iter([1..=1]));
+        assert!(permuted.tokens_for_tsid(2).is_empty());
+        assert!(permuted.tokens_for_tsid(3).is_empty());
+    }
 }
