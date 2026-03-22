@@ -13,11 +13,10 @@
 //! 4. **Reconstruction** — build the minimized DWA from merged state builders.
 #![allow(dead_code)]
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::{Weight, WeightBuilder};
@@ -41,6 +40,13 @@ struct MinimizeAcyclicProfile {
     push_weights_ms: std::time::Duration,
     topo_needed_ms: std::time::Duration,
     graph_color_ms: std::time::Duration,
+    sig_hash_ms: std::time::Duration,
+    sig_graph_build_ms: std::time::Duration,
+    sig_color_ms: std::time::Duration,
+    sig_map_back_ms: std::time::Duration,
+    sparse_overlap_ms: std::time::Duration,
+    sparse_label_conflicts_ms: std::time::Duration,
+    sparse_compatibility_ms: std::time::Duration,
     merge_rebuild_ms: std::time::Duration,
     merge_state_calls: usize,
     merge_final_needed_ms: std::time::Duration,
@@ -655,7 +661,7 @@ fn build_incompatibility_graph(
 fn overlapping_candidate_pairs(
     candidates: &[usize],
     needed: &[Weight],
-) -> Option<HashSet<(usize, usize)>> {
+) -> Option<FxHashSet<(usize, usize)>> {
     if candidates.len() < 100 {
         return None;
     }
@@ -670,7 +676,7 @@ fn overlapping_candidate_pairs(
 
     segments.sort_unstable_by_key(|(start, end, idx, _)| (*start, *end, *idx));
 
-    let mut overlap_pairs = HashSet::new();
+    let mut overlap_pairs = FxHashSet::default();
     let mut active: Vec<(u32, usize, Arc<range_set_blaze::RangeSetBlaze<u32>>)> = Vec::new();
     // Cache: for the current segment's token set, map active token set pointer → overlaps?
     let mut disjoint_cache: FxHashMap<usize, bool> = FxHashMap::default();
@@ -716,9 +722,12 @@ fn build_incompatibility_graph_sparse(
     productive_transitions: &[Vec<ProductiveTransition>],
     profile: &mut MinimizeAcyclicProfile,
 ) -> Option<Vec<Vec<usize>>> {
+    let phase_started_at = std::time::Instant::now();
     let overlap_pairs = overlapping_candidate_pairs(candidates, needed)?;
+    profile.sparse_overlap_ms += phase_started_at.elapsed();
+
     let nc = candidates.len();
-    let mut incompatible_pairs = HashSet::new();
+    let mut incompatible_pairs = FxHashSet::default();
     profile.sparse_graph_buckets += 1;
     profile.sparse_overlap_pairs += overlap_pairs.len();
 
@@ -727,6 +736,7 @@ fn build_incompatibility_graph_sparse(
     // different targets. Seed the sparse graph with those label-target conflicts.
     let mut label_targets: rustc_hash::FxHashMap<Label, rustc_hash::FxHashMap<u32, Vec<usize>>> =
         rustc_hash::FxHashMap::default();
+    let phase_started_at = std::time::Instant::now();
     for (candidate_idx, &state_id) in candidates.iter().enumerate() {
         for transition in &productive_transitions[state_id] {
             let mapped = old_to_new[transition.target as usize];
@@ -741,6 +751,7 @@ fn build_incompatibility_graph_sparse(
                 .push(candidate_idx);
         }
     }
+    profile.sparse_label_conflicts_ms += phase_started_at.elapsed();
 
     for target_groups in label_targets.into_values() {
         if target_groups.len() <= 1 {
@@ -765,6 +776,7 @@ fn build_incompatibility_graph_sparse(
 
     profile.compatibility_checks += overlap_pairs.len();
 
+    let phase_started_at = std::time::Instant::now();
     for (i, j) in overlap_pairs {
         if incompatible_pairs.contains(&(i, j)) {
             continue;
@@ -781,6 +793,7 @@ fn build_incompatibility_graph_sparse(
             incompatible_pairs.insert((i, j));
         }
     }
+    profile.sparse_compatibility_ms += phase_started_at.elapsed();
 
     let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
     for (i, j) in incompatible_pairs {
@@ -805,11 +818,11 @@ fn compute_state_signature(
     productive_transitions: &[Vec<ProductiveTransition>],
 ) -> u64 {
     use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
+    use rustc_hash::FxHasher;
 
     let state = &dwa.states[state_id];
 
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FxHasher::default();
 
     // Hash final weight restricted to needed set
     match &state.final_weight {
@@ -850,6 +863,7 @@ fn build_and_color_with_signature_dedup(
     let nc = candidates.len();
 
     // Step 1: Compute signatures for all candidates
+    let phase_started_at = std::time::Instant::now();
     let signatures: Vec<u64> = candidates
         .iter()
         .map(|&id| compute_state_signature(id, dwa, needed, old_to_new, productive_transitions))
@@ -865,6 +879,7 @@ fn build_and_color_with_signature_dedup(
             rep
         });
     }
+    profile.sig_hash_ms += phase_started_at.elapsed();
 
     let k = unique_indices.len();
 
@@ -879,6 +894,7 @@ fn build_and_color_with_signature_dedup(
     let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
 
     // Step 4: Build and color the representative graph using sparse overlap
+    let phase_started_at = std::time::Instant::now();
     let rep_adj = build_incompatibility_graph_sparse(
         dwa,
         &rep_candidates,
@@ -897,15 +913,20 @@ fn build_and_color_with_signature_dedup(
             profile,
         )
     });
+    profile.sig_graph_build_ms += phase_started_at.elapsed();
 
+    let phase_started_at = std::time::Instant::now();
     let rep_coloring = greedy_coloring(&rep_adj);
+    profile.sig_color_ms += phase_started_at.elapsed();
 
     // Step 5: Map all candidates back — each gets the color of its representative
+    let phase_started_at = std::time::Instant::now();
     let mut coloring = vec![0usize; nc];
     for (idx, &sig) in signatures.iter().enumerate() {
         let rep = sig_to_rep_idx[&sig];
         coloring[idx] = rep_coloring[rep];
     }
+    profile.sig_map_back_ms += phase_started_at.elapsed();
 
     coloring
 }
@@ -961,8 +982,8 @@ fn partition_refine_coloring(
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
 ) -> Vec<usize> {
-    use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+    use rustc_hash::FxHasher;
 
     let nc = candidates.len();
 
@@ -972,7 +993,7 @@ fn partition_refine_coloring(
 
     for idx in 0..nc {
         let c = candidates[idx];
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FxHasher::default();
         dwa.states[c].final_weight.hash(&mut hasher);
         for pt in &productive_transitions[c] {
             pt.label.hash(&mut hasher);
@@ -1151,8 +1172,8 @@ fn partition_refine_coloring_raw(
     dwa: &DWA,
     old_to_new: &[u32],
 ) -> Vec<usize> {
-    use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+    use rustc_hash::FxHasher;
 
     let nc = candidates.len();
     let mut hash_groups: rustc_hash::FxHashMap<u64, Vec<usize>> =
@@ -1160,7 +1181,7 @@ fn partition_refine_coloring_raw(
 
     for idx in 0..nc {
         let c = candidates[idx];
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FxHasher::default();
         dwa.states[c].final_weight.hash(&mut hasher);
         // Hash raw transitions (BTreeMap iterates in label order)
         for (&label, (target, weight)) in &dwa.states[c].transitions {
@@ -1590,7 +1611,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
     profile.merge_rebuild_ms += reconstruct_started_at.elapsed();
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][minimize_acyclic] total_ms={:.3} input_states={} output_states={} height_buckets={} total_candidates={} max_candidates={} singleton_buckets={} all_compatible_buckets={} dense_graph_buckets={} sparse_graph_buckets={} dense_pair_candidates={} sparse_overlap_pairs={} compatibility_checks={} push_weights_ms={:.3} topo_needed_ms={:.3} graph_color_ms={:.3} merge_rebuild_ms={:.3} merge_state_calls={} merge_final_needed_ms={:.3} merge_transition_loop_ms={:.3} builder_finalize_ms={:.3} reconstruct_ms={:.3} try_all_compatible_ms={:.3} setup_extend_ms={:.3}",
+            "[glrmask/profile][minimize_acyclic] total_ms={:.3} input_states={} output_states={} height_buckets={} total_candidates={} max_candidates={} singleton_buckets={} all_compatible_buckets={} dense_graph_buckets={} sparse_graph_buckets={} dense_pair_candidates={} sparse_overlap_pairs={} compatibility_checks={} push_weights_ms={:.3} topo_needed_ms={:.3} graph_color_ms={:.3} sig_hash_ms={:.3} sig_graph_build_ms={:.3} sig_color_ms={:.3} sig_map_back_ms={:.3} sparse_overlap_ms={:.3} sparse_label_conflicts_ms={:.3} sparse_compatibility_ms={:.3} merge_rebuild_ms={:.3} merge_state_calls={} merge_final_needed_ms={:.3} merge_transition_loop_ms={:.3} builder_finalize_ms={:.3} reconstruct_ms={:.3} try_all_compatible_ms={:.3} setup_extend_ms={:.3}",
             started_at.elapsed().as_secs_f64() * 1000.0,
             dwa.states.len(),
             minimized.states.len(),
@@ -1607,6 +1628,13 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
             profile.push_weights_ms.as_secs_f64() * 1000.0,
             profile.topo_needed_ms.as_secs_f64() * 1000.0,
             profile.graph_color_ms.as_secs_f64() * 1000.0,
+            profile.sig_hash_ms.as_secs_f64() * 1000.0,
+            profile.sig_graph_build_ms.as_secs_f64() * 1000.0,
+            profile.sig_color_ms.as_secs_f64() * 1000.0,
+            profile.sig_map_back_ms.as_secs_f64() * 1000.0,
+            profile.sparse_overlap_ms.as_secs_f64() * 1000.0,
+            profile.sparse_label_conflicts_ms.as_secs_f64() * 1000.0,
+            profile.sparse_compatibility_ms.as_secs_f64() * 1000.0,
             profile.merge_rebuild_ms.as_secs_f64() * 1000.0,
             profile.merge_state_calls,
             profile.merge_final_needed_ms.as_secs_f64() * 1000.0,

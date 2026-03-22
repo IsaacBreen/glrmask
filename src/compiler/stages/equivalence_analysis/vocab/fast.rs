@@ -22,6 +22,12 @@ pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
 type EdgeList = SmallVec<[(usize, usize); 4]>;
 
+struct DagNode {
+    hash: u64,
+    edges: EdgeList,
+    end_state: usize,
+}
+
 const HASH_SEED1: u64 = 0x9e37_79b9_7f4a_7c15;
 const HASH_SEED2: u64 = 0xc2b2_ae3d_27d4_eb4f;
 const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
@@ -108,10 +114,11 @@ struct Scratch {
     dirty_groups: Vec<SmallVec<[usize; 16]>>,
     targets: Vec<usize>,
     // Suffix DAG
-    dag: HashMap<usize, (u64, EdgeList)>,
-    dag_end_states: HashMap<usize, usize>,
+    dag: HashMap<usize, DagNode>,
     dag_queue: Vec<usize>,
     dag_disallowed: HashMap<usize, BitSet>,
+    suffix_match_positions: Vec<u32>,
+    suffix_dirty_groups: SmallVec<[usize; 16]>,
 }
 
 static HASH_RANDOM_STATE: Lazy<RandomState> =
@@ -308,9 +315,10 @@ impl Scratch {
             dirty_groups: vec![SmallVec::new(); num_states],
             targets: Vec::new(),
             dag: HashMap::new(),
-            dag_end_states: HashMap::new(),
             dag_queue: Vec::new(),
             dag_disallowed: HashMap::new(),
+            suffix_match_positions: vec![NONE; num_groups],
+            suffix_dirty_groups: SmallVec::new(),
         }
     }
 }
@@ -457,14 +465,16 @@ fn run_suffix(
     slice: &[u8],
     base_pos: usize,
     match_positions: &mut [u32],
+    dirty_groups: &mut SmallVec<[usize; 16]>,
 ) -> (Option<usize>, EdgeList) {
     let num_groups = dfa.num_groups;
-    match_positions[..num_groups].fill(NONE);
+    dirty_groups.clear();
     let mut current = dfa.start_state;
     let mut done = dfa.is_dead_end[current];
 
     for &gid in &dfa.finalizers[current] {
         if gid < num_groups && match_positions[gid] == NONE {
+            dirty_groups.push(gid);
             match_positions[gid] = 0;
         }
     }
@@ -482,6 +492,9 @@ fn run_suffix(
         let position = (idx + 1) as u32;
         for &gid in &dfa.finalizers[current] {
             if gid < num_groups {
+                if match_positions[gid] == NONE {
+                    dirty_groups.push(gid);
+                }
                 match_positions[gid] = position;
             }
         }
@@ -491,12 +504,16 @@ fn run_suffix(
     }
 
     let end_state = if done { None } else { Some(current) };
-    let edges: EdgeList = (0..num_groups)
-        .filter_map(|gid| {
+    let edges: EdgeList = dirty_groups
+        .iter()
+        .filter_map(|&gid| {
             let pv = match_positions[gid];
             (pv != NONE && pv != 0).then(|| (gid, base_pos + pv as usize))
         })
         .collect();
+    for &gid in dirty_groups.iter() {
+        match_positions[gid] = NONE;
+    }
     (end_state, edges)
 }
 
@@ -505,21 +522,11 @@ fn hash_suffixes(
     dfa: &Dfa,
     slice: &[u8],
     scratch: &mut Scratch,
-) {
+) -> usize {
     let len = slice.len();
-    let mut suffix_mp = vec![NONE; dfa.num_groups];
     scratch.dag.clear();
-    scratch.dag_end_states.clear();
     scratch.dag_queue.clear();
     scratch.dag_disallowed.clear();
-
-    // BFS from target positions: run suffix DFA at each, discover new positions from edges
-    for &pos in &scratch.targets {
-        if pos < len && !scratch.dag.contains_key(&pos) {
-            scratch.dag_queue.push(pos);
-            scratch.dag.insert(pos, (0, EdgeList::new())); // placeholder
-        }
-    }
 
     for si in 0..scratch.dirty_groups.len() {
         let base = si * dfa.num_groups;
@@ -532,26 +539,60 @@ fn hash_suffixes(
         }
     }
 
+    // BFS from target positions: run suffix DFA at each, discover new positions from edges
+    for &pos in &scratch.targets {
+        if pos < len && !scratch.dag.contains_key(&pos) {
+            scratch.dag_queue.push(pos);
+            scratch.dag.insert(
+                pos,
+                DagNode {
+                    hash: 0,
+                    edges: EdgeList::new(),
+                    end_state: STATE_NONE,
+                },
+            );
+        }
+    }
+
     let mut cursor = 0;
     while cursor < scratch.dag_queue.len() {
         let pos = scratch.dag_queue[cursor];
         cursor += 1;
         let (end_state, edges) =
-            run_suffix(dfa, &slice[pos..], pos, &mut suffix_mp);
+            run_suffix(
+                dfa,
+                &slice[pos..],
+                pos,
+                &mut scratch.suffix_match_positions,
+                &mut scratch.suffix_dirty_groups,
+            );
         for &(_, target) in &edges {
             if target < len && !scratch.dag.contains_key(&target) {
                 scratch.dag_queue.push(target);
-                scratch.dag.insert(target, (0, EdgeList::new()));
+                scratch.dag.insert(
+                    target,
+                    DagNode {
+                        hash: 0,
+                        edges: EdgeList::new(),
+                        end_state: STATE_NONE,
+                    },
+                );
             }
         }
-        scratch.dag_end_states.insert(pos, end_state.unwrap_or(STATE_NONE));
-        scratch.dag.insert(pos, (0, edges));
+        scratch.dag.insert(
+            pos,
+            DagNode {
+                hash: 0,
+                edges,
+                end_state: end_state.unwrap_or(STATE_NONE),
+            },
+        );
     }
 
     scratch.dag_queue.sort_unstable();
     for idx in 0..scratch.dag_queue.len() {
         let pos = scratch.dag_queue[idx];
-        let (_, edges) = scratch.dag[&pos].clone();
+        let edges = scratch.dag[&pos].edges.clone();
 
         let first_hop_target = edges.iter().map(|&(_, t)| t).min();
         let first_hop_blocked = first_hop_target.is_some_and(|ft| {
@@ -577,8 +618,9 @@ fn hash_suffixes(
     scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
     for idx in 0..scratch.dag_queue.len() {
         let pos = scratch.dag_queue[idx];
-        let (_, edges) = scratch.dag[&pos].clone();
-        let end_state = scratch.dag_end_states.get(&pos).copied().unwrap_or(STATE_NONE);
+        let node = scratch.dag.get(&pos).unwrap();
+        let edges = node.edges.clone();
+        let end_state = node.end_state;
         let mut h = new_hasher();
         h.write_u64(dfa.completion_with_disallowed(end_state, scratch.dag_disallowed.get(&pos)));
 
@@ -603,25 +645,21 @@ fn hash_suffixes(
                 continue;
             }
             h.write_u64(gid as u64);
-            h.write_u64(scratch.dag.get(&target).map_or(0, |e| e.0));
+            h.write_u64(scratch.dag.get(&target).map_or(0, |node| node.hash));
         }
-        scratch.dag.get_mut(&pos).unwrap().0 = h.finish();
+        scratch.dag.get_mut(&pos).unwrap().hash = h.finish();
     }
+
+    scratch.dag_queue.len()
 }
 
 /// Compute a token's full signature over a batch of initial states.
 /// Also cleans up match_positions for dirty groups (maintaining the NONE invariant).
-fn token_signature(
+fn finish_token_signature(
     dfa: &Dfa,
-    token: &[u8],
     chunk_states: &[usize],
     scratch: &mut Scratch,
 ) -> u64 {
-    run_batch(dfa, scratch, token, chunk_states);
-    if !scratch.targets.is_empty() {
-        hash_suffixes(dfa, token, scratch);
-    }
-
     let num_groups = dfa.num_groups;
     let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
@@ -645,7 +683,7 @@ fn token_signature(
                     let pv = scratch.match_positions[base + gid];
                     if pv != NONE && pv > 0 {
                         h.write_u64(gid as u64);
-                        h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |e| e.0));
+                        h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |node| node.hash));
                     }
                 }
                 h.finish()
@@ -669,13 +707,32 @@ fn token_signature(
     sig
 }
 
+fn token_signature(
+    dfa: &Dfa,
+    token: &[u8],
+    chunk_states: &[usize],
+    scratch: &mut Scratch,
+) -> u64 {
+    run_batch(dfa, scratch, token, chunk_states);
+    if !scratch.targets.is_empty() {
+        hash_suffixes(dfa, token, scratch);
+    }
+
+    finish_token_signature(dfa, chunk_states, scratch)
+}
+
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     regex: &Sep1Tokenizer,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let total_started_at = profile_enabled.then(std::time::Instant::now);
+
+    let build_dfa_started_at = profile_enabled.then(std::time::Instant::now);
     let dfa = build_dfa(regex, disallowed_follows);
+    let build_dfa_ms = build_dfa_started_at.map(|started_at| started_at.elapsed());
     let num_tokens = strings.len();
     let num_states = initial_states.len();
 
@@ -690,6 +747,15 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
+    let mut total_signature_ms = std::time::Duration::default();
+    let mut total_refine_ms = std::time::Duration::default();
+    let mut total_run_batch_ms = std::time::Duration::default();
+    let mut total_suffix_ms = std::time::Duration::default();
+    let mut total_finalize_ms = std::time::Duration::default();
+    let mut total_suffix_tokens = 0usize;
+    let mut total_suffix_targets = 0usize;
+    let mut total_suffix_nodes = 0usize;
+    let mut batches_processed = 0usize;
 
     for batch_start in (0..num_states).step_by(batch_size) {
         if active_indices.is_empty() {
@@ -697,22 +763,87 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         }
         let batch_end = (batch_start + batch_size).min(num_states);
         let batch = &initial_states[batch_start..batch_end];
+        let active_before = active_indices.len();
 
-        let active_sigs: Vec<(usize, u64)> = active_indices
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
+        let active_sigs: Vec<(usize, u64, std::time::Duration, std::time::Duration, std::time::Duration, usize, usize, usize)> = active_indices
             .par_iter()
             .map_init(
                 || Scratch::new(batch.len(), num_groups),
                 |scratch, &token_idx| {
                     let token = strings[token_idx].as_ref();
-                    (token_idx, token_signature(&dfa, token, batch, scratch))
+                    if profile_enabled {
+                        let phase_started_at = std::time::Instant::now();
+                        run_batch(&dfa, scratch, token, batch);
+                        let run_batch_ms = phase_started_at.elapsed();
+
+                        let has_suffixes = !scratch.targets.is_empty();
+                        let suffix_targets = scratch.targets.len();
+                        let phase_started_at = std::time::Instant::now();
+                        let suffix_nodes = if has_suffixes {
+                            hash_suffixes(&dfa, token, scratch)
+                        } else {
+                            0
+                        };
+                        let suffix_ms = phase_started_at.elapsed();
+
+                        let phase_started_at = std::time::Instant::now();
+                        let sig = finish_token_signature(&dfa, batch, scratch);
+                        let finalize_ms = phase_started_at.elapsed();
+
+                        (
+                            token_idx,
+                            sig,
+                            run_batch_ms,
+                            suffix_ms,
+                            finalize_ms,
+                            usize::from(has_suffixes),
+                            suffix_targets,
+                            suffix_nodes,
+                        )
+                    } else {
+                        (
+                            token_idx,
+                            token_signature(&dfa, token, batch, scratch),
+                            std::time::Duration::default(),
+                            std::time::Duration::default(),
+                            std::time::Duration::default(),
+                            0,
+                            0,
+                            0,
+                        )
+                    }
                 },
             )
             .collect();
+        let sig_elapsed = phase_started_at.map(|started_at| started_at.elapsed()).unwrap_or_default();
+        total_signature_ms += sig_elapsed;
+        let mut batch_run_batch_ms = std::time::Duration::default();
+        let mut batch_suffix_ms = std::time::Duration::default();
+        let mut batch_finalize_ms = std::time::Duration::default();
+        let mut batch_suffix_tokens = 0usize;
+        let mut batch_suffix_targets = 0usize;
+        let mut batch_suffix_nodes = 0usize;
+        for (_, _, run_batch_ms, suffix_ms, finalize_ms, suffix_tokens, suffix_targets, suffix_nodes) in &active_sigs {
+            batch_run_batch_ms += *run_batch_ms;
+            batch_suffix_ms += *suffix_ms;
+            batch_finalize_ms += *finalize_ms;
+            batch_suffix_tokens += *suffix_tokens;
+            batch_suffix_targets += *suffix_targets;
+            batch_suffix_nodes += *suffix_nodes;
+            total_run_batch_ms += *run_batch_ms;
+            total_suffix_ms += *suffix_ms;
+            total_finalize_ms += *finalize_ms;
+            total_suffix_tokens += *suffix_tokens;
+            total_suffix_targets += *suffix_targets;
+            total_suffix_nodes += *suffix_nodes;
+        }
 
         // Refine partition: group tokens by (old_class, signature)
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
             HashMap::with_capacity(active_sigs.len() / 2);
-        for (ti, sig) in active_sigs {
+        for (ti, sig, _, _, _, _, _, _) in active_sigs {
             refinement
                 .entry((partition[ti], sig))
                 .or_default()
@@ -739,13 +870,56 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             }
         }
         active_indices = new_active;
+        let refine_elapsed = phase_started_at.map(|started_at| started_at.elapsed()).unwrap_or_default();
+        total_refine_ms += refine_elapsed;
+        batches_processed += 1;
+
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][vocab_eq] batch={} states={} active_before={} active_after={} sig_ms={:.3} run_batch_ms={:.3} suffix_ms={:.3} finalize_ms={:.3} suffix_tokens={} suffix_targets={} suffix_nodes={} refine_ms={:.3}",
+                batches_processed,
+                batch.len(),
+                active_before,
+                active_indices.len(),
+                sig_elapsed.as_secs_f64() * 1000.0,
+                batch_run_batch_ms.as_secs_f64() * 1000.0,
+                batch_suffix_ms.as_secs_f64() * 1000.0,
+                batch_finalize_ms.as_secs_f64() * 1000.0,
+                batch_suffix_tokens,
+                batch_suffix_targets,
+                batch_suffix_nodes,
+                refine_elapsed.as_secs_f64() * 1000.0,
+            );
+        }
     }
 
     let mut groups = vec![Vec::new(); next_class_id.max(1)];
     for (ti, &cid) in partition.iter().enumerate() {
         groups[cid].push(ti);
     }
-    groups.into_iter().filter(|group| !group.is_empty()).collect()
+    let result: VocabEquivalenceResult = groups.into_iter().filter(|group| !group.is_empty()).collect();
+
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][vocab_eq] total_ms={:.3} build_dfa_ms={:.3} signature_ms={:.3} run_batch_ms={:.3} suffix_ms={:.3} finalize_ms={:.3} suffix_tokens={} suffix_targets={} suffix_nodes={} refine_ms={:.3} batches={} tokens={} states={} classes={}",
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+            build_dfa_ms.unwrap_or_default().as_secs_f64() * 1000.0,
+            total_signature_ms.as_secs_f64() * 1000.0,
+            total_run_batch_ms.as_secs_f64() * 1000.0,
+            total_suffix_ms.as_secs_f64() * 1000.0,
+            total_finalize_ms.as_secs_f64() * 1000.0,
+            total_suffix_tokens,
+            total_suffix_targets,
+            total_suffix_nodes,
+            total_refine_ms.as_secs_f64() * 1000.0,
+            batches_processed,
+            num_tokens,
+            num_states,
+            result.len(),
+        );
+    }
+
+    result
 }
 
 #[cfg(test)]
