@@ -76,32 +76,19 @@ pub fn compact_dwa_dimensions(
     // Step 1  — collect unique weights (by Arc pointer)
     let unique_weights = collect_unique_weights(dwa);
 
-    // Step 2 — merge TSIDs to a fixed point before reordering.
-    let mut merged_weights = unique_weights.clone();
-    let mut tsid_merge_perm = identity_perm(num_tsids as usize);
-    let mut current_num_tsids = num_tsids as usize;
-
-    loop {
-        let weight_refs: Vec<&Weight> = merged_weights.iter().collect();
-        let tsid_profiles = build_tsid_profiles(&weight_refs, current_num_tsids);
-        let (tsid_step_perm, next_num_tsids) = merge_sort_perm(&tsid_profiles);
-        if next_num_tsids == current_num_tsids {
-            break;
-        }
-
-        merged_weights = apply_permutations_to_weight_set(
-            &merged_weights,
-            &tsid_step_perm,
-            &identity_perm(num_tokens as usize),
-        );
-        tsid_merge_perm = compose_perm(&tsid_merge_perm, &tsid_step_perm);
-        current_num_tsids = next_num_tsids;
-    }
-
-    let weight_refs: Vec<&Weight> = merged_weights.iter().collect();
+    // Step 2 — merge TSIDs once by exact per-weight RangeSet equivalence.
+    let weight_refs: Vec<&Weight> = unique_weights.iter().collect();
+    let tsid_merge_profiles = build_tsid_profiles(&weight_refs, num_tsids as usize);
+    let (tsid_merge_perm, merged_num_tsids) = merge_sort_perm(&tsid_merge_profiles);
+    let merged_weights = apply_permutations_to_weight_set(
+        &unique_weights,
+        &tsid_merge_perm,
+        &identity_perm(num_tokens as usize),
+    );
+    let merged_weight_refs: Vec<&Weight> = merged_weights.iter().collect();
 
     // Step 3 — reorder only the surviving IDs.
-    let tsid_order_profiles = build_tsid_order_profiles(&weight_refs, current_num_tsids);
+    let tsid_order_profiles = build_tsid_order_profiles(&merged_weight_refs, merged_num_tsids);
     let (tsid_order_perm, ordered_num_tsids) = merge_sort_perm(&tsid_order_profiles);
     let tsid_perm = compose_perm(&tsid_merge_perm, &tsid_order_perm);
 
