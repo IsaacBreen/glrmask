@@ -1,5 +1,7 @@
 //! State equivalence analysis implementations.
 //!
-//! - `fast`: K-step hash mixing + token-based refinement (production runtime default)
+//! - `max_length`: bounded-depth path-hash prepass using only the maximum token length
+//! - `fast`: token-based refinement on the surviving representative states
 
 pub mod fast;
+pub mod max_length;
