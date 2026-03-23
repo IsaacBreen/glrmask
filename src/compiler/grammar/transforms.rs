@@ -14,7 +14,7 @@ use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
 use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
 use crate::automata::lexer::tokenizer::Tokenizer;
 
-const DEFAULT_MAX_RUNTIME_REDUCTION_LEN: usize = 8;
+const DEFAULT_MAX_RUNTIME_REDUCTION_LEN: usize = 5;
 
 fn max_runtime_reduction_len_from_env() -> usize {
     let value = match std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN") {
