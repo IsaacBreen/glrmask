@@ -162,21 +162,34 @@ impl Tokenizer {
     }
 
     pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
-        let mut exec = self.execute_from_state_all_widths(input, start);
-        let mut match_positions = FxHashMap::<TerminalID, usize>::default();
-        let mut deduped_matches = Vec::with_capacity(exec.matches.len());
+        let into_matches = |matches: FxHashMap<_, _>| {
+            matches
+                .into_iter()
+                .map(|(id, (width, end_state))| TokenizerMatch { id, width, end_state })
+                .collect()
+        };
 
-        for matched in exec.matches.drain(..) {
-            if let Some(&match_index) = match_positions.get(&matched.id) {
-                deduped_matches[match_index] = matched;
-            } else {
-                match_positions.insert(matched.id, deduped_matches.len());
-                deduped_matches.push(matched);
+        let mut state = start;
+        let mut matches = FxHashMap::<TerminalID, (usize, u32)>::default();
+
+        for (index, &byte) in input.iter().enumerate() {
+            let Some(next) = self.step(state, byte) else {
+                return TokenizerExecResult {
+                    end_state: None,
+                    matches: into_matches(matches),
+                };
+            };
+            state = next;
+
+            for terminal in self.dfa.finalizers(state).iter() {
+                matches.insert(terminal as TerminalID, (index + 1, state));
             }
         }
 
-        exec.matches = deduped_matches;
-        exec
+        TokenizerExecResult {
+            end_state: Some(state),
+            matches: into_matches(matches),
+        }
     }
 
     pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
