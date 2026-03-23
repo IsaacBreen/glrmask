@@ -96,6 +96,21 @@ impl Clone for Constraint {
 }
 
 impl Constraint {
+    fn assert_unambiguous_env_enabled(&self, caller: &str, using_unambiguous: bool) {
+        let enabled = std::env::var("GLRMASK_ASSERT_UNAMBIGUOUS")
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
+            })
+            .unwrap_or(false);
+
+        if enabled && !using_unambiguous {
+            panic!(
+                "{caller}: GLRMASK_ASSERT_UNAMBIGUOUS is set, but this constraint is not unambiguous"
+            );
+        }
+    }
+
     pub(crate) fn detect_unambiguous(&self) -> bool {
         let parser_unambiguous = self
             .table
@@ -339,12 +354,16 @@ impl Constraint {
         crate::ds::weight::clear_stale_weights();
         crate::ds::weight::clear_weight_op_caches();
 
+        self.assert_unambiguous_env_enabled("Constraint::start_ambiguous", false);
+
         self.start_ambiguous_inner()
     }
 
     pub fn start(&self) -> ConstraintState<'_> {
         crate::ds::weight::clear_stale_weights();
         crate::ds::weight::clear_weight_op_caches();
+
+        self.assert_unambiguous_env_enabled("Constraint::start", self.is_unambiguous);
 
         if self.is_unambiguous {
             ConstraintState::Unambiguous(UnambiguousConstraintState::new(self))

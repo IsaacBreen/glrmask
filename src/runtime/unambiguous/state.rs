@@ -4,8 +4,12 @@
 #![allow(unused_imports)]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use range_set_blaze::RangeSetBlaze;
 use crate::compiler::glr::parser::{advance_stack_vectors, stacks_accept};
+use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
+use crate::ds::weight::Weight;
 use crate::ds::leveled_gss::LeveledGSS;
 use crate::runtime::ambiguous::AmbiguousConstraintState;
 use crate::runtime::state::ConstraintStateSummary;
@@ -81,6 +85,56 @@ impl<'a> UnambiguousConstraintState<'a> {
                 Err(format!(
                     "unambiguous state invariant violated: parser advanced to {count} stacks"
                 ))
+            }
+        }
+    }
+
+    fn internal_tsid(&self) -> u32 {
+        self.constraint.internal_tsid_for_state(self.tsid)
+    }
+
+    fn intersect_tokens_with_weight(
+        &self,
+        tokens: &RangeSetBlaze<u32>,
+        weight: &Weight,
+    ) -> RangeSetBlaze<u32> {
+        let result = weight.intersect_single_parts(
+            self.internal_tsid(),
+            self.internal_tsid(),
+            &Arc::new(tokens.clone()),
+        );
+        result
+            .single_compact_entry_parts()
+            .map(|(_, _, tokens)| tokens.as_ref().clone())
+            .unwrap_or_else(RangeSetBlaze::new)
+    }
+
+    fn apply_final_weight_to_mask(
+        &self,
+        tokens: &RangeSetBlaze<u32>,
+        final_weight: &Weight,
+        buf: &mut [u32],
+    ) {
+        self.constraint.or_single_weight_intersection_to_buf(
+            self.internal_tsid(),
+            self.internal_tsid(),
+            tokens,
+            final_weight,
+            buf,
+        );
+    }
+
+    fn update_eos_in_mask(&self, buf: &mut [u32]) {
+        let Some(eos_token_id) = self.constraint.eos_token_id else {
+            return;
+        };
+
+        let word = eos_token_id as usize / 32;
+        let bit = eos_token_id as usize % 32;
+        if let Some(slot) = buf.get_mut(word) {
+            *slot &= !(1u32 << bit);
+            if self.is_complete() {
+                *slot |= 1u32 << bit;
             }
         }
     }
@@ -240,11 +294,76 @@ impl<'a> UnambiguousConstraintState<'a> {
     }
 
     pub fn mask(&self) -> Vec<u32> {
-        self.as_ambiguous().mask()
+        let mut buf = vec![0u32; self.constraint.mask_len()];
+        self.fill_mask(&mut buf);
+        buf
     }
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        self.as_ambiguous().fill_mask(buf);
+        buf.fill(0);
+
+        if self.stack.is_empty() {
+            return;
+        }
+
+        let parser_dwa = self.constraint.parser_dwa();
+        if parser_dwa.states.is_empty() {
+            return;
+        }
+
+        let mut frontier = BTreeMap::from([(
+            parser_dwa.start_state,
+            self.constraint.internal_token_universe(),
+        )]);
+
+        if frontier
+            .values()
+            .all(|tokens| tokens.is_empty())
+        {
+            self.update_eos_in_mask(buf);
+            return;
+        }
+
+        for &parser_state in self.stack.iter().rev() {
+            for (&dwa_state, tokens) in &frontier {
+                if let Some(final_weight) = &parser_dwa.states[dwa_state as usize].final_weight {
+                    self.apply_final_weight_to_mask(tokens, final_weight, buf);
+                }
+            }
+
+            let mut next_frontier = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+            for (&dwa_state, tokens) in &frontier {
+                let fast_transitions = &self.constraint.dwa_fast_transitions[dwa_state as usize];
+                for label in [encode_positive_label(parser_state), DEFAULT_LABEL] {
+                    let Some((target, weight)) = fast_transitions.get(&label) else {
+                        continue;
+                    };
+
+                    let next_tokens = self.intersect_tokens_with_weight(tokens, weight);
+                    if next_tokens.is_empty() {
+                        continue;
+                    }
+
+                    next_frontier
+                        .entry(*target)
+                        .and_modify(|existing| *existing |= next_tokens.clone())
+                        .or_insert(next_tokens);
+                }
+            }
+
+            frontier = next_frontier;
+            if frontier.is_empty() {
+                break;
+            }
+        }
+
+        for (&dwa_state, tokens) in &frontier {
+            if let Some(final_weight) = &parser_dwa.states[dwa_state as usize].final_weight {
+                self.apply_final_weight_to_mask(tokens, final_weight, buf);
+            }
+        }
+
+        self.update_eos_in_mask(buf);
     }
 
     pub fn force(&self) -> Vec<u32> {
