@@ -69,6 +69,8 @@ pub struct CommitDebugMetrics {
     pub advance_base_isolate_ns: u64,
     pub advance_absorb_push_ns: u64,
     pub advance_shift_top_values_ns: u64,
+    pub advance_bookkeeping_ns: u64,
+    pub advance_wrapper_ns: u64,
     pub advance_input_top_values_total: usize,
     pub advance_input_top_values_max: usize,
     pub advance_input_upperbranch_nodes_total: usize,
@@ -118,7 +120,29 @@ pub struct CommitDebugMetrics {
     pub future_group_apply_ns: u64,
     pub merge_ns: u64,
     pub fuse_ns: u64,
+    pub bookkeeping_ns: u64,
     pub total_ns: u64,
+}
+
+fn finalize_commit_timing(metrics: &mut CommitDebugMetrics) {
+    metrics.advance_wrapper_ns = metrics.advance_stacks_ns.saturating_sub(
+        metrics.advance_subtree_isolate_ns
+            + metrics.advance_pop_cache_build_ns
+            + metrics.advance_base_isolate_ns
+            + metrics.advance_absorb_push_ns
+            + metrics.advance_shift_top_values_ns
+            + metrics.advance_bookkeeping_ns,
+    );
+
+    let measured = metrics.initial_tokenizer_exec_ns
+        + metrics.initial_apply_prune_ns
+        + metrics.initial_remap_ns
+        + metrics.processing_tokenizer_exec_ns
+        + metrics.advance_stacks_ns
+        + metrics.future_group_apply_ns
+        + metrics.merge_ns
+        + metrics.fuse_ns;
+    metrics.bookkeeping_ns = metrics.total_ns.saturating_sub(measured);
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -360,6 +384,7 @@ fn accumulate_advance_stacks_metrics(
     metrics.advance_base_isolate_ns += advance_metrics.base_isolate_ns;
     metrics.advance_absorb_push_ns += advance_metrics.absorb_push_ns;
     metrics.advance_shift_top_values_ns += advance_metrics.shift_top_values_ns;
+    metrics.advance_bookkeeping_ns += advance_metrics.bookkeeping_ns;
 
     metrics.advance_input_top_values_total += advance_metrics.input_summary.top_values_count;
     metrics.advance_input_top_values_max = metrics
@@ -767,10 +792,10 @@ fn commit_bytes_impl(
                                 metrics.advance_input_single_path_calls += 1;
                             }
                         }
+                        let mut advance_metrics = AdvanceStacksDebugMetrics::default();
                         let t_advance = metrics
                             .as_ref()
                             .map(|_| std::time::Instant::now());
-                        let mut advance_metrics = AdvanceStacksDebugMetrics::default();
                         let gss = advance_stacks_with_metrics(
                             &constraint.table,
                             &gss_at_offset,
@@ -944,6 +969,7 @@ fn commit_bytes_impl(
         metrics.state_summary_after = summarize_state_map(state);
         if let Some(t_total) = t_total {
             metrics.total_ns = t_total.elapsed().as_nanos() as u64;
+            finalize_commit_timing(metrics);
         }
     }
 

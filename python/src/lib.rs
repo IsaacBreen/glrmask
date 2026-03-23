@@ -247,6 +247,14 @@ fn commit_metrics_to_dict<'py>(
         metrics.advance_shift_top_values_ns,
     )?;
     out.set_item(
+        "advance_bookkeeping_ns",
+        metrics.advance_bookkeeping_ns,
+    )?;
+    out.set_item(
+        "advance_wrapper_ns",
+        metrics.advance_wrapper_ns,
+    )?;
+    out.set_item(
         "advance_input_top_values_total",
         metrics.advance_input_top_values_total,
     )?;
@@ -394,6 +402,7 @@ fn commit_metrics_to_dict<'py>(
     out.set_item("future_group_apply_ns", metrics.future_group_apply_ns)?;
     out.set_item("merge_ns", metrics.merge_ns)?;
     out.set_item("fuse_ns", metrics.fuse_ns)?;
+    out.set_item("bookkeeping_ns", metrics.bookkeeping_ns)?;
     out.set_item("total_ns", metrics.total_ns)?;
     Ok(out)
 }

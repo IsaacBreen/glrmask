@@ -54,6 +54,22 @@ pub(crate) struct AdvanceStacksDebugMetrics {
     pub base_isolate_ns: u64,
     pub absorb_push_ns: u64,
     pub shift_top_values_ns: u64,
+    pub bookkeeping_ns: u64,
+}
+
+fn finalize_advance_timing(
+    metrics: &mut Option<&mut AdvanceStacksDebugMetrics>,
+    started_at: Option<std::time::Instant>,
+) {
+    if let (Some(metrics), Some(started_at)) = (metrics.as_deref_mut(), started_at) {
+        let measured = metrics.subtree_isolate_ns
+            + metrics.pop_cache_build_ns
+            + metrics.base_isolate_ns
+            + metrics.absorb_push_ns
+            + metrics.shift_top_values_ns;
+        let elapsed = started_at.elapsed().as_nanos() as u64;
+        metrics.bookkeeping_ns = elapsed.saturating_sub(measured);
+    }
 }
 
 #[allow(dead_code)]
@@ -353,6 +369,8 @@ pub(crate) fn advance_stacks_with_metrics(
     token: TerminalID,
     mut metrics: Option<&mut AdvanceStacksDebugMetrics>,
 ) -> ParserGSS {
+    let t_total = metrics.as_ref().map(|_| std::time::Instant::now());
+
     if let Some(state) = stack.single_exclusive_top_value() {
         let out = match table.action(state, token) {
             Some(Action::Shift(target)) => {
@@ -385,6 +403,7 @@ pub(crate) fn advance_stacks_with_metrics(
                     metrics.input_summary = stack.summary();
                     metrics.output_summary = LeveledGSSSummary::default();
                 }
+                finalize_advance_timing(&mut metrics, t_total);
                 return ParserGSS::empty();
             }
         };
@@ -392,6 +411,7 @@ pub(crate) fn advance_stacks_with_metrics(
             metrics.output_summary = out.summary();
         }
         if !out.is_empty() {
+            finalize_advance_timing(&mut metrics, t_total);
             return out;
         }
     }
@@ -402,6 +422,7 @@ pub(crate) fn advance_stacks_with_metrics(
             metrics.input_summary = stack.summary();
             metrics.output_summary = LeveledGSSSummary::default();
         }
+        finalize_advance_timing(&mut metrics, t_total);
         return ParserGSS::empty();
     }
 
@@ -437,6 +458,7 @@ pub(crate) fn advance_stacks_with_metrics(
             metrics.input_summary = stack.summary();
             metrics.output_summary = LeveledGSSSummary::default();
         }
+        finalize_advance_timing(&mut metrics, t_total);
         return ParserGSS::empty();
     }
     if pure_shift_only && !pure_shift_targets.is_empty() {
@@ -459,6 +481,7 @@ pub(crate) fn advance_stacks_with_metrics(
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.output_summary = out.summary();
         }
+        finalize_advance_timing(&mut metrics, t_total);
         return out;
     }
 
@@ -672,6 +695,7 @@ pub(crate) fn advance_stacks_with_metrics(
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.output_summary = out.summary();
     }
+    finalize_advance_timing(&mut metrics, t_total);
     out
 }
 
