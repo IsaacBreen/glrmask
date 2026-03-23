@@ -418,6 +418,7 @@ fn commit_bytes_impl(
     }
 
     let mut pending_overall_state = FxHashMap::<u32, ParserGSS>::default();
+    let mut advance_result_cache = FxHashMap::<(usize, u32), ParserGSS>::default();
     let mut processing_queue: Vec<FxHashMap<u32, ParserGSS>> =
         (0..=bytes.len()).map(|_| FxHashMap::default()).collect();
 
@@ -552,31 +553,42 @@ fn commit_bytes_impl(
                 let gss = if let Some(cached) = terminal_result_cache.get(&matched.id) {
                     cached.clone()
                 } else {
-                    if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
-                        terminal_result_cache.insert(matched.id, ParserGSS::empty());
-                        continue;
-                    }
-                    if let Some(metrics) = metrics.as_deref_mut() {
-                        metrics.advance_stacks_calls += 1;
-                    }
-                    let t_advance = metrics
-                        .as_ref()
-                        .map(|_| std::time::Instant::now());
-                    let mut advance_metrics = AdvanceStacksDebugMetrics::default();
-                    let mut gss = advance_stacks_with_metrics(
-                        &constraint.table,
-                        &gss_at_offset,
-                        matched.id,
-                        metrics.as_deref_mut().map(|_| &mut advance_metrics),
-                    );
-                    if let (Some(metrics), Some(t_advance)) = (metrics.as_deref_mut(), t_advance)
+                    let advance_cache_key = (gss_at_offset.ptr_key(), matched.id);
+                    let mut gss = if let Some(cached) = advance_result_cache.get(&advance_cache_key)
                     {
-                        metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
-                        if !gss.is_empty() {
-                            metrics.advance_stacks_nonempty += 1;
+                        cached.clone()
+                    } else {
+                        if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                            advance_result_cache
+                                .insert(advance_cache_key, ParserGSS::empty());
+                            terminal_result_cache.insert(matched.id, ParserGSS::empty());
+                            continue;
                         }
-                        accumulate_advance_stacks_metrics(metrics, &advance_metrics);
-                    }
+                        if let Some(metrics) = metrics.as_deref_mut() {
+                            metrics.advance_stacks_calls += 1;
+                        }
+                        let t_advance = metrics
+                            .as_ref()
+                            .map(|_| std::time::Instant::now());
+                        let mut advance_metrics = AdvanceStacksDebugMetrics::default();
+                        let gss = advance_stacks_with_metrics(
+                            &constraint.table,
+                            &gss_at_offset,
+                            matched.id,
+                            metrics.as_deref_mut().map(|_| &mut advance_metrics),
+                        );
+                        if let (Some(metrics), Some(t_advance)) =
+                            (metrics.as_deref_mut(), t_advance)
+                        {
+                            metrics.advance_stacks_ns += t_advance.elapsed().as_nanos() as u64;
+                            if !gss.is_empty() {
+                                metrics.advance_stacks_nonempty += 1;
+                            }
+                            accumulate_advance_stacks_metrics(metrics, &advance_metrics);
+                        }
+                        advance_result_cache.insert(advance_cache_key, gss.clone());
+                        gss
+                    };
                     if !gss.is_empty() {
                         if let Some(end_state) = exec_result.end_state {
                             if let Some(metrics) = metrics.as_deref_mut() {
