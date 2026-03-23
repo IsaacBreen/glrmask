@@ -1569,7 +1569,22 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let target_children = children_by_target
                         .entry(to)
                         .or_insert_with(IHashMap::new);
-                    target_children.insert(from, kids.clone());
+                    match target_children.get(&from) {
+                        Some(existing_kids) => {
+                            let mut merged_kids = existing_kids.clone();
+                            for (depth, child) in kids.iter() {
+                                if let Some(existing_child) = merged_kids.get(depth) {
+                                    merged_kids.insert(*depth, merge_lower(existing_child, child));
+                                } else {
+                                    merged_kids.insert(*depth, child.clone());
+                                }
+                            }
+                            target_children.insert(from, merged_kids);
+                        }
+                        None => {
+                            target_children.insert(from, kids.clone());
+                        }
+                    }
                 }
 
                 if children_by_target.is_empty() {
