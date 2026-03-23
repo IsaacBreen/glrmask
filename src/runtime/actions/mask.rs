@@ -252,9 +252,9 @@ pub struct MaskDebugMetrics {
     pub max_weighted_gss_top_values: usize,
     pub max_weighted_gss_unique_nodes: usize,
     pub max_weighted_gss_total_edges: usize,
-    pub max_weighted_gss_depth: isize,
-    pub max_depth_bucket_processed: isize,
-    pub min_depth_bucket_processed: isize,
+    pub max_weighted_gss_depth: u32,
+    pub max_depth_bucket_processed: u32,
+    pub min_depth_bucket_processed: u32,
     pub max_items_in_depth_bucket: usize,
     pub positive_transitions_hit: usize,
     pub positive_transitions_enqueued: usize,
@@ -315,7 +315,7 @@ impl<'a> ConstraintState<'a> {
 
         // Depth buckets let us pop the deepest frontier without rescanning or
         // linearly searching for matching (depth, state) entries on enqueue.
-        let mut queue: BTreeMap<isize, FxHashMap<u32, DenseMaskGSS>> = BTreeMap::new();
+        let mut queue: BTreeMap<u32, FxHashMap<u32, DenseMaskGSS>> = BTreeMap::new();
 
         let start_state = parser_dwa.start_state;
         let start_dwa_state = &parser_dwa.states[start_state as usize];

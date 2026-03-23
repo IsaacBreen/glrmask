@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::lexer::tokenizer::TokenizerExecResult;
 use crate::compiler::glr::parser::{
+    AdvanceBenchBreakdown,
     AdvanceStacksDebugMetrics,
     ParserGSS,
     TerminalsDisallowed,
     advance_stacks_with_metrics,
+    benchmark_advance_stacks_breakdown,
     stack_may_advance_on,
     stack_may_advance_on_any,
 };
@@ -148,6 +150,59 @@ fn finalize_commit_timing(metrics: &mut CommitDebugMetrics) {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommitDebugTrace {
     pub exec_calls: Vec<CommitExecTrace>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CommitProfileCapture {
+    tokenizer_exec_starts: Vec<u32>,
+    advance_inputs: Vec<CommitAdvanceInput>,
+}
+
+#[derive(Debug, Clone)]
+struct CommitAdvanceInput {
+    gss: ParserGSS,
+    terminal: u32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CommitAdvanceCallBreakdown {
+    pub terminal: u32,
+    pub total_ns: u64,
+    pub subtree_isolate_ns: u64,
+    pub subtree_isolate_calls: usize,
+    pub pop_cache_build_ns: u64,
+    pub pop_cache_build_calls: usize,
+    pub base_isolate_ns: u64,
+    pub base_isolate_calls: usize,
+    pub absorb_push_ns: u64,
+    pub absorb_push_calls: usize,
+    pub shift_top_values_ns: u64,
+    pub shift_top_values_calls: usize,
+    pub residual_ns: u64,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CommitBenchBreakdown {
+    pub total_ns: u64,
+    pub tokenizer_exec_ns: u64,
+    pub tokenizer_exec_calls: usize,
+    pub advance_total_ns: u64,
+    pub advance_subtree_isolate_ns: u64,
+    pub advance_subtree_isolate_calls: usize,
+    pub advance_pop_cache_build_ns: u64,
+    pub advance_pop_cache_build_calls: usize,
+    pub advance_base_isolate_ns: u64,
+    pub advance_base_isolate_calls: usize,
+    pub advance_absorb_push_ns: u64,
+    pub advance_absorb_push_calls: usize,
+    pub advance_shift_top_values_ns: u64,
+    pub advance_shift_top_values_calls: usize,
+    pub advance_residual_ns: u64,
+    pub advance_calls: usize,
+    pub advance_call_breakdowns: Vec<CommitAdvanceCallBreakdown>,
+    pub other_ns: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -443,6 +498,7 @@ fn commit_bytes_impl(
     bytes: &[u8],
     mut metrics: Option<&mut CommitDebugMetrics>,
     mut trace: Option<&mut CommitDebugTrace>,
+    mut profile: Option<&mut CommitProfileCapture>,
 ) -> Result<(), String> {
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.bytes_len = bytes.len();
@@ -470,6 +526,9 @@ fn commit_bytes_impl(
         let t_exec = metrics
             .as_ref()
             .map(|_| std::time::Instant::now());
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.tokenizer_exec_starts.push(tokenizer_state);
+        }
         let exec = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
         let mut exec_trace = trace.as_ref().map(|_| CommitExecTrace {
             phase: "initial".to_string(),
@@ -634,14 +693,22 @@ fn commit_bytes_impl(
             let (exec_result, reused_initial_exec_result) = if offset == 0 {
                 match initial_exec_results.remove(&tokenizer_state) {
                     Some(exec) => (exec, true),
-                    None => (
-                        constraint
-                            .tokenizer
-                            .execute_from_state(&bytes[offset..], tokenizer_state),
-                        false,
-                    ),
+                    None => {
+                        if let Some(profile) = profile.as_deref_mut() {
+                            profile.tokenizer_exec_starts.push(tokenizer_state);
+                        }
+                        (
+                            constraint
+                                .tokenizer
+                                .execute_from_state(&bytes[offset..], tokenizer_state),
+                            false,
+                        )
+                    }
                 }
             } else {
+                if let Some(profile) = profile.as_deref_mut() {
+                    profile.tokenizer_exec_starts.push(tokenizer_state);
+                }
                 (
                     constraint
                         .tokenizer
@@ -781,6 +848,12 @@ fn commit_bytes_impl(
                                 .insert(advance_cache_key, ParserGSS::empty());
                             terminal_result_cache.insert(matched.id, ParserGSS::empty());
                             continue;
+                        }
+                        if let Some(profile) = profile.as_deref_mut() {
+                            profile.advance_inputs.push(CommitAdvanceInput {
+                                gss: gss_at_offset.clone(),
+                                terminal: matched.id,
+                            });
                         }
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.advance_stacks_calls += 1;
@@ -999,11 +1072,11 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_impl(constraint, &mut self.state, bytes, None, None)
+        commit_bytes_impl(constraint, &mut self.state, bytes, None, None, None)
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        commit_bytes_impl(self.constraint, &mut self.state, bytes, None, None)
+        commit_bytes_impl(self.constraint, &mut self.state, bytes, None, None, None)
     }
 
     pub fn debug_commit_bytes_metrics(&self, bytes: &[u8]) -> CommitDebugMetrics {
@@ -1014,7 +1087,14 @@ impl<'a> ConstraintState<'a> {
             state_summary_after: summarize_state_map(&cloned_state),
             ..CommitDebugMetrics::default()
         };
-        let _ = commit_bytes_impl(self.constraint, &mut cloned_state, bytes, Some(&mut metrics), None);
+        let _ = commit_bytes_impl(
+            self.constraint,
+            &mut cloned_state,
+            bytes,
+            Some(&mut metrics),
+            None,
+            None,
+        );
         if bytes.is_empty() {
             metrics.state_summary_after = metrics.state_summary_before;
         }
@@ -1024,7 +1104,14 @@ impl<'a> ConstraintState<'a> {
     pub fn debug_commit_bytes_trace(&self, bytes: &[u8]) -> CommitDebugTrace {
         let mut cloned_state = self.state.clone();
         let mut trace = CommitDebugTrace::default();
-        let _ = commit_bytes_impl(self.constraint, &mut cloned_state, bytes, None, Some(&mut trace));
+        let _ = commit_bytes_impl(
+            self.constraint,
+            &mut cloned_state,
+            bytes,
+            None,
+            Some(&mut trace),
+            None,
+        );
         trace
     }
 
@@ -1048,6 +1135,106 @@ impl<'a> ConstraintState<'a> {
                 format!("debug_commit_token_trace: token_id {token_id} not in vocabulary")
             })?;
         Ok(self.debug_commit_bytes_trace(bytes))
+    }
+
+    #[doc(hidden)]
+    pub fn profile_commit_token_breakdown(
+        &self,
+        token_id: u32,
+        repeats: usize,
+    ) -> Result<CommitBenchBreakdown, String> {
+        let repeats = repeats.max(1);
+        let bytes = token_bytes_for_id(self.constraint, token_id)
+            .ok_or_else(|| {
+                format!("profile_commit_token_breakdown: token_id {token_id} not in vocabulary")
+            })?;
+
+        let total_ns = {
+            let started = std::time::Instant::now();
+            for _ in 0..repeats {
+                let mut cloned = self.clone();
+                cloned.commit_token(token_id)?;
+                std::hint::black_box(cloned.is_finished());
+            }
+            (started.elapsed().as_nanos() as u64) / repeats as u64
+        };
+
+        let mut captured_state = self.state.clone();
+        let mut capture = CommitProfileCapture::default();
+        commit_bytes_impl(
+            self.constraint,
+            &mut captured_state,
+            bytes,
+            None,
+            None,
+            Some(&mut capture),
+        )?;
+
+        let tokenizer_exec_ns = if capture.tokenizer_exec_starts.is_empty() {
+            0
+        } else {
+            let started = std::time::Instant::now();
+            for _ in 0..repeats {
+                for &start_state in &capture.tokenizer_exec_starts {
+                    std::hint::black_box(
+                        self.constraint.tokenizer.execute_from_state(bytes, start_state),
+                    );
+                }
+            }
+            (started.elapsed().as_nanos() as u64) / repeats as u64
+        };
+
+        let mut breakdown = CommitBenchBreakdown {
+            total_ns,
+            tokenizer_exec_ns,
+            tokenizer_exec_calls: capture.tokenizer_exec_starts.len(),
+            advance_calls: capture.advance_inputs.len(),
+            ..CommitBenchBreakdown::default()
+        };
+
+        for input in &capture.advance_inputs {
+            let advance = benchmark_advance_stacks_breakdown(
+                &self.constraint.table,
+                &input.gss,
+                input.terminal,
+                repeats,
+            );
+            breakdown.advance_total_ns += advance.total_ns;
+            breakdown.advance_subtree_isolate_ns += advance.subtree_isolate_ns;
+            breakdown.advance_subtree_isolate_calls += advance.subtree_isolate_calls;
+            breakdown.advance_pop_cache_build_ns += advance.pop_cache_build_ns;
+            breakdown.advance_pop_cache_build_calls += advance.pop_cache_build_calls;
+            breakdown.advance_base_isolate_ns += advance.base_isolate_ns;
+            breakdown.advance_base_isolate_calls += advance.base_isolate_calls;
+            breakdown.advance_absorb_push_ns += advance.absorb_push_ns;
+            breakdown.advance_absorb_push_calls += advance.absorb_push_calls;
+            breakdown.advance_shift_top_values_ns += advance.shift_top_values_ns;
+            breakdown.advance_shift_top_values_calls += advance.shift_top_values_calls;
+            breakdown.advance_residual_ns += advance.residual_ns;
+            breakdown
+                .advance_call_breakdowns
+                .push(CommitAdvanceCallBreakdown {
+                    terminal: input.terminal,
+                    total_ns: advance.total_ns,
+                    subtree_isolate_ns: advance.subtree_isolate_ns,
+                    subtree_isolate_calls: advance.subtree_isolate_calls,
+                    pop_cache_build_ns: advance.pop_cache_build_ns,
+                    pop_cache_build_calls: advance.pop_cache_build_calls,
+                    base_isolate_ns: advance.base_isolate_ns,
+                    base_isolate_calls: advance.base_isolate_calls,
+                    absorb_push_ns: advance.absorb_push_ns,
+                    absorb_push_calls: advance.absorb_push_calls,
+                    shift_top_values_ns: advance.shift_top_values_ns,
+                    shift_top_values_calls: advance.shift_top_values_calls,
+                    residual_ns: advance.residual_ns,
+                });
+        }
+
+        breakdown.other_ns = breakdown
+            .total_ns
+            .saturating_sub(breakdown.tokenizer_exec_ns + breakdown.advance_total_ns);
+
+        Ok(breakdown)
     }
 
     pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {

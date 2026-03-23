@@ -26,7 +26,7 @@ pub struct ConstraintStateSummary {
     pub parser_unique_nodes_max: usize,
     pub parser_total_edges_total: usize,
     pub parser_accumulator_instances_total: usize,
-    pub parser_max_depth: isize,
+    pub parser_max_depth: u32,
 }
 
 #[derive(Debug, Clone)]

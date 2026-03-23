@@ -57,6 +57,344 @@ pub(crate) struct AdvanceStacksDebugMetrics {
     pub bookkeeping_ns: u64,
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AdvanceBenchBreakdown {
+    pub total_ns: u64,
+    pub subtree_isolate_ns: u64,
+    pub subtree_isolate_calls: usize,
+    pub pop_cache_build_ns: u64,
+    pub pop_cache_build_calls: usize,
+    pub base_isolate_ns: u64,
+    pub base_isolate_calls: usize,
+    pub absorb_push_ns: u64,
+    pub absorb_push_calls: usize,
+    pub shift_top_values_ns: u64,
+    pub shift_top_values_calls: usize,
+    pub residual_ns: u64,
+}
+
+#[derive(Clone)]
+struct SubtreeIsolateWork {
+    current: ParserGSS,
+    state: u32,
+}
+
+#[derive(Clone)]
+struct PopCacheWork {
+    subtree: ParserGSS,
+    needed_rhs_lens: Vec<usize>,
+}
+
+#[derive(Clone)]
+struct BaseIsolateWork {
+    popped: ParserGSS,
+    goto_from: u32,
+}
+
+#[derive(Clone)]
+struct AbsorbPushWork {
+    current: ParserGSS,
+    target: u32,
+    base: ParserGSS,
+}
+
+#[derive(Clone)]
+struct ShiftWork {
+    current: ParserGSS,
+    shift_pairs: Vec<(u32, u32)>,
+}
+
+#[derive(Clone, Default)]
+struct AdvanceBenchWork {
+    subtree_isolates: Vec<SubtreeIsolateWork>,
+    pop_caches: Vec<PopCacheWork>,
+    base_isolates: Vec<BaseIsolateWork>,
+    absorb_pushes: Vec<AbsorbPushWork>,
+    shift: Option<ShiftWork>,
+}
+
+fn avg_ns<F>(repeats: usize, mut f: F) -> u64
+where
+    F: FnMut(),
+{
+    if repeats == 0 {
+        return 0;
+    }
+    let started = std::time::Instant::now();
+    for _ in 0..repeats {
+        f();
+    }
+    (started.elapsed().as_nanos() as u64) / repeats as u64
+}
+
+fn capture_advance_bench_work(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> AdvanceBenchWork {
+    let mut work = AdvanceBenchWork::default();
+
+    if let Some(state) = stack.single_exclusive_top_value() {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
+                work.shift = Some(ShiftWork {
+                    current: stack.clone(),
+                    shift_pairs: vec![(state, *target)],
+                });
+                return work;
+            }
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => {
+                work.shift = Some(ShiftWork {
+                    current: stack.clone(),
+                    shift_pairs: vec![(state, *target)],
+                });
+                return work;
+            }
+            _ => {}
+        }
+    }
+
+    let frontier = stack.peek_values();
+    if frontier.is_empty() {
+        return work;
+    }
+
+    let mut pure_shift_targets = SmallVec::<[(u32, u32); 8]>::new();
+    let mut pure_shift_only = true;
+    let mut any_action = false;
+    for state in frontier.iter().copied() {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
+                any_action = true;
+                pure_shift_targets.push((state, *target));
+            }
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => {
+                any_action = true;
+                pure_shift_targets.push((state, *target));
+            }
+            Some(Action::Reduce(_))
+            | Some(Action::Accept)
+            | Some(Action::Split { .. }) => {
+                any_action = true;
+                pure_shift_only = false;
+                break;
+            }
+            None => {}
+        }
+    }
+    if !any_action {
+        return work;
+    }
+    if pure_shift_only && !pure_shift_targets.is_empty() {
+        work.shift = Some(ShiftWork {
+            current: stack.clone(),
+            shift_pairs: pure_shift_targets.into_iter().collect(),
+        });
+        return work;
+    }
+
+    let mut current = stack.clone();
+    let mut processed = vec![false; table.num_states as usize];
+
+    loop {
+        let mut new_states = SmallVec::<[u32; 8]>::new();
+        if let Some(state) = current.single_top_value() {
+            if !processed[state as usize] {
+                new_states.push(state);
+            }
+        } else {
+            new_states.extend(
+                current
+                    .peek_values()
+                    .into_iter()
+                    .filter(|&state| !processed[state as usize]),
+            );
+        }
+        if new_states.is_empty() {
+            break;
+        }
+
+        let mut any_reduced = false;
+        let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
+        for state in new_states {
+            processed[state as usize] = true;
+            let reduce_rules: &[u32] = match table.action(state, token) {
+                Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
+                Some(Action::Split { reduces, .. }) => reduces.as_slice(),
+                _ => &[],
+            };
+
+            work.subtree_isolates.push(SubtreeIsolateWork {
+                current: current.clone(),
+                state,
+            });
+            let subtree = current.isolate(Some(state));
+
+            let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
+            for &rule_id in reduce_rules {
+                let rule = &table.rules[rule_id as usize];
+                let rhs_len = rule.rhs.len();
+                let popped = subtree.popn(rhs_len as isize);
+                if popped.is_empty() {
+                    continue;
+                }
+
+                let mut handle_goto_from = |goto_from: u32| {
+                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        let base = if let Some((_, cached)) = base_cache.iter().find(
+                            |((cached_rhs_len, cached_goto_from), _)| {
+                                *cached_rhs_len == rhs_len && *cached_goto_from == goto_from
+                            },
+                        ) {
+                            cached.clone()
+                        } else {
+                            work.base_isolates.push(BaseIsolateWork {
+                                popped: popped.clone(),
+                                goto_from,
+                            });
+                            let isolated = popped.isolate(Some(goto_from));
+                            base_cache.push(((rhs_len, goto_from), isolated.clone()));
+                            isolated
+                        };
+                        if let Some((_, existing)) = pending_bases_by_target
+                            .iter_mut()
+                            .find(|(existing_target, _)| *existing_target == target)
+                        {
+                            *existing = existing.merge(&base);
+                        } else {
+                            pending_bases_by_target.push((target, base));
+                        }
+                        any_reduced = true;
+                    }
+                };
+
+                if let Some(goto_from) = popped.single_top_value() {
+                    handle_goto_from(goto_from);
+                } else {
+                    for goto_from in popped.peek_values() {
+                        handle_goto_from(goto_from);
+                    }
+                }
+            }
+        }
+        if !any_reduced {
+            break;
+        }
+        for (target, base) in pending_bases_by_target {
+            work.absorb_pushes.push(AbsorbPushWork {
+                current: current.clone(),
+                target,
+                base: base.clone(),
+            });
+            current = current.absorb_push(target, &base);
+        }
+    }
+
+    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
+    let mut handle_shift_state = |state: u32| {
+        let shift_target = match table.action(state, token) {
+            Some(Action::Shift(target)) => Some(*target),
+            Some(Action::Split { shift: Some(target), .. }) => Some(*target),
+            _ => None,
+        };
+        if let Some(target) = shift_target {
+            shift_pairs.push((state, target));
+        }
+    };
+
+    if let Some(state) = current.single_top_value() {
+        handle_shift_state(state);
+    } else {
+        for state in current.peek_values() {
+            handle_shift_state(state);
+        }
+    }
+    work.shift = Some(ShiftWork {
+        current,
+        shift_pairs: shift_pairs.into_iter().collect(),
+    });
+
+    work
+}
+
+pub(crate) fn benchmark_advance_stacks_breakdown(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+    repeats: usize,
+) -> AdvanceBenchBreakdown {
+    let work = capture_advance_bench_work(table, stack, token);
+
+    let total_ns = avg_ns(repeats, || {
+        std::hint::black_box(advance_stacks(table, stack, token));
+    });
+    let subtree_isolate_ns = avg_ns(repeats, || {
+        for op in &work.subtree_isolates {
+            std::hint::black_box(op.current.isolate(Some(op.state)));
+        }
+    });
+    let pop_cache_build_ns = avg_ns(repeats, || {
+        for op in &work.pop_caches {
+            let mut incremental_popped = op.subtree.clone();
+            let mut incremental_len = 0usize;
+            let mut popped_cache = SmallVec::<[(usize, ParserGSS); 4]>::new();
+            for &rhs_len in &op.needed_rhs_lens {
+                while incremental_len < rhs_len {
+                    incremental_popped = incremental_popped.pop();
+                    incremental_len += 1;
+                }
+                popped_cache.push((rhs_len, incremental_popped.clone()));
+            }
+            std::hint::black_box(popped_cache);
+        }
+    });
+    let base_isolate_ns = avg_ns(repeats, || {
+        for op in &work.base_isolates {
+            std::hint::black_box(op.popped.isolate(Some(op.goto_from)));
+        }
+    });
+    let absorb_push_ns = avg_ns(repeats, || {
+        for op in &work.absorb_pushes {
+            std::hint::black_box(op.current.clone().absorb_push(op.target, &op.base));
+        }
+    });
+    let shift_top_values_ns = avg_ns(repeats, || {
+        if let Some(op) = &work.shift {
+            std::hint::black_box(op.current.shift_top_values(op.shift_pairs.clone()));
+        }
+    });
+
+    let measured = subtree_isolate_ns
+        + pop_cache_build_ns
+        + base_isolate_ns
+        + absorb_push_ns
+        + shift_top_values_ns;
+
+    AdvanceBenchBreakdown {
+        total_ns,
+        subtree_isolate_ns,
+        subtree_isolate_calls: work.subtree_isolates.len(),
+        pop_cache_build_ns,
+        pop_cache_build_calls: work.pop_caches.len(),
+        base_isolate_ns,
+        base_isolate_calls: work.base_isolates.len(),
+        absorb_push_ns,
+        absorb_push_calls: work.absorb_pushes.len(),
+        shift_top_values_ns,
+        shift_top_values_calls: usize::from(work.shift.is_some()),
+        residual_ns: total_ns.saturating_sub(measured),
+    }
+}
+
 fn finalize_advance_timing(
     metrics: &mut Option<&mut AdvanceStacksDebugMetrics>,
     started_at: Option<std::time::Instant>,
@@ -539,29 +877,6 @@ pub(crate) fn advance_stacks_with_metrics(
             if let (Some(metrics), Some(t_subtree)) = (metrics.as_deref_mut(), t_subtree) {
                 metrics.subtree_isolate_ns += t_subtree.elapsed().as_nanos() as u64;
             }
-            let mut needed_rhs_lens: SmallVec<[usize; 4]> = reduce_rules
-                .iter()
-                .map(|&rule_id| table.rules[rule_id as usize].rhs.len())
-                .collect();
-            needed_rhs_lens.sort_unstable();
-            needed_rhs_lens.dedup();
-
-            let mut popped_cache = SmallVec::<[(usize, ParserGSS); 4]>::new();
-            let mut incremental_popped = subtree.clone();
-            let mut incremental_len = 0usize;
-            let t_pop_cache = metrics
-                .as_ref()
-                .map(|_| std::time::Instant::now());
-            for rhs_len in needed_rhs_lens {
-                while incremental_len < rhs_len {
-                    incremental_popped = incremental_popped.pop();
-                    incremental_len += 1;
-                }
-                popped_cache.push((rhs_len, incremental_popped.clone()));
-            }
-            if let (Some(metrics), Some(t_pop_cache)) = (metrics.as_deref_mut(), t_pop_cache) {
-                metrics.pop_cache_build_ns += t_pop_cache.elapsed().as_nanos() as u64;
-            }
             let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
             for &rule_id in reduce_rules {
                 let rule = &table.rules[rule_id as usize];
@@ -569,12 +884,7 @@ pub(crate) fn advance_stacks_with_metrics(
                     metrics.popn_calls += 1;
                 }
                 let rhs_len = rule.rhs.len();
-                let popped = popped_cache
-                    .iter()
-                    .find_map(|(cached_rhs_len, cached)| {
-                        (*cached_rhs_len == rhs_len).then(|| cached.clone())
-                    })
-                    .unwrap_or_else(|| subtree.popn(rhs_len as isize));
+                let popped = subtree.popn(rhs_len as isize);
                 if popped.is_empty() {
                     continue;
                 }

@@ -22,7 +22,16 @@ pub use ds::weight::{
     clear_weight_op_caches,
 };
 pub use error::{GlrMaskError, Result};
-pub use runtime::{CommitDebugMetrics, CommitDebugTrace, Constraint, ConstraintState, ConstraintStateSummary, MaskDebugMetrics};
+pub use runtime::{
+    CommitAdvanceCallBreakdown,
+    CommitBenchBreakdown,
+    CommitDebugMetrics,
+    CommitDebugTrace,
+    Constraint,
+    ConstraintState,
+    ConstraintStateSummary,
+    MaskDebugMetrics,
+};
 pub use vocab::Vocab;
 
 #[doc(hidden)]
