@@ -2,13 +2,13 @@
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
-mod ambiguous;
+mod actions;
 mod constraint;
 mod debug;
 mod serde;
 mod state;
-mod unambiguous;
-
-pub use ambiguous::{CommitDebugMetrics, CommitDebugTrace, MaskDebugMetrics};
+pub use actions::commit::{CommitDebugMetrics, CommitDebugTrace};
+pub use actions::mask::MaskDebugMetrics;
 pub use constraint::Constraint;
-pub use state::{ConstraintState, ConstraintStateSummary, ConstraintStateTrait};
+pub use state::ConstraintState;
+pub use state::ConstraintStateSummary;

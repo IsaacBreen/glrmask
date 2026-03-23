@@ -11,9 +11,9 @@
 //!    position.  Stop if a longer token could extend beyond the forced prefix
 //!    (because we cannot determine the true longest match).
 
-use crate::runtime::state::AmbiguousConstraintState;
+use crate::runtime::state::ConstraintState;
 
-impl<'a> AmbiguousConstraintState<'a> {
+impl<'a> ConstraintState<'a> {
     /// Compute the forced token sequence.
     ///
     /// Uses two strategies, mirroring sep1's behavior:
@@ -512,7 +512,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut s = c.start_ambiguous();
+        let mut s = c.start();
         s.commit_bytes(b"a").unwrap();
         assert!(!s.is_complete(), "after only 'a' the parse should not be complete");
 
@@ -545,7 +545,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"abc", "deterministic grammar should force the whole byte string");
     }
 
@@ -554,7 +554,7 @@ mod tests {
         let vocab = make_vocab_with_ids(&[(0, "a"), (1, "b"), (2, "<|endoftext|>")]);
         let c = Constraint::from_ebnf(r#"start ::= 'a' | 'b'"#, &vocab).unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert!(prefix.is_empty(), "different first bytes should yield no forced prefix");
     }
 
@@ -577,7 +577,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"ab", "only the shared prefix should be forced");
     }
 
@@ -599,7 +599,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"ab", "EOS should stop byte forcing once the shorter branch can finish");
     }
 
@@ -626,7 +626,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"steve", "with EOS present only the shared complete prefix should be forced");
     }
 
@@ -652,7 +652,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"steven", "without EOS the longer continuation should remain fully forced");
     }
 
@@ -675,7 +675,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut s = c.start_ambiguous();
+        let mut s = c.start();
         s.commit_bytes(b"ab").unwrap();
         let prefix = s.compute_forced_byte_prefix();
         assert_eq!(prefix, b"cde", "after committing 'ab' the remaining suffix should still be forced");
@@ -693,7 +693,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut s = c.start_ambiguous();
+        let mut s = c.start();
         s.commit_bytes(b"ab").unwrap();
         let prefix = s.compute_forced_byte_prefix();
         assert!(prefix.is_empty(), "complete parses should have no further forced prefix");
@@ -717,7 +717,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"abcdefghijklmnop", "long deterministic literals should force their full byte sequence");
     }
 
@@ -733,7 +733,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"x", "single-character grammars should force that byte");
     }
 
@@ -749,7 +749,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix.len(), 10_000, "repetition without EOS should stop at the safety cutoff");
         assert!(prefix.iter().all(|&b| b == b'a'), "the forced repetition prefix should contain only 'a' bytes");
     }
@@ -766,7 +766,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"a", "with EOS present only the first repeated byte should be forced");
     }
 
@@ -792,7 +792,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"abcdef", "multibyte vocab entries should not interfere with byte-prefix forcing");
     }
 
@@ -818,7 +818,7 @@ mod tests {
         )
         .unwrap();
 
-        let prefix = c.start_ambiguous().compute_forced_byte_prefix();
+        let prefix = c.start().compute_forced_byte_prefix();
         assert_eq!(prefix, b"hello", "only the shared long prefix should be forced");
     }
 
@@ -831,7 +831,7 @@ mod tests {
         let vocab = make_vocab(&["a", "b", "c", "d", "e", "f"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"abcdef");
+        let tokens = c.start().tokenize_forced_with_stop(b"abcdef");
         assert_eq!(tokens, vec![0, 1, 2, 3, 4, 5], "single-byte tokens should tokenize one byte at a time");
     }
 
@@ -840,7 +840,7 @@ mod tests {
         let vocab = make_vocab(&["a", "b", "c", "ab", "abc"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"abc");
+        let tokens = c.start().tokenize_forced_with_stop(b"abc");
         assert_eq!(tokens, vec![4], "tokenization should prefer the longest full match");
     }
 
@@ -849,7 +849,7 @@ mod tests {
         let vocab = make_vocab(&["a", "b", "c", "cde", "ab"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"abc");
+        let tokens = c.start().tokenize_forced_with_stop(b"abc");
         assert_eq!(tokens, vec![4], "tokenization should stop once a longer token could extend beyond the prefix");
     }
 
@@ -858,7 +858,7 @@ mod tests {
         let vocab = make_vocab(&["a", "b", "abc"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"ab");
+        let tokens = c.start().tokenize_forced_with_stop(b"ab");
         assert!(tokens.is_empty(), "an extending token at position 0 should block all output");
     }
 
@@ -867,7 +867,7 @@ mod tests {
         let vocab = make_vocab(&["a", "b", "c", "d", "e", "f", "ab", "cdef"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"abcdef");
+        let tokens = c.start().tokenize_forced_with_stop(b"abcdef");
         assert_eq!(tokens, vec![6, 7], "multibyte matches in the middle of the prefix should be chosen greedily");
     }
 
@@ -876,7 +876,7 @@ mod tests {
         let vocab = make_vocab(&["abc", "def"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"abcdef");
+        let tokens = c.start().tokenize_forced_with_stop(b"abcdef");
         assert_eq!(tokens, vec![0, 1], "exact full coverage should emit all matching tokens");
     }
 
@@ -885,7 +885,7 @@ mod tests {
         let vocab = make_vocab(&["a"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"");
+        let tokens = c.start().tokenize_forced_with_stop(b"");
         assert!(tokens.is_empty(), "empty input should tokenize to an empty sequence");
     }
 
@@ -894,7 +894,7 @@ mod tests {
         let vocab = make_vocab(&["x", "y"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"abc");
+        let tokens = c.start().tokenize_forced_with_stop(b"abc");
         assert!(tokens.is_empty(), "no matching token at the current position should stop tokenization");
     }
 
@@ -903,7 +903,7 @@ mod tests {
         let vocab = make_vocab(&["a", "b"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"abc");
+        let tokens = c.start().tokenize_forced_with_stop(b"abc");
         assert_eq!(tokens, vec![0, 1], "tokenization should stop after the last covered byte");
     }
 
@@ -912,7 +912,7 @@ mod tests {
         let vocab = make_vocab(&["s", "t", "e", "v", "ste", "ve", "ven"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"steve");
+        let tokens = c.start().tokenize_forced_with_stop(b"steve");
         assert_eq!(tokens, vec![4], "'ven' extending beyond the prefix should stop tokenization after 'ste'");
     }
 
@@ -921,7 +921,7 @@ mod tests {
         let vocab = make_vocab(&["s", "t", "e", "v", "n", "ste", "ve", "ven"]);
         let c = build_tokenize_test_constraint(&vocab);
 
-        let tokens = c.start_ambiguous().tokenize_forced_with_stop(b"steven");
+        let tokens = c.start().tokenize_forced_with_stop(b"steven");
         assert_eq!(tokens, vec![5, 7], "full coverage without extension should emit 'ste' + 'ven'");
     }
 

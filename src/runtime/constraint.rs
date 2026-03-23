@@ -14,7 +14,7 @@ use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalID;
 use crate::ds::leveled_gss::LeveledGSS;
 
-use super::state::{AmbiguousConstraintState, ConstraintState, UnambiguousConstraintState};
+use super::state::ConstraintState;
 
 pub(crate) type TokenizerStateID = u32;
 pub(crate) type PossibleMatchesByState =
@@ -26,8 +26,6 @@ pub struct Constraint {
     pub(crate) parser_dwa: DWA,
     pub(crate) table: GLRTable,
     pub(crate) tokenizer: Tokenizer,
-    #[serde(default)]
-    pub(crate) is_unambiguous: bool,
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
 
@@ -74,7 +72,6 @@ impl Clone for Constraint {
             parser_dwa: self.parser_dwa.clone(),
             table: self.table.clone(),
             tokenizer: self.tokenizer.clone(),
-            is_unambiguous: self.is_unambiguous,
             ignore_terminal: self.ignore_terminal,
             possible_matches: self.possible_matches.clone(),
             state_to_internal_tsid: self.state_to_internal_tsid.clone(),
@@ -96,103 +93,6 @@ impl Clone for Constraint {
 }
 
 impl Constraint {
-    fn unambiguous_diagnostics(&self) -> String {
-        let mut split_action_count = 0usize;
-        let mut split_action_samples = Vec::new();
-        for (state_id, row) in self.table.action.iter().enumerate() {
-            for (&terminal_id, action) in row {
-                if let crate::compiler::glr::table::Action::Split { .. } = action {
-                    split_action_count += 1;
-                    if split_action_samples.len() < 5 {
-                        split_action_samples.push(format!(
-                            "state={state_id} terminal={terminal_id} action={action:?}"
-                        ));
-                    }
-                }
-            }
-        }
-
-        let mut multi_finalizer_count = 0usize;
-        let mut multi_finalizer_samples = Vec::new();
-        let mut extendable_finalizer_count = 0usize;
-        let mut extendable_finalizer_samples = Vec::new();
-
-        for state_id in 0..self.tokenizer.num_states() {
-            let matched: Vec<_> = self.tokenizer.matched_terminals_iter(state_id).collect();
-            let future: Vec<_> = self.tokenizer.possible_future_terminals_iter(state_id).collect();
-
-            if matched.len() > 1 {
-                multi_finalizer_count += 1;
-                if multi_finalizer_samples.len() < 5 {
-                    multi_finalizer_samples.push(format!(
-                        "state={state_id} finalizers={matched:?}"
-                    ));
-                }
-            }
-
-            if !matched.is_empty() && !future.is_empty() {
-                extendable_finalizer_count += 1;
-                if extendable_finalizer_samples.len() < 5 {
-                    extendable_finalizer_samples.push(format!(
-                        "state={state_id} finalizers={matched:?} future={future:?}"
-                    ));
-                }
-            }
-        }
-
-        format!(
-            "unambiguous requirements: no parser Split actions; no tokenizer state with >1 finalizer; any finalizer state must have empty possible_future_group_ids. observed: parser_split_actions={split_action_count}{}; tokenizer_multi_finalizer_states={multi_finalizer_count}{}; tokenizer_extendable_finalizer_states={extendable_finalizer_count}{}",
-            if split_action_samples.is_empty() {
-                String::new()
-            } else {
-                format!(" samples=[{}]", split_action_samples.join("; "))
-            },
-            if multi_finalizer_samples.is_empty() {
-                String::new()
-            } else {
-                format!(" samples=[{}]", multi_finalizer_samples.join("; "))
-            },
-            if extendable_finalizer_samples.is_empty() {
-                String::new()
-            } else {
-                format!(" samples=[{}]", extendable_finalizer_samples.join("; "))
-            },
-        )
-    }
-
-    fn assert_unambiguous_env_enabled(&self, caller: &str, using_unambiguous: bool) {
-        let enabled = std::env::var("GLRMASK_ASSERT_UNAMBIGUOUS")
-            .map(|value| {
-                let value = value.trim().to_ascii_lowercase();
-                !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
-            })
-            .unwrap_or(false);
-
-        if enabled && !using_unambiguous {
-            panic!(
-                "{caller}: GLRMASK_ASSERT_UNAMBIGUOUS is set, but this constraint is not unambiguous; {}",
-                self.unambiguous_diagnostics(),
-            );
-        }
-    }
-
-    pub(crate) fn detect_unambiguous(&self) -> bool {
-        let parser_unambiguous = self
-            .table
-            .action
-            .iter()
-            .flat_map(|row| row.values())
-            .all(|action| !matches!(action, crate::compiler::glr::table::Action::Split { .. }));
-
-        let tokenizer_unambiguous = (0..self.tokenizer.num_states()).all(|state| {
-            let finalizer_count = self.tokenizer.matched_terminals_iter(state).take(2).count();
-            finalizer_count <= 1
-                && (finalizer_count == 0 || self.tokenizer.possible_future_terminals(state).is_empty())
-        });
-
-        parser_unambiguous && tokenizer_unambiguous
-    }
-
 
     /// Build precomputed bitmask fragments for each internal token.
     pub(crate) fn build_buf_masks(&mut self) {
@@ -404,7 +304,11 @@ impl Constraint {
         }
     }
 
-    fn start_ambiguous_inner(&self) -> AmbiguousConstraintState<'_> {
+    pub fn start(&self) -> ConstraintState<'_> {
+        crate::ds::weight::clear_stale_weights();
+        crate::ds::weight::clear_weight_op_caches();
+
+        
         let initial_parser_state = 0u32;
         let initial_tok_state = self.tokenizer.initial_state();
 
@@ -412,29 +316,7 @@ impl Constraint {
         let gss = LeveledGSS::from_stacks(&[(vec![initial_parser_state], BTreeMap::new())]);
         state.insert(initial_tok_state, gss);
 
-        AmbiguousConstraintState { constraint: self, state }
-    }
-
-    pub fn start_ambiguous(&self) -> AmbiguousConstraintState<'_> {
-        crate::ds::weight::clear_stale_weights();
-        crate::ds::weight::clear_weight_op_caches();
-
-        self.assert_unambiguous_env_enabled("Constraint::start_ambiguous", false);
-
-        self.start_ambiguous_inner()
-    }
-
-    pub fn start(&self) -> ConstraintState<'_> {
-        crate::ds::weight::clear_stale_weights();
-        crate::ds::weight::clear_weight_op_caches();
-
-        self.assert_unambiguous_env_enabled("Constraint::start", self.is_unambiguous);
-
-        if self.is_unambiguous {
-            ConstraintState::Unambiguous(UnambiguousConstraintState::new(self))
-        } else {
-            ConstraintState::Ambiguous(self.start_ambiguous_inner())
-        }
+        ConstraintState { constraint: self, state }
     }
 
     pub fn mask_len(&self) -> usize {
@@ -538,53 +420,4 @@ impl Constraint {
         self.possible_matches.get(&tokenizer_state)
     }
 
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::state::ConstraintState;
-    use crate::Vocab;
-
-    fn vocab(tokens: &[&str]) -> Vocab {
-        let entries = tokens
-            .iter()
-            .enumerate()
-            .map(|(index, token)| (index as u32, token.as_bytes().to_vec()))
-            .collect();
-        Vocab::new(entries, None)
-    }
-
-    #[test]
-    fn start_uses_unambiguous_state_for_simple_literal_grammar() {
-        let vocab = vocab(&["a", "b"]);
-        let constraint = Constraint::from_lark(
-            r#"
-            start: A
-            A: "a"
-            "#,
-            &vocab,
-        )
-        .unwrap();
-
-        assert!(constraint.is_unambiguous);
-        assert!(matches!(constraint.start(), ConstraintState::Unambiguous(_)));
-    }
-
-    #[test]
-    fn start_uses_ambiguous_state_when_tokenizer_match_can_extend() {
-        let vocab = vocab(&["a", "b", "ab"]);
-        let constraint = Constraint::from_lark(
-            r#"
-            start: A | B
-            A: "a"
-            B: "ab"
-            "#,
-            &vocab,
-        )
-        .unwrap();
-
-        assert!(!constraint.is_unambiguous);
-        assert!(matches!(constraint.start(), ConstraintState::Ambiguous(_)));
-    }
 }
