@@ -471,12 +471,19 @@ pub(crate) fn advance_stacks_with_metrics(
     }
 
     loop {
-        let frontier = current.peek_values();
-        let new_states: SmallVec<[u32; 8]> = frontier
-            .iter()
-            .filter(|&&state| !processed[state as usize])
-            .copied()
-            .collect();
+        let mut new_states = SmallVec::<[u32; 8]>::new();
+        if let Some(state) = current.single_top_value() {
+            if !processed[state as usize] {
+                new_states.push(state);
+            }
+        } else {
+            new_states.extend(
+                current
+                    .peek_values()
+                    .into_iter()
+                    .filter(|&state| !processed[state as usize]),
+            );
+        }
         if new_states.is_empty() {
             break;
         }
@@ -551,7 +558,8 @@ pub(crate) fn advance_stacks_with_metrics(
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.popn_nonempty += 1;
                 }
-                for goto_from in popped.peek_values() {
+                let mut handle_goto_from = |goto_from: u32,
+                                            metrics: &mut Option<&mut AdvanceStacksDebugMetrics>| {
                     if let Some(metrics) = metrics.as_deref_mut() {
                         metrics.goto_lookups += 1;
                     }
@@ -599,6 +607,14 @@ pub(crate) fn advance_stacks_with_metrics(
                             *metrics.goto_target_counts.entry(target).or_default() += 1;
                         }
                     }
+                };
+
+                if let Some(goto_from) = popped.single_top_value() {
+                    handle_goto_from(goto_from, &mut metrics);
+                } else {
+                    for goto_from in popped.peek_values() {
+                        handle_goto_from(goto_from, &mut metrics);
+                    }
                 }
             }
         }
@@ -621,7 +637,7 @@ pub(crate) fn advance_stacks_with_metrics(
 
     // Shift phase: for each state with a shift action, push the target.
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    for state in current.peek_values() {
+    let mut handle_shift_state = |state: u32, metrics: &mut Option<&mut AdvanceStacksDebugMetrics>| {
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.shift_state_candidates += 1;
         }
@@ -636,6 +652,14 @@ pub(crate) fn advance_stacks_with_metrics(
                 metrics.shift_targets_hit += 1;
                 metrics.shifted_results += 1;
             }
+        }
+    };
+
+    if let Some(state) = current.single_top_value() {
+        handle_shift_state(state, &mut metrics);
+    } else {
+        for state in current.peek_values() {
+            handle_shift_state(state, &mut metrics);
         }
     }
     let t_shift = metrics
