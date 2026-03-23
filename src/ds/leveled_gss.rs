@@ -1781,14 +1781,39 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut current = interface.inner.clone();
         let mut remaining = n;
         while remaining > 0 {
-            if current.empty || current.children.len() != 1 {
-                return None;
+            let next_child = match current.children.len() {
+                0 => None,
+                1 => {
+                    let kids = current.children.values().next().expect("single child entry");
+                    if kids.len() != 1 {
+                        return None;
+                    }
+                    Some(kids.values().next().expect("single child node").clone())
+                }
+                _ => return None,
+            };
+
+            if remaining == 1 {
+                let mut result = next_child
+                    .unwrap_or_else(|| new_lower(IHashMap::new(), false));
+                if current.empty {
+                    let terminal = new_lower(IHashMap::new(), true);
+                    result = merge_lower(&result, &terminal);
+                }
+
+                if result.children.is_empty() && !result.empty {
+                    return Some(Self::empty());
+                }
+
+                return Some(Self {
+                    inner: new_interface(result, interface.acc.clone()),
+                });
             }
-            let kids = current.children.values().next().expect("single child entry");
-            if kids.len() != 1 {
-                return None;
-            }
-            current = kids.values().next().expect("single child node").clone();
+
+            let Some(child) = next_child else {
+                return Some(Self::empty());
+            };
+            current = child;
             remaining -= 1;
         }
 
