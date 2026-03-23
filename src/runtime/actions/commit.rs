@@ -11,7 +11,7 @@ use crate::compiler::glr::parser::{
 };
 use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
-use crate::runtime::state::{ConstraintState, ConstraintStateSummary};
+use crate::runtime::state::{AmbiguousConstraintState, ConstraintStateSummary};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -979,7 +979,7 @@ fn commit_bytes_impl(
     Ok(())
 }
 
-impl<'a> ConstraintState<'a> {
+impl<'a> AmbiguousConstraintState<'a> {
     /// Commit a sampled token, advancing the constraint state.
     ///
     /// `token_id` must be a token that exists in the vocabulary the constraint

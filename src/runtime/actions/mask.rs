@@ -1,4 +1,4 @@
-use crate::runtime::state::ConstraintState;
+use crate::runtime::state::AmbiguousConstraintState;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::{Weight, WeightDebugStats, reset_weight_debug_stats, snapshot_weight_debug_stats};
 use crate::runtime::state::ConstraintStateSummary;
@@ -272,7 +272,7 @@ pub struct MaskDebugMetrics {
     pub internal_token_dense_words: usize,
 }
 
-impl<'a> ConstraintState<'a> {
+impl<'a> AmbiguousConstraintState<'a> {
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
         self.fill_mask(&mut buf);

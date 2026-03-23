@@ -73,6 +73,7 @@ impl Constraint {
         constraint.build_dense_token_masks();
         constraint.build_fast_transitions();
         constraint.build_seed_dense_masks();
+        constraint.is_unambiguous = constraint.detect_unambiguous();
         Ok(constraint)
     }
 }

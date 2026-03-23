@@ -1210,6 +1210,7 @@ fn compile_prepared(
         parser_dwa,
         table,
         tokenizer,
+        is_unambiguous: false,
         ignore_terminal: normalized.ignore_terminal,
         possible_matches,
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
@@ -1259,6 +1260,7 @@ fn compile_prepared(
     }
     constraint.build_fast_transitions();
     constraint.build_seed_dense_masks();
+    constraint.is_unambiguous = constraint.detect_unambiguous();
     constraint
 }
 
@@ -1353,6 +1355,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         parser_dwa: parser_dwa.clone(),
         table: table.clone(),
         tokenizer: tokenizer.clone(),
+        is_unambiguous: false,
         ignore_terminal: normalized.ignore_terminal,
         possible_matches: possible_matches_by_state.clone(),
         state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
@@ -1375,6 +1378,7 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     constraint.build_dense_token_masks();
     constraint.build_fast_transitions();
     constraint.build_seed_dense_masks();
+    constraint.is_unambiguous = constraint.detect_unambiguous();
 
     let debug = CompileDebug::from_parts(
         grammar.clone(),
