@@ -34,6 +34,10 @@ const JSON_STRING_REGEX: &str =
 const JSON_KEY_COLON_REGEX: &str =
     r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
+const JSON_NUMBER_NONINTEGER_REGEX: &str =
+    r#"-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)"#;
+const JSON_NONNEG_NUMBER_NONINTEGER_REGEX: &str =
+    r#"(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)"#;
 const JSON_DIRECT_UTF8_PATTERN: &str =
     r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
@@ -1751,21 +1755,9 @@ impl SchemaCtx {
         self.insert_rule(JSON_STRING_CHAR_RULE, regex_expr(JSON_STRING_CHAR_PATTERN));
         self.insert_rule(JSON_STRING_RULE, regex_expr(JSON_STRING_REGEX));
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
-        self.insert_rule(
-            JSON_NUMBER_RULE,
-            GrammarExpr::Exclude {
-                expr: Box::new(regex_expr(r#"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#)),
-                exclude: Box::new(self.json_integer_ref()),
-            },
-        );
+        self.insert_rule(JSON_NUMBER_RULE, regex_expr(JSON_NUMBER_NONINTEGER_REGEX));
         self.insert_rule(JSON_NONNEG_INTEGER_RULE, regex_expr(r#"(0|[1-9][0-9]*)"#));
-        self.insert_rule(
-            JSON_NONNEG_NUMBER_RULE,
-            GrammarExpr::Exclude {
-                expr: Box::new(regex_expr(r#"(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#)),
-                exclude: Box::new(GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())),
-            },
-        );
+        self.insert_rule(JSON_NONNEG_NUMBER_RULE, regex_expr(JSON_NONNEG_NUMBER_NONINTEGER_REGEX));
         self.insert_rule(
             JSON_BOOL_RULE,
             choice_or_single(vec![literal_expr(b"true"), literal_expr(b"false")]),
@@ -2518,7 +2510,11 @@ impl SchemaCtx {
         }
 
         // Build precise range regex
-        use crate::import::numeric_range::{rx_float_range, rx_int_range};
+        use crate::import::numeric_range::{
+            rx_float_range,
+            rx_int_range,
+            rx_noninteger_float_range,
+        };
 
         if type_name == "integer" {
             let int_left = left.map(|l| if left_inclusive { l as i64 } else { l as i64 + 1 });
@@ -2530,6 +2526,8 @@ impl SchemaCtx {
         }
 
         let float_regex_result = rx_float_range(left, right, left_inclusive, right_inclusive);
+        let non_integer_regex_result =
+            rx_noninteger_float_range(left, right, left_inclusive, right_inclusive);
         let integer_range_result = integer_bounds_for_number_range(
             left,
             left_inclusive,
@@ -2538,20 +2536,15 @@ impl SchemaCtx {
         )
         .map(|(int_left, int_right)| rx_int_range(int_left, int_right));
 
-        match (float_regex_result, integer_range_result) {
-            (Ok(float_regex), Some(Ok(int_regex))) => {
-                let non_integer_expr = self.build_subtracted_regex_expr(
-                    &float_regex,
-                    &int_regex,
-                    "JSON_BOUNDED_NUMBER_NONINT",
-                );
-                let integer_expr = regex_expr(int_regex);
+        match (float_regex_result, non_integer_regex_result, integer_range_result) {
+            (Ok(_float_regex), Ok(Some(non_integer_regex)), Some(Ok(int_regex))) => {
                 choice_or_single(vec![
-                    integer_expr,
-                    non_integer_expr,
+                    regex_expr(int_regex),
+                    regex_expr(non_integer_regex),
                 ])
             }
-            (Ok(float_regex), None) => regex_expr(float_regex),
+            (Ok(_float_regex), Ok(Some(non_integer_regex)), None) => regex_expr(non_integer_regex),
+            (Ok(_float_regex), Ok(None), Some(Ok(int_regex))) => regex_expr(int_regex),
             _ => self.json_number_type_expr(),
         }
     }
@@ -2955,26 +2948,6 @@ impl SchemaCtx {
             GrammarExpr::TerminalExpr(LexerExpr::Dfa(dfa.clone())),
             prefix,
         )
-    }
-
-    fn build_subtracted_regex_expr(
-        &mut self,
-        include_pattern: &str,
-        exclude_pattern: &str,
-        prefix: &str,
-    ) -> GrammarExpr {
-        let include_dfa = build_regex_with_profile_label(
-            &[parse_regex(include_pattern, true)],
-            &format!("{prefix}_include"),
-        )
-        .dfa;
-        let exclude_dfa = build_regex_with_profile_label(
-            &[parse_regex(exclude_pattern, true)],
-            &format!("{prefix}_exclude"),
-        )
-        .dfa;
-        let subtracted = Self::subtract_lexer_dfa(&include_dfa, &exclude_dfa);
-        self.build_lexer_dfa_expr(&subtracted, prefix)
     }
 
     fn build_excluding_key_colon_expr(
@@ -5162,6 +5135,13 @@ mod tests {
         let schema = r#"{"type": "number"}"#;
         assert!(accepts_sequence(schema, &[b"1"]));
         assert!(accepts_sequence(schema, &[b"1.5"]));
+    }
+
+    #[test]
+    fn test_number_type_accepts_exponent_literals() {
+        let schema = r#"{"type": "number"}"#;
+        assert!(accepts_sequence(schema, &[b"1e1"]));
+        assert!(accepts_sequence(schema, &[b"1.5e1"]));
     }
 
     #[test]
