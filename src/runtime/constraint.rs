@@ -96,6 +96,70 @@ impl Clone for Constraint {
 }
 
 impl Constraint {
+    fn unambiguous_diagnostics(&self) -> String {
+        let mut split_action_count = 0usize;
+        let mut split_action_samples = Vec::new();
+        for (state_id, row) in self.table.action.iter().enumerate() {
+            for (&terminal_id, action) in row {
+                if let crate::compiler::glr::table::Action::Split { .. } = action {
+                    split_action_count += 1;
+                    if split_action_samples.len() < 5 {
+                        split_action_samples.push(format!(
+                            "state={state_id} terminal={terminal_id} action={action:?}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut multi_finalizer_count = 0usize;
+        let mut multi_finalizer_samples = Vec::new();
+        let mut extendable_finalizer_count = 0usize;
+        let mut extendable_finalizer_samples = Vec::new();
+
+        for state_id in 0..self.tokenizer.num_states() {
+            let matched: Vec<_> = self.tokenizer.matched_terminals_iter(state_id).collect();
+            let future: Vec<_> = self.tokenizer.possible_future_terminals_iter(state_id).collect();
+
+            if matched.len() > 1 {
+                multi_finalizer_count += 1;
+                if multi_finalizer_samples.len() < 5 {
+                    multi_finalizer_samples.push(format!(
+                        "state={state_id} finalizers={matched:?}"
+                    ));
+                }
+            }
+
+            if !matched.is_empty() && !future.is_empty() {
+                extendable_finalizer_count += 1;
+                if extendable_finalizer_samples.len() < 5 {
+                    extendable_finalizer_samples.push(format!(
+                        "state={state_id} finalizers={matched:?} future={future:?}"
+                    ));
+                }
+            }
+        }
+
+        format!(
+            "unambiguous requirements: no parser Split actions; no tokenizer state with >1 finalizer; any finalizer state must have empty possible_future_group_ids. observed: parser_split_actions={split_action_count}{}; tokenizer_multi_finalizer_states={multi_finalizer_count}{}; tokenizer_extendable_finalizer_states={extendable_finalizer_count}{}",
+            if split_action_samples.is_empty() {
+                String::new()
+            } else {
+                format!(" samples=[{}]", split_action_samples.join("; "))
+            },
+            if multi_finalizer_samples.is_empty() {
+                String::new()
+            } else {
+                format!(" samples=[{}]", multi_finalizer_samples.join("; "))
+            },
+            if extendable_finalizer_samples.is_empty() {
+                String::new()
+            } else {
+                format!(" samples=[{}]", extendable_finalizer_samples.join("; "))
+            },
+        )
+    }
+
     fn assert_unambiguous_env_enabled(&self, caller: &str, using_unambiguous: bool) {
         let enabled = std::env::var("GLRMASK_ASSERT_UNAMBIGUOUS")
             .map(|value| {
@@ -106,7 +170,8 @@ impl Constraint {
 
         if enabled && !using_unambiguous {
             panic!(
-                "{caller}: GLRMASK_ASSERT_UNAMBIGUOUS is set, but this constraint is not unambiguous"
+                "{caller}: GLRMASK_ASSERT_UNAMBIGUOUS is set, but this constraint is not unambiguous; {}",
+                self.unambiguous_diagnostics(),
             );
         }
     }
