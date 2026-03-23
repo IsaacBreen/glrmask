@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::automata::lexer::tokenizer::TokenizerExecResult;
 use crate::compiler::glr::parser::{
     AdvanceStacksDebugMetrics,
     ParserGSS,
@@ -197,6 +198,70 @@ fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
         .or_else(|| constraint.token_bytes.get(&token_id).map(Vec::as_slice))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitExecAmbiguityMode {
+    Off,
+    Warn,
+    Panic,
+}
+
+fn commit_exec_ambiguity_mode() -> CommitExecAmbiguityMode {
+    match std::env::var("GLRMASK_COMMIT_EXEC_AMBIGUITY") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "off" | "none" => CommitExecAmbiguityMode::Off,
+            "1" | "warn" | "warning" => CommitExecAmbiguityMode::Warn,
+            "panic" => CommitExecAmbiguityMode::Panic,
+            _ => CommitExecAmbiguityMode::Off,
+        },
+        Err(_) => CommitExecAmbiguityMode::Off,
+    }
+}
+
+fn maybe_report_exec_match_ambiguity(
+    mode: CommitExecAmbiguityMode,
+    constraint: &Constraint,
+    actionable_terminals: Option<&ActionableTerminals>,
+    ignore_terminal: Option<u32>,
+    exec_result: &TokenizerExecResult,
+    phase: &str,
+    offset: usize,
+    tokenizer_state: u32,
+    input: &[u8],
+) {
+    if mode == CommitExecAmbiguityMode::Off {
+        return;
+    }
+
+    let Some(actionable_terminals) = actionable_terminals else {
+        return;
+    };
+
+    let accepted_matches: Vec<String> = exec_result
+        .matches
+        .iter()
+        .filter(|matched| {
+            Some(matched.id) != ignore_terminal
+                && actionable_terminals.contains(constraint, matched.id)
+        })
+        .map(|matched| format!("(terminal {}, width {})", matched.id, matched.width))
+        .collect();
+
+    if accepted_matches.len() <= 1 {
+        return;
+    }
+
+    let message = format!(
+        "[glrmask][commit] execute_from_state ambiguity: phase={phase} offset={offset} tokenizer_state={tokenizer_state} input={input:?} accepted_matches=[{}]",
+        accepted_matches.join(", ")
+    );
+
+    match mode {
+        CommitExecAmbiguityMode::Off => {}
+        CommitExecAmbiguityMode::Warn => eprintln!("{message}"),
+        CommitExecAmbiguityMode::Panic => panic!("{message}"),
+    }
+}
+
 enum ActionableTerminals {
     SingleState(u32),
     Many(FxHashSet<u32>),
@@ -366,6 +431,7 @@ fn commit_bytes_impl(
         .as_ref()
         .map(|_| std::time::Instant::now());
     let ignore_terminal = constraint.ignore_terminal;
+    let exec_ambiguity_mode = commit_exec_ambiguity_mode();
     let mut initial_exec_results = FxHashMap::default();
     let mut state_map = FxHashMap::default();
     let mut terminals_map = FxHashMap::<u32, FxHashSet<u32>>::default();
@@ -399,6 +465,17 @@ fn commit_bytes_impl(
         if let Some(end_state) = exec.end_state {
             state_map.insert(tokenizer_state, end_state);
         }
+        maybe_report_exec_match_ambiguity(
+            exec_ambiguity_mode,
+            constraint,
+            actionable_terminals.as_ref(),
+            ignore_terminal,
+            &exec,
+            "initial",
+            0,
+            tokenizer_state,
+            bytes,
+        );
         for matched in &exec.matches {
             let ignored = Some(matched.id) == ignore_terminal;
             let actionable = !ignored
@@ -562,6 +639,18 @@ fn commit_bytes_impl(
                     metrics.reused_initial_exec_results += 1;
                 }
             };
+
+            maybe_report_exec_match_ambiguity(
+                exec_ambiguity_mode,
+                constraint,
+                actionable_terminals.as_ref(),
+                ignore_terminal,
+                &exec_result,
+                "processing",
+                offset,
+                tokenizer_state,
+                &bytes[offset..],
+            );
 
             let mut seen_matches = FxHashSet::default();
             let mut terminal_result_cache = FxHashMap::<u32, ParserGSS>::default();
