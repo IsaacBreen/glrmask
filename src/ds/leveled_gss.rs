@@ -17,11 +17,10 @@ enum Lower<T: Clone + Eq + Hash> {
         empty: bool,
         max_depth: u32,
     },
-    /// Single child value with one child node. Eliminates IHashMap + OrdMap
-    /// overhead for the common unary-chain case.
+    /// Single child value with one child node.
+    /// Stores the same data as General but is known to have exactly 1 child key with 1 depth entry.
     Chain {
-        value: T,
-        next: Arc<Lower<T>>,
+        children: Children<T, Lower<T>>,
         empty: bool,
         max_depth: u32,
     },
@@ -43,13 +42,10 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     }
 
     /// Get children as a general Children map.
-    /// For Chain variant, constructs the map on the fly.
+    /// For Chain variant, returns stored children directly.
     fn children(&self) -> Children<T, Lower<T>> {
         match self {
-            Lower::General { children, .. } => children.clone(),
-            Lower::Chain { value, next, .. } => {
-                IHashMap::unit(value.clone(), OrdMap::unit(next.max_depth(), next.clone()))
-            }
+            Lower::General { children, .. } | Lower::Chain { children, .. } => children.clone(),
         }
     }
 
@@ -74,34 +70,30 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     /// Look up children for a given key value.
     fn children_get(&self, key: &T) -> Option<&OrdMap<u32, Arc<Lower<T>>>> {
         match self {
-            Lower::General { children, .. } => children.get(key),
-            Lower::Chain { .. } => None, // must use children_get_chain for Chain
+            Lower::General { children, .. } | Lower::Chain { children, .. } => children.get(key),
         }
     }
 
     /// Check if children contains a key.
     fn children_contains_key(&self, key: &T) -> bool {
         match self {
-            Lower::General { children, .. } => children.contains_key(key),
-            Lower::Chain { value, .. } => value == key,
+            Lower::General { children, .. } | Lower::Chain { children, .. } => children.contains_key(key),
         }
     }
 
     /// Get children keys as a Vec.
     fn children_keys_vec(&self) -> Vec<T> {
         match self {
-            Lower::General { children, .. } => children.keys().cloned().collect(),
-            Lower::Chain { value, .. } => vec![value.clone()],
+            Lower::General { children, .. } | Lower::Chain { children, .. } => children.keys().cloned().collect(),
         }
     }
 
     /// Ensure this Lower is in General form, converting from Chain if necessary.
     /// Returns mutable references to children and max_depth for in-place mutation.
     fn ensure_general(&mut self) {
-        if let Lower::Chain { value, next, empty, max_depth } = self {
-            let children = IHashMap::unit(value.clone(), OrdMap::unit(next.max_depth(), next.clone()));
+        if let Lower::Chain { children, empty, max_depth, .. } = self {
             *self = Lower::General {
-                children,
+                children: children.clone(),
                 empty: *empty,
                 max_depth: *max_depth,
             };
@@ -114,6 +106,34 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         match self {
             Lower::General { children, max_depth, .. } => (children, max_depth),
             Lower::Chain { .. } => unreachable!(),
+        }
+    }
+
+    /// Returns true if this is a Chain variant (single child key, single depth entry).
+    #[inline(always)]
+    fn is_chain(&self) -> bool {
+        matches!(self, Lower::Chain { .. })
+    }
+
+    /// For Chain variant, get the single child value (key) by reference.
+    /// Panics if called on General.
+    #[inline(always)]
+    fn chain_value(&self) -> &T {
+        match self {
+            Lower::Chain { children, .. } => children.keys().next().unwrap(),
+            Lower::General { .. } => panic!("chain_value called on General"),
+        }
+    }
+
+    /// For Chain variant, get the single child Arc<Lower> by reference.
+    /// Panics if called on General.
+    #[inline(always)]
+    fn chain_next(&self) -> &Arc<Lower<T>> {
+        match self {
+            Lower::Chain { children, .. } => {
+                children.values().next().unwrap().values().next().unwrap()
+            }
+            Lower::General { .. } => panic!("chain_next called on General"),
         }
     }
 }
@@ -280,6 +300,19 @@ where
 }
 
 fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
+    // Use Chain variant when there's exactly one key with one depth entry
+    if children.len() == 1 {
+        let (_, ord_map) = children.iter().next().unwrap();
+        if ord_map.len() == 1 {
+            let (_, next) = ord_map.iter().next().unwrap();
+            let max_depth = next.max_depth() + 1;
+            return Arc::new(Lower::Chain {
+                children,
+                empty,
+                max_depth,
+            });
+        }
+    }
     let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth());
     Arc::new(Lower::General {
         children,
@@ -4478,5 +4511,199 @@ mod tests {
 
         assert_eq!(result.to_stacks().len(), gss.to_stacks().len());
         assert!(underflows.is_empty());
+    }
+
+    #[test]
+    fn test_chain_deep_push_pop_roundtrip() {
+        // Build a deep stack: ["A", "B", "C", "D", "E"] with acc [1]
+        let gss0 = gss_from_str_stacks(&[
+            (&["A", "B", "C", "D", "E"], &[1]),
+        ]);
+        let stacks0 = gss0.to_stacks();
+        assert_eq!(stacks0.len(), 1);
+        assert_eq!(stacks0[0].0, vec!["A", "B", "C", "D", "E"]);
+
+        // Pop 1 at a time and verify
+        let gss1 = gss0.popn(1);
+        let s1 = gss1.to_stacks();
+        assert_eq!(s1.len(), 1, "After pop 1: {:?}", s1);
+        assert_eq!(s1[0].0, vec!["A", "B", "C", "D"]);
+
+        let gss2 = gss0.popn(2);
+        let s2 = gss2.to_stacks();
+        assert_eq!(s2.len(), 1, "After pop 2: {:?}", s2);
+        assert_eq!(s2[0].0, vec!["A", "B", "C"]);
+
+        let gss3 = gss0.popn(3);
+        let s3 = gss3.to_stacks();
+        assert_eq!(s3.len(), 1, "After pop 3: {:?}", s3);
+        assert_eq!(s3[0].0, vec!["A", "B"]);
+
+        let gss4 = gss0.popn(4);
+        let s4 = gss4.to_stacks();
+        assert_eq!(s4.len(), 1, "After pop 4: {:?}", s4);
+        assert_eq!(s4[0].0, vec!["A"]);
+
+        let gss5 = gss0.popn(5);
+        let s5 = gss5.to_stacks();
+        assert_eq!(s5.len(), 1, "After pop 5: {:?}", s5);
+        assert_eq!(s5[0].0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_chain_deep_isolate_and_push() {
+        let gss0 = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+        ]);
+
+        // Isolate top value
+        let isolated = gss0.isolate(Some("C".to_string()));
+        let s_iso = isolated.to_stacks();
+        assert_eq!(s_iso.len(), 1, "After isolate C: {:?}", s_iso);
+        assert_eq!(s_iso[0].0, vec!["A", "B", "C"]);
+
+        // Pop then push
+        let popped = gss0.popn(1);
+        let pushed = popped.push("X".to_string());
+        let s_pushed = pushed.to_stacks();
+        assert_eq!(s_pushed.len(), 1, "After pop1+pushX: {:?}", s_pushed);
+        assert_eq!(s_pushed[0].0, vec!["A", "B", "X"]);
+    }
+
+    #[test]
+    fn test_chain_deep_merge_and_fuse() {
+        let gss1 = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+        ]);
+        let gss2 = gss_from_str_stacks(&[
+            (&["A", "B", "D"], &[1]),
+        ]);
+        let merged = gss1.merge(&gss2);
+        let s_merged = merged.to_stacks();
+        assert_eq!(s_merged.len(), 2, "After merge: {:?}", s_merged);
+
+        let fused = merged.fuse(None);
+        let s_fused = fused.to_stacks();
+        assert_eq!(s_fused.len(), 2, "After fuse: {:?}", s_fused);
+    }
+
+    #[test]
+    fn test_chain_shift_top_values() {
+        let gss0 = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+        ]);
+
+        let shifted = gss0.shift_top_values(vec![
+            ("C".to_string(), "X".to_string()),
+        ]);
+        let s = shifted.to_stacks();
+        assert_eq!(s.len(), 1, "After shift: {:?}", s);
+        assert_eq!(s[0].0, vec!["A", "B", "C", "X"]);
+    }
+
+    #[test]
+    fn test_chain_absorb_push() {
+        let gss0 = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+        ]);
+        let base = gss_from_str_stacks(&[
+            (&["A", "B"], &[1]),
+        ]);
+
+        let result = gss0.absorb_push("X".to_string(), &base);
+        let s = result.to_stacks();
+        assert_eq!(s.len(), 2, "After absorb_push: {:?}", s);
+    }
+
+    #[test]
+    fn test_chain_apply_and_prune() {
+        let gss0 = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+        ]);
+        let pruned = gss0.apply_and_prune_no_promote(|_acc| Some(IntAcc::new(&[1])));
+        let s = pruned.to_stacks();
+        assert_eq!(s.len(), 1, "After prune: {:?}", s);
+        assert_eq!(s[0].0, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn test_chain_decompose() {
+        let gss0 = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+        ]);
+        let (decomposed, _root_accs) = gss0.apply_transform_and_decompose(|acc| Some(acc.clone()));
+        // Should decompose into one entry for top value "C"
+        assert_eq!(decomposed.len(), 1, "decomposed: {:?}", decomposed.len());
+        let (val, sub_gss) = &decomposed[0];
+        assert_eq!(val, "C");
+        let sub_stacks = sub_gss.to_stacks();
+        assert_eq!(sub_stacks.len(), 1, "sub stacks: {:?}", sub_stacks);
+        assert_eq!(sub_stacks[0].0, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn test_chain_parser_like_sequence() {
+        // Simulate a parser-like sequence of operations with integer GSS
+        type IGSS = LeveledGSS<i32, IntAcc>;
+
+        // Start: state 0 at bottom
+        let gss = IGSS::from_stacks(&[(vec![0], IntAcc::new(&[0]))]);
+        assert_eq!(gss.to_stacks().len(), 1);
+        
+        // Push state 5
+        let gss = gss.push(5);
+        assert_eq!(gss.to_stacks()[0].0, vec![0, 5]);
+        
+        // Push state 10
+        let gss = gss.push(10);
+        assert_eq!(gss.to_stacks()[0].0, vec![0, 5, 10]);
+        
+        // Isolate state 10
+        let sub = gss.isolate(Some(10));
+        assert!(!sub.is_empty(), "isolate 10 should not be empty");
+        
+        // Pop 2 (simulate a reduce of RHS len 2)
+        let popped = sub.popn(2);
+        assert!(!popped.is_empty(), "popn 2 should not be empty");
+        let popped_stacks = popped.to_stacks();
+        assert_eq!(popped_stacks.len(), 1);
+        assert_eq!(popped_stacks[0].0, vec![0]);
+        
+        // Isolate goto_from state 0
+        let base = popped.isolate(Some(0));
+        assert!(!base.is_empty(), "isolate 0 should not be empty");
+        
+        // Push goto target state 7
+        let result = base.push(7);
+        let result_stacks = result.to_stacks();
+        assert_eq!(result_stacks.len(), 1);
+        assert_eq!(result_stacks[0].0, vec![0, 7]);
+        
+        // Merge with original and shift
+        let merged = gss.merge(&result);
+        let m_stacks = merged.to_stacks();
+        assert_eq!(m_stacks.len(), 2, "merged stacks: {:?}", m_stacks);
+    }
+
+    #[test]
+    fn test_chain_multi_level_push_isolate_pop() {
+        type IGSS = LeveledGSS<i32, IntAcc>;
+
+        // Build a 5-level deep stack
+        let gss = IGSS::from_stacks(&[(vec![0, 1, 2, 3, 4], IntAcc::new(&[0]))]);
+
+        // Isolate top (4) and pop 3
+        let sub = gss.isolate(Some(4));
+        let popped = sub.popn(3);
+        let s = popped.to_stacks();
+        assert_eq!(s.len(), 1, "popped stacks: {:?}", s);
+        assert_eq!(s[0].0, vec![0, 1]);
+
+        // Isolate again, pop again
+        let sub2 = popped.isolate(Some(1));
+        let popped2 = sub2.popn(1);
+        let s2 = popped2.to_stacks();
+        assert_eq!(s2.len(), 1, "popped2 stacks: {:?}", s2);
+        assert_eq!(s2[0].0, vec![0]);
     }
 }
