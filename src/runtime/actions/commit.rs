@@ -806,6 +806,11 @@ fn commit_bytes_impl(
             }
 
             if let Some(end_state) = exec_result.end_state {
+                let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
+                if !stack_may_advance_on_any(&constraint.table, &gss_at_offset, future_terminals)
+                {
+                    continue;
+                }
                 let t_merge = metrics
                     .as_ref()
                     .map(|_| std::time::Instant::now());
@@ -844,18 +849,6 @@ fn commit_bytes_impl(
         }
     }
     new_overall_state.retain(|_, parser_state| !parser_state.is_empty());
-
-    // Prune entries whose parser stacks cannot advance on any
-    // terminal reachable from the corresponding tokenizer state.
-    new_overall_state.retain(|&tsid, gss| {
-        let future_terminals = constraint.tokenizer.possible_future_terminals(tsid);
-        if future_terminals.is_empty() {
-            // Tokenizer is at end — no future terminals, but the entry
-            // may still hold accept states.  Keep it.
-            return true;
-        }
-        stack_may_advance_on_any(&constraint.table, gss, future_terminals)
-    });
 
     *state = new_overall_state;
     if let Some(metrics) = metrics.as_deref_mut() {
