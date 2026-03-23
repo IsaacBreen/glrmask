@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
@@ -108,7 +109,11 @@ impl Tokenizer {
         self.dfa.num_states() as u32
     }
 
-    pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
+    pub(crate) fn execute_from_state_all_widths(
+        &self,
+        input: &[u8],
+        start: u32,
+    ) -> TokenizerExecResult {
         let mut state = start;
         let mut matches = Vec::new();
 
@@ -135,8 +140,26 @@ impl Tokenizer {
         }
     }
 
+    pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
+        let mut exec = self.execute_from_state_all_widths(input, start);
+        let mut match_positions = FxHashMap::<TerminalID, usize>::default();
+        let mut deduped_matches = Vec::with_capacity(exec.matches.len());
+
+        for matched in exec.matches.drain(..) {
+            if let Some(&match_index) = match_positions.get(&matched.id) {
+                deduped_matches[match_index] = matched;
+            } else {
+                match_positions.insert(matched.id, deduped_matches.len());
+                deduped_matches.push(matched);
+            }
+        }
+
+        exec.matches = deduped_matches;
+        exec
+    }
+
     pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
-        let exec = self.execute_from_state(input, start);
+        let exec = self.execute_from_state_all_widths(input, start);
         let end_state = exec.end_state.unwrap_or(start);
         let mut grouped = std::collections::BTreeMap::<usize, BTreeSet<TerminalID>>::new();
         for matched in exec.matches {

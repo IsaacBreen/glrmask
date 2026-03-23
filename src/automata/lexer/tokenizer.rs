@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
@@ -129,7 +130,11 @@ impl Tokenizer {
         self.dfa.num_states() as u32
     }
 
-    pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
+    pub(crate) fn execute_from_state_all_widths(
+        &self,
+        input: &[u8],
+        start: u32,
+    ) -> TokenizerExecResult {
         let mut state = start;
         let mut matches = Vec::new();
 
@@ -156,8 +161,26 @@ impl Tokenizer {
         }
     }
 
+    pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
+        let mut exec = self.execute_from_state_all_widths(input, start);
+        let mut match_positions = FxHashMap::<TerminalID, usize>::default();
+        let mut deduped_matches = Vec::with_capacity(exec.matches.len());
+
+        for matched in exec.matches.drain(..) {
+            if let Some(&match_index) = match_positions.get(&matched.id) {
+                deduped_matches[match_index] = matched;
+            } else {
+                match_positions.insert(matched.id, deduped_matches.len());
+                deduped_matches.push(matched);
+            }
+        }
+
+        exec.matches = deduped_matches;
+        exec
+    }
+
     pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
-        let exec = self.execute_from_state(input, start);
+        let exec = self.execute_from_state_all_widths(input, start);
         let end_state = exec.end_state.unwrap_or(start);
         let mut grouped = std::collections::BTreeMap::<usize, BTreeSet<TerminalID>>::new();
         for matched in exec.matches {
@@ -191,6 +214,68 @@ pub struct TokenizerResult {
 
 #[cfg(test)]
 mod tests {
-    // NOTE: the old tokenizer tests are intentionally omitted until the
-    // sep1-style lexer automata rewrite lands.
+    use super::*;
+    use crate::automata::lexer::ast::bytes;
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+
+    #[test]
+    fn test_execute_from_state_keeps_only_longest_match_per_terminal() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"aa")]);
+
+        let exec = tokenizer.execute_from_state(b"aa", tokenizer.start_state());
+
+        assert_eq!(
+            exec.matches,
+            vec![
+                TokenizerMatch {
+                    id: 0,
+                    width: 1,
+                    end_state: tokenizer.run(b"a"),
+                },
+                TokenizerMatch {
+                    id: 1,
+                    width: 2,
+                    end_state: tokenizer.run(b"aa"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_execute_from_state_replaces_shorter_match_for_same_terminal() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), parse_regex("a+", true)]);
+
+        let exec = tokenizer.execute_from_state(b"aa", tokenizer.start_state());
+
+        assert_eq!(
+            exec.matches,
+            vec![
+                TokenizerMatch {
+                    id: 0,
+                    width: 1,
+                    end_state: tokenizer.run(b"a"),
+                },
+                TokenizerMatch {
+                    id: 1,
+                    width: 2,
+                    end_state: tokenizer.run(b"aa"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_execute_all_matches_keeps_all_widths() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), parse_regex("a+", true)]);
+
+        let result = tokenizer.execute_all_matches(b"aa", tokenizer.start_state());
+
+        assert_eq!(
+            result.matches,
+            vec![
+                (1, BTreeSet::from([0, 1])),
+                (2, BTreeSet::from([1])),
+            ]
+        );
+    }
 }
