@@ -1540,6 +1540,77 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner: new_inner }
     }
 
+    /// Equivalent to merging `self.isolate(Some(from)).push(to)` for each
+    /// `(from, to)` pair, but avoids repeated isolate/push/merge churn by
+    /// rebuilding the shifted top layer in one pass.
+    pub fn shift_top_values<I>(&self, shifts: I) -> Self
+    where
+        I: IntoIterator<Item = (T, T)>,
+    {
+        let pairs: Vec<(T, T)> = shifts.into_iter().collect();
+        if pairs.is_empty() {
+            return Self::empty();
+        }
+        if pairs.len() == 1 {
+            let (from, to) = pairs[0].clone();
+            if self.single_exclusive_top_value().as_ref() == Some(&from) {
+                return self.push(to);
+            }
+        }
+
+        match &*self.inner {
+            Upper::Interface(i) => {
+                let mut children_by_target = StdHashMap::<T, Children<T, Lower<T>>>::new();
+
+                for (from, to) in pairs {
+                    let Some(kids) = i.inner.children.get(&from) else {
+                        continue;
+                    };
+                    let target_children = children_by_target
+                        .entry(to)
+                        .or_insert_with(IHashMap::new);
+                    match target_children.get(&from) {
+                        Some(existing_kids) => {
+                            let mut merged_kids = existing_kids.clone();
+                            for (depth, child) in kids.iter() {
+                                if let Some(existing_child) = merged_kids.get(depth) {
+                                    merged_kids.insert(*depth, merge_lower(existing_child, child));
+                                } else {
+                                    merged_kids.insert(*depth, child.clone());
+                                }
+                            }
+                            target_children.insert(from, merged_kids);
+                        }
+                        None => {
+                            target_children.insert(from, kids.clone());
+                        }
+                    }
+                }
+
+                if children_by_target.is_empty() {
+                    return Self::empty();
+                }
+
+                let mut shifted_children: Children<T, Lower<T>> = IHashMap::new();
+                for (to, lower_children) in children_by_target {
+                    let lower = new_lower(lower_children, false);
+                    shifted_children.insert(to, OrdMap::unit(lower.max_depth, lower));
+                }
+
+                let shifted_root = new_lower(shifted_children, false);
+                LeveledGSS {
+                    inner: new_interface(shifted_root, i.acc.clone()),
+                }
+            }
+            Upper::Branch(_) => {
+                let shifted = pairs
+                    .into_iter()
+                    .map(|(from, to)| self.isolate(Some(from)).push(to));
+                Self::merge_many(shifted)
+            }
+        }
+    }
+
     /// Equivalent to `self.merge(&base.push(value))` but avoids intermediate
     /// allocations by directly inserting into self's structure via Arc::make_mut.
     /// Falls back to the standard path for non-Interface cases.

@@ -438,24 +438,12 @@ pub(crate) fn advance_stacks_with_metrics(
             metrics.input_summary = stack.summary();
             metrics.shift_state_candidates = frontier.len();
         }
-        let out = if pure_shift_targets.len() == 1 {
-            let (state, target) = pure_shift_targets[0];
-            if let Some(metrics) = metrics.as_deref_mut() {
-                metrics.shift_targets_hit = 1;
-                metrics.shifted_results = 1;
-            }
-            stack.isolate(Some(state)).push(target)
-        } else {
-            let mut shifted_results = Vec::with_capacity(pure_shift_targets.len());
-            for (state, target) in pure_shift_targets {
-                shifted_results.push(stack.isolate(Some(state)).push(target));
-            }
-            if let Some(metrics) = metrics.as_deref_mut() {
-                metrics.shift_targets_hit = shifted_results.len();
-                metrics.shifted_results = shifted_results.len();
-            }
-            ParserGSS::merge_many(shifted_results)
-        };
+        let shifted_result_count = pure_shift_targets.len();
+        let out = stack.shift_top_values(pure_shift_targets);
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.shift_targets_hit = shifted_result_count;
+            metrics.shifted_results = shifted_result_count;
+        }
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.output_summary = out.summary();
         }
@@ -580,7 +568,7 @@ pub(crate) fn advance_stacks_with_metrics(
     }
 
     // Shift phase: for each state with a shift action, push the target.
-    let mut shifted_results = Vec::new();
+    let mut shift_pairs = Vec::new();
     for state in current.peek_values() {
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.shift_state_candidates += 1;
@@ -591,15 +579,14 @@ pub(crate) fn advance_stacks_with_metrics(
             _ => None,
         };
         if let Some(target) = shift_target {
-            let subtree = current.isolate(Some(state));
-            shifted_results.push(subtree.push(target));
+            shift_pairs.push((state, target));
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.shift_targets_hit += 1;
                 metrics.shifted_results += 1;
             }
         }
     }
-    let out = ParserGSS::merge_many(shifted_results);
+    let out = current.shift_top_values(shift_pairs);
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.output_summary = out.summary();
     }
