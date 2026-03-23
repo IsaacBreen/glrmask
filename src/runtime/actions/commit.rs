@@ -38,6 +38,10 @@ pub struct CommitDebugMetrics {
     pub processing_ignored_matches: usize,
     pub advance_stacks_calls: usize,
     pub advance_stacks_nonempty: usize,
+    pub advance_input_single_path_calls: usize,
+    pub advance_output_single_path_calls: usize,
+    pub advance_input_path_count_at_most_two_max: usize,
+    pub advance_output_path_count_at_most_two_max: usize,
     pub advance_reduce_closure_iterations_total: usize,
     pub advance_reduce_closure_iterations_max: usize,
     pub advance_frontier_states_total: usize,
@@ -59,6 +63,11 @@ pub struct CommitDebugMetrics {
     pub advance_reduce_state_emitted_counts: BTreeMap<u32, usize>,
     pub advance_goto_from_counts: BTreeMap<u32, usize>,
     pub advance_goto_target_counts: BTreeMap<u32, usize>,
+    pub advance_subtree_isolate_ns: u64,
+    pub advance_pop_cache_build_ns: u64,
+    pub advance_base_isolate_ns: u64,
+    pub advance_absorb_push_ns: u64,
+    pub advance_shift_top_values_ns: u64,
     pub advance_input_top_values_total: usize,
     pub advance_input_top_values_max: usize,
     pub advance_input_upperbranch_nodes_total: usize,
@@ -96,6 +105,9 @@ pub struct CommitDebugMetrics {
     pub parser_final_merges: usize,
     pub passthrough_end_state_pushes: usize,
     pub passthrough_end_state_merges: usize,
+    pub parser_queue_target_counts: BTreeMap<u32, usize>,
+    pub parser_final_target_counts: BTreeMap<u32, usize>,
+    pub passthrough_end_state_counts: BTreeMap<u32, usize>,
     pub fused_parser_states: usize,
     pub initial_tokenizer_exec_ns: u64,
     pub initial_apply_prune_ns: u64,
@@ -106,6 +118,34 @@ pub struct CommitDebugMetrics {
     pub merge_ns: u64,
     pub fuse_ns: u64,
     pub total_ns: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitDebugTrace {
+    pub exec_calls: Vec<CommitExecTrace>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitExecTrace {
+    pub phase: String,
+    pub offset: usize,
+    pub start_state: u32,
+    pub reused_initial_exec_result: bool,
+    pub end_state: Option<u32>,
+    pub matches: Vec<CommitMatchTrace>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitMatchTrace {
+    pub id: u32,
+    pub width: usize,
+    pub end_state: u32,
+    pub ignored: bool,
+    pub actionable: bool,
+    pub advance_attempted: bool,
+    pub advance_nonempty: bool,
+    pub new_offset: usize,
+    pub next_tokenizer_state: Option<u32>,
 }
 
 fn summarize_state_map(state: &BTreeMap<u32, ParserGSS>) -> ConstraintStateSummary {
@@ -250,6 +290,12 @@ fn accumulate_advance_stacks_metrics(
         &advance_metrics.goto_target_counts,
     );
 
+    metrics.advance_subtree_isolate_ns += advance_metrics.subtree_isolate_ns;
+    metrics.advance_pop_cache_build_ns += advance_metrics.pop_cache_build_ns;
+    metrics.advance_base_isolate_ns += advance_metrics.base_isolate_ns;
+    metrics.advance_absorb_push_ns += advance_metrics.absorb_push_ns;
+    metrics.advance_shift_top_values_ns += advance_metrics.shift_top_values_ns;
+
     metrics.advance_input_top_values_total += advance_metrics.input_summary.top_values_count;
     metrics.advance_input_top_values_max = metrics
         .advance_input_top_values_max
@@ -306,6 +352,7 @@ fn commit_bytes_impl(
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
     mut metrics: Option<&mut CommitDebugMetrics>,
+    mut trace: Option<&mut CommitDebugTrace>,
 ) -> Result<(), String> {
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.bytes_len = bytes.len();
@@ -333,6 +380,14 @@ fn commit_bytes_impl(
             .as_ref()
             .map(|_| std::time::Instant::now());
         let exec = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
+        let mut exec_trace = trace.as_ref().map(|_| CommitExecTrace {
+            phase: "initial".to_string(),
+            offset: 0,
+            start_state: tokenizer_state,
+            reused_initial_exec_result: false,
+            end_state: exec.end_state,
+            matches: Vec::with_capacity(exec.matches.len()),
+        });
         if let (Some(metrics), Some(t_exec)) = (metrics.as_deref_mut(), t_exec) {
             metrics.initial_exec_calls += 1;
             metrics.initial_tokenizer_exec_ns += t_exec.elapsed().as_nanos() as u64;
@@ -345,16 +400,31 @@ fn commit_bytes_impl(
             state_map.insert(tokenizer_state, end_state);
         }
         for matched in &exec.matches {
-            if Some(matched.id) == ignore_terminal {
+            let ignored = Some(matched.id) == ignore_terminal;
+            let actionable = !ignored
+                && !actionable_terminals
+                    .as_ref()
+                    .is_some_and(|actionable| !actionable.contains(constraint, matched.id));
+            if let Some(exec_trace) = exec_trace.as_mut() {
+                exec_trace.matches.push(CommitMatchTrace {
+                    id: matched.id,
+                    width: matched.width,
+                    end_state: matched.end_state,
+                    ignored,
+                    actionable,
+                    advance_attempted: false,
+                    advance_nonempty: false,
+                    new_offset: matched.width,
+                    next_tokenizer_state: None,
+                });
+            }
+            if ignored {
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.initial_ignored_matches += 1;
                 }
                 continue;
             }
-            if actionable_terminals
-                .as_ref()
-                .is_some_and(|actionable| !actionable.contains(constraint, matched.id))
-            {
+            if !actionable {
                 continue;
             }
             // TODO: expand via mutually_greedy_group() once greedy groups
@@ -369,6 +439,9 @@ fn commit_bytes_impl(
                 }
             }
         }
+        if let (Some(trace), Some(exec_trace)) = (trace.as_deref_mut(), exec_trace) {
+            trace.exec_calls.push(exec_trace);
+        }
         initial_exec_results.insert(tokenizer_state, exec);
     }
 
@@ -379,7 +452,7 @@ fn commit_bytes_impl(
 
     for parser_state in state.values_mut() {
         let t_transform = metrics.as_ref().map(|_| std::time::Instant::now());
-        let gss = parser_state.apply_and_prune(|terminals_disallowed: &TerminalsDisallowed| {
+        let gss = parser_state.apply_and_prune_no_promote(|terminals_disallowed: &TerminalsDisallowed| {
             for (state_id, matched_terminals) in &terminals_map {
                 if let Some(disallowed) = terminals_disallowed.get(state_id) {
                     if !matched_terminals.is_empty()
@@ -474,6 +547,14 @@ fn commit_bytes_impl(
                     false,
                 )
             };
+            let mut exec_trace = trace.as_ref().map(|_| CommitExecTrace {
+                phase: "processing".to_string(),
+                offset,
+                start_state: tokenizer_state,
+                reused_initial_exec_result,
+                end_state: exec_result.end_state,
+                matches: Vec::with_capacity(exec_result.matches.len()),
+            });
             if let (Some(metrics), Some(t_exec)) = (metrics.as_deref_mut(), t_exec) {
                 metrics.processing_exec_calls += 1;
                 metrics.processing_tokenizer_exec_ns += t_exec.elapsed().as_nanos() as u64;
@@ -485,22 +566,41 @@ fn commit_bytes_impl(
             let mut seen_matches = FxHashSet::default();
             let mut terminal_result_cache = FxHashMap::<u32, ParserGSS>::default();
             for matched in &exec_result.matches {
-                if Some(matched.id) != ignore_terminal
-                    && actionable_terminals
+                let new_offset = offset + matched.width;
+                let ignored = Some(matched.id) == ignore_terminal;
+                let actionable = !ignored
+                    && !actionable_terminals
                         .as_ref()
-                        .is_some_and(|actionable| !actionable.contains(constraint, matched.id))
-                {
+                        .is_some_and(|actionable| !actionable.contains(constraint, matched.id));
+                let mut match_trace = CommitMatchTrace {
+                    id: matched.id,
+                    width: matched.width,
+                    end_state: matched.end_state,
+                    ignored,
+                    actionable,
+                    advance_attempted: false,
+                    advance_nonempty: false,
+                    new_offset,
+                    next_tokenizer_state: None,
+                };
+
+                if !ignored && !actionable {
+                    if let Some(exec_trace) = exec_trace.as_mut() {
+                        exec_trace.matches.push(match_trace);
+                    }
                     continue;
                 }
                 if !seen_matches.insert((matched.width, matched.id)) {
+                    if let Some(exec_trace) = exec_trace.as_mut() {
+                        exec_trace.matches.push(match_trace);
+                    }
                     continue;
                 }
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.processing_matches_total += 1;
                 }
-                let new_offset = offset + matched.width;
 
-                if Some(matched.id) == ignore_terminal {
+                if ignored {
                     let next_tsid = constraint.tokenizer.initial_state();
                     if new_offset == bytes.len() {
                         let t_merge = metrics
@@ -547,9 +647,13 @@ fn commit_bytes_impl(
                             }
                         }
                     }
+                    if let Some(exec_trace) = exec_trace.as_mut() {
+                        exec_trace.matches.push(match_trace);
+                    }
                     continue;
                 }
 
+                match_trace.advance_attempted = true;
                 let gss = if let Some(cached) = terminal_result_cache.get(&matched.id) {
                     cached.clone()
                 } else {
@@ -566,6 +670,13 @@ fn commit_bytes_impl(
                         }
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.advance_stacks_calls += 1;
+                            let input_path_count_at_most_two = gss_at_offset.path_count_at_most(2);
+                            metrics.advance_input_path_count_at_most_two_max = metrics
+                                .advance_input_path_count_at_most_two_max
+                                .max(input_path_count_at_most_two);
+                            if input_path_count_at_most_two <= 1 {
+                                metrics.advance_input_single_path_calls += 1;
+                            }
                         }
                         let t_advance = metrics
                             .as_ref()
@@ -585,6 +696,15 @@ fn commit_bytes_impl(
                                 metrics.advance_stacks_nonempty += 1;
                             }
                             accumulate_advance_stacks_metrics(metrics, &advance_metrics);
+                        }
+                        if let Some(metrics) = metrics.as_deref_mut() {
+                            let output_path_count_at_most_two = gss.path_count_at_most(2);
+                            metrics.advance_output_path_count_at_most_two_max = metrics
+                                .advance_output_path_count_at_most_two_max
+                                .max(output_path_count_at_most_two);
+                            if !gss.is_empty() && output_path_count_at_most_two <= 1 {
+                                metrics.advance_output_single_path_calls += 1;
+                            }
                         }
                         advance_result_cache.insert(advance_cache_key, gss.clone());
                         gss
@@ -622,6 +742,13 @@ fn commit_bytes_impl(
                     terminal_result_cache.insert(matched.id, gss.clone());
                     gss
                 };
+                if !gss.is_empty() {
+                    match_trace.advance_nonempty = true;
+                    match_trace.next_tokenizer_state = Some(constraint.tokenizer.initial_state());
+                }
+                if let Some(exec_trace) = exec_trace.as_mut() {
+                    exec_trace.matches.push(match_trace);
+                }
                 if gss.is_empty() {
                     continue;
                 }
@@ -638,6 +765,7 @@ fn commit_bytes_impl(
                         .or_insert(gss);
                     if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                         metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
+                        *metrics.parser_final_target_counts.entry(next_tsid).or_default() += 1;
                         if existed {
                             metrics.parser_final_merges += 1;
                         } else {
@@ -660,6 +788,7 @@ fn commit_bytes_impl(
                         .or_insert(gss);
                     if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                         metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
+                        *metrics.parser_queue_target_counts.entry(next_tsid).or_default() += 1;
                         metrics.queue_max_offsets_pending = metrics
                             .queue_max_offsets_pending
                             .max(processing_queue[offset..].iter().filter(|bucket| !bucket.is_empty()).count());
@@ -670,6 +799,10 @@ fn commit_bytes_impl(
                         }
                     }
                 }
+            }
+
+            if let (Some(trace), Some(exec_trace)) = (trace.as_deref_mut(), exec_trace) {
+                trace.exec_calls.push(exec_trace);
             }
 
             if let Some(end_state) = exec_result.end_state {
@@ -683,6 +816,10 @@ fn commit_bytes_impl(
                     .or_insert(gss_at_offset);
                 if let (Some(metrics), Some(t_merge)) = (metrics.as_deref_mut(), t_merge) {
                     metrics.merge_ns += t_merge.elapsed().as_nanos() as u64;
+                    *metrics
+                        .passthrough_end_state_counts
+                        .entry(end_state)
+                        .or_default() += 1;
                     if existed {
                         metrics.passthrough_end_state_merges += 1;
                     } else {
@@ -754,11 +891,11 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_impl(constraint, &mut self.state, bytes, None)
+        commit_bytes_impl(constraint, &mut self.state, bytes, None, None)
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        commit_bytes_impl(self.constraint, &mut self.state, bytes, None)
+        commit_bytes_impl(self.constraint, &mut self.state, bytes, None, None)
     }
 
     pub fn debug_commit_bytes_metrics(&self, bytes: &[u8]) -> CommitDebugMetrics {
@@ -769,11 +906,18 @@ impl<'a> ConstraintState<'a> {
             state_summary_after: summarize_state_map(&cloned_state),
             ..CommitDebugMetrics::default()
         };
-        let _ = commit_bytes_impl(self.constraint, &mut cloned_state, bytes, Some(&mut metrics));
+        let _ = commit_bytes_impl(self.constraint, &mut cloned_state, bytes, Some(&mut metrics), None);
         if bytes.is_empty() {
             metrics.state_summary_after = metrics.state_summary_before;
         }
         metrics
+    }
+
+    pub fn debug_commit_bytes_trace(&self, bytes: &[u8]) -> CommitDebugTrace {
+        let mut cloned_state = self.state.clone();
+        let mut trace = CommitDebugTrace::default();
+        let _ = commit_bytes_impl(self.constraint, &mut cloned_state, bytes, None, Some(&mut trace));
+        trace
     }
 
     pub fn debug_commit_token_metrics(
@@ -785,6 +929,17 @@ impl<'a> ConstraintState<'a> {
                 format!("debug_commit_token_metrics: token_id {token_id} not in vocabulary")
             })?;
         Ok(self.debug_commit_bytes_metrics(bytes))
+    }
+
+    pub fn debug_commit_token_trace(
+        &self,
+        token_id: u32,
+    ) -> Result<CommitDebugTrace, String> {
+        let bytes = token_bytes_for_id(self.constraint, token_id)
+            .ok_or_else(|| {
+                format!("debug_commit_token_trace: token_id {token_id} not in vocabulary")
+            })?;
+        Ok(self.debug_commit_bytes_trace(bytes))
     }
 
     pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {

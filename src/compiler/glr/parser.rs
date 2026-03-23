@@ -5,6 +5,7 @@ use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, LeveledGSSSummary, Merge};
+use smallvec::SmallVec;
 use rustc_hash::FxHashMap;
 
 pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
@@ -48,6 +49,11 @@ pub(crate) struct AdvanceStacksDebugMetrics {
     pub reduce_state_emitted_counts: BTreeMap<u32, usize>,
     pub goto_from_counts: BTreeMap<u32, usize>,
     pub goto_target_counts: BTreeMap<u32, usize>,
+    pub subtree_isolate_ns: u64,
+    pub pop_cache_build_ns: u64,
+    pub base_isolate_ns: u64,
+    pub absorb_push_ns: u64,
+    pub shift_top_values_ns: u64,
 }
 
 #[allow(dead_code)]
@@ -399,7 +405,7 @@ pub(crate) fn advance_stacks_with_metrics(
         return ParserGSS::empty();
     }
 
-    let mut pure_shift_targets = Vec::new();
+    let mut pure_shift_targets = SmallVec::<[(u32, u32); 8]>::new();
     let mut pure_shift_only = true;
     let mut any_action = false;
     for state in frontier.iter().copied() {
@@ -439,10 +445,16 @@ pub(crate) fn advance_stacks_with_metrics(
             metrics.shift_state_candidates = frontier.len();
         }
         let shifted_result_count = pure_shift_targets.len();
+        let t_shift = metrics
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         let out = stack.shift_top_values(pure_shift_targets);
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.shift_targets_hit = shifted_result_count;
             metrics.shifted_results = shifted_result_count;
+        }
+        if let (Some(metrics), Some(t_shift)) = (metrics.as_deref_mut(), t_shift) {
+            metrics.shift_top_values_ns += t_shift.elapsed().as_nanos() as u64;
         }
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.output_summary = out.summary();
@@ -460,7 +472,7 @@ pub(crate) fn advance_stacks_with_metrics(
 
     loop {
         let frontier = current.peek_values();
-        let new_states: Vec<u32> = frontier
+        let new_states: SmallVec<[u32; 8]> = frontier
             .iter()
             .filter(|&&state| !processed[state as usize])
             .copied()
@@ -476,7 +488,7 @@ pub(crate) fn advance_stacks_with_metrics(
         }
 
         let mut any_reduced = false;
-        let mut pending_bases_by_target = FxHashMap::<u32, ParserGSS>::default();
+        let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
         for state in new_states {
             processed[state as usize] = true;
             let reduce_rules: &[u32] = match table.action(state, token) {
@@ -490,25 +502,37 @@ pub(crate) fn advance_stacks_with_metrics(
                     *metrics.reduce_rule_considered_counts.entry(rule_id).or_default() += 1;
                 }
             }
+            let t_subtree = metrics
+                .as_ref()
+                .map(|_| std::time::Instant::now());
             let subtree = current.isolate(Some(state));
-            let mut needed_rhs_lens: Vec<usize> = reduce_rules
+            if let (Some(metrics), Some(t_subtree)) = (metrics.as_deref_mut(), t_subtree) {
+                metrics.subtree_isolate_ns += t_subtree.elapsed().as_nanos() as u64;
+            }
+            let mut needed_rhs_lens: SmallVec<[usize; 4]> = reduce_rules
                 .iter()
                 .map(|&rule_id| table.rules[rule_id as usize].rhs.len())
                 .collect();
             needed_rhs_lens.sort_unstable();
             needed_rhs_lens.dedup();
 
-            let mut popped_cache = FxHashMap::<usize, ParserGSS>::default();
+            let mut popped_cache = SmallVec::<[(usize, ParserGSS); 4]>::new();
             let mut incremental_popped = subtree.clone();
             let mut incremental_len = 0usize;
+            let t_pop_cache = metrics
+                .as_ref()
+                .map(|_| std::time::Instant::now());
             for rhs_len in needed_rhs_lens {
                 while incremental_len < rhs_len {
                     incremental_popped = incremental_popped.pop();
                     incremental_len += 1;
                 }
-                popped_cache.insert(rhs_len, incremental_popped.clone());
+                popped_cache.push((rhs_len, incremental_popped.clone()));
             }
-            let mut base_cache = FxHashMap::<(usize, u32), ParserGSS>::default();
+            if let (Some(metrics), Some(t_pop_cache)) = (metrics.as_deref_mut(), t_pop_cache) {
+                metrics.pop_cache_build_ns += t_pop_cache.elapsed().as_nanos() as u64;
+            }
+            let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
             for &rule_id in reduce_rules {
                 let rule = &table.rules[rule_id as usize];
                 if let Some(metrics) = metrics.as_deref_mut() {
@@ -516,8 +540,10 @@ pub(crate) fn advance_stacks_with_metrics(
                 }
                 let rhs_len = rule.rhs.len();
                 let popped = popped_cache
-                    .get(&rhs_len)
-                    .cloned()
+                    .iter()
+                    .find_map(|(cached_rhs_len, cached)| {
+                        (*cached_rhs_len == rhs_len).then(|| cached.clone())
+                    })
                     .unwrap_or_else(|| subtree.popn(rhs_len as isize));
                 if popped.is_empty() {
                     continue;
@@ -530,14 +556,34 @@ pub(crate) fn advance_stacks_with_metrics(
                         metrics.goto_lookups += 1;
                     }
                     if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        let base = base_cache
-                            .entry((rhs_len, goto_from))
-                            .or_insert_with(|| popped.isolate(Some(goto_from)))
-                            .clone();
-                        pending_bases_by_target
-                            .entry(target)
-                            .and_modify(|existing| *existing = existing.merge(&base))
-                            .or_insert(base);
+                        let base = if let Some((_, cached)) = base_cache.iter().find(
+                            |((cached_rhs_len, cached_goto_from), _)| {
+                                *cached_rhs_len == rhs_len && *cached_goto_from == goto_from
+                            },
+                        ) {
+                            cached.clone()
+                        } else {
+                            let t_base_isolate = metrics
+                                .as_ref()
+                                .map(|_| std::time::Instant::now());
+                            let isolated = popped.isolate(Some(goto_from));
+                            if let (Some(metrics), Some(t_base_isolate)) =
+                                (metrics.as_deref_mut(), t_base_isolate)
+                            {
+                                metrics.base_isolate_ns +=
+                                    t_base_isolate.elapsed().as_nanos() as u64;
+                            }
+                            base_cache.push(((rhs_len, goto_from), isolated.clone()));
+                            isolated
+                        };
+                        if let Some((_, existing)) = pending_bases_by_target
+                            .iter_mut()
+                            .find(|(existing_target, _)| *existing_target == target)
+                        {
+                            *existing = existing.merge(&base);
+                        } else {
+                            pending_bases_by_target.push((target, base));
+                        }
                         any_reduced = true;
                         if let Some(metrics) = metrics.as_deref_mut() {
                             metrics.goto_hits += 1;
@@ -563,12 +609,18 @@ pub(crate) fn advance_stacks_with_metrics(
             metrics.absorb_targets += pending_bases_by_target.len();
         }
         for (target, base) in pending_bases_by_target {
+            let t_absorb = metrics
+                .as_ref()
+                .map(|_| std::time::Instant::now());
             current = current.absorb_push(target, &base);
+            if let (Some(metrics), Some(t_absorb)) = (metrics.as_deref_mut(), t_absorb) {
+                metrics.absorb_push_ns += t_absorb.elapsed().as_nanos() as u64;
+            }
         }
     }
 
     // Shift phase: for each state with a shift action, push the target.
-    let mut shift_pairs = Vec::new();
+    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
     for state in current.peek_values() {
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.shift_state_candidates += 1;
@@ -586,7 +638,13 @@ pub(crate) fn advance_stacks_with_metrics(
             }
         }
     }
+    let t_shift = metrics
+        .as_ref()
+        .map(|_| std::time::Instant::now());
     let out = current.shift_top_values(shift_pairs);
+    if let (Some(metrics), Some(t_shift)) = (metrics.as_deref_mut(), t_shift) {
+        metrics.shift_top_values_ns += t_shift.elapsed().as_nanos() as u64;
+    }
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.output_summary = out.summary();
     }
@@ -1018,8 +1076,14 @@ mod tests {
         let mut metrics = AdvanceStacksDebugMetrics::default();
         let advanced =
             advance_stacks_with_metrics(&current.table, &current.stack, CLOSE, Some(&mut metrics));
+        let fast_advanced = advance_stacks(&current.table, &current.stack, CLOSE);
 
         assert!(!advanced.is_empty(), "close token should remain parseable");
+        assert_eq!(
+            fast_advanced.to_stacks().into_iter().collect::<BTreeSet<_>>(),
+            advanced.to_stacks().into_iter().collect::<BTreeSet<_>>(),
+            "metrics and non-metrics advance paths should agree"
+        );
         assert!(
             metrics.reductions_emitted >= WRAPPER_COUNT * 2,
             "expected wrapper family to trigger many reductions, got {}",

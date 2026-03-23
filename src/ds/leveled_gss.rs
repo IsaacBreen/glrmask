@@ -2914,6 +2914,105 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.single_child_key_without_empty()
     }
 
+    pub fn path_count_at_most(&self, limit: usize) -> usize {
+        if limit == 0 || self.is_empty() {
+            return 0;
+        }
+
+        fn capped_add(acc: usize, value: usize, limit: usize) -> usize {
+            acc.saturating_add(value).min(limit)
+        }
+
+        fn count_lower<T>(
+            node: &Arc<Lower<T>>,
+            limit: usize,
+            memo: &mut StdHashMap<usize, usize>,
+        ) -> usize
+        where
+            T: Clone + Eq + Hash,
+        {
+            let ptr = Arc::as_ptr(node) as usize;
+            if let Some(&cached) = memo.get(&ptr) {
+                return cached;
+            }
+
+            let mut count = usize::from(node.empty);
+            for children in node.children.values() {
+                for child in children.values() {
+                    count = capped_add(count, count_lower(child, limit, memo), limit);
+                    if count == limit {
+                        memo.insert(ptr, count);
+                        return count;
+                    }
+                }
+            }
+
+            memo.insert(ptr, count);
+            count
+        }
+
+        fn count_upper<T, A>(
+            node: &Arc<Upper<T, A>>,
+            limit: usize,
+            memo_upper: &mut StdHashMap<usize, usize>,
+            memo_lower: &mut StdHashMap<usize, usize>,
+        ) -> usize
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            let ptr = Arc::as_ptr(node) as usize;
+            if let Some(&cached) = memo_upper.get(&ptr) {
+                return cached;
+            }
+
+            let mut count = match &**node {
+                Upper::Branch(b) => usize::from(b.empty.is_some()),
+                Upper::Interface(i) => usize::from(i.inner.empty),
+            };
+
+            match &**node {
+                Upper::Branch(b) => {
+                    for children in b.children.values() {
+                        for child in children.values() {
+                            count = capped_add(
+                                count,
+                                count_upper(child, limit, memo_upper, memo_lower),
+                                limit,
+                            );
+                            if count == limit {
+                                memo_upper.insert(ptr, count);
+                                return count;
+                            }
+                        }
+                    }
+                }
+                Upper::Interface(i) => {
+                    for children in i.inner.children.values() {
+                        for child in children.values() {
+                            count = capped_add(count, count_lower(child, limit, memo_lower), limit);
+                            if count == limit {
+                                memo_upper.insert(ptr, count);
+                                return count;
+                            }
+                        }
+                    }
+                }
+            }
+
+            memo_upper.insert(ptr, count);
+            count
+        }
+
+        let mut memo_upper = StdHashMap::new();
+        let mut memo_lower = StdHashMap::new();
+        count_upper(&self.inner, limit, &mut memo_upper, &mut memo_lower)
+    }
+
+    pub fn is_single_path(&self) -> bool {
+        self.path_count_at_most(2) <= 1
+    }
+
     pub fn reduce_acc(&self) -> Option<A> {
         
         let mut unique: HashSet<A> = HashSet::new();
@@ -3870,6 +3969,27 @@ mod tests {
             }
             _ => panic!("Expected Interface nodes"),
         }
+    }
+
+    #[test]
+    fn test_path_count_at_most_distinguishes_single_vs_branched() {
+        let single = gss_from_str_stacks(&[(&["A", "B", "C"], &[1])]);
+        assert_eq!(single.path_count_at_most(2), 1);
+        assert!(single.is_single_path());
+
+        let shared_prefix = gss_from_str_stacks(&[
+            (&["A", "B"], &[1]),
+            (&["A", "C"], &[2]),
+        ]);
+        assert_eq!(shared_prefix.path_count_at_most(2), 2);
+        assert!(!shared_prefix.is_single_path());
+
+        let disjoint = gss_from_str_stacks(&[
+            (&["X"], &[3]),
+            (&["Y"], &[4]),
+        ]);
+        assert_eq!(disjoint.path_count_at_most(2), 2);
+        assert!(!disjoint.is_single_path());
     }
 
     #[test]

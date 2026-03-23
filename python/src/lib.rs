@@ -17,7 +17,7 @@
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use self_cell::self_cell;
 use std::sync::Arc;
 
@@ -151,6 +151,22 @@ fn commit_metrics_to_dict<'py>(
     out.set_item("advance_stacks_calls", metrics.advance_stacks_calls)?;
     out.set_item("advance_stacks_nonempty", metrics.advance_stacks_nonempty)?;
     out.set_item(
+        "advance_input_single_path_calls",
+        metrics.advance_input_single_path_calls,
+    )?;
+    out.set_item(
+        "advance_output_single_path_calls",
+        metrics.advance_output_single_path_calls,
+    )?;
+    out.set_item(
+        "advance_input_path_count_at_most_two_max",
+        metrics.advance_input_path_count_at_most_two_max,
+    )?;
+    out.set_item(
+        "advance_output_path_count_at_most_two_max",
+        metrics.advance_output_path_count_at_most_two_max,
+    )?;
+    out.set_item(
         "advance_reduce_closure_iterations_total",
         metrics.advance_reduce_closure_iterations_total,
     )?;
@@ -209,6 +225,26 @@ fn commit_metrics_to_dict<'py>(
     out.set_item(
         "advance_goto_target_counts",
         counts_to_dict(py, &metrics.advance_goto_target_counts)?,
+    )?;
+    out.set_item(
+        "advance_subtree_isolate_ns",
+        metrics.advance_subtree_isolate_ns,
+    )?;
+    out.set_item(
+        "advance_pop_cache_build_ns",
+        metrics.advance_pop_cache_build_ns,
+    )?;
+    out.set_item(
+        "advance_base_isolate_ns",
+        metrics.advance_base_isolate_ns,
+    )?;
+    out.set_item(
+        "advance_absorb_push_ns",
+        metrics.advance_absorb_push_ns,
+    )?;
+    out.set_item(
+        "advance_shift_top_values_ns",
+        metrics.advance_shift_top_values_ns,
     )?;
     out.set_item(
         "advance_input_top_values_total",
@@ -330,12 +366,24 @@ fn commit_metrics_to_dict<'py>(
     out.set_item("parser_final_pushes", metrics.parser_final_pushes)?;
     out.set_item("parser_final_merges", metrics.parser_final_merges)?;
     out.set_item(
+        "parser_queue_target_counts",
+        counts_to_dict(py, &metrics.parser_queue_target_counts)?,
+    )?;
+    out.set_item(
+        "parser_final_target_counts",
+        counts_to_dict(py, &metrics.parser_final_target_counts)?,
+    )?;
+    out.set_item(
         "passthrough_end_state_pushes",
         metrics.passthrough_end_state_pushes,
     )?;
     out.set_item(
         "passthrough_end_state_merges",
         metrics.passthrough_end_state_merges,
+    )?;
+    out.set_item(
+        "passthrough_end_state_counts",
+        counts_to_dict(py, &metrics.passthrough_end_state_counts)?,
     )?;
     out.set_item("fused_parser_states", metrics.fused_parser_states)?;
     out.set_item("initial_tokenizer_exec_ns", metrics.initial_tokenizer_exec_ns)?;
@@ -347,6 +395,40 @@ fn commit_metrics_to_dict<'py>(
     out.set_item("merge_ns", metrics.merge_ns)?;
     out.set_item("fuse_ns", metrics.fuse_ns)?;
     out.set_item("total_ns", metrics.total_ns)?;
+    Ok(out)
+}
+
+fn commit_trace_to_dict<'py>(
+    py: Python<'py>,
+    trace: glrmask::CommitDebugTrace,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    let exec_calls = PyList::empty(py);
+    for exec_call in trace.exec_calls {
+        let exec_dict = PyDict::new(py);
+        exec_dict.set_item("phase", exec_call.phase)?;
+        exec_dict.set_item("offset", exec_call.offset)?;
+        exec_dict.set_item("start_state", exec_call.start_state)?;
+        exec_dict.set_item("reused_initial_exec_result", exec_call.reused_initial_exec_result)?;
+        exec_dict.set_item("end_state", exec_call.end_state)?;
+        let matches = PyList::empty(py);
+        for match_trace in exec_call.matches {
+            let match_dict = PyDict::new(py);
+            match_dict.set_item("id", match_trace.id)?;
+            match_dict.set_item("width", match_trace.width)?;
+            match_dict.set_item("end_state", match_trace.end_state)?;
+            match_dict.set_item("ignored", match_trace.ignored)?;
+            match_dict.set_item("actionable", match_trace.actionable)?;
+            match_dict.set_item("advance_attempted", match_trace.advance_attempted)?;
+            match_dict.set_item("advance_nonempty", match_trace.advance_nonempty)?;
+            match_dict.set_item("new_offset", match_trace.new_offset)?;
+            match_dict.set_item("next_tokenizer_state", match_trace.next_tokenizer_state)?;
+            matches.append(match_dict)?;
+        }
+        exec_dict.set_item("matches", matches)?;
+        exec_calls.append(exec_dict)?;
+    }
+    out.set_item("exec_calls", exec_calls)?;
     Ok(out)
 }
 
@@ -579,6 +661,29 @@ impl PyConstraintState {
             .inner
             .with_dependent(|_owner, state| state.debug_commit_bytes_metrics(data));
         commit_metrics_to_dict(py, metrics)
+    }
+
+    fn debug_commit_token_trace<'py>(
+        &self,
+        py: Python<'py>,
+        token_id: u32,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let trace = self
+            .inner
+            .with_dependent(|_owner, state| state.debug_commit_token_trace(token_id))
+            .map_err(PyValueError::new_err)?;
+        commit_trace_to_dict(py, trace)
+    }
+
+    fn debug_commit_bytes_trace<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let trace = self
+            .inner
+            .with_dependent(|_owner, state| state.debug_commit_bytes_trace(data));
+        commit_trace_to_dict(py, trace)
     }
 
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
