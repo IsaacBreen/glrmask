@@ -1735,6 +1735,10 @@ impl SchemaCtx {
         GrammarExpr::Ref(JSON_NUMBER_RULE.into())
     }
 
+    fn json_number_type_expr(&self) -> GrammarExpr {
+        choice_or_single(vec![self.json_integer_ref(), self.json_number_ref()])
+    }
+
     fn json_bool_ref(&self) -> GrammarExpr {
         GrammarExpr::Ref(JSON_BOOL_RULE.into())
     }
@@ -1749,12 +1753,18 @@ impl SchemaCtx {
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
         self.insert_rule(
             JSON_NUMBER_RULE,
-            regex_expr(r#"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#),
+            GrammarExpr::Exclude {
+                expr: Box::new(regex_expr(r#"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#)),
+                exclude: Box::new(self.json_integer_ref()),
+            },
         );
         self.insert_rule(JSON_NONNEG_INTEGER_RULE, regex_expr(r#"(0|[1-9][0-9]*)"#));
         self.insert_rule(
             JSON_NONNEG_NUMBER_RULE,
-            regex_expr(r#"(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#),
+            GrammarExpr::Exclude {
+                expr: Box::new(regex_expr(r#"(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#)),
+                exclude: Box::new(GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())),
+            },
         );
         self.insert_rule(
             JSON_BOOL_RULE,
@@ -2102,9 +2112,15 @@ impl SchemaCtx {
             }
 
             if let Some(type_values) = object.get("type").and_then(Value::as_array) {
-                let options = type_values
+                let mut allowed_types: BTreeSet<&str> = type_values
                     .iter()
                     .filter_map(Value::as_str)
+                    .collect();
+                if allowed_types.contains("number") {
+                    allowed_types.remove("integer");
+                }
+                let options = allowed_types
+                    .into_iter()
                     .map(|type_name| self.convert_type(type_name, object))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(choice_or_single(options));
@@ -2404,7 +2420,7 @@ impl SchemaCtx {
             "object" => self.json_object_ref(),
             "array" => self.json_array_ref(),
             "string" => self.json_string_ref(),
-            "number" => self.json_number_ref(),
+            "number" => self.json_number_type_expr(),
             "boolean" => self.json_bool_ref(),
             "null" => self.json_null_ref(),
             _ => self.json_value_ref(),
@@ -2447,6 +2463,36 @@ impl SchemaCtx {
     }
 
     fn build_numeric_ref(&mut self, type_name: &str, schema: &Map<String, Value>) -> GrammarExpr {
+        fn integer_bounds_for_number_range(
+            left: Option<f64>,
+            left_inclusive: bool,
+            right: Option<f64>,
+            right_inclusive: bool,
+        ) -> Option<(Option<i64>, Option<i64>)> {
+            let int_left = left.map(|value| {
+                if left_inclusive {
+                    value.ceil() as i64
+                } else {
+                    value.floor() as i64 + 1
+                }
+            });
+            let int_right = right.map(|value| {
+                if right_inclusive {
+                    value.floor() as i64
+                } else {
+                    value.ceil() as i64 - 1
+                }
+            });
+
+            if let (Some(int_left), Some(int_right)) = (int_left, int_right) {
+                if int_left > int_right {
+                    return None;
+                }
+            }
+
+            Some((int_left, int_right))
+        }
+
         let (left, left_inclusive, right, right_inclusive) = normalize_numeric_bounds(schema);
 
         let has_bounds = left.is_some() || right.is_some();
@@ -2454,7 +2500,7 @@ impl SchemaCtx {
             return if type_name == "integer" {
                 self.json_integer_ref()
             } else {
-                self.json_number_ref()
+                self.json_number_type_expr()
             };
         }
 
@@ -2464,37 +2510,49 @@ impl SchemaCtx {
             return if type_name == "integer" {
                 GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())
             } else {
-                GrammarExpr::Ref(JSON_NONNEG_NUMBER_RULE.into())
+                choice_or_single(vec![
+                    GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into()),
+                    GrammarExpr::Ref(JSON_NONNEG_NUMBER_RULE.into()),
+                ])
             };
         }
 
         // Build precise range regex
         use crate::import::numeric_range::{rx_float_range, rx_int_range};
 
-        let regex_result = if type_name == "integer" {
+        if type_name == "integer" {
             let int_left = left.map(|l| if left_inclusive { l as i64 } else { l as i64 + 1 });
             let int_right = right.map(|r| if right_inclusive { r as i64 } else { r as i64 - 1 });
-            rx_int_range(int_left, int_right)
-        } else {
-            rx_float_range(left, right, left_inclusive, right_inclusive)
-        };
+            return match rx_int_range(int_left, int_right) {
+                Ok(regex) => GrammarExpr::RawRegex(regex),
+                Err(_) => self.json_integer_ref(),
+            };
+        }
 
-        match regex_result {
-            Ok(regex) => GrammarExpr::RawRegex(regex),
-            Err(_) => {
-                // Fallback to generic on error
-                if use_nonneg_shortcut {
-                    if type_name == "integer" {
-                        GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())
-                    } else {
-                        GrammarExpr::Ref(JSON_NONNEG_NUMBER_RULE.into())
-                    }
-                } else if type_name == "integer" {
-                    self.json_integer_ref()
-                } else {
-                    self.json_number_ref()
-                }
+        let float_regex_result = rx_float_range(left, right, left_inclusive, right_inclusive);
+        let integer_range_result = integer_bounds_for_number_range(
+            left,
+            left_inclusive,
+            right,
+            right_inclusive,
+        )
+        .map(|(int_left, int_right)| rx_int_range(int_left, int_right));
+
+        match (float_regex_result, integer_range_result) {
+            (Ok(float_regex), Some(Ok(int_regex))) => {
+                let non_integer_expr = self.build_subtracted_regex_expr(
+                    &float_regex,
+                    &int_regex,
+                    "JSON_BOUNDED_NUMBER_NONINT",
+                );
+                let integer_expr = regex_expr(int_regex);
+                choice_or_single(vec![
+                    integer_expr,
+                    non_integer_expr,
+                ])
             }
+            (Ok(float_regex), None) => regex_expr(float_regex),
+            _ => self.json_number_type_expr(),
         }
     }
 
@@ -2897,6 +2955,26 @@ impl SchemaCtx {
             GrammarExpr::TerminalExpr(LexerExpr::Dfa(dfa.clone())),
             prefix,
         )
+    }
+
+    fn build_subtracted_regex_expr(
+        &mut self,
+        include_pattern: &str,
+        exclude_pattern: &str,
+        prefix: &str,
+    ) -> GrammarExpr {
+        let include_dfa = build_regex_with_profile_label(
+            &[parse_regex(include_pattern, true)],
+            &format!("{prefix}_include"),
+        )
+        .dfa;
+        let exclude_dfa = build_regex_with_profile_label(
+            &[parse_regex(exclude_pattern, true)],
+            &format!("{prefix}_exclude"),
+        )
+        .dfa;
+        let subtracted = Self::subtract_lexer_dfa(&include_dfa, &exclude_dfa);
+        self.build_lexer_dfa_expr(&subtracted, prefix)
     }
 
     fn build_excluding_key_colon_expr(
@@ -5077,6 +5155,20 @@ mod tests {
     fn test_type_array_of_types() {
         let g = json_schema_to_grammar(r#"{"type": ["string", "null"]}"#).unwrap();
         assert!(!g.rules.is_empty());
+    }
+
+    #[test]
+    fn test_number_type_accepts_integer_and_fractional_literals() {
+        let schema = r#"{"type": "number"}"#;
+        assert!(accepts_sequence(schema, &[b"1"]));
+        assert!(accepts_sequence(schema, &[b"1.5"]));
+    }
+
+    #[test]
+    fn test_integer_number_type_array_accepts_integer_and_fractional_literals() {
+        let schema = r#"{"type": ["integer", "number"]}"#;
+        assert!(accepts_sequence(schema, &[b"1"]));
+        assert!(accepts_sequence(schema, &[b"1.5"]));
     }
 
     #[test]
