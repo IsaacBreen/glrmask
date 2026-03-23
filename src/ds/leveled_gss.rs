@@ -11,10 +11,111 @@ pub trait Merge: Clone {
 type Children<T, N> = IHashMap<T, OrdMap<u32, Arc<N>>>;
 
 #[derive(Clone)]
-struct Lower<T: Clone + Eq + Hash> {
-    children: Children<T, Lower<T>>,
-    empty: bool,
-    max_depth: u32,
+enum Lower<T: Clone + Eq + Hash> {
+    General {
+        children: Children<T, Lower<T>>,
+        empty: bool,
+        max_depth: u32,
+    },
+    /// Single child value with one child node. Eliminates IHashMap + OrdMap
+    /// overhead for the common unary-chain case.
+    Chain {
+        value: T,
+        next: Arc<Lower<T>>,
+        empty: bool,
+        max_depth: u32,
+    },
+}
+
+impl<T: Clone + Eq + Hash> Lower<T> {
+    #[inline(always)]
+    fn empty(&self) -> bool {
+        match self {
+            Lower::General { empty, .. } | Lower::Chain { empty, .. } => *empty,
+        }
+    }
+
+    #[inline(always)]
+    fn max_depth(&self) -> u32 {
+        match self {
+            Lower::General { max_depth, .. } | Lower::Chain { max_depth, .. } => *max_depth,
+        }
+    }
+
+    /// Get children as a general Children map.
+    /// For Chain variant, constructs the map on the fly.
+    fn children(&self) -> Children<T, Lower<T>> {
+        match self {
+            Lower::General { children, .. } => children.clone(),
+            Lower::Chain { value, next, .. } => {
+                IHashMap::unit(value.clone(), OrdMap::unit(next.max_depth(), next.clone()))
+            }
+        }
+    }
+
+    /// Number of distinct child keys.
+    #[inline(always)]
+    fn children_len(&self) -> usize {
+        match self {
+            Lower::General { children, .. } => children.len(),
+            Lower::Chain { .. } => 1,
+        }
+    }
+
+    /// Whether there are no children.
+    #[inline(always)]
+    fn children_is_empty(&self) -> bool {
+        match self {
+            Lower::General { children, .. } => children.is_empty(),
+            Lower::Chain { .. } => false,
+        }
+    }
+
+    /// Look up children for a given key value.
+    fn children_get(&self, key: &T) -> Option<&OrdMap<u32, Arc<Lower<T>>>> {
+        match self {
+            Lower::General { children, .. } => children.get(key),
+            Lower::Chain { .. } => None, // must use children_get_chain for Chain
+        }
+    }
+
+    /// Check if children contains a key.
+    fn children_contains_key(&self, key: &T) -> bool {
+        match self {
+            Lower::General { children, .. } => children.contains_key(key),
+            Lower::Chain { value, .. } => value == key,
+        }
+    }
+
+    /// Get children keys as a Vec.
+    fn children_keys_vec(&self) -> Vec<T> {
+        match self {
+            Lower::General { children, .. } => children.keys().cloned().collect(),
+            Lower::Chain { value, .. } => vec![value.clone()],
+        }
+    }
+
+    /// Ensure this Lower is in General form, converting from Chain if necessary.
+    /// Returns mutable references to children and max_depth for in-place mutation.
+    fn ensure_general(&mut self) {
+        if let Lower::Chain { value, next, empty, max_depth } = self {
+            let children = IHashMap::unit(value.clone(), OrdMap::unit(next.max_depth(), next.clone()));
+            *self = Lower::General {
+                children,
+                empty: *empty,
+                max_depth: *max_depth,
+            };
+        }
+    }
+
+    /// Get mutable access to children and max_depth. Converts Chain→General first.
+    fn children_and_depth_mut(&mut self) -> (&mut Children<T, Lower<T>>, &mut u32) {
+        self.ensure_general();
+        match self {
+            Lower::General { children, max_depth, .. } => (children, max_depth),
+            Lower::Chain { .. } => unreachable!(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -40,14 +141,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     fn max_depth(&self) -> u32 {
         match self {
             Upper::Branch(branch) => branch.max_depth,
-            Upper::Interface(interface) => interface.inner.max_depth,
+            Upper::Interface(interface) => interface.inner.max_depth(),
         }
     }
 
     fn children_keys(&self) -> Vec<T> {
         match self {
             Upper::Branch(branch) => branch.children.keys().cloned().collect(),
-            Upper::Interface(interface) => interface.inner.children.keys().cloned().collect(),
+            Upper::Interface(interface) => interface.inner.children().keys().cloned().collect(),
         }
     }
 
@@ -61,8 +162,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
                 }
             }
             Upper::Interface(interface) => {
-                if interface.inner.children.len() == 1 {
-                    interface.inner.children.keys().next().cloned()
+                if interface.inner.children().len() == 1 {
+                    interface.inner.children().keys().next().cloned()
                 } else {
                     None
                 }
@@ -80,8 +181,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
                 }
             }
             Upper::Interface(interface) => {
-                if !interface.inner.empty && interface.inner.children.len() == 1 {
-                    interface.inner.children.keys().next().cloned()
+                if !interface.inner.empty() && interface.inner.children().len() == 1 {
+                    interface.inner.children().keys().next().cloned()
                 } else {
                     None
                 }
@@ -179,8 +280,8 @@ where
 }
 
 fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
-    let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth);
-    Arc::new(Lower {
+    let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth());
+    Arc::new(Lower::General {
         children,
         empty,
         max_depth,
@@ -233,13 +334,13 @@ fn filter_lower<T: Clone + Eq + Hash>(
         return None;
     }
 
-    let keep_empty = node.empty && current_depth >= min_d;
+    let keep_empty = node.empty() && current_depth >= min_d;
 
     let mut new_children: Children<T, Lower<T>> = IHashMap::new();
     let mut children_identical = true;
 
     if current_depth < max_d {
-        for (v, kids) in node.children.iter() {
+        for (v, kids) in node.children().iter() {
             let mut new_kids: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
             let mut same_kids = true;
             let mut count = 0usize;
@@ -247,10 +348,10 @@ fn filter_lower<T: Clone + Eq + Hash>(
                 if let Some(new_child) =
                     filter_lower(child, current_depth + 1, min_len, max_len)
                 {
-                    if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
+                    if !Arc::ptr_eq(&new_child, child) || new_child.max_depth() != *orig_depth {
                         same_kids = false;
                     }
-                    new_kids.insert(new_child.max_depth, new_child);
+                    new_kids.insert(new_child.max_depth(), new_child);
                     count += 1;
                 } else {
                     same_kids = false;
@@ -265,10 +366,10 @@ fn filter_lower<T: Clone + Eq + Hash>(
         }
     } else {
         
-        children_identical = node.children.is_empty();
+        children_identical = node.children().is_empty();
     }
 
-    if keep_empty == node.empty && children_identical {
+    if keep_empty == node.empty() && children_identical {
         return Some(node.clone());
     }
 
@@ -348,12 +449,12 @@ where
             }
         }
         Upper::Interface(i) => {
-            let keep_empty = i.inner.empty && current_depth >= min_d;
+            let keep_empty = i.inner.empty() && current_depth >= min_d;
 
             let mut new_children: Children<T, Lower<T>> = IHashMap::new();
             let mut children_identical = true;
             if current_depth < max_d {
-                for (v, kids) in i.inner.children.iter() {
+                for (v, kids) in i.inner.children().iter() {
                     let mut new_kids: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
                     let mut same_kids = true;
                     let mut count = 0usize;
@@ -362,11 +463,11 @@ where
                             filter_lower(child, current_depth + 1, min_len, max_len)
                         {
                             if !Arc::ptr_eq(&new_child, child)
-                                || new_child.max_depth != *orig_depth
+                                || new_child.max_depth() != *orig_depth
                             {
                                 same_kids = false;
                             }
-                            new_kids.insert(new_child.max_depth, new_child);
+                            new_kids.insert(new_child.max_depth(), new_child);
                             count += 1;
                         } else {
                             same_kids = false;
@@ -380,14 +481,14 @@ where
                     children_identical &= same_kids;
                 }
             } else {
-                children_identical = i.inner.children.is_empty();
+                children_identical = i.inner.children().is_empty();
             }
 
             if !keep_empty && new_children.is_empty() {
                 return None;
             }
 
-            if keep_empty == i.inner.empty && children_identical {
+            if keep_empty == i.inner.empty() && children_identical {
                 return Some(node.clone());
             }
 
@@ -409,7 +510,7 @@ fn truncate_lower<T: Clone + Eq + Hash>(
     }
 
     if current_depth == max_len {
-        let res = if node.empty || !node.children.is_empty() {
+        let res = if node.empty() || !node.children().is_empty() {
             Some(new_lower(IHashMap::new(), true))
         } else {
             None
@@ -421,15 +522,15 @@ fn truncate_lower<T: Clone + Eq + Hash>(
     let mut new_children: Children<T, Lower<T>> = IHashMap::new();
     let mut children_identical = true;
 
-    for (v, kids) in node.children.iter() {
+    for (v, kids) in node.children().iter() {
         let mut new_kids_map = OrdMap::new();
         let mut kids_identical = true;
         for (depth, child) in kids.iter() {
             if let Some(new_child) = truncate_lower(child, current_depth + 1, max_len, memo) {
-                if !Arc::ptr_eq(child, &new_child) || *depth != new_child.max_depth {
+                if !Arc::ptr_eq(child, &new_child) || *depth != new_child.max_depth() {
                     kids_identical = false;
                 }
-                new_kids_map.insert(new_child.max_depth, new_child);
+                new_kids_map.insert(new_child.max_depth(), new_child);
             } else {
                 kids_identical = false;
             }
@@ -442,15 +543,15 @@ fn truncate_lower<T: Clone + Eq + Hash>(
         children_identical &= kids_identical;
     }
 
-    if node.empty && children_identical {
+    if node.empty() && children_identical {
         memo.insert(ptr, Some(node.clone()));
         return Some(node.clone());
     }
 
-    let res = if !node.empty && new_children.is_empty() {
+    let res = if !node.empty() && new_children.is_empty() {
         None
     } else {
-        Some(new_lower(new_children, node.empty))
+        Some(new_lower(new_children, node.empty()))
     };
     memo.insert(ptr, res.clone());
     res
@@ -559,7 +660,7 @@ fn accs_by_depth_lower<T, A>(
         return;
     }
 
-    if node.empty {
+    if node.empty() {
         if let Some(existing) = accs.get_mut(&current_depth) {
             *existing = existing.merge(acc);
         } else {
@@ -567,7 +668,7 @@ fn accs_by_depth_lower<T, A>(
         }
     }
 
-    for kids in node.children.values() {
+    for kids in node.children().values() {
         for child in kids.values() {
             accs_by_depth_lower(child, current_depth + 1, acc, accs, memo_lower);
         }
@@ -615,12 +716,12 @@ fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> 
     if Arc::ptr_eq(l1, l2) {
         return l1.clone();
     }
-    let new_empty = l1.empty || l2.empty;
-    let merged_children = merge_children(&l1.children, &l2.children, |a, b| merge_lower(a, b));
-    Arc::new(Lower {
+    let new_empty = l1.empty() || l2.empty();
+    let merged_children = merge_children(&l1.children(), &l2.children(), |a, b| merge_lower(a, b));
+    Arc::new(Lower::General {
         children: merged_children,
         empty: new_empty,
-        max_depth: l1.max_depth.max(l2.max_depth),
+        max_depth: l1.max_depth().max(l2.max_depth()),
     })
 }
 
@@ -630,7 +731,7 @@ where
     A: Merge + Clone + Eq + Hash,
 {
     let mut children: Children<T, Upper<T, A>> = IHashMap::new();
-    for (v, kids) in it.inner.children.iter() {
+    for (v, kids) in it.inner.children().iter() {
         let mut v_map: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
         for lchild in kids.values() {
             let ci = new_interface(lchild.clone(), it.acc.clone());
@@ -641,7 +742,7 @@ where
         }
     }
 
-    let new_empty = if it.inner.empty {
+    let new_empty = if it.inner.empty() {
         Some(it.acc.clone())
     } else {
         None
@@ -753,7 +854,7 @@ where
                     for child in kids.values() {
                         if let Upper::Interface(ci) = &**child {
                             let lower = ci.inner.clone();
-                            v_map.insert(lower.max_depth, lower);
+                            v_map.insert(lower.max_depth(), lower);
                         }
                     }
                     if !v_map.is_empty() {
@@ -1018,7 +1119,7 @@ where
     }
 
     let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Lower<T>>)>> = StdHashMap::new();
-    for (v, kids) in node.children.iter() {
+    for (v, kids) in node.children().iter() {
         let entry = edges_raw.entry(v.clone()).or_default();
         for child in kids.values() {
             let (cid, carc) = normalize_canonicalize_lower(child, memo_lower, interner_lower);
@@ -1033,7 +1134,7 @@ where
         sig_edges.insert(v.clone(), ids);
     }
     let sig = LowerSig {
-        empty: node.empty,
+        empty: node.empty(),
         edges: sig_edges,
     };
     let h = lower_sig_hash(&sig);
@@ -1051,7 +1152,7 @@ where
     for (v, items) in edges_raw {
         let mut ord: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
         for (_, carc) in items {
-            let d = carc.max_depth;
+            let d = carc.max_depth();
             if let Some(prev) = ord.get(&d) {
                 let merged = merge_lower(prev, &carc);
                 ord.insert(d, merged);
@@ -1063,7 +1164,7 @@ where
             new_children.insert(v, ord);
         }
     }
-    let new_node = new_lower(new_children, node.empty);
+    let new_node = new_lower(new_children, node.empty());
 
     let id = interner_lower.next_id;
     interner_lower.next_id += 1;
@@ -1298,16 +1399,18 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 true
             }
             (Upper::Interface(i1), Upper::Interface(i2)) => {
-                if i1.acc != i2.acc || i1.inner.children.len() != i2.inner.children.len() || i1.inner.max_depth != i2.inner.max_depth {
+                if i1.acc != i2.acc || i1.inner.children_len() != i2.inner.children_len() || i1.inner.max_depth() != i2.inner.max_depth() {
                     return false;
                 }
-                let keys1: HashSet<_> = i1.inner.children.keys().collect();
-                let keys2: HashSet<_> = i2.inner.children.keys().collect();
+                let c1 = i1.inner.children();
+                let c2 = i2.inner.children();
+                let keys1: HashSet<_> = c1.keys().collect();
+                let keys2: HashSet<_> = c2.keys().collect();
                 if keys1 != keys2 {
                     return false;
                 }
-                for (v, kids1) in i1.inner.children.iter() {
-                    let kids2 = i2.inner.children.get(v).unwrap();
+                for (v, kids1) in c1.iter() {
+                    let kids2 = c2.get(v).unwrap();
                     if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
                         return false;
                     }
@@ -1385,10 +1488,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 let sub_children = if e.sub.is_empty() {
                     IHashMap::new()
                 } else {
-                    build_lower(&e.sub).children.clone()
+                    build_lower(&e.sub).children().clone()
                 };
                 let node_for_v = new_lower(sub_children, e.end.is_some());
-                l_children.insert(v.clone(), OrdMap::unit(node_for_v.max_depth, node_for_v));
+                l_children.insert(v.clone(), OrdMap::unit(node_for_v.max_depth(), node_for_v));
             }
             new_lower(l_children, false)
         }
@@ -1437,7 +1540,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 if accs.len() <= 1 {
                     if let Some(the_acc) = accs.into_iter().next() {
                         let lower_tree = build_lower(d);
-                        let lower_root = new_lower(lower_tree.children.clone(), root_empty.is_some());
+                        let lower_root = new_lower(lower_tree.children().clone(), root_empty.is_some());
                         return new_interface(lower_root, the_acc);
                     } else {
                         return empty_upper_inner();
@@ -1462,12 +1565,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             acc: &A,
             out: &mut Vec<(Vec<T>, A)>,
         ) {
-            if l.empty {
+            if l.empty() {
                 let mut stack = pref.clone();
                 stack.reverse();
                 out.push((stack, acc.clone()));
             }
-            for (v, kids) in l.children.iter() {
+            for (v, kids) in l.children().iter() {
                 for child in kids.values() {
                     pref.push(v.clone());
                     dfs_lower(child, pref, acc, out);
@@ -1497,12 +1600,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                 }
                 Upper::Interface(i) => {
-                    if i.inner.empty {
+                    if i.inner.empty() {
                         let mut stack = pref.clone();
                         stack.reverse();
                         out.push((stack, i.acc.clone()));
                     }
-                    for (v, kids) in i.inner.children.iter() {
+                    for (v, kids) in i.inner.children().iter() {
                         for child in kids.values() {
                             pref.push(v.clone());
                             dfs_lower(child, pref, &i.acc, out);
@@ -1524,7 +1627,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let new_inner = match &*self.inner {
             Upper::Interface(i) => {
                 let mut new_children: Children<T, Lower<T>> = IHashMap::new();
-                new_children.insert(value, OrdMap::unit(i.inner.max_depth, i.inner.clone()));
+                new_children.insert(value, OrdMap::unit(i.inner.max_depth(), i.inner.clone()));
                 let new_lower_root = new_lower(new_children, false);
                 new_interface(new_lower_root, i.acc.clone())
             }
@@ -1562,8 +1665,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             Upper::Interface(i) => {
                 let mut children_by_target = StdHashMap::<T, Children<T, Lower<T>>>::new();
 
+                let inner_children = i.inner.children();
                 for (from, to) in pairs {
-                    let Some(kids) = i.inner.children.get(&from) else {
+                    let Some(kids) = inner_children.get(&from) else {
                         continue;
                     };
                     let target_children = children_by_target
@@ -1594,7 +1698,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 let mut shifted_children: Children<T, Lower<T>> = IHashMap::new();
                 for (to, lower_children) in children_by_target {
                     let lower = new_lower(lower_children, false);
-                    shifted_children.insert(to, OrdMap::unit(lower.max_depth, lower));
+                    shifted_children.insert(to, OrdMap::unit(lower.max_depth(), lower));
                 }
 
                 let shifted_root = new_lower(shifted_children, false);
@@ -1626,15 +1730,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             (&*base.inner, &*self.inner)
         {
             if self_iface.acc == base_iface.acc {
-                let child_depth = base_iface.inner.max_depth;
+                let child_depth = base_iface.inner.max_depth();
                 let child_node = base_iface.inner.clone();
 
                 let inner_mut = Arc::make_mut(&mut self.inner);
                 if let Upper::Interface(self_iface_arc) = inner_mut {
                     let iface_mut = Arc::make_mut(self_iface_arc);
                     let lower_mut = Arc::make_mut(&mut iface_mut.inner);
+                    let (children_mut, max_depth_mut) = lower_mut.children_and_depth_mut();
 
-                    match lower_mut.children.get(&value) {
+                    match children_mut.get(&value) {
                         Some(existing_ordmap) => {
                             let mut new_ordmap = existing_ordmap.clone();
                             match new_ordmap.get(&child_depth) {
@@ -1645,15 +1750,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                                     new_ordmap.insert(child_depth, child_node);
                                 }
                             }
-                            lower_mut.children.insert(value, new_ordmap);
+                            children_mut.insert(value, new_ordmap);
                         }
                         None => {
-                            lower_mut.children.insert(value, OrdMap::unit(child_depth, child_node));
+                            children_mut.insert(value, OrdMap::unit(child_depth, child_node));
                         }
                     }
 
-                    if child_depth + 1 > lower_mut.max_depth {
-                        lower_mut.max_depth = child_depth + 1;
+                    if child_depth + 1 > *max_depth_mut {
+                        *max_depth_mut = child_depth + 1;
                     }
 
                     return self;
@@ -1692,7 +1797,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
 
             let mut merged: Option<Arc<Lower<T>>> = None;
-            for child in node.children.values().flat_map(|kids| kids.values()) {
+            for child in node.children().values().flat_map(|kids| kids.values()) {
                 let popped_child = popn_lower::<T, A>(child, k - 1, memo_lower);
                 merged = Some(match merged {
                     Some(acc) => merge_lower(&acc, &popped_child),
@@ -1702,7 +1807,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             let mut res = merged.unwrap_or_else(|| new_lower(IHashMap::new(), false));
 
-            if node.empty && k == 1 {
+            if node.empty() && k == 1 {
                 let terminal_node = new_lower(IHashMap::new(), true);
                 res = merge_lower(&res, &terminal_node);
             }
@@ -1757,7 +1862,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Interface(i) => {
                     let popped_lower = popn_lower::<T, A>(&i.inner, k, memo_lower);
-                    if popped_lower.children.is_empty() && !popped_lower.empty {
+                    if popped_lower.children().is_empty() && !popped_lower.empty() {
                         empty_upper_inner()
                     } else {
                         new_interface(popped_lower, i.acc.clone())
@@ -1781,10 +1886,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut current = interface.inner.clone();
         let mut remaining = n;
         while remaining > 0 {
-            let next_child = match current.children.len() {
+            let current_children = current.children();
+            let next_child = match current_children.len() {
                 0 => None,
                 1 => {
-                    let kids = current.children.values().next().expect("single child entry");
+                    let kids = current_children.values().next().expect("single child entry");
                     if kids.len() != 1 {
                         return None;
                     }
@@ -1796,12 +1902,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             if remaining == 1 {
                 let mut result = next_child
                     .unwrap_or_else(|| new_lower(IHashMap::new(), false));
-                if current.empty {
+                if current.empty() {
                     let terminal = new_lower(IHashMap::new(), true);
                     result = merge_lower(&result, &terminal);
                 }
 
-                if result.children.is_empty() && !result.empty {
+                if result.children_is_empty() && !result.empty() {
                     return Some(Self::empty());
                 }
 
@@ -1817,7 +1923,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             remaining -= 1;
         }
 
-        if current.children.is_empty() && !current.empty {
+        if current.children().is_empty() && !current.empty() {
             Some(Self::empty())
         } else {
             Some(Self {
@@ -1859,7 +1965,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
 
             let all_children: Vec<_> = node
-                .children
+                .children()
                 .values()
                 .flat_map(|kids| kids.values())
                 .cloned()
@@ -1878,7 +1984,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 it.fold(first, |acc, next| merge_lower(&acc, &next))
             };
 
-            if node.empty && k >= 1 {
+            if node.empty() && k >= 1 {
                 
                 merge_underflow(underflows, k as usize, acc.clone());
             }
@@ -1927,7 +2033,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Interface(i) => {
                     let popped_lower = popn_lower_uf::<T, A>(&i.inner, k, underflows, &i.acc, memo_lower);
-                    if popped_lower.children.is_empty() && !popped_lower.empty {
+                    if popped_lower.children().is_empty() && !popped_lower.empty() {
                         empty_upper_inner()
                     } else {
                         new_interface(popped_lower, i.acc.clone())
@@ -1984,8 +2090,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 result
             }
             Upper::Interface(i) => {
-                let mut result = Vec::with_capacity(i.inner.children.len());
-                for (val, kids) in i.inner.children.iter() {
+                let mut result = Vec::with_capacity(i.inner.children().len());
+                for (val, kids) in i.inner.children().iter() {
                     // Fast path: single child needs no merge.
                     let lower = if kids.len() == 1 {
                         kids.values().next().unwrap().clone()
@@ -1997,7 +2103,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         }
                         acc
                     };
-                    if !lower.children.is_empty() || lower.empty {
+                    if !lower.children_is_empty() || lower.empty() {
                         let upper = new_interface(lower, i.acc.clone());
                         result.push((val.clone(), LeveledGSS { inner: upper }));
                     }
@@ -2070,7 +2176,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 continue;
             }
             lower_nodes += 1;
-            for children in node.children.values() {
+            for children in node.children().values() {
                 total_edges += children.len();
                 for child in children.values() {
                     lower_queue.push_back(child.clone());
@@ -2100,7 +2206,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                 }
                 Upper::Interface(i) => {
-                    if !i.inner.empty && i.inner.children.len() == 1 && i.inner.children.contains_key(v) {
+                    if !i.inner.empty() && i.inner.children().len() == 1 && i.inner.children().contains_key(v) {
                         return self.clone();
                     }
                 }
@@ -2113,7 +2219,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                 }
                 Upper::Interface(i) => {
-                    if i.inner.children.is_empty() && i.inner.empty {
+                    if i.inner.children().is_empty() && i.inner.empty() {
                         return self.clone();
                     }
                 }
@@ -2141,10 +2247,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     try_promote(&new_b)
                 }
                 Upper::Interface(i) => {
-                    if let Some(kids) = i.inner.children.get(&val) {
+                    if let Some(kids) = i.inner.children().get(&val) {
                         let filtered_children = IHashMap::unit(val.clone(), kids.clone());
                         let max_depth = kids.get_max().map(|(depth, _)| *depth + 1).unwrap_or(0);
-                        let new_lower_root = Arc::new(Lower {
+                        let new_lower_root = Arc::new(Lower::General {
                             children: filtered_children,
                             empty: false,
                             max_depth,
@@ -2159,7 +2265,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             let empty_acc = match &*self.inner {
                 Upper::Branch(b) => b.empty.clone(),
                 Upper::Interface(i) => {
-                    if i.inner.empty {
+                    if i.inner.empty() {
                         Some(i.acc.clone())
                     } else {
                         None
@@ -2190,10 +2296,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             Upper::Interface(i) => {
                 let all_children_kept = i
                     .inner
-                    .children
+                    .children()
                     .keys()
                     .all(|k| values_set.contains(&Some(k.clone())));
-                let empty_kept_ok = i.inner.empty == values_set.contains(&None);
+                let empty_kept_ok = i.inner.empty() == values_set.contains(&None);
                 if all_children_kept && empty_kept_ok {
                     return self.clone();
                 }
@@ -2217,9 +2323,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 try_promote(&new_b)
             }
             Upper::Interface(i) => {
-                let keep_empty = values_set.contains(&None) && i.inner.empty;
+                let keep_empty = values_set.contains(&None) && i.inner.empty();
                 let mut filtered_children: Children<T, Lower<T>> = IHashMap::new();
-                for (v, kids) in i.inner.children.iter() {
+                for (v, kids) in i.inner.children().iter() {
                     if values_set.contains(&Some(v.clone())) {
                         filtered_children.insert(v.clone(), kids.clone());
                     }
@@ -2573,8 +2679,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     Some(a) => a,
                     None => return (Vec::new(), Vec::new()),
                 };
-                let mut result = Vec::with_capacity(i.inner.children.len());
-                for (val, kids) in i.inner.children.iter() {
+                let mut result = Vec::with_capacity(i.inner.children().len());
+                for (val, kids) in i.inner.children().iter() {
                     let lower = if kids.len() == 1 {
                         kids.values().next().unwrap().clone()
                     } else {
@@ -2585,7 +2691,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         }
                         acc
                     };
-                    if !lower.children.is_empty() || lower.empty {
+                    if !lower.children_is_empty() || lower.empty() {
                         let upper = new_interface(lower, new_acc.clone());
                         result.push((val.clone(), LeveledGSS { inner: upper }));
                     }
@@ -2778,12 +2884,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             let next_remain = remain.map(|r| r - 1);
 
-            let has_multi_depth_slots = node.children.values().any(|kids| kids.len() > 1);
+            let has_multi_depth_slots = node.children().values().any(|kids| kids.len() > 1);
 
             let mut new_children_by_value: StdHashMap<T, Vec<Arc<Lower<T>>>> = StdHashMap::new();
             let mut children_changed = false;
 
-            for (v, kids) in node.children.iter() {
+            for (v, kids) in node.children().iter() {
                 for child in kids.values() {
                     let fused_child = fuse_lower::<T, A>(child, next_remain, memo);
                     if !Arc::ptr_eq(&fused_child, child) {
@@ -2809,10 +2915,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 let mut it = fused_kids.into_iter();
                 let first = it.next().unwrap();
                 let merged_child = it.fold(first, |acc, next| merge_lower(&acc, &next));
-                final_children.insert(v, OrdMap::unit(merged_child.max_depth, merged_child));
+                final_children.insert(v, OrdMap::unit(merged_child.max_depth(), merged_child));
             }
 
-            let res = new_lower(final_children, node.empty);
+            let res = new_lower(final_children, node.empty());
             memo.insert(key, res.clone());
             res
         }
@@ -2841,7 +2947,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             let res = match &**node {
                 Upper::Interface(i) => {
-                    let has_multi_depth_slots = i.inner.children.values().any(|kids| kids.len() > 1);
+                    let has_multi_depth_slots = i.inner.children().values().any(|kids| kids.len() > 1);
                     let fused_lower = fuse_lower::<T, A>(&i.inner, next_remain, memo_lower);
                     if !has_multi_depth_slots && Arc::ptr_eq(&fused_lower, &i.inner) {
                         memo_upper.insert(key, node.clone());
@@ -2961,8 +3067,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 return cached;
             }
 
-            let mut count = usize::from(node.empty);
-            for children in node.children.values() {
+            let mut count = usize::from(node.empty());
+            for children in node.children().values() {
                 for child in children.values() {
                     count = capped_add(count, count_lower(child, limit, memo), limit);
                     if count == limit {
@@ -2993,7 +3099,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             let mut count = match &**node {
                 Upper::Branch(b) => usize::from(b.empty.is_some()),
-                Upper::Interface(i) => usize::from(i.inner.empty),
+                Upper::Interface(i) => usize::from(i.inner.empty()),
             };
 
             match &**node {
@@ -3013,7 +3119,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                 }
                 Upper::Interface(i) => {
-                    for children in i.inner.children.values() {
+                    for children in i.inner.children().values() {
                         for child in children.values() {
                             count = capped_add(count, count_lower(child, limit, memo_lower), limit);
                             if count == limit {
@@ -3255,7 +3361,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         num_interface_nodes += 1;
                         unique_accumulators.insert(i.acc.clone());
                         total_accumulator_instances += 1;
-                        if i.inner.empty {
+                        if i.inner.empty() {
                             num_interfaces_with_empty += 1;
                         }
 
@@ -3272,11 +3378,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             let nid = Arc::as_ptr(&node) as usize;
             if visited_lower.insert(nid) {
                 num_lower_nodes += 1;
-                if node.empty {
+                if node.empty() {
                     num_lower_terminal_nodes += 1;
                 }
-                max_lower_depth = std::cmp::max(max_lower_depth, node.max_depth);
-                for (v, kids) in node.children.iter() {
+                max_lower_depth = std::cmp::max(max_lower_depth, node.max_depth());
+                for (v, kids) in node.children().iter() {
                     distinct_values.insert(v.clone());
                     if kids.len() > 1 {
                         num_multi_depth_slots_lower += 1;
@@ -3366,7 +3472,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 return *id;
             }
             let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-            for (v, kids) in node.children.iter() {
+            for (v, kids) in node.children().iter() {
                 let e = edges.entry(v.clone()).or_default();
                 for child in kids.values() {
                     let cid = canon_lower_for_stats::<T, A>(child, memo_lower, interner);
@@ -3376,7 +3482,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 e.dedup();
             }
             let sig = StatsSig {
-                terminal: node.empty,
+                terminal: node.empty(),
                 edges,
             };
             let id = intern_stats_sig(sig, interner);
@@ -3414,7 +3520,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Interface(i) => {
                     let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-                    for (v, kids) in i.inner.children.iter() {
+                    for (v, kids) in i.inner.children().iter() {
                         let e = edges.entry(v.clone()).or_default();
                         for child in kids.values() {
                             let cid = canon_lower_for_stats::<T, A>(child, memo_lower, interner);
@@ -3423,7 +3529,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         e.sort_unstable();
                         e.dedup();
                     }
-                    let terminal = i.inner.empty;
+                    let terminal = i.inner.empty();
                     (terminal, edges)
                 }
             };
@@ -3539,9 +3645,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut info = format!(
             "Lower @ {:#x} (MaxDepth: {})",
             Arc::as_ptr(node) as usize,
-            node.max_depth
+            node.max_depth()
         );
-        if node.empty {
+        if node.empty() {
             info.push_str(" [TERMINAL]");
         }
         info
@@ -3572,7 +3678,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     node.max_depth(),
                     i.acc
                 );
-                if i.inner.empty {
+                if i.inner.empty() {
                     info.push_str(&format!(" [TERMINAL via acc: {:?}]", i.acc));
                 }
                 info
@@ -3591,11 +3697,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         printed_nodes.insert(Arc::as_ptr(node) as usize);
 
         let mut children_to_print = Vec::new();
-        let mut sorted_values: Vec<_> = node.children.keys().collect();
+        let node_children = node.children();
+        let mut sorted_values: Vec<_> = node_children.keys().collect();
         sorted_values.sort_by_key(|v| format!("{:?}", v));
 
         for v in sorted_values {
-            if let Some(kids_at_depths) = node.children.get(v) {
+            if let Some(kids_at_depths) = node_children.get(v) {
                 for (depth, child) in kids_at_depths.iter() {
                     let label = format!("Edge {:?} (d={})", v, depth);
                     children_to_print.push((label, child.clone()));
@@ -3693,20 +3800,21 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
             }
             Upper::Interface(i) => {
-                if upper_only && !i.inner.children.is_empty() {
+                if upper_only && !i.inner.children().is_empty() {
                     let prefix_char = "└── ";
-                    let num_lower_edges: usize = i.inner.children.values().map(|kids| kids.len()).sum();
+                    let num_lower_edges: usize = i.inner.children().values().map(|kids| kids.len()).sum();
                     let line = format!("{}[{} lower edges omitted]", prefix_char, num_lower_edges);
                     output_lines.push(format!("{}{}", current_prefix, line));
                     return;
                 }
 
                 let mut children_to_print = Vec::new();
-                let mut sorted_values: Vec<_> = i.inner.children.keys().collect();
+                let iface_children = i.inner.children();
+                let mut sorted_values: Vec<_> = iface_children.keys().collect();
                 sorted_values.sort_by_key(|v| format!("{:?}", v));
 
                 for v in sorted_values {
-                    if let Some(kids_at_depths) = i.inner.children.get(v) {
+                    if let Some(kids_at_depths) = iface_children.get(v) {
                         for (depth, child) in kids_at_depths.iter() {
                             let label = format!("Edge {:?} (d={})", v, depth);
                             children_to_print.push((label, child.clone()));
@@ -3771,7 +3879,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
             }
             Upper::Interface(i) => {
-                for (edge_val, children_by_depth) in &i.inner.children {
+                for (edge_val, children_by_depth) in &i.inner.children() {
                     let mut preds_by_depth: BTreeMap<u32, Vec<Self>> = BTreeMap::new();
                     for (depth, child_lower_arc) in children_by_depth {
                         let new_interface_upper = new_interface(
@@ -3812,7 +3920,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             return *cached;
         }
 
-        let mut info = if node.empty {
+        let mut info = if node.empty() {
             GSSPathsInfo {
                 num_paths: 1,
                 total_depth: 0,
@@ -3821,7 +3929,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             GSSPathsInfo::default()
         };
 
-        for children in node.children.values() {
+        for children in node.children().values() {
             for child in children.values() {
                 let child_info = Self::paths_info_lower(child, memo);
                 info.num_paths += child_info.num_paths;
@@ -3864,7 +3972,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 info
             }
             Upper::Interface(i) => {
-                let mut info = if i.inner.empty {
+                let mut info = if i.inner.empty() {
                     GSSPathsInfo {
                         num_paths: 1,
                         total_depth: 0,
@@ -3873,7 +3981,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     GSSPathsInfo::default()
                 };
 
-                for children in i.inner.children.values() {
+                for children in i.inner.children().values() {
                     for child in children.values() {
                         let child_info = Self::paths_info_lower(child, memo_lower);
                         info.num_paths += child_info.num_paths;
@@ -3986,8 +4094,10 @@ mod tests {
 
         match (&**inner_pop, &**inner_preds) {
             (Upper::Interface(i_pop), Upper::Interface(i_preds)) => {
-                let children_pop = i_pop.inner.children.get(&"B".to_string()).unwrap();
-                let children_preds = i_preds.inner.children.get(&"B".to_string()).unwrap();
+                let pop_children = i_pop.inner.children();
+                let preds_children = i_preds.inner.children();
+                let children_pop = pop_children.get(&"B".to_string()).unwrap();
+                let children_preds = preds_children.get(&"B".to_string()).unwrap();
                 let child_c_pop = children_pop.values().next().unwrap();
                 let child_c_preds = children_preds.values().next().unwrap();
                 assert!(Arc::ptr_eq(child_c_pop, child_c_preds));
@@ -4159,12 +4269,12 @@ mod tests {
         let l_terminal = new_lower::<i32>(IHashMap::new(), true);
 
         let l_500_parent = new_lower(
-            IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth, l_terminal.clone())),
+            IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth(), l_terminal.clone())),
             false,
         );
 
         let i_54_inner = new_lower(
-            IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth, l_500_parent.clone())),
+            IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth(), l_500_parent.clone())),
             false,
         );
         let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
