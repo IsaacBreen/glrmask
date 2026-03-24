@@ -25,6 +25,8 @@ const SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "SLOW_VOCAB_EQUIV_VERIFICATION";
 const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
 const REFERENCE_VOCAB_EQUIV_PRIMARY_ENV: &str = "REFERENCE_VOCAB_EQUIV_PRIMARY";
 const REFERENCE_STATE_EQUIV_PRIMARY_ENV: &str = "REFERENCE_STATE_EQUIV_PRIMARY";
+const SKIP_MAX_LENGTH_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV";
+const SKIP_TOKEN_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_TOKEN_STATE_EQUIV";
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -531,33 +533,49 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
-    let pre_state_reps = super::state::max_length::find_state_equivalence_classes(
-        regex,
-        tokens,
-        initial_states,
-    );
+    let skip_max_length = env_flag_enabled(SKIP_MAX_LENGTH_STATE_EQUIV_ENV);
+    let skip_token_state = env_flag_enabled(SKIP_TOKEN_STATE_EQUIV_ENV);
+
+    let pre_state_reps = if skip_max_length {
+        initial_states.to_vec()
+    } else {
+        super::state::max_length::find_state_equivalence_classes(
+            regex,
+            tokens,
+            initial_states,
+        )
+    };
 
     let mut rep_set: BTreeSet<usize> = BTreeSet::new();
     for &rep in &pre_state_reps {
         rep_set.insert(rep);
     }
 
-    let reduced_states: Vec<usize> = rep_set.into_iter().collect();
-    let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
-        regex,
-        tokens,
-        &reduced_states,
-    );
-    let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
-    for (i, &rep_state) in reduced_states.iter().enumerate() {
-        rep_to_final.insert(rep_state, reduced_state_reps[i]);
-    }
-    let state_reps: Vec<usize> = pre_state_reps
-        .iter()
-        .map(|pre_rep| rep_to_final[pre_rep])
-        .collect();
+    let pre_reduced_states: Vec<usize> = rep_set.into_iter().collect();
+    let state_reps = if skip_token_state {
+        pre_state_reps
+    } else {
+        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+            regex,
+            tokens,
+            &pre_reduced_states,
+        );
+        let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
+        for (i, &rep_state) in pre_reduced_states.iter().enumerate() {
+            rep_to_final.insert(rep_state, reduced_state_reps[i]);
+        }
+        pre_state_reps
+            .iter()
+            .map(|pre_rep| rep_to_final[pre_rep])
+            .collect()
+    };
     let state_classes =
         state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
+    let mut final_rep_set: BTreeSet<usize> = BTreeSet::new();
+    for &rep in &state_reps {
+        final_rep_set.insert(rep);
+    }
+    let reduced_states: Vec<usize> = final_rep_set.into_iter().collect();
 
     // Step 2: Vocab equivalence analysis on reduced states
     let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
