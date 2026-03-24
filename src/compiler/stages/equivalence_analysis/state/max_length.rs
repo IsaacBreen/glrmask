@@ -1,8 +1,14 @@
 //! Max-length bounded state equivalence prepass.
 //!
-//! Depth 0 hashes each state's own label data plus its outgoing label layout.
-//! Each later depth only mixes in the previous hashes of that state's unique
-//! outgoing destinations.
+//! This pass ignores actual token contents and uses only the maximum token
+//! length. Two states remain equivalent at depth `d` iff they have the same
+//! label and the same byte-to-previous-hash behavior for all paths up to
+//! depth `d`.
+//!
+//! This implementation is intentionally simple:
+//! - depth 0 hashes only each state's own label
+//! - each later depth groups outgoing bytes by the previous hash of the target
+//! - the final subset mapping is built from the depth-k hashes
 
 use std::collections::HashMap;
 
@@ -29,56 +35,53 @@ fn hash_sorted_set(values: &[usize], tag: u64) -> u64 {
 
 #[inline(always)]
 fn hash_state_label(state: &FlatDfaState) -> u64 {
-    let finalizers = hash_sorted_set(&state.finalizers, 0xF11A_F11A_F11A_F11A);
-    let futures = hash_sorted_set(&state.possible_future_group_ids, 0xF0C7_F0C7_F0C7_F0C7);
+    const FINALIZER_TAG: u64 = 0xF11A_F11A_F11A_F11A;
+    const FUTURE_TAG: u64 = 0xF0C7_F0C7_F0C7_F0C7;
+
+    let finalizers = hash_sorted_set(&state.finalizers, FINALIZER_TAG);
+    let futures = hash_sorted_set(&state.possible_future_group_ids, FUTURE_TAG);
     mix_u64(finalizers.wrapping_add(futures))
 }
 
 #[inline(always)]
-fn hash_transition_labels(label_hashes: &[u64]) -> u64 {
-    let mut hash = mix_u64((label_hashes.len() as u64) ^ 0x7F4A_7C15_9E37_79B9);
-    for &label_hash in label_hashes {
-        hash = mix_u64(hash ^ label_hash.wrapping_add(0xA24B_AED4_963E_E407));
-    }
-    hash
-}
-
-#[inline(always)]
-fn hash_transition_targets(targets: &[usize], prev_hashes: &[u64]) -> u64 {
-    let mut hash = mix_u64((targets.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
-    for &target in targets {
-        hash = mix_u64(hash ^ prev_hashes[target].rotate_left(17));
-    }
-    hash
-}
-
-fn build_state_shape(state: &FlatDfaState) -> (Vec<usize>, u64) {
-    let mut targets: Vec<usize> = Vec::new();
-    let mut label_hashes: Vec<u64> = Vec::new();
-    let mut index_by_target: HashMap<usize, usize> = HashMap::new();
+fn hash_transition_partition(state: &FlatDfaState, prev_hashes: &[u64], dead_hash: u64) -> u64 {
+    // Group bytes by the previous hash of their destination.
+    //
+    // This is the key property needed for equivalence with the original:
+    // transitions are partitioned by child hash class, not by concrete state id.
+    let mut byte_sum_by_child_hash: HashMap<u64, u64> = HashMap::new();
 
     for (byte, &target) in state.transitions.iter().enumerate() {
-        if target == u32::MAX {
-            continue;
-        }
+        let child_hash = if target == u32::MAX {
+            dead_hash
+        } else {
+            prev_hashes[target as usize]
+        };
 
         let byte_hash = mix_u64((byte as u64) ^ 0xD6E8_FD93_5E6C_A271);
-        let target = target as usize;
 
-        if let Some(&index) = index_by_target.get(&target) {
-            label_hashes[index] = label_hashes[index].wrapping_add(byte_hash);
-        } else {
-            index_by_target.insert(target, targets.len());
-            targets.push(target);
-            label_hashes.push(byte_hash);
-        }
+        byte_sum_by_child_hash
+            .entry(child_hash)
+            .and_modify(|acc| *acc = acc.wrapping_add(byte_hash))
+            .or_insert(byte_hash);
     }
 
-    (targets, hash_transition_labels(&label_hashes))
+    // Make the result independent of HashMap iteration order.
+    let mut buckets: Vec<(u64, u64)> = byte_sum_by_child_hash.into_iter().collect();
+    buckets.sort_unstable_by_key(|&(child_hash, byte_sum)| (child_hash, byte_sum));
+
+    let mut hash = mix_u64((buckets.len() as u64) ^ 0x7F4A_7C15_9E37_79B9);
+    for (child_hash, byte_sum) in buckets {
+        hash = mix_u64(
+            hash ^ mix_u64(child_hash ^ 0xA24B_AED4_963E_E407)
+                ^ mix_u64(byte_sum ^ 0xC3A5_C85C_97CB_3127),
+        );
+    }
+    hash
 }
 
 fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
-    let mut rep_for_hash = HashMap::new();
+    let mut rep_for_hash: HashMap<u64, usize> = HashMap::new();
     let mut mapping = Vec::with_capacity(states.len());
 
     for &state_id in states {
@@ -99,34 +102,25 @@ fn find_state_equivalence_classes_kstep(
     }
 
     let dfa = regex.dfa();
-    let mut outgoing_targets = Vec::with_capacity(dfa.states.len());
-    let mut prev_hashes = Vec::with_capacity(dfa.states.len());
+    let dead_hash = mix_u64(0xDEAD_BEEF_DEAD_BEEF);
 
-    for state in &dfa.states {
-        let (targets, _) = build_state_shape(state);
-        outgoing_targets.push(targets);
-        prev_hashes.push(hash_state_label(state));
+    // Depth 0: hash only the state's own label.
+    let label_hashes: Vec<u64> = dfa.states.iter().map(hash_state_label).collect();
+
+    if k == 0 {
+        return build_subset_mapping(states, &label_hashes);
     }
 
+    let mut prev_hashes = label_hashes.clone();
     let mut next_hashes = vec![0u64; dfa.states.len()];
 
-    for state_id in 0..dfa.states.len() {
-        let state = &dfa.states[state_id];
-        let (_, transition_label_hash) = build_state_shape(state);
-        next_hashes[state_id] = mix_u64(mix_u64(
-            prev_hashes[state_id]
-                ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes))
-            ^ transition_label_hash
-        );
-    }
-    std::mem::swap(&mut prev_hashes, &mut next_hashes);
-
-    for _ in 1..k {
-        for state_id in 0..dfa.states.len() {
-            next_hashes[state_id] = mix_u64(
-                prev_hashes[state_id]
-                    ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
-            );
+    // Depth d > 0:
+    // hash_d(state) = H(label(state), partition of bytes by hash_{d-1}(dest))
+    for _depth in 0..k {
+        for (state_id, state) in dfa.states.iter().enumerate() {
+            let trans_hash = hash_transition_partition(state, &prev_hashes, dead_hash);
+            next_hashes[state_id] =
+                mix_u64(label_hashes[state_id] ^ mix_u64(trans_hash ^ 0xA5A5_A5A5_5A5A_5A5A));
         }
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
     }
@@ -139,6 +133,11 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
-    let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
+    let max_len = tokens
+        .iter()
+        .map(|token| token.as_ref().len())
+        .max()
+        .unwrap_or(0);
+
     find_state_equivalence_classes_kstep(regex, states, max_len)
 }
