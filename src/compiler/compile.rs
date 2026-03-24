@@ -197,25 +197,16 @@ fn compile_prepared_with_profile(
     let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
     profile.disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
 
-    let id_map_started_at = Instant::now();
-    let mut internal_ids =
-        InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal);
-    profile.id_map_ms = elapsed_ms(id_map_started_at);
-    let token_bytes = vocab.entries.clone();
-
-    let (((mut terminal_dwa, mut possible_matches), terminal_dwa_ms), (templates, templates_ms)) = rayon::join(
+    let ((mut internal_ids, id_map_ms), (templates, templates_ms)) = rayon::join(
         || {
-            let terminal_dwa_started_at = Instant::now();
-            let result = build_terminal_dwa_with_possible_matches_and_coloring(
-                &analyzed_grammar,
+            let id_map_started_at = Instant::now();
+            let result = InternalIdMap::build(
                 &tokenizer,
                 vocab,
-                &internal_ids,
-                &terminal_coloring,
-                terminal_coloring_enabled,
+                &disallowed_follows,
                 prepared_grammar.ignore_terminal,
             );
-            (result, elapsed_ms(terminal_dwa_started_at))
+            (result, elapsed_ms(id_map_started_at))
         },
         || {
             let templates_started_at = Instant::now();
@@ -224,8 +215,21 @@ fn compile_prepared_with_profile(
             (templates, elapsed_ms(templates_started_at))
         },
     );
-    profile.terminal_dwa_ms = terminal_dwa_ms;
+    profile.id_map_ms = id_map_ms;
     profile.templates_ms = templates_ms;
+    let token_bytes = vocab.entries.clone();
+
+    let terminal_dwa_started_at = Instant::now();
+    let (mut terminal_dwa, mut possible_matches) = build_terminal_dwa_with_possible_matches_and_coloring(
+        &analyzed_grammar,
+        &tokenizer,
+        vocab,
+        &internal_ids,
+        &terminal_coloring,
+        terminal_coloring_enabled,
+        prepared_grammar.ignore_terminal,
+    );
+    profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
 
     let compact_started_at = Instant::now();
     let token_permutation = crate::compiler::stages::compact::compact_dwa_dimensions(

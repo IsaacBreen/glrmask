@@ -75,7 +75,12 @@ pub(crate) fn compute_terminal_coloring(table: &GLRTable) -> TerminalColoring {
 
     let mut adjacency = vec![BitSet::new(num_terminals); num_terminals];
     for row in &table.action {
-        let terminals: Vec<usize> = row.keys().map(|&terminal| terminal as usize).collect();
+        let terminals: Vec<usize> = row
+            .keys()
+            .copied()
+            .filter(|&terminal| (terminal as usize) < num_terminals)
+            .map(|terminal| terminal as usize)
+            .collect();
         for left_idx in 0..terminals.len() {
             let left = terminals[left_idx];
             for &right in &terminals[left_idx + 1..] {
