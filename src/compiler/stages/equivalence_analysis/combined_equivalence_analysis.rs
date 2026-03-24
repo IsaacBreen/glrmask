@@ -531,22 +531,31 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
-    // State equivalence remains a safe reduction even with disallowed follows:
-    // the unrestricted tokenizer behavior that this pass hashes is a refinement
-    // of any follow-constrained behavior, so later follow filtering can split
-    // classes further but cannot invalidate these merges.
-    let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+    let pre_state_reps = super::state::max_length::find_state_equivalence_classes(
         regex,
         tokens,
         initial_states,
     );
 
     let mut rep_set: BTreeSet<usize> = BTreeSet::new();
-    for &rep in &state_reps {
+    for &rep in &pre_state_reps {
         rep_set.insert(rep);
     }
 
     let reduced_states: Vec<usize> = rep_set.into_iter().collect();
+    let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+        regex,
+        tokens,
+        &reduced_states,
+    );
+    let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
+    for (i, &rep_state) in reduced_states.iter().enumerate() {
+        rep_to_final.insert(rep_state, reduced_state_reps[i]);
+    }
+    let state_reps: Vec<usize> = pre_state_reps
+        .iter()
+        .map(|pre_rep| rep_to_final[pre_rep])
+        .collect();
     let state_classes =
         state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
 
