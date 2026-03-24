@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -223,30 +218,6 @@ fn compile_repeat_upto_cps(
     split
 }
 
-fn graft_nfa_fragment(target: &mut NFA, fragment: NFA, start: u32, end: u32) {
-    debug_assert!(fragment.num_states() >= 2);
-
-    let mut state_map = Vec::with_capacity(fragment.num_states());
-    state_map.push(start);
-    state_map.push(end);
-    for _ in 2..fragment.num_states() {
-        state_map.push(target.add_state());
-    }
-
-    for (state_id, state) in fragment.states.into_iter().enumerate() {
-        let mapped_state = state_map[state_id];
-        for (set, next) in state.transitions {
-            target.add_u8set_transition(mapped_state, set, state_map[next as usize]);
-        }
-        for next in state.epsilon_transitions {
-            target.add_epsilon(mapped_state, state_map[next as usize]);
-        }
-        for finalizer in state.finalizers {
-            target.add_finalizer(mapped_state, finalizer);
-        }
-    }
-}
-
 fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
     match expr {
         Expr::U8Seq(bytes) => {
@@ -393,26 +364,6 @@ impl Expr {
     }
 }
 
-fn log_tokenizer_profile(
-    enabled: bool,
-    profile_label: &str,
-    phase: &str,
-    started_at: std::time::Instant,
-) {
-    if enabled {
-        eprintln!(
-            "[glrmask/profile][tokenizer] label={} {}_ms={:.3}",
-            profile_label,
-            phase,
-            started_at.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-}
-
-fn tokenizer_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_TOKENIZER").is_some()
-}
-
 /// Compile multiple expressions into a single multi-group [`Regex`].
 ///
 /// Each expression's index becomes its group ID in the resulting DFA.
@@ -420,41 +371,27 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
     build_regex_with_profile_label(exprs, "default")
 }
 
-pub fn build_regex_with_profile_label(exprs: &[Expr], profile_label: &str) -> Regex {
+pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> Regex {
     let plan = build_exclusion_compile_plan(exprs);
-    let profile_enabled = tokenizer_profile_enabled();
-
-    let phase_started_at = std::time::Instant::now();
     let group_sets: Vec<U8Set> = plan
         .compiled_exprs
         .iter()
         .map(|expr| expr_u8set(expr))
         .collect();
-    log_tokenizer_profile(profile_enabled, profile_label, "compute_group_sets", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
     let mut nfa = build_regex_nfa(&plan.compiled_exprs);
-    log_tokenizer_profile(profile_enabled, profile_label, "build_regex_nfa", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
     nfa.condense_epsilon_sccs();
-    log_tokenizer_profile(profile_enabled, profile_label, "condense_epsilon_sccs", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
     let mut dfa = nfa.to_dfa();
-    log_tokenizer_profile(profile_enabled, profile_label, "determinize_regex_nfa", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
     dfa.ensure_group_capacity(group_sets.len());
     for (group_id, set) in group_sets.into_iter().enumerate() {
         dfa.set_group_u8set(group_id as u32, set);
     }
-    log_tokenizer_profile(profile_enabled, profile_label, "assign_group_sets", phase_started_at);
 
     if !plan.exclusions.is_empty() {
-        let phase_started_at = std::time::Instant::now();
-        let _ = dfa.apply_group_exclusions(&plan.exclusions);
-        log_tokenizer_profile(profile_enabled, profile_label, "apply_exclusions", phase_started_at);
+        dfa.apply_group_exclusions(&plan.exclusions);
     }
 
     let mut dfa = if plan.visible_groups < plan.compiled_exprs.len() {
@@ -463,9 +400,7 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], profile_label: &str) -> Re
         dfa
     };
 
-    let phase_started_at = std::time::Instant::now();
     let dfa = dfa.minimize();
-    log_tokenizer_profile(profile_enabled, profile_label, "minimize_regex_dfa", phase_started_at);
     Regex { dfa }
 }
 

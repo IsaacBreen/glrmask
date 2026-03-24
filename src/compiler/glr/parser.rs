@@ -4,7 +4,7 @@ use super::analysis::EOF;
 use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{LeveledGSS, LeveledGSSSummary, Merge};
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use smallvec::SmallVec;
 
 pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
@@ -23,53 +23,6 @@ impl Merge for TerminalsDisallowed {
 }
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct AdvanceStacksDebugMetrics {
-    pub input_summary: LeveledGSSSummary,
-    pub output_summary: LeveledGSSSummary,
-    pub reduce_closure_iterations: usize,
-    pub frontier_states_total: usize,
-    pub frontier_states_max: usize,
-    pub reduce_rules_considered: usize,
-    pub popn_calls: usize,
-    pub popn_nonempty: usize,
-    pub goto_lookups: usize,
-    pub goto_hits: usize,
-    pub reductions_emitted: usize,
-    pub absorb_targets: usize,
-    pub shift_state_candidates: usize,
-    pub shift_targets_hit: usize,
-    pub shifted_results: usize,
-    pub reduce_rule_considered_counts: BTreeMap<u32, usize>,
-    pub reduce_rule_emitted_counts: BTreeMap<u32, usize>,
-    pub reduce_rhs_len_emitted_counts: BTreeMap<usize, usize>,
-    pub reduce_lhs_emitted_counts: BTreeMap<u32, usize>,
-    pub reduce_state_emitted_counts: BTreeMap<u32, usize>,
-    pub goto_from_counts: BTreeMap<u32, usize>,
-    pub goto_target_counts: BTreeMap<u32, usize>,
-    pub subtree_isolate_ns: u64,
-    pub pop_cache_build_ns: u64,
-    pub base_isolate_ns: u64,
-    pub absorb_push_ns: u64,
-    pub shift_top_values_ns: u64,
-    pub bookkeeping_ns: u64,
-}
-
-fn finalize_advance_timing(
-    metrics: &mut Option<&mut AdvanceStacksDebugMetrics>,
-    started_at: Option<std::time::Instant>,
-) {
-    if let (Some(metrics), Some(started_at)) = (metrics.as_deref_mut(), started_at) {
-        let measured = metrics.subtree_isolate_ns
-            + metrics.pop_cache_build_ns
-            + metrics.base_isolate_ns
-            + metrics.absorb_push_ns
-            + metrics.shift_top_values_ns;
-        let elapsed = started_at.elapsed().as_nanos() as u64;
-        metrics.bookkeeping_ns = elapsed.saturating_sub(measured);
-    }
-}
 
 #[cfg(test)]
 pub(crate) struct GLRParser {
@@ -214,9 +167,161 @@ fn valid_terminals_for_stack_vectors(
         .collect()
 }
 
-#[cfg(test)]
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
-    advance_stacks_with_metrics(table, stack, token, None)
+    if let Some(state) = stack.single_exclusive_top_value() {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => return stack.push(*target),
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => return stack.push(*target),
+            Some(Action::Reduce(_)) | Some(Action::Accept) | Some(Action::Split { .. }) => {}
+            None => return ParserGSS::empty(),
+        }
+    }
+
+    let frontier = stack.peek_values();
+    if frontier.is_empty() {
+        return ParserGSS::empty();
+    }
+
+    let mut pure_shift_targets = SmallVec::<[(u32, u32); 8]>::new();
+    let mut pure_shift_only = true;
+    let mut any_action = false;
+    for state in frontier.iter().copied() {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
+                any_action = true;
+                pure_shift_targets.push((state, *target));
+            }
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => {
+                any_action = true;
+                pure_shift_targets.push((state, *target));
+            }
+            Some(Action::Reduce(_))
+            | Some(Action::Accept)
+            | Some(Action::Split { .. }) => {
+                any_action = true;
+                pure_shift_only = false;
+                break;
+            }
+            None => {}
+        }
+    }
+    if !any_action {
+        return ParserGSS::empty();
+    }
+    if pure_shift_only && !pure_shift_targets.is_empty() {
+        return stack.shift_top_values(pure_shift_targets);
+    }
+
+    let mut current = stack.clone();
+    let mut processed = vec![false; table.num_states as usize];
+
+    loop {
+        let mut new_states = SmallVec::<[u32; 8]>::new();
+        if let Some(state) = current.single_top_value() {
+            if !processed[state as usize] {
+                new_states.push(state);
+            }
+        } else {
+            new_states.extend(
+                current
+                    .peek_values()
+                    .into_iter()
+                    .filter(|&state| !processed[state as usize]),
+            );
+        }
+        if new_states.is_empty() {
+            break;
+        }
+
+        let mut any_reduced = false;
+        let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
+        for state in new_states {
+            processed[state as usize] = true;
+            let reduce_rules: &[u32] = match table.action(state, token) {
+                Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
+                Some(Action::Split { reduces, .. }) => reduces.as_slice(),
+                _ => &[],
+            };
+            let subtree = current.isolate(Some(state));
+            let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
+            for &rule_id in reduce_rules {
+                let rule = &table.rules[rule_id as usize];
+                let rhs_len = rule.rhs.len();
+                let popped = subtree.popn(rhs_len as isize);
+                if popped.is_empty() {
+                    continue;
+                }
+
+                let mut handle_goto_from = |goto_from: u32| {
+                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        let base = if let Some((_, cached)) = base_cache.iter().find(
+                            |((cached_rhs_len, cached_goto_from), _)| {
+                                *cached_rhs_len == rhs_len && *cached_goto_from == goto_from
+                            },
+                        ) {
+                            cached.clone()
+                        } else {
+                            let isolated = popped.isolate(Some(goto_from));
+                            base_cache.push(((rhs_len, goto_from), isolated.clone()));
+                            isolated
+                        };
+                        if let Some((_, existing)) = pending_bases_by_target
+                            .iter_mut()
+                            .find(|(existing_target, _)| *existing_target == target)
+                        {
+                            *existing = existing.merge(&base);
+                        } else {
+                            pending_bases_by_target.push((target, base));
+                        }
+                        any_reduced = true;
+                    }
+                };
+
+                if let Some(goto_from) = popped.single_top_value() {
+                    handle_goto_from(goto_from);
+                } else {
+                    for goto_from in popped.peek_values() {
+                        handle_goto_from(goto_from);
+                    }
+                }
+            }
+        }
+        if !any_reduced {
+            break;
+        }
+        for (target, base) in pending_bases_by_target {
+            current = current.absorb_push(target, &base);
+        }
+    }
+
+    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
+    let mut handle_shift_state = |state: u32| {
+        let shift_target = match table.action(state, token) {
+            Some(Action::Shift(target)) => Some(*target),
+            Some(Action::Split { shift: Some(target), .. }) => Some(*target),
+            _ => None,
+        };
+        if let Some(target) = shift_target {
+            shift_pairs.push((state, target));
+        }
+    };
+
+    if let Some(state) = stack.single_exclusive_top_value() {
+        handle_shift_state(state);
+    } else {
+        for state in current.peek_values() {
+            handle_shift_state(state);
+        }
+    }
+    current.shift_top_values(shift_pairs)
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
@@ -256,314 +361,6 @@ pub(crate) fn stack_may_advance_on_any(
             false
         }
     })
-}
-
-pub(crate) fn advance_stacks_with_metrics(
-    table: &GLRTable,
-    stack: &ParserGSS,
-    token: TerminalID,
-    mut metrics: Option<&mut AdvanceStacksDebugMetrics>,
-) -> ParserGSS {
-    let t_total = metrics.as_ref().map(|_| std::time::Instant::now());
-
-    if let Some(state) = stack.single_exclusive_top_value() {
-        let out = match table.action(state, token) {
-            Some(Action::Shift(target)) => {
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.input_summary = stack.summary();
-                    metrics.shift_state_candidates = 1;
-                    metrics.shift_targets_hit = 1;
-                    metrics.shifted_results = 1;
-                }
-                stack.push(*target)
-            }
-            Some(Action::Split {
-                shift: Some(target),
-                reduces,
-                accept,
-            }) if reduces.is_empty() && !*accept => {
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.input_summary = stack.summary();
-                    metrics.shift_state_candidates = 1;
-                    metrics.shift_targets_hit = 1;
-                    metrics.shifted_results = 1;
-                }
-                stack.push(*target)
-            }
-            Some(Action::Reduce(_))
-            | Some(Action::Accept)
-            | Some(Action::Split { .. }) => ParserGSS::empty(),
-            None => {
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.input_summary = stack.summary();
-                    metrics.output_summary = LeveledGSSSummary::default();
-                }
-                finalize_advance_timing(&mut metrics, t_total);
-                return ParserGSS::empty();
-            }
-        };
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.output_summary = out.summary();
-        }
-        if !out.is_empty() {
-            finalize_advance_timing(&mut metrics, t_total);
-            return out;
-        }
-    }
-
-    let frontier = stack.peek_values();
-    if frontier.is_empty() {
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.input_summary = stack.summary();
-            metrics.output_summary = LeveledGSSSummary::default();
-        }
-        finalize_advance_timing(&mut metrics, t_total);
-        return ParserGSS::empty();
-    }
-
-    let mut pure_shift_targets = SmallVec::<[(u32, u32); 8]>::new();
-    let mut pure_shift_only = true;
-    let mut any_action = false;
-    for state in frontier.iter().copied() {
-        match table.action(state, token) {
-            Some(Action::Shift(target)) => {
-                any_action = true;
-                pure_shift_targets.push((state, *target));
-            }
-            Some(Action::Split {
-                shift: Some(target),
-                reduces,
-                accept,
-            }) if reduces.is_empty() && !*accept => {
-                any_action = true;
-                pure_shift_targets.push((state, *target));
-            }
-            Some(Action::Reduce(_))
-            | Some(Action::Accept)
-            | Some(Action::Split { .. }) => {
-                any_action = true;
-                pure_shift_only = false;
-                break;
-            }
-            None => {}
-        }
-    }
-    if !any_action {
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.input_summary = stack.summary();
-            metrics.output_summary = LeveledGSSSummary::default();
-        }
-        finalize_advance_timing(&mut metrics, t_total);
-        return ParserGSS::empty();
-    }
-    if pure_shift_only && !pure_shift_targets.is_empty() {
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.input_summary = stack.summary();
-            metrics.shift_state_candidates = frontier.len();
-        }
-        let shifted_result_count = pure_shift_targets.len();
-        let t_shift = metrics
-            .as_ref()
-            .map(|_| std::time::Instant::now());
-        let out = stack.shift_top_values(pure_shift_targets);
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.shift_targets_hit = shifted_result_count;
-            metrics.shifted_results = shifted_result_count;
-        }
-        if let (Some(metrics), Some(t_shift)) = (metrics.as_deref_mut(), t_shift) {
-            metrics.shift_top_values_ns += t_shift.elapsed().as_nanos() as u64;
-        }
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.output_summary = out.summary();
-        }
-        finalize_advance_timing(&mut metrics, t_total);
-        return out;
-    }
-
-    // Reduce closure: iteratively apply all reduce actions on the GSS directly.
-    let mut current = stack.clone();
-    let mut processed = vec![false; table.num_states as usize];
-
-    if let Some(metrics) = metrics.as_deref_mut() {
-        metrics.input_summary = stack.summary();
-    }
-
-    loop {
-        let mut new_states = SmallVec::<[u32; 8]>::new();
-        if let Some(state) = current.single_top_value() {
-            if !processed[state as usize] {
-                new_states.push(state);
-            }
-        } else {
-            new_states.extend(
-                current
-                    .peek_values()
-                    .into_iter()
-                    .filter(|&state| !processed[state as usize]),
-            );
-        }
-        if new_states.is_empty() {
-            break;
-        }
-
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.reduce_closure_iterations += 1;
-            metrics.frontier_states_total += new_states.len();
-            metrics.frontier_states_max = metrics.frontier_states_max.max(new_states.len());
-        }
-
-        let mut any_reduced = false;
-        let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
-        for state in new_states {
-            processed[state as usize] = true;
-            let reduce_rules: &[u32] = match table.action(state, token) {
-                Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
-                Some(Action::Split { reduces, .. }) => reduces.as_slice(),
-                _ => &[],
-            };
-            if let Some(metrics) = metrics.as_deref_mut() {
-                metrics.reduce_rules_considered += reduce_rules.len();
-                for &rule_id in reduce_rules {
-                    *metrics.reduce_rule_considered_counts.entry(rule_id).or_default() += 1;
-                }
-            }
-            let t_subtree = metrics
-                .as_ref()
-                .map(|_| std::time::Instant::now());
-            let subtree = current.isolate(Some(state));
-            if let (Some(metrics), Some(t_subtree)) = (metrics.as_deref_mut(), t_subtree) {
-                metrics.subtree_isolate_ns += t_subtree.elapsed().as_nanos() as u64;
-            }
-            let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
-            for &rule_id in reduce_rules {
-                let rule = &table.rules[rule_id as usize];
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.popn_calls += 1;
-                }
-                let rhs_len = rule.rhs.len();
-                let popped = subtree.popn(rhs_len as isize);
-                if popped.is_empty() {
-                    continue;
-                }
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.popn_nonempty += 1;
-                }
-                let mut handle_goto_from = |goto_from: u32,
-                                            metrics: &mut Option<&mut AdvanceStacksDebugMetrics>| {
-                    if let Some(metrics) = metrics.as_deref_mut() {
-                        metrics.goto_lookups += 1;
-                    }
-                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        let base = if let Some((_, cached)) = base_cache.iter().find(
-                            |((cached_rhs_len, cached_goto_from), _)| {
-                                *cached_rhs_len == rhs_len && *cached_goto_from == goto_from
-                            },
-                        ) {
-                            cached.clone()
-                        } else {
-                            let t_base_isolate = metrics
-                                .as_ref()
-                                .map(|_| std::time::Instant::now());
-                            let isolated = popped.isolate(Some(goto_from));
-                            if let (Some(metrics), Some(t_base_isolate)) =
-                                (metrics.as_deref_mut(), t_base_isolate)
-                            {
-                                metrics.base_isolate_ns +=
-                                    t_base_isolate.elapsed().as_nanos() as u64;
-                            }
-                            base_cache.push(((rhs_len, goto_from), isolated.clone()));
-                            isolated
-                        };
-                        if let Some((_, existing)) = pending_bases_by_target
-                            .iter_mut()
-                            .find(|(existing_target, _)| *existing_target == target)
-                        {
-                            *existing = existing.merge(&base);
-                        } else {
-                            pending_bases_by_target.push((target, base));
-                        }
-                        any_reduced = true;
-                        if let Some(metrics) = metrics.as_deref_mut() {
-                            metrics.goto_hits += 1;
-                            metrics.reductions_emitted += 1;
-                            *metrics.reduce_rule_emitted_counts.entry(rule_id).or_default() += 1;
-                            *metrics
-                                .reduce_rhs_len_emitted_counts
-                                .entry(rule.rhs.len())
-                                .or_default() += 1;
-                            *metrics.reduce_lhs_emitted_counts.entry(rule.lhs).or_default() += 1;
-                            *metrics.reduce_state_emitted_counts.entry(state).or_default() += 1;
-                            *metrics.goto_from_counts.entry(goto_from).or_default() += 1;
-                            *metrics.goto_target_counts.entry(target).or_default() += 1;
-                        }
-                    }
-                };
-
-                if let Some(goto_from) = popped.single_top_value() {
-                    handle_goto_from(goto_from, &mut metrics);
-                } else {
-                    for goto_from in popped.peek_values() {
-                        handle_goto_from(goto_from, &mut metrics);
-                    }
-                }
-            }
-        }
-        if !any_reduced {
-            break;
-        }
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.absorb_targets += pending_bases_by_target.len();
-        }
-        for (target, base) in pending_bases_by_target {
-            let t_absorb = metrics
-                .as_ref()
-                .map(|_| std::time::Instant::now());
-            current = current.absorb_push(target, &base);
-            if let (Some(metrics), Some(t_absorb)) = (metrics.as_deref_mut(), t_absorb) {
-                metrics.absorb_push_ns += t_absorb.elapsed().as_nanos() as u64;
-            }
-        }
-    }
-
-    // Shift phase: for each state with a shift action, push the target.
-    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    let mut handle_shift_state = |state: u32, metrics: &mut Option<&mut AdvanceStacksDebugMetrics>| {
-        if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.shift_state_candidates += 1;
-        }
-        let shift_target = match table.action(state, token) {
-            Some(Action::Shift(target)) => Some(*target),
-            Some(Action::Split { shift: Some(target), .. }) => Some(*target),
-            _ => None,
-        };
-        if let Some(target) = shift_target {
-            shift_pairs.push((state, target));
-            if let Some(metrics) = metrics.as_deref_mut() {
-                metrics.shift_targets_hit += 1;
-                metrics.shifted_results += 1;
-            }
-        }
-    };
-
-    if let Some(state) = current.single_top_value() {
-        handle_shift_state(state, &mut metrics);
-    } else {
-        for state in current.peek_values() {
-            handle_shift_state(state, &mut metrics);
-        }
-    }
-    let t_shift = metrics
-        .as_ref()
-        .map(|_| std::time::Instant::now());
-    let out = current.shift_top_values(shift_pairs);
-    if let (Some(metrics), Some(t_shift)) = (metrics.as_deref_mut(), t_shift) {
-        metrics.shift_top_values_ns += t_shift.elapsed().as_nanos() as u64;
-    }
-    if let Some(metrics) = metrics.as_deref_mut() {
-        metrics.output_summary = out.summary();
-    }
-    finalize_advance_timing(&mut metrics, t_total);
-    out
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {

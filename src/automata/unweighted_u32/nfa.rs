@@ -7,15 +7,9 @@
 //!
 //! Mirrors the structure of sep1's `dfa_i32::nfa::NFA`.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use super::dfa::Label;
-
-// ---------------------------------------------------------------------------
-// NFA state
-// ---------------------------------------------------------------------------
 
 /// A single NFA state with non-deterministic transitions and epsilon edges.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,10 +21,6 @@ pub struct NFAState {
     /// Epsilon (unlabeled) transitions.
     pub epsilons: Vec<u32>,
 }
-
-// ---------------------------------------------------------------------------
-// NFA
-// ---------------------------------------------------------------------------
 
 /// Non-deterministic Finite Automaton with i32 labels and epsilon transitions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -176,10 +166,6 @@ impl std::fmt::Display for NFA {
         Ok(())
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

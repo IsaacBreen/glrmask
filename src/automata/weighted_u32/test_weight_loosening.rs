@@ -52,16 +52,6 @@ fn test_weight_loosening_loosens_unreachable() {
     // State 1 is final but only for TSIDs [5..=10]
     dwa.set_final_weight(s1, weight_from_range(5, 10));
 
-    println!("Before minimization:");
-    println!(
-        "  State {} final weight: {:?}",
-        s1, dwa.states[s1 as usize].final_weight
-    );
-    println!(
-        "  Transition 0->1 weight: {:?}",
-        dwa.states[0].transitions.get(&(1 as Label))
-    );
-
     // Verify no word accepts before minimization
     let accept_before = dwa.eval_word(&[1 as Label]);
     assert!(
@@ -73,9 +63,6 @@ fn test_weight_loosening_loosens_unreachable() {
     // Apply minimization (standalone fn, returns new DWA)
     let minimized = minimize::minimize(&dwa);
 
-    println!("\nAfter minimization:");
-    println!("  Num states: {}", minimized.num_states());
-
     // Verify semantics preserved after minimization
     let accept_after = minimized.eval_word(&[1 as Label]);
     assert!(
@@ -83,6 +70,4 @@ fn test_weight_loosening_loosens_unreachable() {
         "Expected no acceptance after minimization, got {:?}",
         accept_after
     );
-
-    println!("\n✓ Minimization preserved semantics!");
 }

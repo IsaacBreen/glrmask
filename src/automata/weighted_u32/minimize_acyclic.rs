@@ -25,42 +25,6 @@ type Label = i32;
 
 const UNMAPPED: u32 = u32::MAX;
 
-#[derive(Default)]
-struct MinimizeAcyclicProfile {
-    height_buckets: usize,
-    total_candidates: usize,
-    max_candidates: usize,
-    singleton_buckets: usize,
-    all_compatible_buckets: usize,
-    dense_graph_buckets: usize,
-    sparse_graph_buckets: usize,
-    dense_pair_candidates: usize,
-    sparse_overlap_pairs: usize,
-    compatibility_checks: usize,
-    push_weights_ms: std::time::Duration,
-    topo_needed_ms: std::time::Duration,
-    graph_color_ms: std::time::Duration,
-    sig_hash_ms: std::time::Duration,
-    sig_graph_build_ms: std::time::Duration,
-    sig_color_ms: std::time::Duration,
-    sig_map_back_ms: std::time::Duration,
-    sparse_overlap_ms: std::time::Duration,
-    sparse_label_conflicts_ms: std::time::Duration,
-    sparse_compatibility_ms: std::time::Duration,
-    merge_rebuild_ms: std::time::Duration,
-    merge_state_calls: usize,
-    merge_final_needed_ms: std::time::Duration,
-    merge_transition_loop_ms: std::time::Duration,
-    builder_finalize_ms: std::time::Duration,
-    reconstruct_ms: std::time::Duration,
-    try_all_compatible_ms: std::time::Duration,
-    setup_extend_ms: std::time::Duration,
-}
-
-fn minimize_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_MINIMIZE_ACYCLIC").is_some()
-}
-
 fn weight_body_id(weight: &Weight) -> usize {
     Arc::as_ptr(&weight.0) as usize
 }
@@ -630,16 +594,12 @@ fn build_incompatibility_graph(
     needed: &[Weight],
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
-    profile: &mut MinimizeAcyclicProfile,
 ) -> Vec<Vec<usize>> {
     let nc = candidates.len();
     let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
-    profile.dense_graph_buckets += 1;
-    profile.dense_pair_candidates += nc.saturating_sub(1) * nc / 2;
 
     for i in 0..nc {
         for j in (i + 1)..nc {
-            profile.compatibility_checks += 1;
             if !are_compatible(
                 candidates[i],
                 candidates[j],
@@ -720,23 +680,17 @@ fn build_incompatibility_graph_sparse(
     needed: &[Weight],
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
-    profile: &mut MinimizeAcyclicProfile,
 ) -> Option<Vec<Vec<usize>>> {
-    let phase_started_at = std::time::Instant::now();
     let overlap_pairs = overlapping_candidate_pairs(candidates, needed)?;
-    profile.sparse_overlap_ms += phase_started_at.elapsed();
 
     let nc = candidates.len();
     let mut incompatible_pairs = FxHashSet::default();
-    profile.sparse_graph_buckets += 1;
-    profile.sparse_overlap_pairs += overlap_pairs.len();
 
     // Sparse needed-set overlap is not sufficient on its own: even disjoint-needed
     // states are incompatible if they expose the same label but remap it to
     // different targets. Seed the sparse graph with those label-target conflicts.
     let mut label_targets: rustc_hash::FxHashMap<Label, rustc_hash::FxHashMap<u32, Vec<usize>>> =
         rustc_hash::FxHashMap::default();
-    let phase_started_at = std::time::Instant::now();
     for (candidate_idx, &state_id) in candidates.iter().enumerate() {
         for transition in &productive_transitions[state_id] {
             let mapped = old_to_new[transition.target as usize];
@@ -751,7 +705,6 @@ fn build_incompatibility_graph_sparse(
                 .push(candidate_idx);
         }
     }
-    profile.sparse_label_conflicts_ms += phase_started_at.elapsed();
 
     for target_groups in label_targets.into_values() {
         if target_groups.len() <= 1 {
@@ -774,9 +727,6 @@ fn build_incompatibility_graph_sparse(
         }
     }
 
-    profile.compatibility_checks += overlap_pairs.len();
-
-    let phase_started_at = std::time::Instant::now();
     for (i, j) in overlap_pairs {
         if incompatible_pairs.contains(&(i, j)) {
             continue;
@@ -793,7 +743,6 @@ fn build_incompatibility_graph_sparse(
             incompatible_pairs.insert((i, j));
         }
     }
-    profile.sparse_compatibility_ms += phase_started_at.elapsed();
 
     let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
     for (i, j) in incompatible_pairs {
@@ -858,12 +807,10 @@ fn build_and_color_with_signature_dedup(
     needed: &[Weight],
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
-    profile: &mut MinimizeAcyclicProfile,
 ) -> Vec<usize> {
     let nc = candidates.len();
 
     // Step 1: Compute signatures for all candidates
-    let phase_started_at = std::time::Instant::now();
     let signatures: Vec<u64> = candidates
         .iter()
         .map(|&id| compute_state_signature(id, dwa, needed, old_to_new, productive_transitions))
@@ -879,29 +826,17 @@ fn build_and_color_with_signature_dedup(
             rep
         });
     }
-    profile.sig_hash_ms += phase_started_at.elapsed();
-
-    let k = unique_indices.len();
-
-    if minimize_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][sig_dedup] candidates={} unique_sigs={} dedup_ratio={:.2}",
-            nc, k, k as f64 / nc as f64,
-        );
-    }
 
     // Step 3: Build sub-candidate list of unique representatives
     let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
 
     // Step 4: Build and color the representative graph using sparse overlap
-    let phase_started_at = std::time::Instant::now();
     let rep_adj = build_incompatibility_graph_sparse(
         dwa,
         &rep_candidates,
         needed,
         old_to_new,
         productive_transitions,
-        profile,
     )
     .unwrap_or_else(|| {
         build_incompatibility_graph(
@@ -910,23 +845,17 @@ fn build_and_color_with_signature_dedup(
             needed,
             old_to_new,
             productive_transitions,
-            profile,
         )
     });
-    profile.sig_graph_build_ms += phase_started_at.elapsed();
 
-    let phase_started_at = std::time::Instant::now();
     let rep_coloring = greedy_coloring(&rep_adj);
-    profile.sig_color_ms += phase_started_at.elapsed();
 
     // Step 5: Map all candidates back — each gets the color of its representative
-    let phase_started_at = std::time::Instant::now();
     let mut coloring = vec![0usize; nc];
     for (idx, &sig) in signatures.iter().enumerate() {
         let rep = sig_to_rep_idx[&sig];
         coloring[idx] = rep_coloring[rep];
     }
-    profile.sig_map_back_ms += phase_started_at.elapsed();
 
     coloring
 }
@@ -1364,10 +1293,7 @@ fn merge_state_into_builder(
     dwa: &DWA,
     old_to_new: &[u32],
     builders: &mut [MergedStateBuilder],
-    profile: &mut MinimizeAcyclicProfile,
 ) {
-    profile.merge_state_calls += 1;
-    let phase_started_at = std::time::Instant::now();
     let builder = &mut builders[color];
     let old_state = &dwa.states[old_id];
 
@@ -1375,10 +1301,8 @@ fn merge_state_into_builder(
     if let Some(fw) = &old_state.final_weight {
         builder.add_final_weight(fw);
     }
-    profile.merge_final_needed_ms += phase_started_at.elapsed();
 
     // Merge transitions
-    let phase_started_at = std::time::Instant::now();
     let n = dwa.states.len();
     for (&label, (target_raw, w_orig)) in &old_state.transitions {
         let t = *target_raw as usize;
@@ -1396,7 +1320,6 @@ fn merge_state_into_builder(
             builder.add_transition(label, target_new, w_orig.clone());
         }
     }
-    profile.merge_transition_loop_ms += phase_started_at.elapsed();
 }
 
 fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedStateBuilder>) -> DWA {
@@ -1445,17 +1368,11 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
     if dwa.states.is_empty() {
         return dwa.clone();
     }
-    let profile_enabled = minimize_profile_enabled();
-    let started_at = std::time::Instant::now();
-    let mut profile = MinimizeAcyclicProfile::default();
 
     // Clone and push weights
-    let phase_started_at = std::time::Instant::now();
     let mut pushed = dwa.clone();
     let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
-    profile.push_weights_ms = phase_started_at.elapsed();
 
-    let phase_started_at = std::time::Instant::now();
     // Reuse topo order from push_weights (graph structure unchanged by push).
     let topo = match topo_from_push {
         Some(t) => t,
@@ -1471,7 +1388,6 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
     let productive_transitions = compute_productive_transitions(&pushed, &needed);
     let heights = compute_heights(&pushed, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
-    profile.topo_needed_ms = phase_started_at.elapsed();
 
     let n = pushed.states.len();
     let start_state = pushed.start_state as usize;
@@ -1515,18 +1431,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
         if candidates.is_empty() {
             continue;
         }
-        profile.height_buckets += 1;
-        profile.total_candidates += candidates.len();
-        profile.max_candidates = profile.max_candidates.max(candidates.len());
-        if candidates.len() == 1 {
-            profile.singleton_buckets += 1;
-        }
-
-        let phase_started_at = std::time::Instant::now();
-        let tac_started = std::time::Instant::now();
-        if h == 0 && let Some(coloring) = try_all_compatible_height_0_coloring(candidates, &pushed, &needed) {
-            profile.try_all_compatible_ms += tac_started.elapsed();
-            profile.all_compatible_buckets += 1;
+        if h == 0 && try_all_compatible_height_0_coloring(candidates, &pushed, &needed).is_some() {
             let base_new_id = new_states.len() as u32;
             let num_colors = 1usize;
 
@@ -1544,15 +1449,11 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
                     &pushed,
                     &old_to_new,
                     builders,
-                    &mut profile,
                 );
             }
-            let finalize_started_at = std::time::Instant::now();
             for builder in builders.iter_mut() {
                 builder.finalize_for_reuse();
             }
-            profile.builder_finalize_ms += finalize_started_at.elapsed();
-            profile.merge_rebuild_ms += phase_started_at.elapsed();
             continue;
         }
 
@@ -1561,18 +1462,24 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
         // (final_weight_on_needed, mapped transitions, weights) share a
         // signature and are guaranteed compatible, so we only build the
         // O(K²) graph among unique-signature representatives (K << N).
-        let graph_started_at = std::time::Instant::now();
-        let coloring = build_and_color_with_signature_dedup(
-            &pushed,
-            candidates,
-            &needed,
-            &old_to_new,
-            &productive_transitions,
-            &mut profile,
-        );
-        profile.graph_color_ms += graph_started_at.elapsed();
+        let coloring = if candidates.len() > partition_refine_threshold {
+            partition_refine_coloring(
+                candidates,
+                &pushed,
+                &needed,
+                &old_to_new,
+                &productive_transitions,
+            )
+        } else {
+            build_and_color_with_signature_dedup(
+                &pushed,
+                candidates,
+                &needed,
+                &old_to_new,
+                &productive_transitions,
+            )
+        };
 
-        let setup_started = std::time::Instant::now();
         let base_new_id = new_states.len() as u32;
         let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
 
@@ -1583,7 +1490,6 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
 
         // Extend builders
         new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
-        profile.setup_extend_ms += setup_started.elapsed();
 
         // Merge states into builders
         let builders = &mut new_states[base_new_id as usize..];
@@ -1594,57 +1500,14 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
                 &pushed,
                 &old_to_new,
                 builders,
-                &mut profile,
             );
         }
-        let finalize_started_at = std::time::Instant::now();
         for builder in builders.iter_mut() {
             builder.finalize_for_reuse();
         }
-        profile.builder_finalize_ms += finalize_started_at.elapsed();
-        profile.merge_rebuild_ms += phase_started_at.elapsed();
     }
 
-    let reconstruct_started_at = std::time::Instant::now();
     let minimized = reconstruct_dwa(start_state, &old_to_new, new_states);
-    profile.reconstruct_ms = reconstruct_started_at.elapsed();
-    profile.merge_rebuild_ms += reconstruct_started_at.elapsed();
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][minimize_acyclic] total_ms={:.3} input_states={} output_states={} height_buckets={} total_candidates={} max_candidates={} singleton_buckets={} all_compatible_buckets={} dense_graph_buckets={} sparse_graph_buckets={} dense_pair_candidates={} sparse_overlap_pairs={} compatibility_checks={} push_weights_ms={:.3} topo_needed_ms={:.3} graph_color_ms={:.3} sig_hash_ms={:.3} sig_graph_build_ms={:.3} sig_color_ms={:.3} sig_map_back_ms={:.3} sparse_overlap_ms={:.3} sparse_label_conflicts_ms={:.3} sparse_compatibility_ms={:.3} merge_rebuild_ms={:.3} merge_state_calls={} merge_final_needed_ms={:.3} merge_transition_loop_ms={:.3} builder_finalize_ms={:.3} reconstruct_ms={:.3} try_all_compatible_ms={:.3} setup_extend_ms={:.3}",
-            started_at.elapsed().as_secs_f64() * 1000.0,
-            dwa.states.len(),
-            minimized.states.len(),
-            profile.height_buckets,
-            profile.total_candidates,
-            profile.max_candidates,
-            profile.singleton_buckets,
-            profile.all_compatible_buckets,
-            profile.dense_graph_buckets,
-            profile.sparse_graph_buckets,
-            profile.dense_pair_candidates,
-            profile.sparse_overlap_pairs,
-            profile.compatibility_checks,
-            profile.push_weights_ms.as_secs_f64() * 1000.0,
-            profile.topo_needed_ms.as_secs_f64() * 1000.0,
-            profile.graph_color_ms.as_secs_f64() * 1000.0,
-            profile.sig_hash_ms.as_secs_f64() * 1000.0,
-            profile.sig_graph_build_ms.as_secs_f64() * 1000.0,
-            profile.sig_color_ms.as_secs_f64() * 1000.0,
-            profile.sig_map_back_ms.as_secs_f64() * 1000.0,
-            profile.sparse_overlap_ms.as_secs_f64() * 1000.0,
-            profile.sparse_label_conflicts_ms.as_secs_f64() * 1000.0,
-            profile.sparse_compatibility_ms.as_secs_f64() * 1000.0,
-            profile.merge_rebuild_ms.as_secs_f64() * 1000.0,
-            profile.merge_state_calls,
-            profile.merge_final_needed_ms.as_secs_f64() * 1000.0,
-            profile.merge_transition_loop_ms.as_secs_f64() * 1000.0,
-            profile.builder_finalize_ms.as_secs_f64() * 1000.0,
-            profile.reconstruct_ms.as_secs_f64() * 1000.0,
-            profile.try_all_compatible_ms.as_secs_f64() * 1000.0,
-            profile.setup_extend_ms.as_secs_f64() * 1000.0,
-        );
-    }
     minimized
 }
 
@@ -1656,17 +1519,12 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     if dwa.states.is_empty() {
         return dwa.clone();
     }
-    let profile_enabled = minimize_profile_enabled();
-    let started_at = std::time::Instant::now();
-    let mut profile = MinimizeAcyclicProfile::default();
 
-    let phase_started_at = std::time::Instant::now();
     let Some(topo) = compute_topo_order(dwa) else {
         return dwa.clone(); // cyclic
     };
     let heights = compute_heights(dwa, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
-    profile.topo_needed_ms = phase_started_at.elapsed();
 
     let n = dwa.states.len();
     let start_state = dwa.start_state as usize;
@@ -1698,16 +1556,12 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
         if candidates.is_empty() { continue; }
-        profile.height_buckets += 1;
-        profile.total_candidates += candidates.len();
 
-        let graph_started_at = std::time::Instant::now();
         let coloring = partition_refine_coloring_raw(
             candidates,
             dwa,
             &old_to_new,
         );
-        profile.graph_color_ms += graph_started_at.elapsed();
 
         let base_new_id = next_new_id;
         let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
@@ -1723,7 +1577,6 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     }
 
     // Phase 2: Build output DWA.
-    let merge_started_at = std::time::Instant::now();
     let minimized = if !any_merging {
         // Fast path: no merging happened — just remap state IDs without cloning weights.
         let total_new = next_new_id as usize;
@@ -1753,7 +1606,6 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
             .collect();
         for (old_id, &new_id) in old_to_new.iter().enumerate() {
             if new_id == UNMAPPED { continue; }
-            profile.merge_state_calls += 1;
             let builder = &mut new_states[new_id as usize];
             let old_state = &dwa.states[old_id];
 
@@ -1776,19 +1628,6 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
         }
         reconstruct_dwa(start_state, &old_to_new, new_states)
     };
-    profile.merge_rebuild_ms = merge_started_at.elapsed();
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][minimize_acyclic_fast] total_ms={:.3} input_states={} output_states={} push_ms={:.3} topo_ms={:.3} color_ms={:.3} merge_ms={:.3}",
-            started_at.elapsed().as_secs_f64() * 1000.0,
-            dwa.states.len(),
-            minimized.states.len(),
-            profile.push_weights_ms.as_secs_f64() * 1000.0,
-            profile.topo_needed_ms.as_secs_f64() * 1000.0,
-            profile.graph_color_ms.as_secs_f64() * 1000.0,
-            profile.merge_rebuild_ms.as_secs_f64() * 1000.0,
-        );
-    }
     minimized
 }
 
@@ -1830,14 +1669,12 @@ mod tests {
         old_to_new[target_left as usize] = 9;
         old_to_new[target_right as usize] = 10;
 
-        let mut profile = MinimizeAcyclicProfile::default();
         let adj = build_incompatibility_graph_sparse(
             &dwa,
             &candidates,
             &needed,
             &old_to_new,
             &productive_transitions,
-            &mut profile,
         )
         .expect("candidate bucket should be large enough for sparse graph mode");
 

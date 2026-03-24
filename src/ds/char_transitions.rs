@@ -1,14 +1,7 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::fmt;
 use std::ops::{Index, IndexMut};
 
 use serde::{Deserialize, Serialize};
-
-use crate::ds::u8set::U8Set;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct CharTransitions<T> {
@@ -75,7 +68,6 @@ impl<T> CharTransitions<T> {
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.entries.iter().map(|(_, v)| v)
     }
-
 }
 
 impl<T> Index<u8> for CharTransitions<T> {

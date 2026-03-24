@@ -43,7 +43,8 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    #[cfg(test)]
+    /// Get children as a general Children map.
+    /// For Chain variant, returns stored children directly.
     fn children(&self) -> Children<T, Lower<T>> {
         match self {
             Lower::General { children, .. } | Lower::Chain { children, .. } => children.clone(),
@@ -82,6 +83,15 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
+    /// Get children keys as a Vec.
+    fn children_keys_vec(&self) -> Vec<T> {
+        match self {
+            Lower::General { children, .. } | Lower::Chain { children, .. } => children.keys().cloned().collect(),
+        }
+    }
+
+    /// Ensure this Lower is in General form, converting from Chain if necessary.
+    /// Returns mutable references to children and max_depth for in-place mutation.
     fn ensure_general(&mut self) {
         if let Lower::Chain { children, empty, max_depth, .. } = self {
             *self = Lower::General {
@@ -89,6 +99,15 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 empty: *empty,
                 max_depth: *max_depth,
             };
+        }
+    }
+
+    /// Get mutable access to children and max_depth. Converts Chain→General first.
+    fn children_and_depth_mut(&mut self) -> (&mut Children<T, Lower<T>>, &mut u32) {
+        self.ensure_general();
+        match self {
+            Lower::General { children, max_depth, .. } => (children, max_depth),
+            Lower::Chain { .. } => unreachable!(),
         }
     }
 
@@ -117,6 +136,16 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 children.values().next().unwrap().values().next().unwrap()
             }
             Lower::General { .. } => panic!("chain_next called on General"),
+        }
+    }
+
+    /// For Chain variant, get the OrdMap for the single child key.
+    /// Panics if called on General.
+    #[inline(always)]
+    fn chain_kids(&self) -> &OrdMap<u32, Arc<Lower<T>>> {
+        match self {
+            Lower::Chain { children, .. } => children.values().next().unwrap(),
+            Lower::General { .. } => panic!("chain_kids called on General"),
         }
     }
 
@@ -522,7 +551,6 @@ where
     }
 }
 
-#[cfg(test)]
 fn truncate_lower<T: Clone + Eq + Hash>(
     node: &Arc<Lower<T>>,
     current_depth: isize,
@@ -582,7 +610,6 @@ fn truncate_lower<T: Clone + Eq + Hash>(
     res
 }
 
-#[cfg(test)]
 fn truncate_upper<T, A>(
     node: &Arc<Upper<T, A>>,
     current_depth: isize,
@@ -1363,12 +1390,39 @@ impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Merge + Clone + Eq + Hash + std:
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-    pub(crate) fn ptr_key(&self) -> usize {
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.inner) as usize
     }
 
+    pub fn root_interface_shape_key(&self) -> Option<usize> {
+        match &*self.inner {
+            Upper::Interface(interface) => Some(Arc::as_ptr(&interface.inner) as usize),
+            Upper::Branch(_) => None,
+        }
+    }
+
+    pub fn root_interface_acc(&self) -> Option<A> {
+        match &*self.inner {
+            Upper::Interface(interface) => Some(interface.acc.clone()),
+            Upper::Branch(_) => None,
+        }
+    }
+
+    pub fn with_root_interface_acc(&self, acc: A) -> Option<Self> {
+        match &*self.inner {
+            Upper::Interface(interface) => Some(Self {
+                inner: new_interface(interface.inner.clone(), acc),
+            }),
+            Upper::Branch(_) => None,
+        }
+    }
+
     #[cfg(test)]
-    fn inner_ptrs_eq(&self, other: &Self) -> bool {
+    pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
         match (&*self.inner, &*other.inner) {
             (Upper::Branch(b1), Upper::Branch(b2)) => {
                 if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
@@ -1797,7 +1851,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
 
             // Chain fast path: single child, directly recurse
-            let merged: Option<Arc<Lower<T>>> = if node.is_chain() {
+            let mut merged: Option<Arc<Lower<T>>> = if node.is_chain() {
                 let popped = popn_lower::<T, A>(node.chain_next(), k - 1, memo_lower);
                 Some(popped)
             } else {
@@ -2061,9 +2115,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         (LeveledGSS { inner: new_inner }, underflows)
     }
 
+    pub fn pop(&self) -> Self {
+        self.popn(1)
+    }
+
     /// Decompose the top level and pop one level in a single pass.
     /// Returns `(value, popped_gss)` for each top-level child value.
-    /// Equivalent to calling `self.isolate(Some(v)).popn(1)` for each v in `peek_values()`,
+    /// Equivalent to calling `self.isolate(Some(v)).pop()` for each v in `peek_values()`,
     /// but avoids repeated HashMap lookups.
     pub fn decompose_and_pop(&self) -> Vec<(T, Self)> {
         match &*self.inner {
@@ -2525,6 +2583,93 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         res_inner_opt.map_or_else(Self::empty, |inner| LeveledGSS { inner })
     }
 
+    pub fn apply_and_prune<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
+    where
+        B: Merge + Clone + Eq + Hash,
+        M: FnMut(&A) -> Option<B>,
+    {
+        // Fast path: single Interface at root — no memo or tree traversal needed.
+        if let Upper::Interface(i) = &*self.inner {
+            return match mutator(&i.acc) {
+                Some(new_acc) => LeveledGSS { inner: new_interface(i.inner.clone(), new_acc) },
+                None => LeveledGSS::empty(),
+            };
+        }
+
+        // Use a flat Vec for memo instead of HashMap — avoids hashing cost
+        // for the typical case of 2-4 unique accumulators.
+        let mut acc_memo: Vec<(A, Option<B>)> = Vec::with_capacity(4);
+
+        fn mutate_acc<A, B, M>(
+            a: &A,
+            memo: &mut Vec<(A, Option<B>)>,
+            m: &mut M,
+        ) -> Option<B>
+        where
+            A: Clone + Eq,
+            B: Clone,
+            M: FnMut(&A) -> Option<B>,
+        {
+            for (k, v) in memo.iter() {
+                if k == a {
+                    return v.clone();
+                }
+            }
+            let r = m(a);
+            memo.push((a.clone(), r.clone()));
+            r
+        }
+
+        fn transform<T, A, B, M>(
+            node: &Arc<Upper<T, A>>,
+            memo: &mut Vec<(A, Option<B>)>,
+            m: &mut M,
+        ) -> Option<Arc<Upper<T, B>>>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            B: Merge + Clone + Eq + Hash,
+            M: FnMut(&A) -> Option<B>,
+        {
+            match &**node {
+                Upper::Interface(i) => {
+                    let new_acc_opt = mutate_acc(&i.acc, memo, m);
+                    if let Some(new_acc) = new_acc_opt {
+                        let new_i = new_interface(i.inner.clone(), new_acc);
+                        Some(try_promote(&new_i))
+                    } else {
+                        None
+                    }
+                }
+                Upper::Branch(b) => {
+                    let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc(e, memo, m));
+                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
+                    for (v, kids) in b.children.iter() {
+                        let mut new_kids: OrdMap<u32, Arc<Upper<T, B>>> = OrdMap::new();
+                        for child in kids.values() {
+                            if let Some(nc) = transform::<T, A, B, M>(child, memo, m) {
+                                new_kids.insert(nc.max_depth(), nc);
+                            }
+                        }
+                        if !new_kids.is_empty() {
+                            new_children.insert(v.clone(), new_kids);
+                        }
+                    }
+
+                    if new_children.is_empty() && new_empty_opt.is_none() {
+                        None
+                    } else {
+                        let new_b = new_branch(new_children, new_empty_opt);
+                        Some(try_promote(&new_b))
+                    }
+                }
+            }
+        }
+
+        let res_inner_opt = transform::<T, A, B, M>(&self.inner, &mut acc_memo, &mut mutator);
+        res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
+    }
+
     /// Like a cross-type no-promote transform followed by decompose_and_pop, but avoids
     /// building the root-level Branch node. Returns (value, sub_gss) pairs directly,
     /// plus a Vec of "root accumulators" (transformed empty values at the root Branch)
@@ -2967,6 +3112,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner }
     }
 
+    pub fn peek(&self) -> HashSet<T> {
+        self.inner.children_keys().into_iter().collect()
+    }
+
     pub fn peek_values(&self) -> Vec<T> {
         self.inner.children_keys()
     }
@@ -3074,8 +3223,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         count_upper(&self.inner, limit, &mut memo_upper, &mut memo_lower)
     }
 
-    #[cfg(test)]
-    fn reduce_acc(&self) -> Option<A> {
+    pub fn is_single_path(&self) -> bool {
+        self.path_count_at_most(2) <= 1
+    }
+
+    pub fn reduce_acc(&self) -> Option<A> {
         
         let mut unique: HashSet<A> = HashSet::new();
         let mut queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
@@ -3177,21 +3329,37 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         walk(&self.inner, &mut visited, &mut f);
     }
 
+    pub fn truncate(&self, max_len: isize) -> Self {
+        if max_len < 0 {
+            return Self::empty();
+        }
+
+        let mut memo_upper = StdHashMap::new();
+        let mut memo_lower = StdHashMap::new();
+
+        let new_inner = truncate_upper(
+            &self.inner,
+            0,
+            max_len,
+            &mut memo_upper,
+            &mut memo_lower,
+        );
+
+        new_inner.map_or_else(Self::empty, |inner| Self { inner })
+    }
+
     #[cfg(test)]
-    fn split_at_depth(&self, depth: isize) -> (Self, Self) {
+    pub fn split_at_depth(&self, depth: isize) -> (Self, Self) {
         if depth < 0 {
             return (self.clone(), Self::empty());
         }
         let below = self.popn(depth);
-        let mut memo_upper = StdHashMap::new();
-        let mut memo_lower = StdHashMap::new();
-        let above = truncate_upper(&self.inner, 0, depth, &mut memo_upper, &mut memo_lower)
-            .map_or_else(Self::empty, |inner| Self { inner });
+        let above = self.truncate(depth);
         (below, above)
     }
 
     #[cfg(test)]
-    fn accs_by_depth(&self) -> BTreeMap<isize, A>
+    pub fn accs_by_depth(&self) -> BTreeMap<isize, A>
     where
         A: Ord,
     {
@@ -3202,7 +3370,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn stats(&self) -> LeveledGSSStats<T, A> {
+    pub fn stats(&self) -> LeveledGSSStats<T, A> {
         let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
 
         let mut visited_upperbranch: HashSet<usize> = HashSet::new();
@@ -3524,7 +3692,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn to_graph_string(&self, upper_only: bool) -> String
+    pub fn to_graph_string(&self, upper_only: bool) -> String
     where
         T: std::fmt::Debug,
         A: std::fmt::Debug,
@@ -3534,7 +3702,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn to_graph_string_with_memo(&self, memo: &mut HashSet<usize>, upper_only: bool) -> String
+    pub fn to_graph_string_with_memo(&self, memo: &mut HashSet<usize>, upper_only: bool) -> String
     where
         T: std::fmt::Debug,
         A: std::fmt::Debug,
@@ -3553,7 +3721,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         output_lines.join("\n")
     }
 
-    #[cfg(test)]
     fn get_node_info_lower(node: &Arc<Lower<T>>) -> String
     where
         T: std::fmt::Debug,
@@ -3569,7 +3736,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         info
     }
 
-    #[cfg(test)]
     fn get_node_info_upper(node: &Arc<Upper<T, A>>) -> String
     where
         T: std::fmt::Debug,
@@ -3603,7 +3769,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    #[cfg(test)]
     fn format_recursive_lower(
         node: &Arc<Lower<T>>,
         current_prefix: &str,
@@ -3656,7 +3821,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    #[cfg(test)]
     fn format_recursive_upper(
         node: &Arc<Upper<T, A>>,
         current_prefix: &str,
@@ -3818,12 +3982,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn num_paths(&self) -> usize {
+    pub fn num_paths(&self) -> usize {
         self.paths_info().num_paths
     }
 
     #[cfg(test)]
-    fn paths_info(&self) -> GSSPathsInfo {
+    pub fn paths_info(&self) -> GSSPathsInfo {
         let mut memo_upper = StdHashMap::new();
         let mut memo_lower = StdHashMap::new();
         Self::paths_info_upper(&self.inner, &mut memo_upper, &mut memo_lower)
@@ -3965,11 +4129,11 @@ mod tests {
             &[1],
         )]);
 
-        let gss1 = gss0.popn(1);
-        let gss2 = gss0.popn(1);
+        let gss1 = gss0.pop();
+        let gss2 = gss0.pop();
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert_ne!(gss1.ptr_key(), gss2.ptr_key()); 
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -3979,18 +4143,18 @@ mod tests {
             &[1],
         )]);
 
-        let gss1 = gss0.push("X".to_string()).popn(1);
+        let gss1 = gss0.push("X".to_string()).pop();
 
         assert!(gss0.inner_ptrs_eq(&gss1));
-        assert_ne!(gss0.ptr_key(), gss1.ptr_key()); 
+        assert!(!gss0.ptr_eq(&gss1)); 
     }
 
     #[test]
     fn test_push_pop_identity_from_empty() {
         let gss0 = TestGSS::empty();
-        let gss1 = gss0.push("X".to_string()).popn(1);
+        let gss1 = gss0.push("X".to_string()).pop();
 
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
     }
 
     #[test]
@@ -4000,7 +4164,7 @@ mod tests {
             &[1],
         )]);
 
-        let gss_bc_from_pop = gss_abc.popn(1);
+        let gss_bc_from_pop = gss_abc.pop();
 
         let preds = gss_abc.predecessors();
         let children_of_a = preds.get(&"A".to_string()).unwrap();
@@ -4029,21 +4193,21 @@ mod tests {
     fn test_path_count_at_most_distinguishes_single_vs_branched() {
         let single = gss_from_str_stacks(&[(&["A", "B", "C"], &[1])]);
         assert_eq!(single.path_count_at_most(2), 1);
-        assert!(single.path_count_at_most(2) <= 1);
+        assert!(single.is_single_path());
 
         let shared_prefix = gss_from_str_stacks(&[
             (&["A", "B"], &[1]),
             (&["A", "C"], &[2]),
         ]);
         assert_eq!(shared_prefix.path_count_at_most(2), 2);
-        assert!(shared_prefix.path_count_at_most(2) > 1);
+        assert!(!shared_prefix.is_single_path());
 
         let disjoint = gss_from_str_stacks(&[
             (&["X"], &[3]),
             (&["Y"], &[4]),
         ]);
         assert_eq!(disjoint.path_count_at_most(2), 2);
-        assert!(disjoint.path_count_at_most(2) > 1);
+        assert!(!disjoint.is_single_path());
     }
 
     #[test]
@@ -4057,7 +4221,7 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert_ne!(gss1.ptr_key(), gss2.ptr_key()); 
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -4071,7 +4235,7 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert_ne!(gss1.ptr_key(), gss2.ptr_key()); 
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -4085,7 +4249,7 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert_ne!(gss1.ptr_key(), gss2.ptr_key()); 
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -4093,19 +4257,19 @@ mod tests {
         
         let gss0 = gss_from_str_stacks(&[(&["A"], &[1])]);
         let gss1 = gss0.isolate(Some("A".to_string()));
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
 
         let gss2 = gss_from_str_stacks(&[(&[], &[1])]);
         let gss3 = gss2.isolate(None);
-        assert_eq!(gss2.ptr_key(), gss3.ptr_key());
+        assert!(gss2.ptr_eq(&gss3));
 
         let gss4 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
         let gss5 = gss4.isolate(Some("A".to_string()));
-        assert_ne!(gss4.ptr_key(), gss5.ptr_key());
+        assert!(!gss4.ptr_eq(&gss5));
 
         let gss6 = gss_from_str_stacks(&[(&["A"], &[1]), (&[], &[2])]);
         let gss7 = gss6.isolate(None);
-        assert_ne!(gss6.ptr_key(), gss7.ptr_key());
+        assert!(!gss6.ptr_eq(&gss7));
     }
 
     #[test]
@@ -4113,20 +4277,20 @@ mod tests {
         let gss0 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2]), (&[], &[3])]);
 
         let gss1 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
 
         let gss2 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), Some("C".to_string()), None]);
-        assert_eq!(gss0.ptr_key(), gss2.ptr_key());
+        assert!(gss0.ptr_eq(&gss2));
 
         let gss3 = gss0.isolate_many(vec![Some("A".to_string()), None]);
-        assert_ne!(gss0.ptr_key(), gss3.ptr_key());
+        assert!(!gss0.ptr_eq(&gss3));
 
         let gss4 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string())]);
-        assert_ne!(gss0.ptr_key(), gss4.ptr_key());
+        assert!(!gss0.ptr_eq(&gss4));
 
         let gss5 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
         let gss6 = gss5.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
-        assert_ne!(gss5.ptr_key(), gss6.ptr_key());
+        assert!(!gss5.ptr_eq(&gss6));
     }
 
     #[test]
@@ -4139,20 +4303,20 @@ mod tests {
         ]);
 
         let gss1 = gss0.filter_by_length(None, None);
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
 
         let gss2 = gss0.filter_by_length(Some(0), Some(3));
-        assert_eq!(gss0.ptr_key(), gss2.ptr_key());
+        assert!(gss0.ptr_eq(&gss2));
         let gss3 = gss0.filter_by_length(Some(-1), Some(10));
-        assert_eq!(gss0.ptr_key(), gss3.ptr_key());
+        assert!(gss0.ptr_eq(&gss3));
 
         let gss4 = gss0.filter_by_length(Some(1), Some(2));
-        assert_ne!(gss0.ptr_key(), gss4.ptr_key());
+        assert!(!gss0.ptr_eq(&gss4));
         assert_eq!(gss4.to_stacks().len(), 2);
 
         let gss_empty = TestGSS::empty();
         let gss_empty_filtered = gss_empty.filter_by_length(Some(1), Some(2));
-        assert_eq!(gss_empty.ptr_key(), gss_empty_filtered.ptr_key());
+        assert!(gss_empty.ptr_eq(&gss_empty_filtered));
     }
 
     #[test]
@@ -4165,20 +4329,20 @@ mod tests {
         ]);
 
         let gss1 = gss0.prune(|_acc| true);
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
 
         let gss2 = gss0.prune(|acc| acc.0.contains(&1));
-        assert_ne!(gss0.ptr_key(), gss2.ptr_key());
+        assert!(!gss0.ptr_eq(&gss2));
         
         assert_eq!(gss2.to_stacks().len(), 2);
 
         let gss3 = gss0.prune(|_acc| false);
         assert!(gss3.is_empty());
-        assert_ne!(gss0.ptr_key(), gss3.ptr_key());
+        assert!(!gss0.ptr_eq(&gss3));
 
         let gss_empty = TestGSS::empty();
         let gss_empty_pruned = gss_empty.prune(|_acc| true);
-        assert_eq!(gss_empty.ptr_key(), gss_empty_pruned.ptr_key());
+        assert!(gss_empty.ptr_eq(&gss_empty_pruned));
     }
 
     #[test]

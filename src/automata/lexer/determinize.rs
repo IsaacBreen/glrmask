@@ -11,20 +11,7 @@ use crate::ds::u8set::U8Set;
 use super::dfa::DFA;
 use super::nfa::{CompactNFA, NFA};
 
-#[derive(Default)]
-struct LexerDeterminizeProfile {
-    num_nfa_states: usize,
-    num_classes: usize,
-    distinct_transition_sets: usize,
-    precomputed_closures: usize,
-    subsets_processed: usize,
-    subset_state_total: usize,
-    fast_singleton_hits: usize,
-    reachable_groups_ms: std::time::Duration,
-    class_remap_ms: std::time::Duration,
-    closure_precompute_ms: std::time::Duration,
-    subset_construction_ms: std::time::Duration,
-}
+const EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD: u32 = 1;
 
 fn sparse_to_sorted_vec(set: &SparseStateSet) -> Vec<u32> {
     let mut states = Vec::new();
@@ -196,9 +183,6 @@ fn compute_reachable_groups(nfa: &NFA, group_count: usize) -> Vec<BitSet> {
 
 impl NFA {
     pub fn to_dfa(&self) -> DFA {
-        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LEXER_DETERMINIZE").is_some();
-        let mut profile = profile_enabled.then(LexerDeterminizeProfile::default);
-
         let group_count = self
             .states
             .iter()
@@ -207,17 +191,11 @@ impl NFA {
             .map(|group| *group as usize + 1)
             .unwrap_or(0);
 
-        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let reachable_groups = compute_reachable_groups(self, group_count);
-        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
-            profile.num_nfa_states = self.states.len();
-            profile.reachable_groups_ms = started_at.elapsed();
-        }
 
         let mut dfa = DFA::new(1);
         dfa.ensure_group_capacity(group_count);
 
-        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
         let mut remapped_set_cache: FxHashMap<U8Set, U8Set> = FxHashMap::default();
         let remapped_transitions: Vec<Vec<(U8Set, u32)>> = self
@@ -240,13 +218,7 @@ impl NFA {
                     .collect()
             })
             .collect();
-        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
-            profile.num_classes = num_classes;
-            profile.distinct_transition_sets = remapped_set_cache.len();
-            profile.class_remap_ms = started_at.elapsed();
-        }
 
-        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let compact_nfa = self.build_compact_nfa();
         let num_nfa_states = self.states.len();
         let mut stack: Vec<usize> = Vec::with_capacity(num_nfa_states);
@@ -254,18 +226,6 @@ impl NFA {
         let out_degree: Vec<u32> = (0..num_nfa_states)
             .map(|state| compact_nfa.epsilon_offsets[state + 1] - compact_nfa.epsilon_offsets[state])
             .collect();
-
-        let precompute_threshold: u32 = [
-            "GLRMASK_DFA_EPS_PRECOMPUTE_THRESHOLD",
-            "DFA_EPS_PRECOMPUTE_THRESHOLD",
-        ]
-        .iter()
-        .find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .and_then(|value| value.trim().parse::<u32>().ok())
-        })
-        .unwrap_or(1);
 
         let mut high_degree_closures: Vec<Option<Vec<u32>>> = vec![None; num_nfa_states];
         let mut visited = vec![false; num_nfa_states];
@@ -303,12 +263,12 @@ impl NFA {
         }
 
         for state in 0..num_nfa_states {
-            if out_degree[state] >= precompute_threshold {
+            if out_degree[state] >= EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD {
                 dfs_postorder_selective(
                     state,
                     &compact_nfa,
                     &out_degree,
-                    precompute_threshold,
+                    EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD,
                     &mut visited,
                     &mut post_order,
                 );
@@ -338,12 +298,6 @@ impl NFA {
 
             high_degree_closures[state] = Some(sparse_to_sorted_vec(&temp_set));
         }
-        if let Some(profile) = profile.as_mut() {
-            profile.precomputed_closures = high_degree_closures
-                .iter()
-                .filter(|closure| closure.is_some())
-                .count();
-        }
 
         let mut start_closure = SparseStateSet::new(num_nfa_states);
         start_closure.insert(self.start_state as usize);
@@ -361,9 +315,6 @@ impl NFA {
                     }
                 }
             }
-        }
-        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
-            profile.closure_precompute_ms = started_at.elapsed();
         }
 
         let start_key = CompressedStateSet::from_sparse(&start_closure);
@@ -383,14 +334,8 @@ impl NFA {
         let mut seen_class = vec![false; num_classes];
         let mut closure_set = SparseStateSet::new(num_nfa_states);
         let mut scratch_closure = CompressedStateSet::new();
-        let mut sort_scratch = Vec::with_capacity(1024);
 
-        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         while let Some(current_set) = worklist.pop() {
-            if let Some(profile) = profile.as_mut() {
-                profile.subsets_processed += 1;
-                profile.subset_state_total += current_set.len();
-            }
             let current_dfa_state = subset_map[&current_set];
 
             for state in current_set.iter() {
@@ -419,9 +364,6 @@ impl NFA {
                         let state = word_idx * 64 + bit;
                         if out_degree[state] == 0 && high_degree_closures[state].is_none() {
                             fast_singleton_state = Some(state);
-                            if let Some(profile) = profile.as_mut() {
-                                profile.fast_singleton_hits += 1;
-                            }
                         }
                     }
                 }
@@ -475,11 +417,7 @@ impl NFA {
                     scratch_closure.hash = (word_idx as u64).wrapping_mul(0x517c_c1b7_2722_0a95)
                         ^ mask.wrapping_mul(0x9e37_79b9_7f4a_7c15);
                 } else {
-                    CompressedStateSet::reuse_from_sparse(
-                        &closure_set,
-                        &mut scratch_closure,
-                        &mut sort_scratch,
-                    );
+                    CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
                 }
 
                 let next_dfa_state = if let Some(&existing) = subset_map.get(&scratch_closure) {
@@ -510,31 +448,6 @@ impl NFA {
                 transition_targets[idx].clear();
             }
             used_classes.clear();
-        }
-        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
-            profile.subset_construction_ms = started_at.elapsed();
-        }
-
-        if let Some(profile) = profile {
-            eprintln!(
-                "[glrmask/profile][lexer_determinize] nfa_states={} classes={} distinct_transition_sets={} dfa_states={} precomputed_closures={} subsets={} avg_subset_states={:.2} fast_singleton_hits={} reachable_groups_ms={:.3} class_remap_ms={:.3} closure_precompute_ms={:.3} subset_construction_ms={:.3}",
-                profile.num_nfa_states,
-                profile.num_classes,
-                profile.distinct_transition_sets,
-                subset_map.len(),
-                profile.precomputed_closures,
-                profile.subsets_processed,
-                if profile.subsets_processed == 0 {
-                    0.0
-                } else {
-                    profile.subset_state_total as f64 / profile.subsets_processed as f64
-                },
-                profile.fast_singleton_hits,
-                profile.reachable_groups_ms.as_secs_f64() * 1000.0,
-                profile.class_remap_ms.as_secs_f64() * 1000.0,
-                profile.closure_precompute_ms.as_secs_f64() * 1000.0,
-                profile.subset_construction_ms.as_secs_f64() * 1000.0,
-            );
         }
 
         dfa

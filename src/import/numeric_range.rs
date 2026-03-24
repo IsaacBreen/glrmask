@@ -255,6 +255,54 @@ fn escape_float_str(s: &str) -> String {
     s.replace('.', "\\.")
 }
 
+struct NonnegativeDecimalBounds {
+    left_integer: i64,
+    right_integer: i64,
+    left_fraction: String,
+    right_fraction: String,
+}
+
+fn decimal_fraction(rendered: &str) -> String {
+    rendered.split('.').nth(1).unwrap_or("").to_string()
+}
+
+fn parse_decimal_integer(rendered: &str, label: &str) -> Result<i64> {
+    rendered
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .parse()
+        .map_err(|e| format!("Failed to parse {label} integer part: {e}"))
+}
+
+fn nonnegative_decimal_bounds(left: f64, right: f64) -> Result<NonnegativeDecimalBounds> {
+    if !left.is_finite() || !right.is_finite() {
+        return Err("Infinite numbers not supported".to_string());
+    }
+
+    let left_text = float_to_str(left);
+    let right_text = float_to_str(right);
+    if left_text == right_text {
+        return Err("Unexpected equality of left and right string representations".to_string());
+    }
+
+    Ok(NonnegativeDecimalBounds {
+        left_integer: parse_decimal_integer(&left_text, "left")?,
+        right_integer: parse_decimal_integer(&right_text, "right")?,
+        left_fraction: decimal_fraction(&left_text),
+        right_fraction: decimal_fraction(&right_text),
+    })
+}
+
+fn pad_decimal_fractions(left_fraction: &mut String, right_fraction: &mut String) {
+    while left_fraction.len() < right_fraction.len() {
+        left_fraction.push('0');
+    }
+    while right_fraction.len() < left_fraction.len() {
+        right_fraction.push('0');
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Float range
 // ---------------------------------------------------------------------------
@@ -458,70 +506,48 @@ fn nonneg_float_range(
     left_inclusive: bool,
     right_inclusive: bool,
 ) -> Result<String> {
-    let l = float_to_str(left);
-    let r = float_to_str(right);
-    if l == r {
-        return Err(format!(
-            "Unexpected equality of left and right string representations"
-        ));
-    }
-    if !left.is_finite() || !right.is_finite() {
-        return Err(format!("Infinite numbers not supported"));
-    }
+    let mut bounds = nonnegative_decimal_bounds(left, right)?;
 
-    let mut left_rec: i64 = l
-        .split('.')
-        .next()
-        .unwrap()
-        .parse()
-        .map_err(|e| format!("Failed to parse left integer part: {}", e))?;
-    let right_rec: i64 = r
-        .split('.')
-        .next()
-        .unwrap()
-        .parse()
-        .map_err(|e| format!("Failed to parse right integer part: {}", e))?;
-
-    let mut ld = l.split('.').nth(1).unwrap_or("").to_string();
-    let mut rd = r.split('.').nth(1).unwrap_or("").to_string();
-
-    if left_rec == right_rec {
-        while ld.len() < rd.len() {
-            ld.push('0');
-        }
-        while rd.len() < ld.len() {
-            rd.push('0');
-        }
-        let suff = format!("\\.{}", lexi_range(&ld, &rd, left_inclusive, right_inclusive)?);
-        if ld.parse::<i64>().unwrap_or(0) == 0 {
-            Ok(format!("({left_rec}({suff})?)"))
+    if bounds.left_integer == bounds.right_integer {
+        pad_decimal_fractions(&mut bounds.left_fraction, &mut bounds.right_fraction);
+        let suffix = format!(
+            "\\.{}",
+            lexi_range(
+                &bounds.left_fraction,
+                &bounds.right_fraction,
+                left_inclusive,
+                right_inclusive,
+            )?
+        );
+        if bounds.left_fraction.parse::<i64>().unwrap_or(0) == 0 {
+            Ok(format!("({}({suffix})?)", bounds.left_integer))
         } else {
-            Ok(format!("({left_rec}{suff})"))
+            Ok(format!("({}{suffix})", bounds.left_integer))
         }
     } else {
         let mut parts = vec![];
-        if !ld.is_empty() || !left_inclusive {
+        if !bounds.left_fraction.is_empty() || !left_inclusive {
             parts.push(format!(
                 "({}\\.{})",
-                left_rec,
-                lexi_x_to_9(&ld, left_inclusive)?
+                bounds.left_integer,
+                lexi_x_to_9(&bounds.left_fraction, left_inclusive)?
             ));
-            left_rec += 1;
+            bounds.left_integer += 1;
         }
 
-        if right_rec > left_rec {
-            let inner = rx_int_range(Some(left_rec), Some(right_rec - 1))?;
+        if bounds.right_integer > bounds.left_integer {
+            let inner = rx_int_range(Some(bounds.left_integer), Some(bounds.right_integer - 1))?;
             parts.push(format!("({inner}(\\.[0-9]+)?)"));
         }
 
-        if !rd.is_empty() {
+        if !bounds.right_fraction.is_empty() {
             parts.push(format!(
                 "({}(\\.{})?)",
-                right_rec,
-                lexi_0_to_x(&rd, right_inclusive)?
+                bounds.right_integer,
+                lexi_0_to_x(&bounds.right_fraction, right_inclusive)?
             ));
         } else if right_inclusive {
-            parts.push(format!("{right_rec}(\\.0+)?"));
+            parts.push(format!("{}(\\.0+)?", bounds.right_integer));
         }
 
         Ok(mk_or(parts))
@@ -534,69 +560,47 @@ fn nonneg_float_range_no_ints(
     left_inclusive: bool,
     right_inclusive: bool,
 ) -> Result<Option<String>> {
-    let l = float_to_str(left);
-    let r = float_to_str(right);
-    if l == r {
-        return Err(format!(
-            "Unexpected equality of left and right string representations"
-        ));
-    }
-    if !left.is_finite() || !right.is_finite() {
-        return Err(format!("Infinite numbers not supported"));
-    }
+    let mut bounds = nonnegative_decimal_bounds(left, right)?;
 
-    let mut left_rec: i64 = l
-        .split('.')
-        .next()
-        .unwrap()
-        .parse()
-        .map_err(|e| format!("Failed to parse left integer part: {}", e))?;
-    let right_rec: i64 = r
-        .split('.')
-        .next()
-        .unwrap()
-        .parse()
-        .map_err(|e| format!("Failed to parse right integer part: {}", e))?;
-
-    let mut ld = l.split('.').nth(1).unwrap_or("").to_string();
-    let mut rd = r.split('.').nth(1).unwrap_or("").to_string();
-
-    if left_rec == right_rec {
-        while ld.len() < rd.len() {
-            ld.push('0');
-        }
-        while rd.len() < ld.len() {
-            rd.push('0');
-        }
-        let suff = format!("\\.{}", lexi_range(&ld, &rd, left_inclusive, right_inclusive)?);
-        return Ok(Some(format!("({left_rec}{suff})")));
+    if bounds.left_integer == bounds.right_integer {
+        pad_decimal_fractions(&mut bounds.left_fraction, &mut bounds.right_fraction);
+        let suffix = format!(
+            "\\.{}",
+            lexi_range(
+                &bounds.left_fraction,
+                &bounds.right_fraction,
+                left_inclusive,
+                right_inclusive,
+            )?
+        );
+        return Ok(Some(format!("({}{suffix})", bounds.left_integer)));
     }
 
     let mut parts = vec![];
-    if !ld.is_empty() {
+    if !bounds.left_fraction.is_empty() {
         parts.push(format!(
             "({}\\.{})",
-            left_rec,
-            lexi_x_to_9(&ld, left_inclusive)?
+            bounds.left_integer,
+            lexi_x_to_9(&bounds.left_fraction, left_inclusive)?
         ));
-        left_rec += 1;
+        bounds.left_integer += 1;
     } else {
-        parts.push(format!("({left_rec}\\.[0-9]+)"));
-        left_rec += 1;
+        parts.push(format!("({}\\.[0-9]+)", bounds.left_integer));
+        bounds.left_integer += 1;
     }
 
-    if right_rec > left_rec {
-        let inner = rx_int_range(Some(left_rec), Some(right_rec - 1))?;
+    if bounds.right_integer > bounds.left_integer {
+        let inner = rx_int_range(Some(bounds.left_integer), Some(bounds.right_integer - 1))?;
         parts.push(format!("({inner}\\.[0-9]+)"));
     }
 
-    if !rd.is_empty() {
-        let right_frac = lexi_0_to_x(&rd, right_inclusive)?;
+    if !bounds.right_fraction.is_empty() {
+        let right_frac = lexi_0_to_x(&bounds.right_fraction, right_inclusive)?;
         if !right_frac.is_empty() {
-            parts.push(format!("({}\\.{})", right_rec, right_frac));
+            parts.push(format!("({}\\.{})", bounds.right_integer, right_frac));
         }
     } else if right_inclusive {
-        parts.push(format!("{right_rec}\\.0+"));
+        parts.push(format!("{}\\.0+", bounds.right_integer));
     }
 
     Ok(mk_or_opt(parts))

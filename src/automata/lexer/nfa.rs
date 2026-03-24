@@ -1,10 +1,4 @@
-//! NOTE: this file is intentionally gutted.
-//! Reintroduce only the minimal lexer NFA needed as input to the future
-//! sep1-style DFA pipeline.
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
+//! Byte-oriented lexer NFA used as the determinization input.
 
 use std::collections::{BTreeSet, HashSet};
 

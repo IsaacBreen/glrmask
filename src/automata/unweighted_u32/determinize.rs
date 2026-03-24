@@ -6,8 +6,6 @@
 //! The caller is responsible for asserting acyclicity of the input NFA when
 //! that invariant is required.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use super::dfa::{DFA, Label};
@@ -32,12 +30,8 @@ fn epsilon_closure(nfa: &NFA, seeds: &[u32]) -> BTreeSet<u32> {
 /// Determinize an NFA into a DFA using subset construction.
 ///
 /// Every DFA state corresponds to a set of NFA states (its "subset").
-/// Epsilon transitions are resolved via epsilon-closure.
 pub fn determinize(nfa: &NFA) -> DFA {
-    assert!(
-        nfa.is_acyclic(),
-        "determinize: input NFA is cyclic"
-    );
+    assert!(nfa.is_acyclic(), "determinize: input NFA is cyclic");
 
     if nfa.states.is_empty() || nfa.start_states.is_empty() {
         return DFA::new();

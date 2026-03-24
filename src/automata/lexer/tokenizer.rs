@@ -1,9 +1,4 @@
-//! NOTE: regex parsing and compilation helpers live in `regex.rs`.
-//! Keep this file focused on the runtime-facing tokenizer surface.
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
+//! Runtime-facing tokenizer API built on top of the lexer DFA.
 
 use std::collections::BTreeSet;
 
@@ -13,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::automata::dfa::DFA;
 use crate::compiler::grammar_def::TerminalID;
 use crate::ds::bitset::BitSet;
-use crate::ds::u8set::U8Set;
 
 pub use super::regex::parse_regex;
 
@@ -47,8 +41,11 @@ impl Tokenizer {
     /// terminals as matched at state 0.
     pub fn isolate_start_state_and_drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
         self.isolate_start_state();
-        let nullable = self.dfa.clear_finalizers_for_state(self.start_state()).iter().map(|terminal| terminal as TerminalID).collect();
-        nullable
+        self.dfa
+            .clear_finalizers_for_state(self.start_state())
+            .iter()
+            .map(|terminal| terminal as TerminalID)
+            .collect()
     }
 
     /// Ensure that no byte transition in the DFA targets the start state.
@@ -216,7 +213,6 @@ impl Tokenizer {
     pub fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
         self.possible_future_terminals(state)
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

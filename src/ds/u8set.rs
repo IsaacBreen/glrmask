@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::fmt;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
@@ -24,10 +19,6 @@ impl U8Set {
             lo: u128::MAX,
             hi: u128::MAX,
         }
-    }
-
-    const fn full() -> Self {
-        Self::all()
     }
 
     pub fn single(b: u8) -> Self {
@@ -234,7 +225,7 @@ impl fmt::Display for U8Set {
 pub struct U8SetIter {
     lo: u128,
     hi: u128,
-    phase: u8, 
+    phase: u8,
 }
 
 impl Iterator for U8SetIter {
@@ -286,7 +277,7 @@ mod tests {
         assert!(!s.contains(42));
         assert!(s.insert(42));
         assert!(s.contains(42));
-        assert!(!s.insert(42)); 
+        assert!(!s.insert(42));
         assert_eq!(s.len(), 1);
     }
 
@@ -317,13 +308,13 @@ mod tests {
         let b = U8Set::from_range(5, 15);
 
         let u = a.union(&b);
-        assert_eq!(u.len(), 16); 
+        assert_eq!(u.len(), 16);
 
         let i = a.intersection(&b);
-        assert_eq!(i.len(), 6); 
+        assert_eq!(i.len(), 6);
 
         let d = a.difference(&b);
-        assert_eq!(d.len(), 5); 
+        assert_eq!(d.len(), 5);
 
         let c = a.complement();
         assert_eq!(c.len(), 256 - 11);

@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -66,7 +61,6 @@ impl Terminal {
             Terminal::Expr { expr, .. } => format!("{:?}", expr),
         }
     }
-
 }
 
 impl GrammarDef {
@@ -78,18 +72,14 @@ impl GrammarDef {
         self.rules
             .iter()
             .flat_map(|rule| {
-                std::iter::once(rule.lhs).chain(rule.rhs.iter().filter_map(|sym| match sym {
-                    Symbol::Nonterminal(id) => Some(*id),
+                std::iter::once(rule.lhs).chain(rule.rhs.iter().filter_map(|symbol| match symbol {
+                    Symbol::Nonterminal(nonterminal) => Some(*nonterminal),
                     Symbol::Terminal(_) => None,
                 }))
             })
             .max()
             .map(|id| id + 1)
             .unwrap_or(0)
-    }
-
-    pub fn nonterminal_display_name(&self, nonterminal: NonterminalID) -> Option<&str> {
-        self.nonterminal_names.get(&nonterminal).map(String::as_str)
     }
 
     pub fn terminal_display_name(&self, terminal: TerminalID) -> String {
@@ -99,12 +89,11 @@ impl GrammarDef {
             .or_else(|| {
                 self.terminals
                     .iter()
-                    .find(|candidate| candidate.id() == terminal)
+                    .find(|terminal_def| terminal_def.id() == terminal)
                     .map(Terminal::name)
             })
             .unwrap_or_else(|| format!("T{terminal}"))
     }
-
 }
 
 #[cfg(test)]
@@ -149,7 +138,6 @@ pub(crate) mod tests {
     }
 
     pub fn two_nt_grammar() -> GrammarDef {
-
         GrammarDef {
             rules: vec![
                 Rule {
@@ -168,7 +156,6 @@ pub(crate) mod tests {
     }
 
     pub fn nested_nt_grammar() -> GrammarDef {
-
         GrammarDef {
             rules: vec![
                 Rule {
@@ -207,7 +194,6 @@ pub(crate) mod tests {
     }
 
     pub fn nested_two_rhs_grammar() -> GrammarDef {
-
         GrammarDef {
             rules: vec![
                 Rule {

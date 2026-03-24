@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -69,8 +64,8 @@ struct Lowerer {
     rules: Vec<Rule>,
     terminal_map: BTreeMap<String, TerminalID>,
     terminals: Vec<Terminal>,
-    nt_map: BTreeMap<String, NonterminalID>,
-    anon_counter: u32,
+    nonterminal_ids: BTreeMap<String, NonterminalID>,
+    generated_nonterminal_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
 }
 
@@ -82,7 +77,8 @@ enum RepeatTreeShape {
 }
 
 fn repeat_tree_shape() -> RepeatTreeShape {
-    repeat_tree_shape_from_value(&std::env::var("GLRMASK_TREE_SHAPE").unwrap_or_default())
+    let shape = std::env::var("GLRMASK_TREE_SHAPE");
+    repeat_tree_shape_from_value(shape.as_deref().unwrap_or(""))
 }
 
 fn repeat_tree_shape_from_value(value: &str) -> RepeatTreeShape {
@@ -91,11 +87,6 @@ fn repeat_tree_shape_from_value(value: &str) -> RepeatTreeShape {
         "balanced" => RepeatTreeShape::Balanced,
         _ => RepeatTreeShape::Right,
     }
-}
-
-fn highest_power_of_two_less_than(value: usize) -> usize {
-    debug_assert!(value > 1);
-    1usize << ((usize::BITS - 1) - (value - 1).leading_zeros())
 }
 
 const RIGHT_REPEAT_RANGE_FRONT_BUCKET: usize = 128;
@@ -127,48 +118,54 @@ fn range_repeat_split(min: usize, max: usize, shape: RepeatTreeShape) -> (usize,
     }
 }
 
+fn char_class_pattern(def: &str, negate: bool) -> String {
+    if negate {
+        format!("[^{def}]")
+    } else {
+        format!("[{def}]")
+    }
+}
+
 impl Lowerer {
     fn new() -> Self {
         Self {
             rules: Vec::new(),
             terminal_map: BTreeMap::new(),
             terminals: Vec::new(),
-            nt_map: BTreeMap::new(),
-            anon_counter: 0,
+            nonterminal_ids: BTreeMap::new(),
+            generated_nonterminal_counter: 0,
             terminal_names: BTreeMap::new(),
         }
     }
 
-    fn nt_id(&mut self, name: &str) -> NonterminalID {
-        if let Some(&id) = self.nt_map.get(name) {
+    fn nonterminal_id(&mut self, name: &str) -> NonterminalID {
+        if let Some(&id) = self.nonterminal_ids.get(name) {
             id
         } else {
-            let id = self.nt_map.len() as NonterminalID;
-            self.nt_map.insert(name.to_string(), id);
+            let id = self.nonterminal_ids.len() as NonterminalID;
+            self.nonterminal_ids.insert(name.to_string(), id);
             id
         }
     }
 
-    fn fresh_nt(&mut self, hint: &str) -> (String, NonterminalID) {
-        let name = format!("__{}_{}", hint, self.anon_counter);
-        self.anon_counter += 1;
-        let id = self.nt_id(&name);
+    fn fresh_nonterminal(&mut self, hint: &str) -> (String, NonterminalID) {
+        let name = format!("__{}_{}", hint, self.generated_nonterminal_counter);
+        self.generated_nonterminal_counter += 1;
+        let id = self.nonterminal_id(&name);
         (name, id)
     }
 
     fn terminal_id(&mut self, name: &str, pattern: &str, utf8: bool) -> TerminalID {
-        let key = format!("{}:{}", pattern, utf8);
-        if let Some(&id) = self.terminal_map.get(&key) {
+        let pattern_key = format!("{pattern}:{utf8}");
+        if let Some(&id) = self.terminal_map.get(&pattern_key) {
             return id;
         }
         let id = self.terminals.len() as TerminalID;
-        self.terminal_map.insert(key, id);
+        self.terminal_map.insert(pattern_key, id);
         self.terminal_names.insert(id, name.to_string());
-        // Decide variant: if the pattern is the same as the escaped literal of
-        // the name bytes, store as Literal; otherwise store as Pattern.
         let name_bytes = name.as_bytes();
-        let escaped: String = name_bytes.iter().map(|&b| regex_escape_byte(b)).collect();
-        if escaped == pattern && !utf8 {
+        let literal_pattern: String = name_bytes.iter().map(|&byte| regex_escape_byte(byte)).collect();
+        if literal_pattern == pattern && !utf8 {
             self.terminals.push(Terminal::Literal {
                 id,
                 bytes: name_bytes.to_vec(),
@@ -183,41 +180,49 @@ impl Lowerer {
         id
     }
 
-    fn repeat_exact_nt(
+    fn repeat_exact_nonterminal(
         &mut self,
-        item: &Symbol,
+        symbol: &Symbol,
         count: usize,
         shape: RepeatTreeShape,
         cache: &mut BTreeMap<usize, NonterminalID>,
     ) -> NonterminalID {
-        if let Some(&nt) = cache.get(&count) {
-            return nt;
+        if let Some(&nonterminal) = cache.get(&count) {
+            return nonterminal;
         }
 
-        let (_, nt) = self.fresh_nt("repeat_exact");
-        cache.insert(count, nt);
+        let (_, nonterminal) = self.fresh_nonterminal("repeat_exact");
+        cache.insert(count, nonterminal);
         match count {
-            0 => self.rules.push(Rule { lhs: nt, rhs: Vec::new() }),
+            0 => self.rules.push(Rule {
+                lhs: nonterminal,
+                rhs: Vec::new(),
+            }),
             1 => self.rules.push(Rule {
-                lhs: nt,
-                rhs: vec![item.clone()],
+                lhs: nonterminal,
+                rhs: vec![symbol.clone()],
             }),
             _ => {
                 let (left, right) = exact_repeat_split(count, shape);
-                let left_nt = self.repeat_exact_nt(item, left, shape, cache);
-                let right_nt = self.repeat_exact_nt(item, right, shape, cache);
+                let left_nonterminal =
+                    self.repeat_exact_nonterminal(symbol, left, shape, cache);
+                let right_nonterminal =
+                    self.repeat_exact_nonterminal(symbol, right, shape, cache);
                 self.rules.push(Rule {
-                    lhs: nt,
-                    rhs: vec![Symbol::Nonterminal(left_nt), Symbol::Nonterminal(right_nt)],
+                    lhs: nonterminal,
+                    rhs: vec![
+                        Symbol::Nonterminal(left_nonterminal),
+                        Symbol::Nonterminal(right_nonterminal),
+                    ],
                 });
             }
         }
-        nt
+        nonterminal
     }
 
-    fn repeat_range_nt(
+    fn repeat_range_nonterminal(
         &mut self,
-        item: &Symbol,
+        symbol: &Symbol,
         min: usize,
         max: usize,
         shape: RepeatTreeShape,
@@ -226,27 +231,28 @@ impl Lowerer {
     ) -> NonterminalID {
         debug_assert!(min <= max);
         if min == max {
-            return self.repeat_exact_nt(item, min, shape, exact_cache);
+            return self.repeat_exact_nonterminal(symbol, min, shape, exact_cache);
         }
-        if let Some(&nt) = range_cache.get(&(min, max)) {
-            return nt;
+        if let Some(&nonterminal) = range_cache.get(&(min, max)) {
+            return nonterminal;
         }
 
-        let (_, nt) = self.fresh_nt("repeat_range");
-        range_cache.insert((min, max), nt);
+        let (_, nonterminal) = self.fresh_nonterminal("repeat_range");
+        range_cache.insert((min, max), nonterminal);
         match shape {
             RepeatTreeShape::Right if (max - min + 1) > RIGHT_REPEAT_RANGE_FRONT_BUCKET => {
                 let cutoff = (min + RIGHT_REPEAT_RANGE_FRONT_BUCKET - 1).min(max);
                 for count in min..=cutoff {
-                    let exact_nt = self.repeat_exact_nt(item, count, shape, exact_cache);
+                    let exact_nonterminal =
+                        self.repeat_exact_nonterminal(symbol, count, shape, exact_cache);
                     self.rules.push(Rule {
-                        lhs: nt,
-                        rhs: vec![Symbol::Nonterminal(exact_nt)],
+                        lhs: nonterminal,
+                        rhs: vec![Symbol::Nonterminal(exact_nonterminal)],
                     });
                 }
                 if cutoff < max {
-                    let tail_nt = self.repeat_range_nt(
-                        item,
+                    let tail_nonterminal = self.repeat_range_nonterminal(
+                        symbol,
                         cutoff + 1,
                         max,
                         shape,
@@ -254,17 +260,17 @@ impl Lowerer {
                         range_cache,
                     );
                     self.rules.push(Rule {
-                        lhs: nt,
-                        rhs: vec![Symbol::Nonterminal(tail_nt)],
+                        lhs: nonterminal,
+                        rhs: vec![Symbol::Nonterminal(tail_nonterminal)],
                     });
                 }
-                return nt;
+                return nonterminal;
             }
             RepeatTreeShape::Left if (max - min + 1) > LEFT_REPEAT_RANGE_BACK_BUCKET => {
                 let cutoff = max.saturating_sub(LEFT_REPEAT_RANGE_BACK_BUCKET - 1).max(min);
                 if min < cutoff {
-                    let head_nt = self.repeat_range_nt(
-                        item,
+                    let head_nonterminal = self.repeat_range_nonterminal(
+                        symbol,
                         min,
                         cutoff - 1,
                         shape,
@@ -272,35 +278,48 @@ impl Lowerer {
                         range_cache,
                     );
                     self.rules.push(Rule {
-                        lhs: nt,
-                        rhs: vec![Symbol::Nonterminal(head_nt)],
+                        lhs: nonterminal,
+                        rhs: vec![Symbol::Nonterminal(head_nonterminal)],
                     });
                 }
                 for count in cutoff..=max {
-                    let exact_nt = self.repeat_exact_nt(item, count, shape, exact_cache);
+                    let exact_nonterminal =
+                        self.repeat_exact_nonterminal(symbol, count, shape, exact_cache);
                     self.rules.push(Rule {
-                        lhs: nt,
-                        rhs: vec![Symbol::Nonterminal(exact_nt)],
+                        lhs: nonterminal,
+                        rhs: vec![Symbol::Nonterminal(exact_nonterminal)],
                     });
                 }
-                return nt;
+                return nonterminal;
             }
             _ => {}
         }
         let (split, _) = range_repeat_split(min, max, shape);
-        let left_nt =
-            self.repeat_range_nt(item, min, split, shape, exact_cache, range_cache);
-        let right_nt =
-            self.repeat_range_nt(item, split + 1, max, shape, exact_cache, range_cache);
+        let left_nonterminal = self.repeat_range_nonterminal(
+            symbol,
+            min,
+            split,
+            shape,
+            exact_cache,
+            range_cache,
+        );
+        let right_nonterminal = self.repeat_range_nonterminal(
+            symbol,
+            split + 1,
+            max,
+            shape,
+            exact_cache,
+            range_cache,
+        );
         self.rules.push(Rule {
-            lhs: nt,
-            rhs: vec![Symbol::Nonterminal(left_nt)],
+            lhs: nonterminal,
+            rhs: vec![Symbol::Nonterminal(left_nonterminal)],
         });
         self.rules.push(Rule {
-            lhs: nt,
-            rhs: vec![Symbol::Nonterminal(right_nt)],
+            lhs: nonterminal,
+            rhs: vec![Symbol::Nonterminal(right_nonterminal)],
         });
-        nt
+        nonterminal
     }
 
     fn emit_repeat_range(
@@ -311,15 +330,21 @@ impl Lowerer {
         max: usize,
     ) -> Result<(), GlrMaskError> {
         debug_assert!(min <= max);
-        let item = self.lower_expr_terminalish(inner)?;
+        let symbol = self.lower_expr_terminalish(inner)?;
         let shape = repeat_tree_shape();
         let mut exact_cache = BTreeMap::new();
         let mut range_cache = BTreeMap::new();
-        let range_nt =
-            self.repeat_range_nt(&item, min, max, shape, &mut exact_cache, &mut range_cache);
+        let range_nonterminal = self.repeat_range_nonterminal(
+            &symbol,
+            min,
+            max,
+            shape,
+            &mut exact_cache,
+            &mut range_cache,
+        );
         self.rules.push(Rule {
             lhs,
-            rhs: vec![Symbol::Nonterminal(range_nt)],
+            rhs: vec![Symbol::Nonterminal(range_nonterminal)],
         });
         Ok(())
     }
@@ -344,14 +369,23 @@ impl Lowerer {
                     emit(lowerer, lhs, inner)?;
                 }
                 GrammarExpr::Repeat(inner) => {
-                    let item = lowerer.lower_expr(inner);
+                    let symbol = lowerer.lower_expr(inner);
                     lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
-                    lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), item] });
+                    lowerer.rules.push(Rule {
+                        lhs,
+                        rhs: vec![Symbol::Nonterminal(lhs), symbol],
+                    });
                 }
                 GrammarExpr::RepeatOne(inner) => {
-                    let item = lowerer.lower_expr(inner);
-                    lowerer.rules.push(Rule { lhs, rhs: vec![item.clone()] });
-                    lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), item] });
+                    let symbol = lowerer.lower_expr(inner);
+                    lowerer.rules.push(Rule {
+                        lhs,
+                        rhs: vec![symbol.clone()],
+                    });
+                    lowerer.rules.push(Rule {
+                        lhs,
+                        rhs: vec![Symbol::Nonterminal(lhs), symbol],
+                    });
                 }
                 GrammarExpr::RepeatRange { expr, min, max } => {
                     lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
@@ -367,24 +401,21 @@ impl Lowerer {
             Ok(())
         }
 
-        let (_, nt) = self.fresh_nt("expr");
-        emit(self, nt, expr).expect("grammar lowering should not fail for internal expression emission");
-        Symbol::Nonterminal(nt)
+        let (_, nonterminal) = self.fresh_nonterminal("expr");
+        emit(self, nonterminal, expr)
+            .expect("grammar lowering should not fail for internal expression emission");
+        Symbol::Nonterminal(nonterminal)
     }
 
     fn lower_expr_terminalish(&mut self, expr: &GrammarExpr) -> Result<Symbol, GlrMaskError> {
         Ok(match expr {
-            GrammarExpr::Ref(name) => Symbol::Nonterminal(self.nt_id(name)),
+            GrammarExpr::Ref(name) => Symbol::Nonterminal(self.nonterminal_id(name)),
             GrammarExpr::Literal(bytes) => {
                 let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
                 Symbol::Terminal(self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false))
             }
             GrammarExpr::CharClass { def, negate, utf8 } => {
-                let pattern = if *negate {
-                    format!("[^{def}]")
-                } else {
-                    format!("[{def}]")
-                };
+                let pattern = char_class_pattern(def, *negate);
                 Symbol::Terminal(self.terminal_id(&pattern, &pattern, *utf8))
             }
             GrammarExpr::RawRegex(pattern) => {
@@ -414,14 +445,13 @@ impl Lowerer {
 
     /// Register a pre-resolved terminal Expr, deduplicating by value.
     fn register_terminal_expr(&mut self, name: &str, expr: Expr) -> TerminalID {
-        // Dedup by the Expr tree itself
-        for (i, t) in self.terminals.iter().enumerate() {
-            if let Terminal::Expr { expr: existing, .. } = t {
-                if *existing == expr {
-                    return i as TerminalID;
-                }
-            }
+        if let Some(id) = self.terminals.iter().find_map(|terminal| match terminal {
+            Terminal::Expr { id, expr: existing } if *existing == expr => Some(*id),
+            _ => None,
+        }) {
+            return id;
         }
+
         let id = self.terminals.len() as TerminalID;
         self.terminal_names.insert(id, name.to_string());
         self.terminals.push(Terminal::Expr { id, expr });
@@ -432,19 +462,15 @@ impl Lowerer {
 /// Convert a GrammarExpr to an Expr tree, resolving terminal Ref nodes
 /// via the `terminal_bodies` map and caching results in `terminal_expr_cache`.
 fn grammar_expr_to_expr(
-    ge: &GrammarExpr,
+    expr: &GrammarExpr,
     terminal_bodies: &HashMap<String, GrammarExpr>,
     terminal_expr_cache: &mut HashMap<String, Arc<Expr>>,
     visiting: &mut HashSet<String>,
 ) -> Result<Expr, GlrMaskError> {
-    Ok(match ge {
+    Ok(match expr {
         GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes.clone()),
         GrammarExpr::CharClass { def, negate, utf8 } => {
-            let pattern = if *negate {
-                format!("[^{def}]")
-            } else {
-                format!("[{def}]")
-            };
+            let pattern = char_class_pattern(def, *negate);
             parse_regex(&pattern, *utf8)
         }
         GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true),
@@ -557,17 +583,17 @@ fn promote_expr_literals(
                     .iter()
                     .all(|o| matches!(o, GrammarExpr::Literal(_)))
             {
-                let mut sorted_bytes: Vec<Vec<u8>> = options
+                let mut literal_options: Vec<Vec<u8>> = options
                     .iter()
-                    .map(|o| match o {
-                        GrammarExpr::Literal(b) => b.clone(),
-                        _ => unreachable!(),
+                    .filter_map(|option| match option {
+                        GrammarExpr::Literal(bytes) => Some(bytes.clone()),
+                        _ => None,
                     })
                     .collect();
-                sorted_bytes.sort();
+                literal_options.sort();
 
                 let rule_name = cache
-                    .entry(sorted_bytes)
+                    .entry(literal_options)
                     .or_insert_with(|| {
                         let name = format!("ENUM_{}", *counter);
                         *counter += 1;
@@ -610,7 +636,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut lowerer = Lowerer::new();
 
     for rule in &grammar.rules {
-        lowerer.nt_id(&rule.name);
+        lowerer.nonterminal_id(&rule.name);
     }
 
     // Build a map of terminal rule bodies for resolving Ref nodes inside terminal exprs.
@@ -623,7 +649,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut terminal_expr_cache: HashMap<String, Arc<Expr>> = HashMap::new();
 
     for rule in &grammar.rules {
-        let lhs = lowerer.nt_id(&rule.name);
+        let lhs = lowerer.nonterminal_id(&rule.name);
 
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
@@ -687,25 +713,20 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         }
     }
 
-    let start = lowerer.nt_id(&grammar.start);
+    let start = lowerer.nonterminal_id(&grammar.start);
     let nonterminal_names = lowerer
-        .nt_map
+        .nonterminal_ids
         .iter()
         .filter(|(name, _)| !name.starts_with("__"))
         .map(|(name, id)| (*id, name.clone()))
         .collect();
 
-    let ignore_terminal = if let Some(ref ignore_name) = grammar.ignore {
-        // Find the terminal created for the ignore rule.
-        // The ignore rule has is_terminal=true, so it was lowered above
-        // as NT → Terminal. The terminal has the ignore name in terminal_names.
-        let tid = lowerer.terminal_names.iter()
-            .find(|(_, name)| *name == ignore_name)
-            .map(|(&id, _)| id);
-        tid
-    } else {
-        None
-    };
+    let ignore_terminal = grammar.ignore.as_ref().and_then(|ignore_name| {
+        lowerer
+            .terminal_names
+            .iter()
+            .find_map(|(&id, name)| (name == ignore_name).then_some(id))
+    });
 
     Ok(GrammarDef {
         rules: lowerer.rules,

@@ -616,22 +616,6 @@ fn test_conversion_enum() {
         .expect("schema should convert to named grammar");
     assert!(!named.rules.is_empty());
 
-    // Check that the grammar contains the literal strings somewhere in the rules
-    fn contains_literal(expr: &GrammarExpr, target: &[u8]) -> bool {
-        match expr {
-            GrammarExpr::Literal(bytes) => bytes == target,
-            GrammarExpr::Sequence(parts) => parts.iter().any(|p| contains_literal(p, target)),
-            GrammarExpr::Choice(options) => options.iter().any(|o| contains_literal(o, target)),
-            GrammarExpr::Optional(inner)
-            | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner)
-            | GrammarExpr::RepeatRange { expr: inner, .. } => {
-                contains_literal(inner, target)
-            }
-            _ => false,
-        }
-    }
-
     let has_red = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"red\""));
     let has_green = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"green\""));
     let has_blue = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"blue\""));

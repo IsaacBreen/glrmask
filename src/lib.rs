@@ -15,20 +15,9 @@ pub use ds::weight::{
     clear_weight_caches,
     clear_weight_op_caches,
 };
-pub use error::{Error, Result};
-#[allow(deprecated)]
-pub use error::GlrMaskError;
+pub use error::{Error, GlrMaskError, Result};
 pub use runtime::{
-    CommitMetrics,
-    CommitTrace,
     Constraint,
     ConstraintState,
-    ConstraintStateSummary,
-    MaskMetrics,
 };
 pub use vocab::Vocab;
-
-#[doc(hidden)]
-pub fn __check_live_minimal_tokenizer_fineness() {
-    compiler::stages::equivalence_analysis::combined_equivalence_analysis::check_live_minimal_tokenizer_fineness();
-}

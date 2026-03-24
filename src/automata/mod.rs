@@ -1,7 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-
 pub mod lexer;
 pub mod weighted_u32;
 pub mod unweighted_u32;

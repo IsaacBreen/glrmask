@@ -1202,12 +1202,16 @@ impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Merge + Clone + Eq + Hash + std:
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-    pub(crate) fn ptr_key(&self) -> usize {
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.inner) as usize
     }
 
     #[cfg(test)]
-    fn inner_ptrs_eq(&self, other: &Self) -> bool {
+    pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
         match (&*self.inner, &*other.inner) {
             (Upper::Branch(b1), Upper::Branch(b2)) => {
                 if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
@@ -1753,9 +1757,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         (LeveledGSS { inner: new_inner }, underflows)
     }
 
+    pub fn pop(&self) -> Self {
+        self.popn(1)
+    }
+
     /// Decompose the top level and pop one level in a single pass.
     /// Returns `(value, popped_gss)` for each top-level child value.
-    /// Equivalent to calling `self.isolate(Some(v)).popn(1)` for each v in `peek_values()`,
+    /// Equivalent to calling `self.isolate(Some(v)).pop()` for each v in `peek_values()`,
     /// but avoids repeated HashMap lookups.
     pub fn decompose_and_pop(&self) -> Vec<(T, Self)> {
         match &*self.inner {
@@ -2727,11 +2735,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner }
     }
 
+    pub fn peek(&self) -> HashSet<T> {
+        self.inner.children_keys().into_iter().collect()
+    }
+
     pub fn peek_values(&self) -> Vec<T> {
         self.inner.children_keys()
     }
 
-    fn reduce_acc(&self) -> Option<A> {
+    pub fn reduce_acc(&self) -> Option<A> {
         
         let mut unique: HashSet<A> = HashSet::new();
         let mut queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
@@ -2833,21 +2845,37 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         walk(&self.inner, &mut visited, &mut f);
     }
 
+    pub fn truncate(&self, max_len: isize) -> Self {
+        if max_len < 0 {
+            return Self::empty();
+        }
+
+        let mut memo_upper = StdHashMap::new();
+        let mut memo_lower = StdHashMap::new();
+
+        let new_inner = truncate_upper(
+            &self.inner,
+            0,
+            max_len,
+            &mut memo_upper,
+            &mut memo_lower,
+        );
+
+        new_inner.map_or_else(Self::empty, |inner| Self { inner })
+    }
+
     #[cfg(test)]
-    fn split_at_depth(&self, depth: isize) -> (Self, Self) {
+    pub fn split_at_depth(&self, depth: isize) -> (Self, Self) {
         if depth < 0 {
             return (self.clone(), Self::empty());
         }
         let below = self.popn(depth);
-        let mut memo_upper = StdHashMap::new();
-        let mut memo_lower = StdHashMap::new();
-        let above = truncate_upper(&self.inner, 0, depth, &mut memo_upper, &mut memo_lower)
-            .map_or_else(Self::empty, |inner| Self { inner });
+        let above = self.truncate(depth);
         (below, above)
     }
 
     #[cfg(test)]
-    fn accs_by_depth(&self) -> BTreeMap<isize, A>
+    pub fn accs_by_depth(&self) -> BTreeMap<isize, A>
     where
         A: Ord,
     {
@@ -2858,7 +2886,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn stats(&self) -> LeveledGSSStats<T, A> {
+    pub fn stats(&self) -> LeveledGSSStats<T, A> {
         let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
 
         let mut visited_upperbranch: HashSet<usize> = HashSet::new();
@@ -3180,7 +3208,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn to_graph_string(&self, upper_only: bool) -> String
+    pub fn to_graph_string(&self, upper_only: bool) -> String
     where
         T: std::fmt::Debug,
         A: std::fmt::Debug,
@@ -3190,7 +3218,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn to_graph_string_with_memo(&self, memo: &mut HashSet<usize>, upper_only: bool) -> String
+    pub fn to_graph_string_with_memo(&self, memo: &mut HashSet<usize>, upper_only: bool) -> String
     where
         T: std::fmt::Debug,
         A: std::fmt::Debug,
@@ -3428,7 +3456,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn predecessors(&self) -> BTreeMap<T, BTreeMap<isize, Vec<Self>>>
+    pub fn predecessors(&self) -> BTreeMap<T, BTreeMap<isize, Vec<Self>>>
     where
         T: Clone + Eq + Hash + Ord,
         A: Merge + Clone + Eq + Hash + Ord,
@@ -3468,12 +3496,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[cfg(test)]
-    fn num_paths(&self) -> usize {
+    pub fn num_paths(&self) -> usize {
         self.paths_info().num_paths
     }
 
     #[cfg(test)]
-    fn paths_info(&self) -> GSSPathsInfo {
+    pub fn paths_info(&self) -> GSSPathsInfo {
         let mut memo_upper = StdHashMap::new();
         let mut memo_lower = StdHashMap::new();
         Self::paths_info_upper(&self.inner, &mut memo_upper, &mut memo_lower)
@@ -3615,11 +3643,11 @@ mod tests {
             &[1],
         )]);
 
-        let gss1 = gss0.popn(1);
-        let gss2 = gss0.popn(1);
+        let gss1 = gss0.pop();
+        let gss2 = gss0.pop();
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert_ne!(gss1.ptr_key(), gss2.ptr_key()); 
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -3629,18 +3657,18 @@ mod tests {
             &[1],
         )]);
 
-        let gss1 = gss0.push("X".to_string()).popn(1);
+        let gss1 = gss0.push("X".to_string()).pop();
 
         assert!(gss0.inner_ptrs_eq(&gss1));
-        assert_ne!(gss0.ptr_key(), gss1.ptr_key()); 
+        assert!(!gss0.ptr_eq(&gss1)); 
     }
 
     #[test]
     fn test_push_pop_identity_from_empty() {
         let gss0 = TestGSS::empty();
-        let gss1 = gss0.push("X".to_string()).popn(1);
+        let gss1 = gss0.push("X".to_string()).pop();
 
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
     }
 
     #[test]
@@ -3650,7 +3678,7 @@ mod tests {
             &[1],
         )]);
 
-        let gss_bc_from_pop = gss_abc.popn(1);
+        let gss_bc_from_pop = gss_abc.pop();
 
         let preds = gss_abc.predecessors();
         let children_of_a = preds.get(&"A".to_string()).unwrap();
@@ -3684,7 +3712,7 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert_ne!(gss1.ptr_key(), gss2.ptr_key()); 
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -3698,7 +3726,7 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert_ne!(gss1.ptr_key(), gss2.ptr_key()); 
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -3712,7 +3740,7 @@ mod tests {
         let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
-        assert_ne!(gss1.ptr_key(), gss2.ptr_key()); 
+        assert!(!gss1.ptr_eq(&gss2)); 
     }
 
     #[test]
@@ -3720,19 +3748,19 @@ mod tests {
         
         let gss0 = gss_from_str_stacks(&[(&["A"], &[1])]);
         let gss1 = gss0.isolate(Some("A".to_string()));
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
 
         let gss2 = gss_from_str_stacks(&[(&[], &[1])]);
         let gss3 = gss2.isolate(None);
-        assert_eq!(gss2.ptr_key(), gss3.ptr_key());
+        assert!(gss2.ptr_eq(&gss3));
 
         let gss4 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
         let gss5 = gss4.isolate(Some("A".to_string()));
-        assert_ne!(gss4.ptr_key(), gss5.ptr_key());
+        assert!(!gss4.ptr_eq(&gss5));
 
         let gss6 = gss_from_str_stacks(&[(&["A"], &[1]), (&[], &[2])]);
         let gss7 = gss6.isolate(None);
-        assert_ne!(gss6.ptr_key(), gss7.ptr_key());
+        assert!(!gss6.ptr_eq(&gss7));
     }
 
     #[test]
@@ -3740,20 +3768,20 @@ mod tests {
         let gss0 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2]), (&[], &[3])]);
 
         let gss1 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
 
         let gss2 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), Some("C".to_string()), None]);
-        assert_eq!(gss0.ptr_key(), gss2.ptr_key());
+        assert!(gss0.ptr_eq(&gss2));
 
         let gss3 = gss0.isolate_many(vec![Some("A".to_string()), None]);
-        assert_ne!(gss0.ptr_key(), gss3.ptr_key());
+        assert!(!gss0.ptr_eq(&gss3));
 
         let gss4 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string())]);
-        assert_ne!(gss0.ptr_key(), gss4.ptr_key());
+        assert!(!gss0.ptr_eq(&gss4));
 
         let gss5 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
         let gss6 = gss5.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
-        assert_ne!(gss5.ptr_key(), gss6.ptr_key());
+        assert!(!gss5.ptr_eq(&gss6));
     }
 
     #[test]
@@ -3766,20 +3794,20 @@ mod tests {
         ]);
 
         let gss1 = gss0.filter_by_length(None, None);
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
 
         let gss2 = gss0.filter_by_length(Some(0), Some(3));
-        assert_eq!(gss0.ptr_key(), gss2.ptr_key());
+        assert!(gss0.ptr_eq(&gss2));
         let gss3 = gss0.filter_by_length(Some(-1), Some(10));
-        assert_eq!(gss0.ptr_key(), gss3.ptr_key());
+        assert!(gss0.ptr_eq(&gss3));
 
         let gss4 = gss0.filter_by_length(Some(1), Some(2));
-        assert_ne!(gss0.ptr_key(), gss4.ptr_key());
+        assert!(!gss0.ptr_eq(&gss4));
         assert_eq!(gss4.to_stacks().len(), 2);
 
         let gss_empty = TestGSS::empty();
         let gss_empty_filtered = gss_empty.filter_by_length(Some(1), Some(2));
-        assert_eq!(gss_empty.ptr_key(), gss_empty_filtered.ptr_key());
+        assert!(gss_empty.ptr_eq(&gss_empty_filtered));
     }
 
     #[test]
@@ -3792,20 +3820,20 @@ mod tests {
         ]);
 
         let gss1 = gss0.prune(|_acc| true);
-        assert_eq!(gss0.ptr_key(), gss1.ptr_key());
+        assert!(gss0.ptr_eq(&gss1));
 
         let gss2 = gss0.prune(|acc| acc.0.contains(&1));
-        assert_ne!(gss0.ptr_key(), gss2.ptr_key());
+        assert!(!gss0.ptr_eq(&gss2));
         
         assert_eq!(gss2.to_stacks().len(), 2);
 
         let gss3 = gss0.prune(|_acc| false);
         assert!(gss3.is_empty());
-        assert_ne!(gss0.ptr_key(), gss3.ptr_key());
+        assert!(!gss0.ptr_eq(&gss3));
 
         let gss_empty = TestGSS::empty();
         let gss_empty_pruned = gss_empty.prune(|_acc| true);
-        assert_eq!(gss_empty.ptr_key(), gss_empty_pruned.ptr_key());
+        assert!(gss_empty.ptr_eq(&gss_empty_pruned));
     }
 
     #[test]

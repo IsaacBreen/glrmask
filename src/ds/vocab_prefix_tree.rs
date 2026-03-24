@@ -1,9 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
-use std::cmp::Ordering;
 use std::fmt;
 
 use range_set_blaze::RangeSetBlaze;
@@ -13,11 +7,10 @@ pub struct VocabPrefixTreeNode {
     token_id: usize,
     has_token: bool,
     prefix: Box<[u8]>,
-    prefix_length: usize,
 
     // Packed child storage.
     // Edge labels are implicit:
-    // child_edge_label = &child.prefix[self.prefix_length..]
+    // child_edge_label = &child.prefix[self.prefix.len()..]
     children: Box<[VocabPrefixTreeNode]>,
 
     reachable_token_ids: RangeSetBlaze<usize>,
@@ -50,12 +43,10 @@ impl ExactSizeIterator for VocabPrefixTreeChildIter<'_> {}
 impl VocabPrefixTreeNode {
     #[inline]
     fn new(token_id: usize, prefix: Box<[u8]>, has_token: bool) -> Self {
-        let prefix_length = prefix.len();
         Self {
             token_id,
             has_token,
             prefix,
-            prefix_length,
             children: Box::new([]),
             reachable_token_ids: RangeSetBlaze::new(),
             subtree_bytes: [0u64; 4],
@@ -74,7 +65,7 @@ impl VocabPrefixTreeNode {
 
     #[inline]
     pub fn prefix_length(&self) -> usize {
-        self.prefix_length
+        self.prefix.len()
     }
 
     #[inline]
@@ -90,7 +81,7 @@ impl VocabPrefixTreeNode {
     #[inline]
     pub fn iter_children(&self) -> VocabPrefixTreeChildIter<'_> {
         VocabPrefixTreeChildIter {
-            parent_prefix_len: self.prefix_length,
+            parent_prefix_len: self.prefix.len(),
             inner: self.children.iter(),
         }
     }
@@ -107,12 +98,12 @@ impl VocabPrefixTreeNode {
 
     #[inline]
     fn child_edge_label<'a>(&'a self, child: &'a VocabPrefixTreeNode) -> &'a [u8] {
-        &child.prefix[self.prefix_length..]
+        &child.prefix[self.prefix.len()..]
     }
 
     #[inline]
     fn child_key_byte(&self, child: &VocabPrefixTreeNode) -> u8 {
-        child.prefix[self.prefix_length]
+        child.prefix[self.prefix.len()]
     }
 
     #[inline]
@@ -146,7 +137,7 @@ impl fmt::Debug for VocabPrefixTreeNode {
         let mut debug_struct = f.debug_struct("VocabPrefixTreeNode");
         debug_struct.field("token_id", &self.token_id);
         debug_struct.field("has_token", &self.has_token);
-        debug_struct.field("prefix_length", &self.prefix_length);
+        debug_struct.field("prefix_length", &self.prefix.len());
         debug_struct.field("prefix", &format_bytes(&self.prefix));
         debug_struct.field(
             "reachable_token_ids",
@@ -316,7 +307,6 @@ impl VocabPrefixTree {
             token_id,
             has_token,
             prefix,
-            prefix_length: prefix_len,
             children: children.into_boxed_slice(),
             reachable_token_ids,
             subtree_bytes,
@@ -404,20 +394,6 @@ impl Default for VocabPrefixTree {
 }
 
 impl Eq for VocabPrefixTreeNode {}
-
-impl PartialOrd for VocabPrefixTreeNode {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for VocabPrefixTreeNode {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.prefix_length
-            .cmp(&other.prefix_length)
-            .then_with(|| self.token_id.cmp(&other.token_id))
-    }
-}
 
 #[cfg(test)]
 mod tests {

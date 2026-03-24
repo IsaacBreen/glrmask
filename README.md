@@ -67,8 +67,6 @@ assert_eq!(constraint.mask_len(), restored.mask_len());
 - `state.commit_tokens(&token_ids)` advances with a token slice.
 - `state.commit_bytes(bytes)` advances with raw bytes.
 - `state.force()` returns the currently forced token IDs.
-- `state.summary()` returns structural state statistics.
-- `state.mask_metrics()` and `state.commit_*_metrics()` expose runtime metrics.
 
 ## Examples
 

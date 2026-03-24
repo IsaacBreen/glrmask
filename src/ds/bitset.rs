@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -162,7 +157,6 @@ impl BitSet {
     }
 
     pub fn fill_u32_mask(&self, buf: &mut [u32]) {
-        
         for (i, &word) in self.words.iter().enumerate() {
             let base = i * 2;
             if base < buf.len() {
@@ -204,7 +198,7 @@ impl Iterator for BitIter {
             return None;
         }
         let tz = self.word.trailing_zeros() as usize;
-        self.word &= self.word - 1; 
+        self.word &= self.word - 1;
         Some(self.base + tz)
     }
 }

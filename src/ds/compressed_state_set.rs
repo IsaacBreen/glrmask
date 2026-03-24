@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::hash::{Hash, Hasher};
 
 /// Sparse bitset that tracks which words became non-zero so clearing is cheap.
@@ -79,16 +74,12 @@ impl CompressedStateSet {
     #[inline]
     pub fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut result = Self::new();
-        Self::reuse_from_sparse(sparse, &mut result, &mut Vec::new());
+        Self::reuse_from_sparse(sparse, &mut result);
         result
     }
 
     #[inline]
-    pub fn reuse_from_sparse(
-        sparse: &SparseStateSet,
-        buffer: &mut Self,
-        _sort_scratch: &mut Vec<usize>,
-    ) {
+    pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
         buffer.words.clear();
 
         let mut hash = 0u64;

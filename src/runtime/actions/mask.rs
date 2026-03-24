@@ -1,7 +1,6 @@
 use crate::runtime::state::ConstraintState;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
-use crate::ds::weight::{Weight, WeightStats, reset_weight_stats, snapshot_weight_stats};
-use crate::runtime::state::ConstraintStateSummary;
+use crate::ds::weight::Weight;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -228,48 +227,18 @@ impl Merge for DenseMaskAcc {
 
 type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MaskMetrics {
-    pub state_summary: ConstraintStateSummary,
-    pub weight_ops: WeightStats,
-    pub mask_words: usize,
-    pub allowed_token_count: usize,
-    pub seeded_entries: usize,
-    pub seeded_empty_after_weight: usize,
-    pub queue_depth_buckets_processed: usize,
-    pub queue_items_processed: usize,
-    pub final_weight_checks: usize,
-    pub final_weight_full_hits: usize,
-    pub final_weight_intersection_hits: usize,
-    pub parser_states_peeked: usize,
-    pub transitions_considered: usize,
-    pub transitions_hit: usize,
-    pub transitions_missing: usize,
-    pub transitions_popped_empty: usize,
-    pub transitions_pruned_empty: usize,
-    pub transitions_enqueued: usize,
-    pub max_queue_items: usize,
-    pub max_weighted_gss_top_values: usize,
-    pub max_weighted_gss_unique_nodes: usize,
-    pub max_weighted_gss_total_edges: usize,
-    pub max_weighted_gss_depth: u32,
-    pub max_depth_bucket_processed: u32,
-    pub min_depth_bucket_processed: u32,
-    pub max_items_in_depth_bucket: usize,
-    pub positive_transitions_hit: usize,
-    pub positive_transitions_enqueued: usize,
-    pub default_transitions_hit: usize,
-    pub default_transitions_enqueued: usize,
-    /// Timing breakdown (nanoseconds), only populated by `mask_metrics`.
-    pub seed_ns: u64,
-    pub final_weight_ns: u64,
-    pub transition_gss_ns: u64,
-    pub transition_intersect_ns: u64,
-    pub transition_enqueue_ns: u64,
-    pub queue_pop_ns: u64,
-    pub bfs_loop_ns: u64,
-    pub total_ns: u64,
-    pub internal_token_dense_words: usize,
+fn enqueue_gss(
+    queue: &mut BTreeMap<u32, FxHashMap<u32, DenseMaskGSS>>,
+    depth: u32,
+    target: u32,
+    gss: DenseMaskGSS,
+) {
+    queue
+        .entry(depth)
+        .or_default()
+        .entry(target)
+        .and_modify(|existing| *existing = existing.merge(&gss))
+        .or_insert(gss);
 }
 
 impl<'a> ConstraintState<'a> {
@@ -280,25 +249,6 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        self.fill_mask_impl(buf, None);
-    }
-
-    pub fn mask_metrics(&self) -> MaskMetrics {
-        let mut metrics = MaskMetrics {
-            state_summary: self.summary(),
-            mask_words: self.constraint.mask_len(),
-            ..MaskMetrics::default()
-        };
-        let mut buf = vec![0u32; self.constraint.mask_len()];
-        reset_weight_stats();
-        self.fill_mask_impl(&mut buf, Some(&mut metrics));
-        metrics.allowed_token_count = buf.iter().map(|word| word.count_ones() as usize).sum();
-        metrics.weight_ops = snapshot_weight_stats();
-        metrics.internal_token_dense_words = self.constraint.internal_token_dense_words;
-        metrics
-    }
-
-    fn fill_mask_impl(&self, buf: &mut [u32], mut metrics: Option<&mut MaskMetrics>) {
         buf.fill(0);
 
         let parser_dwa = self.constraint.parser_dwa();
@@ -307,10 +257,6 @@ impl<'a> ConstraintState<'a> {
         }
 
         let precomputed = &self.constraint.weight_token_dense_masks;
-        let timed = metrics.is_some();
-
-        let t_total = if timed { Some(std::time::Instant::now()) } else { None };
-        let t_seed_start = if timed { Some(std::time::Instant::now()) } else { None };
 
         // Depth buckets let us pop the deepest frontier without rescanning or
         // linearly searching for matching (depth, state) entries on enqueue.
@@ -358,13 +304,7 @@ impl<'a> ConstraintState<'a> {
             });
 
             if decomposed.is_empty() && root_accs.is_empty() {
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.seeded_empty_after_weight += 1;
-                }
                 continue;
-            }
-            if let Some(metrics) = metrics.as_deref_mut() {
-                metrics.seeded_entries += 1;
             }
 
             // Apply start_state's final_weight to the seed accumulators.
@@ -410,144 +350,54 @@ impl<'a> ConstraintState<'a> {
                     if pruned.is_empty() {
                         continue;
                     }
-                    let new_depth = pruned.max_depth();
-                    queue
-                        .entry(new_depth)
-                        .or_default()
-                        .entry(*target)
-                        .and_modify(|existing| *existing = existing.merge(&pruned))
-                        .or_insert(pruned);
+                    enqueue_gss(&mut queue, pruned.max_depth(), *target, pruned);
                 }
             }
         }
 
         // Process DWA states depth-first.
-        if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_seed_start) {
-            metrics.seed_ns = t.elapsed().as_nanos() as u64;
-        }
-        let t_bfs_loop = if timed { Some(std::time::Instant::now()) } else { None };
-        while let Some((max_depth, states_at_depth)) = queue.pop_last() {
-            let t_pop = if timed { Some(std::time::Instant::now()) } else { None };
+        while let Some((_depth, states_at_depth)) = queue.pop_last() {
             let items: Vec<(u32, DenseMaskGSS)> = states_at_depth.into_iter().collect();
-            if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_pop) {
-                metrics.queue_pop_ns += t.elapsed().as_nanos() as u64;
-                metrics.queue_depth_buckets_processed += 1;
-                if metrics.queue_depth_buckets_processed == 1 {
-                    metrics.max_depth_bucket_processed = max_depth;
-                }
-                metrics.min_depth_bucket_processed = max_depth;
-                metrics.max_items_in_depth_bucket = metrics.max_items_in_depth_bucket.max(items.len());
-            }
             for (wa_state, gss) in items {
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.queue_items_processed += 1;
-                }
                 let dwa_state = &parser_dwa.states[wa_state as usize];
                 let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
 
                 // Final weight → OR allowed tokens into buf.
-                let t_fw = if timed { Some(std::time::Instant::now()) } else { None };
                 if let Some(final_weight) = &dwa_state.final_weight {
-                    if let Some(metrics) = metrics.as_deref_mut() {
-                        metrics.final_weight_checks += 1;
-                    }
                     if final_weight.is_full() {
-                        let mut hit = false;
                         gss.for_each_acc(|acc| {
                             acc.or_to_buf(&self.constraint, buf);
-                            hit = true;
                         });
-                        if hit {
-                            if let Some(metrics) = metrics.as_deref_mut() {
-                                metrics.final_weight_full_hits += 1;
-                            }
-                        }
                     } else {
-                        let mut hit = false;
                         gss.for_each_acc(|acc| {
                             acc.or_intersection_to_buf(
                                 &self.constraint, final_weight, precomputed, buf,
                             );
-                            hit = true;
                         });
-                        if hit {
-                            if let Some(metrics) = metrics.as_deref_mut() {
-                                metrics.final_weight_intersection_hits += 1;
-                            }
-                        }
                     }
                 }
 
                 // Advance through DWA transitions for each parser state.
-                if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_fw) {
-                    metrics.final_weight_ns += t.elapsed().as_nanos() as u64;
-                }
-                let t_gss = if timed { Some(std::time::Instant::now()) } else { None };
                 let decomposed = gss.decompose_and_pop();
-                if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_gss) {
-                    metrics.parser_states_peeked += decomposed.len();
-                    metrics.transition_gss_ns += t.elapsed().as_nanos() as u64;
-                }
                 for (parser_state, popped) in &decomposed {
                     let labels = [
-                        (crate::compiler::glr::labels::encode_positive_label(*parser_state), false),
-                        (crate::compiler::glr::labels::DEFAULT_LABEL, true),
+                        crate::compiler::glr::labels::encode_positive_label(*parser_state),
+                        crate::compiler::glr::labels::DEFAULT_LABEL,
                     ];
-                    for (label, is_default) in labels {
-                        if let Some(metrics) = metrics.as_deref_mut() {
-                            metrics.transitions_considered += 1;
-                        }
+                    for label in labels {
                         let Some((target, weight)) = fast_trans.get(&label) else {
-                            if let Some(metrics) = metrics.as_deref_mut() {
-                                metrics.transitions_missing += 1;
-                            }
                             continue;
                         };
-                        if let Some(metrics) = metrics.as_deref_mut() {
-                            metrics.transitions_hit += 1;
-                            if is_default {
-                                metrics.default_transitions_hit += 1;
-                            } else {
-                                metrics.positive_transitions_hit += 1;
-                            }
-                        }
-                        let t_int = if timed { Some(std::time::Instant::now()) } else { None };
                         let pruned = popped.apply_and_prune_no_promote(|allowed| {
                             allowed.intersect_with_weight(weight, precomputed)
                         });
                         if pruned.is_empty() {
-                            if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_int) {
-                                metrics.transitions_pruned_empty += 1;
-                                metrics.transition_intersect_ns += t.elapsed().as_nanos() as u64;
-                            }
                             continue;
                         }
-                        let t_enq = if timed { Some(std::time::Instant::now()) } else { None };
-                        if let (Some(metrics), Some(te), Some(ti)) = (metrics.as_deref_mut(), t_enq, t_int) {
-                            metrics.transition_intersect_ns += te.duration_since(ti).as_nanos() as u64;
-                        }
-                        let new_depth = pruned.max_depth();
-                        queue
-                            .entry(new_depth)
-                            .or_default()
-                            .entry(*target)
-                            .and_modify(|existing| *existing = existing.merge(&pruned))
-                            .or_insert(pruned);
-                        if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_enq) {
-                            metrics.transitions_enqueued += 1;
-                            if is_default {
-                                metrics.default_transitions_enqueued += 1;
-                            } else {
-                                metrics.positive_transitions_enqueued += 1;
-                            }
-                            metrics.transition_enqueue_ns += t.elapsed().as_nanos() as u64;
-                        }
+                        enqueue_gss(&mut queue, pruned.max_depth(), *target, pruned);
                     }
                 }
             }
-        }
-        if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_bfs_loop) {
-            metrics.bfs_loop_ns = t.elapsed().as_nanos() as u64;
         }
 
         // EOS token: clear unconditionally, then re-set if constraint is complete.
@@ -563,10 +413,5 @@ impl<'a> ConstraintState<'a> {
                 }
             }
         }
-
-        if let (Some(metrics), Some(t)) = (metrics.as_deref_mut(), t_total) {
-            metrics.total_ns = t.elapsed().as_nanos() as u64;
-        }
     }
-
 }

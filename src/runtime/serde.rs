@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use range_set_blaze::RangeSetBlaze;
 use std::collections::BTreeMap;
 
@@ -21,7 +16,7 @@ fn decode_ranges(ranges: Vec<[u32; 2]>) -> RangeSetBlaze<u32> {
         .collect()
 }
 
-pub(in crate::runtime) mod serde_btmap_rsb {
+pub(in crate::runtime) mod serde_btreemap_rangeset {
     use range_set_blaze::RangeSetBlaze;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;

@@ -30,32 +30,9 @@ use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::equivalence_analysis::reference::{
     build_disallowed_follow_dfa, normalize_disallowed_follows,
 };
-use crate::compiler::stages::profile_stats::{
-    WeightedDwaStats,
-    WeightedNwaStats,
-    collect_weighted_dwa_stats,
-    collect_weighted_nwa_stats,
-};
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct TerminalDwaBuildReport {
-    pub build_vocab_trie_time: std::time::Duration,
-    pub build_nwa_from_trie_time: std::time::Duration,
-    pub collapse_always_allowed_time: std::time::Duration,
-    pub collapse_always_allowed_applied: bool,
-    pub subtract_disallowed_time: std::time::Duration,
-    pub determinize_time: std::time::Duration,
-    pub minimize_time: std::time::Duration,
-    pub total_time: std::time::Duration,
-    pub vocab_entries: usize,
-    pub internal_tsids: usize,
-    pub terminal_nwa: WeightedNwaStats,
-    pub terminal_dwa: WeightedDwaStats,
-    pub terminal_minimized_dwa: WeightedDwaStats,
-}
 
 pub(crate) fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
     let mut ever_allowed = vec![BTreeSet::new(); grammar.num_terminals as usize];
@@ -209,7 +186,6 @@ fn deduplicate_roots(
     nwa: &mut NWA,
     start_state: u32,
     num_roots: usize,
-    profile_enabled: bool,
 ) {
     let root_start = start_state as usize + 1;
     let root_end = root_start + num_roots;
@@ -253,12 +229,6 @@ fn deduplicate_roots(
     }
 
     if dedup_count == 0 {
-        if profile_enabled {
-            eprintln!(
-                "[glrmask/profile][terminal_dwa] deduplicate_roots dedup=0 roots={}",
-                num_roots,
-            );
-        }
         return;
     }
 
@@ -280,15 +250,6 @@ fn deduplicate_roots(
 
     // Prune now-unreachable duplicate root states.
     prune_unreachable_states(nwa);
-
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][terminal_dwa] deduplicate_roots dedup={} roots={} remaining_states={}",
-            dedup_count,
-            num_roots,
-            nwa.states.len(),
-        );
-    }
 }
 
 fn prune_unreachable_states(nwa: &mut NWA) -> bool {
@@ -785,21 +746,6 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     leaf_weight_cache_canonical: HashMap<LeafTokenIds, Weight>,
     transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
     epsilon_buffer: BTreeMap<(u32, u32), Weight>,
-    profile_enabled: bool,
-    profile_trie_calls: usize,
-    profile_assoc_clones: usize,
-    profile_tokenizer_execs: usize,
-    profile_exec_ms: std::time::Duration,
-    profile_weight_ms: std::time::Duration,
-    profile_weight_compute_ms: std::time::Duration,
-    profile_weight_compute_calls: usize,
-    profile_match_ms: std::time::Duration,
-    profile_assoc_clone_ms: std::time::Duration,
-    profile_self_loop_leaf_only_ms: std::time::Duration,
-    profile_leaf_ms: std::time::Duration,
-    profile_merge_ms: std::time::Duration,
-    profile_pending_ms: std::time::Duration,
-    profile_flush_ms: std::time::Duration,
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
@@ -838,10 +784,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return weight.clone();
         }
 
-        let t = std::time::Instant::now();
         let weight = self.token_set_weight_fast(token_ids);
-        self.profile_weight_compute_ms += t.elapsed();
-        self.profile_weight_compute_calls += 1;
         self.reachable_weight_cache.insert(cache_key, weight.clone());
         weight
     }
@@ -929,13 +872,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         assoc_by_state: &AssocByState,
     ) {
-        let started_at = std::time::Instant::now();
         let mut accessible = node.reachable_token_ids().clone();
         if node.has_token() {
             accessible.remove(node.token_id() as usize);
         }
         if accessible.is_empty() {
-            self.profile_self_loop_leaf_only_ms += started_at.elapsed();
             return;
         }
         let accessible_weight = self.token_set_weight_fast(&accessible);
@@ -944,7 +885,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 self.add_match_from_sources(source_nodes, terminal_id, self.leaf_state, &accessible_weight);
             }
         }
-        self.profile_self_loop_leaf_only_ms += started_at.elapsed();
     }
 
     fn add_match_from_sources(
@@ -970,9 +910,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn flush_transition_buffer(&mut self) {
-        let t0 = std::time::Instant::now();
-        let mut leaf_entries = 0usize;
-        let mut leaf_cache_misses = 0usize;
         for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
             .into_iter()
             .enumerate()
@@ -981,20 +918,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if token_ids.is_empty() {
                     continue;
                 }
-                leaf_entries += 1;
-                let (weight, cache_miss) = self.cached_leaf_weight(token_ids);
-                if cache_miss {
-                    leaf_cache_misses += 1;
-                }
+                let (weight, _) = self.cached_leaf_weight(token_ids);
                 self.transition_buffer
                     .entry((from as u32, label_idx as i32, self.leaf_state))
                     .and_modify(|existing| *existing = existing.union(&weight))
                     .or_insert(weight);
             }
         }
-        let leaf_ms = t0.elapsed();
 
-        let t1 = std::time::Instant::now();
         for ((from, target), weight) in std::mem::take(&mut self.epsilon_buffer) {
             let state = self
                 .nwa
@@ -1003,8 +934,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 .expect("buffered epsilon source state must exist");
             state.epsilons.push((target, weight));
         }
-        let eps_ms = t1.elapsed();
-        let t2 = std::time::Instant::now();
         for ((from, label, target), weight) in std::mem::take(&mut self.transition_buffer) {
             let state = self
                 .nwa
@@ -1013,18 +942,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 .expect("buffered transition source state must exist");
             state.transitions.entry(label).or_default().push((target, weight));
         }
-        let trans_ms = t2.elapsed();
-        if self.profile_enabled {
-            eprintln!(
-                "[glrmask/profile][terminal_dwa] flush leaf_ms={:.3} eps_ms={:.3} trans_ms={:.3} leaf_entries={} leaf_cache_misses={} transition_buffer_size={}",
-                leaf_ms.as_secs_f64() * 1000.0,
-                eps_ms.as_secs_f64() * 1000.0,
-                trans_ms.as_secs_f64() * 1000.0,
-                leaf_entries,
-                leaf_cache_misses,
-                0, // already drained
-            );
-        }
     }
 
     fn build_from_trie(
@@ -1032,7 +949,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         assoc_by_state: &AssocByState,
     ) {
-        self.profile_trie_calls += 1;
         let assoc_capacity = self.tokenizer.num_states() as usize;
         let mut recursive_assoc = AssocByState::new(assoc_capacity);
         let mut self_loop_leaf_only_assoc = AssocByState::new(assoc_capacity);
@@ -1058,33 +974,24 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
             let mut next_level_assoc = AssocByState::new(assoc_capacity);
             let mut pending = BTreeMap::<usize, AssocByState>::new();
-            let clone_started = std::time::Instant::now();
             pending.insert(0, recursive_assoc.clone());
-            self.profile_assoc_clone_ms += clone_started.elapsed();
-            self.profile_assoc_clones += 1;
 
             while let Some((pos, mut states_at_pos)) = pending.pop_first() {
                 if pos == segment_bytes.len() {
-                    let t = std::time::Instant::now();
                     for (tokenizer_state, nwa_states) in states_at_pos.drain_pairs() {
                         next_level_assoc.merge(tokenizer_state, &nwa_states);
                     }
-                    self.profile_merge_ms += t.elapsed();
                     continue;
                 }
 
                 for (tokenizer_state, source_nodes) in states_at_pos.drain_pairs() {
-                    let exec_started = std::time::Instant::now();
                     let exec = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state);
-                    self.profile_exec_ms += exec_started.elapsed();
-                    self.profile_tokenizer_execs += 1;
                     let exec_end_state = exec.end_state;
                     let mut possible_matches_at_end = None;
 
                     if let Some(end_state) = exec_end_state {
-                        let t = std::time::Instant::now();
                         if child_node.has_token() {
                             for terminal_id in self.tokenizer.possible_future_terminals_iter(end_state) {
                                 self.add_leaf_token_from_sources(
@@ -1094,11 +1001,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                                 );
                             }
                         }
-                        self.profile_leaf_ms += t.elapsed();
 
-                        let t = std::time::Instant::now();
                         next_level_assoc.merge(end_state, &source_nodes);
-                        self.profile_merge_ms += t.elapsed();
                     }
 
                     for matched in exec.matches {
@@ -1112,7 +1016,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             );
                         }
 
-                        let weight_started = std::time::Instant::now();
                         let continuation_weight = if next_pos == segment_bytes.len()
                             && child_node.has_token()
                         {
@@ -1136,25 +1039,19 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                                     }
                                 }
                                 if remaining.is_empty() {
-                                    self.profile_weight_ms += weight_started.elapsed();
                                     continue;
                                 }
-                                let t = std::time::Instant::now();
                                 let weight = self.token_set_weight_fast(&remaining);
-                                self.profile_weight_compute_ms += t.elapsed();
-                                self.profile_weight_compute_calls += 1;
                                 self.pruned_weight_cache.insert(cache_key, weight.clone());
                                 weight
                             }
                         } else {
                             self.cached_reachable_weight(child_node.reachable_token_ids())
                         };
-                        self.profile_weight_ms += weight_started.elapsed();
                         if continuation_weight.is_empty() {
                             continue;
                         }
 
-                        let t = std::time::Instant::now();
                         let continuation_assoc = pending
                             .entry(next_pos)
                             .or_insert_with(|| AssocByState::new(assoc_capacity));
@@ -1163,16 +1060,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             self.tokenizer.initial_state_id(),
                             self.nwa,
                         );
-                        self.profile_pending_ms += t.elapsed();
 
-                        let match_started = std::time::Instant::now();
                         self.add_match_from_sources(
                             &source_nodes,
                             matched.id,
                             destination,
                             &continuation_weight,
                         );
-                        self.profile_match_ms += match_started.elapsed();
                     }
                 }
             }
@@ -1207,19 +1101,6 @@ fn continuation_state(
     state
 }
 
-fn terminal_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-}
-
-fn log_terminal_profile(enabled: bool, phase: &str, started_at: std::time::Instant) {
-    if enabled {
-        eprintln!(
-            "[glrmask/profile][terminal_dwa] {phase}_ms={:.3}",
-            started_at.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-}
-
 fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
     id_map
         .vocab_tokens
@@ -1241,41 +1122,22 @@ pub(crate) fn build_terminal_dwa(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
-    build_terminal_dwa_with_possible_matches_report(grammar, tokenizer, vocab, id_map, ignore_terminal).0
+    build_terminal_dwa_with_possible_matches(grammar, tokenizer, vocab, id_map, ignore_terminal).0
 }
 
-pub(crate) fn build_terminal_dwa_with_possible_matches_report(
+pub(crate) fn build_terminal_dwa_with_possible_matches(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
-) -> (DWA, PossibleMatchesByState, TerminalDwaBuildReport) {
-    let (dwa, possible_matches, report) = build_terminal_dwa_impl(
+) -> (DWA, PossibleMatchesByState) {
+    build_terminal_dwa_impl(
         grammar,
         tokenizer,
         vocab,
         id_map,
         ignore_terminal,
-    );
-    (dwa, possible_matches, report)
-}
-
-pub(crate) fn build_terminal_dwa_with_report(
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-    ignore_terminal: Option<TerminalID>,
-) -> (DWA, TerminalDwaBuildReport) {
-    let (dwa, _possible_matches, report) = build_terminal_dwa_impl(
-        grammar,
-        tokenizer,
-        vocab,
-        id_map,
-        ignore_terminal,
-    );
-    (dwa, report)
 }
 
 fn build_terminal_dwa_impl(
@@ -1284,22 +1146,13 @@ fn build_terminal_dwa_impl(
     vocab: &Vocab,
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
-) -> (DWA, PossibleMatchesByState, TerminalDwaBuildReport) {
-    let profile_enabled = terminal_profile_enabled();
-    let total_started_at = std::time::Instant::now();
-    let mut report = TerminalDwaBuildReport {
-        vocab_entries: vocab.entries.len(),
-        internal_tsids: id_map.num_tsids() as usize,
-        ..TerminalDwaBuildReport::default()
-    };
-
+) -> (DWA, PossibleMatchesByState) {
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
     let start_state = nwa.add_state();
     nwa.start_states.push(start_state);
 
-    let phase_started_at = std::time::Instant::now();
     let internal_vocab = internal_vocab_entries(vocab, id_map);
     let vocab_tree = VocabPrefixTree::build_owned(
         internal_vocab
@@ -1309,10 +1162,7 @@ fn build_terminal_dwa_impl(
     );
     let self_loop_bytes = build_self_loop_bytes(tokenizer);
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
-    report.build_vocab_trie_time = phase_started_at.elapsed();
-    log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
     let mut assoc_by_state = AssocByState::new(tokenizer.num_states() as usize);
     for internal_tsid in 0..id_map.num_tsids() {
         let root = nwa.add_state();
@@ -1344,101 +1194,19 @@ fn build_terminal_dwa_impl(
         leaf_weight_cache_canonical: HashMap::new(),
         transition_buffer: BTreeMap::new(),
         epsilon_buffer: BTreeMap::new(),
-        profile_enabled,
-        profile_trie_calls: 0,
-        profile_assoc_clones: 0,
-        profile_tokenizer_execs: 0,
-        profile_exec_ms: std::time::Duration::ZERO,
-        profile_weight_ms: std::time::Duration::ZERO,
-        profile_weight_compute_ms: std::time::Duration::ZERO,
-        profile_weight_compute_calls: 0,
-        profile_match_ms: std::time::Duration::ZERO,
-        profile_assoc_clone_ms: std::time::Duration::ZERO,
-        profile_self_loop_leaf_only_ms: std::time::Duration::ZERO,
-        profile_leaf_ms: std::time::Duration::ZERO,
-        profile_merge_ms: std::time::Duration::ZERO,
-        profile_pending_ms: std::time::Duration::ZERO,
-        profile_flush_ms: std::time::Duration::ZERO,
     };
     builder.build_from_trie(&vocab_tree.root, &assoc_by_state);
-    let flush_t = std::time::Instant::now();
     builder.flush_transition_buffer();
-    builder.profile_flush_ms = flush_t.elapsed();
-    let builder_profile = (
-        builder.profile_trie_calls,
-        builder.profile_assoc_clones,
-        builder.profile_tokenizer_execs,
-        builder.profile_exec_ms,
-        builder.profile_weight_ms,
-        builder.profile_weight_compute_ms,
-        builder.profile_weight_compute_calls,
-        builder.profile_match_ms,
-        builder.profile_assoc_clone_ms,
-        builder.profile_self_loop_leaf_only_ms,
-        builder.profile_leaf_ms,
-        builder.profile_merge_ms,
-        builder.profile_pending_ms,
-        builder.profile_flush_ms,
-    );
     drop(builder);
-    let possible_matches_started_at = std::time::Instant::now();
     let possible_matches_by_state = collect_possible_matches_by_state(
         tokenizer,
         &vocab_tree.root,
         &mut possible_matches,
     );
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][terminal_dwa] collect_possible_matches_ms={:.3}",
-            possible_matches_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    report.build_nwa_from_trie_time = phase_started_at.elapsed();
-    if profile_enabled {
-        let (
-            profile_trie_calls,
-            profile_assoc_clones,
-            profile_tokenizer_execs,
-            profile_exec_ms,
-            profile_weight_ms,
-            profile_weight_compute_ms,
-            profile_weight_compute_calls,
-            profile_match_ms,
-            profile_assoc_clone_ms,
-            profile_self_loop_leaf_only_ms,
-            profile_leaf_ms,
-            profile_merge_ms,
-            profile_pending_ms,
-            profile_flush_ms,
-        ) = builder_profile;
-        eprintln!(
-            "[glrmask/profile][terminal_dwa] build_nwa_from_trie_ms={:.3} trie_calls={} assoc_clones={} tokenizer_execs={} exec_ms={:.3} weight_ms={:.3} weight_compute_ms={:.3} weight_compute_calls={} match_ms={:.3} assoc_clone_ms={:.3} self_loop_leaf_only_ms={:.3} leaf_ms={:.3} merge_ms={:.3} pending_ms={:.3} flush_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0,
-            profile_trie_calls,
-            profile_assoc_clones,
-            profile_tokenizer_execs,
-            profile_exec_ms.as_secs_f64() * 1000.0,
-            profile_weight_ms.as_secs_f64() * 1000.0,
-            profile_weight_compute_ms.as_secs_f64() * 1000.0,
-            profile_weight_compute_calls,
-            profile_match_ms.as_secs_f64() * 1000.0,
-            profile_assoc_clone_ms.as_secs_f64() * 1000.0,
-            profile_self_loop_leaf_only_ms.as_secs_f64() * 1000.0,
-            profile_leaf_ms.as_secs_f64() * 1000.0,
-            profile_merge_ms.as_secs_f64() * 1000.0,
-            profile_pending_ms.as_secs_f64() * 1000.0,
-            profile_flush_ms.as_secs_f64() * 1000.0,
-        );
-    }
 
-    let phase_started_at = std::time::Instant::now();
     let always_allowed_by_label = compute_always_allowed_follows(grammar);
     let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
-    report.collapse_always_allowed_applied = true;
-    report.collapse_always_allowed_time = phase_started_at.elapsed();
-    log_terminal_profile(profile_enabled, "collapse_always_allowed", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
     {
         let disallowed_follows = compute_disallowed_follows(grammar);
         let normalized = normalize_disallowed_follows(
@@ -1450,41 +1218,15 @@ fn build_terminal_dwa_impl(
             nwa = subtract_disallowed_dfa(&nwa, &disallowed_dfa);
         }
     }
-    report.subtract_disallowed_time = phase_started_at.elapsed();
-    log_terminal_profile(profile_enabled, "subtract_disallowed", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
-    deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize, profile_enabled);
-    log_terminal_profile(profile_enabled, "deduplicate_roots", phase_started_at);
+    deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize);
 
-    report.terminal_nwa = collect_weighted_nwa_stats(&nwa);
-
-    let phase_started_at = std::time::Instant::now();
     let determinized = determinize(&nwa)
         .expect("terminal NWA determinization failed despite acyclic token trie construction");
-    report.determinize_time = phase_started_at.elapsed();
-    report.terminal_dwa = collect_weighted_dwa_stats(&determinized);
-    log_terminal_profile(profile_enabled, "determinize", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
     let dwa = minimize(&determinized);
-    report.minimize_time = phase_started_at.elapsed();
-    report.terminal_minimized_dwa = collect_weighted_dwa_stats(&dwa);
-    log_terminal_profile(profile_enabled, "minimize", phase_started_at);
-    report.total_time = total_started_at.elapsed();
 
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][terminal_dwa] total_ms={:.3} vocab_entries={} internal_tsids={} {} {}",
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-            vocab.entries.len(),
-            id_map.num_tsids(),
-            report.terminal_nwa,
-            report.terminal_minimized_dwa,
-        );
-    }
-
-    (dwa, possible_matches_by_state, report)
+    (dwa, possible_matches_by_state)
 }
 
 #[cfg(test)]

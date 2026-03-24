@@ -12,11 +12,11 @@ use crate::compiler::grammar::model::{GrammarDef, Terminal};
 use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
 use crate::compiler::grammar::transforms::prepare_owned_grammar_for_compile;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
-use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report;
+use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::terminal_dwa::{
-    build_terminal_dwa_with_possible_matches_report,
+    build_terminal_dwa_with_possible_matches,
     compute_ever_allowed_follows,
 };
 use crate::ds::bitset::BitSet;
@@ -85,10 +85,6 @@ fn build_internal_token_bytes(vocab: &Vocab, id_map: &InternalIdMap) -> BTreeMap
         .collect()
 }
 
-pub(crate) fn compile_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-}
-
 fn compile_prepared(normalized: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab) -> Constraint {
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
 
@@ -103,9 +99,9 @@ fn compile_prepared(normalized: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab)
         InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, normalized.ignore_terminal);
     let token_bytes = vocab.entries.clone();
 
-    let ((mut terminal_dwa, mut possible_matches, _terminal_build_report), (characterizations, templates)) = rayon::join(
+    let ((mut terminal_dwa, mut possible_matches), templates) = rayon::join(
         || {
-            build_terminal_dwa_with_possible_matches_report(
+            build_terminal_dwa_with_possible_matches(
                 &glr_grammar,
                 &tokenizer,
                 vocab,
@@ -115,8 +111,7 @@ fn compile_prepared(normalized: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab)
         },
         || {
             let characterizations = characterize_terminals(&table, &glr_grammar);
-            let templates = Templates::from_characterizations(&characterizations);
-            (characterizations, templates)
+            Templates::from_characterizations(&characterizations)
         },
     );
 
@@ -131,15 +126,12 @@ fn compile_prepared(normalized: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab)
     );
 
     let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
-    let (parser_dwa, _parser_build_report) =
-        build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
-            &table,
-            &glr_grammar,
-            &tokenizer,
-            &terminal_dwa,
-            characterizations,
-            templates,
-        );
+    let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+        &table,
+        &glr_grammar,
+        &terminal_dwa,
+        templates,
+    );
 
     let mut constraint = Constraint {
         parser_dwa,

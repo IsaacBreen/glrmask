@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -23,8 +18,7 @@ pub struct DWA {
 }
 
 impl DWA {
-    pub fn new(num_tsids: u32, max_token: u32) -> Self {
-        let _ = (num_tsids, max_token);
+    pub fn new(_num_tsids: u32, _max_token: u32) -> Self {
         Self {
             states: vec![DWAState::default()],
             start_state: 0,
@@ -137,20 +131,6 @@ impl DWA {
         }
         true
     }
-
-    pub fn display_with_all_maps<'a>(
-        &'a self,
-        symbols: &'a BTreeMap<Label, String>,
-        tsid_names: &'a std::collections::BTreeMap<u32, String>,
-        token_names: &'a std::collections::BTreeMap<u32, String>,
-    ) -> DWADisplayWithAllMaps<'a> {
-        DWADisplayWithAllMaps {
-            dwa: self,
-            symbols,
-            tsid_names,
-            token_names,
-        }
-    }
 }
 
 fn fmt_dwa_states(
@@ -187,26 +167,6 @@ impl std::fmt::Display for DWA {
     }
 }
 
-pub struct DWADisplayWithAllMaps<'a> {
-    dwa: &'a DWA,
-    symbols: &'a BTreeMap<Label, String>,
-    tsid_names: &'a std::collections::BTreeMap<u32, String>,
-    token_names: &'a std::collections::BTreeMap<u32, String>,
-}
-
-impl std::fmt::Display for DWADisplayWithAllMaps<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = self.tsid_names;
-        let dwa = self.dwa;
-        let syms = self.symbols;
-        writeln!(f, "DWA: {} states, start=State {}", dwa.states.len(), dwa.start_state)?;
-        fmt_dwa_states(dwa, f,
-            &|label| syms.get(&label).cloned().unwrap_or_else(|| label.to_string()),
-            &|weight| format!("{}", weight.display_with_names(self.tsid_names, self.token_names)),
-        )
-    }
-}
-
 impl PartialEq for DWA {
     fn eq(&self, other: &Self) -> bool {
         self.start_state == other.start_state && self.states == other.states
@@ -222,11 +182,9 @@ impl PartialEq for DWAState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use range_set_blaze::RangeSetBlaze;
 
     #[test]
     fn test_dwa_eval_word() {
-        
         let nt = 1u32;
         let max_tok = 5u32;
         let mut dwa = DWA::new(nt, max_tok);
@@ -245,7 +203,7 @@ mod tests {
     fn test_dwa_eval_word_reject() {
         let nt = 1u32;
         let dwa = DWA::new(nt, 5);
-        
+
         let result = dwa.eval_word(&[0]);
         assert!(result.is_empty());
     }

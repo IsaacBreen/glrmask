@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;
@@ -10,9 +5,9 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
+use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalID;
-use crate::ds::leveled_gss::LeveledGSS;
 
 use super::state::ConstraintState;
 
@@ -20,8 +15,7 @@ pub(crate) type TokenizerStateID = u32;
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
     pub(crate) parser_dwa: DWA,
     pub(crate) table: GLRTable,
@@ -29,7 +23,7 @@ pub struct Constraint {
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
 
-    #[serde(with = "crate::runtime::serde::serde_btmap_rsb")]
+    #[serde(with = "crate::runtime::serde::serde_btreemap_rangeset")]
     pub(crate) possible_matches: PossibleMatchesByState,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
@@ -66,34 +60,7 @@ pub struct Constraint {
     pub(crate) dwa_fast_transitions: Vec<FxHashMap<i32, (u32, crate::ds::weight::Weight)>>,
 }
 
-impl Clone for Constraint {
-    fn clone(&self) -> Self {
-        Self {
-            parser_dwa: self.parser_dwa.clone(),
-            table: self.table.clone(),
-            tokenizer: self.tokenizer.clone(),
-            ignore_terminal: self.ignore_terminal,
-            possible_matches: self.possible_matches.clone(),
-            state_to_internal_tsid: self.state_to_internal_tsid.clone(),
-            internal_tsid_to_states: self.internal_tsid_to_states.clone(),
-            original_token_to_internal: self.original_token_to_internal.clone(),
-            internal_token_to_tokens: self.internal_token_to_tokens.clone(),
-            eos_token_id: self.eos_token_id,
-            token_bytes: self.token_bytes.clone(),
-            internal_token_bytes: self.internal_token_bytes.clone(),
-            token_bytes_dense: self.token_bytes_dense.clone(),
-            internal_token_buf_masks: self.internal_token_buf_masks.clone(),
-            internal_token_dense_words: self.internal_token_dense_words,
-            weight_token_dense_masks: self.weight_token_dense_masks.clone(),
-            seed_terminal_dense: self.seed_terminal_dense.clone(),
-            seed_universe_dense: self.seed_universe_dense.clone(),
-            dwa_fast_transitions: self.dwa_fast_transitions.clone(),
-        }
-    }
-}
-
 impl Constraint {
-
     /// Build precomputed bitmask fragments for each internal token.
     pub(crate) fn build_buf_masks(&mut self) {
         if self.internal_token_to_tokens.is_empty() {
@@ -308,14 +275,12 @@ impl Constraint {
         crate::ds::weight::clear_stale_weights();
         crate::ds::weight::clear_weight_op_caches();
 
-        
         let initial_parser_state = 0u32;
         let initial_tok_state = self.tokenizer.initial_state();
-
-        let mut state = BTreeMap::new();
-        let gss = LeveledGSS::from_stacks(&[(vec![initial_parser_state], BTreeMap::new())]);
-        state.insert(initial_tok_state, gss);
-
+        let state = BTreeMap::from([(
+            initial_tok_state,
+            ParserGSS::from_stacks(&[(vec![initial_parser_state], BTreeMap::new())]),
+        )]);
         ConstraintState { constraint: self, state }
     }
 
@@ -419,5 +384,4 @@ impl Constraint {
     ) -> Option<&BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
         self.possible_matches.get(&tokenizer_state)
     }
-
 }

@@ -5,10 +5,6 @@
 //! they are retained deliberately: every `Expr` variant should have a
 //! corresponding named constructor so the API surface stays coherent and
 //! usable for tests, downstream crate consumers, and future grammar work.
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
 
 use std::sync::Arc;
 
