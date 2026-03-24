@@ -11,6 +11,42 @@ use crate::ds::u8set::U8Set;
 pub type GroupId = u32;
 pub const DEAD: u32 = u32::MAX;
 
+fn resized_bitset(bits: &BitSet, num_groups: usize) -> BitSet {
+    let mut resized = BitSet::new(num_groups);
+    for bit in bits.iter() {
+        resized.set(bit);
+    }
+    resized
+}
+
+fn project_bitset(bits: &BitSet, num_groups: usize) -> BitSet {
+    let mut projected = BitSet::new(num_groups);
+    for group_id in bits.iter().filter(|group_id| *group_id < num_groups) {
+        projected.set(group_id);
+    }
+    projected
+}
+
+fn excluded_group_indices(
+    finalizers: &BitSet,
+    excludes: &BTreeMap<GroupId, BTreeSet<GroupId>>,
+) -> Vec<usize> {
+    let mut to_clear = Vec::new();
+    for (&group_id, blocked_by) in excludes {
+        let group_index = group_id as usize;
+        if !finalizers.contains(group_index) {
+            continue;
+        }
+        if blocked_by
+            .iter()
+            .any(|blocked_by_id| finalizers.contains(*blocked_by_id as usize))
+        {
+            to_clear.push(group_index);
+        }
+    }
+    to_clear
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DFAState {
     pub transitions: CharTransitions<u32>,
@@ -52,19 +88,7 @@ impl DFA {
             self.group_id_to_u8set.resize(num_groups, U8Set::empty());
         }
         for state in &mut self.states {
-            if state.finalizers.len() < num_groups {
-                let mut finalizers = BitSet::new(num_groups);
-                for bit in state.finalizers.iter() {
-                    finalizers.set(bit);
-                }
-                state.finalizers = finalizers;
-
-                let mut future = BitSet::new(num_groups);
-                for bit in state.possible_future_group_ids.iter() {
-                    future.set(bit);
-                }
-                state.possible_future_group_ids = future;
-            }
+            Self::resize_state_group_bits(state, num_groups);
         }
     }
 
@@ -85,7 +109,7 @@ impl DFA {
     }
 
     pub(super) fn clear_finalizers_for_state(&mut self, state: u32) -> BitSet {
-        if let Some(entry) = self.states.get_mut(state as usize) {
+        if let Some(entry) = self.state_mut(state) {
             std::mem::take(&mut entry.finalizers)
         } else {
             BitSet::empty(0)
@@ -98,7 +122,7 @@ impl DFA {
         finalizers: BitSet,
         possible_future_group_ids: BitSet,
     ) {
-        if let Some(entry) = self.states.get_mut(state as usize) {
+        if let Some(entry) = self.state_mut(state) {
             entry.finalizers = finalizers;
             entry.possible_future_group_ids = possible_future_group_ids;
         }
@@ -155,7 +179,7 @@ impl DFA {
     }
 
     pub(super) fn set_possible_future_group_ids(&mut self, state: u32, ids: BitSet) {
-        if let Some(entry) = self.states.get_mut(state as usize) {
+        if let Some(entry) = self.state_mut(state) {
             entry.possible_future_group_ids = ids;
         }
     }
@@ -191,21 +215,7 @@ impl DFA {
                 continue;
             }
 
-            let mut to_clear = Vec::new();
-            for (&group_id, blocked_by) in excludes {
-                let group_index = group_id as usize;
-                if !state.finalizers.contains(group_index) {
-                    continue;
-                }
-                if blocked_by
-                    .iter()
-                    .any(|blocked_by_id| state.finalizers.contains(*blocked_by_id as usize))
-                {
-                    to_clear.push(group_index);
-                }
-            }
-
-            for group_index in to_clear {
+            for group_index in excluded_group_indices(&state.finalizers, excludes) {
                 if state.finalizers.contains(group_index) {
                     state.finalizers.clear(group_index);
                     changed = true;
@@ -227,19 +237,8 @@ impl DFA {
                 .collect();
             projected.set_transitions_from_sorted_entries(state_index as u32, transitions);
 
-            let mut finalizers = BitSet::new(num_groups);
-            for group_id in state.finalizers.iter().filter(|group_id| *group_id < num_groups) {
-                finalizers.set(group_id);
-            }
-
-            let mut future = BitSet::new(num_groups);
-            for group_id in state
-                .possible_future_group_ids
-                .iter()
-                .filter(|group_id| *group_id < num_groups)
-            {
-                future.set(group_id);
-            }
+            let finalizers = project_bitset(&state.finalizers, num_groups);
+            let future = project_bitset(&state.possible_future_group_ids, num_groups);
 
             projected.overwrite_state_metadata(state_index as u32, finalizers, future);
         }
@@ -249,5 +248,17 @@ impl DFA {
         }
 
         projected
+    }
+
+    fn state_mut(&mut self, state: u32) -> Option<&mut DFAState> {
+        self.states.get_mut(state as usize)
+    }
+
+    fn resize_state_group_bits(state: &mut DFAState, num_groups: usize) {
+        if state.finalizers.len() < num_groups {
+            state.finalizers = resized_bitset(&state.finalizers, num_groups);
+            state.possible_future_group_ids =
+                resized_bitset(&state.possible_future_group_ids, num_groups);
+        }
     }
 }

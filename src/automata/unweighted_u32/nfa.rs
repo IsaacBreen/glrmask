@@ -4,12 +4,21 @@
 //! primarily for template-DFA construction.  The template builder creates one
 //! NFA per terminal characterization (with fresh intermediate states for each
 //! path) and then determinizes it into an acyclic `DFA`.
-//!
-//! Unweighted NFA representation for integer-labeled automata.
 
 use std::collections::BTreeMap;
 
 use super::dfa::Label;
+
+fn visit_successors(state: &NFAState, mut visit: impl FnMut(u32)) {
+    for targets in state.transitions.values() {
+        for &target in targets {
+            visit(target);
+        }
+    }
+    for &target in &state.epsilons {
+        visit(target);
+    }
+}
 
 /// A single NFA state with non-deterministic transitions and epsilon edges.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,44 +97,31 @@ impl NFA {
     /// contains no cycles.  Uses DFS 3-coloring.
     pub fn is_acyclic(&self) -> bool {
         let n = self.states.len();
-        // 0 = white, 1 = gray, 2 = black
         let mut color = vec![0u8; n];
 
         fn visit(s: usize, states: &[NFAState], color: &mut [u8]) -> bool {
             color[s] = 1;
-            // Check labeled transitions
-            for targets in states[s].transitions.values() {
-                for &t in targets {
-                    let t = t as usize;
-                    if t >= color.len() {
-                        continue;
-                    }
-                    match color[t] {
-                        1 => return false,
-                        0 => {
-                            if !visit(t, states, color) {
-                                return false;
-                            }
-                        }
-                        _ => {}
-                    }
+            let mut acyclic = true;
+            visit_successors(&states[s], |target| {
+                if !acyclic {
+                    return;
                 }
-            }
-            // Check epsilon transitions
-            for &t in &states[s].epsilons {
-                let t = t as usize;
+                let t = target as usize;
                 if t >= color.len() {
-                    continue;
+                    return;
                 }
                 match color[t] {
-                    1 => return false,
+                    1 => acyclic = false,
                     0 => {
                         if !visit(t, states, color) {
-                            return false;
+                            acyclic = false;
                         }
                     }
                     _ => {}
                 }
+            });
+            if !acyclic {
+                return false;
             }
             color[s] = 2;
             true

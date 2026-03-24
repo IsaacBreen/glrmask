@@ -85,6 +85,90 @@ pub fn eps() -> Expr {
     Expr::Epsilon
 }
 
+fn optimize_repeat_expr(expr: Expr, min: usize, max: Option<usize>) -> Expr {
+    match (min, max) {
+        (0, Some(0)) => Expr::Epsilon,
+        (1, Some(1)) => expr,
+        _ => Expr::Repeat {
+            expr: Box::new(expr),
+            min,
+            max,
+        },
+    }
+}
+
+fn flatten_sequence_parts(exprs: Vec<Expr>) -> Vec<Expr> {
+    let mut flat = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        match expr {
+            Expr::Seq(children) => flat.extend(children),
+            Expr::Epsilon => {}
+            other => flat.push(other),
+        }
+    }
+    flat
+}
+
+fn simplify_single_byte_classes(exprs: &mut [Expr]) {
+    for expr in exprs {
+        if let Expr::U8Class(set) = expr {
+            if set.len() == 1 {
+                let byte = set.iter().next().unwrap();
+                *expr = Expr::U8Seq(vec![byte]);
+            }
+        }
+    }
+}
+
+fn merge_adjacent_byte_sequences(exprs: Vec<Expr>) -> Vec<Expr> {
+    let mut merged = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        match expr {
+            Expr::U8Seq(mut current) => {
+                if let Some(Expr::U8Seq(previous)) = merged.last_mut() {
+                    previous.append(&mut current);
+                } else {
+                    merged.push(Expr::U8Seq(current));
+                }
+            }
+            other => merged.push(other),
+        }
+    }
+    merged
+}
+
+fn flatten_choice_parts(exprs: Vec<Expr>) -> Vec<Expr> {
+    let mut worklist = exprs;
+    let mut flat = Vec::with_capacity(worklist.len());
+    while let Some(expr) = worklist.pop() {
+        match expr {
+            Expr::Choice(children) => worklist.extend(children),
+            other => flat.push(other),
+        }
+    }
+    flat
+}
+
+fn fold_choice_byte_classes(exprs: Vec<Expr>) -> Vec<Expr> {
+    let mut classes = U8Set::empty();
+    let mut complex = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        match expr {
+            Expr::U8Class(set) => classes |= set,
+            Expr::U8Seq(bytes) if bytes.len() == 1 => {
+                classes.insert(bytes[0]);
+            }
+            other => complex.push(other),
+        }
+    }
+
+    if !classes.is_empty() {
+        complex.push(Expr::U8Class(classes));
+    }
+
+    complex
+}
+
 impl Expr {
     pub fn is_nullable(&self) -> bool {
         match self {
@@ -113,15 +197,7 @@ impl Expr {
             },
             Expr::Repeat { expr, min, max } => {
                 let child = expr.optimize();
-                match (min, max) {
-                    (0, Some(0)) => Expr::Epsilon,
-                    (1, Some(1)) => child,
-                    _ => Expr::Repeat {
-                        expr: Box::new(child),
-                        min,
-                        max,
-                    },
-                }
+                optimize_repeat_expr(child, min, max)
             }
             Expr::Shared(inner) => Expr::Shared(Arc::new(inner.as_ref().clone().optimize())),
             leaf => leaf,
@@ -151,41 +227,14 @@ impl Expr {
     }
 
     pub fn make_seq(exprs: Vec<Expr>) -> Expr {
-        let mut flat = Vec::with_capacity(exprs.len());
-        for expr in exprs {
-            match expr {
-                Expr::Seq(children) => flat.extend(children),
-                Expr::Epsilon => {}
-                other => flat.push(other),
-            }
-        }
+        let mut flat = flatten_sequence_parts(exprs);
 
         if flat.is_empty() {
             return Expr::Epsilon;
         }
 
-        for expr in &mut flat {
-            if let Expr::U8Class(set) = expr {
-                if set.len() == 1 {
-                    let byte = set.iter().next().unwrap();
-                    *expr = Expr::U8Seq(vec![byte]);
-                }
-            }
-        }
-
-        let mut merged = Vec::with_capacity(flat.len());
-        for expr in flat {
-            match expr {
-                Expr::U8Seq(mut curr) => {
-                    if let Some(Expr::U8Seq(prev)) = merged.last_mut() {
-                        prev.append(&mut curr);
-                    } else {
-                        merged.push(Expr::U8Seq(curr));
-                    }
-                }
-                other => merged.push(other),
-            }
-        }
+        simplify_single_byte_classes(&mut flat);
+        let mut merged = merge_adjacent_byte_sequences(flat);
 
         if merged.len() == 1 {
             merged.pop().unwrap()
@@ -195,14 +244,7 @@ impl Expr {
     }
 
     pub fn make_choice(exprs: Vec<Expr>) -> Expr {
-        let mut worklist = exprs;
-        let mut flat = Vec::with_capacity(worklist.len());
-        while let Some(expr) = worklist.pop() {
-            match expr {
-                Expr::Choice(children) => worklist.extend(children),
-                other => flat.push(other),
-            }
-        }
+        let mut flat = flatten_choice_parts(exprs);
 
         if flat.is_empty() {
             return Expr::Choice(vec![]);
@@ -211,21 +253,7 @@ impl Expr {
             return flat.pop().unwrap();
         }
 
-        let mut classes = U8Set::empty();
-        let mut complex = Vec::with_capacity(flat.len());
-        for expr in flat {
-            match expr {
-                Expr::U8Class(set) => classes |= set,
-                Expr::U8Seq(bytes) if bytes.len() == 1 => {
-                    classes.insert(bytes[0]);
-                }
-                other => complex.push(other),
-            }
-        }
-
-        if !classes.is_empty() {
-            complex.push(Expr::U8Class(classes));
-        }
+        let mut complex = fold_choice_byte_classes(flat);
 
         if complex.len() == 1 {
             complex.pop().unwrap()

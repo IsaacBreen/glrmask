@@ -6,6 +6,14 @@ use crate::ds::u8set::U8Set;
 use super::super::dfa::{DFA as LexerDfa, DEAD};
 use super::super::nfa::NFA as LexerNfa;
 
+type TransitionTable = [u32; 256];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ProductState {
+    left: u32,
+    right: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub transitions: Vec<(U8Set, u32)>,
@@ -112,12 +120,12 @@ impl Nfa {
 
     pub fn determinize(&self) -> Self {
         if self.deterministic {
-            return self.clone();
+            self.clone()
+        } else {
+            let lexer_nfa = self.to_lexer_nfa();
+            let lexer_dfa = lexer_nfa.to_dfa();
+            Self::from_lexer_dfa(&lexer_dfa, false)
         }
-
-        let lexer_nfa = self.to_lexer_nfa();
-        let lexer_dfa = lexer_nfa.to_dfa();
-        Self::from_lexer_dfa(&lexer_dfa, false)
     }
 
     pub fn minimize(&self) -> Self {
@@ -125,36 +133,18 @@ impl Nfa {
             return self.clone();
         }
 
-        let deterministic = if self.deterministic {
-            self.clone()
-        } else {
-            self.determinize()
-        };
+        let deterministic = self.as_deterministic();
         let lexer_dfa = deterministic.to_lexer_dfa();
         let minimized = lexer_dfa.minimize();
         Self::from_lexer_dfa(&minimized, true)
     }
 
     pub fn subtract(&self, rhs: &Self) -> Self {
-        let lhs = if self.minimal {
-            self.clone()
-        } else {
-            self.minimize()
-        };
-        let rhs = if rhs.minimal {
-            rhs.clone()
-        } else {
-            rhs.minimize()
-        };
+        let lhs = self.as_minimal();
+        let rhs = rhs.as_minimal();
 
         let lhs_tables = lhs.transition_tables();
         let rhs_tables = rhs.transition_tables();
-
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-        struct ProductState {
-            left: u32,
-            right: Option<u32>,
-        }
 
         let start = ProductState {
             left: lhs.start_state,
@@ -171,43 +161,16 @@ impl Nfa {
 
         while let Some(product) = worklist.pop_front() {
             let out_state = state_ids[&product];
-            let lhs_accepting = lhs.states[product.left as usize].is_end;
-            let rhs_accepting = product
-                .right
-                .map(|state| rhs.states[state as usize].is_end)
-                .unwrap_or(false);
-            out.set_end(out_state, lhs_accepting && !rhs_accepting);
+            out.set_end(out_state, Self::product_accepts(product, &lhs, &rhs));
 
-            let mut bytes_by_target = HashMap::<ProductState, U8Set>::new();
-            for byte in 0u8..=255 {
-                let left_next = lhs_tables[product.left as usize][byte as usize];
-                if left_next == DEAD {
-                    continue;
-                }
-                let right_next = product
-                    .right
-                    .and_then(|state| {
-                        let next = rhs_tables[state as usize][byte as usize];
-                        (next != DEAD).then_some(next)
-                    });
-                bytes_by_target
-                    .entry(ProductState {
-                        left: left_next,
-                        right: right_next,
-                    })
-                    .or_insert_with(U8Set::empty)
-                    .insert(byte);
-            }
-
-            for (next_product, bytes) in bytes_by_target {
-                let next_state = if let Some(&existing) = state_ids.get(&next_product) {
-                    existing
-                } else {
-                    let new_state = out.add_state();
-                    state_ids.insert(next_product, new_state);
-                    worklist.push_back(next_product);
-                    new_state
-                };
+            for (next_product, bytes) in Self::product_successors(product, &lhs_tables, &rhs_tables)
+            {
+                let next_state = Self::product_state_id(
+                    next_product,
+                    &mut state_ids,
+                    &mut worklist,
+                    &mut out,
+                );
                 out.add_u8set_transition(out_state, bytes, next_state);
             }
         }
@@ -215,7 +178,7 @@ impl Nfa {
         out.minimize()
     }
 
-    fn transition_tables(&self) -> Vec<[u32; 256]> {
+    fn transition_tables(&self) -> Vec<TransitionTable> {
         debug_assert!(self.deterministic);
         self.states
             .iter()
@@ -257,20 +220,9 @@ impl Nfa {
         dfa.ensure_group_capacity(1);
 
         for (state_id, state) in self.states.iter().enumerate() {
-            let mut target_bytes = HashMap::<u32, BTreeSet<u8>>::new();
-            for (set, target) in &state.transitions {
-                for byte in set.iter() {
-                    target_bytes.entry(*target).or_default().insert(byte);
-                }
-            }
-
-            let mut entries = Vec::new();
-            for (target, bytes) in target_bytes {
-                for byte in bytes {
-                    entries.push((byte, target));
-                }
-            }
-            entries.sort_unstable_by_key(|(byte, _)| *byte);
+            let entries = Self::sorted_transition_entries(Self::group_target_bytes(
+                &state.transitions,
+            ));
             dfa.set_transitions_from_sorted_entries(state_id as u32, entries);
 
             let mut finalizers = BitSet::new(1);
@@ -287,16 +239,8 @@ impl Nfa {
 
     fn from_lexer_dfa(dfa: &LexerDfa, minimal: bool) -> Self {
         let mut states = Vec::with_capacity(dfa.num_states());
-        for state in dfa.states() {
-            let mut target_bytes = HashMap::<u32, U8Set>::new();
-            for (byte, &target) in state.transitions.iter() {
-                target_bytes
-                    .entry(target)
-                    .or_insert_with(U8Set::empty)
-                    .insert(byte);
-            }
-
-            let mut transitions = target_bytes
+        for (state_id, state) in dfa.states().iter().enumerate() {
+            let mut transitions = Self::group_dfa_transition_bytes(state)
                 .into_iter()
                 .map(|(target, bytes)| (bytes, target))
                 .collect::<Vec<_>>();
@@ -304,7 +248,7 @@ impl Nfa {
             states.push(State {
                 transitions,
                 epsilon_transitions: Vec::new(),
-                is_end: dfa.finalizers(states.len() as u32).contains(0),
+                is_end: dfa.finalizers(state_id as u32).contains(0),
             });
         }
 
@@ -314,5 +258,105 @@ impl Nfa {
             deterministic: true,
             minimal,
         }
+    }
+
+    fn as_deterministic(&self) -> Self {
+        if self.deterministic {
+            self.clone()
+        } else {
+            self.determinize()
+        }
+    }
+
+    fn as_minimal(&self) -> Self {
+        if self.minimal {
+            self.clone()
+        } else {
+            self.minimize()
+        }
+    }
+
+    fn product_accepts(product: ProductState, lhs: &Self, rhs: &Self) -> bool {
+        let lhs_accepting = lhs.states[product.left as usize].is_end;
+        let rhs_accepting = product
+            .right
+            .map(|state| rhs.states[state as usize].is_end)
+            .unwrap_or(false);
+        lhs_accepting && !rhs_accepting
+    }
+
+    fn product_successors(
+        product: ProductState,
+        lhs_tables: &[TransitionTable],
+        rhs_tables: &[TransitionTable],
+    ) -> HashMap<ProductState, U8Set> {
+        let mut bytes_by_target = HashMap::<ProductState, U8Set>::new();
+        for byte in 0u8..=255 {
+            let left_next = lhs_tables[product.left as usize][byte as usize];
+            if left_next == DEAD {
+                continue;
+            }
+
+            let right_next = product.right.and_then(|state| {
+                let next = rhs_tables[state as usize][byte as usize];
+                (next != DEAD).then_some(next)
+            });
+            bytes_by_target
+                .entry(ProductState {
+                    left: left_next,
+                    right: right_next,
+                })
+                .or_insert_with(U8Set::empty)
+                .insert(byte);
+        }
+        bytes_by_target
+    }
+
+    fn product_state_id(
+        product: ProductState,
+        state_ids: &mut HashMap<ProductState, u32>,
+        worklist: &mut VecDeque<ProductState>,
+        out: &mut Nfa,
+    ) -> u32 {
+        if let Some(&existing) = state_ids.get(&product) {
+            existing
+        } else {
+            let new_state = out.add_state();
+            state_ids.insert(product, new_state);
+            worklist.push_back(product);
+            new_state
+        }
+    }
+
+    fn group_target_bytes(transitions: &[(U8Set, u32)]) -> HashMap<u32, BTreeSet<u8>> {
+        let mut target_bytes = HashMap::<u32, BTreeSet<u8>>::new();
+        for (set, target) in transitions {
+            for byte in set.iter() {
+                target_bytes.entry(*target).or_default().insert(byte);
+            }
+        }
+        target_bytes
+    }
+
+    fn sorted_transition_entries(target_bytes: HashMap<u32, BTreeSet<u8>>) -> Vec<(u8, u32)> {
+        let mut entries = Vec::new();
+        for (target, bytes) in target_bytes {
+            for byte in bytes {
+                entries.push((byte, target));
+            }
+        }
+        entries.sort_unstable_by_key(|(byte, _)| *byte);
+        entries
+    }
+
+    fn group_dfa_transition_bytes(state: &super::super::dfa::DFAState) -> HashMap<u32, U8Set> {
+        let mut target_bytes = HashMap::<u32, U8Set>::new();
+        for (byte, &target) in state.transitions.iter() {
+            target_bytes
+                .entry(target)
+                .or_insert_with(U8Set::empty)
+                .insert(byte);
+        }
+        target_bytes
     }
 }

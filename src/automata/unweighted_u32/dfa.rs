@@ -14,6 +14,35 @@ pub struct DFA {
     pub start_state: u32,
 }
 
+fn has_self_loop(state_id: usize, state: &DFAState) -> bool {
+    state.transitions.values().any(|&target| target as usize == state_id)
+}
+
+fn visit_successors(
+    state_id: usize,
+    states: &[DFAState],
+    colors: &mut [u8],
+) -> bool {
+    colors[state_id] = 1;
+    for target in states[state_id].transitions.values() {
+        let target = *target as usize;
+        if target >= colors.len() {
+            continue;
+        }
+        match colors[target] {
+            1 => return false,
+            0 => {
+                if !visit_successors(target, states, colors) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    colors[state_id] = 2;
+    true
+}
+
 impl DFA {
     pub fn new() -> Self {
         Self {
@@ -48,40 +77,15 @@ impl DFA {
     pub fn is_acyclic(&self) -> bool {
         let num_states = self.states.len();
 
-        // Quick check: self-loops.
         for (state_id, state) in self.states.iter().enumerate() {
-            for target in state.transitions.values() {
-                if *target as usize == state_id {
-                    return false;
-                }
+            if has_self_loop(state_id, state) {
+                return false;
             }
-        }
-
-        // Full DFS 3-coloring: 0=white, 1=gray, 2=black.
-        fn visit(state_id: usize, states: &[DFAState], colors: &mut [u8]) -> bool {
-            colors[state_id] = 1;
-            for target in states[state_id].transitions.values() {
-                let target = *target as usize;
-                if target >= colors.len() {
-                    continue;
-                }
-                match colors[target] {
-                    1 => return false,
-                    0 => {
-                        if !visit(target, states, colors) {
-                            return false;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            colors[state_id] = 2;
-            true
         }
 
         let mut colors = vec![0u8; num_states];
         for state_id in 0..num_states {
-            if colors[state_id] == 0 && !visit(state_id, &self.states, &mut colors) {
+            if colors[state_id] == 0 && !visit_successors(state_id, &self.states, &mut colors) {
                 return false;
             }
         }

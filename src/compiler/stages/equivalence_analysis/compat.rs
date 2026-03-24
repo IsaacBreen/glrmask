@@ -1,26 +1,23 @@
-//! Compatibility layer bridging glrmask's tokenizer DFA to the flat interface
-//! used by the equivalence-analysis passes.
-//!
-//! The analysis code expects:
-//! - `Tokenizer` with `.dfa()` returning a DFA struct that exposes
-//!   `.states` and `.start_state`
-//! - `DFAState` with public `.transitions`, `.finalizers`, and
-//!   `.possible_future_group_ids`
-//! - State indices as `usize`
-//!
-//! glrmask uses:
-//! - `Tokenizer` with public `.dfa` field
-//! - `DFAState` with `BitSet` finalizers and private future-group storage
-//! - State indices as `u32`
-//!
-//! This module provides flat, pre-extracted views of the DFA data so the
-//! equivalence-analysis code can operate on a stable representation.
-
+//! Flattened tokenizer-DFA views for the equivalence-analysis passes.
 
 #[cfg(test)]
 use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+
+fn build_transition_table(
+    transitions: impl Iterator<Item = (u8, u32)>,
+) -> [u32; 256] {
+    let mut table = [u32::MAX; 256];
+    for (byte, target) in transitions {
+        table[byte as usize] = target;
+    }
+    table
+}
+
+fn collect_group_ids(groups: impl Iterator<Item = usize>) -> Vec<usize> {
+    groups.collect()
+}
 
 /// Pre-extracted DFA state data in analysis-compatible format.
 #[derive(Debug, Clone)]
@@ -42,7 +39,6 @@ pub struct FlatDfa {
 }
 
 impl FlatDfa {
-    /// Extract a flat DFA from a glrmask Tokenizer.
     pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
         let dfa = &tokenizer.dfa;
         let dfa_states = dfa.states();
@@ -51,17 +47,15 @@ impl FlatDfa {
             .iter()
             .enumerate()
             .map(|(i, state)| {
-                let mut table = [u32::MAX; 256];
-                for (byte, &target) in state.transitions.iter() {
-                    table[byte as usize] = target;
-                }
-
-                let finalizers: Vec<usize> = state.finalizers.iter().collect();
-                let possible_future_group_ids: Vec<usize> =
-                    dfa.possible_future_group_ids(i as u32).iter().collect();
+                let transitions = build_transition_table(
+                    state.transitions.iter().map(|(byte, &target)| (byte, target)),
+                );
+                let finalizers = collect_group_ids(state.finalizers.iter());
+                let possible_future_group_ids =
+                    collect_group_ids(dfa.possible_future_group_ids(i as u32).iter());
 
                 FlatDfaState {
-                    transitions: table,
+                    transitions,
                     finalizers,
                     possible_future_group_ids,
                 }
@@ -89,6 +83,17 @@ pub struct TokenizerView {
     pub flat_dfa: FlatDfa,
 }
 
+#[cfg(test)]
+fn execution_result(
+    match_positions: &BTreeMap<usize, usize>,
+    end_state: Option<usize>,
+) -> ExecuteResult {
+    ExecuteResult {
+        matches: collect_matches(match_positions),
+        end_state,
+    }
+}
+
 impl TokenizerView {
     pub fn new(tokenizer: &Tokenizer) -> Self {
         TokenizerView {
@@ -96,18 +101,14 @@ impl TokenizerView {
         }
     }
 
-    /// Returns the extracted DFA view.
     pub fn dfa(&self) -> &FlatDfa {
         &self.flat_dfa
     }
 
-    /// Returns the tokenizer start state.
     pub fn initial_state_id(&self) -> usize {
         self.flat_dfa.start_state
     }
 
-    /// Runs the DFA from a given state on input bytes using the same execution
-    /// semantics as the equivalence-analysis helpers.
     #[cfg(test)]
     pub fn execute_from_state_nonzero(&self, input: &[u8], start_state: usize) -> ExecuteResult {
         let dfa = &self.flat_dfa;
@@ -129,10 +130,7 @@ impl TokenizerView {
         for (pos, &byte) in input.iter().enumerate() {
             let next = dfa.states[current].transitions[byte as usize];
             if next == u32::MAX {
-                return ExecuteResult {
-                    matches: collect_matches(&match_positions),
-                    end_state: None,
-                };
+                return execution_result(&match_positions, None);
             }
 
             current = next as usize;
@@ -142,17 +140,14 @@ impl TokenizerView {
             }
 
             if dfa.states[current].possible_future_group_ids.is_empty() {
-                return ExecuteResult {
-                    matches: collect_matches(&match_positions),
-                    end_state: None,
-                };
+                return execution_result(&match_positions, None);
             }
         }
 
-        ExecuteResult {
-            matches: collect_matches(&match_positions),
-            end_state: (!state_is_done(&dfa.states[current])).then_some(current),
-        }
+        execution_result(
+            &match_positions,
+            (!state_is_done(&dfa.states[current])).then_some(current),
+        )
     }
 }
 

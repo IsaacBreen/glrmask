@@ -38,8 +38,6 @@ use super::state::fast::StateEquivalenceResult;
 use super::disallowed_follows::{build_disallowed_follow_dfa, normalize_disallowed_follows};
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
-// ---- Deterministic hashing ----
-
 const HASH_SEED1: u64 = 0x9e37_79b9_7f4a_7c15;
 const HASH_SEED2: u64 = 0xc2b2_ae3d_27d4_eb4f;
 const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
@@ -47,20 +45,13 @@ const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
 
-static HASH_STATE: Lazy<RandomState> =
+static HASH_RANDOM_STATE: Lazy<RandomState> =
     Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
 
 #[inline]
 fn new_hasher() -> AHasher {
-    HASH_STATE.build_hasher()
+    HASH_RANDOM_STATE.build_hasher()
 }
-
-// ---- Label encoding ----
-//
-// NFA labels encode two kinds of information:
-//   - Edge labels (group IDs from the trellis): `gid as Label` (non-negative)
-//   - Completion labels use the same label space as edge labels:
-//     `terminal_label(gid)` for each future group
 
 #[inline]
 fn terminal_label(gid: usize) -> Label {
@@ -71,8 +62,6 @@ fn terminal_label(gid: usize) -> Label {
 fn future_groups_cover_all_terminals(future_groups: &[usize], num_groups: usize) -> bool {
     future_groups.len() == num_groups && future_groups.iter().copied().eq(0..num_groups)
 }
-
-// ---- Precomputed data (derived from FlatDfa, reused across all tokens) ----
 
 struct PrecomputedData {
     num_groups: usize,
@@ -101,8 +90,6 @@ fn precompute(dfa: &FlatDfa, disallowed_follows: &BTreeMap<u32, BitSet>) -> Prec
     }
 }
 
-// ---- Trellis DAG construction ----
-
 type Edge = (usize, usize); // (group_id, target_position)
 
 #[derive(Debug)]
@@ -111,48 +98,86 @@ struct FlatNode {
     edges: Vec<Edge>,
 }
 
+fn enqueue_dag_target(
+    dag: &mut BTreeMap<usize, FlatNode>,
+    queue: &mut VecDeque<usize>,
+    target_pos: usize,
+    token_len: usize,
+) {
+    if target_pos < token_len && !dag.contains_key(&target_pos) {
+        queue.push_back(target_pos);
+        dag.insert(
+            target_pos,
+            FlatNode {
+                end_state: STATE_NONE,
+                edges: Vec::new(),
+            },
+        );
+    }
+}
+
+fn get_or_create_nfa_state(
+    nfa: &mut NFA,
+    state_map: &mut HashMap<usize, u32>,
+    worklist: &mut VecDeque<usize>,
+    pos: usize,
+    end_pos: usize,
+    accept_sink: u32,
+) -> u32 {
+    if let Some(&id) = state_map.get(&pos) {
+        id
+    } else if pos == end_pos {
+        accept_sink
+    } else {
+        let id = nfa.add_state();
+        state_map.insert(pos, id);
+        worklist.push_back(pos);
+        id
+    }
+}
+
 /// Walk the tokenizer DFA from `start_state` on `slice`, recording the
 /// last-match position per group. Returns the end state (or STATE_NONE if
 /// the DFA reaches a dead end).
 fn walk_tokenizer_dfa(
     dfa: &FlatDfa,
-    ng: usize,
+    num_groups: usize,
     slice: &[u8],
     start_state: usize,
-    mp: &mut [u32],
+    match_positions: &mut [u32],
 ) -> usize {
-    mp[..ng].fill(NONE);
-    let mut cur = start_state;
-    let mut done = dfa.states[cur].possible_future_group_ids.is_empty();
+    match_positions[..num_groups].fill(NONE);
+    let mut current_state = start_state;
+    let mut done = dfa.states[current_state].possible_future_group_ids.is_empty();
 
     for (i, &byte) in slice.iter().enumerate() {
         if done {
             break;
         }
-        let ns = dfa.states[cur].transitions[byte as usize];
-        if ns == NONE {
+        let next_state = dfa.states[current_state].transitions[byte as usize];
+        if next_state == NONE {
             done = true;
             break;
         }
-        cur = ns as usize;
+        current_state = next_state as usize;
         let pos = (i + 1) as u32;
-        for &gid in &dfa.states[cur].finalizers {
-            if gid < ng {
-                mp[gid] = pos;
+        for &gid in &dfa.states[current_state].finalizers {
+            if gid < num_groups {
+                match_positions[gid] = pos;
             }
         }
-        if dfa.states[cur].possible_future_group_ids.is_empty() {
+        if dfa.states[current_state].possible_future_group_ids.is_empty() {
             done = true;
         }
     }
 
-    if done { STATE_NONE } else { cur }
+    if done { STATE_NONE } else { current_state }
 }
 
-fn edges_from_mp(mp: &[u32], ng: usize, base_pos: usize) -> Vec<Edge> {
-    (0..ng)
+fn edges_from_match_positions(match_positions: &[u32], num_groups: usize, base_pos: usize) -> Vec<Edge> {
+    (0..num_groups)
         .filter_map(|gid| {
-            let pv = mp[gid];
+            let pv = match_positions[gid];
             (pv != NONE && pv > 0).then(|| (gid, base_pos + pv as usize))
         })
         .collect()
@@ -160,16 +185,16 @@ fn edges_from_mp(mp: &[u32], ng: usize, base_pos: usize) -> Vec<Edge> {
 
 fn build_trellis_dag(
     dfa: &FlatDfa,
-    ng: usize,
+    num_groups: usize,
     token: &[u8],
     initial_state: usize,
-    tmp_mp: &mut Vec<u32>,
+    tmp_match_positions: &mut Vec<u32>,
 ) -> BTreeMap<usize, FlatNode> {
     let len = token.len();
-    tmp_mp.resize(ng, NONE);
+    tmp_match_positions.resize(num_groups, NONE);
 
-    let root_end = walk_tokenizer_dfa(dfa, ng, token, initial_state, tmp_mp);
-    let root_edges = edges_from_mp(tmp_mp, ng, 0);
+    let root_end = walk_tokenizer_dfa(dfa, num_groups, token, initial_state, tmp_match_positions);
+    let root_edges = edges_from_match_positions(tmp_match_positions, num_groups, 0);
 
     let mut dag: BTreeMap<usize, FlatNode> = BTreeMap::new();
     let mut queue: VecDeque<usize> = VecDeque::new();
@@ -177,21 +202,21 @@ fn build_trellis_dag(
     dag.insert(0, FlatNode { end_state: root_end, edges: root_edges.clone() });
 
     for &(_, pos) in &root_edges {
-        if pos < len && !dag.contains_key(&pos) {
-            queue.push_back(pos);
-            dag.insert(pos, FlatNode { end_state: STATE_NONE, edges: Vec::new() });
-        }
+        enqueue_dag_target(&mut dag, &mut queue, pos, len);
     }
 
     while let Some(pos) = queue.pop_front() {
-        let end = walk_tokenizer_dfa(dfa, ng, &token[pos..], dfa.start_state, tmp_mp);
-        let edges = edges_from_mp(tmp_mp, ng, pos);
+        let end = walk_tokenizer_dfa(
+            dfa,
+            num_groups,
+            &token[pos..],
+            dfa.start_state,
+            tmp_match_positions,
+        );
+        let edges = edges_from_match_positions(tmp_match_positions, num_groups, pos);
 
         for &(_, target) in &edges {
-            if target < len && !dag.contains_key(&target) {
-                queue.push_back(target);
-                dag.insert(target, FlatNode { end_state: STATE_NONE, edges: Vec::new() });
-            }
+            enqueue_dag_target(&mut dag, &mut queue, target, len);
         }
 
         let node = dag.get_mut(&pos).unwrap();
@@ -201,8 +226,6 @@ fn build_trellis_dag(
 
     dag
 }
-
-// ---- NFA construction from trellis DAG ----
 
 fn build_nfa_from_trellis(
     dfa: &FlatDfa,
@@ -215,29 +238,17 @@ fn build_nfa_from_trellis(
     let mut state_map: HashMap<usize, u32> = HashMap::new();
     let mut worklist: VecDeque<usize> = VecDeque::new();
 
-    // Global accepting sink for completion transitions
     let accept_sink = nfa.add_state();
     nfa.set_accepting(accept_sink);
 
-    let get_or_create = |nfa: &mut NFA,
-                         state_map: &mut HashMap<usize, u32>,
-                         worklist: &mut VecDeque<usize>,
-                         pos: usize|
-     -> u32 {
-        if let Some(&id) = state_map.get(&pos) {
-            id
-        } else if pos == end_pos {
-            accept_sink
-        } else {
-            let id = nfa.add_state();
-            state_map.insert(pos, id);
-            worklist.push_back(pos);
-            id
-        }
-    };
-
-    // Root: position 0
-    let root_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, 0);
+    let root_id = get_or_create_nfa_state(
+        &mut nfa,
+        &mut state_map,
+        &mut worklist,
+        0,
+        end_pos,
+        accept_sink,
+    );
     nfa.start_states = vec![root_id];
 
     while let Some(pos) = worklist.pop_front() {
@@ -248,7 +259,6 @@ fn build_nfa_from_trellis(
             None => continue,
         };
 
-        // --- Completion transitions (no disallowed filtering) ---
         if node.end_state != STATE_NONE {
             let future_groups = &dfa.states[node.end_state].possible_future_group_ids;
             if future_groups_cover_all_terminals(future_groups, num_groups) {
@@ -260,17 +270,28 @@ fn build_nfa_from_trellis(
             }
         }
 
-        // --- Edge transitions (no disallowed filtering) ---
         for &(gid, target_pos) in &node.edges {
             let is_ignore = ignore_terminal.map_or(false, |ig| gid == ig);
 
             if is_ignore {
-                // Epsilon: ignore terminal is transparent
-                let child_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, target_pos);
+                let child_id = get_or_create_nfa_state(
+                    &mut nfa,
+                    &mut state_map,
+                    &mut worklist,
+                    target_pos,
+                    end_pos,
+                    accept_sink,
+                );
                 nfa.add_epsilon(nfa_state, child_id);
             } else {
-                // Labeled transition
-                let child_id = get_or_create(&mut nfa, &mut state_map, &mut worklist, target_pos);
+                let child_id = get_or_create_nfa_state(
+                    &mut nfa,
+                    &mut state_map,
+                    &mut worklist,
+                    target_pos,
+                    end_pos,
+                    accept_sink,
+                );
                 nfa.add_transition(nfa_state, gid as Label, child_id);
             }
         }
@@ -278,8 +299,6 @@ fn build_nfa_from_trellis(
 
     nfa
 }
-
-// ---- Canonical hash of minimized DFA ----
 
 fn canonical_nfa_hash(nfa: &NFA) -> u64 {
     if nfa.states.is_empty() {
@@ -371,41 +390,46 @@ fn hash_dfa_state(dfa: &DFA, state: u32, memo: &mut HashMap<u32, u64>) -> u64 {
     result
 }
 
-// ---- Per-(token, state) processing ----
+fn finalize_reference_dfa(nfa: &NFA, precomputed: &PrecomputedData) -> DFA {
+    let determinized = determinize(nfa);
+    let minimized = minimize_acyclic(&determinized);
+    match &precomputed.disallowed_detector {
+        Some(disallowed_detector) => minimize_acyclic(&subtract(&minimized, disallowed_detector)),
+        None => minimized,
+    }
+}
 
 fn process_token_for_state(
     dfa: &FlatDfa,
-    pre: &PrecomputedData,
+    precomputed: &PrecomputedData,
     token: &[u8],
     initial_state: usize,
     ignore_terminal: Option<usize>,
     hash_memo: &Mutex<HashMap<u64, u64>>,
     tmp_mp: &mut Vec<u32>,
 ) -> u64 {
-    tmp_mp.resize(pre.num_groups, NONE);
+    tmp_mp.resize(precomputed.num_groups, NONE);
 
-    let dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
+    let dag = build_trellis_dag(dfa, precomputed.num_groups, token, initial_state, tmp_mp);
 
-    let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, ignore_terminal, token.len());
+    let nfa = build_nfa_from_trellis(
+        dfa,
+        &dag,
+        precomputed.num_groups,
+        ignore_terminal,
+        token.len(),
+    );
     let nfa_hash = canonical_nfa_hash(&nfa);
 
     if let Some(&cached) = hash_memo.lock().unwrap().get(&nfa_hash) {
         return cached;
     }
 
-    let det_dfa = determinize(&nfa);
-    let min_dfa = minimize_acyclic(&det_dfa);
-    let pruned_dfa = match &pre.disallowed_detector {
-        Some(disallowed_detector) => minimize_acyclic(&subtract(&min_dfa, disallowed_detector)),
-        None => min_dfa,
-    };
-    let final_hash = canonical_hash(&pruned_dfa);
+    let final_hash = canonical_hash(&finalize_reference_dfa(&nfa, precomputed));
 
     hash_memo.lock().unwrap().insert(nfa_hash, final_hash);
     final_hash
 }
-
-// ---- Public API ----
 
 /// Result of reference equivalence analysis.
 pub struct ReferenceEquivalenceResult {
@@ -413,31 +437,73 @@ pub struct ReferenceEquivalenceResult {
     pub state_classes: StateEquivalenceResult,
 }
 
+fn empty_reference_result(
+    num_tokens: usize,
+    initial_states: &[usize],
+) -> ReferenceEquivalenceResult {
+    let vocab_classes = BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
+    let state_classes = initial_states
+        .iter()
+        .map(|&state| std::iter::once(state).collect())
+        .collect();
+    ReferenceEquivalenceResult {
+        vocab_classes,
+        state_classes,
+    }
+}
+
+fn group_tokens_by_hashes(
+    hashes: &[u64],
+    num_tokens: usize,
+    num_states: usize,
+) -> VocabEquivalenceResult {
+    let mut vocab_groups: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
+    for token_index in 0..num_tokens {
+        let signature: Vec<u64> = (0..num_states)
+            .map(|state_index| hashes[token_index * num_states + state_index])
+            .collect();
+        vocab_groups.entry(signature).or_default().push(token_index);
+    }
+    vocab_groups.into_values().collect()
+}
+
+fn group_states_by_hashes(
+    hashes: &[u64],
+    num_tokens: usize,
+    initial_states: &[usize],
+) -> StateEquivalenceResult {
+    let num_states = initial_states.len();
+    let mut state_groups: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
+    for (state_index, &state) in initial_states.iter().enumerate() {
+        let signature: Vec<u64> = (0..num_tokens)
+            .map(|token_index| hashes[token_index * num_states + state_index])
+            .collect();
+        state_groups.entry(signature).or_default().push(state);
+    }
+    state_groups
+        .into_values()
+        .map(|states| states.into_iter().collect::<BTreeSet<usize>>())
+        .collect()
+}
+
 pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<usize>,
 ) -> ReferenceEquivalenceResult {
-    let dfa = regex.dfa();
-    let pre = precompute(dfa, disallowed_follows);
-    let nt = strings.len();
-    let ns = initial_states.len();
+    let dfa = tokenizer.dfa();
+    let precomputed = precompute(dfa, disallowed_follows);
+    let num_tokens = strings.len();
+    let num_states = initial_states.len();
 
-    if ns == 0 || nt == 0 {
-        let vocab_classes = BTreeSet::from_iter(vec![(0..nt).collect()]);
-        let state_classes: StateEquivalenceResult = initial_states
-            .iter()
-            .map(|&s| std::iter::once(s).collect())
-            .collect();
-        return ReferenceEquivalenceResult { vocab_classes, state_classes };
+    if num_states == 0 || num_tokens == 0 {
+        return empty_reference_result(num_tokens, initial_states);
     }
 
     let hash_memo = Arc::new(Mutex::new(HashMap::<u64, u64>::new()));
 
-    // Compute per-(token, state) hash matrix in parallel.
-    // Layout: hashes[ti * ns + si] = hash for token ti at state initial_states[si]
     let hashes: Vec<u64> = {
         use rayon::prelude::*;
         let hash_memo = hash_memo.clone();
@@ -445,13 +511,13 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
             .par_iter()
             .map(|token_ref| {
                 let token = token_ref.as_ref();
-                let mut tmp_mp = vec![NONE; pre.num_groups];
+                let mut tmp_mp = vec![NONE; precomputed.num_groups];
                 let row: Vec<u64> = initial_states
                     .iter()
                     .map(|&state| {
                         process_token_for_state(
                             dfa,
-                            &pre,
+                            &precomputed,
                             token,
                             state,
                             ignore_terminal,
@@ -466,26 +532,10 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
         rows.into_iter().flatten().collect()
     };
 
-    // --- Vocab equivalence: combine per-state hashes for each token ---
-    let mut vocab_groups: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
-    for ti in 0..nt {
-        let row: Vec<u64> = (0..ns).map(|si| hashes[ti * ns + si]).collect();
-        vocab_groups.entry(row).or_default().push(ti);
+    ReferenceEquivalenceResult {
+        vocab_classes: group_tokens_by_hashes(&hashes, num_tokens, num_states),
+        state_classes: group_states_by_hashes(&hashes, num_tokens, initial_states),
     }
-    let vocab_classes: VocabEquivalenceResult = vocab_groups.into_values().collect();
-
-    // --- State equivalence: combine per-token hashes for each state ---
-    let mut state_groups: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
-    for (si, &state) in initial_states.iter().enumerate() {
-        let col: Vec<u64> = (0..nt).map(|ti| hashes[ti * ns + si]).collect();
-        state_groups.entry(col).or_default().push(state);
-    }
-    let state_classes: StateEquivalenceResult = state_groups
-        .into_values()
-        .map(|states| states.into_iter().collect::<BTreeSet<usize>>())
-        .collect();
-
-    ReferenceEquivalenceResult { vocab_classes, state_classes }
 }
 
 #[cfg(test)]

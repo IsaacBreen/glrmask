@@ -14,6 +14,21 @@ struct ProductState {
     right: Option<u32>,
 }
 
+fn get_or_create_product_state(
+    result: &mut DFA,
+    state_ids: &mut HashMap<ProductState, u32>,
+    worklist: &mut VecDeque<ProductState>,
+    product_state: ProductState,
+) -> u32 {
+    if let Some(&existing) = state_ids.get(&product_state) {
+        return existing;
+    }
+    let new_state = result.add_state();
+    state_ids.insert(product_state, new_state);
+    worklist.push_back(product_state);
+    new_state
+}
+
 pub fn subtract(left: &DFA, right: &DFA) -> DFA {
     if left.states.is_empty() {
         return left.clone();
@@ -51,14 +66,12 @@ pub fn subtract(left: &DFA, right: &DFA) -> DFA {
                 left: left_next,
                 right: right_next,
             };
-            let next_result_state = if let Some(&existing) = state_ids.get(&next_product) {
-                existing
-            } else {
-                let new_state = result.add_state();
-                state_ids.insert(next_product, new_state);
-                worklist.push_back(next_product);
-                new_state
-            };
+            let next_result_state = get_or_create_product_state(
+                &mut result,
+                &mut state_ids,
+                &mut worklist,
+                next_product,
+            );
             result.add_transition(result_state, label, next_result_state);
         }
     }

@@ -35,15 +35,19 @@ pub struct NFA {
     pub(crate) start_state: u32,
 }
 
+fn build_states(count: usize) -> Vec<NFAState> {
+    let mut states = Vec::with_capacity(count);
+    for _ in 0..count {
+        states.push(NFAState::new());
+    }
+    states
+}
+
 impl NFA {
     pub fn new(num_states: usize) -> Self {
         let count = num_states.max(1);
-        let mut states = Vec::with_capacity(count);
-        for _ in 0..count {
-            states.push(NFAState::new());
-        }
         Self {
-            states,
+            states: build_states(count),
             start_state: 0,
         }
     }
@@ -159,33 +163,8 @@ impl NFA {
             return;
         }
 
-        let mut new_states = Vec::with_capacity(scc_count);
-        for _ in 0..scc_count {
-            new_states.push(NFAState::new());
-        }
-
-        for (old_id, state) in self.states.iter().enumerate() {
-            let new_id = scc_map[old_id];
-            let new_state = &mut new_states[new_id];
-            new_state.finalizers.extend(state.finalizers.iter().copied());
-
-            for (set, target) in &state.transitions {
-                let new_target = scc_map[*target as usize] as u32;
-                new_state.transitions.push((*set, new_target));
-            }
-
-            for &target in &state.epsilon_transitions {
-                let new_target = scc_map[target as usize] as u32;
-                if new_target != new_id as u32 {
-                    new_state.epsilon_transitions.push(new_target);
-                }
-            }
-        }
-
-        for state in &mut new_states {
-            state.epsilon_transitions.sort_unstable();
-            state.epsilon_transitions.dedup();
-        }
+        let mut new_states = self.build_condensed_states(&scc_map, scc_count);
+        Self::dedup_epsilon_transitions(&mut new_states);
 
         self.states = new_states;
         self.start_state = scc_map[self.start_state as usize] as u32;
@@ -214,22 +193,70 @@ impl NFA {
         for state in &self.states {
             for (set, _) in &state.transitions {
                 if seen_sets.insert(*set) {
-                    let mut next_partitions = Vec::with_capacity(partitions.len() * 2);
-                    for partition in partitions {
-                        let intersection = partition.intersection(set);
-                        let difference = partition.difference(set);
-                        if !intersection.is_empty() {
-                            next_partitions.push(intersection);
-                        }
-                        if !difference.is_empty() {
-                            next_partitions.push(difference);
-                        }
-                    }
-                    partitions = next_partitions;
+                    partitions = Self::refine_partitions(partitions, *set);
                 }
             }
         }
 
+        let (class_map, class_members) = Self::build_equivalence_class_outputs(&partitions);
+
+        (class_map, partitions.len(), class_members)
+    }
+
+    fn build_condensed_states(&self, scc_map: &[usize], scc_count: usize) -> Vec<NFAState> {
+        let mut new_states = build_states(scc_count);
+        for (old_id, state) in self.states.iter().enumerate() {
+            Self::merge_condensed_state(old_id, state, scc_map, &mut new_states);
+        }
+        new_states
+    }
+
+    fn merge_condensed_state(
+        old_id: usize,
+        state: &NFAState,
+        scc_map: &[usize],
+        new_states: &mut [NFAState],
+    ) {
+        let new_id = scc_map[old_id];
+        let new_state = &mut new_states[new_id];
+        new_state.finalizers.extend(state.finalizers.iter().copied());
+
+        for (set, target) in &state.transitions {
+            let new_target = scc_map[*target as usize] as u32;
+            new_state.transitions.push((*set, new_target));
+        }
+
+        for &target in &state.epsilon_transitions {
+            let new_target = scc_map[target as usize] as u32;
+            if new_target != new_id as u32 {
+                new_state.epsilon_transitions.push(new_target);
+            }
+        }
+    }
+
+    fn dedup_epsilon_transitions(states: &mut [NFAState]) {
+        for state in states {
+            state.epsilon_transitions.sort_unstable();
+            state.epsilon_transitions.dedup();
+        }
+    }
+
+    fn refine_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
+        let mut next_partitions = Vec::with_capacity(partitions.len() * 2);
+        for partition in partitions {
+            let intersection = partition.intersection(&split);
+            let difference = partition.difference(&split);
+            if !intersection.is_empty() {
+                next_partitions.push(intersection);
+            }
+            if !difference.is_empty() {
+                next_partitions.push(difference);
+            }
+        }
+        next_partitions
+    }
+
+    fn build_equivalence_class_outputs(partitions: &[U8Set]) -> (Vec<u8>, Vec<Vec<u8>>) {
         let mut class_map = vec![0u8; 256];
         let mut class_members = vec![Vec::new(); partitions.len()];
         for (index, partition) in partitions.iter().enumerate() {
@@ -238,7 +265,6 @@ impl NFA {
                 class_members[index].push(byte);
             }
         }
-
-        (class_map, partitions.len(), class_members)
+        (class_map, class_members)
     }
 }
