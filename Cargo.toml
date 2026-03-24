@@ -26,8 +26,8 @@ serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 
-# Parallelism (optional)
-rayon = { version = "1", optional = true }
+# Parallelism
+rayon = "1"
 
 # Logging
 tracing = "0.1"
@@ -39,5 +39,3 @@ thiserror = "1"
 [dev-dependencies]
 pretty_assertions = "1"
 
-[features]
-default = ["rayon"]

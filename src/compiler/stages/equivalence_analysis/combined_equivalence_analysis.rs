@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::compat::{FlatDfa, GroupID, Sep1Tokenizer};
+use super::compat::{FlatDfa, Sep1Tokenizer};
 use crate::ds::bitset::BitSet;
 
 use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};

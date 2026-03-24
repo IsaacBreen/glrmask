@@ -1,7 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-
 pub mod compile;
 pub mod glr;
 pub mod grammar;

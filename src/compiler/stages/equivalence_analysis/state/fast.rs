@@ -12,8 +12,11 @@
 //! bounded-repeat chains efficiently.
 
 use std::collections::BTreeSet;
+
+#[cfg(test)]
 use rayon::prelude::*;
-use super::super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
+#[cfg(test)]
+use super::super::compat::Sep1Tokenizer;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
@@ -22,6 +25,7 @@ pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
 // Hashing Utilities (128-bit)
 // -----------------------------------------------------------------------------
 
+#[cfg(test)]
 #[inline(always)]
 fn mix_u128(mut x: u128) -> u128 {
     x ^= x >> 33;
@@ -32,6 +36,7 @@ fn mix_u128(mut x: u128) -> u128 {
     x
 }
 
+#[cfg(test)]
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -41,6 +46,7 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn env_flag_enabled_any(names: &[&str]) -> bool {
     names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
         let trimmed = value.trim();
@@ -48,11 +54,13 @@ fn env_flag_enabled_any(names: &[&str]) -> bool {
     })
 }
 
+#[cfg(test)]
 fn profile_equivalence_enabled() -> bool {
     env_flag_enabled_any(&["GLRMASK_PROFILE_EQUIVALENCE", "PROFILE_EQUIVALENCE"])
         || env_flag_enabled("GLRMASK_PROFILE_COMPILE")
 }
 
+#[cfg(test)]
 fn count_classes(mapping: &[usize]) -> usize {
     mapping.iter().copied().collect::<BTreeSet<_>>().len()
 }
@@ -71,6 +79,7 @@ fn count_classes(mapping: &[usize]) -> usize {
 /// # Returns
 /// A vector where `result[i]` is the representative state for `states[i]`.
 /// States with the same representative are equivalent.
+#[cfg(test)]
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     regex: &Sep1Tokenizer,
     tokens: &[S],
@@ -160,6 +169,7 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     mapping
 }
 
+#[cfg(test)]
 fn find_state_equivalence_classes_token_based(
     regex: &Sep1Tokenizer,
     tokens: &[Vec<u8>],
@@ -177,7 +187,7 @@ fn find_state_equivalence_classes_token_based(
         .iter()
         .map(|state| {
             let mut table = [NONE_STATE; 256];
-            for (byte_idx, &target) in state.transitions.iter().enumerate() { let byte = byte_idx as u8;
+            for (byte_idx, &target) in state.transitions.iter().enumerate() {
                 table[byte_idx] = target;
             }
             table

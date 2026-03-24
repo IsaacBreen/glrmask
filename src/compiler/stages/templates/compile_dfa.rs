@@ -30,32 +30,18 @@ impl Templates {
     pub(crate) fn from_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> Self {
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            let by_terminal: BTreeMap<TerminalID, UnweightedDfa> = characterizations
-                .par_iter()
-                .map(|(&terminal, characterization)| {
-                    let nfa = build_template_nfa(characterization);
-                    let dfa = minimize_dfa(&determinize(&nfa));
-                    (terminal, dfa)
-                })
-                .collect();
-            Self { by_terminal }
-        }
+        use rayon::prelude::*;
 
-        #[cfg(not(feature = "rayon"))]
-        {
-            let by_terminal = characterizations
-                .iter()
-                .map(|(&terminal, characterization)| {
-                    let nfa = build_template_nfa(characterization);
-                    let dfa = minimize_dfa(&determinize(&nfa));
-                    (terminal, dfa)
-                })
-                .collect();
-            Self { by_terminal }
-        }
+        let by_terminal: BTreeMap<TerminalID, UnweightedDfa> = characterizations
+            .par_iter()
+            .map(|(&terminal, characterization)| {
+                let nfa = build_template_nfa(characterization);
+                let dfa = minimize_dfa(&determinize(&nfa));
+                (terminal, dfa)
+            })
+            .collect();
+
+        Self { by_terminal }
     }
 }
 

@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 pub mod equivalence_analysis;
 pub mod profile_stats;
 pub mod compact;

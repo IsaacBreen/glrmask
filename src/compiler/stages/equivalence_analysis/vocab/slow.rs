@@ -13,7 +13,7 @@
 
 // Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
 
-use super::super::compat::{FlatDfa, FlatDfaState, GroupID, Sep1Tokenizer};
+use super::super::compat::Sep1Tokenizer;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -193,7 +193,6 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
     for state in &dfa.states {
         let mut table = [NONE; 256];
         for (byte_idx, &target) in state.transitions.iter().enumerate() {
-            let byte = byte_idx as u8;
             table[byte_idx] = target;
         }
         transitions.push(table);
@@ -969,6 +968,7 @@ pub fn partitions_are_comparable(a: &VocabEquivalenceResult, b: &VocabEquivalenc
 }
 
 /// Returns true if both partitions have identical classes.
+#[cfg(test)]
 pub fn partitions_are_equivalent(a: &VocabEquivalenceResult, b: &VocabEquivalenceResult) -> bool {
     a == b
 }

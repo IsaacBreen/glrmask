@@ -20,28 +20,17 @@ impl ManyToOneIdMap {
         self.internal_to_originals.len() as u32
     }
 
-    pub fn internal_id_for_original(&self, original_id: u32) -> Option<u32> {
-        self.original_to_internal
-            .get(original_id as usize)
-            .copied()
-            .filter(|internal_id| *internal_id != u32::MAX)
-    }
-
     pub fn representative_original_id_for_internal(&self, internal_id: u32) -> Option<u32> {
         self.representative_original_ids
             .get(internal_id as usize)
             .copied()
     }
 
-    pub fn representative_original_id_for_original(&self, original_id: u32) -> Option<u32> {
-        self.internal_id_for_original(original_id)
-            .and_then(|internal_id| self.representative_original_id_for_internal(internal_id))
-    }
-
     pub fn iter_representative_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.representative_original_ids.iter().copied()
     }
 
+    #[cfg(test)]
     pub fn original_ids_for_internal(&self, internal_id: u32) -> Option<&RangeSetBlaze<u32>> {
         self.internal_to_originals.get(internal_id as usize)
     }
@@ -53,6 +42,7 @@ impl ManyToOneIdMap {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn max_original_id(&self) -> u32 {
         self.original_to_internal
             .len()
@@ -80,6 +70,7 @@ impl InternalIdMap {
 
     /// Build a trivial identity map where each tokenizer state and vocab token
     /// maps to its own singleton equivalence class (no merging).
+    #[cfg(test)]
     pub fn build_identity(
         tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
         vocab: &crate::Vocab,
@@ -127,9 +118,8 @@ impl InternalIdMap {
         self.num_internal_tokens().saturating_sub(1)
     }
 
+    #[cfg(test)]
     pub fn max_token_id(&self) -> u32 {
         self.vocab_tokens.max_original_id()
     }
 }
-
-pub(crate) use combined::analyze_equivalences;

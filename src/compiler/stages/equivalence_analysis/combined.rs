@@ -152,51 +152,6 @@ mod tests {
     use super::*;
     use crate::compiler::compile::build_tokenizer;
     use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
-    use std::path::Path;
-
-    fn build_gpt2_unicode_to_byte_map() -> BTreeMap<char, u8> {
-        let mut byte_values: Vec<u32> = (b'!' as u32..=b'~' as u32).collect();
-        byte_values.extend(0xA1u32..=0xACu32);
-        byte_values.extend(0xAEu32..=0xFFu32);
-
-        let mut unicode_values = byte_values.clone();
-        let mut extra = 0u32;
-        for byte in 0u32..=255u32 {
-            if !byte_values.contains(&byte) {
-                byte_values.push(byte);
-                unicode_values.push(256 + extra);
-                extra += 1;
-            }
-        }
-
-        let mut unicode_to_byte = BTreeMap::new();
-        for (byte, codepoint) in byte_values.into_iter().zip(unicode_values.into_iter()) {
-            let ch = char::from_u32(codepoint).expect("valid GPT-2 codepoint");
-            unicode_to_byte.insert(ch, byte as u8);
-        }
-        unicode_to_byte
-    }
-
-    fn load_cached_gpt2_vocab() -> Vocab {
-        let vocab_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../constraint-framework-analysis/.cache/vocab_cache/vocab.json");
-        let raw = std::fs::read_to_string(&vocab_path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", vocab_path.display()));
-        let vocab: BTreeMap<String, u32> =
-            serde_json::from_str(&raw).expect("cached GPT-2 vocab should parse");
-        let unicode_to_byte = build_gpt2_unicode_to_byte_map();
-        let entries: Vec<(u32, Vec<u8>)> = vocab
-            .into_iter()
-            .map(|(token_str, token_id)| {
-                let token_bytes: Vec<u8> = token_str
-                    .chars()
-                    .map(|ch| unicode_to_byte[&ch])
-                    .collect();
-                (token_id, token_bytes)
-            })
-            .collect();
-        Vocab::new(entries, None)
-    }
 
     #[test]
     fn test_internal_id_map_shape() {

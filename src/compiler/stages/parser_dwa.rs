@@ -29,7 +29,6 @@ use crate::compiler::stages::profile_stats::{
 };
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::terminal_dwa::{
-    build_terminal_dwa,
     build_terminal_dwa_with_report,
     TerminalDwaBuildReport,
 };
@@ -285,7 +284,6 @@ fn build_state_summaries(
 
     // Phase 2: Build all unique bundles in parallel.
     let build_bundle_started = std::time::Instant::now();
-    #[cfg(feature = "rayon")]
     let built_bundles: Vec<Arc<NWA>> = {
         use rayon::prelude::*;
         unique_bundles_ordered
@@ -293,11 +291,6 @@ fn build_state_summaries(
             .map(|(_id, _key, bundle)| Arc::new(templates.build_bundle(bundle)))
             .collect()
     };
-    #[cfg(not(feature = "rayon"))]
-    let built_bundles: Vec<Arc<NWA>> = unique_bundles_ordered
-        .iter()
-        .map(|(_id, _key, bundle)| Arc::new(templates.build_bundle(bundle)))
-        .collect();
     let build_bundle_time = build_bundle_started.elapsed();
 
     // Phase 3: Assemble StateSummary structs using prebuilt bundles.
@@ -1011,7 +1004,8 @@ fn optimize_parser_default_transitions(
     any_changed
 }
 
-pub fn build_parser_dwa(
+#[cfg(test)]
+pub(crate) fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -1022,7 +1016,8 @@ pub fn build_parser_dwa(
     build_parser_dwa_with_report(table, grammar, tokenizer, vocab, id_map, ignore_terminal).0
 }
 
-pub(crate) fn build_parser_dwa_with_report(
+#[cfg(test)]
+fn build_parser_dwa_with_report(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -1030,10 +1025,6 @@ pub(crate) fn build_parser_dwa_with_report(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> (DWA, ParserDwaBuildReport) {
-    // Overlap terminal-DWA construction with template compilation:
-    // terminal_dwa depends on (grammar, tokenizer, vocab, id_map)
-    // templates depend on (table, grammar) only — no terminal_dwa
-    #[cfg(feature = "rayon")]
     let ((terminal_dwa, terminal_build), (characterizations, templates)) = rayon::join(
         || build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal),
         || {
@@ -1042,13 +1033,6 @@ pub(crate) fn build_parser_dwa_with_report(
             (characterizations, templates)
         },
     );
-    #[cfg(not(feature = "rayon"))]
-    let ((terminal_dwa, terminal_build), (characterizations, templates)) = {
-        let td = build_terminal_dwa_with_report(grammar, tokenizer, vocab, id_map, ignore_terminal);
-        let characterizations = characterize_terminals(table, grammar);
-        let templates = Templates::from_characterizations(&characterizations);
-        (td, (characterizations, templates))
-    };
 
     let (mut parser_dwa, mut report) =
         build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
@@ -1057,43 +1041,6 @@ pub(crate) fn build_parser_dwa_with_report(
     report.terminal_build = Some(terminal_build);
     parser_dwa.clip_weights(id_map.max_internal_token_id());
     (parser_dwa, report)
-}
-
-pub(crate) fn build_parser_dwa_from_terminal_dwa(
-    table: &GLRTable,
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    terminal_dwa: &DWA,
-) -> DWA {
-    build_parser_dwa_from_terminal_dwa_with_report(table, grammar, tokenizer, terminal_dwa).0
-}
-
-pub(crate) fn build_parser_dwa_from_terminal_dwa_with_report(
-    table: &GLRTable,
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    terminal_dwa: &DWA,
-) -> (DWA, ParserDwaBuildReport) {
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
-    let phase_started_at = std::time::Instant::now();
-    let characterizations = characterize_terminals(table, grammar);
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][parser_dwa] characterize_terminals_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    let phase_started_at = std::time::Instant::now();
-    let templates = Templates::from_characterizations(&characterizations);
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][parser_dwa] from_characterizations_ms={:.3}",
-            phase_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(
-        table, grammar, tokenizer, terminal_dwa, characterizations, templates,
-    )
 }
 
 pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report(

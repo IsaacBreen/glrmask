@@ -8,7 +8,6 @@ use crate::automata::weighted_u32::nwa::NWA as WeightedNwa;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WeightedNwaStats {
     pub states: usize,
-    pub start_states: usize,
     pub final_states: usize,
     pub epsilon_edges: usize,
     pub labeled_edges: usize,
@@ -55,7 +54,6 @@ pub(crate) struct UnweightedDfaStats {
 pub(crate) fn collect_weighted_nwa_stats(nwa: &WeightedNwa) -> WeightedNwaStats {
     let mut stats = WeightedNwaStats {
         states: nwa.states.len(),
-        start_states: nwa.start_states.len(),
         ..WeightedNwaStats::default()
     };
 

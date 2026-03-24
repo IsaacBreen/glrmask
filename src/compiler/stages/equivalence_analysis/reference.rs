@@ -28,7 +28,7 @@ use ahash::{AHasher, RandomState};
 use once_cell::sync::Lazy;
 use std::hash::Hasher;
 
-use super::compat::{FlatDfa, FlatDfaState, Sep1Tokenizer};
+use super::compat::{FlatDfa, Sep1Tokenizer};
 use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::dfa::{Label, DFA};
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
@@ -289,10 +289,10 @@ fn build_nfa_from_trellis(
     let accept_sink = nfa.add_state();
     nfa.set_accepting(accept_sink);
 
-    let mut get_or_create = |nfa: &mut NFA,
-                             state_map: &mut HashMap<usize, u32>,
-                             worklist: &mut VecDeque<usize>,
-                             pos: usize|
+    let get_or_create = |nfa: &mut NFA,
+                         state_map: &mut HashMap<usize, u32>,
+                         worklist: &mut VecDeque<usize>,
+                         pos: usize|
      -> u32 {
         if let Some(&id) = state_map.get(&pos) {
             id
@@ -454,9 +454,9 @@ fn process_token_for_state(
 ) -> u64 {
     tmp_mp.resize(pre.num_groups, NONE);
 
-    let mut dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
+    let dag = build_trellis_dag(dfa, pre.num_groups, token, initial_state, tmp_mp);
 
-    let mut nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, ignore_terminal, token.len());
+    let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, ignore_terminal, token.len());
     let nfa_hash = canonical_nfa_hash(&nfa);
 
     if let Some(&cached) = hash_memo.lock().unwrap().get(&nfa_hash) {
@@ -552,7 +552,6 @@ pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
         None
     };
 
-    #[cfg(feature = "rayon")]
     let hashes: Vec<u64> = {
         use rayon::prelude::*;
         let hash_memo = hash_memo.clone();
@@ -580,34 +579,6 @@ pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
             })
             .collect();
         rows.into_iter().flatten().collect()
-    };
-
-    #[cfg(not(feature = "rayon"))]
-    let hashes: Vec<u64> = {
-        let mut tmp_mp = vec![NONE; pre.num_groups];
-        let hash_memo = hash_memo.clone();
-        strings
-            .iter()
-            .flat_map(|token_ref| {
-                let token = token_ref.as_ref();
-                let row: Vec<u64> = initial_states
-                    .iter()
-                    .map(|&state| {
-                        process_token_for_state(
-                            dfa,
-                            &pre,
-                            token,
-                            state,
-                            ignore_terminal,
-                            &hash_memo,
-                            &mut tmp_mp,
-                        )
-                    })
-                    .collect();
-                counter.fetch_add(1, Ordering::Relaxed);
-                row
-            })
-            .collect()
     };
 
     if let Some(t) = progress_thread {
@@ -650,63 +621,10 @@ pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
 mod tests {
     use super::*;
     use crate::automata::lexer::ast::{bytes, class, seq, star};
-    use crate::compiler::compile::{build_tokenizer, build_tokenizer_from_exprs, compute_disallowed_follows};
+    use crate::compiler::compile::{build_tokenizer_from_exprs, compute_disallowed_follows};
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+    use crate::compiler::stages::equivalence_analysis::compat::{FlatDfaState, Sep1Tokenizer};
     use crate::ds::u8set::U8Set;
-    use std::path::Path;
-
-    fn build_gpt2_unicode_to_byte_map() -> BTreeMap<char, u8> {
-        let mut byte_values: Vec<u32> = (b'!' as u32..=b'~' as u32).collect();
-        byte_values.extend(0xA1u32..=0xACu32);
-        byte_values.extend(0xAEu32..=0xFFu32);
-
-        let mut unicode_values = byte_values.clone();
-        let mut extra = 0u32;
-        for byte in 0u32..=255u32 {
-            if !byte_values.contains(&byte) {
-                byte_values.push(byte);
-                unicode_values.push(256 + extra);
-                extra += 1;
-            }
-        }
-
-        let mut unicode_to_byte = BTreeMap::new();
-        for (byte, codepoint) in byte_values.into_iter().zip(unicode_values.into_iter()) {
-            let ch = char::from_u32(codepoint).expect("valid GPT-2 codepoint");
-            unicode_to_byte.insert(ch, byte as u8);
-        }
-        unicode_to_byte
-    }
-
-    fn load_cached_gpt2_vocab_bytes() -> Vec<Vec<u8>> {
-        let vocab_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../constraint-framework-analysis/.cache/vocab_cache/vocab.json");
-        let raw = std::fs::read_to_string(&vocab_path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", vocab_path.display()));
-        let vocab: BTreeMap<String, u32> =
-            serde_json::from_str(&raw).expect("cached GPT-2 vocab should parse");
-        let unicode_to_byte = build_gpt2_unicode_to_byte_map();
-        let max_id = vocab.values().copied().max().unwrap_or(0) as usize;
-        let mut tokens = vec![Vec::new(); max_id + 1];
-
-        for (token_str, token_id) in vocab {
-            let token_bytes: Vec<u8> = token_str
-                .chars()
-                .map(|ch| unicode_to_byte[&ch])
-                .collect();
-            tokens[token_id as usize] = token_bytes;
-        }
-
-        tokens
-    }
-
-    fn format_vocab_classes(classes: &VocabEquivalenceResult, token_ids: &[usize]) -> Vec<Vec<usize>> {
-        classes
-            .iter()
-            .map(|class| class.iter().map(|&idx| token_ids[idx]).collect())
-            .collect()
-    }
 
     #[test]
     fn test_reference_simple_ab_with_disallowed_follow() {

@@ -24,29 +24,7 @@ const TOKEN_ORDER_FINISH_ITERS: usize = 20000;
 const TOKEN_ORDER_FINISH_SEED: u64 = 7;
 
 pub struct CompactReport {
-    pub old_num_tsids: u32,
-    pub new_num_tsids: u32,
-    pub old_num_tokens: u32,
-    pub new_num_tokens: u32,
-    pub old_ranges: usize,
-    pub new_ranges: usize,
-    pub old_weight_ranges: usize,
-    pub new_weight_ranges: usize,
-    pub old_unique_token_ranges: usize,
-    pub new_unique_token_ranges: usize,
     pub token_perm: Vec<u32>,
-}
-
-pub struct StochasticCompactProbeReport {
-    pub baseline_ranges: usize,
-    pub best_ranges: usize,
-    pub baseline_weight_ranges: usize,
-    pub best_weight_ranges: usize,
-    pub baseline_token_ranges: usize,
-    pub best_token_ranges: usize,
-    pub iterations: usize,
-    pub best_iteration: usize,
-    pub seed: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -160,92 +138,18 @@ pub fn compact_dwa_dimensions(
     let new_storage = count_unique_storage(dwa);
     let new_ranges = new_storage.total_ranges();
 
-    CompactReport {
-        old_num_tsids: num_tsids,
-        new_num_tsids: ordered_num_tsids as u32,
-        old_num_tokens: num_tokens,
-        new_num_tokens: ordered_num_tokens as u32,
+    let _ = (
+        num_tsids,
+        num_tokens,
         old_ranges,
         new_ranges,
-        old_weight_ranges: old_storage.weight_ranges,
-        new_weight_ranges: new_storage.weight_ranges,
-        old_unique_token_ranges: old_storage.token_ranges,
-        new_unique_token_ranges: new_storage.token_ranges,
-        token_perm,
-    }
-}
+        old_storage,
+        new_storage,
+        ordered_num_tsids,
+        ordered_num_tokens,
+    );
 
-pub fn probe_stochastic_token_reordering(
-    dwa: &DWA,
-    num_tsids: u32,
-    num_tokens: u32,
-    iterations: usize,
-    seed: u64,
-) -> StochasticCompactProbeReport {
-    let unique_weights = collect_unique_weights(dwa);
-    let identity_token_perm: Vec<u32> = (0..num_tokens).collect();
-    let merged_unique_token_sets =
-        collect_merged_unique_token_sets(&unique_weights, &identity_token_perm);
-    let scorer = TokenOrderScorer::new(&merged_unique_token_sets, num_tokens as usize);
-    let baseline_storage = count_unique_storage_for_weights(&unique_weights);
-    let mut rng = StdRng::seed_from_u64(seed);
-
-    let mut current_layout: Vec<u32> = (0..num_tokens).collect();
-    let baseline_token_ranges = scorer.score_layout(&current_layout);
-    let baseline_ranges = baseline_storage.weight_ranges + baseline_token_ranges;
-
-    let mut current_token_ranges = baseline_token_ranges;
-    let mut current_ranges = baseline_ranges;
-
-    let mut best_token_ranges = baseline_token_ranges;
-    let mut best_ranges = baseline_ranges;
-    let mut best_iteration = 0usize;
-
-    let mut temperature = 8.0f64;
-    for iteration in 1..=iterations {
-        let mut candidate_layout = current_layout.clone();
-        apply_random_token_move(&mut candidate_layout, &mut rng);
-        let candidate_token_ranges = scorer.score_layout(&candidate_layout);
-        let candidate_ranges = baseline_storage.weight_ranges + candidate_token_ranges;
-
-        let better_than_best = candidate_ranges < best_ranges
-            || (candidate_ranges == best_ranges
-                && candidate_token_ranges < best_token_ranges);
-        if better_than_best {
-            best_ranges = candidate_ranges;
-            best_token_ranges = candidate_token_ranges;
-            best_iteration = iteration;
-        }
-
-        let delta = candidate_ranges as i64 - current_ranges as i64;
-        let accept = if delta <= 0 {
-            true
-        } else {
-            let probability = (-(delta as f64) / temperature.max(0.1)).exp().clamp(0.0, 1.0);
-            rng.gen_bool(probability)
-        };
-
-        if accept {
-            current_layout = candidate_layout;
-            current_ranges = candidate_ranges;
-            current_token_ranges = candidate_token_ranges;
-        }
-
-        let _ = current_token_ranges;
-        temperature *= 0.995;
-    }
-
-    StochasticCompactProbeReport {
-        baseline_ranges,
-        best_ranges,
-        baseline_weight_ranges: baseline_storage.weight_ranges,
-        best_weight_ranges: baseline_storage.weight_ranges,
-        baseline_token_ranges,
-        best_token_ranges,
-        iterations,
-        best_iteration,
-        seed,
-    }
+    CompactReport { token_perm }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -366,7 +270,6 @@ fn merge_sort_perm<P: Ord + std::hash::Hash + Eq>(profiles: &[P]) -> (Vec<u32>, 
     }
 
     // Group old IDs by profile: profile → list of old IDs with that profile
-    let mut profile_groups: HashMap<usize, Vec<usize>> = HashMap::new();
     // Use index-based comparison to avoid requiring Clone
     let mut sorted_indices: Vec<usize> = (0..n).collect();
     sorted_indices.sort_by(|&a, &b| profiles[a].cmp(&profiles[b]));
@@ -383,7 +286,6 @@ fn merge_sort_perm<P: Ord + std::hash::Hash + Eq>(profiles: &[P]) -> (Vec<u32>, 
         }
     }
     groups.push(current_group);
-    drop(profile_groups);
 
     // Assign new IDs: one per group, in sorted order
     let new_count = groups.len();
@@ -397,49 +299,7 @@ fn merge_sort_perm<P: Ord + std::hash::Hash + Eq>(profiles: &[P]) -> (Vec<u32>, 
     (perm, new_count)
 }
 
-fn merge_sort_perm_with_group_order<Pm, Po>(merge_profiles: &[Pm], order_profiles: &[Po]) -> (Vec<u32>, usize)
-where
-    Pm: Ord + std::hash::Hash + Eq,
-    Po: Ord,
-{
-    let n = merge_profiles.len();
-    if n == 0 {
-        return (vec![], 0);
-    }
-    assert_eq!(merge_profiles.len(), order_profiles.len());
-
-    let mut sorted_indices: Vec<usize> = (0..n).collect();
-    sorted_indices.sort_by(|&a, &b| merge_profiles[a].cmp(&merge_profiles[b]));
-
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut current_group = vec![sorted_indices[0]];
-    for &idx in &sorted_indices[1..] {
-        if merge_profiles[idx] == merge_profiles[current_group[0]] {
-            current_group.push(idx);
-        } else {
-            groups.push(std::mem::take(&mut current_group));
-            current_group.push(idx);
-        }
-    }
-    groups.push(current_group);
-
-    groups.sort_by(|left, right| {
-        order_profiles[left[0]]
-            .cmp(&order_profiles[right[0]])
-            .then_with(|| merge_profiles[left[0]].cmp(&merge_profiles[right[0]]))
-    });
-
-    let new_count = groups.len();
-    let mut perm = vec![0u32; n];
-    for (new_id, group) in groups.iter().enumerate() {
-        for &old_id in group {
-            perm[old_id] = new_id as u32;
-        }
-    }
-
-    (perm, new_count)
-}
-
+#[cfg(test)]
 fn unique_storage_better(candidate: UniqueStorageCounts, current: UniqueStorageCounts) -> bool {
     candidate.total_ranges() < current.total_ranges()
         || (candidate.total_ranges() == current.total_ranges()
@@ -463,6 +323,7 @@ fn collect_merged_unique_token_sets(weights: &[Weight], merge_token_perm: &[u32]
     unique_sets
 }
 
+#[cfg(test)]
 fn count_token_ranges_after_group_permutation_exact(
     merged_unique_token_sets: &[RangeSetBlaze<u32>],
     group_positions: &[u32],
@@ -642,6 +503,7 @@ fn apply_random_token_move(perm: &mut [u32], rng: &mut StdRng) {
     }
 }
 
+#[cfg(test)]
 fn score_permuted_weights(
     weights: &[Weight],
     tsid_perm: &[u32],
