@@ -9,5 +9,4 @@ pub mod fast;
 #[cfg(test)]
 pub mod medium;
 
-#[cfg(test)]
 pub mod slow;

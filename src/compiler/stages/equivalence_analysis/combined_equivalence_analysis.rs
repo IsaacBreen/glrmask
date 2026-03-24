@@ -10,9 +10,9 @@ use crate::ds::bitset::BitSet;
 
 use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};
 use super::vocab::fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
-#[cfg(test)]
 use super::vocab::slow::partition_is_at_least_as_fine;
 
+const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
 const SKIP_MAX_LENGTH_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV";
 const SKIP_TOKEN_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_TOKEN_STATE_EQUIV";
 
@@ -34,7 +34,6 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
 fn verify_state_partition_reference(
     fast_state_classes: &StateEquivalenceResult,
     reference_state_classes: &StateEquivalenceResult,
@@ -49,11 +48,25 @@ fn verify_state_partition_reference(
         .collect();
     assert!(
         partition_is_at_least_as_fine(&fast_state_classes, &reference_state_classes),
-        "Fast state equivalence merged tokens that reference kept separate!\n\
+        "Fast state equivalence merged states that reference kept separate!\n\
          Fast classes: {}\n\
          Reference classes: {}",
         fast_state_classes.len(),
         reference_state_classes.len(),
+    );
+}
+
+fn verify_vocab_partition_reference(
+    fast_vocab_classes: &VocabEquivalenceResult,
+    reference_vocab_classes: &VocabEquivalenceResult,
+) {
+    assert!(
+        partition_is_at_least_as_fine(fast_vocab_classes, reference_vocab_classes),
+        "Fast vocab equivalence merged tokens that reference kept separate!\n\
+         Fast classes: {}\n\
+         Reference classes: {}",
+        fast_vocab_classes.len(),
+        reference_vocab_classes.len(),
     );
 }
 
@@ -79,7 +92,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    _ignore_terminal: Option<u32>,
+    ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
     let skip_max_length = env_flag_enabled(SKIP_MAX_LENGTH_STATE_EQUIV_ENV);
     let skip_token_state = env_flag_enabled(SKIP_TOKEN_STATE_EQUIV_ENV);
@@ -122,6 +135,18 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         &reduced_states,
         disallowed_follows,
     );
+
+    if env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV) {
+        let reference = super::reference::find_equivalence_classes(
+            tokenizer,
+            tokens,
+            initial_states,
+            disallowed_follows,
+            ignore_terminal.map(|terminal| terminal as usize),
+        );
+        verify_state_partition_reference(&state_classes, &reference.state_classes);
+        verify_vocab_partition_reference(&vocab_classes, &reference.vocab_classes);
+    }
 
     CombinedEquivalenceResult {
         vocab_classes,

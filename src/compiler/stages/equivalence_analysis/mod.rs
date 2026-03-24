@@ -7,8 +7,6 @@ pub mod compat;
 pub mod state;
 pub mod vocab;
 pub mod combined_equivalence_analysis;
-
-#[cfg(test)]
 pub mod reference;
 
 #[derive(Debug, Clone)]
