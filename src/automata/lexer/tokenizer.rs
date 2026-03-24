@@ -9,8 +9,6 @@ use crate::automata::dfa::DFA;
 use crate::compiler::grammar_def::TerminalID;
 use crate::ds::bitset::BitSet;
 
-pub use super::regex::parse_regex;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {
     pub(crate) dfa: DFA,
@@ -225,6 +223,7 @@ pub struct TokenizerResult {
 mod tests {
     use super::*;
     use crate::automata::lexer::ast::bytes;
+    use crate::automata::lexer::regex::parse_regex;
     use crate::compiler::compile::build_tokenizer_from_exprs;
 
     #[test]

@@ -111,9 +111,7 @@ fn test_epsilon_explosion_minimal() {
         nwa_labeled.set_final_weight(final_state, weight_from_item(i as u32));
     }
 
-    let dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
-    let labeled_states = dwa_labeled.states.len();
-    let labeled_trans = count_transitions(&dwa_labeled);
+    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
 
     // EPSILON: start --eps--> intermediate --char--> final
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -128,9 +126,7 @@ fn test_epsilon_explosion_minimal() {
         nwa_epsilon.set_final_weight(final_state, weight_from_item(i as u32));
     }
 
-    let dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-    let epsilon_states = dwa_epsilon.states.len();
-    let epsilon_trans = count_transitions(&dwa_epsilon);
+    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
 
 }
 
@@ -154,9 +150,7 @@ fn test_epsilon_explosion_diverging_patterns() {
         nwa_labeled.set_final_weight(f_i, weight_from_item(i as u32));
     }
 
-    let dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
-    let labeled_states = dwa_labeled.states.len();
-    let labeled_trans = count_transitions(&dwa_labeled);
+    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -173,9 +167,7 @@ fn test_epsilon_explosion_diverging_patterns() {
         nwa_epsilon.set_final_weight(f_i, weight_from_item(i as u32));
     }
 
-    let dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-    let epsilon_states = dwa_epsilon.states.len();
-    let epsilon_trans = count_transitions(&dwa_epsilon);
+    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
 
 }
 
@@ -202,9 +194,7 @@ fn test_epsilon_explosion_overlapping_alphabet() {
         nwa_labeled.set_final_weight(final_state, weight_from_item(i as u32));
     }
 
-    let dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
-    let labeled_states = dwa_labeled.states.len();
-    let labeled_trans = count_transitions(&dwa_labeled);
+    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -224,9 +214,7 @@ fn test_epsilon_explosion_overlapping_alphabet() {
         nwa_epsilon.set_final_weight(final_state, weight_from_item(i as u32));
     }
 
-    let dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-    let epsilon_states = dwa_epsilon.states.len();
-    let epsilon_trans = count_transitions(&dwa_epsilon);
+    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
 
 }
 
@@ -247,9 +235,7 @@ fn test_epsilon_explosion_shared_second_hop() {
         nwa_labeled.add_transition(first_hop, char_x, shared_state, weight_from_item(i as u32));
     }
 
-    let dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
-    let labeled_states = dwa_labeled.states.len();
-    let labeled_trans = count_transitions(&dwa_labeled);
+    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -263,9 +249,7 @@ fn test_epsilon_explosion_shared_second_hop() {
         nwa_epsilon.add_transition(first_hop, char_x, shared_state_eps, weight_from_item(i as u32));
     }
 
-    let dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-    let epsilon_states = dwa_epsilon.states.len();
-    let epsilon_trans = count_transitions(&dwa_epsilon);
+    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
 
 }
 
@@ -288,9 +272,7 @@ fn test_epsilon_explosion_shared_then_diverge() {
         nwa_labeled.set_final_weight(unique_second, weight_from_item(i as u32));
     }
 
-    let dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
-    let labeled_states = dwa_labeled.states.len();
-    let labeled_trans = count_transitions(&dwa_labeled);
+    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -307,9 +289,7 @@ fn test_epsilon_explosion_shared_then_diverge() {
         nwa_epsilon.set_final_weight(unique_second, weight_from_item(i as u32));
     }
 
-    let dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-    let epsilon_states = dwa_epsilon.states.len();
-    let epsilon_trans = count_transitions(&dwa_epsilon);
+    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
 
 }
 
@@ -338,9 +318,7 @@ fn test_epsilon_explosion_paths_through_shared() {
         nwa_labeled.add_transition(sh, 'f' as Label, final_state, Weight::all());
     }
 
-    let dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
-    let labeled_states = dwa_labeled.states.len();
-    let labeled_trans = count_transitions(&dwa_labeled);
+    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -363,9 +341,7 @@ fn test_epsilon_explosion_paths_through_shared() {
         nwa_epsilon.add_transition(sh, 'f' as Label, final_state_eps, Weight::all());
     }
 
-    let dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-    let epsilon_states = dwa_epsilon.states.len();
-    let epsilon_trans = count_transitions(&dwa_epsilon);
+    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
 
 }
 
@@ -386,9 +362,7 @@ fn test_epsilon_explosion_many_sources_same_label() {
         nwa_labeled.set_final_weight(target, weight_from_item(i as u32));
     }
 
-    let dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
-    let labeled_states = dwa_labeled.states.len();
-    let labeled_trans = count_transitions(&dwa_labeled);
+    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -402,9 +376,7 @@ fn test_epsilon_explosion_many_sources_same_label() {
         nwa_epsilon.set_final_weight(target, weight_from_item(i as u32));
     }
 
-    let dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-    let epsilon_states = dwa_epsilon.states.len();
-    let epsilon_trans = count_transitions(&dwa_epsilon);
+    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
 
 }
 
@@ -434,9 +406,7 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
         }
     }
 
-    let dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
-    let labeled_states = dwa_labeled.states.len();
-    let labeled_trans = count_transitions(&dwa_labeled);
+    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -458,9 +428,7 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
         }
     }
 
-    let dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-    let epsilon_states = dwa_epsilon.states.len();
-    let epsilon_trans = count_transitions(&dwa_epsilon);
+    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
 
 }
 

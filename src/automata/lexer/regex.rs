@@ -38,7 +38,7 @@ pub(crate) fn unescape_literal(input: &[u8]) -> Vec<u8> {
 }
 
 fn parse_alternation(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
-    let (mut left, mut pos) = parse_sequence(input, pos, utf8);
+    let (left, mut pos) = parse_sequence(input, pos, utf8);
     let mut alts = vec![left];
     while pos < input.len() && input[pos] == b'|' {
         let (right, next) = parse_sequence(input, pos + 1, utf8);

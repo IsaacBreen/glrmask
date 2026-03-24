@@ -559,10 +559,10 @@ fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::
     let mut state_ids: HashMap<ProdState, u32> = HashMap::new();
     let mut worklist: VecDeque<ProdState> = VecDeque::new();
 
-    let mut get_or_create = |result: &mut NWA,
-                              state_ids: &mut HashMap<ProdState, u32>,
-                              worklist: &mut VecDeque<ProdState>,
-                              ps: ProdState|
+    let get_or_create = |result: &mut NWA,
+                         state_ids: &mut HashMap<ProdState, u32>,
+                         worklist: &mut VecDeque<ProdState>,
+                         ps: ProdState|
      -> u32 {
         if let Some(&id) = state_ids.get(&ps) {
             id
@@ -1133,6 +1133,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches(
         vocab,
         id_map,
         ignore_terminal,
+    )
 }
 
 fn build_terminal_dwa_impl(

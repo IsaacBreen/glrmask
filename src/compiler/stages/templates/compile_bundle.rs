@@ -7,7 +7,6 @@ use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
 use crate::automata::unweighted_u32::determinize::determinize as unweighted_determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as unweighted_minimize;
-use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize_fast;
 use crate::automata::weighted::nwa::NWA;
@@ -112,7 +111,7 @@ impl Templates {
 /// weights from precomputed effective-weight tables. O(states × labels × groups)
 /// with no Weight intersection operations in the inner loop.
 fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
-    use crate::automata::weighted_u32::dwa::{DWA, DWAState};
+    use crate::automata::weighted_u32::dwa::DWA;
 
     let n = groups.len();
     if n == 0 {

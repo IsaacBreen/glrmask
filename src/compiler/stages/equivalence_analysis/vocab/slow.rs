@@ -264,7 +264,6 @@ fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
         && scratch.dag_disallowed[pos].contains(gid)
 }
 
-#[inline]
 struct ProgressReporter {
 }
 

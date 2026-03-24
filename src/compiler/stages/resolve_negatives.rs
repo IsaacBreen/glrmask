@@ -142,12 +142,12 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
             }
         }
 
-        let mut check_cancellations = |target: u32,
-                                       w_st: &Weight,
-                                       queries: &mut HashMap<u32, HashMap<QueryKey, Weight>>,
-                                       worklist: &mut VecDeque<(u32, u32, i32)>,
-                                       in_queue: &mut [HashSet<QueryKey>],
-                                       new_eps_from: &mut HashMap<u32, HashMap<u32, Weight>>| {
+        let check_cancellations = |target: u32,
+                       w_st: &Weight,
+                       queries: &mut HashMap<u32, HashMap<QueryKey, Weight>>,
+                       worklist: &mut VecDeque<(u32, u32, i32)>,
+                       in_queue: &mut [HashSet<QueryKey>],
+                       new_eps_from: &mut HashMap<u32, HashMap<u32, Weight>>| {
             let new_eps_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), w_st);
             if new_eps_w.is_empty() {
                 return;
@@ -338,12 +338,12 @@ pub(crate) fn compute_cancellations_range(
             }
         }
 
-        let mut check_cancellations = |target: u32,
-                           w_st: &Weight,
-                           queries: &mut Vec<Option<FxHashMap<QueryKey, Weight>>>,
-                           worklist: &mut VecDeque<(u32, u32, i32)>,
-                           in_queue: &mut FxHashSet<(u32, u32, i32)>,
-                           new_eps_from: &mut Vec<Option<FxHashMap<u32, Weight>>>| {
+        let check_cancellations = |target: u32,
+                       w_st: &Weight,
+                       queries: &mut Vec<Option<FxHashMap<QueryKey, Weight>>>,
+                       worklist: &mut VecDeque<(u32, u32, i32)>,
+                       in_queue: &mut FxHashSet<(u32, u32, i32)>,
+                       new_eps_from: &mut Vec<Option<FxHashMap<u32, Weight>>>| {
             let new_eps_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), w_st);
             if new_eps_w.is_empty() {
                 return;
@@ -808,12 +808,12 @@ mod tests {
                 }
             }
 
-            let mut check_cancellations = |target: u32,
-                                           w_st: &Weight,
-                                           queries: &mut HashMap<u32, HashMap<QueryKey, Weight>>,
-                                           worklist: &mut VecDeque<(u32, u32, i32)>,
-                                           in_queue: &mut [HashSet<QueryKey>],
-                                           new_eps_from: &mut HashMap<u32, HashMap<u32, Weight>>| {
+            let check_cancellations = |target: u32,
+                                       w_st: &Weight,
+                                       queries: &mut HashMap<u32, HashMap<QueryKey, Weight>>,
+                                       worklist: &mut VecDeque<(u32, u32, i32)>,
+                                       in_queue: &mut [HashSet<QueryKey>],
+                                       new_eps_from: &mut HashMap<u32, HashMap<u32, Weight>>| {
                 let new_eps_w = w_as.intersection(w_st);
                 if new_eps_w.is_empty() {
                     return;

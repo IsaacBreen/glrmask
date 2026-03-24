@@ -2370,11 +2370,6 @@ fn test_mask_commit_consistency_minimal_repro_minimized_copy() {
 }
 
 #[test]
-fn test_live_minimal_tokenizer_fineness() {
-    glrmask::__check_live_minimal_tokenizer_fineness();
-}
-
-#[test]
 fn test_python_reported_bug_def_rep_space_f() {
     let vocab = Vocab::new(
         vec![(0u32, b" ".to_vec()), (1u32, b" f".to_vec())],

@@ -394,7 +394,7 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
         dfa.apply_group_exclusions(&plan.exclusions);
     }
 
-    let mut dfa = if plan.visible_groups < plan.compiled_exprs.len() {
+    let dfa = if plan.visible_groups < plan.compiled_exprs.len() {
         dfa.project_groups(plan.visible_groups)
     } else {
         dfa

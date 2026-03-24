@@ -1128,7 +1128,7 @@ fn upper_sig_hash<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
             if let Some(e) = empty {
                 e.hash(&mut h);
             }
-            let mut seed = 0x6a09_e667_f3bc_c908u64 ^ h.finish() ^ (edges.len() as u64);
+            let seed = 0x6a09_e667_f3bc_c908u64 ^ h.finish() ^ (edges.len() as u64);
 
             let mut xor_acc: u64 = 0;
             let mut sum_acc: u64 = 0;
@@ -1851,7 +1851,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
 
             // Chain fast path: single child, directly recurse
-            let mut merged: Option<Arc<Lower<T>>> = if node.is_chain() {
+            let merged: Option<Arc<Lower<T>>> = if node.is_chain() {
                 let popped = popn_lower::<T, A>(node.chain_next(), k - 1, memo_lower);
                 Some(popped)
             } else {
@@ -3392,7 +3392,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut num_upper_with_empty = 0;
         let mut num_interfaces_with_empty = 0;
         let mut num_lower_terminal_nodes = 0;
-        let mut num_interface_implicit_terminals = 0;
+        let num_interface_implicit_terminals = 0;
 
         let mut num_multi_depth_slots_upper = 0;
         let mut num_multi_depth_slots_lower = 0;

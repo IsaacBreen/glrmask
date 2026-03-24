@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::ds::u8set::U8Set;
 
-use super::dfa::{DFA, GroupId};
+use super::dfa::GroupId;
 
 #[derive(Debug, Clone)]
 pub struct NFAState {
