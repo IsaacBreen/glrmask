@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[cfg(test)]
 use crate::Vocab;
@@ -9,8 +10,6 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
-use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
-use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
@@ -23,12 +22,35 @@ use crate::compiler::stages::terminal_dwa::build_terminal_dwa;
 use crate::compiler::stages::templates::Templates;
 #[cfg(test)]
 use crate::compiler::stages::templates::characterize::characterize_terminals;
+use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
 type ComposeMemo = Vec<Option<Option<NwaBody>>>;
 type ConcatMemo = HashMap<(usize, u32), Option<NwaBody>>;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ParserDwaPhaseProfile {
+    build_state_summaries_ms: f64,
+    compose_state_ms: f64,
+    resolve_negatives_ms: f64,
+    viable_suffix_ms: f64,
+    determinize_supports_ms: f64,
+    optimize_defaults_ms: f64,
+    subtract_final_ms: f64,
+    determinize_after_defaults_ms: f64,
+    minimize_ms: f64,
+    total_ms: f64,
+}
+
+fn parser_dwa_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some()
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
+}
 
 #[derive(Debug, Clone, Copy)]
 struct PendingBranch {
@@ -47,12 +69,6 @@ struct Branch {
 struct StateSummary {
     final_weight: Option<Weight>,
     branches: Vec<Branch>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ViableSuffixRecognizer {
-    subset_to_state: HashMap<Vec<u32>, u32>,
-    possible_outgoing_ids: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -279,124 +295,46 @@ fn parser_state_label(label: i32, num_parser_states: u32) -> Option<u32> {
     }
 }
 
-fn nwa_to_unweighted(nwa: &NWA) -> UnweightedNfa {
-    let mut out = UnweightedNfa::new_empty();
-    out.states = vec![crate::automata::unweighted_u32::nfa::NFAState::default(); nwa.states.len()];
-    out.start_states = nwa.start_states.clone();
-
-    for (state_id, state) in nwa.states.iter().enumerate() {
-        if state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty()) {
-            out.states[state_id].is_accepting = true;
-        }
-
-        for (&label, targets) in &state.transitions {
-            for (target, weight) in targets {
-                if !weight.is_empty() {
-                    out.states[state_id].transitions.entry(label).or_default().push(*target);
-                }
-            }
-        }
-
-        for (target, weight) in &state.epsilons {
-            if !weight.is_empty() {
-                out.states[state_id].epsilons.push(*target);
-            }
-        }
-    }
-
-    out
-}
-
-fn determinize_unweighted_with_subset_map(nfa: &UnweightedNfa) -> (UnweightedDfa, HashMap<Vec<u32>, u32>) {
-    fn epsilon_closure(nfa: &UnweightedNfa, seeds: &[u32]) -> BTreeSet<u32> {
-        let mut closed = BTreeSet::new();
-        let mut queue: VecDeque<u32> = seeds.iter().copied().collect();
-        while let Some(state_id) = queue.pop_front() {
-            if closed.insert(state_id) {
-                for &target in &nfa.states[state_id as usize].epsilons {
-                    if !closed.contains(&target) {
-                        queue.push_back(target);
-                    }
-                }
-            }
-        }
-        closed
-    }
-
-    if nfa.states.is_empty() || nfa.start_states.is_empty() {
-        return (UnweightedDfa::new(), HashMap::new());
-    }
-
-    let mut dfa = UnweightedDfa::new();
-    let mut subset_map: HashMap<Vec<u32>, u32> = HashMap::new();
-    let mut worklist: VecDeque<Vec<u32>> = VecDeque::new();
-
-    let start_closure = epsilon_closure(nfa, &nfa.start_states);
-    let start_key: Vec<u32> = start_closure.iter().copied().collect();
-    subset_map.insert(start_key.clone(), dfa.start_state);
-    worklist.push_back(start_key);
-
-    while let Some(subset_key) = worklist.pop_front() {
-        let dfa_state = subset_map[&subset_key];
-        if subset_key.iter().any(|&state_id| nfa.states[state_id as usize].is_accepting) {
-            dfa.set_accepting(dfa_state, true);
-        }
-
-        let mut label_targets: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
-        for &state_id in &subset_key {
-            for (&label, targets) in &nfa.states[state_id as usize].transitions {
-                let entry = label_targets.entry(label).or_default();
-                for &target in targets {
-                    entry.insert(target);
-                }
-            }
-        }
-
-        for (label, raw_targets) in label_targets {
-            let closure = epsilon_closure(nfa, &raw_targets.iter().copied().collect::<Vec<_>>());
-            let next_key: Vec<u32> = closure.iter().copied().collect();
-            if next_key.is_empty() {
-                continue;
-            }
-
-            let next_state = if let Some(&existing) = subset_map.get(&next_key) {
-                existing
-            } else {
-                let new_state = dfa.add_state();
-                subset_map.insert(next_key.clone(), new_state);
-                worklist.push_back(next_key);
-                new_state
-            };
-            dfa.add_transition(dfa_state, label, next_state);
-        }
-    }
-
-    (dfa, subset_map)
-}
-
-fn build_viable_suffix_recognizer(nwa: &NWA, num_parser_states: u32) -> ViableSuffixRecognizer {
-    let unweighted = nwa_to_unweighted(nwa);
-    let (dfa, subset_to_state) = determinize_unweighted_with_subset_map(&unweighted);
-    let possible_outgoing_ids = dfa
+fn build_possible_outgoing_ids_by_state(
+    parser_nwa: &NWA,
+    state_supports: &[Vec<u32>],
+    num_parser_states: u32,
+) -> Vec<BitSet> {
+    let num_parser_states = num_parser_states as usize;
+    let all_parser_states = BitSet::all(num_parser_states);
+    let state_outgoing_ids: Vec<BitSet> = parser_nwa
         .states
         .iter()
         .map(|state| {
-            let mut ids = BTreeSet::new();
+            let mut ids = BitSet::new(num_parser_states);
             for &label in state.transitions.keys() {
                 if label == DEFAULT_LABEL {
-                    ids.extend(0..num_parser_states);
-                } else if let Some(parser_state_id) = parser_state_label(label, num_parser_states) {
-                    ids.insert(parser_state_id);
+                    return all_parser_states.clone();
+                }
+                if let Some(parser_state_id) = parser_state_label(label, num_parser_states as u32) {
+                    ids.set(parser_state_id as usize);
                 }
             }
-            ids.into_iter().collect()
+            ids
         })
         .collect();
 
-    ViableSuffixRecognizer {
-        subset_to_state,
-        possible_outgoing_ids,
-    }
+    state_supports
+        .iter()
+        .map(|support| {
+            let mut ids = BitSet::new(num_parser_states);
+            for &state_id in support {
+                let Some(state_ids) = state_outgoing_ids.get(state_id as usize) else {
+                    continue;
+                };
+                ids.union_with(state_ids);
+                if ids == all_parser_states {
+                    break;
+                }
+            }
+            ids
+        })
+        .collect()
 }
 
 fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
@@ -565,8 +503,7 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
 
 fn optimize_parser_default_transitions(
     nwa: &mut NWA,
-    state_supports: &[Vec<u32>],
-    recognizer: &ViableSuffixRecognizer,
+    possible_by_state: &[BitSet],
     num_parser_states: u32,
 ) -> bool {
     fn subtract_weight_from_outgoing(
@@ -600,18 +537,6 @@ fn optimize_parser_default_transitions(
         changed
     }
 
-    let possible_by_state: Vec<Vec<u32>> = state_supports
-        .iter()
-        .map(|support| {
-            recognizer
-                .subset_to_state
-                .get(support)
-                .and_then(|state_id| recognizer.possible_outgoing_ids.get(*state_id as usize))
-                .cloned()
-                .unwrap_or_default()
-        })
-        .collect();
-
     let mut any_changed = false;
 
     loop {
@@ -621,17 +546,17 @@ fn optimize_parser_default_transitions(
             if possible_ids.is_empty() {
                 continue;
             }
-            if possible_ids.len() < 2 {
+            if possible_ids.count_ones() < 2 {
                 continue;
             }
 
-            let possible_set: BTreeSet<u32> = possible_ids.iter().copied().collect();
-            let actual_positive: BTreeSet<u32> = nwa.states[state_id]
-                .transitions
-                .iter()
-                .filter_map(|(&label, _)| parser_state_label(label, num_parser_states))
-                .collect();
-            if actual_positive != possible_set {
+            let mut actual_positive = BitSet::new(num_parser_states as usize);
+            for &label in nwa.states[state_id].transitions.keys() {
+                if let Some(parser_state_id) = parser_state_label(label, num_parser_states) {
+                    actual_positive.set(parser_state_id as usize);
+                }
+            }
+            if actual_positive != *possible_ids {
                 continue;
             }
 
@@ -639,8 +564,8 @@ fn optimize_parser_default_transitions(
             let mut default_weight: Option<Weight> = None;
             let mut valid = true;
 
-            for parser_state_id in possible_ids {
-                let Some(targets) = nwa.states[state_id].transitions.get(&(*parser_state_id as i32)) else {
+            for parser_state_id in possible_ids.iter_ones().map(|state_id| state_id as i32) {
+                let Some(targets) = nwa.states[state_id].transitions.get(&parser_state_id) else {
                     valid = false;
                     break;
                 };
@@ -757,11 +682,17 @@ fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
     templates: Templates,
-) -> Option<NWA> {
+) -> Option<(NWA, ParserDwaPhaseProfile)> {
+    let mut profile = ParserDwaPhaseProfile::default();
+
+    let build_state_summaries_started_at = Instant::now();
     let states = build_state_summaries(terminal_dwa, grammar, &templates);
+    profile.build_state_summaries_ms = elapsed_ms(build_state_summaries_started_at);
+
     let mut arena = NWA::new(0, 0);
     let mut body_memo = vec![None; states.len()];
     let mut concatenated_branches = HashMap::new();
+    let compose_started_at = Instant::now();
     let parser_body = compose_state(
         terminal_dwa.start_state,
         &states,
@@ -769,9 +700,10 @@ fn build_parser_nwa_from_terminal_dwa(
         &mut body_memo,
         &mut concatenated_branches,
     )?;
+    profile.compose_state_ms = elapsed_ms(compose_started_at);
 
     arena.start_states = parser_body.start_states.clone();
-    Some(arena)
+    Some((arena, profile))
 }
 
 #[cfg(test)]
@@ -807,30 +739,67 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     terminal_dwa: &DWA,
     templates: Templates,
 ) -> DWA {
-    let Some(mut parser_nwa) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
+    let total_started_at = Instant::now();
+    let Some((mut parser_nwa, mut profile)) =
+        build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates)
+    else {
         return DWA::new(0, 0);
     };
 
+    let resolve_negatives_started_at = Instant::now();
     resolve_negative_codes_in_nwa(&mut parser_nwa);
+    profile.resolve_negatives_ms = elapsed_ms(resolve_negatives_started_at);
 
-    let viable_suffix_recognizer = build_viable_suffix_recognizer(&parser_nwa, table.num_states);
-
+    let determinize_supports_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa);
+    profile.determinize_supports_ms = elapsed_ms(determinize_supports_started_at);
     let parser_dwa_pre_minimize = determinized.dwa;
 
+    let viable_suffix_started_at = Instant::now();
+    let possible_by_state =
+        build_possible_outgoing_ids_by_state(&parser_nwa, &determinized.supports, table.num_states);
+    profile.viable_suffix_ms = elapsed_ms(viable_suffix_started_at);
+
     let mut optimized_parser_nwa = dwa_to_nwa(&parser_dwa_pre_minimize);
+    let optimize_defaults_started_at = Instant::now();
     optimize_parser_default_transitions(
         &mut optimized_parser_nwa,
-        &determinized.supports,
-        &viable_suffix_recognizer,
+        &possible_by_state,
         table.num_states,
     );
+    profile.optimize_defaults_ms = elapsed_ms(optimize_defaults_started_at);
 
+    let subtract_final_started_at = Instant::now();
     optimized_parser_nwa.subtract_final_weights_from_outgoing();
+    profile.subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
+    let determinize_after_defaults_started_at = Instant::now();
     let determinized_after_defaults = determinize(&optimized_parser_nwa)
         .expect("parser NWA determinization failed after default-transition optimization");
-    minimize(&determinized_after_defaults)
+    profile.determinize_after_defaults_ms = elapsed_ms(determinize_after_defaults_started_at);
+
+    let minimize_started_at = Instant::now();
+    let minimized = minimize(&determinized_after_defaults);
+    profile.minimize_ms = elapsed_ms(minimize_started_at);
+    profile.total_ms = elapsed_ms(total_started_at);
+
+    if parser_dwa_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_dwa] build_state_summaries_ms={:.3} compose_state_ms={:.3} resolve_negatives_ms={:.3} viable_suffix_ms={:.3} determinize_supports_ms={:.3} optimize_defaults_ms={:.3} subtract_final_ms={:.3} determinize_after_defaults_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            profile.build_state_summaries_ms,
+            profile.compose_state_ms,
+            profile.resolve_negatives_ms,
+            profile.viable_suffix_ms,
+            profile.determinize_supports_ms,
+            profile.optimize_defaults_ms,
+            profile.subtract_final_ms,
+            profile.determinize_after_defaults_ms,
+            profile.minimize_ms,
+            profile.total_ms,
+        );
+    }
+
+    minimized
 }
 
 #[cfg(test)]
@@ -890,13 +859,12 @@ mod tests {
         dwa.add_transition(0, 1, accept, token_weight(&[2, 3]));
 
         let mut nwa = dwa_to_nwa(&dwa);
-        let supports = vec![vec![0], vec![1]];
-        let recognizer = ViableSuffixRecognizer {
-            subset_to_state: HashMap::from([(vec![0], 0), (vec![1], 1)]),
-            possible_outgoing_ids: vec![vec![0, 1], vec![]],
-        };
+        let mut start_ids = BitSet::new(2);
+        start_ids.set(0);
+        start_ids.set(1);
+        let possible_by_state = vec![start_ids, BitSet::new(2)];
 
-        assert!(optimize_parser_default_transitions(&mut nwa, &supports, &recognizer, 2));
+        assert!(optimize_parser_default_transitions(&mut nwa, &possible_by_state, 2));
 
         let defaults = nwa.states[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
         assert_eq!(defaults.len(), 1);
@@ -921,13 +889,9 @@ mod tests {
             .push((1, token_weight(&[1, 2])));
         nwa.states[1].final_weight = Some(token_weight(&[2, 3]));
 
-        let supports = vec![vec![0], vec![1]];
-        let recognizer = ViableSuffixRecognizer {
-            subset_to_state: HashMap::from([(vec![0], 0), (vec![1], 1)]),
-            possible_outgoing_ids: vec![vec![], vec![]],
-        };
+        let possible_by_state = vec![BitSet::new(4), BitSet::new(4)];
 
-        assert!(optimize_parser_default_transitions(&mut nwa, &supports, &recognizer, 4));
+        assert!(optimize_parser_default_transitions(&mut nwa, &possible_by_state, 4));
 
         assert_eq!(nwa.states[0].final_weight, Some(token_weight(&[2])));
         let defaults = nwa.states[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
