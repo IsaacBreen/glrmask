@@ -56,16 +56,17 @@ fn new_hasher() -> AHasher {
     HASH_STATE.build_hasher()
 }
 
-const PROGRESS_ENV: &str = "REFERENCE_EQUIV_PROGRESS";
+const PROGRESS_ENVS: &[&str] = &[
+    "GLRMASK_REFERENCE_EQUIV_PROGRESS",
+    "REFERENCE_EQUIV_PROGRESS",
+];
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            let t = v.trim();
+fn env_flag_enabled_any(names: &[&str]) -> bool {
+    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
+        let t = value.trim();
             !t.is_empty() && t != "0" && !t.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
+    })
 }
 
 // ---- Label encoding ----
@@ -495,7 +496,7 @@ pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
         initial_states,
         disallowed_follows,
         ignore_terminal,
-        env_flag_enabled(PROGRESS_ENV),
+        env_flag_enabled_any(PROGRESS_ENVS),
     )
 }
 

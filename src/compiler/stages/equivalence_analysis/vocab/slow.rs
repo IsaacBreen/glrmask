@@ -35,7 +35,10 @@ const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
 const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
-const SLOW_VOCAB_EQUIV_PROGRESS_ENV: &str = "SLOW_VOCAB_EQUIV_PROGRESS";
+const SLOW_VOCAB_EQUIV_PROGRESS_ENVS: &[&str] = &[
+    "GLRMASK_SLOW_VOCAB_EQUIV_PROGRESS",
+    "SLOW_VOCAB_EQUIV_PROGRESS",
+];
 const SLOW_VOCAB_EQUIV_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
 // ---- Deterministic hashing ----
@@ -270,13 +273,11 @@ fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
 }
 
 #[inline]
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            let trimmed = value.trim();
+fn env_flag_enabled_any(names: &[&str]) -> bool {
+    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
+        let trimmed = value.trim();
             !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
+    })
 }
 
 struct ProgressReporter {
@@ -291,7 +292,7 @@ impl ProgressReporter {
     fn new(total: usize) -> Self {
         let now = Instant::now();
         ProgressReporter {
-            enabled: env_flag_enabled(SLOW_VOCAB_EQUIV_PROGRESS_ENV),
+            enabled: env_flag_enabled_any(SLOW_VOCAB_EQUIV_PROGRESS_ENVS),
             total,
             processed: 0,
             started_at: now,

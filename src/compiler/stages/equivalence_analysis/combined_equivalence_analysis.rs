@@ -20,11 +20,26 @@ use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceRes
 use super::vocab::fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
 use super::vocab::slow::{partitions_are_comparable, partition_is_at_least_as_fine};
 
-const MEDIUM_VOCAB_EQUIV_VERIFICATION_ENV: &str = "MEDIUM_VOCAB_EQUIV_VERIFICATION";
-const SLOW_VOCAB_EQUIV_VERIFICATION_ENV: &str = "SLOW_VOCAB_EQUIV_VERIFICATION";
-const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
-const REFERENCE_VOCAB_EQUIV_PRIMARY_ENV: &str = "REFERENCE_VOCAB_EQUIV_PRIMARY";
-const REFERENCE_STATE_EQUIV_PRIMARY_ENV: &str = "REFERENCE_STATE_EQUIV_PRIMARY";
+const MEDIUM_VOCAB_EQUIV_VERIFICATION_ENVS: &[&str] = &[
+    "GLRMASK_MEDIUM_VOCAB_EQUIV_VERIFICATION",
+    "MEDIUM_VOCAB_EQUIV_VERIFICATION",
+];
+const SLOW_VOCAB_EQUIV_VERIFICATION_ENVS: &[&str] = &[
+    "GLRMASK_SLOW_VOCAB_EQUIV_VERIFICATION",
+    "SLOW_VOCAB_EQUIV_VERIFICATION",
+];
+const REFERENCE_EQUIV_VERIFICATION_ENVS: &[&str] = &[
+    "GLRMASK_REFERENCE_EQUIV_VERIFICATION",
+    "REFERENCE_EQUIV_VERIFICATION",
+];
+const REFERENCE_VOCAB_EQUIV_PRIMARY_ENVS: &[&str] = &[
+    "GLRMASK_REFERENCE_VOCAB_EQUIV_PRIMARY",
+    "REFERENCE_VOCAB_EQUIV_PRIMARY",
+];
+const REFERENCE_STATE_EQUIV_PRIMARY_ENVS: &[&str] = &[
+    "GLRMASK_REFERENCE_STATE_EQUIV_PRIMARY",
+    "REFERENCE_STATE_EQUIV_PRIMARY",
+];
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -35,13 +50,11 @@ pub struct CombinedEquivalenceResult {
     pub state_classes: StateEquivalenceResult,
 }
 
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            let trimmed = v.trim();
+fn env_flag_enabled_any(names: &[&str]) -> bool {
+    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
+        let trimmed = value.trim();
             !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
+    })
 }
 
 fn verify_vocab_partition(
@@ -554,7 +567,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         disallowed_follows,
     );
 
-    if env_flag_enabled(SLOW_VOCAB_EQUIV_VERIFICATION_ENV) {
+    if env_flag_enabled_any(SLOW_VOCAB_EQUIV_VERIFICATION_ENVS) {
         let slow_vocab_classes = super::vocab::slow::find_vocab_equivalence_classes_with_follow(
             regex,
             tokens,
@@ -565,7 +578,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         verify_vocab_partition("slow", &vocab_classes, &slow_vocab_classes);
     }
 
-    if env_flag_enabled(MEDIUM_VOCAB_EQUIV_VERIFICATION_ENV) {
+    if env_flag_enabled_any(MEDIUM_VOCAB_EQUIV_VERIFICATION_ENVS) {
         let medium_vocab_classes = super::vocab::medium::find_vocab_equivalence_classes_with_follow(
             regex,
             tokens,
@@ -578,9 +591,9 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
 
     // --- Reference analysis ---
     // Run once if any reference env var is enabled, reuse the result.
-    let need_reference_verify = env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV) || cfg!(test);
-    let need_reference_vocab = env_flag_enabled(REFERENCE_VOCAB_EQUIV_PRIMARY_ENV);
-    let need_reference_state = env_flag_enabled(REFERENCE_STATE_EQUIV_PRIMARY_ENV);
+    let need_reference_verify = env_flag_enabled_any(REFERENCE_EQUIV_VERIFICATION_ENVS) || cfg!(test);
+    let need_reference_vocab = env_flag_enabled_any(REFERENCE_VOCAB_EQUIV_PRIMARY_ENVS);
+    let need_reference_state = env_flag_enabled_any(REFERENCE_STATE_EQUIV_PRIMARY_ENVS);
 
     let reference_result = if need_reference_verify || need_reference_vocab || need_reference_state {
         Some(super::reference::find_equivalence_classes(

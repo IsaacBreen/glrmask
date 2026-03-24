@@ -34,6 +34,37 @@ use crate::ds::weight::Weight;
 use crate::runtime::Constraint;
 
 const DWA_SAMPLE_TOKEN_REPR_LIMIT: usize = 48;
+const TERMINAL_DWA_SAMPLE_PATHS_ENVS: &[&str] = &["GLRMASK_DWA_SAMPLE_PATHS", "DWA_SAMPLE_PATHS"];
+const TERMINAL_DWA_SAMPLE_LONG_ENVS: &[&str] = &["GLRMASK_DWA_SAMPLE_LONG", "DWA_SAMPLE_LONG"];
+const TERMINAL_DWA_SAMPLE_MIN_LEN_ENVS: &[&str] = &["GLRMASK_DWA_SAMPLE_MIN_LEN", "DWA_SAMPLE_MIN_LEN"];
+const TERMINAL_DWA_SAMPLE_MAX_TOKENS_ENVS: &[&str] = &[
+    "GLRMASK_DWA_SAMPLE_MAX_TOKENS",
+    "DWA_SAMPLE_MAX_TOKENS",
+];
+const TERMINAL_DWA_SAMPLE_MAX_ATTEMPTS_ENVS: &[&str] = &[
+    "GLRMASK_DWA_SAMPLE_MAX_ATTEMPTS",
+    "DWA_SAMPLE_MAX_ATTEMPTS",
+];
+const TERMINAL_DWA_SAMPLE_MAX_STEPS_ENVS: &[&str] = &[
+    "GLRMASK_DWA_SAMPLE_MAX_STEPS",
+    "DWA_SAMPLE_MAX_STEPS",
+];
+const TERMINAL_DWA_SAMPLE_END_PROB_ENVS: &[&str] = &[
+    "GLRMASK_DWA_SAMPLE_END_PROB",
+    "DWA_SAMPLE_END_PROB",
+];
+const PARSER_DWA_SAMPLE_PATHS_ENVS: &[&str] = &[
+    "GLRMASK_PARSER_DWA_SAMPLE_PATHS",
+    "PARSER_DWA_SAMPLE_PATHS",
+];
+const PARSER_DWA_SAMPLE_LONG_ENVS: &[&str] = &[
+    "GLRMASK_PARSER_DWA_SAMPLE_LONG",
+    "PARSER_DWA_SAMPLE_LONG",
+];
+const PARSER_DWA_SAMPLE_MAX_TOKENS_ENVS: &[&str] = &[
+    "GLRMASK_PARSER_DWA_SAMPLE_MAX_TOKENS",
+    "PARSER_DWA_SAMPLE_MAX_TOKENS",
+];
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_DWA_TERM: &str = "\x1b[38;5;45m";
 const ANSI_DWA_TOKEN: &str = "\x1b[38;5;114m";
@@ -206,12 +237,35 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_flag_enabled_any(names: &[&str]) -> bool {
+    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
 fn env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok().and_then(|value| value.parse().ok())
 }
 
+fn env_usize_any(names: &[&str]) -> Option<usize> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+    })
+}
+
 fn env_f64(name: &str) -> Option<f64> {
     std::env::var(name).ok().and_then(|value| value.parse().ok())
+}
+
+fn env_f64_any(names: &[&str]) -> Option<f64> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+    })
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -646,7 +700,7 @@ fn log_terminal_dwa_sample_paths(
 ) {
     use rand::Rng;
 
-    let Some(num_sample_paths) = env_usize("DWA_SAMPLE_PATHS") else {
+    let Some(num_sample_paths) = env_usize_any(TERMINAL_DWA_SAMPLE_PATHS_ENVS) else {
         return;
     };
 
@@ -655,19 +709,19 @@ fn log_terminal_dwa_sample_paths(
         return;
     }
 
-    let sample_long = env_flag_enabled("DWA_SAMPLE_LONG");
-    let min_len = env_usize("DWA_SAMPLE_MIN_LEN");
-    let max_tokens = env_usize("DWA_SAMPLE_MAX_TOKENS").unwrap_or(3);
+    let sample_long = env_flag_enabled_any(TERMINAL_DWA_SAMPLE_LONG_ENVS);
+    let min_len = env_usize_any(TERMINAL_DWA_SAMPLE_MIN_LEN_ENVS);
+    let max_tokens = env_usize_any(TERMINAL_DWA_SAMPLE_MAX_TOKENS_ENVS).unwrap_or(3);
     let target_samples = if sample_long {
         num_sample_paths.saturating_mul(20).max(num_sample_paths)
     } else {
         num_sample_paths
     };
-    let max_attempts = env_usize("DWA_SAMPLE_MAX_ATTEMPTS")
+    let max_attempts = env_usize_any(TERMINAL_DWA_SAMPLE_MAX_ATTEMPTS_ENVS)
         .unwrap_or_else(|| target_samples.saturating_mul(50).max(target_samples));
-    let max_steps = env_usize("DWA_SAMPLE_MAX_STEPS")
+    let max_steps = env_usize_any(TERMINAL_DWA_SAMPLE_MAX_STEPS_ENVS)
         .unwrap_or(if sample_long { 2048 } else { 512 });
-    let end_prob = env_f64("DWA_SAMPLE_END_PROB")
+    let end_prob = env_f64_any(TERMINAL_DWA_SAMPLE_END_PROB_ENVS)
         .map(|prob| prob.clamp(0.0, 1.0))
         .unwrap_or(if sample_long { 0.1 } else { 0.3 });
 
@@ -788,7 +842,7 @@ fn log_parser_dwa_sample_paths(
 ) {
     use rand::Rng;
 
-    let Some(num_sample_paths) = env_usize("PARSER_DWA_SAMPLE_PATHS") else {
+    let Some(num_sample_paths) = env_usize_any(PARSER_DWA_SAMPLE_PATHS_ENVS) else {
         return;
     };
 
@@ -797,8 +851,8 @@ fn log_parser_dwa_sample_paths(
         return;
     }
 
-    let sample_long = env_flag_enabled("PARSER_DWA_SAMPLE_LONG");
-    let max_tokens = env_usize("PARSER_DWA_SAMPLE_MAX_TOKENS").unwrap_or(3);
+    let sample_long = env_flag_enabled_any(PARSER_DWA_SAMPLE_LONG_ENVS);
+    let max_tokens = env_usize_any(PARSER_DWA_SAMPLE_MAX_TOKENS_ENVS).unwrap_or(3);
     let target_samples = if sample_long {
         num_sample_paths.saturating_mul(20).max(num_sample_paths)
     } else {

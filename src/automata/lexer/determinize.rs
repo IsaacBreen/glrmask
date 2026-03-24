@@ -255,10 +255,17 @@ impl NFA {
             .map(|state| compact_nfa.epsilon_offsets[state + 1] - compact_nfa.epsilon_offsets[state])
             .collect();
 
-        let precompute_threshold: u32 = std::env::var("DFA_EPS_PRECOMPUTE_THRESHOLD")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(1);
+        let precompute_threshold: u32 = [
+            "GLRMASK_DFA_EPS_PRECOMPUTE_THRESHOLD",
+            "DFA_EPS_PRECOMPUTE_THRESHOLD",
+        ]
+        .iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+        })
+        .unwrap_or(1);
 
         let mut high_degree_closures: Vec<Option<Vec<u32>>> = vec![None; num_nfa_states];
         let mut visited = vec![false; num_nfa_states];

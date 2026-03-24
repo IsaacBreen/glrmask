@@ -41,8 +41,16 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_flag_enabled_any(names: &[&str]) -> bool {
+    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
+        let trimmed = value.trim();
+        !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+    })
+}
+
 fn profile_equivalence_enabled() -> bool {
-    env_flag_enabled("PROFILE_EQUIVALENCE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE")
+    env_flag_enabled_any(&["GLRMASK_PROFILE_EQUIVALENCE", "PROFILE_EQUIVALENCE"])
+        || env_flag_enabled("GLRMASK_PROFILE_COMPILE")
 }
 
 fn count_classes(mapping: &[usize]) -> usize {
@@ -161,14 +169,7 @@ fn find_state_equivalence_classes_token_based(
 
     let dfa = regex.dfa();
 
-    // Note: Token sampling (STATE_EQUIV_MAX_TOKENS) was tested but causes correctness issues.
-    // Sampled state equivalence doesn't fully capture distinguishing states,
-    // leading to incorrect vocab class merging. Keep this disabled.
-    //
-    // let max_tokens = std::env::var("STATE_EQUIV_MAX_TOKENS")
-    //     .ok()
-    //     .and_then(|s| s.parse::<usize>().ok())
-    //     .unwrap_or(tokens.len());
+    // Keep the full token pass here; sampled state equivalence was unsound.
 
     // Precompute packed transition tables and finalizers for cache efficiency
     const NONE_STATE: u32 = u32::MAX;
@@ -285,9 +286,8 @@ fn find_state_equivalence_classes_token_based(
         end.wrapping_add(structure)
     };
 
-    let early_stop = std::env::var("STATE_EQUIV_EARLY_STOP")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let early_stop =
+        env_flag_enabled_any(&["GLRMASK_STATE_EQUIV_EARLY_STOP", "STATE_EQUIV_EARLY_STOP"]);
     let batch_size = 5000usize;
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
