@@ -1,19 +1,17 @@
-//! State equivalence analysis for tokenizer DFAs.
+//! State equivalence analysis.
 //!
-//! A max-length prepass collapses obviously equivalent states before a full
-//! token-based refinement on the surviving representatives.
+//! Performs full token-based refinement over the supplied tokenizer states.
+//! Any coarse max-length reduction happens in combined equivalence analysis.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(test)]
-use super::super::compat::TokenizerView;
-#[cfg(test)]
 use rayon::prelude::*;
+
+use super::super::compat::TokenizerView;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
 
-#[cfg(test)]
 #[inline(always)]
 fn mix_u128(mut x: u128) -> u128 {
     x ^= x >> 33;
@@ -24,63 +22,164 @@ fn mix_u128(mut x: u128) -> u128 {
     x
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn profile_equivalence_enabled() -> bool {
+    env_flag_enabled("PROFILE_EQUIVALENCE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE")
+}
+
+fn count_classes(mapping: &[usize]) -> usize {
+    mapping.iter().copied().collect::<BTreeSet<_>>().len()
+}
+
+#[inline(always)]
+fn mix_tagged(hash: u128, tag: u128, value: u128) -> u128 {
+    mix_u128(hash ^ tag.wrapping_add(value.rotate_left(17)))
+}
+
+fn hash_future_groups(future_groups: &[usize]) -> u128 {
+    let mut hash = mix_u128(0xF0C7_F0C7_F0C7_F0C7 ^ future_groups.len() as u128);
+    for &gid in future_groups {
+        hash = mix_tagged(hash, 0x9E37_79B9_7F4A_7C15, gid as u128);
+    }
+    hash
+}
+
+fn hash_trellis_node_from_positions(
+    end_state: Option<usize>,
+    positions: &[i32],
+    token_len: usize,
+    suffix_hashes: &[u128],
+    future_group_hashes: &[u128],
+) -> u128 {
+    const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
+    const ACCEPT_SINK_HASH: u128 = 0xA11C_EA5E_A11C_EA5E;
+    const EDGE_COUNT_TAG: u128 = 0xEDEC_EDEC_EDEC_EDEC;
+    const EDGE_GID_TAG: u128 = 0xE001_E001_E001_E001;
+    const EDGE_POS_TAG: u128 = 0xE002_E002_E002_E002;
+    const EDGE_CHILD_TAG: u128 = 0xE003_E003_E003_E003;
+
+    let mut edge_count = 0usize;
+    let mut hash = match end_state {
+        Some(state) => mix_tagged(
+            0x51A7_E000_0000_0001,
+            0xF070_F070_F070_F070,
+            future_group_hashes[state],
+        ),
+        None => mix_u128(DEAD_NODE_TAG),
+    };
+
+    for (gid, &target_pos) in positions.iter().enumerate() {
+        if target_pos < 0 {
+            continue;
+        }
+        edge_count += 1;
+        let target_pos = target_pos as usize;
+        let child_hash = if target_pos >= token_len {
+            ACCEPT_SINK_HASH
+        } else {
+            suffix_hashes[target_pos]
+        };
+        hash = mix_tagged(hash, EDGE_GID_TAG, gid as u128);
+        hash = mix_tagged(hash, EDGE_POS_TAG, target_pos as u128);
+        hash = mix_tagged(hash, EDGE_CHILD_TAG, child_hash);
+    }
+
+    mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
+}
+
+fn build_start_state_suffix_hashes(
+    token: &[u8],
+    tokenizer_start: usize,
+    dfa_transitions: &[[u32; 256]],
+    dfa_finalizers: &[Vec<usize>],
+    dfa_future_groups: &[Vec<usize>],
+    future_group_hashes: &[u128],
+    num_groups: usize,
+) -> Vec<u128> {
+    let len = token.len();
+    let mut suffix_hashes = vec![0u128; len];
+    let mut positions = vec![-1i32; num_groups];
+
+    for pos in (0..len).rev() {
+        positions.fill(-1);
+
+        let mut current = tokenizer_start;
+        let mut done = dfa_future_groups[current].is_empty();
+
+        for (offset, &byte) in token[pos..].iter().enumerate() {
+            if done {
+                break;
+            }
+            let next = dfa_transitions[current][byte as usize];
+            if next == u32::MAX {
+                done = true;
+                break;
+            }
+            current = next as usize;
+            let absolute_pos = (pos + offset + 1) as i32;
+            for &gid in &dfa_finalizers[current] {
+                if gid < num_groups {
+                    positions[gid] = absolute_pos;
+                }
+            }
+            if dfa_future_groups[current].is_empty() {
+                done = true;
+            }
+        }
+
+        let end_state = (!done).then_some(current);
+        suffix_hashes[pos] = hash_trellis_node_from_positions(
+            end_state,
+            &positions,
+            len,
+            &suffix_hashes,
+            future_group_hashes,
+        );
+    }
+
+    suffix_hashes
+}
+
 /// Find state equivalence classes for a tokenizer.
-///
-/// Uses a pre-filter + refinement approach:
-/// 1. k-step inductive hashing to reduce the number of states.
-/// 2. Full token-based analysis only on the reduced set.
-///
-/// # Arguments
-/// * `tokenizer` - The tokenizer DFA
-/// * `tokens` - Vocabulary tokens to consider
-/// * `states` - List of state IDs to analyze
-///
-/// # Returns
-/// A vector where `result[i]` is the representative state for `states[i]`.
-/// States with the same representative are equivalent.
-#[cfg(test)]
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     tokenizer: &TokenizerView,
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
+    let profile_equivalence = profile_equivalence_enabled();
+
     if states.is_empty() {
         return Vec::new();
     }
 
-    let pre_mapping = super::max_length::find_state_equivalence_classes(tokenizer, tokens, states);
-
     let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
 
-    use std::collections::HashMap;
+    let refinement_started_at = std::time::Instant::now();
+    let mapping = find_state_equivalence_classes_token_based(tokenizer, &owned_tokens, states);
+    let refinement_time = refinement_started_at.elapsed();
 
-    let reduced_states = collect_reduced_states(&pre_mapping);
-
-    if reduced_states.len() == states.len() {
-        return find_state_equivalence_classes_token_based(tokenizer, &owned_tokens, states);
-    }
-
-    let reduced_mapping =
-        find_state_equivalence_classes_token_based(tokenizer, &owned_tokens, &reduced_states);
-    let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
-    for (i, &rep_state) in reduced_states.iter().enumerate() {
-        rep_to_final.insert(rep_state, reduced_mapping[i]);
-    }
-
-    let mut mapping = vec![0usize; states.len()];
-    for (i, &pre_rep) in pre_mapping.iter().enumerate() {
-        mapping[i] = rep_to_final[&pre_rep];
+    if profile_equivalence {
+        let final_classes = count_classes(&mapping);
+        eprintln!(
+            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x)",
+            refinement_time.as_secs_f64() * 1000.0,
+            states.len(),
+            final_classes,
+            states.len() as f64 / final_classes.max(1) as f64,
+        );
     }
 
     mapping
 }
 
-#[cfg(test)]
-fn collect_reduced_states(pre_mapping: &[usize]) -> Vec<usize> {
-    pre_mapping.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
-}
-
-#[cfg(test)]
 fn find_state_equivalence_classes_token_based(
     tokenizer: &TokenizerView,
     tokens: &[Vec<u8>],
@@ -90,11 +189,9 @@ fn find_state_equivalence_classes_token_based(
 
     let dfa = tokenizer.dfa();
 
-    // Keep the full token pass here; sampled state equivalence was unsound.
-
-    // Precompute packed transition tables and finalizers for cache efficiency
     const NONE_STATE: u32 = u32::MAX;
-    let dfa_transitions: Vec<[u32; 256]> = dfa.states
+    let dfa_transitions: Vec<[u32; 256]> = dfa
+        .states
         .iter()
         .map(|state| {
             let mut table = [NONE_STATE; 256];
@@ -105,9 +202,19 @@ fn find_state_equivalence_classes_token_based(
         })
         .collect();
 
-    let dfa_finalizers: Vec<Vec<usize>> = dfa.states
+    let dfa_finalizers: Vec<Vec<usize>> = dfa
+        .states
         .iter()
         .map(|state| state.finalizers.iter().copied().collect())
+        .collect();
+    let dfa_future_groups: Vec<Vec<usize>> = dfa
+        .states
+        .iter()
+        .map(|state| state.possible_future_group_ids.iter().copied().collect())
+        .collect();
+    let future_group_hashes: Vec<u128> = dfa_future_groups
+        .iter()
+        .map(|future_groups| hash_future_groups(future_groups))
         .collect();
 
     let mut max_gid: Option<usize> = None;
@@ -118,26 +225,6 @@ fn find_state_equivalence_classes_token_based(
     }
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
 
-    // We test tokens in batches, but only on states that haven't been uniquely
-    // identified yet. Once a state is in a singleton group, it stays there.
-
-    // Precompute end state hashes
-    // Include the number of possible futures so sets like [0, 6] and [6]
-    // do not collide when their element hashes sum to the same value.
-    let end_state_hashes: Vec<u128> = dfa.states
-        .iter()
-        .map(|state| {
-            let futures = &state.possible_future_group_ids;
-            let mut h = mix_u128(futures.len() as u128 | (1u128 << 48));
-            // Match the reference hash shape so the refinement stays comparable.
-            for &gid in futures {
-                h = h.wrapping_add(mix_u128(gid as u128));
-            }
-            h | (1u128 << 127)
-        })
-        .collect();
-
-    // Process tokens in lexicographic order and reuse prefix simulations per state.
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
     sorted_indices.sort_by(|&a, &b| tokens[a].cmp(&tokens[b]));
 
@@ -147,6 +234,22 @@ fn find_state_equivalence_classes_token_based(
         sorted_tokens.push(tokens[idx].as_slice());
         sorted_weights.push(mix_u128((idx + 1) as u128));
     }
+
+    let tokenizer_start = tokenizer.initial_state_id();
+    let suffix_hashes_by_token: Vec<Vec<u128>> = sorted_tokens
+        .iter()
+        .map(|token| {
+            build_start_state_suffix_hashes(
+                token,
+                tokenizer_start,
+                &dfa_transitions,
+                &dfa_finalizers,
+                &dfa_future_groups,
+                &future_group_hashes,
+                num_groups,
+            )
+        })
+        .collect();
 
     let common_prefix_len = |a: &[u8], b: &[u8]| -> usize {
         let len = a.len().min(b.len());
@@ -166,7 +269,6 @@ fn find_state_equivalence_classes_token_based(
     }
 
     let total_tokens = sorted_tokens.len();
-
     let mut weight_prefix: Vec<u128> = vec![0u128; total_tokens + 1];
     for i in 0..total_tokens {
         weight_prefix[i + 1] = weight_prefix[i].wrapping_add(sorted_weights[i]);
@@ -193,19 +295,26 @@ fn find_state_equivalence_classes_token_based(
         first_byte_ranges[byte] = (start, idx);
     }
 
-    let dead_hash_depth1 = {
-        let structure = mix_u128(1_u128 ^ 0xDEAD_DEAD_DEAD_DEAD);
-        let end = mix_u128(0xDEADBEEF_u128);
-        end.wrapping_add(structure)
-    };
-
+    let early_stop = std::env::var("STATE_EQUIV_EARLY_STOP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let batch_size = 5000usize;
+    let dead_positions = vec![-1i32; num_groups];
+    let fully_dead_token_hash = hash_trellis_node_from_positions(
+        None,
+        &dead_positions,
+        0,
+        &[],
+        &future_group_hashes,
+    );
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
     let mut next_group_ids: Vec<usize> = vec![0usize; states.len()];
     let mut active_indices: Vec<usize> = (0..states.len()).collect();
     let mut active_flags: Vec<bool> = vec![false; states.len()];
     let mut active_hashes: Vec<u128> = vec![0u128; states.len()];
+    let mut prev_groups = 1usize;
+    let mut stable_batches = 0usize;
 
     let mut batch_start = 0usize;
     while batch_start < total_tokens {
@@ -228,185 +337,188 @@ fn find_state_equivalence_classes_token_based(
                     )
                 },
                 |scratch, &state_idx| {
-                let state = states[state_idx] as u32;
-                let mut hash_delta: u128 = 0;
-                let state_transitions = &dfa_transitions[state as usize];
+                    let state = states[state_idx] as u32;
+                    let mut hash_delta: u128 = 0;
+                    let state_transitions = &dfa_transitions[state as usize];
 
-                let mut dead_weight_sum: u128 = 0;
-                let mut live_ranges: Vec<(usize, usize)> = Vec::new();
+                    let mut live_ranges: Vec<(usize, usize)> = Vec::new();
 
-                if empty_range.0 < empty_range.1 {
-                    let start = empty_range.0.max(batch_start);
-                    let end = empty_range.1.min(batch_end);
-                    if start < end {
-                        live_ranges.push((start, end));
-                    }
-                }
-
-                for byte in 0usize..256 {
-                    let (range_start, range_end) = first_byte_ranges[byte];
-                    if range_start >= range_end {
-                        continue;
-                    }
-                    let start = range_start.max(batch_start);
-                    let end = range_end.min(batch_end);
-                    if start >= end {
-                        continue;
+                    if empty_range.0 < empty_range.1 {
+                        let start = empty_range.0.max(batch_start);
+                        let end = empty_range.1.min(batch_end);
+                        if start < end {
+                            live_ranges.push((start, end));
+                        }
                     }
 
-                    if state_transitions[byte] == NONE_STATE {
-                        let weight_sum = weight_prefix[end].wrapping_sub(weight_prefix[start]);
-                        dead_weight_sum = dead_weight_sum.wrapping_add(weight_sum);
-                    } else {
-                        live_ranges.push((start, end));
-                    }
-                }
-
-                if dead_weight_sum != 0 {
-                    hash_delta = hash_delta.wrapping_add(
-                        dead_hash_depth1.wrapping_mul(dead_weight_sum),
-                    );
-                }
-
-                let (state_stack, dead_depth_stack, depth_marks, positions, changes) = scratch;
-                let mut matches_len: usize;
-                let mut matches_hash_sum: u128;
-
-                for (range_start, range_end) in live_ranges {
-                    if range_start >= range_end {
-                        continue;
-                    }
-
-                    state_stack.clear();
-                    state_stack.push(state);
-                    dead_depth_stack.clear();
-                    dead_depth_stack.push(None);
-                    depth_marks.clear();
-                    depth_marks.push(0);
-                    if num_groups > 0 {
-                        positions.fill(-1);
-                    }
-                    changes.clear();
-                    matches_len = 0;
-                    matches_hash_sum = 0;
-
-                    for token_idx in range_start..range_end {
-                        let token = sorted_tokens[token_idx];
-                        let mut prefix_len = if token_idx == range_start {
-                            0
-                        } else {
-                            lcp_with_prev[token_idx]
-                        };
-                        let max_prefix = state_stack.len().saturating_sub(1);
-                        if prefix_len > max_prefix {
-                            prefix_len = max_prefix;
+                    for byte in 0usize..256 {
+                        let (range_start, range_end) = first_byte_ranges[byte];
+                        if range_start >= range_end {
+                            continue;
+                        }
+                        let start = range_start.max(batch_start);
+                        let end = range_end.min(batch_end);
+                        if start >= end {
+                            continue;
                         }
 
-                        if state_stack.len() > prefix_len + 1 {
-                            let target_mark = depth_marks[prefix_len];
-                            while changes.len() > target_mark {
-                                let (gid, prev_pos) = changes.pop().unwrap();
-                                let cur_pos = positions[gid];
-                                if cur_pos >= 0 {
-                                    let cur_pos_u = cur_pos as u32;
-                                    matches_hash_sum = matches_hash_sum.wrapping_sub(mix_u128(
-                                        (gid as u128) | ((cur_pos_u as u128) << 32),
-                                    ));
-                                    if prev_pos < 0 {
-                                        matches_len -= 1;
-                                        positions[gid] = -1;
-                                    } else {
-                                        let prev_pos_u = prev_pos as u32;
-                                        matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
-                                            (gid as u128) | ((prev_pos_u as u128) << 32),
+                        if state_transitions[byte] == NONE_STATE {
+                            let weight_sum = weight_prefix[end].wrapping_sub(weight_prefix[start]);
+                            hash_delta = hash_delta
+                                .wrapping_add(fully_dead_token_hash.wrapping_mul(weight_sum));
+                        } else {
+                            live_ranges.push((start, end));
+                        }
+                    }
+
+                    let (state_stack, dead_depth_stack, depth_marks, positions, changes) = scratch;
+                    let mut prev_groups_hash: u128;
+
+                    for (range_start, range_end) in live_ranges {
+                        if range_start >= range_end {
+                            continue;
+                        }
+
+                        state_stack.clear();
+                        state_stack.push(state);
+                        dead_depth_stack.clear();
+                        dead_depth_stack.push(None);
+                        depth_marks.clear();
+                        depth_marks.push(0);
+                        if num_groups > 0 {
+                            positions.fill(-1);
+                        }
+                        changes.clear();
+                        prev_groups_hash = 0;
+
+                        for token_idx in range_start..range_end {
+                            let token = sorted_tokens[token_idx];
+                            let mut prefix_len = if token_idx == range_start {
+                                0
+                            } else {
+                                lcp_with_prev[token_idx]
+                            };
+                            let max_prefix = state_stack.len().saturating_sub(1);
+                            if prefix_len > max_prefix {
+                                prefix_len = max_prefix;
+                            }
+
+                            if state_stack.len() > prefix_len + 1 {
+                                let target_mark = depth_marks[prefix_len];
+                                while changes.len() > target_mark {
+                                    let (gid, prev_pos) = changes.pop().unwrap();
+                                    let cur_pos = positions[gid];
+                                    if cur_pos >= 0 {
+                                        let cur_pos_u = cur_pos as u32;
+                                        prev_groups_hash = prev_groups_hash.wrapping_sub(mix_u128(
+                                            (gid as u128) | ((cur_pos_u as u128) << 32),
                                         ));
+                                        if prev_pos < 0 {
+                                            positions[gid] = -1;
+                                        } else {
+                                            let prev_pos_u = prev_pos as u32;
+                                            prev_groups_hash = prev_groups_hash.wrapping_add(
+                                                mix_u128(
+                                                    (gid as u128)
+                                                        | ((prev_pos_u as u128) << 32),
+                                                ),
+                                            );
+                                            positions[gid] = prev_pos;
+                                        }
+                                    } else {
                                         positions[gid] = prev_pos;
                                     }
-                                } else {
-                                    positions[gid] = prev_pos;
                                 }
+
+                                state_stack.truncate(prefix_len + 1);
+                                dead_depth_stack.truncate(prefix_len + 1);
+                                depth_marks.truncate(prefix_len + 1);
                             }
 
-                            state_stack.truncate(prefix_len + 1);
-                            dead_depth_stack.truncate(prefix_len + 1);
-                            depth_marks.truncate(prefix_len + 1);
-                        }
+                            let mut dead_at_depth = dead_depth_stack[prefix_len];
 
-                        let mut dead_at_depth = dead_depth_stack[prefix_len];
+                            if dead_at_depth.is_none() {
+                                let mut current = *state_stack.last().unwrap();
+                                for (offset, &byte) in token[prefix_len..].iter().enumerate() {
+                                    if current == NONE_STATE {
+                                        dead_at_depth = Some(prefix_len + offset);
+                                        break;
+                                    }
+                                    let next = dfa_transitions[current as usize][byte as usize];
+                                    if next == NONE_STATE {
+                                        dead_at_depth = Some(prefix_len + offset + 1);
+                                        state_stack.push(NONE_STATE);
+                                        dead_depth_stack.push(dead_at_depth);
+                                        depth_marks.push(changes.len());
+                                        break;
+                                    }
+                                    current = next;
+                                    state_stack.push(current);
+                                    let position = prefix_len + offset + 1;
 
-                        if dead_at_depth.is_none() {
-                            let mut current = *state_stack.last().unwrap();
-                            for (offset, &byte) in token[prefix_len..].iter().enumerate() {
-                                if current == NONE_STATE {
-                                    dead_at_depth = Some(prefix_len + offset);
-                                    break;
-                                }
-                                let next = dfa_transitions[current as usize][byte as usize];
-                                if next == NONE_STATE {
-                                    dead_at_depth = Some(prefix_len + offset + 1);
-                                    state_stack.push(NONE_STATE);
-                                    dead_depth_stack.push(dead_at_depth);
-                                    depth_marks.push(changes.len());
-                                    break;
-                                }
-                                current = next;
-                                state_stack.push(current);
-                                let position = prefix_len + offset + 1;
-
-                                if num_groups > 0 {
-                                    for &gid in &dfa_finalizers[current as usize] {
-                                        if gid >= num_groups {
-                                            continue;
-                                        }
-                                        let pos_i32 = position as i32;
-                                        let prev = positions[gid];
-                                        if prev != pos_i32 {
-                                            if prev < 0 {
-                                                matches_len += 1;
-                                                matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
-                                                    (gid as u128) | ((position as u128) << 32),
-                                                ));
-                                                changes.push((gid, -1));
-                                            } else {
-                                                matches_hash_sum = matches_hash_sum.wrapping_sub(mix_u128(
-                                                    (gid as u128) | ((prev as u128) << 32),
-                                                ));
-                                                matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
-                                                    (gid as u128) | ((position as u128) << 32),
-                                                ));
-                                                changes.push((gid, prev));
+                                    if num_groups > 0 {
+                                        for &gid in &dfa_finalizers[current as usize] {
+                                            if gid >= num_groups {
+                                                continue;
                                             }
-                                            positions[gid] = pos_i32;
+                                            let pos_i32 = position as i32;
+                                            let prev = positions[gid];
+                                            if prev != pos_i32 {
+                                                if prev < 0 {
+                                                    prev_groups_hash = prev_groups_hash
+                                                        .wrapping_add(mix_u128(
+                                                            (gid as u128)
+                                                                | ((position as u128) << 32),
+                                                        ));
+                                                    changes.push((gid, -1));
+                                                } else {
+                                                    prev_groups_hash = prev_groups_hash
+                                                        .wrapping_sub(mix_u128(
+                                                            (gid as u128) | ((prev as u128) << 32),
+                                                        ));
+                                                    prev_groups_hash = prev_groups_hash
+                                                        .wrapping_add(mix_u128(
+                                                            (gid as u128)
+                                                                | ((position as u128) << 32),
+                                                        ));
+                                                    changes.push((gid, prev));
+                                                }
+                                                positions[gid] = pos_i32;
+                                            }
                                         }
                                     }
+
+                                    dead_depth_stack.push(dead_at_depth);
+                                    depth_marks.push(changes.len());
                                 }
-
-                                dead_depth_stack.push(dead_at_depth);
-                                depth_marks.push(changes.len());
                             }
+
+                            let token_hash = if dead_at_depth.is_some() {
+                                hash_trellis_node_from_positions(
+                                    None,
+                                    positions,
+                                    token.len(),
+                                    &suffix_hashes_by_token[token_idx],
+                                    &future_group_hashes,
+                                )
+                            } else {
+                                let current = *state_stack.last().unwrap();
+                                hash_trellis_node_from_positions(
+                                    Some(current as usize),
+                                    positions,
+                                    token.len(),
+                                    &suffix_hashes_by_token[token_idx],
+                                    &future_group_hashes,
+                                )
+                            };
+                            hash_delta = hash_delta
+                                .wrapping_add(token_hash.wrapping_mul(sorted_weights[token_idx]));
                         }
-
-                        let (structure_hash, end_hash) = if let Some(dead_depth) = dead_at_depth {
-                            (
-                                mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD),
-                                mix_u128(0xDEADBEEF_u128),
-                            )
-                        } else {
-                            let sh = mix_u128(matches_len as u128 | (1u128 << 48))
-                                .wrapping_add(matches_hash_sum);
-                            let current = *state_stack.last().unwrap();
-                            (sh, end_state_hashes[current as usize])
-                        };
-
-                        let token_hash = end_hash.wrapping_add(structure_hash);
-                        hash_delta = hash_delta.wrapping_add(
-                            token_hash.wrapping_mul(sorted_weights[token_idx]),
-                        );
                     }
-                }
 
-                (state_idx, hash_delta)
-            })
+                    (state_idx, hash_delta)
+                },
+            )
             .collect();
 
         let all_active = active_indices.len() == states.len();
@@ -467,15 +579,23 @@ fn find_state_equivalence_classes_token_based(
             }
         }
 
+        let tokens_tested = batch_end;
+        if early_stop && tokens_tested * 2 >= total_tokens {
+            if num_groups == prev_groups {
+                stable_batches += 1;
+            } else {
+                stable_batches = 0;
+            }
+            if stable_batches >= 2 {
+                break;
+            }
+        }
+
+        prev_groups = num_groups;
         batch_start = batch_end;
     }
 
     let num_groups = group_ids.iter().copied().max().map(|v| v + 1).unwrap_or(0);
-    let mut group_sizes = vec![0usize; num_groups];
-    for &gid in &group_ids {
-        group_sizes[gid] += 1;
-    }
-
     let mut rep_for_group: Vec<usize> = vec![usize::MAX; num_groups];
     for (idx, &gid) in group_ids.iter().enumerate() {
         if rep_for_group[gid] == usize::MAX {
@@ -491,14 +611,7 @@ fn find_state_equivalence_classes_token_based(
     mapping
 }
 
-/// Convert a state-to-representative mapping to StateEquivalenceResult format.
-///
-/// # Arguments
-/// * `states` - The original list of state IDs
-/// * `mapping` - The mapping where `mapping[i]` is the representative for `states[i]`
-///
-/// # Returns
-/// A set of equivalence classes, where each class is a set of state IDs.
+/// Convert a state-to-representative mapping to `StateEquivalenceResult` format.
 pub fn mapping_to_equivalence_classes(
     states: &[usize],
     mapping: &[usize],
@@ -510,4 +623,42 @@ pub fn mapping_to_equivalence_classes(
     }
 
     rep_to_class.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        find_state_equivalence_classes,
+        find_state_equivalence_classes_token_based,
+    };
+    use crate::automata::lexer::ast::{bytes, choice, repeat, seq};
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+    use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
+
+    #[test]
+    fn full_refinement_matches_direct_token_analysis() {
+        let exprs = vec![
+            seq(vec![bytes(b"ab"), repeat(choice(vec![bytes(b"x"), bytes(b"y")]), 0, Some(3))]),
+            seq(vec![bytes(b"ac"), repeat(bytes(b"z"), 0, Some(2))]),
+        ];
+        let tokenizer = build_tokenizer_from_exprs(&exprs);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
+        let tokens: Vec<Vec<u8>> = vec![
+            b"ab".to_vec(),
+            b"abx".to_vec(),
+            b"abyy".to_vec(),
+            b"ac".to_vec(),
+            b"aczz".to_vec(),
+            b"zzz".to_vec(),
+        ];
+        let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+
+        let direct = find_state_equivalence_classes_token_based(&tokenizer_view, &tokens, &states);
+        let actual = find_state_equivalence_classes(&tokenizer_view, &tokens, &states);
+
+        assert_eq!(
+            actual, direct,
+            "full refinement should be determined solely by direct token-based analysis"
+        );
+    }
 }
