@@ -11,8 +11,9 @@
 //! Solution: pair the `ConstraintState<'a>` with its `Arc<Constraint>` owner inside
 //! a [`self_cell::self_cell!`] struct (`OwnedState`). `self_cell` generates the
 //! necessary unsafe bookkeeping internally (owner outlives dependent, stable
-//! address via heap allocation) and exposes a fully safe public API. No handwritten
-//! `unsafe` blocks appear in this file.
+//! address via heap allocation) and exposes a safe public API for the owner /
+//! dependent relationship. The only handwritten `unsafe` in this file is the
+//! NumPy `i32` to `u32` bitmask view cast used by `fill_mask`.
 
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
@@ -55,6 +56,10 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     Ok(glrmask::Vocab::new(entries, None))
 }
 
+fn constraint_result<T>(result: glrmask::Result<T>) -> PyResult<T> {
+    result.map_err(|e| PyValueError::new_err(format!("{e}")))
+}
+
 // ---------------------------------------------------------------------------
 // PyVocab
 // ---------------------------------------------------------------------------
@@ -86,36 +91,43 @@ pub struct PyConstraint {
     max_token: u32,
 }
 
+impl PyConstraint {
+    fn from_constraint_result(
+        constraint: glrmask::Result<glrmask::Constraint>,
+        vocab: &PyVocab,
+    ) -> PyResult<Self> {
+        let constraint = constraint_result(constraint)?;
+        Ok(Self {
+            inner: Arc::new(constraint),
+            max_token: vocab.inner.max_token_id(),
+        })
+    }
+}
+
 #[pymethods]
 impl PyConstraint {
     #[staticmethod]
     fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let constraint = glrmask::Constraint::from_json_schema(schema, &vocab.inner)
-            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token: vocab.inner.max_token_id(),
-        })
+        Self::from_constraint_result(
+            glrmask::Constraint::from_json_schema(schema, &vocab.inner),
+            vocab,
+        )
     }
 
     #[staticmethod]
     fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let constraint = glrmask::Constraint::from_lark(lark_source, &vocab.inner)
-            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token: vocab.inner.max_token_id(),
-        })
+        Self::from_constraint_result(
+            glrmask::Constraint::from_lark(lark_source, &vocab.inner),
+            vocab,
+        )
     }
 
     #[staticmethod]
     fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let constraint = glrmask::Constraint::from_ebnf(ebnf_source, &vocab.inner)
-            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token: vocab.inner.max_token_id(),
-        })
+        Self::from_constraint_result(
+            glrmask::Constraint::from_ebnf(ebnf_source, &vocab.inner),
+            vocab,
+        )
     }
 
     fn save(&self) -> Vec<u8> {
@@ -124,12 +136,7 @@ impl PyConstraint {
 
     #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        let constraint = glrmask::Constraint::load(data)
-            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token: vocab.inner.max_token_id(),
-        })
+        Self::from_constraint_result(glrmask::Constraint::load(data), vocab)
     }
 
     fn start(&self) -> PyConstraintState {
@@ -183,49 +190,19 @@ impl PyConstraintState {
         Ok(())
     }
 
-    fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
-        let buf: &mut [u32] = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
-        };
-        let t0 = std::time::Instant::now();
-        self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
-        Ok(t0.elapsed().as_nanos() as u64)
-    }
-
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| {
-                state.commit_token(token_id)
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
-            })
-    }
-
-    fn commit_token_timed_ns(&mut self, token_id: u32) -> PyResult<u64> {
-        let t0 = std::time::Instant::now();
-        self.inner.with_dependent_mut(|_owner, state| {
-            state.commit_token(token_id)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
-        })?;
-        Ok(t0.elapsed().as_nanos() as u64)
+            .with_dependent_mut(|_owner, state| constraint_result(state.commit_token(token_id)))
     }
 
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| {
-                state.commit_tokens(&token_ids)
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
-            })
+            .with_dependent_mut(|_owner, state| constraint_result(state.commit_tokens(&token_ids)))
     }
 
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| {
-                state.commit_bytes(data)
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
-            })
+            .with_dependent_mut(|_owner, state| constraint_result(state.commit_bytes(data)))
     }
 
     fn force(&self) -> Vec<u32> {
@@ -246,16 +223,9 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
-    m.add_function(wrap_pyfunction!(clear_all_weights, m)?)?;
     m.add_function(wrap_pyfunction!(clear_stale_weights, m)?)?;
     m.add_function(wrap_pyfunction!(clear_weight_op_caches, m)?)?;
-    m.add_function(wrap_pyfunction!(clear_weight_caches, m)?)?;
     Ok(())
-}
-
-#[pyfunction]
-fn clear_all_weights() {
-    glrmask::clear_all_weights();
 }
 
 #[pyfunction]
@@ -266,10 +236,4 @@ fn clear_stale_weights() {
 #[pyfunction]
 fn clear_weight_op_caches() {
     glrmask::clear_weight_op_caches();
-}
-
-/// Clear global weight interning and thread-local op memo caches.
-#[pyfunction]
-fn clear_weight_caches() {
-    glrmask::clear_weight_caches();
 }

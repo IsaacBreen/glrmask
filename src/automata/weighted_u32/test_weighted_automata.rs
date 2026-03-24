@@ -1,4 +1,4 @@
-//! Tests ported from sep1's `dwa_i32/test_weighted_automata.rs`.
+//! Regression tests for the weighted automata stack.
 //!
 //! These exercise the weighted DWA/NWA/determinize/minimize stack directly,
 //! using glrmask's internal types.
@@ -15,14 +15,12 @@ use crate::ds::weight::Weight;
 // Helper functions
 // ============================================================================
 
-/// Create a Weight that represents a single TSID item.
-/// Maps sep1's `Weight::from_item(n)`.
+/// Create a weight that represents a single TSID item.
 fn weight_from_item(n: u32) -> Weight {
     Weight::from_compact_ranges(vec![(n..=n, vec![0..=0])])
 }
 
-/// Create a Weight that represents a set of TSID items.
-/// Maps sep1's `Weight::from_iter(...)`.
+/// Create a weight that represents a set of TSID items.
 fn weight_from_iter<I: IntoIterator<Item = u32>>(items: I) -> Weight {
     let mut sorted: Vec<u32> = items.into_iter().collect();
     if sorted.is_empty() {
@@ -47,8 +45,7 @@ fn weight_from_iter<I: IntoIterator<Item = u32>>(items: I) -> Weight {
     Weight::from_compact_ranges(ranges)
 }
 
-/// Create a Weight from inclusive ranges of TSIDs.
-/// Maps sep1's `Weight::from_ranges(...)`.
+/// Create a weight from inclusive ranges of TSIDs.
 fn weight_from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<u32>>>(ranges: I) -> Weight {
     let entries: Vec<_> = ranges
         .into_iter()
@@ -120,8 +117,8 @@ fn dwa_concatenate(a: &DWA, b: &DWA) -> DWA {
     determinize::determinize(&combined).expect("determinize failed in dwa_concatenate")
 }
 
-/// Apply a weight gate to a DWA's start state (clones start state with
-/// intersected weights). Maps sep1's `DWA::apply_weight`.
+/// Apply a weight gate to a DWA's start state by cloning the start state with
+/// intersected weights.
 fn apply_weight_to_dwa(dwa: &mut DWA, w: &Weight) {
     let start = dwa.start_state as usize;
     let old_state = dwa.states[start].clone();
@@ -319,7 +316,7 @@ fn nwa_accepts_char(ch: char, weight: Weight) -> NWA {
     nwa
 }
 
-/// Negative label encoding used in sep1 (Label::MIN + x).
+/// Negative label encoding used by these weighted-automata tests.
 fn neg(x: Label) -> Label {
     x.wrapping_add(Label::MIN)
 }

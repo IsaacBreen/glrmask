@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -800,15 +797,12 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let parser_dwa_pre_minimize = determinized.dwa;
 
     let mut optimized_parser_nwa = dwa_to_nwa(&parser_dwa_pre_minimize);
-    let default_opt_enabled = std::env::var_os("GLRMASK_DISABLE_PARSER_DEFAULT_OPT").is_none();
-    if default_opt_enabled {
-        optimize_parser_default_transitions(
-            &mut optimized_parser_nwa,
-            &determinized.supports,
-            &viable_suffix_recognizer,
-            table.num_states,
-        );
-    }
+    optimize_parser_default_transitions(
+        &mut optimized_parser_nwa,
+        &determinized.supports,
+        &viable_suffix_recognizer,
+        table.num_states,
+    );
 
     optimized_parser_nwa.subtract_final_weights_from_outgoing();
 

@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::{BTreeSet, BTreeMap, HashSet};
 
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
@@ -686,22 +681,13 @@ fn build_non_nullable_tree(
         return leaf_nt;
     }
 
-    let tree_shape = std::env::var("GLRMASK_TREE_SHAPE").unwrap_or_else(|_| "right".to_string());
-    let chunks: Vec<&[Symbol]> = if tree_shape == "right" {
-        // Right-heavy: first element is its own chunk, rest is one chunk
-        let (first, rest) = nn_segment.split_at(1);
-        if rest.is_empty() { vec![first] } else { vec![first, rest] }
-    } else if tree_shape == "left" {
-        // Left-heavy: all but last is one chunk, last element is its own chunk
-        let (bulk, last) = nn_segment.split_at(nn_segment.len() - 1);
-        if bulk.is_empty() { vec![last] } else { vec![bulk, last] }
-    } else if tree_shape == "balanced" {
-        // Balanced: chunks of size k
-        nn_segment.chunks(k).collect()
+    // Keep the default right-heavy decomposition; alternate shapes were only
+    // used for internal experiments.
+    let (first, rest) = nn_segment.split_at(1);
+    let chunks: Vec<&[Symbol]> = if rest.is_empty() {
+        vec![first]
     } else {
-        // Right-heavy by default: first element is its own chunk, rest is one chunk
-        let (first, rest) = nn_segment.split_at(1);
-        if rest.is_empty() { vec![first] } else { vec![first, rest] }
+        vec![first, rest]
     };
     let chunk_nts: Vec<NonterminalID> = chunks
         .into_iter()
@@ -945,9 +931,8 @@ pub(crate) fn merge_identical_nonterminals(
 //   3. No indirect left recursion — only direct left recursion (A → A α) is
 //      permitted (safe for GLR).
 //
-// The pipeline runs a fixed-point loop of three phases (phase numbering
-// follows sep1's convention; Phase 1 is the nullable-terminal transformation
-// performed earlier in compile.rs):
+// The pipeline runs a fixed-point loop of three phases. Phase 1 is the
+// nullable-terminal transformation performed earlier in compile.rs:
 //
 //   ┌─────────────────────────────────────────────────┐
 //   │  Phase 2: Inline null productions               │

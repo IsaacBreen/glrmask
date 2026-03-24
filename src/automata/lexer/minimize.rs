@@ -1,6 +1,6 @@
 //! Hopcroft-based DFA minimization for the lexer DFA.
 //!
-//! Ported from grammars2024/src/dfa_u8/dfa.rs with minimal adaptation.
+//! DFA minimization for byte-oriented lexer automata.
 //! Two–phase approach:
 //!   Phase 1: topology-aware pre-refinement (fast path for DAG portions)
 //!   Phase 2: Hopcroft refinement (handles cycles)

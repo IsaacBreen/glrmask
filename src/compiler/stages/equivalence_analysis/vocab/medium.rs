@@ -4,7 +4,7 @@
 //! uses self-loop detection for bulk assignment. Non-bulk tokens are
 //! processed in parallel with rayon.
 
-use super::super::compat::Sep1Tokenizer;
+use super::super::compat::TokenizerView;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -157,7 +157,7 @@ fn normalize_disallowed_follows(
     normalized
 }
 
-fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
+fn build_dfa(regex: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
     let dfa = regex.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -806,7 +806,7 @@ fn classify_sorted_collect<S: AsRef<[u8]>>(
 ///
 /// Phase 2: Process non-bulk tokens (leaves) in parallel with rayon.
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
-    regex: &Sep1Tokenizer,
+    regex: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,

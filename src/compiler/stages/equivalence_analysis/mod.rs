@@ -1,12 +1,15 @@
 
 use range_set_blaze::RangeSetBlaze;
 
+pub(crate) mod disallowed_follows;
 pub mod combined;
 pub mod compat;
-pub mod reference;
 pub mod state;
 pub mod vocab;
 pub mod combined_equivalence_analysis;
+
+#[cfg(test)]
+pub mod reference;
 
 #[derive(Debug, Clone)]
 pub struct ManyToOneIdMap {

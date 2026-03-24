@@ -307,7 +307,7 @@ fn commit_bytes_impl(
                 continue;
             }
             // TODO: expand via mutually_greedy_group() once greedy groups
-            // are wired into glrmask (see sep1 compute_commit_maps).
+            // are wired into glrmask.
             terminals_map
                 .entry(tokenizer_state)
                 .or_default()

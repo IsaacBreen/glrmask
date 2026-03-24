@@ -1,8 +1,4 @@
 //! Template bundle assembly into a weighted NWA.
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use rustc_hash::FxHashMap;
@@ -13,7 +9,7 @@ use crate::automata::unweighted_u32::determinize::determinize as unweighted_dete
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as unweighted_minimize;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::{minimize, minimize_fast};
+use crate::automata::weighted::minimize::minimize_fast;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
@@ -63,8 +59,6 @@ impl Templates {
             return nwa;
         }
 
-        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
-
         // Group entries by weight so we can merge templates that share weights
         // using fast unweighted DFA operations.
         let mut weight_groups: HashMap<&Weight, Vec<TerminalID>> = HashMap::new();
@@ -80,7 +74,6 @@ impl Templates {
         let num_groups = weight_groups.len();
 
         // Build a merged unweighted DFA for each weight group.
-        let unweighted_started = std::time::Instant::now();
         let mut group_dfas: Vec<(&Weight, UnweightedDfa)> = Vec::with_capacity(num_groups);
         for (weight, terminals) in &weight_groups {
             if terminals.len() == 1 {
@@ -96,58 +89,19 @@ impl Templates {
                 group_dfas.push((weight, merged));
             }
         }
-        let unweighted_ms = unweighted_started.elapsed().as_secs_f64() * 1000.0;
 
         // Specialized weighted determinize: product of unweighted group DFAs.
-        // Avoids the generic determinize's Weight intersection/clone overhead.
-        let det_started = std::time::Instant::now();
         let bundle_dwa = determinize_bundle_groups(&group_dfas);
-        let det_ms = det_started.elapsed().as_secs_f64() * 1000.0;
-        let dwa_states = bundle_dwa.states.len();
 
-        // Per-bundle minimize.
-        //
-        // Minimize can only help when num_groups > 1, because the "diamond"
-        // optimization merges states whose weight domains are disjoint — which
-        // requires at least two distinct weights. With a single weight group,
-        // all states carry the same weight, so only structurally identical
-        // states can be merged (which the product construction already avoids).
-        //
-        // INVESTIGATION NOTES (kb_143, 2025-06):
-        //   - minimize_fast (partition refinement): ~270ms total across all bundles,
-        //     0% state reduction on every bundle. Product-DWA states are
-        //     structurally unique, so partition refinement finds nothing to merge.
-        //   - minimize (exact graph-coloring with diamond merging): achieves 8-37%
-        //     reduction per bundle BUT takes ~70 seconds total, while the final
-        //     parser DWA is nearly identical (2,466 vs 2,461 states). The parser
-        //     DWA minimize at the end compensates fully for any unmerged bundle states.
-        //
-        // Per-bundle DETERMINIZE (above) is essential and must not be removed —
-        // it converts the union of weighted group DFAs into a single product DWA
-        // that the downstream composition relies on. The minimize step is kept as
-        // a cheap best-effort pass for multi-group bundles; a faster
-        // bundle-specific minimize algorithm could improve this in the future.
-        let min_started = std::time::Instant::now();
+        // Determinization is essential here; minimization is only worthwhile
+        // for multi-group bundles, so keep it as a cheap best-effort pass.
         let minimized = if num_groups > 1 {
             minimize_fast(&bundle_dwa)
         } else {
             bundle_dwa
         };
-        let min_ms = min_started.elapsed().as_secs_f64() * 1000.0;
-        let min_states = minimized.states.len();
 
-        let conv_started = std::time::Instant::now();
-        let result = dwa_to_nwa(&minimized);
-        let conv_ms = conv_started.elapsed().as_secs_f64() * 1000.0;
-
-        if profile_enabled {
-            eprintln!(
-                "[glrmask/profile][bundle_detmin] entries={} groups={} dwa_states={} min_states={} unweighted_ms={:.1} det_ms={:.1} min_ms={:.1} conv_ms={:.1}",
-                terminal_weights.len(), num_groups, dwa_states, min_states, unweighted_ms, det_ms, min_ms, conv_ms,
-            );
-        }
-
-        result
+        dwa_to_nwa(&minimized)
     }
 }
 
@@ -330,29 +284,6 @@ fn union_unweighted_dfas<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> U
 
     let det = unweighted_determinize(&nfa);
     unweighted_minimize(&det)
-}
-
-fn append_template(nwa: &mut NWA, bundle_start: u32, dfa: &UnweightedDfa, entry_weight: &Weight) {
-    if dfa.states.is_empty() {
-        return;
-    }
-
-    let offset = nwa.states.len() as u32;
-    for _state in &dfa.states {
-        nwa.add_state();
-    }
-
-    nwa.add_epsilon(bundle_start, offset + dfa.start_state, entry_weight.clone());
-
-    for (state_id, state) in dfa.states.iter().enumerate() {
-        let from = offset + state_id as u32;
-        if state.is_accepting {
-            nwa.set_final_weight(from, Weight::all());
-        }
-        for (&label, &target) in &state.transitions {
-            nwa.add_transition(from, label, offset + target, Weight::all());
-        }
-    }
 }
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {

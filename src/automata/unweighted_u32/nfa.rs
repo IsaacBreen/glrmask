@@ -5,7 +5,7 @@
 //! NFA per terminal characterization (with fresh intermediate states for each
 //! path) and then determinizes it into an acyclic `DFA`.
 //!
-//! Mirrors the structure of sep1's `dfa_i32::nfa::NFA`.
+//! Unweighted NFA representation for integer-labeled automata.
 
 use std::collections::BTreeMap;
 

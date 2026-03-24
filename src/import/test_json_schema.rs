@@ -1,13 +1,13 @@
-//! Ported JSON-schema and EBNF constraint tests from sep1.
+//! Regression tests for JSON-schema and EBNF constraints.
 //!
 //! Source: `grammars2024/src/interface/json_schema/tests.rs`
-//!   (21 tests total; 16 ported, 5 skipped)
+//!   (21 tests total; 16 retained, 5 skipped)
 //!
 //! Skipped tests:
 //!   - test_small_vocab_only_brace_valid_at_start: complex debug reproduction with
-//!     extensive sep1-internal-API assertions (possible_matches, DWA internals,
+//!     extensive internal-API assertions (possible_matches, DWA internals,
 //!     vocab mapping) that have no glrmask surface equivalent
-//!   - test_schema_simple_object_weight_heavy: #[ignore] in sep1 source
+//!   - test_schema_simple_object_weight_heavy: `#[ignore]` in the source suite
 //!   - test_multibyte_tokens_simple_object: requires GPT-2 vocab file on disk
 //!   - test_multibyte_tokens_additional_properties_true: requires GPT-2 vocab file
 //!   - test_object_schema_rejects_quote_at_empty_prefix: requires GPT-2 vocab file
@@ -98,7 +98,7 @@ fn contains_repeat_range(expr: &GrammarExpr) -> bool {
 
 // ── EBNF constraint tests ───────────────────────────────────────────────────
 
-/// Ported from `test_ebnf_ws_nullable`.
+/// Adapted from `test_ebnf_ws_nullable`.
 ///
 /// Whitespace rule is nullable via `(…)*`; after committing `{`, the `}`
 /// should be immediately valid.
@@ -137,7 +137,7 @@ fn test_bounded_array_uses_repeat_range_ast() {
     );
 }
 
-/// Ported from `test_ebnf_object_member_after_brace`.
+/// Adapted from `test_ebnf_object_member_after_brace`.
 ///
 /// After `{`, both `"` (starting a member) and `}` (empty object) should be valid.
 #[test]
@@ -165,7 +165,7 @@ WS ::= ( ' ' | '\\t' | '\\n' | '\\r' )*";
 
 // ── JSON schema constraint tests ────────────────────────────────────────────
 
-/// Ported from `test_schema_simple_object`.
+/// Adapted from `test_schema_simple_object`.
 #[test]
 fn test_schema_simple_object() {
     let schema = r#"{
@@ -182,7 +182,7 @@ fn test_schema_simple_object() {
     );
 }
 
-/// Ported from `test_schema_additional_properties_true`.
+/// Adapted from `test_schema_additional_properties_true`.
 #[test]
 fn test_schema_additional_properties_true() {
     let schema = r#"{
@@ -204,7 +204,7 @@ fn test_schema_additional_properties_true() {
     );
 }
 
-/// Ported from `test_schema_additional_properties_schema`.
+/// Adapted from `test_schema_additional_properties_schema`.
 #[test]
 fn test_schema_additional_properties_schema() {
     let schema = r#"{
@@ -225,7 +225,7 @@ fn test_schema_additional_properties_schema() {
     );
 }
 
-/// Ported from `test_schema_dependencies`.
+/// Adapted from `test_schema_dependencies`.
 #[test]
 fn test_schema_dependencies() {
     let schema = r#"{
@@ -250,7 +250,7 @@ fn test_schema_dependencies() {
     );
 }
 
-/// Ported from `test_schema_nested_objects`.
+/// Adapted from `test_schema_nested_objects`.
 #[test]
 fn test_schema_nested_objects() {
     let schema = r#"{
@@ -383,7 +383,7 @@ fn test_o56012_after_comma_requires_key_quote() {
     );
 }
 
-/// Ported from `test_schema_array`.
+/// Adapted from `test_schema_array`.
 #[test]
 fn test_schema_array() {
     let schema = r#"{
@@ -393,7 +393,7 @@ fn test_schema_array() {
     schema_accepts(schema, &["[]", r#"["a"]"#, r#"["a", "b", "c"]"#]);
 }
 
-/// Ported from `test_schema_anyof`.
+/// Adapted from `test_schema_anyof`.
 #[test]
 fn test_schema_anyof() {
     let schema = r#"{
@@ -406,7 +406,7 @@ fn test_schema_anyof() {
     schema_accepts(schema, &[r#""hello""#, "42", "3.14", "true", "false"]);
 }
 
-/// Ported from `test_schema_enum`.
+/// Adapted from `test_schema_enum`.
 #[test]
 fn test_schema_enum() {
     let schema = r#"{
@@ -415,7 +415,7 @@ fn test_schema_enum() {
     schema_accepts(schema, &[r#""red""#, r#""green""#, r#""blue""#]);
 }
 
-/// Ported from `test_schema_const`.
+/// Adapted from `test_schema_const`.
 #[test]
 fn test_schema_const() {
     let schema = r#"{
@@ -424,7 +424,7 @@ fn test_schema_const() {
     schema_accepts(schema, &[r#""fixed_value""#]);
 }
 
-/// Ported from `test_schema_const2`.
+/// Adapted from `test_schema_const2`.
 ///
 /// Uses a minimal custom vocabulary (only the bytes needed for `"x"`).
 #[test]
@@ -474,7 +474,7 @@ fn test_schema_const_array_native_spacing() {
     schema_accepts(schema, &["[1, 2, 3]"]);
 }
 
-/// Ported from `test_json_schema_mask_generation`.
+/// Adapted from `test_json_schema_mask_generation`.
 #[test]
 #[ignore = "current JSON Schema key-prefix continuation still rejects sparse multibyte whitespace+quote vocab after '{\\n  \"' prefix"]
 fn test_json_schema_allows_name_after_brace_newline_space_quote_prefix() {
@@ -511,7 +511,7 @@ fn test_json_schema_allows_name_after_brace_newline_space_quote_prefix() {
     );
 }
 
-/// Ported from `test_newsletter_schema_disallows_quote_colon_minus`.
+/// Adapted from `test_newsletter_schema_disallows_quote_colon_minus`.
 #[test]
 fn test_json_schema_name_prefix_disallows_quote_colon_minus_token() {
     let schema = r#"{
@@ -559,7 +559,7 @@ fn test_json_schema_name_prefix_disallows_quote_colon_minus_token() {
 
 // ── JSON schema conversion tests ────────────────────────────────────────────
 
-/// Ported from `test_conversion_simple_object`.
+/// Adapted from `test_conversion_simple_object`.
 ///
 /// Checks that a simple object schema with string and integer properties
 /// compiles to a grammar containing rules for those types.
@@ -582,7 +582,7 @@ fn test_conversion_simple_object() {
     assert_eq!(named.start, "start");
 }
 
-/// Ported from `test_conversion_any_of`.
+/// Adapted from `test_conversion_any_of`.
 ///
 /// Checks that an anyOf schema produces a non-empty grammar.
 #[test]
@@ -602,7 +602,7 @@ fn test_conversion_any_of() {
     );
 }
 
-/// Ported from `test_conversion_enum`.
+/// Adapted from `test_conversion_enum`.
 ///
 /// Checks that an enum schema produces grammar rules containing the
 /// literal enum values.
@@ -625,7 +625,7 @@ fn test_conversion_enum() {
     assert!(has_blue, "Grammar should contain literal for \"blue\"");
 }
 
-/// Ported from `test_conversion_ref`.
+/// Adapted from `test_conversion_ref`.
 ///
 /// Checks that `$ref` and `$defs` are resolved correctly, producing a valid grammar.
 #[test]

@@ -77,8 +77,7 @@ enum RepeatTreeShape {
 }
 
 fn repeat_tree_shape() -> RepeatTreeShape {
-    let shape = std::env::var("GLRMASK_TREE_SHAPE");
-    repeat_tree_shape_from_value(shape.as_deref().unwrap_or(""))
+    RepeatTreeShape::Right
 }
 
 fn repeat_tree_shape_from_value(value: &str) -> RepeatTreeShape {
@@ -858,7 +857,7 @@ mod tests {
         assert!(gdef.rules.len() >= 2);
     }
 
-    /// Adapted from sep1 `test_nullability_handling_in_from_exprs`.
+    /// Regression case covering nullability handling in `from_exprs`.
     #[test]
     fn test_lower_nullability_uses_epsilon_rules_not_empty_terminals() {
         let g = NamedGrammar {

@@ -1,8 +1,4 @@
 //! Resolve negative parser-state labels in weighted NWAs.
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
 
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -59,27 +55,6 @@ fn intersect_or_clone_right_if_subset(left: &Weight, right: &Weight) -> Weight {
     }
 }
 
-#[derive(Default)]
-struct CancellationProfile {
-    seed_queries: usize,
-    worklist_pops: usize,
-    existing_eps_edges: usize,
-    existing_eps_nonempty: usize,
-    check_calls: usize,
-    queries_at_a_clones: usize,
-    queries_at_a_entries: usize,
-    queries_at_a_nonempty: usize,
-    new_eps_updates: usize,
-    direct_eps_edges: usize,
-    existing_eps_ms: std::time::Duration,
-    existing_eps_intersection_ms: std::time::Duration,
-    existing_eps_merge_ms: std::time::Duration,
-    check_ms: std::time::Duration,
-    queries_at_a_clone_ms: std::time::Duration,
-    queries_at_a_scan_ms: std::time::Duration,
-    direct_eps_ms: std::time::Duration,
-}
-
 #[derive(Clone, Copy)]
 enum PredEdge {
     Epsilon { from: usize, eps_idx: usize },
@@ -92,8 +67,6 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
     if n == 0 {
         return Vec::new();
     }
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_CANCELLATIONS").is_some();
-    let mut profile = profile_enabled.then(CancellationProfile::default);
 
     let mut queries: HashMap<u32, HashMap<QueryKey, Weight>> = HashMap::new();
     let mut worklist = VecDeque::<(u32, u32, i32)>::new();
@@ -134,9 +107,6 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                     .entry(query_key)
                     .or_insert_with(Weight::empty);
                 if merge_into(entry, w_ab.clone()) {
-                    if let Some(profile) = profile.as_mut() {
-                        profile.seed_queries += 1;
-                    }
                     if in_queue[*b as usize].insert(query_key) {
                         worklist.push_back((*b, a as u32, c));
                     }
@@ -146,36 +116,19 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
     }
 
     while let Some((s, a, c)) = worklist.pop_front() {
-        if let Some(profile) = profile.as_mut() {
-            profile.worklist_pops += 1;
-        }
         in_queue[s as usize].remove(&(a, c));
         let Some(w_as) = queries.get(&s).and_then(|m| m.get(&(a, c))).cloned() else {
             continue;
         };
         let w_as_single = w_as.single_compact_entry_parts();
 
-        let existing_eps_started_at = profile_enabled.then(std::time::Instant::now);
         if let Some(epsilons_from_s) = new_eps_from.get(&s) {
             for (&target, eps_w) in epsilons_from_s {
-                if let Some(profile) = profile.as_mut() {
-                    profile.existing_eps_edges += 1;
-                }
-                let existing_eps_intersection_started_at = profile_enabled.then(std::time::Instant::now);
                 let prop_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), eps_w);
-                if let (Some(profile), Some(started_at)) =
-                    (profile.as_mut(), existing_eps_intersection_started_at)
-                {
-                    profile.existing_eps_intersection_ms += started_at.elapsed();
-                }
                 if prop_w.is_empty() {
                     continue;
                 }
-                if let Some(profile) = profile.as_mut() {
-                    profile.existing_eps_nonempty += 1;
-                }
                 let query_key = (a, c);
-                let existing_eps_merge_started_at = profile_enabled.then(std::time::Instant::now);
                 let entry = queries
                     .entry(target)
                     .or_default()
@@ -186,15 +139,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                         worklist.push_back((target, a, c));
                     }
                 }
-                if let (Some(profile), Some(started_at)) =
-                    (profile.as_mut(), existing_eps_merge_started_at)
-                {
-                    profile.existing_eps_merge_ms += started_at.elapsed();
-                }
             }
-        }
-        if let (Some(profile), Some(started_at)) = (profile.as_mut(), existing_eps_started_at) {
-            profile.existing_eps_ms += started_at.elapsed();
         }
 
         let mut check_cancellations = |target: u32,
@@ -203,15 +148,8 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                                        worklist: &mut VecDeque<(u32, u32, i32)>,
                                        in_queue: &mut [HashSet<QueryKey>],
                                        new_eps_from: &mut HashMap<u32, HashMap<u32, Weight>>| {
-            let check_started_at = profile_enabled.then(std::time::Instant::now);
-            if let Some(profile) = profile.as_mut() {
-                profile.check_calls += 1;
-            }
             let new_eps_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), w_st);
             if new_eps_w.is_empty() {
-                if let (Some(profile), Some(started_at)) = (profile.as_mut(), check_started_at) {
-                    profile.check_ms += started_at.elapsed();
-                }
                 return;
             }
 
@@ -226,39 +164,19 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
             } else {
                 let delta_eps = new_eps_w.difference(eps_entry);
                 if delta_eps.is_empty() {
-                    if let (Some(profile), Some(started_at)) = (profile.as_mut(), check_started_at) {
-                        profile.check_ms += started_at.elapsed();
-                    }
                     return;
                 }
                 *eps_entry = eps_entry.union(&delta_eps);
                 delta_eps
             };
-            if let Some(profile) = profile.as_mut() {
-                profile.new_eps_updates += 1;
-            }
 
-            let queries_at_a_started_at = profile_enabled.then(std::time::Instant::now);
             let queries_at_a = queries.get(&a).cloned();
-            if let (Some(profile), Some(started_at)) = (profile.as_mut(), queries_at_a_started_at) {
-                profile.queries_at_a_clone_ms += started_at.elapsed();
-                if queries_at_a.is_some() {
-                    profile.queries_at_a_clones += 1;
-                }
-            }
 
             if let Some(queries_at_a) = queries_at_a {
-                if let Some(profile) = profile.as_mut() {
-                    profile.queries_at_a_entries += queries_at_a.len();
-                }
-                let queries_at_a_scan_started_at = profile_enabled.then(std::time::Instant::now);
                 for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
                     let prop_w = intersect_or_clone_right_if_subset(&w_a_prime_a, &delta_eps);
                     if prop_w.is_empty() {
                         continue;
-                    }
-                    if let Some(profile) = profile.as_mut() {
-                        profile.queries_at_a_nonempty += 1;
                     }
                     let query_key = (a_prime, c_prime);
                     let entry = queries
@@ -272,13 +190,6 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                         }
                     }
                 }
-                if let (Some(profile), Some(started_at)) = (profile.as_mut(), queries_at_a_scan_started_at) {
-                    profile.queries_at_a_scan_ms += started_at.elapsed();
-                }
-            }
-
-            if let (Some(profile), Some(started_at)) = (profile.as_mut(), check_started_at) {
-                profile.check_ms += started_at.elapsed();
             }
         };
 
@@ -314,11 +225,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
             }
         }
 
-        let direct_eps_started_at = profile_enabled.then(std::time::Instant::now);
         for (t, w_st) in &nwa.states[s as usize].epsilons {
-            if let Some(profile) = profile.as_mut() {
-                profile.direct_eps_edges += 1;
-            }
             if *t as usize >= n {
                 continue;
             }
@@ -338,9 +245,6 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                 }
             }
         }
-        if let (Some(profile), Some(started_at)) = (profile.as_mut(), direct_eps_started_at) {
-            profile.direct_eps_ms += started_at.elapsed();
-        }
     }
 
     let mut result = Vec::new();
@@ -350,29 +254,6 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
                 result.push((from, to, w));
             }
         }
-    }
-
-    if let Some(profile) = profile {
-        eprintln!(
-            "[glrmask/profile][parser_dwa] cancellations_detail seed_queries={} worklist_pops={} existing_eps_edges={} existing_eps_nonempty={} check_calls={} queries_at_a_clones={} queries_at_a_entries={} queries_at_a_nonempty={} new_eps_updates={} direct_eps_edges={} existing_eps_ms={:.3} existing_eps_intersection_ms={:.3} existing_eps_merge_ms={:.3} check_ms={:.3} queries_at_a_clone_ms={:.3} queries_at_a_scan_ms={:.3} direct_eps_ms={:.3}",
-            profile.seed_queries,
-            profile.worklist_pops,
-            profile.existing_eps_edges,
-            profile.existing_eps_nonempty,
-            profile.check_calls,
-            profile.queries_at_a_clones,
-            profile.queries_at_a_entries,
-            profile.queries_at_a_nonempty,
-            profile.new_eps_updates,
-            profile.direct_eps_edges,
-            profile.existing_eps_ms.as_secs_f64() * 1000.0,
-            profile.existing_eps_intersection_ms.as_secs_f64() * 1000.0,
-            profile.existing_eps_merge_ms.as_secs_f64() * 1000.0,
-            profile.check_ms.as_secs_f64() * 1000.0,
-            profile.queries_at_a_clone_ms.as_secs_f64() * 1000.0,
-            profile.queries_at_a_scan_ms.as_secs_f64() * 1000.0,
-            profile.direct_eps_ms.as_secs_f64() * 1000.0,
-        );
     }
 
     result
@@ -386,9 +267,6 @@ pub(crate) fn compute_cancellations_range(
     if n == 0 {
         return Vec::new();
     }
-
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_CANCELLATIONS").is_some();
-    let mut profile = profile_enabled.then(CancellationProfile::default);
 
     let mut queries: Vec<Option<FxHashMap<QueryKey, Weight>>> = vec![None; n as usize];
     let mut worklist: VecDeque<(u32, u32, i32)> = VecDeque::new();
@@ -426,9 +304,6 @@ pub(crate) fn compute_cancellations_range(
                     .or_insert_with(Weight::empty);
                 if !w_ab.is_subset(query_weight) {
                     *query_weight = query_weight.union(w_ab);
-                    if let Some(profile) = profile.as_mut() {
-                        profile.seed_queries += 1;
-                    }
                     enqueue(&mut worklist, &mut in_queue, *b, a, c);
                 }
             }
@@ -436,41 +311,22 @@ pub(crate) fn compute_cancellations_range(
     }
 
     while let Some((s, a, c)) = worklist.pop_front() {
-        if let Some(profile) = profile.as_mut() {
-            profile.worklist_pops += 1;
-        }
         in_queue.remove(&(s, a, c));
         let Some(w_as) = queries[s as usize].as_ref().and_then(|m| m.get(&(a, c))).cloned() else {
             continue;
         };
         let w_as_single = w_as.single_compact_entry_parts();
 
-        let existing_eps_started_at = profile_enabled.then(std::time::Instant::now);
         if let Some(epsilons_from_s) = new_eps_from[s as usize].as_ref() {
             let propagations: Vec<(u32, Weight)> = epsilons_from_s
                 .iter()
                 .filter_map(|(&target, eps_w): (&u32, &Weight)| {
-                    if let Some(profile) = profile.as_mut() {
-                        profile.existing_eps_edges += 1;
-                    }
-                    let existing_eps_intersection_started_at = profile_enabled.then(std::time::Instant::now);
                     let prop_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), eps_w);
-                    if let (Some(profile), Some(started_at)) =
-                        (profile.as_mut(), existing_eps_intersection_started_at)
-                    {
-                        profile.existing_eps_intersection_ms += started_at.elapsed();
-                    }
-                    if !prop_w.is_empty() {
-                        if let Some(profile) = profile.as_mut() {
-                            profile.existing_eps_nonempty += 1;
-                        }
-                    }
                     (!prop_w.is_empty()).then_some((target, prop_w))
                 })
                 .collect();
             for (target, prop_w) in propagations {
                 let query_key = (a, c);
-                let existing_eps_merge_started_at = profile_enabled.then(std::time::Instant::now);
                 let query_weight = queries[target as usize]
                     .get_or_insert_with(FxHashMap::default)
                     .entry(query_key)
@@ -479,15 +335,7 @@ pub(crate) fn compute_cancellations_range(
                     *query_weight = query_weight.union(&prop_w);
                     enqueue(&mut worklist, &mut in_queue, target, a, c);
                 }
-                if let (Some(profile), Some(started_at)) =
-                    (profile.as_mut(), existing_eps_merge_started_at)
-                {
-                    profile.existing_eps_merge_ms += started_at.elapsed();
-                }
             }
-        }
-        if let (Some(profile), Some(started_at)) = (profile.as_mut(), existing_eps_started_at) {
-            profile.existing_eps_ms += started_at.elapsed();
         }
 
         let mut check_cancellations = |target: u32,
@@ -496,15 +344,8 @@ pub(crate) fn compute_cancellations_range(
                            worklist: &mut VecDeque<(u32, u32, i32)>,
                            in_queue: &mut FxHashSet<(u32, u32, i32)>,
                            new_eps_from: &mut Vec<Option<FxHashMap<u32, Weight>>>| {
-            let check_started_at = profile_enabled.then(std::time::Instant::now);
-            if let Some(profile) = profile.as_mut() {
-                profile.check_calls += 1;
-            }
             let new_eps_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), w_st);
             if new_eps_w.is_empty() {
-                if let (Some(profile), Some(started_at)) = (profile.as_mut(), check_started_at) {
-                    profile.check_ms += started_at.elapsed();
-                }
                 return;
             }
 
@@ -513,36 +354,16 @@ pub(crate) fn compute_cancellations_range(
                 .entry(target)
                 .or_insert_with(Weight::empty);
             if !merge_weight(eps_weight, new_eps_w) {
-                if let (Some(profile), Some(started_at)) = (profile.as_mut(), check_started_at) {
-                    profile.check_ms += started_at.elapsed();
-                }
                 return;
             }
-            if let Some(profile) = profile.as_mut() {
-                profile.new_eps_updates += 1;
-            }
 
-            let queries_at_a_started_at = profile_enabled.then(std::time::Instant::now);
             let queries_at_a = queries[a as usize].clone();
-            if let (Some(profile), Some(started_at)) = (profile.as_mut(), queries_at_a_started_at) {
-                profile.queries_at_a_clone_ms += started_at.elapsed();
-                if queries_at_a.is_some() {
-                    profile.queries_at_a_clones += 1;
-                }
-            }
 
             if let Some(queries_at_a) = queries_at_a {
-                if let Some(profile) = profile.as_mut() {
-                    profile.queries_at_a_entries += queries_at_a.len();
-                }
-                let queries_at_a_scan_started_at = profile_enabled.then(std::time::Instant::now);
                 for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
                     let prop_w = intersect_or_clone_right_if_subset(&w_a_prime_a, eps_weight);
                     if prop_w.is_empty() {
                         continue;
-                    }
-                    if let Some(profile) = profile.as_mut() {
-                        profile.queries_at_a_nonempty += 1;
                     }
                     let query_key = (a_prime, c_prime);
                     let query_weight = queries[target as usize]
@@ -554,13 +375,6 @@ pub(crate) fn compute_cancellations_range(
                         enqueue(worklist, in_queue, target, a_prime, c_prime);
                     }
                 }
-                if let (Some(profile), Some(started_at)) = (profile.as_mut(), queries_at_a_scan_started_at) {
-                    profile.queries_at_a_scan_ms += started_at.elapsed();
-                }
-            }
-
-            if let (Some(profile), Some(started_at)) = (profile.as_mut(), check_started_at) {
-                profile.check_ms += started_at.elapsed();
             }
         };
 
@@ -580,11 +394,7 @@ pub(crate) fn compute_cancellations_range(
             }
         }
 
-        let direct_eps_started_at = profile_enabled.then(std::time::Instant::now);
         for (t, w_st) in &nwa.states[s as usize].epsilons {
-            if let Some(profile) = profile.as_mut() {
-                profile.direct_eps_edges += 1;
-            }
             if *t >= n {
                 continue;
             }
@@ -602,9 +412,6 @@ pub(crate) fn compute_cancellations_range(
                 enqueue(&mut worklist, &mut in_queue, *t, a, c);
             }
         }
-        if let (Some(profile), Some(started_at)) = (profile.as_mut(), direct_eps_started_at) {
-            profile.direct_eps_ms += started_at.elapsed();
-        }
     }
 
     let mut result = Vec::new();
@@ -615,29 +422,6 @@ pub(crate) fn compute_cancellations_range(
                 result.push((from as u32, to, w));
             }
         }
-    }
-
-    if let Some(profile) = profile {
-        eprintln!(
-            "[glrmask/profile][parser_dwa] cancellations_detail seed_queries={} worklist_pops={} existing_eps_edges={} existing_eps_nonempty={} check_calls={} queries_at_a_clones={} queries_at_a_entries={} queries_at_a_nonempty={} new_eps_updates={} direct_eps_edges={} existing_eps_ms={:.3} existing_eps_intersection_ms={:.3} existing_eps_merge_ms={:.3} check_ms={:.3} queries_at_a_clone_ms={:.3} queries_at_a_scan_ms={:.3} direct_eps_ms={:.3}",
-            profile.seed_queries,
-            profile.worklist_pops,
-            profile.existing_eps_edges,
-            profile.existing_eps_nonempty,
-            profile.check_calls,
-            profile.queries_at_a_clones,
-            profile.queries_at_a_entries,
-            profile.queries_at_a_nonempty,
-            profile.new_eps_updates,
-            profile.direct_eps_edges,
-            profile.existing_eps_ms.as_secs_f64() * 1000.0,
-            profile.existing_eps_intersection_ms.as_secs_f64() * 1000.0,
-            profile.existing_eps_merge_ms.as_secs_f64() * 1000.0,
-            profile.check_ms.as_secs_f64() * 1000.0,
-            profile.queries_at_a_clone_ms.as_secs_f64() * 1000.0,
-            profile.queries_at_a_scan_ms.as_secs_f64() * 1000.0,
-            profile.direct_eps_ms.as_secs_f64() * 1000.0,
-        );
     }
 
     result
@@ -722,7 +506,7 @@ fn build_finality_predecessors(nwa: &NWA) -> Vec<Vec<PredEdge>> {
     preds
 }
 
-fn build_finality_topo_order(nwa: &NWA, graph_profile_enabled: bool) -> Option<Vec<usize>> {
+fn build_finality_topo_order(nwa: &NWA) -> Option<Vec<usize>> {
     let n = nwa.states.len();
     let mut indegree = vec![0usize; n];
 
@@ -782,17 +566,7 @@ fn build_finality_topo_order(nwa: &NWA, graph_profile_enabled: bool) -> Option<V
         }
     }
 
-    let acyclic = topo_order.len() == n;
-    if graph_profile_enabled {
-        eprintln!(
-            "[glrmask/profile][parser_dwa] finality_graph nodes={} acyclic={} cyclic_nodes={}",
-            n,
-            acyclic,
-            n.saturating_sub(topo_order.len()),
-        );
-    }
-
-    acyclic.then_some(topo_order)
+    (topo_order.len() == n).then_some(topo_order)
 }
 
 fn apply_finality_fixpoint_worklist(
@@ -862,15 +636,8 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     if n == 0 {
         return;
     }
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
-    let graph_profile_enabled = std::env::var_os("GLRMASK_PROFILE_FINALITY_GRAPH").is_some();
-    let t0 = std::time::Instant::now();
-    let topo_order = build_finality_topo_order(nwa, graph_profile_enabled);
-    let topo_ms = t0.elapsed();
-    let t1 = std::time::Instant::now();
+    let topo_order = build_finality_topo_order(nwa);
     let preds = build_finality_predecessors(nwa);
-    let preds_ms = t1.elapsed();
-    let total_pred_edges: usize = preds.iter().map(|v| v.len()).sum();
 
     let mut future_final = vec![None::<Weight>; n];
     for state_id in 0..n {
@@ -882,27 +649,14 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
         }
     }
 
-    let t2 = std::time::Instant::now();
     if let Some(topo_order) = topo_order.as_deref() {
         apply_finality_fixpoint_acyclic(nwa, &preds, &mut future_final, topo_order);
     } else {
         apply_finality_fixpoint_worklist(nwa, &preds, &mut future_final);
     }
-    let fixpoint_ms = t2.elapsed();
 
     for (state_id, final_weight) in future_final.into_iter().enumerate() {
         nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
-    }
-
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][parser_dwa] finality_detail topo_ms={:.3} preds_ms={:.3} fixpoint_ms={:.3} total_pred_edges={} states={}",
-            topo_ms.as_secs_f64() * 1000.0,
-            preds_ms.as_secs_f64() * 1000.0,
-            fixpoint_ms.as_secs_f64() * 1000.0,
-            total_pred_edges,
-            n,
-        );
     }
 }
 
@@ -963,33 +717,10 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some();
-
-    let phase_started_at = std::time::Instant::now();
     apply_cancellations_range(nwa, 0..nwa.states.len() as u32);
-    let apply_cancellations_time = phase_started_at.elapsed();
-
-    let phase_started_at = std::time::Instant::now();
     apply_finality_fixpoint(nwa);
-    let apply_finality_fixpoint_time = phase_started_at.elapsed();
-
-    let phase_started_at = std::time::Instant::now();
     remove_negative_transitions(nwa);
-    let remove_negative_transitions_time = phase_started_at.elapsed();
-
-    let phase_started_at = std::time::Instant::now();
     remove_redundant_default_transitions(nwa);
-    let remove_redundant_default_transitions_time = phase_started_at.elapsed();
-
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][parser_dwa] resolve_negative_codes_detail apply_cancellations_ms={:.3} apply_finality_fixpoint_ms={:.3} remove_negative_transitions_ms={:.3} remove_redundant_default_transitions_ms={:.3}",
-            apply_cancellations_time.as_secs_f64() * 1000.0,
-            apply_finality_fixpoint_time.as_secs_f64() * 1000.0,
-            remove_negative_transitions_time.as_secs_f64() * 1000.0,
-            remove_redundant_default_transitions_time.as_secs_f64() * 1000.0,
-        );
-    }
 }
 
 #[cfg(test)]

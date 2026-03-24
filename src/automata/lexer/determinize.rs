@@ -1,4 +1,4 @@
-//! sep1-style lexer NFA → DFA determinization, adapted to glrmask's leaner DFA types.
+//! Lexer NFA -> DFA determinization for glrmask's byte-oriented DFA types.
 
 use std::collections::VecDeque;
 

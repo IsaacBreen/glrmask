@@ -1,7 +1,7 @@
-//! Ported from sep1: `grammars2024/src/dwa_i32/tests/test_weight_loosening.rs`
+//! Regression tests for weight loosening.
 //!
 //! Source had 3 tests; 2 depend on `loosen_weights_for_minimize()` (absent in glrmask) and are
-//! skipped. 1 test is ported.
+//! skipped. 1 test is retained here.
 //!
 //! Skipped tests:
 //!   - test_weight_loosening_preserves_semantics  (needs loosen_weights_for_minimize)
@@ -26,9 +26,9 @@ fn weight_from_range(lo: u32, hi: u32) -> Weight {
     Weight::from_compact_ranges([(lo..=hi, [0u32..=0])])
 }
 
-// ── ported tests ─────────────────────────────────────────────────────────────
+// ── regression tests ─────────────────────────────────────────────────────────
 
-/// Ported from `test_weight_loosening_loosens_unreachable`.
+/// Adapted from `test_weight_loosening_loosens_unreachable`.
 ///
 /// DWA structure:
 /// ```text

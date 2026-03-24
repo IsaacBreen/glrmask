@@ -5,5 +5,9 @@
 //! - `slow`: Trie-based per-token hashing (validation reference)
 
 pub mod fast;
+
+#[cfg(test)]
 pub mod medium;
+
+#[cfg(test)]
 pub mod slow;

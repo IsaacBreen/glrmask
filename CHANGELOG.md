@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — public/runtime boundary conformance pass
+## Unreleased — public API cleanup
 
 ### Breaking Change: `commit` is now infallible
 - `ConstraintState::commit(constraint, token_id)` now returns `()` (was `Result<(), GlrMaskError>`)
@@ -9,9 +9,9 @@
 
 ### Visibility cleanup
 - `runtime::gss_acc` and `runtime::leveled_gss` changed to `pub(crate)` — not part of public API
-- Removed top-level `BitSet` re-export from `lib.rs` — not in plan's public surface
+- Removed top-level `BitSet` re-export from `lib.rs` — not part of the supported public API
 
-### New Public API (aligned with rewrite plan)
+### Public API additions
 
 #### `Constraint`
 - `mask_len() -> usize` — number of `u32` words needed for a mask buffer

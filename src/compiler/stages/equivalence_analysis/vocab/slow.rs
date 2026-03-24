@@ -1,4 +1,4 @@
-//! Simplified fast vocab equivalence analysis.
+//! Trie-based reference vocab equivalence analysis.
 //!
 //! Partitions tokens by DFA behavior using a byte-level trie and per-token hashing.
 //! The trie amortizes DFA transitions: tokens sharing a prefix share the walk.
@@ -13,14 +13,13 @@
 
 // Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
 
-use super::super::compat::Sep1Tokenizer;
+use super::super::compat::TokenizerView;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
-use std::time::{Duration, Instant};
 
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
@@ -35,12 +34,6 @@ const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
 const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
-const SLOW_VOCAB_EQUIV_PROGRESS_ENVS: &[&str] = &[
-    "GLRMASK_SLOW_VOCAB_EQUIV_PROGRESS",
-    "SLOW_VOCAB_EQUIV_PROGRESS",
-];
-const SLOW_VOCAB_EQUIV_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
-
 // ---- Deterministic hashing ----
 
 static HASH_STATE: Lazy<RandomState> =
@@ -168,7 +161,7 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
     h.finish()
 }
 
-fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
+fn build_dfa(regex: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
     let dfa = regex.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -272,52 +265,16 @@ fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
 }
 
 #[inline]
-fn env_flag_enabled_any(names: &[&str]) -> bool {
-    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
-        let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-    })
-}
-
 struct ProgressReporter {
-    enabled: bool,
-    total: usize,
-    processed: usize,
-    started_at: Instant,
-    last_report_at: Instant,
 }
 
 impl ProgressReporter {
-    fn new(total: usize) -> Self {
-        let now = Instant::now();
-        ProgressReporter {
-            enabled: env_flag_enabled_any(SLOW_VOCAB_EQUIV_PROGRESS_ENVS),
-            total,
-            processed: 0,
-            started_at: now,
-            last_report_at: now,
-        }
+    fn new(_total: usize) -> Self {
+        ProgressReporter {}
     }
 
     #[inline]
-    fn record(&mut self, count: usize) {
-        if !self.enabled || count == 0 {
-            return;
-        }
-
-        self.processed = self.processed.saturating_add(count).min(self.total);
-        let now = Instant::now();
-        let should_report = self.processed == self.total
-            || now.duration_since(self.last_report_at) >= SLOW_VOCAB_EQUIV_PROGRESS_INTERVAL;
-        if should_report {
-            eprintln!(
-                "[slow vocab equiv] processed {}/{} tokens in {:.1}s",
-                self.processed,
-                self.total,
-                now.duration_since(self.started_at).as_secs_f64(),
-            );
-            self.last_report_at = now;
-        }
+    fn record(&mut self, _count: usize) {
     }
 }
 
@@ -889,7 +846,7 @@ fn walk_trie<S: AsRef<[u8]>>(
 // ---- Public API ----
 
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
-    regex: &Sep1Tokenizer,
+    regex: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -979,7 +936,8 @@ pub fn partitions_are_equivalent(a: &VocabEquivalenceResult, b: &VocabEquivalenc
 mod tests {
     use super::*;
 
-    // NOTE: test_a_plus_equivalence disabled in glrmask port (needs sep1's dfa_u8 types)
+    // NOTE: test_a_plus_equivalence remains disabled until the legacy byte-DFA
+    // fixtures used by this test are restored.
     // Original test used: crate::dfa_u8::{eat_u8, greedy_group, rep1, Tokenizer}
 
     #[test]

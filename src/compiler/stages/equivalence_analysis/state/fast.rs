@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 #[cfg(test)]
 use rayon::prelude::*;
 #[cfg(test)]
-use super::super::compat::Sep1Tokenizer;
+use super::super::compat::TokenizerView;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
@@ -36,35 +36,6 @@ fn mix_u128(mut x: u128) -> u128 {
     x
 }
 
-#[cfg(test)]
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(test)]
-fn env_flag_enabled_any(names: &[&str]) -> bool {
-    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
-        let trimmed = value.trim();
-        !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-    })
-}
-
-#[cfg(test)]
-fn profile_equivalence_enabled() -> bool {
-    env_flag_enabled_any(&["GLRMASK_PROFILE_EQUIVALENCE", "PROFILE_EQUIVALENCE"])
-        || env_flag_enabled("GLRMASK_PROFILE_COMPILE")
-}
-
-#[cfg(test)]
-fn count_classes(mapping: &[usize]) -> usize {
-    mapping.iter().copied().collect::<BTreeSet<_>>().len()
-}
-
 /// Find state equivalence classes for a tokenizer.
 ///
 /// Uses a pre-filter + refinement approach:
@@ -81,19 +52,15 @@ fn count_classes(mapping: &[usize]) -> usize {
 /// States with the same representative are equivalent.
 #[cfg(test)]
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
-    regex: &Sep1Tokenizer,
+    regex: &TokenizerView,
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
-    let profile_equivalence = profile_equivalence_enabled();
-
     if states.is_empty() {
         return Vec::new();
     }
 
-    let prepass_started_at = std::time::Instant::now();
     let pre_mapping = super::max_length::find_state_equivalence_classes(regex, tokens, states);
-    let prepass_time = prepass_started_at.elapsed();
 
     let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
 
@@ -104,36 +71,12 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
         rep_set.insert(rep);
     }
     let reduced_states: Vec<usize> = rep_set.into_iter().collect();
-    let prepass_classes = reduced_states.len();
 
     if reduced_states.len() == states.len() {
-        let refinement_started_at = std::time::Instant::now();
-        let mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, states);
-        let refinement_time = refinement_started_at.elapsed();
-
-        if profile_equivalence {
-            eprintln!(
-                "[glrmask/profile][state_equiv] max_length_ms={:.3} states={}→{} ({:.2}x)",
-                prepass_time.as_secs_f64() * 1000.0,
-                states.len(),
-                prepass_classes,
-                states.len() as f64 / prepass_classes.max(1) as f64,
-            );
-            eprintln!(
-                "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x)",
-                refinement_time.as_secs_f64() * 1000.0,
-                states.len(),
-                count_classes(&mapping),
-                states.len() as f64 / count_classes(&mapping).max(1) as f64,
-            );
-        }
-
-        return mapping;
+        return find_state_equivalence_classes_token_based(regex, &owned_tokens, states);
     }
 
-    let refinement_started_at = std::time::Instant::now();
     let reduced_mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, &reduced_states);
-    let refinement_time = refinement_started_at.elapsed();
     let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
     for (i, &rep_state) in reduced_states.iter().enumerate() {
         rep_to_final.insert(rep_state, reduced_mapping[i]);
@@ -144,34 +87,12 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
         mapping[i] = rep_to_final[&pre_rep];
     }
 
-    if profile_equivalence {
-        let final_classes = count_classes(&mapping);
-        let refinement_classes = count_classes(&reduced_mapping);
-        eprintln!(
-            "[glrmask/profile][state_equiv] max_length_ms={:.3} states={}→{} ({:.2}x)",
-            prepass_time.as_secs_f64() * 1000.0,
-            states.len(),
-            prepass_classes,
-            states.len() as f64 / prepass_classes.max(1) as f64,
-        );
-        eprintln!(
-            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x) input={}→{} ({:.2}x)",
-            refinement_time.as_secs_f64() * 1000.0,
-            states.len(),
-            final_classes,
-            states.len() as f64 / final_classes.max(1) as f64,
-            reduced_states.len(),
-            refinement_classes,
-            reduced_states.len() as f64 / refinement_classes.max(1) as f64,
-        );
-    }
-
     mapping
 }
 
 #[cfg(test)]
 fn find_state_equivalence_classes_token_based(
-    regex: &Sep1Tokenizer,
+    regex: &TokenizerView,
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
@@ -296,8 +217,6 @@ fn find_state_equivalence_classes_token_based(
         end.wrapping_add(structure)
     };
 
-    let early_stop =
-        env_flag_enabled_any(&["GLRMASK_STATE_EQUIV_EARLY_STOP", "STATE_EQUIV_EARLY_STOP"]);
     let batch_size = 5000usize;
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
@@ -305,9 +224,6 @@ fn find_state_equivalence_classes_token_based(
     let mut active_indices: Vec<usize> = (0..states.len()).collect();
     let mut active_flags: Vec<bool> = vec![false; states.len()];
     let mut active_hashes: Vec<u128> = vec![0u128; states.len()];
-    let mut prev_groups = 1usize;
-    let mut stable_batches = 0usize;
-    let mut tokens_tested;
 
     let mut batch_start = 0usize;
     while batch_start < total_tokens {
@@ -569,19 +485,6 @@ fn find_state_equivalence_classes_token_based(
             }
         }
 
-        tokens_tested = batch_end;
-        if early_stop && tokens_tested * 2 >= total_tokens {
-            if num_groups == prev_groups {
-                stable_batches += 1;
-            } else {
-                stable_batches = 0;
-            }
-            if stable_batches >= 2 {
-                break;
-            }
-        }
-
-        prev_groups = num_groups;
         batch_start = batch_end;
     }
 

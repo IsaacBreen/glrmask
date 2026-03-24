@@ -1,6 +1,6 @@
 //! Forced-token computation.
 //!
-//! Mirrors sep1's `force()` algorithm:
+//! Uses the current `force()` algorithm:
 //!
 //! 1. **Compute forced byte prefix** — at each step, check whether all tokens
 //!    allowed by the mask share the same first byte.  If yes, commit that byte
@@ -16,7 +16,7 @@ use crate::runtime::state::ConstraintState;
 impl<'a> ConstraintState<'a> {
     /// Compute the forced token sequence.
     ///
-    /// Uses two strategies, mirroring sep1's behavior:
+    /// Uses two strategies that preserve the established behavior:
     ///
     /// 1. **Byte-level** — find the longest byte prefix where all token first
     ///    bytes agree, then greedy tokenize.  Handles cases where multiple
@@ -301,7 +301,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Ported from sep1 `test_constraint_basic.rs` force() tests
+    // Additional force() regression tests
     // ---------------------------------------------------------------------
 
     #[test]
@@ -523,7 +523,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Ported from sep1 `test_constraint_basic.rs` compute_forced_byte_prefix
+    // compute_forced_byte_prefix regression tests
     // ---------------------------------------------------------------------
 
     #[test]
@@ -823,7 +823,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Ported from sep1 `test_constraint_basic.rs` tokenize_forced_with_stop
+    // tokenize_forced_with_stop regression tests
     // ---------------------------------------------------------------------
 
     #[test]

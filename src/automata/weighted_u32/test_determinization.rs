@@ -1,4 +1,4 @@
-//! Tests ported from sep1's `dwa_i32/tests/test_determinization.rs`.
+//! Regression tests for weighted-automata determinization.
 //!
 //! Focuses on determinization behavior: edge cases, epsilon-explosion analysis,
 //! and weight-inflation regression tests.
@@ -50,8 +50,9 @@ fn count_transitions(dwa: &DWA) -> usize {
 // Determinize Edge Cases
 // ============================================================================
 
-/// Ported from sep1's `test_determinize_simple_divergence`.
-/// In sep1 this is `#[should_panic]` — the assertions on state count fail.
+/// Adapted from `test_determinize_simple_divergence`.
+/// In the legacy suite this used `#[should_panic]` because the assertions on
+/// state count fail.
 /// In glrmask the determinize returns Result, so we keep `should_panic`
 /// to preserve the original test intent. If glrmask handles this correctly
 /// (no panic), the test will fail, exposing the behavioral difference.

@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use range_set_blaze::RangeSetBlaze;
@@ -19,6 +14,9 @@ use crate::compiler::glr::analysis::EOF;
 use crate::compiler::grammar::model::Symbol;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{PossibleMatchesByState, PossibleMatchesComputer, collect_possible_matches_by_state};
+use crate::compiler::stages::equivalence_analysis::disallowed_follows::{
+    build_disallowed_follow_dfa, normalize_disallowed_follows,
+};
 
 /// NWA state identifier (index into `NWA.states`).
 type NwaState = u32;
@@ -27,9 +25,6 @@ type TokenizerState = u32;
 type LeafTokenIds = SmallVec<[u32; 8]>;
 use crate::compiler::compile::compute_disallowed_follows;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
-use crate::compiler::stages::equivalence_analysis::reference::{
-    build_disallowed_follow_dfa, normalize_disallowed_follows,
-};
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;

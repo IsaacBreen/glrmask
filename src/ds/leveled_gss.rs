@@ -4393,12 +4393,6 @@ mod tests {
         let gss_after = gss.normalize();
         let stats_after = gss_after.stats();
 
-        println!("GSS before normalization: {}", gss.to_graph_string(false));
-        println!("GSS after normalization: {}", gss_after.to_graph_string(false));
-
-        println!("Stats before: {:?}", stats_before);
-        println!("Stats after: {:?}", stats_after);
-
         assert_eq!(gss.to_stacks().len(), 11);
         assert_eq!(gss_after.to_stacks().len(), 11);
 

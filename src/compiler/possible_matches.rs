@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -73,9 +68,9 @@ impl<'a> PossibleMatchesComputer<'a> {
 
         let mut result = PossibleMatchMap::default();
 
-        // This intentionally includes the token ending exactly at `node`.
-        // sep1's `possible_matches(node, state)` does the same before recursing
-        // into child segments, so the recursive part only adds longer continuations.
+        // This intentionally includes the token ending exactly at `node` before
+        // recursing into child segments, so the recursive part only adds longer
+        // continuations.
         if node.has_token() {
             let token_id = node.token_id() as u32;
             for terminal in self.tokenizer.matched_terminals_iter(tokenizer_state) {

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use super::super::compat::{FlatDfaState, Sep1Tokenizer};
+use super::super::compat::{FlatDfaState, TokenizerView};
 
 #[inline(always)]
 fn mix_u64(mut x: u64) -> u64 {
@@ -90,7 +90,7 @@ fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
 }
 
 fn find_state_equivalence_classes_kstep(
-    regex: &Sep1Tokenizer,
+    regex: &TokenizerView,
     states: &[usize],
     k: usize,
 ) -> Vec<usize> {
@@ -123,7 +123,7 @@ fn find_state_equivalence_classes_kstep(
 }
 
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
-    regex: &Sep1Tokenizer,
+    regex: &TokenizerView,
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {

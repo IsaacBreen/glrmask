@@ -1,8 +1,8 @@
-//! Ported grammar-import tests from sep1.
+//! Regression tests for grammar import.
 //!
 //! Sources:
-//!   - `grammars2024/src/interface/ebnf.rs` (9 tests total; 2 ported, 7 skipped)
-//!   - `grammars2024/src/interface/lark.rs` (4 tests total; 2 ported, 2 skipped)
+//!   - `grammars2024/src/interface/ebnf.rs` (9 tests total; 2 retained, 7 skipped)
+//!   - `grammars2024/src/interface/lark.rs` (4 tests total; 2 retained, 2 skipped)
 //!
 //! Skipped tests:
 //!   EBNF (7):
@@ -24,7 +24,7 @@ use crate::grammar::ast::lower;
 
 // ── EBNF tests ───────────────────────────────────────────────────────────────
 
-/// Ported from `test_ebnf_parser_simple`.
+/// Adapted from `test_ebnf_parser_simple`.
 ///
 /// Parses a basic EBNF grammar and checks the resulting AST structure.
 #[test]
@@ -59,7 +59,7 @@ c ::= 'c'?";
     );
 }
 
-/// Ported from `test_ebnf_parser_error_with_span` (adapted).
+/// Adapted from `test_ebnf_parser_error_with_span`.
 ///
 /// Verifies the parser returns an error for invalid EBNF (double '?').
 #[test]
@@ -79,7 +79,7 @@ c ::= 'c'??";
 
 // ── Lark tests ───────────────────────────────────────────────────────────────
 
-/// Ported from `test_lark_repeat_bounded`.
+/// Adapted from `test_lark_repeat_bounded`.
 #[test]
 fn test_lark_repeat_bounded_preserves_range_node() {
     let lark = r#"
@@ -166,7 +166,7 @@ fn test_lark_terminal_rule_rejects_undefined_reference() {
     );
 }
 
-/// Ported from `test_lark_parser_simple`.
+/// Adapted from `test_lark_parser_simple`.
 ///
 /// Parses a simple Lark grammar and checks rule count and names at the AST level.
 #[test]
@@ -196,7 +196,7 @@ NUMBER: /[0-9]+/
     assert_eq!(named.rules[3].name, "term");
 }
 
-/// Ported from `test_lark_regex_charclass_not_nested`.
+/// Adapted from `test_lark_regex_charclass_not_nested`.
 ///
 /// Verifies that regex char classes like `/[^"\\\x00-\x1F]/` are parsed correctly
 /// as a flat CharClass (not nested `[[...]]`).
@@ -223,7 +223,7 @@ STR_CHAR: /[^"\\\x00-\x1F]/
     }
 }
 
-/// Ported from `test_duplicate_terminals_are_merged`.
+/// Adapted from `test_duplicate_terminals_are_merged`.
 #[test]
 fn test_lark_duplicate_terminals_are_merged() {
     let lark = r#"
@@ -247,7 +247,7 @@ H: "x"
     );
 }
 
-/// Ported from `test_lark_terminal_chain_differs_from_ebnf_terminal_chain_when_utf8_enabled`.
+/// Adapted from `test_lark_terminal_chain_differs_from_ebnf_terminal_chain_when_utf8_enabled`.
 #[test]
 fn test_lark_json_string_chain_differs_from_ebnf_char_class_chain() {
     let lark = r#"

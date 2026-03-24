@@ -2,10 +2,9 @@
 //!
 //! Builds each template as a lightweight NFA (fresh intermediate states per
 //! path, epsilon-connected to NT nodes) and then determinizes + minimizes to
-//! produce an acyclic unweighted DFA.  The NFA approach mirrors sep1's
-//! `build_nfa_from_terminal_characterization` and avoids the self-loops that
-//! the old direct-DFA builder created when two reduces shared a label prefix
-//! and target NT but had different pop counts.
+//! produce an acyclic unweighted DFA. The NFA approach avoids the self-loops
+//! that the older direct-DFA builder created when two reduces shared a label
+//! prefix and target NT but had different pop counts.
 
 use std::collections::BTreeMap;
 
@@ -46,7 +45,7 @@ impl Templates {
 }
 
 // ---------------------------------------------------------------------------
-// NFA construction (mirrors sep1's build_nfa_from_terminal_characterization)
+// NFA construction
 // ---------------------------------------------------------------------------
 
 /// Build an unweighted NFA from a terminal characterization.

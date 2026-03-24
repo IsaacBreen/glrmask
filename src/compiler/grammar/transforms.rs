@@ -10,20 +10,8 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 
 const DEFAULT_MAX_RUNTIME_REDUCTION_LEN: usize = 5;
 
-fn max_runtime_reduction_len_from_env() -> usize {
-    let value = match std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN") {
-        Ok(raw) => raw.parse::<usize>().unwrap_or_else(|_| {
-            panic!(
-                "GLRMASK_MAX_RUNTIME_REDUCTION_LEN must parse as usize, got {raw:?}"
-            )
-        }),
-        Err(_) => DEFAULT_MAX_RUNTIME_REDUCTION_LEN,
-    };
-    assert!(
-        value >= 2,
-        "GLRMASK_MAX_RUNTIME_REDUCTION_LEN must be at least 2; 1 cannot preserve general CFG concatenation"
-    );
-    value
+fn max_runtime_reduction_len() -> usize {
+    DEFAULT_MAX_RUNTIME_REDUCTION_LEN
 }
 
 // ── Nullable terminal expansion ─────────────────────────────────────────────
@@ -455,7 +443,7 @@ fn prepare_owned_grammar_for_compile_impl(
 
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
 
-    let max_rhs_len = max_runtime_reduction_len_from_env();
+    let max_rhs_len = max_runtime_reduction_len();
     bound_runtime_reduction_length(normalized, max_rhs_len);
 
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);

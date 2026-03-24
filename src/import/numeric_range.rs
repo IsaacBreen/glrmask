@@ -1,6 +1,6 @@
 //! Numeric range regex generators for JSON schema constraints.
 //!
-//! Ported from llguidance's `parser/src/json/numeric.rs` (guidance-ai/llguidance).
+//! Numeric-range parsing adapted from llguidance's JSON number parser.
 //! Produces regex strings matching integers or floats within specified ranges.
 
 type Result<T> = std::result::Result<T, String>;

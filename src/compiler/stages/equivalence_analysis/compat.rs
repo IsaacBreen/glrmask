@@ -1,20 +1,20 @@
-//! Compatibility layer bridging glrmask's DFA types to the interface expected by
-//! the ported sep1 equivalence analysis code.
+//! Compatibility layer bridging glrmask's tokenizer DFA to the flat interface
+//! used by the equivalence-analysis passes.
 //!
-//! The sep1 code expects:
-//! - `Tokenizer` with `.dfa()` returning a DFA struct that has public
-//!   `.states`, `.start_state`
-//! - `DFAState` with public `.transitions: CharTransitions<usize>`,
-//!   `.finalizers: DenseStateSet`, `.possible_future_group_ids: BTreeSet<GroupID>`
+//! The analysis code expects:
+//! - `Tokenizer` with `.dfa()` returning a DFA struct that exposes
+//!   `.states` and `.start_state`
+//! - `DFAState` with public `.transitions`, `.finalizers`, and
+//!   `.possible_future_group_ids`
 //! - State indices as `usize`
 //!
 //! glrmask uses:
 //! - `Tokenizer` with public `.dfa` field
-//! - `DFAState` with `BitSet` finalizers, private `possible_future_group_ids`
+//! - `DFAState` with `BitSet` finalizers and private future-group storage
 //! - State indices as `u32`
 //!
-//! This module provides flat, pre-extracted views of the DFA data so the sep1
-//! code can be adapted with minimal changes.
+//! This module provides flat, pre-extracted views of the DFA data so the
+//! equivalence-analysis code can operate on a stable representation.
 
 
 #[cfg(test)]
@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 
-/// Pre-extracted DFA state data in sep1-compatible format.
+/// Pre-extracted DFA state data in analysis-compatible format.
 #[derive(Debug, Clone)]
 pub struct FlatDfaState {
     /// Transition table: `transitions[byte]` = target state index, or `usize::MAX` for no transition.
@@ -33,8 +33,8 @@ pub struct FlatDfaState {
     pub possible_future_group_ids: Vec<usize>,
 }
 
-/// Pre-extracted DFA in sep1-compatible format.
-/// All the sep1 code needs is this struct; no reference to glrmask types at runtime.
+/// Pre-extracted DFA in the format used by equivalence analysis.
+/// The analysis passes only depend on this struct, not on live glrmask types.
 #[derive(Debug, Clone)]
 pub struct FlatDfa {
     pub states: Vec<FlatDfaState>,
@@ -80,32 +80,34 @@ impl FlatDfa {
     }
 }
 
-/// A thin wrapper around glrmask's `Tokenizer` that provides sep1-compatible accessors.
+/// A thin wrapper around glrmask's `Tokenizer` that exposes the flattened DFA.
 ///
-/// The sep1 code calls `regex.dfa()` and accesses `.states`, `.start_state`, etc.
+/// The equivalence-analysis code calls `dfa()` and accesses `.states` and
+/// `.start_state` directly.
 /// This wrapper pre-extracts all data into `FlatDfa` on construction.
-pub struct Sep1Tokenizer {
+pub struct TokenizerView {
     pub flat_dfa: FlatDfa,
 }
 
-impl Sep1Tokenizer {
+impl TokenizerView {
     pub fn new(tokenizer: &Tokenizer) -> Self {
-        Sep1Tokenizer {
+        TokenizerView {
             flat_dfa: FlatDfa::from_tokenizer(tokenizer),
         }
     }
 
-    /// Returns the flat DFA (analogous to sep1's `Tokenizer::dfa()`).
+    /// Returns the extracted DFA view.
     pub fn dfa(&self) -> &FlatDfa {
         &self.flat_dfa
     }
 
-    /// Start state (analogous to sep1's `Tokenizer::initial_state_id().0`).
+    /// Returns the tokenizer start state.
     pub fn initial_state_id(&self) -> usize {
         self.flat_dfa.start_state
     }
 
-    /// Run the DFA from a given state on input bytes using sep1-compatible execution semantics.
+    /// Runs the DFA from a given state on input bytes using the same execution
+    /// semantics as the equivalence-analysis helpers.
     #[cfg(test)]
     pub fn execute_from_state_nonzero(&self, input: &[u8], start_state: usize) -> ExecuteResult {
         let dfa = &self.flat_dfa;
@@ -192,9 +194,9 @@ mod tests {
     #[test]
     fn test_execute_from_state_nonzero_deduplicates_group_matches() {
         let tokenizer = build_tokenizer_from_exprs(&[plus(bytes(b"1"))]);
-        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
 
-        let result = sep1.execute_from_state_nonzero(b"11", sep1.initial_state_id());
+        let result = tokenizer_view.execute_from_state_nonzero(b"11", tokenizer_view.initial_state_id());
 
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].group_id, 0);
@@ -204,9 +206,9 @@ mod tests {
     #[test]
     fn test_execute_from_state_nonzero_returns_none_for_sink_end_state() {
         let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a")]);
-        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
 
-        let result = sep1.execute_from_state_nonzero(b"a", sep1.initial_state_id());
+        let result = tokenizer_view.execute_from_state_nonzero(b"a", tokenizer_view.initial_state_id());
 
         assert_eq!(result.end_state, None);
     }

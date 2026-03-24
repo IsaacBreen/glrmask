@@ -1,9 +1,4 @@
-//! NOTE: terminal characterization is intentionally deferred.
-//! Keep only the minimal data shape and entrypoint for this cleanup pass.
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
+//! Terminal characterization for template construction.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

@@ -6,7 +6,7 @@ use range_set_blaze::RangeSetBlaze;
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
 use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis;
 use crate::ds::bitset::BitSet;
 
@@ -16,15 +16,14 @@ pub(crate) fn analyze_equivalences(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> InternalIdMap {
-    analyze_equivalences_sep1(tokenizer, vocab, disallowed_follows, ignore_terminal)
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal)
 }
 
-/// Sep1-derived combined equivalence analysis.
+/// Combined equivalence analysis over a flattened tokenizer DFA.
 ///
-/// Uses the ported sep1 pipeline: state equivalence (k-step hashing + token-based
-/// refinement) followed by vocab equivalence (parallel batched with byte-class
-/// compression). Cross-validates against simple and flat implementations in tests.
-fn analyze_equivalences_sep1(
+/// Uses state equivalence (k-step hashing plus token-based refinement) followed
+/// by vocab equivalence (parallel batched with byte-class compression).
+fn analyze_equivalences_impl(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -50,25 +49,23 @@ fn analyze_equivalences_sep1(
         disallowed_follows
     };
 
-    let sep1_tok = Sep1Tokenizer::new(tokenizer);
+    let tokenizer_view = TokenizerView::new(tokenizer);
 
     // Extract vocab tokens as byte slices, ordered by token ID.
     // Vocab entries is a BTreeMap<u32, Vec<u8>>, so we need to handle sparse IDs.
     let max_token_id = vocab.max_token_id();
     let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
-    let mut token_lengths: Vec<usize> = Vec::with_capacity(vocab.len());
     for (&tid, bytes) in &vocab.entries {
         token_ids.push(tid);
         token_bytes.push(bytes.as_slice());
-        token_lengths.push(bytes.len());
     }
 
     // All DFA states as initial states
     let initial_states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
     let result = combined_equivalence_analysis::compute_combined_equivalence(
-        &sep1_tok,
+        &tokenizer_view,
         &token_bytes,
         &initial_states,
         effective_disallowed,
@@ -98,7 +95,7 @@ fn analyze_equivalences_sep1(
     };
 
     // Convert vocab equivalence classes to ManyToOneIdMap
-    // The sep1 result uses indices into our token_bytes array, but we need
+    // The equivalence result uses indices into our token_bytes array, but we need
     // to map back to original token IDs.
     let mut ordered_vocab_classes: Vec<(usize, Vec<u32>)> = result
         .vocab_classes
@@ -183,7 +180,7 @@ mod tests {
     }
 
         #[test]
-        fn test_json_schema_equivalence_classes_port() {
+        fn test_json_schema_equivalence_classes() {
             use crate::import::json_schema::json_schema_to_grammar;
             // Schema: {"type": "object", "properties": {"name": {"type": "string"}}}
             let schema = r#"{
@@ -201,11 +198,6 @@ mod tests {
             let vocab = Vocab::new(vocab_entries, None);
             let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
             let classes = &id_map.vocab_tokens.internal_to_originals;
-            // Print for debugging
-            for (i, class) in classes.iter().enumerate() {
-                let content: Vec<&str> = class.iter().map(|idx| vocab_strs[idx as usize]).collect();
-                println!("  Class {}: {:?}", i, content);
-            }
             // Combined state+vocab equivalence analysis groups tokens by their
             // behavior across all tokenizer states. Tokens "i" and "g" behave
             // identically (both are single-char string characters with the same
@@ -239,7 +231,7 @@ mod tests {
         }
 
         #[test]
-        fn test_json_schema_equivalence_classes_simpler_port() {
+        fn test_json_schema_equivalence_classes_simpler() {
             // Simple EBNF: root ::= '{' '}'
             let ebnf = "root ::= '{' '}'";
             let grammar = crate::import::ebnf::parse_ebnf(ebnf).expect("Grammar should build");
@@ -249,10 +241,6 @@ mod tests {
             let vocab = Vocab::new(vocab_entries, None);
             let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
             let classes = &id_map.vocab_tokens.internal_to_originals;
-            for (i, class) in classes.iter().enumerate() {
-                let content: Vec<&str> = class.iter().map(|idx| vocab_strs[idx as usize]).collect();
-                println!("  Class {}: {:?}", i, content);
-            }
             let expected: Vec<Vec<usize>> = vec![vec![0], vec![1]];
             let mut expected_sorted: Vec<Vec<usize>> = expected.iter().map(|c| { let mut v = c.clone(); v.sort(); v }).collect();
             expected_sorted.sort();
@@ -263,57 +251,6 @@ mod tests {
                  Expected: {:?}\n\
                  Actual:   {:?}",
                 expected_sorted, actual_sorted);
-        }
-
-        /// Diagnostic test: measures equivalence analysis effectiveness.
-        /// Run with: cargo test --lib measure_equivalence_effectiveness -- --nocapture
-        #[test]
-        fn measure_equivalence_effectiveness() {
-            use crate::import::json_schema::json_schema_to_grammar;
-
-            let schema = r#"{
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                }
-            }"#;
-            let grammar = json_schema_to_grammar(schema).expect("Schema should convert");
-            let tok = build_tokenizer(&grammar);
-
-            // Build a realistic-ish vocab with 16 entries
-            let vocab_strs = vec![
-                "{", "}", "\"", ":", ",", "n", "a", "m", "e", "s", "t", "r", "i", "g", "{\"", "\":"
-            ];
-            let vocab_entries: Vec<(u32, Vec<u8>)> = vocab_strs.iter().enumerate()
-                .map(|(i, s)| (i as u32, s.as_bytes().to_vec())).collect();
-            let vocab = Vocab::new(vocab_entries, None);
-
-            // Full combined analysis (sep1 pipeline)
-            let full_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
-            let num_original_states = tok.num_states();
-            let num_combined_state_classes = full_map.num_tsids();
-            let num_combined_vocab_classes = full_map.num_internal_tokens();
-
-            println!("\n=== Equivalence Analysis Effectiveness (sep1 pipeline) ===");
-            println!("Grammar: JSON schema (object with 'name' string property)");
-            println!("Vocab: {} entries", vocab_strs.len());
-            println!();
-            println!("STATE EQUIVALENCE:");
-            println!("  Original DFA states:     {}", num_original_states);
-            println!("  State equiv classes:     {}", num_combined_state_classes);
-            println!("  Compression ratio:       {:.1}x", num_original_states as f64 / num_combined_state_classes as f64);
-            println!();
-            println!("VOCAB EQUIVALENCE:");
-            println!("  Original vocab entries:  {}", vocab_strs.len());
-            println!("  Vocab classes:           {}", num_combined_vocab_classes);
-
-            // Show classes
-            println!();
-            println!("Vocab classes:");
-            for (i, class) in full_map.vocab_tokens.internal_to_originals.iter().enumerate() {
-                let content: Vec<&str> = class.iter().map(|idx| vocab_strs[idx as usize]).collect();
-                println!("  Class {}: {:?}", i, content);
-            }
         }
     }
 

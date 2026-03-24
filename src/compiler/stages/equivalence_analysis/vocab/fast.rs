@@ -6,7 +6,7 @@
 
 // Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
 
-use super::super::compat::Sep1Tokenizer;
+use super::super::compat::TokenizerView;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -177,7 +177,7 @@ fn normalize_disallowed_follows(
     normalized
 }
 
-fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
+fn build_dfa(regex: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
     let dfa = regex.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -720,17 +720,12 @@ fn token_signature(
 }
 
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
-    regex: &Sep1Tokenizer,
+    regex: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
-    let total_started_at = profile_enabled.then(std::time::Instant::now);
-
-    let build_dfa_started_at = profile_enabled.then(std::time::Instant::now);
     let dfa = build_dfa(regex, disallowed_follows);
-    let build_dfa_ms = build_dfa_started_at.map(|started_at| started_at.elapsed());
     let num_tokens = strings.len();
     let num_states = initial_states.len();
 
@@ -745,15 +740,6 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
-    let mut total_signature_ms = std::time::Duration::default();
-    let mut total_refine_ms = std::time::Duration::default();
-    let mut total_run_batch_ms = std::time::Duration::default();
-    let mut total_suffix_ms = std::time::Duration::default();
-    let mut total_finalize_ms = std::time::Duration::default();
-    let mut total_suffix_tokens = 0usize;
-    let mut total_suffix_targets = 0usize;
-    let mut total_suffix_nodes = 0usize;
-    let mut batches_processed = 0usize;
 
     for batch_start in (0..num_states).step_by(batch_size) {
         if active_indices.is_empty() {
@@ -761,87 +747,21 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         }
         let batch_end = (batch_start + batch_size).min(num_states);
         let batch = &initial_states[batch_start..batch_end];
-        let active_before = active_indices.len();
-
-        let phase_started_at = profile_enabled.then(std::time::Instant::now);
-        let active_sigs: Vec<(usize, u64, std::time::Duration, std::time::Duration, std::time::Duration, usize, usize, usize)> = active_indices
+        let active_sigs: Vec<(usize, u64)> = active_indices
             .par_iter()
             .map_init(
                 || Scratch::new(batch.len(), num_groups),
                 |scratch, &token_idx| {
                     let token = strings[token_idx].as_ref();
-                    if profile_enabled {
-                        let phase_started_at = std::time::Instant::now();
-                        run_batch(&dfa, scratch, token, batch);
-                        let run_batch_ms = phase_started_at.elapsed();
-
-                        let has_suffixes = !scratch.targets.is_empty();
-                        let suffix_targets = scratch.targets.len();
-                        let phase_started_at = std::time::Instant::now();
-                        let suffix_nodes = if has_suffixes {
-                            hash_suffixes(&dfa, token, scratch)
-                        } else {
-                            0
-                        };
-                        let suffix_ms = phase_started_at.elapsed();
-
-                        let phase_started_at = std::time::Instant::now();
-                        let sig = finish_token_signature(&dfa, batch, scratch);
-                        let finalize_ms = phase_started_at.elapsed();
-
-                        (
-                            token_idx,
-                            sig,
-                            run_batch_ms,
-                            suffix_ms,
-                            finalize_ms,
-                            usize::from(has_suffixes),
-                            suffix_targets,
-                            suffix_nodes,
-                        )
-                    } else {
-                        (
-                            token_idx,
-                            token_signature(&dfa, token, batch, scratch),
-                            std::time::Duration::default(),
-                            std::time::Duration::default(),
-                            std::time::Duration::default(),
-                            0,
-                            0,
-                            0,
-                        )
-                    }
+                    (token_idx, token_signature(&dfa, token, batch, scratch))
                 },
             )
             .collect();
-        let sig_elapsed = phase_started_at.map(|started_at| started_at.elapsed()).unwrap_or_default();
-        total_signature_ms += sig_elapsed;
-        let mut batch_run_batch_ms = std::time::Duration::default();
-        let mut batch_suffix_ms = std::time::Duration::default();
-        let mut batch_finalize_ms = std::time::Duration::default();
-        let mut batch_suffix_tokens = 0usize;
-        let mut batch_suffix_targets = 0usize;
-        let mut batch_suffix_nodes = 0usize;
-        for (_, _, run_batch_ms, suffix_ms, finalize_ms, suffix_tokens, suffix_targets, suffix_nodes) in &active_sigs {
-            batch_run_batch_ms += *run_batch_ms;
-            batch_suffix_ms += *suffix_ms;
-            batch_finalize_ms += *finalize_ms;
-            batch_suffix_tokens += *suffix_tokens;
-            batch_suffix_targets += *suffix_targets;
-            batch_suffix_nodes += *suffix_nodes;
-            total_run_batch_ms += *run_batch_ms;
-            total_suffix_ms += *suffix_ms;
-            total_finalize_ms += *finalize_ms;
-            total_suffix_tokens += *suffix_tokens;
-            total_suffix_targets += *suffix_targets;
-            total_suffix_nodes += *suffix_nodes;
-        }
 
         // Refine partition: group tokens by (old_class, signature)
-        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
             HashMap::with_capacity(active_sigs.len() / 2);
-        for (ti, sig, _, _, _, _, _, _) in active_sigs {
+        for (ti, sig) in active_sigs {
             refinement
                 .entry((partition[ti], sig))
                 .or_default()
@@ -868,56 +788,13 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             }
         }
         active_indices = new_active;
-        let refine_elapsed = phase_started_at.map(|started_at| started_at.elapsed()).unwrap_or_default();
-        total_refine_ms += refine_elapsed;
-        batches_processed += 1;
-
-        if profile_enabled {
-            eprintln!(
-                "[glrmask/profile][vocab_eq] batch={} states={} active_before={} active_after={} sig_ms={:.3} run_batch_ms={:.3} suffix_ms={:.3} finalize_ms={:.3} suffix_tokens={} suffix_targets={} suffix_nodes={} refine_ms={:.3}",
-                batches_processed,
-                batch.len(),
-                active_before,
-                active_indices.len(),
-                sig_elapsed.as_secs_f64() * 1000.0,
-                batch_run_batch_ms.as_secs_f64() * 1000.0,
-                batch_suffix_ms.as_secs_f64() * 1000.0,
-                batch_finalize_ms.as_secs_f64() * 1000.0,
-                batch_suffix_tokens,
-                batch_suffix_targets,
-                batch_suffix_nodes,
-                refine_elapsed.as_secs_f64() * 1000.0,
-            );
-        }
     }
 
     let mut groups = vec![Vec::new(); next_class_id.max(1)];
     for (ti, &cid) in partition.iter().enumerate() {
         groups[cid].push(ti);
     }
-    let result: VocabEquivalenceResult = groups.into_iter().filter(|group| !group.is_empty()).collect();
-
-    if let Some(total_started_at) = total_started_at {
-        eprintln!(
-            "[glrmask/profile][vocab_eq] total_ms={:.3} build_dfa_ms={:.3} signature_ms={:.3} run_batch_ms={:.3} suffix_ms={:.3} finalize_ms={:.3} suffix_tokens={} suffix_targets={} suffix_nodes={} refine_ms={:.3} batches={} tokens={} states={} classes={}",
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-            build_dfa_ms.unwrap_or_default().as_secs_f64() * 1000.0,
-            total_signature_ms.as_secs_f64() * 1000.0,
-            total_run_batch_ms.as_secs_f64() * 1000.0,
-            total_suffix_ms.as_secs_f64() * 1000.0,
-            total_finalize_ms.as_secs_f64() * 1000.0,
-            total_suffix_tokens,
-            total_suffix_targets,
-            total_suffix_nodes,
-            total_refine_ms.as_secs_f64() * 1000.0,
-            batches_processed,
-            num_tokens,
-            num_states,
-            result.len(),
-        );
-    }
-
-    result
+    groups.into_iter().filter(|group| !group.is_empty()).collect()
 }
 
 #[cfg(test)]
@@ -925,7 +802,7 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::{bytes, choice};
     use crate::compiler::compile::build_tokenizer_from_exprs;
-    use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+    use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
     use std::collections::BTreeMap;
 
     #[test]
@@ -934,9 +811,9 @@ mod tests {
             choice(vec![bytes(b"a"), bytes(b"b")]),
             choice(vec![bytes(b"b"), bytes(b"c")]),
         ]);
-        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
         let tokens = vec![b"ab".to_vec(), b"ac".to_vec()];
-        let initial_states = vec![sep1_tok.initial_state_id()];
+        let initial_states = vec![tokenizer_view.initial_state_id()];
 
         let mut disallowed = BTreeMap::new();
         let mut bitset = BitSet::new(2);
@@ -944,7 +821,7 @@ mod tests {
         disallowed.insert(0u32, bitset);
 
         let classes = find_vocab_equivalence_classes_with_follow(
-            &sep1_tok,
+            &tokenizer_view,
             &tokens,
             &initial_states,
             &disallowed,
@@ -962,9 +839,9 @@ mod tests {
             bytes(b"a"),
             bytes(b"bc"),
         ]);
-        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
         let tokens = vec![b"a".to_vec(), b"ab".to_vec()];
-        let initial_states = vec![sep1_tok.initial_state_id()];
+        let initial_states = vec![tokenizer_view.initial_state_id()];
 
         let mut disallowed = BTreeMap::new();
         let mut bitset = BitSet::new(2);
@@ -972,7 +849,7 @@ mod tests {
         disallowed.insert(0u32, bitset);
 
         let classes = find_vocab_equivalence_classes_with_follow(
-            &sep1_tok,
+            &tokenizer_view,
             &tokens,
             &initial_states,
             &disallowed,

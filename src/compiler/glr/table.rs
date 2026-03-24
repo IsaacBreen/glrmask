@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rustc_hash::FxHashMap;
@@ -35,14 +30,8 @@ pub struct GLRTable {
 
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
-        let use_lr1 = std::env::var("GLRMASK_LR1").unwrap_or_else(|_| "1".to_string()) != "0";
-        let mut table = if use_lr1 {
-            let (item_sets, transitions) = build_lr1_item_sets(grammar);
-            build_ielr_table(grammar, &item_sets, &transitions)
-        } else {
-            let (item_sets, transitions) = build_lr0_item_sets(grammar);
-            build_slr1_table(grammar, &item_sets, &transitions)
-        };
+        let (item_sets, transitions) = build_lr1_item_sets(grammar);
+        let mut table = build_ielr_table(grammar, &item_sets, &transitions);
         table.merge_identical_rows();
         table
     }
@@ -189,6 +178,7 @@ fn goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<It
     closure(&kernel, rules)
 }
 
+#[allow(dead_code)]
 fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
     let rules = &grammar.rules;
 
@@ -277,6 +267,7 @@ impl PendingAction {
     }
 }
 
+#[allow(dead_code)]
 fn build_slr1_table(
     grammar: &AnalyzedGrammar,
     item_sets: &[BTreeSet<Item>],

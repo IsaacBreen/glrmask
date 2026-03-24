@@ -20,15 +20,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::BuildHasher;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use ahash::{AHasher, RandomState};
 use once_cell::sync::Lazy;
 use std::hash::Hasher;
 
-use super::compat::{FlatDfa, Sep1Tokenizer};
+use super::compat::{FlatDfa, TokenizerView};
 use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::dfa::{Label, DFA};
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
@@ -37,6 +35,7 @@ use crate::automata::unweighted_u32::subtract::subtract;
 use crate::ds::bitset::BitSet;
 
 use super::state::fast::StateEquivalenceResult;
+use super::disallowed_follows::{build_disallowed_follow_dfa, normalize_disallowed_follows};
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
 // ---- Deterministic hashing ----
@@ -54,19 +53,6 @@ static HASH_STATE: Lazy<RandomState> =
 #[inline]
 fn new_hasher() -> AHasher {
     HASH_STATE.build_hasher()
-}
-
-const PROGRESS_ENVS: &[&str] = &[
-    "GLRMASK_REFERENCE_EQUIV_PROGRESS",
-    "REFERENCE_EQUIV_PROGRESS",
-];
-const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
-
-fn env_flag_enabled_any(names: &[&str]) -> bool {
-    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
-        let t = value.trim();
-            !t.is_empty() && t != "0" && !t.eq_ignore_ascii_case("false")
-    })
 }
 
 // ---- Label encoding ----
@@ -93,25 +79,6 @@ struct PrecomputedData {
     disallowed_detector: Option<DFA>,
 }
 
-pub(crate) fn normalize_disallowed_follows(
-    num_groups: usize,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> Vec<BitSet> {
-    let mut normalized = vec![BitSet::new(num_groups); num_groups];
-    for gid in 0..num_groups {
-        if let Some(bits) = disallowed_follows.get(&(gid as u32)) {
-            let mut out = BitSet::new(num_groups);
-            for bit in bits.iter() {
-                if bit < num_groups {
-                    out.set(bit);
-                }
-            }
-            normalized[gid] = out;
-        }
-    }
-    normalized
-}
-
 fn precompute(dfa: &FlatDfa, disallowed_follows: &BTreeMap<u32, BitSet>) -> PrecomputedData {
     let num_groups = dfa
         .states
@@ -132,43 +99,6 @@ fn precompute(dfa: &FlatDfa, disallowed_follows: &BTreeMap<u32, BitSet>) -> Prec
         num_groups,
         disallowed_detector,
     }
-}
-
-pub(crate) fn build_disallowed_follow_dfa(disallowed_follows: &[BitSet]) -> DFA {
-    let num_groups = disallowed_follows.len();
-    if num_groups == 0 {
-        return DFA::new();
-    }
-
-    let mut dfa = DFA::new();
-    let start = dfa.start_state;
-    let accept = dfa.add_state();
-    dfa.set_accepting(accept, true);
-
-    let mut previous_terminal_states = Vec::with_capacity(num_groups);
-    for _ in 0..num_groups {
-        previous_terminal_states.push(dfa.add_state());
-    }
-
-    for prev_gid in 0..num_groups {
-        let prev_state = previous_terminal_states[prev_gid];
-        dfa.add_transition(start, terminal_label(prev_gid), prev_state);
-
-        for next_gid in 0..num_groups {
-            let target = if disallowed_follows[prev_gid].contains(next_gid) {
-                accept
-            } else {
-                previous_terminal_states[next_gid]
-            };
-            dfa.add_transition(prev_state, terminal_label(next_gid), target);
-        }
-    }
-
-    for gid in 0..num_groups {
-        dfa.add_transition(accept, terminal_label(gid), accept);
-    }
-
-    dfa
 }
 
 // ---- Trellis DAG construction ----
@@ -484,29 +414,11 @@ pub struct ReferenceEquivalenceResult {
 }
 
 pub fn find_equivalence_classes<S: AsRef<[u8]> + Sync>(
-    regex: &Sep1Tokenizer,
+    regex: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<usize>,
-) -> ReferenceEquivalenceResult {
-    find_equivalence_classes_with_progress(
-        regex,
-        strings,
-        initial_states,
-        disallowed_follows,
-        ignore_terminal,
-        env_flag_enabled_any(PROGRESS_ENVS),
-    )
-}
-
-pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
-    regex: &Sep1Tokenizer,
-    strings: &[S],
-    initial_states: &[usize],
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-    ignore_terminal: Option<usize>,
-    show_progress: bool,
 ) -> ReferenceEquivalenceResult {
     let dfa = regex.dfa();
     let pre = precompute(dfa, disallowed_follows);
@@ -522,36 +434,10 @@ pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
         return ReferenceEquivalenceResult { vocab_classes, state_classes };
     }
 
-    let started = Instant::now();
     let hash_memo = Arc::new(Mutex::new(HashMap::<u64, u64>::new()));
 
     // Compute per-(token, state) hash matrix in parallel.
     // Layout: hashes[ti * ns + si] = hash for token ti at state initial_states[si]
-    let counter = Arc::new(AtomicUsize::new(0));
-
-    let progress_thread = if show_progress {
-        let counter = counter.clone();
-        let nt = nt;
-        let started = started;
-        Some(std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(PROGRESS_INTERVAL);
-                let done = counter.load(Ordering::Relaxed);
-                eprintln!(
-                    "[reference equiv] processed {}/{} tokens in {:.1}s",
-                    done,
-                    nt,
-                    started.elapsed().as_secs_f64(),
-                );
-                if done >= nt {
-                    break;
-                }
-            }
-        }))
-    } else {
-        None
-    };
-
     let hashes: Vec<u64> = {
         use rayon::prelude::*;
         let hash_memo = hash_memo.clone();
@@ -574,26 +460,11 @@ pub(super) fn find_equivalence_classes_with_progress<S: AsRef<[u8]> + Sync>(
                         )
                     })
                     .collect();
-                counter.fetch_add(1, Ordering::Relaxed);
                 row
             })
             .collect();
         rows.into_iter().flatten().collect()
     };
-
-    if let Some(t) = progress_thread {
-        counter.store(nt, Ordering::Relaxed);
-        let _ = t.join();
-    }
-
-    if show_progress {
-        eprintln!(
-            "[reference equiv] finished {}/{} tokens in {:.1}s",
-            nt,
-            nt,
-            started.elapsed().as_secs_f64(),
-        );
-    }
 
     // --- Vocab equivalence: combine per-state hashes for each token ---
     let mut vocab_groups: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
@@ -623,15 +494,15 @@ mod tests {
     use crate::automata::lexer::ast::{bytes, class, seq, star};
     use crate::compiler::compile::{build_tokenizer_from_exprs, compute_disallowed_follows};
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::compiler::stages::equivalence_analysis::compat::{FlatDfaState, Sep1Tokenizer};
+    use crate::compiler::stages::equivalence_analysis::compat::{FlatDfaState, TokenizerView};
     use crate::ds::u8set::U8Set;
 
     #[test]
     fn test_reference_simple_ab_with_disallowed_follow() {
         let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"b")]);
-        let sep1_tok = Sep1Tokenizer::new(&tokenizer);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
         let tokens = vec![b"a".to_vec(), b"b".to_vec()];
-        let initial_states = vec![sep1_tok.initial_state_id()];
+        let initial_states = vec![tokenizer_view.initial_state_id()];
 
         let mut disallowed = BTreeMap::new();
         let mut after_a = BitSet::new(2);
@@ -639,7 +510,7 @@ mod tests {
         disallowed.insert(0u32, after_a);
 
         let result = find_equivalence_classes(
-            &sep1_tok,
+            &tokenizer_view,
             &tokens,
             &initial_states,
             &disallowed,
@@ -649,17 +520,17 @@ mod tests {
         assert_eq!(result.vocab_classes, BTreeSet::from([vec![0], vec![1]]));
         assert_eq!(
             result.state_classes,
-            BTreeSet::from([BTreeSet::from([sep1_tok.initial_state_id()])]),
+            BTreeSet::from([BTreeSet::from([tokenizer_view.initial_state_id()])]),
         );
     }
 
-    fn build_live_minimal_tokenizer_fixture() -> (Sep1Tokenizer, BTreeMap<u32, BitSet>, usize, Vec<Vec<u8>>) {
+    fn build_live_minimal_tokenizer_fixture() -> (TokenizerView, BTreeMap<u32, BitSet>, usize, Vec<Vec<u8>>) {
         let b_or_c = class(U8Set::from_bytes(b"bc"));
         let tokenizer = build_tokenizer_from_exprs(&[
             star(b_or_c.clone()),
             seq(vec![star(b_or_c), bytes(b"b")]),
         ]);
-        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
 
         let mut disallowed_follows = BTreeMap::new();
         let mut all_groups = BitSet::new(2);
@@ -669,22 +540,22 @@ mod tests {
         disallowed_follows.insert(1, all_groups);
 
         let tokens = vec![b"ba".to_vec(), b"bca".to_vec()];
-        let initial_state = sep1.initial_state_id();
-        (sep1, disallowed_follows, initial_state, tokens)
+        let initial_state = tokenizer_view.initial_state_id();
+        (tokenizer_view, disallowed_follows, initial_state, tokens)
     }
 
     #[test]
     fn test_live_minimal_tokenizer_fast_reference_agree() {
-        let (sep1, disallowed_follows, initial_state, tokens) =
+        let (tokenizer_view, disallowed_follows, initial_state, tokens) =
             build_live_minimal_tokenizer_fixture();
 
         let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
-            &sep1,
+            &tokenizer_view,
             &tokens,
             &[initial_state],
             &disallowed_follows,
         );
-        let reference = find_equivalence_classes(&sep1, &tokens, &[initial_state], &disallowed_follows, None);
+        let reference = find_equivalence_classes(&tokenizer_view, &tokens, &[initial_state], &disallowed_follows, None);
 
         assert_eq!(fast_classes, BTreeSet::from([vec![0, 1]]));
         assert_eq!(reference.vocab_classes, fast_classes);
@@ -692,9 +563,9 @@ mod tests {
 
     #[test]
     fn test_live_minimal_tokenizer_reference_hashes_match() {
-        let (sep1, disallowed_follows, initial_state, tokens) =
+        let (tokenizer_view, disallowed_follows, initial_state, tokens) =
             build_live_minimal_tokenizer_fixture();
-        let dfa = sep1.dfa();
+        let dfa = tokenizer_view.dfa();
         let pre = precompute(&dfa, &disallowed_follows);
         let hash_memo = Mutex::new(HashMap::new());
 
@@ -746,7 +617,7 @@ mod tests {
             bytes(b"c"),             // group 2
         ];
         let tokenizer = build_tokenizer_from_exprs(&exprs);
-        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
 
         let mut disallowed = BTreeMap::new();
         let mut bits = BitSet::new(3);
@@ -754,12 +625,12 @@ mod tests {
         disallowed.insert(2u32, bits); // after group 2, group 1 forbidden
 
         let tokens: Vec<Vec<u8>> = vec![b"ca".to_vec(), b"cba".to_vec()];
-        let states = vec![sep1.initial_state_id()];
+        let states = vec![tokenizer_view.initial_state_id()];
 
         let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
-            &sep1, &tokens, &states, &disallowed,
+            &tokenizer_view, &tokens, &states, &disallowed,
         );
-        let reference = find_equivalence_classes(&sep1, &tokens, &states, &disallowed, None);
+        let reference = find_equivalence_classes(&tokenizer_view, &tokens, &states, &disallowed, None);
 
         // Both should split: "ca" has valid segmentation (group2→group0),
         // while "cba" has none (only path goes through forbidden group1).
@@ -887,108 +758,6 @@ mod tests {
         let token_space_a: &[u8] = &[32, 97];  // " a"
         let token_space_1: &[u8] = &[32, 49];  // " 1"
 
-        // Debug: process each token step by step and print intermediate DFAs.
-        for (label, token) in [("' a'", token_space_a), ("' 1'", token_space_1)] {
-            eprintln!("\n============================================================");
-            eprintln!("=== Token {label} (bytes {:?}) from state 3 ===", token);
-            eprintln!("============================================================");
-
-            let mut tmp_mp = vec![NONE; pre.num_groups];
-
-            // 1. Build trellis DAG
-            let dag = build_trellis_dag(&dfa, pre.num_groups, token, 3, &mut tmp_mp);
-            eprintln!("\n--- Trellis DAG ---");
-            for (&pos, node) in &dag {
-                eprintln!("  pos={pos}: end_state={}{}, edges={:?}",
-                    if node.end_state == STATE_NONE { "NONE".to_string() } else { node.end_state.to_string() },
-                    if node.end_state != STATE_NONE {
-                        format!(" (pfg={:?})", dfa.states[node.end_state].possible_future_group_ids)
-                    } else { String::new() },
-                    node.edges);
-            }
-
-            // 2. Build NFA from trellis
-            let nfa = build_nfa_from_trellis(&dfa, &dag, pre.num_groups, None, token.len());
-            eprintln!("\n--- NFA ({} states, starts={:?}) ---", nfa.states.len(), nfa.start_states);
-            for (i, s) in nfa.states.iter().enumerate() {
-                let acc = if s.is_accepting { " [ACCEPT]" } else { "" };
-                if !s.transitions.is_empty() || !s.epsilons.is_empty() || s.is_accepting {
-                    eprintln!("  state {i}{acc}:");
-                    for (&lbl, targets) in &s.transitions {
-                        let label_str = if lbl < 0 {
-                            format!("completion({})", -(lbl + 1))
-                        } else {
-                            format!("edge(gid={})", lbl)
-                        };
-                        eprintln!("    {label_str} → {:?}", targets);
-                    }
-                    for &eps in &s.epsilons {
-                        eprintln!("    ε → {eps}");
-                    }
-                }
-            }
-
-            // 3. Determinize
-            let det_dfa = determinize(&nfa);
-            eprintln!("\n--- Determinized DFA ({} states, start={}) ---", det_dfa.states.len(), det_dfa.start_state);
-            for (i, s) in det_dfa.states.iter().enumerate() {
-                let acc = if s.is_accepting { " [ACCEPT]" } else { "" };
-                if !s.transitions.is_empty() || s.is_accepting {
-                    eprintln!("  state {i}{acc}:");
-                    for (&lbl, &target) in &s.transitions {
-                        let label_str = if lbl < 0 {
-                            format!("completion({})", -(lbl + 1))
-                        } else {
-                            format!("edge(gid={})", lbl)
-                        };
-                        eprintln!("    {label_str} → {target}");
-                    }
-                }
-            }
-
-            // 4. Minimize (acyclic)
-            let min_dfa = minimize_acyclic(&det_dfa);
-            eprintln!("\n--- Minimized DFA ({} states, start={}) ---", min_dfa.states.len(), min_dfa.start_state);
-            for (i, s) in min_dfa.states.iter().enumerate() {
-                let acc = if s.is_accepting { " [ACCEPT]" } else { "" };
-                if !s.transitions.is_empty() || s.is_accepting {
-                    eprintln!("  state {i}{acc}:");
-                    for (&lbl, &target) in &s.transitions {
-                        let label_str = if lbl < 0 {
-                            format!("completion({})", -(lbl + 1))
-                        } else {
-                            format!("edge(gid={})", lbl)
-                        };
-                        eprintln!("    {label_str} → {target}");
-                    }
-                }
-            }
-
-            // 5. Subtract disallowed follows + minimize
-            let pruned_dfa = match &pre.disallowed_detector {
-                Some(dd) => minimize_acyclic(&subtract(&min_dfa, dd)),
-                None => min_dfa.clone(),
-            };
-            eprintln!("\n--- Final DFA after subtract+minimize ({} states, start={}) ---", pruned_dfa.states.len(), pruned_dfa.start_state);
-            for (i, s) in pruned_dfa.states.iter().enumerate() {
-                let acc = if s.is_accepting { " [ACCEPT]" } else { "" };
-                if !s.transitions.is_empty() || s.is_accepting {
-                    eprintln!("  state {i}{acc}:");
-                    for (&lbl, &target) in &s.transitions {
-                        let label_str = if lbl < 0 {
-                            format!("completion({})", -(lbl + 1))
-                        } else {
-                            format!("edge(gid={})", lbl)
-                        };
-                        eprintln!("    {label_str} → {target}");
-                    }
-                }
-            }
-
-            let final_hash = canonical_hash(&pruned_dfa);
-            eprintln!("\n>>> Hash for {label}: {final_hash}");
-        }
-
         // Now run the actual assertions.
         let hash_a = process_token_for_state(
             &dfa, &pre, token_space_a, 3, None, &hash_memo, &mut Vec::new(),
@@ -1067,8 +836,8 @@ mod tests {
         let (normalized, tokenizer) = prepare_grammar_for_compile(&grammar);
         let analyzed = AnalyzedGrammar::from_grammar_def(&normalized);
         let disallowed_follows = compute_disallowed_follows(&analyzed);
-        let sep1 = Sep1Tokenizer::new(&tokenizer);
-        let dfa = sep1.dfa();
+        let tokenizer_view = TokenizerView::new(&tokenizer);
+        let dfa = tokenizer_view.dfa();
         let pre = precompute(dfa, &disallowed_follows);
 
         let token_space_a: &[u8] = &[32, 97]; // " a"
@@ -1081,18 +850,17 @@ mod tests {
             let hash_a = canonical_hash(&final_a);
             let hash_1 = canonical_hash(&final_1);
 
-            if hash_a != hash_1 {
-                eprintln!(
-                    "Reference analysis: tokens ' a' and ' 1' differ from state {distinguishing_state}\n\
-                     hash_a={hash_a}, hash_1={hash_1}\n\
-                     \n\
-                     Final DFA for ' a':\n{}\
-                     Final DFA for ' 1':\n{}",
-                    pretty_dfa(&normalized, &final_a),
-                    pretty_dfa(&normalized, &final_1),
-                );
-                panic!();
-            }
+            assert_eq!(
+                hash_a,
+                hash_1,
+                "Reference analysis: tokens ' a' and ' 1' differ from state {distinguishing_state}\n\
+                 hash_a={hash_a}, hash_1={hash_1}\n\
+                 \n\
+                 Final DFA for ' a':\n{}\
+                 Final DFA for ' 1':\n{}",
+                pretty_dfa(&normalized, &final_a),
+                pretty_dfa(&normalized, &final_1),
+            );
         }
     }
 
@@ -1115,38 +883,8 @@ mod tests {
     /// analysis incorrectly merges them.
     #[test]
     fn test_minimal_equiv_mismatch_o56012() {
-        use crate::automata::unweighted_u32::dfa::DFA;
-        use crate::automata::unweighted_u32::determinize::determinize;
-        use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
-        use crate::automata::unweighted_u32::subtract::subtract;
-
-        let group_names: &[&str] = &["'{' (group 0)", "'}' (group 1)"];
-
-        fn format_label(group_names: &[&str], label: Label) -> String {
-            group_names.get(label as usize)
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| format!("group {label}"))
-        }
-
-        fn pretty_dfa(group_names: &[&str], dfa: &DFA) -> String {
-            use std::fmt::Write;
-            let mut out = String::new();
-            let _ = writeln!(out, "  {} states, start={}", dfa.states.len(), dfa.start_state);
-            for (i, state) in dfa.states.iter().enumerate() {
-                let accept = if state.is_accepting { " [accept]" } else { "" };
-                let trans: Vec<String> = state.transitions.iter()
-                    .map(|(&l, &t)| format!("{} -> {}", format_label(group_names, l), t))
-                    .collect();
-                let trans_str = if trans.is_empty() { String::new() } else {
-                    format!(" {{ {} }}", trans.join(", "))
-                };
-                let _ = writeln!(out, "  state {i}{accept}{trans_str}");
-            }
-            out
-        }
-
         let tokenizer = build_tokenizer_from_exprs(&[bytes(b"{"), bytes(b"}")]);
-        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
 
         // After group 0 (`{`): group 0 disallowed
         let mut disallowed = BTreeMap::new();
@@ -1160,86 +898,18 @@ mod tests {
         disallowed.insert(1u32, after_1);
 
         let tokens: Vec<Vec<u8>> = vec![b"}:".to_vec(), b"}}}".to_vec()];
-        let states = vec![sep1.initial_state_id()];
-
-        let dfa = sep1.dfa();
-        let pre = precompute(dfa, &disallowed);
-
-        // Print tokenizer DFA
-        eprintln!("Tokenizer DFA: {} states, start={}", dfa.num_states(), dfa.start_state);
-        for (i, state) in dfa.states.iter().enumerate() {
-            let trans: Vec<String> = state.transitions.iter().enumerate()
-                .filter(|&(_, &t)| t != u32::MAX)
-                .map(|(b, &t)| format!("0x{b:02x}({}) -> {t}", b as u8 as char))
-                .collect();
-            eprintln!("  state {i}: finalizers={:?} pfg={:?} trans=[{}]",
-                state.finalizers, state.possible_future_group_ids, trans.join(", "));
-        }
-
-        if let Some(dd) = &pre.disallowed_detector {
-            eprintln!("Disallowed detector DFA:\n{}", pretty_dfa(group_names, dd));
-        }
-
-        // Compute and print intermediate DFAs for both tokens
-        for (i, token) in tokens.iter().enumerate() {
-            let mut tmp_mp = Vec::new();
-            let dag = build_trellis_dag(dfa, pre.num_groups, token, states[0], &mut tmp_mp);
-            eprintln!("--- Token {i} {:?} ---", String::from_utf8_lossy(token));
-            eprintln!("Trellis DAG:");
-            for (&pos, node) in &dag {
-                let edges: Vec<String> = node.edges.iter()
-                    .map(|(gid, target)| format!("group {} -> pos {}", gid, target))
-                    .collect();
-                eprintln!("  pos {pos}: end_state={}, edges=[{}]",
-                    if node.end_state == STATE_NONE { "NONE".to_string() } else { node.end_state.to_string() },
-                    edges.join(", "));
-            }
-
-            let nfa = build_nfa_from_trellis(dfa, &dag, pre.num_groups, None, token.len());
-            eprintln!("NFA: {} states, starts={:?}", nfa.states.len(), nfa.start_states);
-            for (si, s) in nfa.states.iter().enumerate() {
-                let eps: Vec<String> = s.epsilons.iter().map(|e| e.to_string()).collect();
-                let trans: Vec<String> = s.transitions.iter()
-                    .map(|(label, targets)| {
-                        let label_str = format_label(group_names, *label);
-                        let tgt: Vec<String> = targets.iter().map(|t| t.to_string()).collect();
-                        format!("{label_str} -> [{}]", tgt.join(", "))
-                    })
-                    .collect();
-                eprintln!("  nfa state {si}: accept={} eps=[{}] trans=[{}]",
-                    s.is_accepting, eps.join(", "), trans.join(", "));
-            }
-
-            let det = determinize(&nfa);
-            eprintln!("Det DFA:\n{}", pretty_dfa(group_names, &det));
-            let min = minimize_acyclic(&det);
-            eprintln!("Min DFA:\n{}", pretty_dfa(group_names, &min));
-            let final_dfa = match &pre.disallowed_detector {
-                Some(dd) => {
-                    let sub = subtract(&min, dd);
-                    eprintln!("Subtracted DFA:\n{}", pretty_dfa(group_names, &sub));
-                    let result = minimize_acyclic(&sub);
-                    eprintln!("Final (minimized subtracted) DFA:\n{}", pretty_dfa(group_names, &result));
-                    result
-                }
-                None => min,
-            };
-            let hash = canonical_hash(&final_dfa);
-            eprintln!("Hash: {hash}\n");
-        }
+        let states = vec![tokenizer_view.initial_state_id()];
 
         let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
-            &sep1, &tokens, &states, &disallowed,
+            &tokenizer_view, &tokens, &states, &disallowed,
         );
-        let reference = find_equivalence_classes(&sep1, &tokens, &states, &disallowed, None);
-
-        eprintln!("Fast classes: {:?}", fast);
-        eprintln!("Reference classes: {:?}", reference.vocab_classes);
+        let reference = find_equivalence_classes(&tokenizer_view, &tokens, &states, &disallowed, None);
 
         // After fixing disallowed-follow subtraction, both tokens produce
         // empty DFAs (no valid segmentation), so both analyses should merge them.
         assert_eq!(
-            reference.vocab_classes, fast,
+            reference.vocab_classes,
+            fast,
             "reference and fast should agree (both merge)"
         );
     }

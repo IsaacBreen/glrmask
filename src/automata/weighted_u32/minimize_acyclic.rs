@@ -1,6 +1,6 @@
 //! Graph-coloring-based acyclic DWA minimization.
 //!
-//! Ported from sep1's `dwa_i32/minimization/dwa_acyclic`.
+//! Acyclic minimization for weighted DWAs.
 //!
 //! The algorithm works in these phases:
 //! 1. **Weight pushing** — intersect each transition weight with the backward
@@ -11,8 +11,6 @@
 //!    height. At each height, build an incompatibility graph and color it. States
 //!    with the same color get merged ("diamond" optimization).
 //! 4. **Reconstruction** — build the minimized DWA from merged state builders.
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;

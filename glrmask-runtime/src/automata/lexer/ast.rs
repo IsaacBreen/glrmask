@@ -97,6 +97,6 @@ impl From<&str> for Expr {
 
 #[cfg(test)]
 mod tests {
-    // NOTE: the old AST tests are intentionally omitted until the sep1-style
+    // NOTE: the old AST tests are intentionally omitted until the planned
     // lexer rewrite lands.
 }

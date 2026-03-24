@@ -194,5 +194,5 @@ pub struct TokenizerResult {
 #[cfg(test)]
 mod tests {
     // NOTE: the old tokenizer tests are intentionally omitted until the
-    // sep1-style lexer automata rewrite lands.
+    // planned lexer automata rewrite lands.
 }

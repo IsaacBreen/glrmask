@@ -1,54 +1,9 @@
-//! Ported from sep1: `grammars2024/src/glr/tests.rs`
+//! Additional GLR parser regression tests adapted from earlier internal test
+//! suites.
 //!
-//! Source had 35 tests. 8 were already ported (as `test_ported_glr_*` in parser.rs).
-//! 8 more involve `analyze::validate` (absent in glrmask). 4 need
-//! `remove_productions_with_undefined_nonterminals` (absent). 1 needs
-//! `filter_productions_by_reachability` (absent). 4 are `#[ignore]` (need stats/explain APIs).
-//! 3 are duplicates of already-ported grammar patterns (expression_grammar, unit_production).
-//!
-//! Newly ported: 7 tests below.
-//!
-//! Skipped tests and reasons:
-//!   Already ported (8):
-//!     - test_ambiguous_dangling_else → test_ported_glr_ambiguous_dangling_else
-//!     - test_reduce_reduce_conflict → test_ported_glr_reduce_reduce_conflict
-//!     - test_epsilon_rules_ambiguity → test_ported_glr_epsilon_ambiguity
-//!     - test_highly_ambiguous_potentially_slow → test_ported_glr_highly_ambiguous
-//!     - test_right_recursive_grammar_parse → test_ported_glr_right_recursive
-//!     - test_nullable_nonterminal_before_terminal → test_ported_glr_nullable_before_terminal
-//!     - test_expression_parse_table_generation_and_parse → test_ported_glr_expression_grammar
-//!     - test_hidden_left_recursion → test_ported_glr_left_recursive (conceptual match;
-//!       sep1 only tests validate() which is absent; the parse test was commented out)
-//!
-//!   Needs analyze::validate (8):
-//!     - validation_fails_direct_length_1_recursion
-//!     - validation_fails_indirect_length_1_recursion
-//!     - validation_fails_direct_length_1_recursion_nullable_prefix
-//!     - validation_fails_indirect_length_1_recursion_nullable_prefix
-//!     - validation_passes_non_unit_recursion
-//!     - validation_fails_left_nullable_left_recursion
-//!     - validation_fails_missing_nonterminal
-//!     - validation_passes_complex_unit_rules_no_cycle
-//!
-//!   Needs remove_productions_with_undefined_nonterminals (4):
-//!     - test_remove_undefined_simple
-//!     - test_remove_undefined_iterative
-//!     - test_remove_undefined_no_change
-//!     - test_remove_undefined_empty_input
-//!
-//!   Needs filter_productions_by_reachability (1):
-//!     - test_filter_productions_selectivity
-//!
-//!   #[ignore] in source / needs absent APIs (4):
-//!     - test_resolve_right_recursion (#[ignore], needs analyze::resolve_direct_right_recursion)
-//!     - test_explain_stack (#[ignore], needs parser.explain_stack)
-//!     - test_parser_stats_conflicts (#[ignore], needs stats::get_stats)
-//!     - test_lr1_not_lalr1_grammar (#[ignore], needs stats::get_stats)
-//!
-//!   Duplicate grammar patterns already covered (3):
-//!     - test_standard_expression_grammar_parse (same grammar as test_ported_glr_expression_grammar)
-//!     - test_unit_production_elimination (same grammar; only unique part is stats, absent)
-//!     - validation_passes_standard_grammars (not a test, no #[test] attribute)
+//! This file keeps the cases that map cleanly onto the current parser API.
+//! Historical cases that depended on removed validation, reachability, or
+//! stats helpers are intentionally omitted.
 
 use super::analysis::AnalyzedGrammar;
 use super::parser::{stacks_finished, GLRParser};
@@ -112,13 +67,12 @@ fn can_continue(parser: &GLRParser, input: &[TerminalID]) -> bool {
     stacks_finished(&current.table, &current.stack) || !current.valid_terminals().is_empty()
 }
 
-// ── ported tests ─────────────────────────────────────────────────────────────
+// ── regression tests ─────────────────────────────────────────────────────────
 
-/// Ported from `test_repetition_no_eof_1`.
+/// Repetition without EOF, left-recursive form.
 ///
 /// Grammar: S -> S a | a  (left-recursive, single terminal 'a')
-/// Tests parsing various inputs without EOF. In sep1 the test checks `is_ok()`
-/// (can-continue semantics); we test both acceptance and can-continue.
+/// Tests parsing various inputs without EOF using can-continue semantics.
 #[test]
 fn test_repetition_no_eof_1() {
     // S -> S a | a
@@ -163,7 +117,7 @@ fn test_repetition_no_eof_1() {
     );
 }
 
-/// Ported from `test_repetition_no_eof_2`.
+/// Repetition without EOF, right-recursive form.
 ///
 /// Grammar: S -> S a | a, Other -> b
 /// Tests that invalid token 'b' causes parse failure for the S language.
@@ -208,7 +162,7 @@ fn test_repetition_no_eof_2() {
     assert!(accepts(&parser, &[0]), "\"a\" should be accepted");
 }
 
-/// Ported from `test_super_simple_grammar`.
+/// Minimal single-production grammar.
 ///
 /// Grammar: S -> a eof
 /// Tests the simplest possible grammar with explicit EOF terminal.
@@ -249,7 +203,7 @@ fn test_super_simple_grammar() {
     assert!(!accepts(&parser, &[]), "empty should not be accepted");
 }
 
-/// Ported from `test_simple_parse_table_generation_and_parse`.
+/// Simple parse-table generation and parse.
 ///
 /// Grammar: S -> A $, A -> A a | b
 /// This grammar defines language b a* $ — any number of 'a's after a 'b', terminated by '$'.
@@ -311,7 +265,7 @@ fn test_simple_parse_table_generation_and_parse() {
     );
 }
 
-/// Ported from `test_ambiguous_arithmetic`.
+/// Ambiguous arithmetic grammar.
 ///
 /// Grammar: E -> E + E | E * E | id
 /// This is ambiguous: id + id * id has two parses.
@@ -392,7 +346,7 @@ fn test_ambiguous_arithmetic() {
     assert_eq!(r1, r2, "parser should be deterministic for same input");
 }
 
-/// Ported from `test_hidden_right_recursion`.
+/// Hidden right-recursion grammar.
 ///
 /// Grammar: S -> a S B | b, B -> epsilon
 /// S -> a S B is effectively S -> a S (because B is nullable).
@@ -461,7 +415,7 @@ fn test_hidden_right_recursion() {
     );
 }
 
-/// Ported from `test_single_terminal_production`.
+/// Single-terminal production grammar.
 ///
 /// Grammar: S -> x
 /// The simplest possible grammar — a single terminal production.

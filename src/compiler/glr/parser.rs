@@ -314,7 +314,7 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         }
     };
 
-    if let Some(state) = stack.single_exclusive_top_value() {
+    if let Some(state) = current.single_top_value() {
         handle_shift_state(state);
     } else {
         for state in current.peek_values() {
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ported_glr_left_recursive() {
+    fn test_glr_left_recursive() {
         
         let gdef = make_grammar(
             vec![
@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ported_glr_right_recursive() {
+    fn test_glr_right_recursive() {
         
         let gdef = make_grammar(
             vec![
@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ported_glr_expression_grammar() {
+    fn test_glr_expression_grammar() {
         
         let gdef = make_grammar(
             vec![
@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ported_glr_reduce_reduce_conflict() {
+    fn test_glr_reduce_reduce_conflict() {
         
         let gdef = make_grammar(
             vec![
@@ -631,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ported_glr_epsilon_ambiguity() {
+    fn test_glr_epsilon_ambiguity() {
         
         let gdef = make_grammar(
             vec![
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ported_glr_highly_ambiguous() {
+    fn test_glr_highly_ambiguous() {
         
         let gdef = make_grammar(
             vec![
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ported_glr_nullable_before_terminal() {
+    fn test_glr_nullable_before_terminal() {
         
         let gdef = make_grammar(
             vec![
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ported_glr_ambiguous_dangling_else() {
+    fn test_glr_ambiguous_dangling_else() {
         
         let gdef = make_grammar(
             vec![
@@ -713,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn test_close_token_wrapper_family_causes_reduction_spike() {
+    fn test_close_token_wrapper_family_remains_parseable() {
         const OPEN: u32 = 0;
         const NUM: u32 = 1;
         const COMMA: u32 = 2;
@@ -786,55 +786,12 @@ mod tests {
             current = next;
         }
 
-        let mut metrics = AdvanceStacksDebugMetrics::default();
-        let advanced =
-            advance_stacks_with_metrics(&current.table, &current.stack, CLOSE, Some(&mut metrics));
-        let fast_advanced = advance_stacks(&current.table, &current.stack, CLOSE);
+        let advanced = advance_stacks(&current.table, &current.stack, CLOSE);
 
         assert!(!advanced.is_empty(), "close token should remain parseable");
-        assert_eq!(
-            fast_advanced.to_stacks().into_iter().collect::<BTreeSet<_>>(),
-            advanced.to_stacks().into_iter().collect::<BTreeSet<_>>(),
-            "metrics and non-metrics advance paths should agree"
-        );
         assert!(
-            metrics.reductions_emitted >= WRAPPER_COUNT * 2,
-            "expected wrapper family to trigger many reductions, got {}",
-            metrics.reductions_emitted
-        );
-        assert!(
-            metrics
-                .reduce_rhs_len_emitted_counts
-                .get(&1)
-                .copied()
-                .unwrap_or(0)
-                >= WRAPPER_COUNT * 2,
-            "expected unary wrapper reductions to dominate: {:?}",
-            metrics.reduce_rhs_len_emitted_counts
-        );
-        assert!(
-            metrics
-                .reduce_rhs_len_emitted_counts
-                .get(&2)
-                .copied()
-                .unwrap_or(0)
-                >= 1,
-            "expected the pair-packing rule to participate: {:?}",
-            metrics.reduce_rhs_len_emitted_counts
-        );
-
-        let wrapper_reductions: usize = (0..WRAPPER_COUNT)
-            .map(|i| {
-                metrics
-                    .reduce_lhs_emitted_counts
-                    .get(&(FIRST_WRAP + i as u32))
-                    .copied()
-                    .unwrap_or(0)
-            })
-            .sum();
-        assert!(
-            wrapper_reductions >= WRAPPER_COUNT,
-            "expected wrapper nonterminals to account for many reductions, got {wrapper_reductions}"
+            stacks_finished(&current.table, &advanced),
+            "close token should reduce the wrapper family to a finished parse"
         );
     }
 }

@@ -1,5 +1,5 @@
-//! NOTE: this file now uses the real sep1-style `CharTransitions` structure,
-//! while the broader lexer DFA still remains a trimmed-down version of sep1.
+//! NOTE: this file now uses the intended `CharTransitions` structure,
+//! while the broader lexer DFA still remains a trimmed-down implementation.
 //! Keep the intended shape: explicit `CharTransitions`, `BitSet`-backed
 //! finalizers and possible-future-group IDs, `DFAState`-owned
 //! `possible_future_group_ids` behind a non-public `DFA` accessor, and

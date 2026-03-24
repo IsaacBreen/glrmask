@@ -626,13 +626,13 @@ fn test_plan_api_force_nondeterministic() {
 }
 
 // ===========================================================================
-// Ported tests from grammars2024/src/test_constraint_basic.rs
+// Constraint regression tests
 // ===========================================================================
 
 /// Trivial 2-token grammar: s ::= A EOF; A ::= 'a'; EOF ::= '$'.
 /// Initial mask = {0("a")}; after commit "a" → {1("$")}; after commit "$" → is_finished().
 #[test]
-fn test_ported_trivial() {
+fn test_trivial() {
     // IDs: "a"→0, "$"→1
     let vocab = make_vocab(&["a", "$"]);
 
@@ -662,7 +662,7 @@ fn test_ported_trivial() {
 /// Grammar with two paths: s ::= x EOF; x ::= A B_OR_C | AB.
 /// Multi-byte LLM tokens ("ab", "ac") each match a grammar token sequence.
 #[test]
-fn test_ported_simple() {
+fn test_simple() {
     // IDs: "ab"→0, "ac"→1, "$"→2
     let vocab = make_vocab(&["ab", "ac", "$"]);
     let c = Constraint::from_ebnf(
@@ -691,7 +691,7 @@ fn test_ported_simple() {
 
 /// Minimal path: s ::= x EOF; x ::= A — one token then EOF.
 #[test]
-fn test_ported_simple_minimized() {
+fn test_simple_minimized() {
     // IDs: "a"→0, "$"→1
     let vocab = make_vocab(&["a", "$"]);
     let c = Constraint::from_ebnf(
@@ -720,7 +720,7 @@ fn test_ported_simple_minimized() {
 /// Optional-statement grammar: program ::= expression_statement expression_statement? EOF.
 /// Verifies comma/semicolon/EOF interactions across multi-step sequences.
 #[test]
-fn test_ported_x_semicolon_x() {
+fn test_x_semicolon_x() {
     // IDs: "x"→0, ";"→1, "$"→2
     let vocab = make_vocab(&["x", ";", "$"]);
     let c = Constraint::from_ebnf(
@@ -760,7 +760,7 @@ fn test_ported_x_semicolon_x() {
 /// Left-recursive expression grammar: e → e '+' t | t; t → t '*' f | f; f → '(' e ')' | 'i'.
 /// Verifies initial mask and mask after multi-byte token "(i".
 #[test]
-fn test_ported_expression() {
+fn test_expression() {
     // IDs: "i"→0, "+"→1, "*"→2, "("→3, ")"→4, "(i"→5, "+i"→6
     let vocab = make_vocab(&["i", "+", "*", "(", ")", "(i", "+i"]);
     let c = Constraint::from_ebnf(
@@ -803,7 +803,7 @@ fn test_ported_expression() {
 /// Grammar: s ::= A; A ::= 'a'+.
 /// Committing "a" three times should produce the same mask as committing "aaa" once.
 #[test]
-fn test_ported_a_plus_commit_equivalence() {
+fn test_a_plus_commit_equivalence() {
     // IDs: "a"→0, "aaa"→1
     let vocab = make_vocab(&["a", "aaa"]);
     let c = Constraint::from_ebnf(
@@ -839,7 +839,7 @@ fn test_ported_a_plus_commit_equivalence() {
 /// Ambiguous grammar: s ::= A A; A ::= 'a'+.
 /// With only "a" in vocab the constraint should keep token 0 allowed across many commits.
 #[test]
-fn test_ported_hideous_ambiguity() {
+fn test_hideous_ambiguity() {
     let vocab = make_vocab(&["a"]);
     let c = Constraint::from_ebnf(
         r#"s ::= A A
@@ -867,7 +867,7 @@ fn test_ported_hideous_ambiguity() {
 /// Grammar: s ::= DEF_T; DEF_T ::= "def".
 /// Verifies that the multi-byte vocab token "def" is allowed at token id 0.
 #[test]
-fn test_ported_def_token() {
+fn test_def_token() {
     let vocab = make_vocab(&["def"]);
     let c = Constraint::from_ebnf(
         r#"s ::= DEF_T
@@ -886,7 +886,7 @@ fn test_ported_def_token() {
 /// Grammar: s ::= HASH_OPT_A | HASH_OPT_A A; A ::= 'a'; HASH_OPT_A ::= '#' 'a'?.
 /// Verifies that commit("#") then commit("a") yields the same mask as commit("#a").
 #[test]
-fn test_ported_hash_restart() {
+fn test_hash_restart() {
     // IDs: "#"→0, "a"→1, "#a"→2
     let vocab = make_vocab(&["#", "a", "#a"]);
     let c = Constraint::from_ebnf(
@@ -917,7 +917,7 @@ fn test_ported_hash_restart() {
 /// Grammar: s ::= HASH_OPT_AA | HASH_OPT_AA A A; HASH_OPT_AA ::= '#' ('a' 'a')?.
 /// Verifies that "#","a","a" and "#aa" yield the same final mask.
 #[test]
-fn test_ported_multi_commit_hash() {
+fn test_multi_commit_hash() {
     // IDs: "#"→0, "a"→1, "#aa"→2
     let vocab = make_vocab(&["#", "a", "#aa"]);
     let c = Constraint::from_ebnf(
@@ -949,7 +949,7 @@ fn test_ported_multi_commit_hash() {
 /// Indirect recursion: s_prime ::= s EOF; s ::= A e | B; e ::= s.
 /// Equivalent to s → a* b; valid strings are "b", "ab", "aab", …
 #[test]
-fn test_ported_indirect_recursion() {
+fn test_indirect_recursion() {
     // IDs: "a"→0, "b"→1, "$"→2
     let vocab = make_vocab(&["a", "b", "$"]);
     let c = Constraint::from_ebnf(
@@ -985,7 +985,7 @@ fn test_ported_indirect_recursion() {
 /// Left-recursive repetition: s_prime ::= s; s ::= s A | ε.
 /// Equivalent to A*; "a" must remain allowed after each commit.
 #[test]
-fn test_ported_repetition_left_recursive() {
+fn test_repetition_left_recursive() {
     let vocab = make_vocab(&["a"]);
     let c = Constraint::from_ebnf(
         r#"s_prime ::= s
@@ -1007,7 +1007,7 @@ fn test_ported_repetition_left_recursive() {
 /// Token "i(" spans grammar terminals [I, LPAREN] but after I only EOF is valid.
 /// Therefore "i(" is always forbidden, and "$" is forbidden at start → empty mask.
 #[test]
-fn test_ported_split_token_invalid() {
+fn test_split_token_invalid() {
     // IDs: "i("→0, "$"→1
     let vocab = make_vocab(&["i(", "$"]);
     let c = Constraint::from_ebnf(
@@ -1035,7 +1035,7 @@ fn test_ported_split_token_invalid() {
 /// Indirect expression: s ::= e EOF; e ::= f; f ::= LPAREN e | I.
 /// '(' may recurse indefinitely; after "(i" only '$' remains.
 #[test]
-fn test_ported_trivial_indirect_expression() {
+fn test_trivial_indirect_expression() {
     // IDs: "i"→0, "("→1, "(i"→2, "$"→3
     let vocab = make_vocab(&["i", "(", "(i", "$"]);
     let c = Constraint::from_ebnf(
@@ -1074,7 +1074,7 @@ fn test_ported_trivial_indirect_expression() {
 /// Direct left-recursive expression: s ::= e EOF; e ::= LPAREN e | I.
 /// Same behavioural expectations as the indirect version above.
 #[test]
-fn test_ported_trivial_direct_expression() {
+fn test_trivial_direct_expression() {
     // IDs: "i"→0, "("→1, "(i"→2, "$"→3
     let vocab = make_vocab(&["i", "(", "(i", "$"]);
     let c = Constraint::from_ebnf(
@@ -1107,14 +1107,14 @@ fn test_ported_trivial_direct_expression() {
 }
 
 // ===========================================================================
-// Ported tests — second batch
+// Constraint regression tests — second batch
 // ===========================================================================
 
 /// Sparse vocabulary: only token ID=2 ("(i") exists; IDs 0 and 1 are absent.
 /// Grammar: s ::= e EOF; e ::= LPAREN e | I.
 /// Initial mask has only token 2 set. After commit, need EOF (not in vocab) → empty.
 #[test]
-fn test_ported_limited_vocab_direct_expression() {
+fn test_limited_vocab_direct_expression() {
     // Only token ID 2 exists; IDs 0 and 1 are absent (sparse vocab)
     let vocab = Vocab::new(vec![(2u32, b"(i".to_vec())], None);
     let c = Constraint::from_ebnf(
@@ -1143,7 +1143,7 @@ fn test_ported_limited_vocab_direct_expression() {
 /// Grammar with shared prefixes and 'a'+: regression for trie self-loop panic.
 /// Verifies that constraint construction does not panic.
 #[test]
-fn test_ported_shared_prefix_no_panic() {
+fn test_shared_prefix_no_panic() {
     // IDs: "za"→0, "zaabm"→1, "zaabn"→2
     let vocab = make_vocab(&["za", "zaabm", "zaabn"]);
     let c = Constraint::from_ebnf(
@@ -1169,7 +1169,7 @@ fn test_ported_shared_prefix_no_panic() {
 /// Initial mask should allow "a"(0), "!\""(1), "\""(2).
 /// After committing "a", the parser needs ';' then EOF — none in vocab → empty mask.
 #[test]
-fn test_ported_js_minimized_ebnf_string() {
+fn test_js_minimized_ebnf_string() {
     // IDs: "a"→0, "!\""→1, "\""→2
     let vocab = make_vocab(&["a", "!\"", "\""]);
     let c = Constraint::from_ebnf(
@@ -1202,7 +1202,7 @@ fn test_ported_js_minimized_ebnf_string() {
 /// Grammar s ::= x x '$'; x ::= ('!' x | 'a') ';'?.
 /// After commit_bytes("a") the parser is mid-first-x; second x can be satisfied by "a;"(1).
 #[test]
-fn test_ported_js_like_mask_after_commit_bytes() {
+fn test_js_like_mask_after_commit_bytes() {
     // IDs: ";;;"→0, "a;"→1
     let vocab = make_vocab(&[";;;", "a;"]);
     let c = Constraint::from_ebnf(
@@ -1234,7 +1234,7 @@ fn test_ported_js_like_mask_after_commit_bytes() {
 /// unary_expression ::= ('!' unary_expression | 'X') ';'?.
 /// After commit_bytes("X") no vocab token (only ";;") should satisfy the grammar.
 #[test]
-fn test_ported_js_like_mask_minimized() {
+fn test_js_like_mask_minimized() {
     // IDs: ";;"→0  (the only token)
     let vocab = make_vocab(&[";;"]);
     let c = Constraint::from_ebnf(
@@ -1261,7 +1261,7 @@ fn test_ported_js_like_mask_minimized() {
 /// Vocab: " "(0) and "@"(1). Token "@" alone cannot match IGNORE (' '  or the 2-byte '$@').
 /// Initial mask should contain only token 0 (' ').
 #[test]
-fn test_ported_ebnf_initial_mask_with_alternation() {
+fn test_ebnf_initial_mask_with_alternation() {
     // IDs: " "→0, "@"→1
     let vocab = make_vocab(&[" ", "@"]);
     let c = Constraint::from_ebnf(
@@ -1286,7 +1286,7 @@ fn test_ported_ebnf_initial_mask_with_alternation() {
 /// Simpler companion: program ::= IGNORE; IGNORE ::= ' '.
 /// Only ' ' (id=0) should be in initial mask.
 #[test]
-fn test_ported_ebnf_initial_mask_mandatory() {
+fn test_ebnf_initial_mask_mandatory() {
     // IDs: " "→0, "@"→1
     let vocab = make_vocab(&[" ", "@"]);
     let c = Constraint::from_ebnf(
@@ -1312,7 +1312,7 @@ fn test_ported_ebnf_initial_mask_mandatory() {
 /// Grammar: item: "," D ":" D item | ""; start: "{" D ":" D item "}".
 /// After feeding "{1:2,3:4,5:6", comma must still be in the mask.
 #[test]
-fn test_ported_right_recursive_item_bug() {
+fn test_right_recursive_item_bug() {
     // IDs: ","→0, "}"→1
     let vocab = make_vocab(&[",", "}"]);
     let c = Constraint::from_lark(
@@ -1337,13 +1337,13 @@ fn test_ported_right_recursive_item_bug() {
 }
 
 // ---------------------------------------------------------------------------
-// Ported force() tests (token-level forcing: exactly one token in mask)
+// force() regression tests (token-level forcing: exactly one token in mask)
 // ---------------------------------------------------------------------------
 
 /// Grammar: s ::= 'a' 'b' 'c' (fully deterministic single path).
 /// With single-byte vocab each token is forced one at a time: [0, 1, 2].
 #[test]
-fn test_ported_force_fully_determined() {
+fn test_force_fully_determined() {
     // IDs: "a"→0, "b"→1, "c"→2
     let vocab = make_vocab(&["a", "b", "c"]);
     let c = Constraint::from_ebnf(
@@ -1361,7 +1361,7 @@ fn test_ported_force_fully_determined() {
 /// Grammar: s ::= A | B (two alternatives, different first byte).
 /// Mask starts with {0, 1} → nothing is forced.
 #[test]
-fn test_ported_force_ambiguous_first_byte() {
+fn test_force_ambiguous_first_byte() {
     // IDs: "a"→0, "b"→1
     let vocab = make_vocab(&["a", "b"]);
     let c = Constraint::from_ebnf(
@@ -1380,7 +1380,7 @@ fn test_ported_force_ambiguous_first_byte() {
 /// Grammar: s ::= AB | AC (shared 1-byte prefix 'a', then branch).
 /// Only "a" (id=0) is forced; second byte branches to 'b' or 'c' → stop.
 #[test]
-fn test_ported_force_partial_prefix() {
+fn test_force_partial_prefix() {
     // IDs: "a"→0, "b"→1, "c"→2
     let vocab = make_vocab(&["a", "b", "c"]);
     let c = Constraint::from_ebnf(
@@ -1397,13 +1397,13 @@ fn test_ported_force_partial_prefix() {
 }
 
 // ===========================================================================
-// Ported force() tests — third batch (token-level, read-only, edge cases)
+// force() regression tests — third batch (token-level, read-only, edge cases)
 // ===========================================================================
 
 /// After committing the single token "a" the grammar is complete.
 /// force() on the finished state returns empty (no more tokens to force).
 #[test]
-fn test_ported_force_empty_after_complete() {
+fn test_force_empty_after_complete() {
     // IDs: "a"→0, "<|endoftext|>"→1 (EOS; auto-detected)
     let vocab = make_vocab(&["a", "<|endoftext|>"]);
     let c = Constraint::from_ebnf(
@@ -1422,7 +1422,7 @@ fn test_ported_force_empty_after_complete() {
 /// Grammar: s ::= AB CD (four distinct single-byte tokens in sequence).
 /// Initial force gives all four. After committing the first two, mid-parse force gives the last two.
 #[test]
-fn test_ported_force_after_partial_commit() {
+fn test_force_after_partial_commit() {
     // IDs: "a"→0, "b"→1, "c"→2, "d"→3
     let vocab = make_vocab(&["a", "b", "c", "d"]);
     let c = Constraint::from_ebnf(
@@ -1448,7 +1448,7 @@ fn test_ported_force_after_partial_commit() {
 /// force() must not mutate the state: two consecutive calls must agree,
 /// and mask() must be identical before and after.
 #[test]
-fn test_ported_force_is_readonly() {
+fn test_force_is_readonly() {
     // IDs: "a"→0, "b"→1, "c"→2
     let vocab = make_vocab(&["a", "b", "c"]);
     let c = Constraint::from_ebnf(
@@ -1471,7 +1471,7 @@ fn test_ported_force_is_readonly() {
 /// Committing the tokens returned by force() must advance the parser correctly.
 /// Grammar: s ::= AB CD; vocab: a/b/c/d (single byte). Expected force = [0,1,2,3].
 #[test]
-fn test_ported_force_commit_roundtrip() {
+fn test_force_commit_roundtrip() {
     // IDs: "a"→0, "b"→1, "c"→2, "d"→3
     let vocab = make_vocab(&["a", "b", "c", "d"]);
     let c = Constraint::from_ebnf(
@@ -1497,7 +1497,7 @@ fn test_ported_force_commit_roundtrip() {
 /// Grammar: s ::= 'x' | no alternatives. Vocab: x=0 only.
 /// The single character is forced immediately in the initial state.
 #[test]
-fn test_ported_force_single_character_grammar() {
+fn test_force_single_character_grammar() {
     let vocab = make_vocab(&["x"]);
     let c = Constraint::from_ebnf(
         r#"s ::= X
@@ -1514,7 +1514,7 @@ fn test_ported_force_single_character_grammar() {
 /// Grammar: s ::= 'a' 'b'. Vocab: only "ab"=0 (no individual byte tokens).
 /// With exactly one token in the mask, force() should return [0].
 #[test]
-fn test_ported_force_only_multibyte_token() {
+fn test_force_only_multibyte_token() {
     let vocab = Vocab::new(vec![(0u32, b"ab".to_vec())], None);
     let c = Constraint::from_ebnf(
         r#"s ::= AB
@@ -1536,7 +1536,7 @@ fn test_ported_force_only_multibyte_token() {
 /// Grammar: `start: "a" ":" "x" STR_CHAR STR_CHAR "x"` where STR_CHAR = "a"|":"|"-".
 /// Regression for Super DWA specialization admitting tokens that skip required literals.
 #[test]
-fn test_ported_super_dwa_fp_minimal() {
+fn test_super_dwa_fp_minimal() {
     let vocab = Vocab::new(
         vec![
             (0u32, b"a".to_vec()),
@@ -1560,7 +1560,7 @@ STR_CHAR: "a" | ":" | "-"
 /// Grammar: `start: ws object ws` where object has a QUOTE-wrapped name_pair.
 #[test]
 #[ignore]
-fn test_ported_glr_fp_repro_minimal() {
+fn test_glr_fp_repro_minimal() {
     let lark = r#"start: ws object ws
 object: "{" ws name_pair ws "}"
 name_pair: QUOTE "name" QUOTE ws ":" ws QUOTE name_val QUOTE
@@ -1599,7 +1599,7 @@ STR_CHAR: /[A-Za-z0-9 \[\]\-:{}@.]/
 /// in a UTF-8-aware manner: only valid UTF-8 sequences are matched, not arbitrary
 /// bytes.  In particular, standalone continuation bytes (0x80–0xBF) are rejected.
 #[test]
-fn test_ported_json_string_rejects_invalid_utf8() {
+fn test_json_string_rejects_invalid_utf8() {
     let lark = r#"start: "{" JSON_STRING ":" JSON_STRING "}"
 JSON_STRING: "\"" STRING_CHARS "\""
 STRING_CHARS: STRING_CHAR*
@@ -1629,7 +1629,7 @@ STRING_CHAR: /[^\x00-\x1F"\\]/
 /// Grammar: `start: "a" ":" "a"`. After commit_bytes("a"), token ":a" spans two
 /// grammar terminals and must appear in the mask.
 #[test]
-fn test_ported_span_token_in_mask() {
+fn test_span_token_in_mask() {
     let lark = r#"start: "a" ":" "a""#;
     let vocab = Vocab::new(vec![(0u32, b":a".to_vec())], None);
     let c = Constraint::from_lark(lark, &vocab).unwrap();
@@ -1643,7 +1643,7 @@ fn test_ported_span_token_in_mask() {
 /// After committing `{"`, the span token `":\"\","` must be in the mask.
 /// (Tests span across string-close + ":" + string-open + string-close + ",".)
 #[test]
-fn test_ported_json_value_span_token_fn_copy_minimized() {
+fn test_json_value_span_token_fn_copy_minimized() {
     let lark = r#"start: "{" pair "}"
 pair: string ":" string "," string ":" "null"
 string: QUOTE char* QUOTE
@@ -1676,7 +1676,7 @@ QUOTE: "\""
 /// Minimal EBNF span-token test: `start ::= string ':' string ','` where `string ::= '"' '"'`.
 /// After commit_bytes(`"`), the token `":\""` (spanning string-end + : + string-start) must be allowed.
 #[test]
-fn test_ported_json_value_span_token_fn_minimal() {
+fn test_json_value_span_token_fn_minimal() {
     let vocab = Vocab::new(vec![(0u32, b"\":\"".to_vec())], None);
     let c = Constraint::from_ebnf(
         r#"start ::= string ':' string ','
@@ -1696,7 +1696,7 @@ string ::= '"' '"'"#,
 /// Full JSON Lark grammar; after committing token b'{"' (ID 4895), the span-token
 /// b'":\"\","' (ID 34713) must be in the mask. Exercises sparse high-ID vocab.
 #[test]
-fn test_ported_json_value_span_token_fn() {
+fn test_json_value_span_token_fn() {
     let lark = r#"start: ws value ws
 value: object | array | string | number | "true" | "false" | "null"
 object: "{" ws members? ws "}"
@@ -1751,10 +1751,10 @@ DIGIT: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
 /// Equivalent to `a* b $`. After `a` the state recurses through `e = s`; after `ab`
 /// only `$` (EOF) remains.
 ///
-/// Differs from `test_ported_indirect_recursion` (which is `s ::= A s | B end`):
+/// Differs from `test_indirect_recursion` (which is `s ::= A s | B end`):
 /// here the recursive step goes through an intermediate non-terminal `e`.
 #[test]
-fn test_ported_indirect_recursion_minimized() {
+fn test_indirect_recursion_minimized() {
     let vocab = make_vocab(&["a", "b", "$"]);
     let c = Constraint::from_ebnf(
         r#"s_prime ::= s EOF
@@ -1796,7 +1796,7 @@ EOF ::= '$'"#,
 /// a valid continuation because acceptance of the full grammar requires another term after `+`,
 /// and we allow speculative extension (prefix-consistent).
 #[test]
-fn test_ported_expression_minimized() {
+fn test_expression_minimized() {
     let vocab = Vocab::new(vec![(0u32, b"+".to_vec())], None);
     let c = Constraint::from_ebnf(
         r#"s ::= e
@@ -1828,18 +1828,10 @@ I ::= 'i'"#,
 }
 
 // =============================================================================
-// Batch 6: Expression grammar variants (ported from sep1 test_constraint_basic.rs)
+// Batch 6: Expression grammar variants
 // =============================================================================
-
-/// Ported from sep1 `test_constraint_expression_no_times`.
-/// Grammar: S → E EOF; E → E '+' T | T; T → F; F → '(' E ')' | 'i'.
-/// No multiplication operator — reduced expression grammar.
-/// Vocab: i(0), +(1), ((2), )(3), (i(4), +i(5). No EOF token in vocab.
-///
-/// Initial mask: {i, (, (i} = {0, 2, 4}.
-/// After commit "(i": {+, ), +i} = {1, 3, 5}.
 #[test]
-fn test_ported_expression_no_times() {
+fn test_expression_no_times() {
     let vocab = Vocab::new(
         vec![
             (0, b"i".to_vec()),
@@ -1882,15 +1874,8 @@ f ::= "(" e ")" | "i""#,
     assert!(!token_allowed(&mask, 4), "(i must NOT be in mask after (i");
 }
 
-/// Ported from sep1 `test_constraint_expression_no_parens`.
-/// Grammar: S → E EOF; E → E '+' T | T; T → T '*' F | F; F → 'i'.
-/// No parentheses — tests addition and multiplication only.
-/// Vocab: i(0), +(1), *(2), +i(3). No EOF token in vocab.
-///
-/// Initial mask: {i} = {0}.
-/// After commit "i": {+, *, +i} = {1, 2, 3}.
 #[test]
-fn test_ported_expression_no_parens() {
+fn test_expression_no_parens() {
     let vocab = Vocab::new(
         vec![
             (0, b"i".to_vec()),
@@ -1927,15 +1912,8 @@ f ::= "i""#,
     assert!(!token_allowed(&mask, 0), "i must NOT be in mask after i");
 }
 
-/// Ported from sep1 `test_constraint_expression_no_plus_times`.
-/// Grammar: S → E EOF; E → T; T → F; F → '(' E ')' | 'i'.
-/// No operators — just nested parens and atoms.
-/// Vocab: i(0), ((1), )(2), (i(3). No EOF token in vocab.
-///
-/// Initial mask: {i, (, (i} = {0, 1, 3}.
-/// After commit "(i": {)} = {2}.
 #[test]
-fn test_ported_expression_no_plus_times() {
+fn test_expression_no_plus_times() {
     let vocab = Vocab::new(
         vec![
             (0, b"i".to_vec()),
@@ -1972,15 +1950,8 @@ f ::= "(" e ")" | "i""#,
     assert!(!token_allowed(&mask, 3), "(i must NOT be in mask after (i");
 }
 
-/// Ported from sep1 `test_constraint_expression_no_times_parens`.
-/// Grammar: S → E EOF; E → E '+' T | T; T → F; F → 'i'.
-/// Addition only — no multiplication or parentheses.
-/// Vocab: i(0), +(1), +i(2). No EOF token in vocab.
-///
-/// Initial mask: {i} = {0}.
-/// After commit "i": {+, +i} = {1, 2}.
 #[test]
-fn test_ported_expression_no_times_parens() {
+fn test_expression_no_times_parens() {
     let vocab = Vocab::new(
         vec![
             (0, b"i".to_vec()),
@@ -2014,16 +1985,8 @@ f ::= "i""#,
     assert!(!token_allowed(&mask, 0), "i must NOT be in mask after i");
 }
 
-/// Ported from sep1 `test_constraint_expression_unbalanced_parens`.
-/// Grammar: S → E EOF; E → T; T → F; F → '(' E | 'i'.
-/// Open parens only (never closed) — tests left-recursion through '(' E.
-/// Vocab: i(0), ((1), (i(2), $(3).
-///
-/// Initial mask: {i, (, (i} = {0, 1, 2}.
-/// After commit "(": {i, (, (i} = {0, 1, 2} — recurses into another E.
-/// After commit "i": {$} = {3} — E satisfied, EOF expected.
 #[test]
-fn test_ported_expression_unbalanced_parens() {
+fn test_expression_unbalanced_parens() {
     let vocab = Vocab::new(
         vec![
             (0, b"i".to_vec()),
@@ -2067,15 +2030,8 @@ f ::= "(" e | "i""#,
     assert!(!token_allowed(&mask, 2), "(i must NOT be in mask after (i");
 }
 
-/// Ported from sep1 `test_constraint_expression_cycle`.
-/// Grammar: S → E EOF; E → F; F → I (F → E cycle production commented out in sep1).
-/// Vocab: i(0), $(1).
-///
-/// Initial mask: {i} = {0}.
-/// After commit "i": {$} = {1}.
-/// After commit "$": {} — parse done.
 #[test]
-fn test_ported_expression_cycle_reduced() {
+fn test_expression_cycle_reduced() {
     let vocab = Vocab::new(
         vec![
             (0, b"i".to_vec()),
@@ -2108,21 +2064,8 @@ f ::= "i""#,
     assert!(iter_allowed(&mask).is_empty(), "mask must be empty after i$");
 }
 
-/// Ported from sep1 `test_force_long_shared_prefix`.
-/// Grammar: "hello_world" | "hello_earth" (two strings sharing 6-byte prefix "hello_").
-/// Vocab: h(0),e(1),l(2),o(3),_(4),w(5),r(6),d(7),a(8),t(9),hello(10).
-///
-/// In sep1, forced bytes equal the shared prefix "h,e,l,l,o,_" (6 bytes), then
-/// tokenize-with-stop yields [hello(10), _(4)].
-///
-/// In glrmask, the token-level force iterates the mask. Initially only 'h' (and
-/// 'hello') are in the mask, so if token 0 ('h') is the only allowed token,
-/// force emits it. If multiple tokens are allowed, it stops.
-/// The exact result depends on whether glrmask's mask emits just 'h' or
-/// both 'h' and 'hello'. This test captures the expected sep1 behavior — if it
-/// fails, the behavioral difference is recorded.
 #[test]
-fn test_ported_force_long_shared_prefix() {
+fn test_force_long_shared_prefix() {
     let vocab = Vocab::new(
         vec![
             (0, b"h".to_vec()),
@@ -2149,7 +2092,7 @@ hello_earth ::= "h" "e" "l" "l" "o" "_" "e" "a" "r" "t" "h""#,
 
     let s = c.start();
     let forced = s.force();
-    // Sep1 expects: [hello(10), _(4)] — greedy tokenize of the shared prefix.
+    // Greedy tokenization of the shared prefix yields [hello(10), _(4)].
     // glrmask's token-level force may differ (see comment above).
     // If glrmask's force produces a different result, this test documents the gap.
     assert!(
@@ -2158,19 +2101,8 @@ hello_earth ::= "h" "e" "l" "l" "o" "_" "e" "a" "r" "t" "h""#,
     );
 }
 
-/// Ported from sep1 `test_dwa_ws_boundary_long_token`.
-/// Grammar uses `#![ignore(WS)]` directive — NOT supported by glrmask's simple EBNF.
-/// Instead, we test the core behavior: a grammar `s ::= stmt` where `stmt` matches
-/// `[a-z]+` by expressing it as left-recursive `stmt ::= stmt letter | letter` with
-/// an explicit letter nonterminal.
-///
-/// Vocab: " "(0), " the"(1), " that"(2), "that"(3), "a"(4).
-///
-/// Without ignore-WS support, the grammar has no whitespace terminals, so
-/// only tokens matching letter sequences should be allowed. This tests that
-/// multi-byte tokens starting with letters are correctly handled.
 #[test]
-fn test_ported_ws_boundary_no_ignore() {
+fn test_ws_boundary_no_ignore() {
     let vocab = Vocab::new(
         vec![
             (0, b" ".to_vec()),
@@ -2267,9 +2199,8 @@ start: "{" obj_ord_0_0_nc "}"
 "###
 }
 
-/// Ported from sep1 `test_char_class_excludes_control_bytes`.
 #[test]
-fn test_ported_char_class_excludes_control_bytes() {
+fn test_char_class_excludes_control_bytes() {
     let vocab = Vocab::new(
         vec![
             (0u32, vec![0x00]),
@@ -2291,9 +2222,8 @@ fn test_ported_char_class_excludes_control_bytes() {
     assert!(token_allowed(&mask, 1), "space byte 0x20 should match the char class");
 }
 
-/// Ported from sep1 `test_nullable_string_property_allows_quote_comma_quote_boundary_token`.
 #[test]
-fn test_ported_nullable_string_property_allows_quote_comma_quote_boundary_token() {
+fn test_nullable_string_property_allows_quote_comma_quote_boundary_token() {
     let vocab = Vocab::new(vec![(0u32, b"\",\"".to_vec())], None);
     let c = Constraint::from_lark(nullable_string_inline_alternation_lark(), &vocab).unwrap();
 
@@ -2308,9 +2238,8 @@ fn test_ported_nullable_string_property_allows_quote_comma_quote_boundary_token(
     );
 }
 
-/// Ported from sep1 `test_nullable_string_helper_rule_variant`.
 #[test]
-fn test_ported_nullable_string_helper_rule_variant() {
+fn test_nullable_string_helper_rule_variant() {
     let vocab = Vocab::new(vec![(0u32, b"\",\"".to_vec())], None);
     let c = Constraint::from_lark(nullable_string_helper_rule_lark(), &vocab).unwrap();
 
@@ -2325,9 +2254,8 @@ fn test_ported_nullable_string_helper_rule_variant() {
     );
 }
 
-/// Ported from sep1 `test_nullable_string_no_alternation_works`.
 #[test]
-fn test_ported_nullable_string_no_alternation_works() {
+fn test_nullable_string_no_alternation_works() {
     let vocab = Vocab::new(vec![(0u32, b"\",\"".to_vec())], None);
     let c = Constraint::from_lark(nullable_string_no_alternation_lark(), &vocab).unwrap();
 
@@ -2342,9 +2270,8 @@ fn test_ported_nullable_string_no_alternation_works() {
     );
 }
 
-/// Ported from sep1 `test_github_easy_o63377_false_positive_a`.
 #[test]
-fn test_ported_github_easy_o63377_false_positive_a() {
+fn test_github_easy_o63377_false_positive_a() {
     let vocab = Vocab::new(vec![(0u32, b"b".to_vec())], None);
     let c = Constraint::from_lark(
         r#"
@@ -2367,9 +2294,8 @@ fn test_ported_github_easy_o63377_false_positive_a() {
     );
 }
 
-/// Ported from sep1 `test_mask_commit_consistency_minimal_repro_should_fail_loudly`.
 #[test]
-fn test_ported_mask_commit_consistency_minimal_repro() {
+fn test_mask_commit_consistency_minimal_repro() {
     let lark = r#"
 PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/
 PATTERN_1: /[\xC2-\xDF]/
@@ -2433,9 +2359,8 @@ start: "{" obj_required_0_0 "}"
     );
 }
 
-/// Ported from sep1 `test_mask_commit_consistency_minimal_repro_should_fail_loudly_minimized_copy`.
 #[test]
-fn test_ported_mask_commit_consistency_minimal_repro_minimized_copy() {
+fn test_mask_commit_consistency_minimal_repro_minimized_copy() {
     let vocab = Vocab::new(
         vec![(0u32, b"ay".to_vec()), (1u32, b"xa".to_vec())],
         None,
@@ -2449,9 +2374,8 @@ fn test_live_minimal_tokenizer_fineness() {
     glrmask::__check_live_minimal_tokenizer_fineness();
 }
 
-/// Ported from sep1 `test_python_reported_bug_def_rep_space_f`.
 #[test]
-fn test_ported_python_reported_bug_def_rep_space_f() {
+fn test_python_reported_bug_def_rep_space_f() {
     let vocab = Vocab::new(
         vec![(0u32, b" ".to_vec()), (1u32, b" f".to_vec())],
         None,
@@ -2471,9 +2395,8 @@ fn test_ported_python_reported_bug_def_rep_space_f() {
     assert!(token_allowed(&mask, 1), "span token ' f' should be allowed at the start of SPACE* F");
 }
 
-/// Ported from sep1 `test_sentence_grammar_from_prompt_minimized`.
 #[test]
-fn test_ported_sentence_grammar_from_prompt_minimized() {
+fn test_sentence_grammar_from_prompt_minimized() {
     let vocab = Vocab::new(vec![(0u32, b"b".to_vec())], None);
     let c = Constraint::from_ebnf(
         r#"
@@ -2489,9 +2412,8 @@ fn test_ported_sentence_grammar_from_prompt_minimized() {
     assert!(iter_allowed(&mask).is_empty(), "token 'b' alone must not be allowed at the start of 'ab' 'bc'");
 }
 
-/// Ported from sep1 `test_sentence_grammar_from_prompt`.
 #[test]
-fn test_ported_sentence_grammar_from_prompt() {
+fn test_sentence_grammar_from_prompt() {
     let vocab = make_vocab(&[
         "a",
         "the",
@@ -2557,9 +2479,8 @@ fn test_ported_sentence_grammar_from_prompt() {
     );
 }
 
-/// Ported from sep1 `test_minimal_python_example_with_compiled_grammar`.
 #[test]
-fn test_ported_minimal_python_example_with_compiled_grammar() {
+fn test_minimal_python_example_with_compiled_grammar() {
     let vocab = Vocab::new(
         (0u32..=9)
             .map(|i| (i, vec![b'0' + i as u8]))
