@@ -62,7 +62,11 @@ fn state_signature(
                 .get(&label)
                 .and_then(|&target| {
                     let target = target as usize;
-                    reachable.contains(&target).then_some(class_of_state[target])
+                    if reachable.contains(&target) {
+                        Some(class_of_state[target])
+                    } else {
+                        None
+                    }
                 })
                 .unwrap_or(dead_class);
             (label, target_class)
@@ -112,7 +116,11 @@ fn build_minimized_acyclic_dfa(
                     return None;
                 }
                 let target_class = class_of_state[target];
-                (target_class != dead_class).then_some((label, class_to_state[&target_class]))
+                if target_class == dead_class {
+                    None
+                } else {
+                    Some((label, class_to_state[&target_class]))
+                }
             })
             .collect();
     }

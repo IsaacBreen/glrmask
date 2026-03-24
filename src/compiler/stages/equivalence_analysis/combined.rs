@@ -58,6 +58,7 @@ fn build_vocab_map(
     max_token_id: u32,
 ) -> ManyToOneIdMap {
     let mut ordered_vocab_classes: Vec<(usize, Vec<u32>)> = vocab_classes
+        .iter()
         .map(|class| {
             let mut indices: Vec<usize> = class.iter().copied().collect();
             indices.sort_unstable_by(|&left, &right| {
@@ -243,7 +244,7 @@ mod tests {
         let mut actual_sorted: Vec<Vec<usize>> = classes
             .iter()
             .map(|class| {
-                let mut sorted: Vec<usize> = class.iter().map(|id| *id as usize).collect();
+                let mut sorted: Vec<usize> = class.iter().map(|id| id as usize).collect();
                 sorted.sort();
                 sorted
             })
@@ -279,7 +280,7 @@ mod tests {
         let mut actual_sorted: Vec<Vec<usize>> = classes
             .iter()
             .map(|class| {
-                let mut sorted: Vec<usize> = class.iter().map(|id| *id as usize).collect();
+                let mut sorted: Vec<usize> = class.iter().map(|id| id as usize).collect();
                 sorted.sort();
                 sorted
             })

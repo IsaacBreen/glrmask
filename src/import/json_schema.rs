@@ -2900,8 +2900,8 @@ impl SchemaCtx {
                     .iter()
                     .map(|(byte, &left_next)| {
                         let right_next =
-                            right_state_id.and_then(|state_id| right.step(state_id, *byte));
-                        (*byte, (left_next, right_next))
+                            right_state_id.and_then(|state_id| right.step(state_id, byte));
+                        (byte, (left_next, right_next))
                     })
                     .collect()
             },
@@ -2921,8 +2921,8 @@ impl SchemaCtx {
                     .iter()
                     .filter_map(|(byte, &left_next)| {
                         right
-                            .step(right_state_id, *byte)
-                            .map(|right_next| (*byte, (left_next, right_next)))
+                            .step(right_state_id, byte)
+                            .map(|right_next| (byte, (left_next, right_next)))
                     })
                     .collect()
             },
@@ -3483,9 +3483,6 @@ impl SchemaCtx {
 
             ordered.push((key.clone(), value_expr, true));
         }
-
-        let additional_properties_schema =
-            self.normalized_additional_properties_schema(additional_properties_schema.as_ref());
 
         if ordered.is_empty() && additional_properties_schema.is_none() && pattern_properties.is_empty() {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));

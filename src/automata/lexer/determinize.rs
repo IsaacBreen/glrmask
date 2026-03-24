@@ -241,7 +241,7 @@ fn precompute_epsilon_closures(
     out_degree: &[u32],
 ) -> Vec<Option<Vec<u32>>> {
     let num_states = out_degree.len();
-    let mut high_degree_closures = vec![None; num_states];
+    let mut high_degree_closures: Vec<Option<Vec<u32>>> = vec![None; num_states];
     let mut visited = vec![false; num_states];
     let mut post_order = Vec::with_capacity(num_states);
 

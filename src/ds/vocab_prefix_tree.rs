@@ -144,10 +144,10 @@ fn merge_child_metadata(
     merge_reachable_token_ids(reachable_token_ids, child);
 }
 
-fn next_matching_child<'a>(
-    current: &'a VocabPrefixTreeNode,
-    remaining: &[u8],
-) -> Option<(&'a VocabPrefixTreeNode, &'a [u8])> {
+fn next_matching_child<'tree, 'bytes>(
+    current: &'tree VocabPrefixTreeNode,
+    remaining: &'bytes [u8],
+) -> Option<(&'tree VocabPrefixTreeNode, &'bytes [u8])> {
     let child = current.find_child(*remaining.first()?)?;
     let edge = current.child_edge_label(child);
     remaining

@@ -422,29 +422,25 @@ impl DFA {
             return working;
         }
 
-        let (mut partition, mut blocks) = partition_by_finalizers(&working);
+        let (partition, blocks) = partition_by_finalizers(&working);
+        let mut minimality_check_blocks = blocks.clone();
 
         if n <= TOPOLOGY_PREREFINE_MAX_STATES {
             match topology_prerefine_partition(&working, &partition) {
                 TopologyPrerefine::AlreadyMinimal(blocks) => {
                     return working.rebuild_from_blocks(blocks);
                 }
-                TopologyPrerefine::Refined {
-                    partition: refined_partition,
-                    blocks: refined_blocks,
-                } => {
-                    partition = refined_partition;
-                    blocks = refined_blocks;
+                TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
+                    minimality_check_blocks = refined_blocks;
                 }
                 TopologyPrerefine::Skip => {}
             }
         }
 
-        if blocks.iter().all(|block| block.len() <= 1) {
-            return working.rebuild_from_blocks(blocks);
+        if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
+            return working.rebuild_from_blocks(minimality_check_blocks);
         }
 
-        let (partition, blocks) = partition_by_finalizers(&working);
         let blocks = hopcroft_refine_partition(&working, partition, blocks);
 
         working.rebuild_from_blocks(blocks)
