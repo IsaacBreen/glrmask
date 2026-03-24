@@ -95,6 +95,25 @@ fn hash_trellis_node_from_positions(
     mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
 }
 
+fn build_strided_batches(total_tokens: usize, target_batch_size: usize) -> Vec<Vec<usize>> {
+    if total_tokens == 0 {
+        return Vec::new();
+    }
+
+    let num_batches = total_tokens.div_ceil(target_batch_size.max(1));
+    let mut batches = Vec::with_capacity(num_batches);
+    for offset in 0..num_batches {
+        let mut batch = Vec::with_capacity(total_tokens.div_ceil(num_batches));
+        let mut idx = offset;
+        while idx < total_tokens {
+            batch.push(idx);
+            idx += num_batches;
+        }
+        batches.push(batch);
+    }
+    batches
+}
+
 fn build_start_state_suffix_hashes(
     token: &[u8],
     tokenizer_start: usize,
@@ -224,7 +243,6 @@ fn find_state_equivalence_classes_token_based(
         }
     }
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
-
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
     sorted_indices.sort_by(|&a, &b| tokens[a].cmp(&tokens[b]));
 
@@ -234,6 +252,8 @@ fn find_state_equivalence_classes_token_based(
         sorted_tokens.push(tokens[idx].as_slice());
         sorted_weights.push(mix_u128((idx + 1) as u128));
     }
+
+    let total_tokens = sorted_tokens.len();
 
     let tokenizer_start = tokenizer.initial_state_id();
     let suffix_hashes_by_token: Vec<Vec<u128>> = sorted_tokens
@@ -260,45 +280,11 @@ fn find_state_equivalence_classes_token_based(
         i
     };
 
-    let mut lcp_with_prev: Vec<usize> = Vec::with_capacity(sorted_tokens.len());
-    let mut prev_token: Option<&[u8]> = None;
-    for token in &sorted_tokens {
-        let lcp = prev_token.map_or(0, |prev| common_prefix_len(prev, token));
-        lcp_with_prev.push(lcp);
-        prev_token = Some(token);
-    }
-
-    let total_tokens = sorted_tokens.len();
-    let mut weight_prefix: Vec<u128> = vec![0u128; total_tokens + 1];
-    for i in 0..total_tokens {
-        weight_prefix[i + 1] = weight_prefix[i].wrapping_add(sorted_weights[i]);
-    }
-
-    let mut empty_end = 0usize;
-    while empty_end < total_tokens && sorted_tokens[empty_end].is_empty() {
-        empty_end += 1;
-    }
-    let empty_range = (0usize, empty_end);
-
-    let mut first_byte_ranges: Vec<(usize, usize)> = vec![(0usize, 0usize); 256];
-    let mut idx = empty_end;
-    while idx < total_tokens {
-        let byte = sorted_tokens[idx][0] as usize;
-        let start = idx;
-        idx += 1;
-        while idx < total_tokens
-            && !sorted_tokens[idx].is_empty()
-            && sorted_tokens[idx][0] as usize == byte
-        {
-            idx += 1;
-        }
-        first_byte_ranges[byte] = (start, idx);
-    }
-
     let early_stop = std::env::var("STATE_EQUIV_EARLY_STOP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let batch_size = 5000usize;
+    let batches = build_strided_batches(total_tokens, batch_size);
     let dead_positions = vec![-1i32; num_groups];
     let fully_dead_token_hash = hash_trellis_node_from_positions(
         None,
@@ -315,14 +301,53 @@ fn find_state_equivalence_classes_token_based(
     let mut active_hashes: Vec<u128> = vec![0u128; states.len()];
     let mut prev_groups = 1usize;
     let mut stable_batches = 0usize;
-
-    let mut batch_start = 0usize;
-    while batch_start < total_tokens {
+    let mut tokens_tested = 0usize;
+    for batch_indices in &batches {
         if active_indices.is_empty() {
             break;
         }
 
-        let batch_end = (batch_start + batch_size).min(total_tokens);
+        let batch_len = batch_indices.len();
+        if batch_len == 0 {
+            continue;
+        }
+        tokens_tested += batch_len;
+
+        let mut batch_tokens: Vec<&[u8]> = Vec::with_capacity(batch_len);
+        let mut batch_lcp_with_prev = Vec::with_capacity(batch_len);
+        let mut batch_weight_prefix = vec![0u128; batch_len + 1];
+        let mut prev_token: Option<&[u8]> = None;
+
+        for (local_idx, &token_idx) in batch_indices.iter().enumerate() {
+            let token = sorted_tokens[token_idx];
+            let lcp = prev_token.map_or(0, |prev| common_prefix_len(prev, token));
+            batch_tokens.push(token);
+            batch_lcp_with_prev.push(lcp);
+            batch_weight_prefix[local_idx + 1] =
+                batch_weight_prefix[local_idx].wrapping_add(sorted_weights[token_idx]);
+            prev_token = Some(token);
+        }
+
+        let batch_empty_end = batch_tokens
+            .iter()
+            .take_while(|token| token.is_empty())
+            .count();
+        let batch_empty_range = (0usize, batch_empty_end);
+
+        let mut batch_first_byte_ranges: Vec<(usize, usize)> = vec![(0usize, 0usize); 256];
+        let mut batch_pos = batch_empty_end;
+        while batch_pos < batch_len {
+            let byte = batch_tokens[batch_pos][0] as usize;
+            let start = batch_pos;
+            batch_pos += 1;
+            while batch_pos < batch_len
+                && !batch_tokens[batch_pos].is_empty()
+                && batch_tokens[batch_pos][0] as usize == byte
+            {
+                batch_pos += 1;
+            }
+            batch_first_byte_ranges[byte] = (start, batch_pos);
+        }
 
         let mut batch_hashes: Vec<(usize, u128)> = active_indices
             .par_iter()
@@ -343,31 +368,23 @@ fn find_state_equivalence_classes_token_based(
 
                     let mut live_ranges: Vec<(usize, usize)> = Vec::new();
 
-                    if empty_range.0 < empty_range.1 {
-                        let start = empty_range.0.max(batch_start);
-                        let end = empty_range.1.min(batch_end);
-                        if start < end {
-                            live_ranges.push((start, end));
-                        }
+                    if batch_empty_range.0 < batch_empty_range.1 {
+                        live_ranges.push(batch_empty_range);
                     }
 
                     for byte in 0usize..256 {
-                        let (range_start, range_end) = first_byte_ranges[byte];
+                        let (range_start, range_end) = batch_first_byte_ranges[byte];
                         if range_start >= range_end {
-                            continue;
-                        }
-                        let start = range_start.max(batch_start);
-                        let end = range_end.min(batch_end);
-                        if start >= end {
                             continue;
                         }
 
                         if state_transitions[byte] == NONE_STATE {
-                            let weight_sum = weight_prefix[end].wrapping_sub(weight_prefix[start]);
+                            let weight_sum =
+                                batch_weight_prefix[range_end].wrapping_sub(batch_weight_prefix[range_start]);
                             hash_delta = hash_delta
                                 .wrapping_add(fully_dead_token_hash.wrapping_mul(weight_sum));
                         } else {
-                            live_ranges.push((start, end));
+                            live_ranges.push((range_start, range_end));
                         }
                     }
 
@@ -392,11 +409,12 @@ fn find_state_equivalence_classes_token_based(
                         prev_groups_hash = 0;
 
                         for token_idx in range_start..range_end {
-                            let token = sorted_tokens[token_idx];
+                            let global_token_idx = batch_indices[token_idx];
+                            let token = batch_tokens[token_idx];
                             let mut prefix_len = if token_idx == range_start {
                                 0
                             } else {
-                                lcp_with_prev[token_idx]
+                                batch_lcp_with_prev[token_idx]
                             };
                             let max_prefix = state_stack.len().saturating_sub(1);
                             if prefix_len > max_prefix {
@@ -498,7 +516,7 @@ fn find_state_equivalence_classes_token_based(
                                     None,
                                     positions,
                                     token.len(),
-                                    &suffix_hashes_by_token[token_idx],
+                                    &suffix_hashes_by_token[global_token_idx],
                                     &future_group_hashes,
                                 )
                             } else {
@@ -507,12 +525,13 @@ fn find_state_equivalence_classes_token_based(
                                     Some(current as usize),
                                     positions,
                                     token.len(),
-                                    &suffix_hashes_by_token[token_idx],
+                                    &suffix_hashes_by_token[global_token_idx],
                                     &future_group_hashes,
                                 )
                             };
-                            hash_delta = hash_delta
-                                .wrapping_add(token_hash.wrapping_mul(sorted_weights[token_idx]));
+                            hash_delta = hash_delta.wrapping_add(
+                                token_hash.wrapping_mul(sorted_weights[global_token_idx]),
+                            );
                         }
                     }
 
@@ -579,7 +598,6 @@ fn find_state_equivalence_classes_token_based(
             }
         }
 
-        let tokens_tested = batch_end;
         if early_stop && tokens_tested * 2 >= total_tokens {
             if num_groups == prev_groups {
                 stable_batches += 1;
@@ -592,7 +610,6 @@ fn find_state_equivalence_classes_token_based(
         }
 
         prev_groups = num_groups;
-        batch_start = batch_end;
     }
 
     let num_groups = group_ids.iter().copied().max().map(|v| v + 1).unwrap_or(0);
