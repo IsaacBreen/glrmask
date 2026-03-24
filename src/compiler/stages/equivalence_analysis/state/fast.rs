@@ -4,12 +4,13 @@
 //! States that are equivalent can be merged, reducing the workload for subsequent
 //! vocab equivalence analysis.
 //!
-//! The algorithm always runs:
-//! 1. max-length bounded path hashing to measure an approximate prepass partition.
-//! 2. Full token-based analysis on the original state set.
+//! The algorithm uses a two-stage pipeline:
+//! 1. max-length bounded path hashing to collapse obviously equivalent states.
+//! 2. Full token-based analysis on the reduced representative set.
 //!
-//! The max-length pass is retained for profiling visibility and future optimization
-//! work, but it does not constrain the final partition returned by this module.
+//! Max-length state equivalence is an exact reduction. The token-based pass builds
+//! on that reduction and may discover additional equivalences among the remaining
+//! representatives.
 
 use std::collections::BTreeSet;
 use rayon::prelude::*;
@@ -52,8 +53,8 @@ fn count_classes(mapping: &[usize]) -> usize {
 /// Find state equivalence classes for a tokenizer.
 ///
 /// Uses a prepass + refinement approach:
-/// 1. k-step inductive hashing to measure a coarse partition.
-/// 2. Full token-based analysis on the full state set.
+/// 1. k-step inductive hashing to reduce the number of candidate states.
+/// 2. Full token-based analysis on the reduced representative set.
 ///
 /// # Arguments
 /// * `regex` - The tokenizer DFA
@@ -87,12 +88,48 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     let reduced_states: Vec<usize> = rep_set.into_iter().collect();
     let prepass_classes = reduced_states.len();
 
+    if reduced_states.len() == states.len() {
+        let refinement_started_at = std::time::Instant::now();
+        let mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, states);
+        let refinement_time = refinement_started_at.elapsed();
+
+        if profile_equivalence {
+            let final_classes = count_classes(&mapping);
+            eprintln!(
+                "[glrmask/profile][state_equiv] max_length_ms={:.3} states={}→{} ({:.2}x)",
+                prepass_time.as_secs_f64() * 1000.0,
+                states.len(),
+                prepass_classes,
+                states.len() as f64 / prepass_classes.max(1) as f64,
+            );
+            eprintln!(
+                "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x)",
+                refinement_time.as_secs_f64() * 1000.0,
+                states.len(),
+                final_classes,
+                states.len() as f64 / final_classes.max(1) as f64,
+            );
+        }
+
+        return mapping;
+    }
+
     let refinement_started_at = std::time::Instant::now();
-    let mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, states);
+    let reduced_mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, &reduced_states);
     let refinement_time = refinement_started_at.elapsed();
+    let mut rep_to_final: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (i, &rep_state) in reduced_states.iter().enumerate() {
+        rep_to_final.insert(rep_state, reduced_mapping[i]);
+    }
+
+    let mut mapping = vec![0usize; states.len()];
+    for (i, &pre_rep) in pre_mapping.iter().enumerate() {
+        mapping[i] = rep_to_final[&pre_rep];
+    }
 
     if profile_equivalence {
         let final_classes = count_classes(&mapping);
+        let refinement_classes = count_classes(&reduced_mapping);
         eprintln!(
             "[glrmask/profile][state_equiv] max_length_ms={:.3} states={}→{} ({:.2}x)",
             prepass_time.as_secs_f64() * 1000.0,
@@ -101,12 +138,14 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
             states.len() as f64 / prepass_classes.max(1) as f64,
         );
         eprintln!(
-            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x) prepass_classes={}",
+            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x) input={}→{} ({:.2}x)",
             refinement_time.as_secs_f64() * 1000.0,
             states.len(),
             final_classes,
             states.len() as f64 / final_classes.max(1) as f64,
-            prepass_classes,
+            reduced_states.len(),
+            refinement_classes,
+            reduced_states.len() as f64 / refinement_classes.max(1) as f64,
         );
     }
 
