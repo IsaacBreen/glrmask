@@ -9,80 +9,22 @@ use super::determinize;
 use super::dwa::DWA;
 use super::minimize;
 use super::nwa::{Label, NWA};
+use super::test_support::{
+    add_dwa_states,
+    add_nwa_states,
+    assert_weights_eq,
+    weight_from_item,
+    weight_from_iter,
+    weight_from_ranges,
+};
 use crate::ds::weight::Weight;
 
-// ============================================================================
 // Helper functions
-// ============================================================================
-
-/// Create a weight that represents a single TSID item.
-fn weight_from_item(n: u32) -> Weight {
-    Weight::from_compact_ranges(vec![(n..=n, vec![0..=0])])
-}
-
-/// Create a weight that represents a set of TSID items.
-fn weight_from_iter<I: IntoIterator<Item = u32>>(items: I) -> Weight {
-    let mut sorted: Vec<u32> = items.into_iter().collect();
-    if sorted.is_empty() {
-        return Weight::empty();
-    }
-    sorted.sort_unstable();
-    sorted.dedup();
-    // Group into contiguous ranges
-    let mut ranges = Vec::new();
-    let mut start = sorted[0];
-    let mut end = sorted[0];
-    for &item in &sorted[1..] {
-        if item == end + 1 {
-            end = item;
-        } else {
-            ranges.push((start..=end, vec![0..=0]));
-            start = item;
-            end = item;
-        }
-    }
-    ranges.push((start..=end, vec![0..=0]));
-    Weight::from_compact_ranges(ranges)
-}
-
-/// Create a weight from inclusive ranges of TSIDs.
-fn weight_from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<u32>>>(ranges: I) -> Weight {
-    let entries: Vec<_> = ranges
-        .into_iter()
-        .map(|r| (r, vec![0..=0]))
-        .collect();
-    if entries.is_empty() {
-        return Weight::empty();
-    }
-    Weight::from_compact_ranges(entries)
-}
-
-/// Check if `sub` is a subset of `sup` (all bits in sub are in sup).
-fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
-    sub.difference(sup).is_empty()
-}
-
-/// Assert two weights are semantically equivalent.
-fn assert_weights_eq(a: &Weight, b: &Weight, msg: &str) {
-    let diff_ab = a.difference(b);
-    let diff_ba = b.difference(a);
-    assert!(
-        diff_ab.is_empty() && diff_ba.is_empty(),
-        "{}\nA: {}\nB: {}\nA\\B: {}\nB\\A: {}",
-        msg,
-        a,
-        b,
-        diff_ab,
-        diff_ba
-    );
-}
 
 /// Convert a DWA into an NWA (for use in union/concatenate).
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
     let mut nwa = NWA::new(0, 0);
-    for _ in 0..dwa.states.len() {
-        nwa.add_state();
-    }
+    add_nwa_states(&mut nwa, dwa.states.len());
     nwa.start_states = vec![dwa.start_state];
     for (state_id, state) in dwa.states.iter().enumerate() {
         if let Some(fw) = &state.final_weight {
@@ -321,9 +263,7 @@ fn neg(x: Label) -> Label {
     x.wrapping_add(Label::MIN)
 }
 
-// ============================================================================
 // DWA Builder Tests
-// ============================================================================
 
 #[test]
 fn test_dwa_builder() {
@@ -349,9 +289,7 @@ fn test_dwa_builder() {
     assert_weights_eq(tw, &weight_from_item(30), "Transition weight should be 30");
 }
 
-// ============================================================================
 // Minimize Tests
-// ============================================================================
 
 #[test]
 fn test_minimize_redundant_states() {
@@ -705,9 +643,7 @@ fn test_minimize_cross_height_via_relaxed_conditions() {
     );
 }
 
-// ============================================================================
 // Union Tests
-// ============================================================================
 
 #[test]
 fn test_union_simple() {
@@ -773,14 +709,12 @@ fn test_union_identical_cyclic() {
 
     let d2 = d1.clone();
 
-    // The union of two identical automata should be equivalent to the original.
-    // Note: this may fail because glrmask's determinize rejects cyclic NWAs.
     let u = dwa_union(&d1, &d2);
     assert_dwa_equivalent(&u, &d1, 10);
 }
 
 #[test]
-fn test_union_from_debug_log_minimized1() {
+fn test_union_handles_final_start_and_single_branch_regression() {
     let mut left = DWA::new(0, 0);
     left.set_final_weight(0, weight_from_item(0));
 
@@ -794,7 +728,7 @@ fn test_union_from_debug_log_minimized1() {
 }
 
 #[test]
-fn test_union_from_debug_log_minimized2() {
+fn test_union_handles_shorter_left_branch_regression() {
     let mut left = DWA::new(0, 0);
     let s1a = left.add_state();
     left.add_transition(0, 0, s1a, weight_from_item(0));
@@ -812,7 +746,7 @@ fn test_union_from_debug_log_minimized2() {
 }
 
 #[test]
-fn test_union_from_debug_log_minimized2_with_minimization_trick() {
+fn test_union_handles_shared_target_regression() {
     let mut left = DWA::new(0, 0);
     let s1a = left.add_state();
     left.add_transition(0, 0, s1a, weight_from_item(0));
@@ -831,7 +765,7 @@ fn test_union_from_debug_log_minimized2_with_minimization_trick() {
 }
 
 #[test]
-fn test_union_from_debug_log_minimized3() {
+fn test_union_handles_nested_shared_prefix_regression() {
     let mut left = DWA::new(0, 0);
     let s1a = left.add_state();
     let s2a = left.add_state();
@@ -853,11 +787,9 @@ fn test_union_from_debug_log_minimized3() {
 }
 
 #[test]
-fn test_union_from_debug_log() {
+fn test_union_handles_large_mixed_label_regression() {
     let mut left = DWA::new(0, 0);
-    for _ in 0..9 {
-        left.add_state();
-    }
+    add_dwa_states(&mut left, 9);
     assert_eq!(left.states.len(), 10);
 
     left.set_final_weight(0, weight_from_item(2));
@@ -874,9 +806,7 @@ fn test_union_from_debug_log() {
     left.set_final_weight(9, Weight::all());
 
     let mut right = DWA::new(0, 0);
-    for _ in 0..12 {
-        right.add_state();
-    }
+    add_dwa_states(&mut right, 12);
     assert_eq!(right.states.len(), 13);
 
     right.add_transition(0, 1, 1, weight_from_item(3));
@@ -898,11 +828,9 @@ fn test_union_from_debug_log() {
 }
 
 #[test]
-fn test_union_from_panicked_log() {
+fn test_union_handles_large_union_regression() {
     let mut a = DWA::new(0, 0);
-    for _ in 0..23 {
-        a.add_state();
-    }
+    add_dwa_states(&mut a, 23);
     assert_eq!(a.states.len(), 24);
 
     a.add_transition(0, 0, 1, weight_from_item(1));
@@ -946,9 +874,7 @@ fn test_union_from_panicked_log() {
     a.add_transition(23, neg(3), 13, weight_from_item(2));
 
     let mut b = DWA::new(0, 0);
-    for _ in 0..16 {
-        b.add_state();
-    }
+    add_dwa_states(&mut b, 16);
     assert_eq!(b.states.len(), 17);
 
     b.add_transition(0, 0, 1, weight_from_item(3));
@@ -990,9 +916,7 @@ fn test_union_complex_from_attachment() {
 
     // --- Build LEFT DWA ---
     let mut left = DWA::new(0, 0);
-    for _ in 0..47 {
-        left.add_state();
-    }
+    add_dwa_states(&mut left, 47);
 
     left.add_transition(0, 0, 1, weight_from_item(1));
     left.add_transition(0, 2, 2, weight_from_item(1));
@@ -1084,9 +1008,7 @@ fn test_union_complex_from_attachment() {
 
     // --- Build RIGHT DWA ---
     let mut right = DWA::new(0, 0);
-    for _ in 0..42 {
-        right.add_state();
-    }
+    add_dwa_states(&mut right, 42);
 
     right.add_transition(0, 2, 1, weight_from_item(0));
     right.add_transition(0, 4, 2, weight_from_item(0));
@@ -1167,9 +1089,7 @@ fn test_union_complex_from_attachment_simplified() {
 
     // Build left DWA
     let mut left = DWA::new(0, 0);
-    for _ in 0..20 {
-        left.add_state();
-    }
+    add_dwa_states(&mut left, 20);
     assert_eq!(left.states.len(), 21);
 
     left.add_transition(0, 0, 1, weight_from_item(1));
@@ -1210,9 +1130,7 @@ fn test_union_complex_from_attachment_simplified() {
 
     // Build right DWA
     let mut right = DWA::new(0, 0);
-    for _ in 0..22 {
-        right.add_state();
-    }
+    add_dwa_states(&mut right, 22);
     assert_eq!(right.states.len(), 23);
 
     right.add_transition(0, 5, 1, weight_from_item(0));
@@ -1256,9 +1174,7 @@ fn test_union_complex_from_attachment_simplified() {
     validate_union(&left, &right, &u, 20);
 }
 
-// ============================================================================
 // Concatenate Tests
-// ============================================================================
 
 #[test]
 fn test_concatenate_simple() {
@@ -1349,9 +1265,7 @@ fn test_concatenate_complex_from_attachment() {
     let w_01 = weight_from_iter(0..=1);
 
     let mut left = DWA::new(0, 0);
-    for _ in 0..25 {
-        left.add_state();
-    }
+    add_dwa_states(&mut left, 25);
     left.start_state = 25;
     assert_eq!(left.states.len(), 26);
 
@@ -1405,11 +1319,9 @@ fn test_concatenate_complex_from_attachment() {
 }
 
 #[test]
-fn test_concatenate_from_debug_log() {
+fn test_concatenate_handles_weight_gated_regression() {
     let mut base_dwa = DWA::new(0, 0);
-    for _ in 0..12 {
-        base_dwa.add_state();
-    }
+    add_dwa_states(&mut base_dwa, 12);
     assert_eq!(base_dwa.states.len(), 13);
 
     base_dwa.add_transition(0, 6, 1, Weight::all());
@@ -1441,9 +1353,7 @@ fn test_concatenate_from_debug_log() {
     validate_concatenation(&dwa1, &dwa2, &c, 15);
 }
 
-// ============================================================================
 // Minimize Complex Tests
-// ============================================================================
 
 #[test]
 fn test_minimize_complex_dwa_from_attachment() {
@@ -1451,9 +1361,7 @@ fn test_minimize_complex_dwa_from_attachment() {
     let w_01 = weight_from_iter(0..=1);
 
     let mut left = DWA::new(0, 0);
-    for _ in 0..25 {
-        left.add_state();
-    }
+    add_dwa_states(&mut left, 25);
     left.start_state = 25;
     assert_eq!(left.states.len(), 26);
 
@@ -1501,16 +1409,12 @@ fn test_minimize_complex_dwa_from_attachment() {
     assert_dwa_equivalent(&minimized, &expected, 15);
 }
 
-// ============================================================================
 // DWA ↔ NWA Roundtrip Tests
-// ============================================================================
 
 #[test]
 fn test_dwa_to_nwa_to_dwa_roundtrip() {
     let mut a = DWA::new(0, 0);
-    for _ in 0..23 {
-        a.add_state();
-    }
+    add_dwa_states(&mut a, 23);
     assert_eq!(a.states.len(), 24);
 
     a.add_transition(0, 0, 1, weight_from_item(1));
@@ -1579,9 +1483,7 @@ fn test_dwa_roundtrip_minimal_repro() {
     assert_dwa_equivalent(&a, &roundtrip_dwa, 10);
 }
 
-// ============================================================================
 // Determinize Tests
-// ============================================================================
 
 #[test]
 fn test_det_simple_char() {
@@ -1742,10 +1644,7 @@ fn test_det_accepts_empty_word() {
 #[ignore] // glrmask determinize only supports acyclic NWAs; this NWA contains cycles
 fn test_determinize_complex_nwa_from_template() {
     let mut nwa = NWA::new(0, 0);
-    // Create 39 states (0..38)
-    for _ in 0..39 {
-        nwa.add_state();
-    }
+    add_nwa_states(&mut nwa, 39);
     nwa.start_states.push(0);
 
     // State 0
@@ -1835,9 +1734,7 @@ fn test_determinize_complex_nwa_from_template() {
 #[test]
 fn test_determinize_minimal_failing_nwa() {
     let mut nwa = NWA::new(0, 0);
-    for _ in 0..34 {
-        nwa.add_state();
-    }
+    add_nwa_states(&mut nwa, 34);
     nwa.start_states.push(0);
 
     nwa.add_epsilon(0, 19, Weight::all());
@@ -1855,9 +1752,7 @@ fn test_determinize_minimal_failing_nwa() {
     assert!(!weight.is_empty(), "Path should be valid after determinization");
 }
 
-// ============================================================================
 // Diamond Structure Optimization Test
-// ============================================================================
 
 #[test]
 fn test_diamond_structure() {

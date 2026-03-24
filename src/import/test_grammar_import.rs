@@ -1,56 +1,63 @@
 //! Regression tests for grammar import.
 //!
-//! Sources:
-//!   - `grammars2024/src/interface/ebnf.rs` (9 tests total; 2 retained, 7 skipped)
-//!   - `grammars2024/src/interface/lark.rs` (4 tests total; 2 retained, 2 skipped)
-//!
-//! Skipped tests:
-//!   EBNF (7):
-//!     - test_ebnf_parser_greedy_group_directives: needs greedy group directives (absent)
-//!     - test_ebnf_parser_allows_wildcard_greedy_group: needs greedy groups
-//!     - test_ebnf_parser_rejects_greedy_all_directive: needs greedy_all directive
-//!     - test_ebnf_parser_rejects_mixed_greedy_all_and_greedy_group: needs mixed greedy
-//!     - test_grammar_definition_from_ebnf_wildcard_greedy_group_directive: needs GrammarDefinition
-//!     - test_ebnf_parser_allows_wildcard_and_explicit_greedy_groups: needs wildcard groups
-//!     - test_grammar_definition_from_ebnf_wildcard_and_explicit_greedy_groups: needs GrammarDefinition
-//!
-//!   Lark (1):
-//!     - test_lark_ignore_directive: NamedGrammar has no ignore_symbol_name field
+//! Cases that depend on greedy directives or missing ignore metadata stay
+//! omitted because they do not map onto glrmask's current import surface.
 
-use crate::import::ast::{GrammarExpr, NamedRule};
+use std::fmt::Display;
+
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
 use crate::import::ebnf::parse_ebnf_to_named;
 use crate::import::lark::parse_lark_to_named;
 use crate::grammar::ast::lower;
 
-// ── EBNF tests ───────────────────────────────────────────────────────────────
+fn parse_ebnf_named(input: &str) -> NamedGrammar {
+    parse_ebnf_to_named(input).expect("EBNF should parse")
+}
+
+fn parse_lark_named(input: &str) -> NamedGrammar {
+    parse_lark_to_named(input).expect("Lark should parse")
+}
+
+fn nonterminal_rule(name: &str, expr: GrammarExpr) -> NamedRule {
+    NamedRule {
+        name: name.to_string(),
+        expr,
+        is_terminal: false,
+    }
+}
+
+fn assert_error_contains<T, E>(result: Result<T, E>, expected: &str, context: &str)
+where
+    T: std::fmt::Debug,
+    E: Display,
+{
+    let error = result.expect_err(context);
+    assert!(error.to_string().contains(expected), "unexpected error: {error}");
+}
 
 /// Adapted from `test_ebnf_parser_simple`.
 ///
 /// Parses a basic EBNF grammar and checks the resulting AST structure.
 #[test]
 fn test_ebnf_parser_simple() {
-    // glrmask EBNF uses newlines (not semicolons) as rule separators
     let ebnf = "\
 s ::= a b
 a ::= 'a' |
 b ::= c*
 c ::= 'c'?";
-    let named = parse_ebnf_to_named(ebnf).expect("EBNF should parse");
+    let named = parse_ebnf_named(ebnf);
 
-    let nt = |name: &str, expr: GrammarExpr| -> NamedRule {
-        NamedRule { name: name.to_string(), expr, is_terminal: false }
-    };
     let expected_rules: Vec<NamedRule> = vec![
-        nt("s", GrammarExpr::Sequence(vec![
+        nonterminal_rule("s", GrammarExpr::Sequence(vec![
             GrammarExpr::Ref("a".into()),
             GrammarExpr::Ref("b".into()),
         ])),
-        nt("a", GrammarExpr::Choice(vec![
+        nonterminal_rule("a", GrammarExpr::Choice(vec![
             GrammarExpr::Literal(b"a".to_vec()),
             GrammarExpr::Sequence(vec![]),
         ])),
-        nt("b", GrammarExpr::Repeat(Box::new(GrammarExpr::Ref("c".into())))),
-        nt("c", GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"c".to_vec())))),
+        nonterminal_rule("b", GrammarExpr::Repeat(Box::new(GrammarExpr::Ref("c".into())))),
+        nonterminal_rule("c", GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"c".to_vec())))),
     ];
 
     assert_eq!(
@@ -64,20 +71,13 @@ c ::= 'c'?";
 /// Verifies the parser returns an error for invalid EBNF (double '?').
 #[test]
 fn test_ebnf_parser_error_for_invalid_syntax() {
-    // Double '?' is invalid — parser should fail
     let ebnf = "\
 s ::= a b
 a ::= 'a' |
 b ::= c*
 c ::= 'c'??";
-    let result = parse_ebnf_to_named(ebnf);
-    assert!(
-        result.is_err(),
-        "EBNF with 'c'?? should produce a parse error"
-    );
+    assert!(parse_ebnf_to_named(ebnf).is_err(), "EBNF with 'c'?? should produce a parse error");
 }
-
-// ── Lark tests ───────────────────────────────────────────────────────────────
 
 /// Adapted from `test_lark_repeat_bounded`.
 #[test]
@@ -86,9 +86,8 @@ fn test_lark_repeat_bounded_preserves_range_node() {
 start: STR_CHAR~3..5
 STR_CHAR: "a"
 "#;
-    let named = parse_lark_to_named(lark).expect("Lark should parse bounded repeats");
+    let named = parse_lark_named(lark);
 
-    // Terminal rule is stored as expanded GrammarExpr; parser rule keeps Ref nodes.
     assert_eq!(named.rules[0].name, "STR_CHAR");
     assert_eq!(named.rules[0].expr, GrammarExpr::Literal(b"a".to_vec()));
     assert_eq!(named.rules[1].name, "start");
@@ -106,9 +105,8 @@ STR_CHAR: "a"
 #[test]
 fn test_lark_parser_supports_single_quotes_ranges_aliases_and_priority() {
     let lark = "?start: DIGIT -> picked\nDIGIT.2: '0'..'9'";
-    let named = parse_lark_to_named(lark).expect("Lark syntax subset should parse");
+    let named = parse_lark_named(lark);
 
-    // Terminal rule preserved as expanded GrammarExpr; parser rule keeps Ref.
     assert_eq!(named.rules.len(), 2);
     assert_eq!(named.rules[0].name, "DIGIT");
     assert_eq!(
@@ -122,9 +120,8 @@ fn test_lark_parser_supports_single_quotes_ranges_aliases_and_priority() {
 #[test]
 fn test_lark_terminal_rules_follow_capitalization_convention() {
     let lark = "start: WORD\nWORD: LETTER+\nLETTER: 'a' | 'b'";
-    let named = parse_lark_to_named(lark).expect("Lark terminal rules should be compiled to regex");
+    let named = parse_lark_named(lark);
 
-    // Terminal rules are stored as expanded GrammarExpr; parser rules keep Ref nodes.
     assert_eq!(named.rules.len(), 3);
     assert_eq!(named.rules[0].name, "WORD");
     assert_eq!(named.rules[1].name, "LETTER");
@@ -138,7 +135,6 @@ fn test_lark_terminal_rules_follow_capitalization_convention() {
     assert_eq!(named.rules[2].name, "start");
     assert_eq!(named.rules[2].expr, GrammarExpr::Ref("WORD".into()));
 
-    // The is_terminal flag marks terminal rule names.
     let term_set = named.terminal_names_set();
     assert!(term_set.contains("WORD"));
     assert!(term_set.contains("LETTER"));
@@ -148,29 +144,27 @@ fn test_lark_terminal_rules_follow_capitalization_convention() {
 
 #[test]
 fn test_lark_terminal_rule_rejects_parser_rule_reference() {
-    let err = parse_lark_to_named("start: WORD\nitem: 'a'\nWORD: item")
-        .expect_err("uppercase terminal rules should not reference lowercase parser rules");
-    assert!(
-        err.to_string().contains("references nonterminal item"),
-        "unexpected error: {err}"
+    assert_error_contains(
+        parse_lark_to_named("start: WORD\nitem: 'a'\nWORD: item"),
+        "references nonterminal item",
+        "uppercase terminal rules should not reference lowercase parser rules",
     );
 }
 
 #[test]
 fn test_lark_terminal_rule_rejects_undefined_reference() {
-    let err = parse_lark_to_named("start: WORD\nWORD: MISSING")
-        .expect_err("terminal referencing undefined rule should fail");
-    assert!(
-        err.to_string().contains("references undefined rule MISSING"),
-        "unexpected error: {err}"
+    assert_error_contains(
+        parse_lark_to_named("start: WORD\nWORD: MISSING"),
+        "references undefined rule MISSING",
+        "terminal referencing undefined rule should fail",
     );
 }
 
-/// Adapted from `test_lark_parser_simple`.
+/// Adapted from the original simple Lark parser smoke test.
 ///
 /// Parses a simple Lark grammar and checks rule count and names at the AST level.
 #[test]
-fn test_lark_parser_simple() {
+fn test_lark_parser_reports_expected_rule_names() {
     let lark = r#"
 start: expr
 
@@ -181,9 +175,8 @@ term: NUMBER
 
 NUMBER: /[0-9]+/
 "#;
-    let named = parse_lark_to_named(lark).expect("Lark should parse");
+    let named = parse_lark_named(lark);
 
-    // Terminal rule preserved; parser rules reference it via Ref.
     assert_eq!(
         named.rules.len(),
         4,
@@ -206,11 +199,10 @@ fn test_lark_regex_charclass_not_nested() {
 start: STR_CHAR
 STR_CHAR: /[^"\\\x00-\x1F]/
 "#;
-    let named = parse_lark_to_named(lark).expect("Lark should parse");
+    let named = parse_lark_named(lark);
 
     let str_char_expr = &named.rules[0].expr;
 
-    // After terminal-rule normalization, STR_CHAR is stored as expanded GrammarExpr.
     match str_char_expr {
         GrammarExpr::RawRegex(pattern) => {
             assert!(
@@ -237,7 +229,7 @@ F: "x"
 G: "x"
 H: "x"
 "#;
-    let named = parse_lark_to_named(lark).expect("Lark should parse");
+    let named = parse_lark_named(lark);
     let lowered = lower(&named).expect("lowering should succeed");
 
     assert_eq!(
@@ -266,11 +258,9 @@ JSON_STRING ::= '"' STR_CHAR* '"'
 STR_CHAR ::= [^"\\\x00-\x1F]
 "#;
 
-    let lark_named = parse_lark_to_named(lark).expect("Lark grammar should parse");
-    let ebnf_named = parse_ebnf_to_named(ebnf).expect("EBNF grammar should parse");
+    let lark_named = parse_lark_named(lark);
+    let ebnf_named = parse_ebnf_named(ebnf);
 
-    // Lark terminal rules are compiled to single regex patterns and kept as
-    // named rules.  EBNF keeps the helper-rule chain as structured nonterminals.
     assert!(
         lark_named.rules.iter().any(|r| r.name == "JSON_STRING"),
         "Lark should keep JSON_STRING as a named rule (compiled to regex)"
@@ -281,7 +271,6 @@ STR_CHAR ::= [^"\\\x00-\x1F]
         "EBNF import should keep the explicit terminal-chain helper rules visible in the named grammar"
     );
 
-    // Lark terminal rules are stored as expanded GrammarExpr; EBNF preserves structure.
     let lark_json_string = &lark_named.rules.iter().find(|r| r.name == "JSON_STRING").unwrap().expr;
     assert!(
         !matches!(lark_json_string, GrammarExpr::Ref(_)),
@@ -292,7 +281,6 @@ STR_CHAR ::= [^"\\\x00-\x1F]
     let lark_lowered = lower(&lark_named).expect("Lark lowering should succeed");
     let ebnf_lowered = lower(&ebnf_named).expect("EBNF lowering should succeed");
 
-    // Lark's compiled regex produces no more terminals than EBNF's decomposed structure.
     assert!(
         lark_lowered.terminals.len() <= ebnf_lowered.terminals.len(),
         "Lark composite terminals should produce no more lowered terminals ({}) than EBNF decomposed form ({})",

@@ -5,6 +5,9 @@ pub mod minimize_acyclic;
 pub mod nwa;
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod test_weighted_automata;
 
 #[cfg(test)]

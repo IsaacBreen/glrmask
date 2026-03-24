@@ -16,21 +16,7 @@ struct StateSignature {
     transitions: Vec<(i32, usize)>,
 }
 
-/// Minimize an acyclic unweighted DFA by merging states with identical
-/// signatures (acceptance + transition map modulo equivalence class).
-///
-/// Panics (debug) if the input is cyclic.
-pub fn minimize_acyclic(dfa: &DFA) -> DFA {
-    assert!(
-        dfa.is_acyclic(),
-        "minimize_acyclic: input DFA is cyclic"
-    );
-
-    if dfa.states.is_empty() {
-        return dfa.clone();
-    }
-
-    // ---- Reverse-topological order via post-order DFS ----
+fn reverse_topological_order(dfa: &DFA) -> Vec<usize> {
     fn dfs(state_id: usize, dfa: &DFA, visited: &mut [bool], order: &mut Vec<usize>) {
         if visited[state_id] {
             return;
@@ -46,67 +32,57 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
     }
 
     let mut visited = vec![false; dfa.states.len()];
-    let mut topo = Vec::new();
-    dfs(dfa.start_state as usize, dfa, &mut visited, &mut topo);
-    // `topo` is in reverse-topological order (leaves first).
+    let mut order = Vec::new();
+    dfs(dfa.start_state as usize, dfa, &mut visited, &mut order);
+    order
+}
 
-    let reachable: HashSet<usize> = topo.iter().copied().collect();
-    let labels: Vec<i32> = topo
-        .iter()
+fn reachable_labels(dfa: &DFA, topo: &[usize]) -> Vec<i32> {
+    topo.iter()
         .flat_map(|&state_id| dfa.states[state_id].transitions.keys().copied())
         .collect::<BTreeSet<_>>()
         .into_iter()
+        .collect()
+}
+
+fn state_signature(
+    state_id: usize,
+    dfa: &DFA,
+    labels: &[i32],
+    reachable: &HashSet<usize>,
+    class_of_state: &[usize],
+    dead_class: usize,
+) -> StateSignature {
+    let state = &dfa.states[state_id];
+    let transitions = labels
+        .iter()
+        .map(|&label| {
+            let target_class = state
+                .transitions
+                .get(&label)
+                .and_then(|&target| {
+                    let target = target as usize;
+                    reachable.contains(&target).then_some(class_of_state[target])
+                })
+                .unwrap_or(dead_class);
+            (label, target_class)
+        })
         .collect();
 
-    const DEAD_CLASS: usize = 0;
-    let dead_signature = StateSignature {
-        is_accepting: false,
-        transitions: labels.iter().map(|&label| (label, DEAD_CLASS)).collect(),
-    };
-
-    let mut signature_to_class = HashMap::<StateSignature, usize>::new();
-    signature_to_class.insert(dead_signature.clone(), DEAD_CLASS);
-    let mut class_of_state = vec![usize::MAX; dfa.states.len()];
-    let mut class_representatives = HashMap::<usize, usize>::new();
-    let mut next_class_id = 1usize;
-
-    // Process leaves before parents.
-    for &state_id in &topo {
-        let state = &dfa.states[state_id];
-        let transitions: Vec<(i32, usize)> = labels
-            .iter()
-            .map(|&label| {
-                let target_class = state
-                    .transitions
-                    .get(&label)
-                    .and_then(|&target| {
-                        let target = target as usize;
-                        reachable.contains(&target).then_some(class_of_state[target])
-                    })
-                    .unwrap_or(DEAD_CLASS);
-                (label, target_class)
-            })
-            .collect();
-
-        let signature = StateSignature {
-            is_accepting: state.is_accepting,
-            transitions,
-        };
-
-        let class_id = if let Some(&existing) = signature_to_class.get(&signature) {
-            existing
-        } else {
-            let new_id = next_class_id;
-            next_class_id += 1;
-            signature_to_class.insert(signature, new_id);
-            class_representatives.insert(new_id, state_id);
-            new_id
-        };
-        class_of_state[state_id] = class_id;
+    StateSignature {
+        is_accepting: state.is_accepting,
+        transitions,
     }
+}
 
-    // ---- Rebuild minimized DFA ----
-    if class_of_state[dfa.start_state as usize] == DEAD_CLASS {
+fn build_minimized_acyclic_dfa(
+    dfa: &DFA,
+    reachable: &HashSet<usize>,
+    class_of_state: &[usize],
+    class_representatives: &HashMap<usize, usize>,
+    dead_class: usize,
+) -> DFA {
+    if class_of_state[dfa.start_state as usize] == dead_class {
         return DFA::new();
     }
 
@@ -119,7 +95,6 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
         .collect();
 
     let mut minimized = DFA::new();
-    // Replace the default first state.
     minimized.states = vec![super::dfa::DFAState::default(); class_ids.len()];
     minimized.start_state = class_to_state[&class_of_state[dfa.start_state as usize]];
 
@@ -137,16 +112,74 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
                     return None;
                 }
                 let target_class = class_of_state[target];
-                if target_class == DEAD_CLASS {
-                    None
-                } else {
-                    Some((label, class_to_state[&target_class]))
-                }
+                (target_class != dead_class).then_some((label, class_to_state[&target_class]))
             })
             .collect();
     }
 
     minimized
+}
+
+/// Minimize an acyclic unweighted DFA by merging states with identical
+/// signatures (acceptance + transition map modulo equivalence class).
+///
+/// Panics (debug) if the input is cyclic.
+pub fn minimize_acyclic(dfa: &DFA) -> DFA {
+    assert!(
+        dfa.is_acyclic(),
+        "minimize_acyclic: input DFA is cyclic"
+    );
+
+    if dfa.states.is_empty() {
+        return dfa.clone();
+    }
+
+    let topo = reverse_topological_order(dfa);
+
+    let reachable: HashSet<usize> = topo.iter().copied().collect();
+    let labels = reachable_labels(dfa, &topo);
+
+    const DEAD_CLASS: usize = 0;
+    let dead_signature = StateSignature {
+        is_accepting: false,
+        transitions: labels.iter().map(|&label| (label, DEAD_CLASS)).collect(),
+    };
+
+    let mut signature_to_class = HashMap::<StateSignature, usize>::new();
+    signature_to_class.insert(dead_signature.clone(), DEAD_CLASS);
+    let mut class_of_state = vec![usize::MAX; dfa.states.len()];
+    let mut class_representatives = HashMap::<usize, usize>::new();
+    let mut next_class_id = 1usize;
+
+    for &state_id in &topo {
+        let signature = state_signature(
+            state_id,
+            dfa,
+            &labels,
+            &reachable,
+            &class_of_state,
+            DEAD_CLASS,
+        );
+
+        let class_id = if let Some(&existing) = signature_to_class.get(&signature) {
+            existing
+        } else {
+            let new_id = next_class_id;
+            next_class_id += 1;
+            signature_to_class.insert(signature, new_id);
+            class_representatives.insert(new_id, state_id);
+            new_id
+        };
+        class_of_state[state_id] = class_id;
+    }
+
+    build_minimized_acyclic_dfa(
+        dfa,
+        &reachable,
+        &class_of_state,
+        &class_representatives,
+        DEAD_CLASS,
+    )
 }
 
 #[cfg(test)]

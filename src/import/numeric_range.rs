@@ -21,6 +21,16 @@ fn mk_or_opt(parts: Vec<String>) -> Option<String> {
     }
 }
 
+fn push_optional_part(parts: &mut Vec<String>, part: Option<String>) {
+    if let Some(part) = part {
+        parts.push(part);
+    }
+}
+
+fn negative_regex(pattern: String) -> String {
+    format!("-{pattern}")
+}
+
 fn num_digits(n: i64) -> usize {
     n.abs().to_string().len()
 }
@@ -255,6 +265,10 @@ fn escape_float_str(s: &str) -> String {
     s.replace('.', "\\.")
 }
 
+fn exact_float_regex(value: f64) -> String {
+    format!("({})", escape_float_str(&float_to_str(value)))
+}
+
 struct NonnegativeDecimalBounds {
     left_integer: i64,
     right_integer: i64,
@@ -303,6 +317,129 @@ fn pad_decimal_fractions(left_fraction: &mut String, right_fraction: &mut String
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FloatRangeMode {
+    AllowIntegers,
+    FractionOnly,
+}
+
+fn same_integer_float_part(
+    bounds: &mut NonnegativeDecimalBounds,
+    left_inclusive: bool,
+    right_inclusive: bool,
+    mode: FloatRangeMode,
+) -> Result<String> {
+    pad_decimal_fractions(&mut bounds.left_fraction, &mut bounds.right_fraction);
+    let suffix = format!(
+        "\\.{}",
+        lexi_range(
+            &bounds.left_fraction,
+            &bounds.right_fraction,
+            left_inclusive,
+            right_inclusive,
+        )?
+    );
+
+    if mode == FloatRangeMode::AllowIntegers
+        && bounds.left_fraction.parse::<i64>().unwrap_or(0) == 0
+    {
+        Ok(format!("({}({suffix})?)", bounds.left_integer))
+    } else {
+        Ok(format!("({}{suffix})", bounds.left_integer))
+    }
+}
+
+fn lower_float_part(
+    bounds: &mut NonnegativeDecimalBounds,
+    left_inclusive: bool,
+    mode: FloatRangeMode,
+) -> Result<Option<String>> {
+    match mode {
+        FloatRangeMode::AllowIntegers => {
+            if !bounds.left_fraction.is_empty() || !left_inclusive {
+                let part = format!(
+                    "({}\\.{})",
+                    bounds.left_integer,
+                    lexi_x_to_9(&bounds.left_fraction, left_inclusive)?
+                );
+                bounds.left_integer += 1;
+                Ok(Some(part))
+            } else {
+                Ok(None)
+            }
+        }
+        FloatRangeMode::FractionOnly => {
+            let part = if !bounds.left_fraction.is_empty() {
+                format!(
+                    "({}\\.{})",
+                    bounds.left_integer,
+                    lexi_x_to_9(&bounds.left_fraction, left_inclusive)?
+                )
+            } else {
+                format!("({}\\.[0-9]+)", bounds.left_integer)
+            };
+            bounds.left_integer += 1;
+            Ok(Some(part))
+        }
+    }
+}
+
+fn middle_float_part(bounds: &NonnegativeDecimalBounds, mode: FloatRangeMode) -> Result<Option<String>> {
+    if bounds.right_integer <= bounds.left_integer {
+        return Ok(None);
+    }
+
+    let inner = rx_int_range(Some(bounds.left_integer), Some(bounds.right_integer - 1))?;
+    Ok(Some(match mode {
+        FloatRangeMode::AllowIntegers => format!("({inner}(\\.[0-9]+)?)"),
+        FloatRangeMode::FractionOnly => format!("({inner}\\.[0-9]+)"),
+    }))
+}
+
+fn upper_float_part(
+    bounds: &NonnegativeDecimalBounds,
+    right_inclusive: bool,
+    mode: FloatRangeMode,
+) -> Result<Option<String>> {
+    if !bounds.right_fraction.is_empty() {
+        let right_fraction = lexi_0_to_x(&bounds.right_fraction, right_inclusive)?;
+        if mode == FloatRangeMode::FractionOnly && right_fraction.is_empty() {
+            return Ok(None);
+        }
+
+        return Ok(Some(match mode {
+            FloatRangeMode::AllowIntegers => {
+                format!("({}(\\.{})?)", bounds.right_integer, right_fraction)
+            }
+            FloatRangeMode::FractionOnly => {
+                format!("({}\\.{})", bounds.right_integer, right_fraction)
+            }
+        }));
+    }
+
+    if !right_inclusive {
+        return Ok(None);
+    }
+
+    Ok(Some(match mode {
+        FloatRangeMode::AllowIntegers => format!("{}(\\.0+)?", bounds.right_integer),
+        FloatRangeMode::FractionOnly => format!("{}\\.0+", bounds.right_integer),
+    }))
+}
+
+fn collect_nonnegative_float_parts(
+    bounds: &mut NonnegativeDecimalBounds,
+    left_inclusive: bool,
+    right_inclusive: bool,
+    mode: FloatRangeMode,
+) -> Result<Vec<String>> {
+    let mut parts = Vec::new();
+    push_optional_part(&mut parts, lower_float_part(bounds, left_inclusive, mode)?);
+    push_optional_part(&mut parts, middle_float_part(bounds, mode)?);
+    push_optional_part(&mut parts, upper_float_part(bounds, right_inclusive, mode)?);
+    Ok(parts)
+}
+
 // ---------------------------------------------------------------------------
 // Float range
 // ---------------------------------------------------------------------------
@@ -336,7 +473,7 @@ pub fn rx_float_range(
         }
         (None, Some(right)) => {
             if right == 0.0 {
-                let r = format!("-{}", rx_float_range(Some(0.0), None, false, false)?);
+                let r = negative_regex(rx_float_range(Some(0.0), None, false, false)?);
                 if right_inclusive {
                     Ok(mk_or(vec![r, "0".to_string()]))
                 } else {
@@ -344,14 +481,16 @@ pub fn rx_float_range(
                 }
             } else if right > 0.0 {
                 Ok(mk_or(vec![
-                    format!("-{}", rx_float_range(Some(0.0), None, false, false)?),
+                    negative_regex(rx_float_range(Some(0.0), None, false, false)?),
                     rx_float_range(Some(0.0), Some(right), true, right_inclusive)?,
                 ]))
             } else {
-                Ok(format!(
-                    "-{}",
-                    rx_float_range(Some(-right), None, right_inclusive, false)?
-                ))
+                Ok(negative_regex(rx_float_range(
+                    Some(-right),
+                    None,
+                    right_inclusive,
+                    false,
+                )?))
             }
         }
         (Some(left), Some(right)) => {
@@ -364,7 +503,7 @@ pub fn rx_float_range(
             }
             if left == right {
                 if left_inclusive && right_inclusive {
-                    Ok(format!("({})", escape_float_str(&float_to_str(left))))
+                    Ok(exact_float_regex(left))
                 } else {
                     Err(format!(
                         "Empty range when left equals right and not both inclusive"
@@ -432,25 +571,30 @@ pub fn rx_noninteger_float_range(
         (None, Some(right)) => {
             if right == 0.0 {
                 let mut parts = Vec::new();
-                if let Some(part) = rx_noninteger_float_range(Some(0.0), None, false, false)? {
-                    parts.push(format!("-{part}"));
-                }
+                push_optional_part(
+                    &mut parts,
+                    rx_noninteger_float_range(Some(0.0), None, false, false)?
+                        .map(negative_regex),
+                );
                 if right_inclusive {
                     parts.push("0\\.0+".to_string());
                 }
                 Ok(mk_or_opt(parts))
             } else if right > 0.0 {
                 let mut parts = Vec::new();
-                if let Some(part) = rx_noninteger_float_range(Some(0.0), None, false, false)? {
-                    parts.push(format!("-{part}"));
-                }
-                if let Some(part) = rx_noninteger_float_range(Some(0.0), Some(right), true, right_inclusive)? {
-                    parts.push(part);
-                }
+                push_optional_part(
+                    &mut parts,
+                    rx_noninteger_float_range(Some(0.0), None, false, false)?
+                        .map(negative_regex),
+                );
+                push_optional_part(
+                    &mut parts,
+                    rx_noninteger_float_range(Some(0.0), Some(right), true, right_inclusive)?,
+                );
                 Ok(mk_or_opt(parts))
             } else {
                 Ok(rx_noninteger_float_range(Some(-right), None, right_inclusive, false)?
-                    .map(|part| format!("-{part}")))
+                    .map(negative_regex))
             }
         }
         (Some(left), Some(right)) => {
@@ -468,7 +612,7 @@ pub fn rx_noninteger_float_range(
 
                 let rendered = float_to_str(left);
                 if rendered.contains('.') {
-                    Ok(Some(format!("({})", escape_float_str(&rendered))))
+                    Ok(Some(exact_float_regex(left)))
                 } else {
                     Ok(None)
                 }
@@ -509,48 +653,19 @@ fn nonneg_float_range(
     let mut bounds = nonnegative_decimal_bounds(left, right)?;
 
     if bounds.left_integer == bounds.right_integer {
-        pad_decimal_fractions(&mut bounds.left_fraction, &mut bounds.right_fraction);
-        let suffix = format!(
-            "\\.{}",
-            lexi_range(
-                &bounds.left_fraction,
-                &bounds.right_fraction,
-                left_inclusive,
-                right_inclusive,
-            )?
-        );
-        if bounds.left_fraction.parse::<i64>().unwrap_or(0) == 0 {
-            Ok(format!("({}({suffix})?)", bounds.left_integer))
-        } else {
-            Ok(format!("({}{suffix})", bounds.left_integer))
-        }
+        same_integer_float_part(
+            &mut bounds,
+            left_inclusive,
+            right_inclusive,
+            FloatRangeMode::AllowIntegers,
+        )
     } else {
-        let mut parts = vec![];
-        if !bounds.left_fraction.is_empty() || !left_inclusive {
-            parts.push(format!(
-                "({}\\.{})",
-                bounds.left_integer,
-                lexi_x_to_9(&bounds.left_fraction, left_inclusive)?
-            ));
-            bounds.left_integer += 1;
-        }
-
-        if bounds.right_integer > bounds.left_integer {
-            let inner = rx_int_range(Some(bounds.left_integer), Some(bounds.right_integer - 1))?;
-            parts.push(format!("({inner}(\\.[0-9]+)?)"));
-        }
-
-        if !bounds.right_fraction.is_empty() {
-            parts.push(format!(
-                "({}(\\.{})?)",
-                bounds.right_integer,
-                lexi_0_to_x(&bounds.right_fraction, right_inclusive)?
-            ));
-        } else if right_inclusive {
-            parts.push(format!("{}(\\.0+)?", bounds.right_integer));
-        }
-
-        Ok(mk_or(parts))
+        Ok(mk_or(collect_nonnegative_float_parts(
+            &mut bounds,
+            left_inclusive,
+            right_inclusive,
+            FloatRangeMode::AllowIntegers,
+        )?))
     }
 }
 
@@ -563,47 +678,21 @@ fn nonneg_float_range_no_ints(
     let mut bounds = nonnegative_decimal_bounds(left, right)?;
 
     if bounds.left_integer == bounds.right_integer {
-        pad_decimal_fractions(&mut bounds.left_fraction, &mut bounds.right_fraction);
-        let suffix = format!(
-            "\\.{}",
-            lexi_range(
-                &bounds.left_fraction,
-                &bounds.right_fraction,
-                left_inclusive,
-                right_inclusive,
-            )?
-        );
-        return Ok(Some(format!("({}{suffix})", bounds.left_integer)));
+        return same_integer_float_part(
+            &mut bounds,
+            left_inclusive,
+            right_inclusive,
+            FloatRangeMode::FractionOnly,
+        )
+        .map(Some);
     }
 
-    let mut parts = vec![];
-    if !bounds.left_fraction.is_empty() {
-        parts.push(format!(
-            "({}\\.{})",
-            bounds.left_integer,
-            lexi_x_to_9(&bounds.left_fraction, left_inclusive)?
-        ));
-        bounds.left_integer += 1;
-    } else {
-        parts.push(format!("({}\\.[0-9]+)", bounds.left_integer));
-        bounds.left_integer += 1;
-    }
-
-    if bounds.right_integer > bounds.left_integer {
-        let inner = rx_int_range(Some(bounds.left_integer), Some(bounds.right_integer - 1))?;
-        parts.push(format!("({inner}\\.[0-9]+)"));
-    }
-
-    if !bounds.right_fraction.is_empty() {
-        let right_frac = lexi_0_to_x(&bounds.right_fraction, right_inclusive)?;
-        if !right_frac.is_empty() {
-            parts.push(format!("({}\\.{})", bounds.right_integer, right_frac));
-        }
-    } else if right_inclusive {
-        parts.push(format!("{}\\.0+", bounds.right_integer));
-    }
-
-    Ok(mk_or_opt(parts))
+    Ok(mk_or_opt(collect_nonnegative_float_parts(
+        &mut bounds,
+        left_inclusive,
+        right_inclusive,
+        FloatRangeMode::FractionOnly,
+    )?))
 }
 
 #[cfg(test)]

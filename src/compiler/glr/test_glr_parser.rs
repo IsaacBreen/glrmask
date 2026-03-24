@@ -10,16 +10,14 @@ use super::parser::{stacks_finished, GLRParser};
 use super::table::GLRTable;
 use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal, TerminalID};
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-fn tdef(id: u32, name: &str) -> Terminal {
+fn literal_terminal(id: u32, name: &str) -> Terminal {
     Terminal::Literal {
         id,
         bytes: name.as_bytes().to_vec(),
     }
 }
 
-fn make_grammar(rules: Vec<Rule>, start: u32, terminals: Vec<Terminal>) -> GrammarDef {
+fn grammar_definition(rules: Vec<Rule>, start: u32, terminals: Vec<Terminal>) -> GrammarDef {
     GrammarDef {
         rules,
         start,
@@ -28,8 +26,8 @@ fn make_grammar(rules: Vec<Rule>, start: u32, terminals: Vec<Terminal>) -> Gramm
     }
 }
 
-fn build_parser(gdef: &GrammarDef) -> GLRParser {
-    let grammar = AnalyzedGrammar::from_grammar_def(gdef);
+fn parser_for(grammar_def: &GrammarDef) -> GLRParser {
+    let grammar = AnalyzedGrammar::from_grammar_def(grammar_def);
     let table = GLRTable::build(&grammar);
     GLRParser::new(table)
 }
@@ -67,18 +65,24 @@ fn can_continue(parser: &GLRParser, input: &[TerminalID]) -> bool {
     stacks_finished(&current.table, &current.stack) || !current.valid_terminals().is_empty()
 }
 
-// ── regression tests ─────────────────────────────────────────────────────────
+fn assert_accepts(parser: &GLRParser, input: &[TerminalID], message: &str) {
+    assert!(accepts(parser, input), "{message}");
+}
+
+fn assert_rejects(parser: &GLRParser, input: &[TerminalID], message: &str) {
+    assert!(!accepts(parser, input), "{message}");
+}
 
 /// Repetition without EOF, left-recursive form.
 ///
 /// Grammar: S -> S a | a  (left-recursive, single terminal 'a')
 /// Tests parsing various inputs without EOF using can-continue semantics.
 #[test]
-fn test_repetition_no_eof_1() {
+fn test_left_recursive_repetition_accepts_without_eof() {
     // S -> S a | a
     // NT 0 = S
     // T 0 = a
-    let gdef = make_grammar(
+    let grammar = grammar_definition(
         vec![
             Rule {
                 lhs: 0,
@@ -90,27 +94,17 @@ fn test_repetition_no_eof_1() {
             }, // S -> a
         ],
         0,
-        vec![tdef(0, "a")],
+        vec![literal_terminal(0, "a")],
     );
-    let parser = build_parser(&gdef);
+    let parser = parser_for(&grammar);
 
-    // "a" is a valid sentence
-    assert!(
-        accepts(&parser, &[0]),
-        "\"a\" should be accepted (S -> a)"
+    assert_accepts(&parser, &[0], "\"a\" should be accepted (S -> a)");
+    assert_accepts(
+        &parser,
+        &[0, 0, 0],
+        "\"aaa\" should be accepted (S -> S a -> S a a -> a a a)",
     );
-
-    // "aaa" is a valid sentence
-    assert!(
-        accepts(&parser, &[0, 0, 0]),
-        "\"aaa\" should be accepted (S -> S a -> S a a -> a a a)"
-    );
-
-    // "" (empty) is NOT in the language (S is not nullable), but the parser can continue
-    assert!(
-        !accepts(&parser, &[]),
-        "\"\" should NOT be accepted (S is not nullable)"
-    );
+    assert_rejects(&parser, &[], "\"\" should NOT be accepted (S is not nullable)");
     assert!(
         can_continue(&parser, &[]),
         "parser should be able to continue from initial state"
@@ -122,11 +116,11 @@ fn test_repetition_no_eof_1() {
 /// Grammar: S -> S a | a, Other -> b
 /// Tests that invalid token 'b' causes parse failure for the S language.
 #[test]
-fn test_repetition_no_eof_2() {
+fn test_left_recursive_repetition_rejects_other_branch_tokens() {
     // S -> S a | a, Other -> b
     // NT 0 = S, NT 1 = Other
     // T 0 = a, T 1 = b
-    let gdef = make_grammar(
+    let grammar = grammar_definition(
         vec![
             Rule {
                 lhs: 0,
@@ -142,24 +136,13 @@ fn test_repetition_no_eof_2() {
             }, // Other -> b
         ],
         0,
-        vec![tdef(0, "a"), tdef(1, "b")],
+        vec![literal_terminal(0, "a"), literal_terminal(1, "b")],
     );
-    let parser = build_parser(&gdef);
+    let parser = parser_for(&grammar);
 
-    // "b" should fail (not part of S language)
-    assert!(
-        !accepts(&parser, &[1]),
-        "\"b\" should fail for S language"
-    );
-
-    // "ab" should fail (b is not valid after a in S language)
-    assert!(
-        !accepts(&parser, &[0, 1]),
-        "\"ab\" should fail for S language"
-    );
-
-    // Confirm "a" still works
-    assert!(accepts(&parser, &[0]), "\"a\" should be accepted");
+    assert_rejects(&parser, &[1], "\"b\" should fail for S language");
+    assert_rejects(&parser, &[0, 1], "\"ab\" should fail for S language");
+    assert_accepts(&parser, &[0], "\"a\" should be accepted");
 }
 
 /// Minimal single-production grammar.
@@ -167,40 +150,24 @@ fn test_repetition_no_eof_2() {
 /// Grammar: S -> a eof
 /// Tests the simplest possible grammar with explicit EOF terminal.
 #[test]
-fn test_super_simple_grammar() {
+fn test_explicit_eof_single_rule_grammar() {
     // S -> a eof
     // NT 0 = S
     // T 0 = a, T 1 = $
-    let gdef = make_grammar(
+    let grammar = grammar_definition(
         vec![Rule {
             lhs: 0,
             rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
         }],
         0,
-        vec![tdef(0, "a"), tdef(1, "$")],
+        vec![literal_terminal(0, "a"), literal_terminal(1, "$")],
     );
-    let parser = build_parser(&gdef);
+    let parser = parser_for(&grammar);
 
-    // Valid: "a$"
-    assert!(
-        accepts(&parser, &[0, 1]),
-        "\"a$\" should be accepted"
-    );
-
-    // Invalid: "$" alone
-    assert!(
-        !accepts(&parser, &[1]),
-        "\"$\" should fail (wrong first token)"
-    );
-
-    // Invalid: "a" alone (missing $)
-    assert!(
-        !accepts(&parser, &[0]),
-        "\"a\" alone should not be accepted (missing $)"
-    );
-
-    // Invalid: empty
-    assert!(!accepts(&parser, &[]), "empty should not be accepted");
+    assert_accepts(&parser, &[0, 1], "\"a$\" should be accepted");
+    assert_rejects(&parser, &[1], "\"$\" should fail (wrong first token)");
+    assert_rejects(&parser, &[0], "\"a\" alone should not be accepted (missing $)");
+    assert_rejects(&parser, &[], "empty should not be accepted");
 }
 
 /// Simple parse-table generation and parse.
@@ -214,7 +181,7 @@ fn test_simple_parse_table_generation_and_parse() {
     // A -> b
     // NT 0 = S, NT 1 = A
     // T 0 = a, T 1 = b, T 2 = $
-    let gdef = make_grammar(
+    let grammar = grammar_definition(
         vec![
             Rule {
                 lhs: 0,
@@ -230,39 +197,28 @@ fn test_simple_parse_table_generation_and_parse() {
             }, // A -> b
         ],
         0,
-        vec![tdef(0, "a"), tdef(1, "b"), tdef(2, "$")],
+        vec![
+            literal_terminal(0, "a"),
+            literal_terminal(1, "b"),
+            literal_terminal(2, "$"),
+        ],
     );
-    let parser = build_parser(&gdef);
+    let parser = parser_for(&grammar);
 
     // "b$" → accepted (A -> b, S -> A $)
-    assert!(
-        accepts(&parser, &[1, 2]),
-        "\"b$\" should be accepted"
-    );
+    assert_accepts(&parser, &[1, 2], "\"b$\" should be accepted");
 
     // "ba$" → accepted (A -> A a -> b a, S -> A $)
-    assert!(
-        accepts(&parser, &[1, 0, 2]),
-        "\"ba$\" should be accepted"
-    );
+    assert_accepts(&parser, &[1, 0, 2], "\"ba$\" should be accepted");
 
     // "baa$" → accepted
-    assert!(
-        accepts(&parser, &[1, 0, 0, 2]),
-        "\"baa$\" should be accepted"
-    );
+    assert_accepts(&parser, &[1, 0, 0, 2], "\"baa$\" should be accepted");
 
     // "a$" → rejected (cannot start with 'a')
-    assert!(
-        !accepts(&parser, &[0, 2]),
-        "\"a$\" should be rejected"
-    );
+    assert_rejects(&parser, &[0, 2], "\"a$\" should be rejected");
 
     // "bb$" → rejected (two b's)
-    assert!(
-        !accepts(&parser, &[1, 1, 2]),
-        "\"bb$\" should be rejected"
-    );
+    assert_rejects(&parser, &[1, 1, 2], "\"bb$\" should be rejected");
 }
 
 /// Ambiguous arithmetic grammar.
@@ -275,7 +231,7 @@ fn test_ambiguous_arithmetic() {
     // E -> E + E | E * E | id
     // NT 0 = E
     // T 0 = id, T 1 = +, T 2 = *
-    let gdef = make_grammar(
+    let grammar = grammar_definition(
         vec![
             Rule {
                 lhs: 0,
@@ -299,45 +255,38 @@ fn test_ambiguous_arithmetic() {
             }, // E -> id
         ],
         0,
-        vec![tdef(0, "id"), tdef(1, "+"), tdef(2, "*")],
+        vec![
+            literal_terminal(0, "id"),
+            literal_terminal(1, "+"),
+            literal_terminal(2, "*"),
+        ],
     );
-    let parser = build_parser(&gdef);
+    let parser = parser_for(&grammar);
 
     // "id" → accepted
-    assert!(accepts(&parser, &[0]), "\"id\" should be accepted");
+    assert_accepts(&parser, &[0], "\"id\" should be accepted");
 
     // "id + id * id" → accepted (ambiguous: (id+id)*id or id+(id*id))
-    assert!(
-        accepts(&parser, &[0, 1, 0, 2, 0]),
-        "\"id+id*id\" should be accepted (ambiguous)"
+    assert_accepts(
+        &parser,
+        &[0, 1, 0, 2, 0],
+        "\"id+id*id\" should be accepted (ambiguous)",
     );
 
     // "id + id" → accepted
-    assert!(
-        accepts(&parser, &[0, 1, 0]),
-        "\"id+id\" should be accepted"
-    );
+    assert_accepts(&parser, &[0, 1, 0], "\"id+id\" should be accepted");
 
     // "id * id" → accepted
-    assert!(
-        accepts(&parser, &[0, 2, 0]),
-        "\"id*id\" should be accepted"
-    );
+    assert_accepts(&parser, &[0, 2, 0], "\"id*id\" should be accepted");
 
     // "id +" → rejected (incomplete)
-    assert!(
-        !accepts(&parser, &[0, 1]),
-        "\"id+\" should be rejected (incomplete)"
-    );
+    assert_rejects(&parser, &[0, 1], "\"id+\" should be rejected (incomplete)");
 
     // "id + + id" → rejected
-    assert!(
-        !accepts(&parser, &[0, 1, 1, 0]),
-        "\"id++id\" should be rejected"
-    );
+    assert_rejects(&parser, &[0, 1, 1, 0], "\"id++id\" should be rejected");
 
     // "" → rejected
-    assert!(!accepts(&parser, &[]), "empty should be rejected");
+    assert_rejects(&parser, &[], "empty should be rejected");
 
     // Determinism: same input produces same result
     let input = &[0, 1, 0, 2, 0];
@@ -357,7 +306,7 @@ fn test_hidden_right_recursion() {
     // B -> epsilon
     // NT 0 = S, NT 1 = B
     // T 0 = a, T 1 = b
-    let gdef = make_grammar(
+    let grammar = grammar_definition(
         vec![
             Rule {
                 lhs: 0,
@@ -377,42 +326,27 @@ fn test_hidden_right_recursion() {
             }, // B -> epsilon
         ],
         0,
-        vec![tdef(0, "a"), tdef(1, "b")],
+        vec![literal_terminal(0, "a"), literal_terminal(1, "b")],
     );
-    let parser = build_parser(&gdef);
+    let parser = parser_for(&grammar);
 
     // "b" → accepted (S -> b)
-    assert!(accepts(&parser, &[1]), "\"b\" should be accepted");
+    assert_accepts(&parser, &[1], "\"b\" should be accepted");
 
     // "ab" → accepted (S -> a S B -> a b ε)
-    assert!(
-        accepts(&parser, &[0, 1]),
-        "\"ab\" should be accepted"
-    );
+    assert_accepts(&parser, &[0, 1], "\"ab\" should be accepted");
 
     // "aab" → accepted
-    assert!(
-        accepts(&parser, &[0, 0, 1]),
-        "\"aab\" should be accepted"
-    );
+    assert_accepts(&parser, &[0, 0, 1], "\"aab\" should be accepted");
 
     // "aaab" → accepted
-    assert!(
-        accepts(&parser, &[0, 0, 0, 1]),
-        "\"aaab\" should be accepted"
-    );
+    assert_accepts(&parser, &[0, 0, 0, 1], "\"aaab\" should be accepted");
 
     // "a" → rejected (needs 'b')
-    assert!(
-        !accepts(&parser, &[0]),
-        "\"a\" should be rejected (needs 'b')"
-    );
+    assert_rejects(&parser, &[0], "\"a\" should be rejected (needs 'b')");
 
     // "ba" → rejected
-    assert!(
-        !accepts(&parser, &[1, 0]),
-        "\"ba\" should be rejected"
-    );
+    assert_rejects(&parser, &[1, 0], "\"ba\" should be rejected");
 }
 
 /// Single-terminal production grammar.
@@ -424,19 +358,16 @@ fn test_single_terminal_production() {
     // S -> x
     // NT 0 = S
     // T 0 = x
-    let gdef = make_grammar(
+    let grammar = grammar_definition(
         vec![Rule {
             lhs: 0,
             rhs: vec![Symbol::Terminal(0)],
         }],
         0,
-        vec![tdef(0, "x")],
+        vec![literal_terminal(0, "x")],
     );
-    let parser = build_parser(&gdef);
+    let parser = parser_for(&grammar);
 
-    // "x" → accepted
-    assert!(accepts(&parser, &[0]), "\"x\" should be accepted");
-
-    // "" → rejected
-    assert!(!accepts(&parser, &[]), "empty should be rejected");
+    assert_accepts(&parser, &[0], "\"x\" should be accepted");
+    assert_rejects(&parser, &[], "empty should be rejected");
 }

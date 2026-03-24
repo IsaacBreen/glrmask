@@ -1,24 +1,13 @@
 //! Regression tests for JSON-schema and EBNF constraints.
 //!
-//! Source: `grammars2024/src/interface/json_schema/tests.rs`
-//!   (21 tests total; 16 retained, 5 skipped)
-//!
-//! Skipped tests:
-//!   - test_small_vocab_only_brace_valid_at_start: complex debug reproduction with
-//!     extensive internal-API assertions (possible_matches, DWA internals,
-//!     vocab mapping) that have no glrmask surface equivalent
-//!   - test_schema_simple_object_weight_heavy: `#[ignore]` in the source suite
-//!   - test_multibyte_tokens_simple_object: requires GPT-2 vocab file on disk
-//!   - test_multibyte_tokens_additional_properties_true: requires GPT-2 vocab file
-//!   - test_object_schema_rejects_quote_at_empty_prefix: requires GPT-2 vocab file
+//! Cases that depend on external GPT-2 vocab fixtures or removed internal
+//! assertions stay omitted.
 
-use crate::import::ast::GrammarExpr;
+use crate::import::ast::{GrammarExpr, NamedGrammar};
 use crate::import::json_schema::schema_to_named_grammar;
-use crate::runtime::Constraint;
+use crate::runtime::{Constraint, ConstraintState};
 use crate::Vocab;
 use std::path::Path;
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Build a byte-level vocabulary: token 0 = [0x00], token 1 = [0x01], ..., 255 = [0xFF].
 fn byte_vocab() -> Vocab {
@@ -35,23 +24,81 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
     (mask[word] >> (id % 32)) & 1 != 0
 }
 
+fn assert_token_allowed(mask: &[u32], token_id: usize, message: &str) {
+    assert!(token_allowed(mask, token_id), "{message}");
+}
+
+fn assert_token_disallowed(mask: &[u32], token_id: usize, message: &str) {
+    assert!(!token_allowed(mask, token_id), "{message}");
+}
+
+fn schema_constraint(schema: &str) -> Constraint {
+    schema_constraint_with_vocab(schema, &byte_vocab())
+}
+
+fn schema_constraint_with_vocab(schema: &str, vocab: &Vocab) -> Constraint {
+    Constraint::from_json_schema(schema, vocab)
+        .unwrap_or_else(|error| panic!("schema should compile: {error}"))
+}
+
+fn named_grammar_from_schema(schema: &str) -> NamedGrammar {
+    let value: serde_json::Value = serde_json::from_str(schema).expect("schema JSON should parse");
+    schema_to_named_grammar(&value).expect("schema should convert to named grammar")
+}
+
+fn advance_byte_prefix(state: &mut ConstraintState<'_>, prefix: &[u8]) {
+    for &byte in prefix {
+        let mask = state.mask();
+        assert_token_allowed(
+            &mask,
+            byte as usize,
+            &format!("prefix byte {byte:?} should be allowed"),
+        );
+        state.commit_token(byte as u32).unwrap();
+    }
+}
+
+fn advance_tokens(state: &mut ConstraintState<'_>, tokens: &[u32]) {
+    for &token in tokens {
+        state.commit_token(token).unwrap();
+    }
+}
+
+fn read_fixture_schema(path: &Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+
+    let fixture_text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("should read fixture: {error}"));
+    let fixture: serde_json::Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|error| panic!("should parse fixture: {error}"));
+    Some(
+        fixture
+            .get("schema")
+            .unwrap_or_else(|| panic!("fixture should contain schema"))
+            .to_string(),
+    )
+}
+
 /// Build a Constraint from a JSON schema (using the byte vocab) and assert
 /// that every input is accepted byte-by-byte.
 fn schema_accepts(schema: &str, inputs: &[&str]) {
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .unwrap_or_else(|e| panic!("schema should compile: {}", e));
+    let c = schema_constraint(schema);
     for input in inputs {
         let mut s = c.start();
-        for (i, byte) in input.bytes().enumerate() {
+        for (index, byte) in input.bytes().enumerate() {
             let mask = s.mask();
-            assert!(
-                token_allowed(&mask, byte as usize),
-                "Schema should accept {:?}: byte {:?} ({:#04x}) at position {} not in mask",
-                input,
-                byte as char,
-                byte,
-                i
+            assert_token_allowed(
+                &mask,
+                byte as usize,
+                &format!(
+                    "Schema should accept {:?}: byte {:?} ({:#04x}) at position {} not in mask",
+                    input,
+                    byte as char,
+                    byte,
+                    index
+                ),
             );
             s.commit_token(byte as u32).unwrap();
         }
@@ -62,7 +109,7 @@ fn schema_accepts(schema: &str, inputs: &[&str]) {
 fn ebnf_constraint(ebnf: &str) -> Constraint {
     let vocab = byte_vocab();
     Constraint::from_ebnf(ebnf, &vocab)
-        .unwrap_or_else(|e| panic!("EBNF should compile: {}", e))
+        .unwrap_or_else(|error| panic!("EBNF should compile: {error}"))
 }
 
 fn contains_literal(expr: &GrammarExpr, target: &[u8]) -> bool {
@@ -96,8 +143,6 @@ fn contains_repeat_range(expr: &GrammarExpr) -> bool {
     }
 }
 
-// ── EBNF constraint tests ───────────────────────────────────────────────────
-
 /// Adapted from `test_ebnf_ws_nullable`.
 ///
 /// Whitespace rule is nullable via `(…)*`; after committing `{`, the `}`
@@ -129,8 +174,7 @@ fn test_bounded_array_uses_repeat_range_ast() {
         "maxItems": 3
     }"#;
 
-    let value: serde_json::Value = serde_json::from_str(schema).expect("schema JSON should parse");
-    let named = schema_to_named_grammar(&value).expect("schema should convert to named grammar");
+    let named = named_grammar_from_schema(schema);
     assert!(
         named.rules.iter().any(|rule| contains_repeat_range(&rule.expr)),
         "bounded arrays should preserve a RepeatRange node instead of desugaring to an optional ladder"
@@ -285,48 +329,32 @@ fn test_schema_object_after_comma_requires_key_quote() {
             "lastSetValue": {"type": "number"}
         }
     }"#;
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .unwrap_or_else(|e| panic!("schema should compile: {}", e));
+    let c = schema_constraint(schema);
 
     let mut s = c.start();
-    for byte in br#"{"id": 1, "# {
-        let mask = s.mask();
-        assert!(
-            token_allowed(&mask, *byte as usize),
-            "prefix byte {byte:?} should be allowed"
-        );
-        s.commit_token(*byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut s, br#"{"id": 1, "#);
 
     let mask = s.mask();
-    assert!(
-        token_allowed(&mask, b'"' as usize),
-        "object member after comma+space should start with a quote"
+    assert_token_allowed(
+        &mask,
+        b'"' as usize,
+        "object member after comma+space should start with a quote",
     );
-    assert!(
-        !token_allowed(&mask, b'1' as usize),
-        "object member after comma+space must not allow a digit"
+    assert_token_disallowed(
+        &mask,
+        b'1' as usize,
+        "object member after comma+space must not allow a digit",
     );
 }
 
 #[test]
-fn test_o56012_after_comma_requires_key_quote() {
+fn test_o56012_fixture_after_comma_requires_key_quote() {
     let fixture_path = Path::new(
         "/Users/isaacbreen/Projects2/constraint-framework-analysis/data/sources/jsonschemabench/maskbench/data/Github_hard---o56012.json",
     );
-    if !fixture_path.exists() {
+    let Some(schema) = read_fixture_schema(fixture_path) else {
         return;
-    }
-
-    let fixture_text = std::fs::read_to_string(fixture_path)
-        .unwrap_or_else(|e| panic!("should read o56012 fixture: {e}"));
-    let fixture: serde_json::Value = serde_json::from_str(&fixture_text)
-        .unwrap_or_else(|e| panic!("should parse o56012 fixture: {e}"));
-    let schema = fixture
-        .get("schema")
-        .unwrap_or_else(|| panic!("fixture should contain schema"))
-        .to_string();
+    };
     let example = concat!(
         "{\"id\": 2, \"name\": \"RGB Light\", \"roomID\": 0, \"type\": \"rgb_driver\", ",
         "\"remoteGatewayId\": 0, \"remoteDeviceID\": 0, \"properties\": {\"UIMessageSendTime\": ",
@@ -365,20 +393,15 @@ fn test_o56012_after_comma_requires_key_quote() {
         .unwrap_or_else(|| panic!("example should contain target prefix"))
         + prefix_marker.len();
 
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(&schema, &vocab)
-        .unwrap_or_else(|e| panic!("schema should compile: {}", e));
+    let c = schema_constraint(&schema);
     let mut s = c.start();
-    for &byte in &example.as_bytes()[..prefix_end] {
-        let mask = s.mask();
-        assert!(token_allowed(&mask, byte as usize), "prefix byte {byte:?} should be allowed");
-        s.commit_token(byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut s, &example.as_bytes()[..prefix_end]);
 
     let mask = s.mask();
-    assert!(token_allowed(&mask, b'"' as usize));
-    assert!(
-        !token_allowed(&mask, b'1' as usize),
+    assert_token_allowed(&mask, b'"' as usize, "expected a key-opening quote");
+    assert_token_disallowed(
+        &mask,
+        b'1' as usize,
         "o56012 native path must not allow a digit after comma+space in parameters item"
     );
 }
@@ -424,11 +447,11 @@ fn test_schema_const() {
     schema_accepts(schema, &[r#""fixed_value""#]);
 }
 
-/// Adapted from `test_schema_const2`.
+/// Adapted from the original minimal-vocab const regression.
 ///
 /// Uses a minimal custom vocabulary (only the bytes needed for `"x"`).
 #[test]
-fn test_schema_const2() {
+fn test_schema_const_with_minimal_vocab() {
     let schema = r#"{
         "const": "x"
     }"#;
@@ -441,20 +464,16 @@ fn test_schema_const2() {
         (b'\t' as u32, vec![b'\t']),
     ];
     let vocab = Vocab::new(entries, None);
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .expect("schema should compile with minimal vocab");
+    let c = schema_constraint_with_vocab(schema, &vocab);
     let mut s = c.start();
-    // Walk through "x" byte by byte: ", x, "
     for byte in b"\"x\"" {
         let mask = s.mask();
-        assert!(
-            token_allowed(&mask, *byte as usize),
-            "Byte {:?} ({:#04x}) should be valid",
-            *byte as char,
-            byte
+        assert_token_allowed(
+            &mask,
+            *byte as usize,
+            &format!("Byte {:?} ({:#04x}) should be valid", *byte as char, byte),
         );
-        let token_id = *byte as u32;
-        s.commit_token(token_id).unwrap()
+        s.commit_token(*byte as u32).unwrap()
     }
 }
 
@@ -495,14 +514,10 @@ fn test_json_schema_allows_name_after_brace_newline_space_quote_prefix() {
         ],
         None,
     );
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .expect("schema should compile with sparse multibyte vocab");
+    let c = schema_constraint_with_vocab(schema, &vocab);
     let mut s = c.start();
 
-    s.commit_token(90u32).unwrap();
-    s.commit_token(198u32).unwrap();
-    s.commit_token(220u32).unwrap();
-    s.commit_token(366u32).unwrap();
+    advance_tokens(&mut s, &[90u32, 198u32, 220u32, 366u32]);
 
     let mask = s.mask();
     assert!(
@@ -542,22 +557,18 @@ fn test_json_schema_name_prefix_disallows_quote_colon_minus_token() {
         ],
         None,
     );
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .expect("newsletter schema should compile");
+    let c = schema_constraint_with_vocab(schema, &vocab);
     let mut s = c.start();
 
-    s.commit_token(1u32).unwrap();
-    s.commit_token(2u32).unwrap();
-    s.commit_token(3u32).unwrap();
+    advance_tokens(&mut s, &[1u32, 2u32, 3u32]);
 
     let mask = s.mask();
-    assert!(
-        !token_allowed(&mask, 4),
-        "token '\":-' must not be allowed after the key prefix '\"name'"
+    assert_token_disallowed(
+        &mask,
+        4,
+        "token '\":-' must not be allowed after the key prefix '\"name'",
     );
 }
-
-// ── JSON schema conversion tests ────────────────────────────────────────────
 
 /// Adapted from `test_conversion_simple_object`.
 ///
@@ -572,9 +583,7 @@ fn test_conversion_simple_object() {
             "age": {"type": "integer"}
         }
     }"#;
-    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
-    let named = schema_to_named_grammar(&parsed)
-        .expect("schema should convert to named grammar");
+    let named = named_grammar_from_schema(schema);
     assert!(
         !named.rules.is_empty(),
         "Should produce non-empty rules"
@@ -593,9 +602,7 @@ fn test_conversion_any_of() {
             {"type": "number"}
         ]
     }"#;
-    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
-    let named = schema_to_named_grammar(&parsed)
-        .expect("schema should convert to named grammar");
+    let named = named_grammar_from_schema(schema);
     assert!(
         !named.rules.is_empty(),
         "anyOf schema should produce non-empty rules"
@@ -611,9 +618,7 @@ fn test_conversion_enum() {
     let schema = r#"{
         "enum": ["red", "green", "blue"]
     }"#;
-    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
-    let named = schema_to_named_grammar(&parsed)
-        .expect("schema should convert to named grammar");
+    let named = named_grammar_from_schema(schema);
     assert!(!named.rules.is_empty());
 
     let has_red = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"red\""));
@@ -625,11 +630,11 @@ fn test_conversion_enum() {
     assert!(has_blue, "Grammar should contain literal for \"blue\"");
 }
 
-/// Adapted from `test_conversion_ref`.
+/// Adapted from the original `$ref` conversion regression.
 ///
 /// Checks that `$ref` and `$defs` are resolved correctly, producing a valid grammar.
 #[test]
-fn test_conversion_ref() {
+fn test_conversion_resolves_ref() {
     let schema = r##"{
         "$defs": {
             "person": {
@@ -642,9 +647,7 @@ fn test_conversion_ref() {
         "type": "array",
         "items": {"$ref": "#/$defs/person"}
     }"##;
-    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
-    let named = schema_to_named_grammar(&parsed)
-        .expect("schema with $ref should convert to named grammar");
+    let named = named_grammar_from_schema(schema);
     assert!(!named.rules.is_empty());
 }
 
@@ -658,9 +661,7 @@ fn test_conversion_merges_property_key_and_colon() {
         "required": ["name"],
         "additionalProperties": true
     }"#;
-    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
-    let named = schema_to_named_grammar(&parsed)
-        .expect("object schema should convert to named grammar");
+    let named = named_grammar_from_schema(schema);
 
     assert!(
         named.rules.iter().any(|r| r.name == "JSON_KEY_COLON"),
@@ -687,9 +688,7 @@ fn test_conversion_supports_definitions_ref() {
         },
         "$ref": "#/definitions/Point"
     }"##;
-    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
-    let named = schema_to_named_grammar(&parsed)
-        .expect("schema using definitions refs should convert to named grammar");
+    let named = named_grammar_from_schema(schema);
 
     assert!(
         named.rules.iter().any(|r| contains_literal(&r.expr, b"\"x\": ")),
@@ -722,9 +721,7 @@ fn test_conversion_allof_merges_object_properties() {
             }
         ]
     }"#;
-    let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
-    let named = schema_to_named_grammar(&parsed)
-        .expect("allOf object schema should convert to named grammar");
+    let named = named_grammar_from_schema(schema);
 
     assert!(
         named.rules.iter().any(|r| contains_literal(&r.expr, b"\"a\": ")),
@@ -753,8 +750,7 @@ fn test_prefix_items_follow_optional_tuple_semantics() {
         ],
         None,
     );
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .expect("prefixItems schema should compile");
+    let c = schema_constraint_with_vocab(schema, &vocab);
     let mut state = c.start();
     let mask = state.mask();
 
@@ -790,20 +786,19 @@ fn test_date_format_rejects_impossible_february_day_prefix() {
             }
         }
     }"#;
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(schema, &vocab).expect("date schema should compile");
+    let c = schema_constraint(schema);
     let mut state = c.start();
-    for byte in br#"{"end_date": "2020-02-"# {
-        state.commit_token(*byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut state, br#"{"end_date": "2020-02-"#);
     let mask = state.mask();
-    assert!(
-        token_allowed(&mask, b'2' as usize),
-        "day prefix '2' should remain valid because 20-29 can still complete"
+    assert_token_allowed(
+        &mask,
+        b'2' as usize,
+        "day prefix '2' should remain valid because 20-29 can still complete",
     );
-    assert!(
-        !token_allowed(&mask, b'3' as usize),
-        "day prefix '3' should be rejected for February because only 30/31 remain"
+    assert_token_disallowed(
+        &mask,
+        b'3' as usize,
+        "day prefix '3' should be rejected for February because only 30/31 remain",
     );
 }
 
@@ -825,20 +820,19 @@ fn test_false_schema_property_is_omitted_when_additional_properties_are_forbidde
         },
         "required": ["paging"]
     }"#;
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(schema, &vocab).expect("false-subschema object should compile");
+    let c = schema_constraint(schema);
     let mut state = c.start();
-    for byte in b"{\"" {
-        state.commit_token(*byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut state, b"{\"");
     let mask = state.mask();
-    assert!(
-        !token_allowed(&mask, b'a' as usize),
-        "false-schema property should not contribute the impossible additionalProperties key"
+    assert_token_disallowed(
+        &mask,
+        b'a' as usize,
+        "false-schema property should not contribute the impossible additionalProperties key",
     );
-    assert!(
-        token_allowed(&mask, b'p' as usize),
-        "real declared keys should remain available"
+    assert_token_allowed(
+        &mask,
+        b'p' as usize,
+        "real declared keys should remain available",
     );
 }
 
@@ -860,21 +854,20 @@ fn test_dotted_required_property_name_restricts_key_prefix() {
         "required": ["PersonController.personal"],
         "additionalProperties": false
     }"#;
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(schema, &vocab).expect("dotted-key schema should compile");
+    let c = schema_constraint(schema);
     let mut state = c.start();
-    for byte in b"{\"" {
-        state.commit_token(*byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut state, b"{\"");
     let mask = state.mask();
 
-    assert!(
-        token_allowed(&mask, b'P' as usize),
-        "declared dotted key should remain available"
+    assert_token_allowed(
+        &mask,
+        b'P' as usize,
+        "declared dotted key should remain available",
     );
-    assert!(
-        !token_allowed(&mask, b'!' as usize),
-        "undeclared key prefixes should be rejected when additionalProperties is false"
+    assert_token_disallowed(
+        &mask,
+        b'!' as usize,
+        "undeclared key prefixes should be rejected when additionalProperties is false",
     );
 }
 
@@ -905,10 +898,9 @@ fn test_dotted_required_property_name_restricts_token_vocab_prefix() {
         ],
         None,
     );
-    let c = Constraint::from_json_schema(schema, &vocab).expect("dotted-key schema should compile");
+    let c = schema_constraint_with_vocab(schema, &vocab);
     let mut state = c.start();
-    state.commit_token(1).unwrap();
-    state.commit_token(2).unwrap();
+    advance_tokens(&mut state, &[1, 2]);
 
     let mask = state.mask();
     assert!(
@@ -931,27 +923,24 @@ fn test_required_only_untyped_object_allows_extra_keys_but_not_early_closure() {
             "required": ["host", "port"]
         }
     }"#;
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(schema, &vocab).expect("required-only untyped object schema should compile");
+    let c = schema_constraint(schema);
 
     let mut key_state = c.start();
-    for byte in b"[{\"" {
-        key_state.commit_token(*byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut key_state, b"[{\"");
     let key_mask = key_state.mask();
-    assert!(
-        token_allowed(&key_mask, b'!' as usize),
-        "free-form object keys should remain allowed before required keys are satisfied"
+    assert_token_allowed(
+        &key_mask,
+        b'!' as usize,
+        "free-form object keys should remain allowed before required keys are satisfied",
     );
 
     let mut value_state = c.start();
-    for byte in b"[{\"host\": \"\"" {
-        value_state.commit_token(*byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut value_state, b"[{\"host\": \"\"");
     let value_mask = value_state.mask();
-    assert!(
-        !token_allowed(&value_mask, b'}' as usize),
-        "object closure should remain invalid until the required port key appears"
+    assert_token_disallowed(
+        &value_mask,
+        b'}' as usize,
+        "object closure should remain invalid until the required port key appears",
     );
 }
 
@@ -973,31 +962,29 @@ fn test_pattern_length_constraints_bound_string_content() {
             }
         }
     }"##;
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(schema, &vocab).expect("pattern+length schema should compile");
+    let c = schema_constraint(schema);
 
     let mut client_id_state = c.start();
-    for byte in br#"{"clientId": "0123456789ab"# {
-        client_id_state.commit_token(*byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut client_id_state, br#"{"clientId": "0123456789ab"#);
     let client_id_mask = client_id_state.mask();
-    assert!(
-        token_allowed(&client_id_mask, b'"' as usize),
-        "closing quote should be allowed once the fixed-length hex string is complete"
+    assert_token_allowed(
+        &client_id_mask,
+        b'"' as usize,
+        "closing quote should be allowed once the fixed-length hex string is complete",
     );
-    assert!(
-        !token_allowed(&client_id_mask, b'c' as usize),
-        "extra hex characters should be rejected once maxLength is reached"
+    assert_token_disallowed(
+        &client_id_mask,
+        b'c' as usize,
+        "extra hex characters should be rejected once maxLength is reached",
     );
 
     let mut secret_state = c.start();
-    for byte in br#"{"secret": "abcdefghijklmnopqrstuvwxyz012"# {
-        secret_state.commit_token(*byte as u32).unwrap();
-    }
+    advance_byte_prefix(&mut secret_state, br#"{"secret": "abcdefghijklmnopqrstuvwxyz012"#);
     let secret_mask = secret_state.mask();
-    assert!(
-        !token_allowed(&secret_mask, b'"' as usize),
-        "closing quote should remain invalid before minLength is reached"
+    assert_token_disallowed(
+        &secret_mask,
+        b'"' as usize,
+        "closing quote should remain invalid before minLength is reached",
     );
 }
 
@@ -1013,8 +1000,7 @@ fn test_date_or_null_schema_rejects_empty_string_span_token() {
         }
     }"#;
     let vocab = Vocab::new(vec![(13538u32, b" \"\"".to_vec())], None);
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .expect("date-or-null schema should compile");
+    let c = schema_constraint_with_vocab(schema, &vocab);
     let mut state = c.start();
     state.commit_bytes(br#"{"start_date":"#).unwrap();
     let mask = state.mask();
@@ -1038,8 +1024,7 @@ fn test_pattern_with_min_length_rejects_empty_string_span_token() {
         }
     }"#;
     let vocab = Vocab::new(vec![(13538u32, b" \"\"".to_vec())], None);
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .expect("pattern+minLength schema should compile");
+    let c = schema_constraint_with_vocab(schema, &vocab);
     let mut state = c.start();
     state.commit_bytes(br#"{"question":"#).unwrap();
     let mask = state.mask();
@@ -1062,18 +1047,18 @@ fn test_group_wrapped_anchored_pattern_rejects_leading_space() {
             }
         }
     }"#;
-    let vocab = byte_vocab();
-    let c = Constraint::from_json_schema(schema, &vocab)
-        .expect("group-wrapped anchored pattern schema should compile");
+    let c = schema_constraint(schema);
     let mut state = c.start();
     state.commit_bytes(br#"{"question": ""#).unwrap();
     let mask = state.mask();
-    assert!(
-        !token_allowed(&mask, b' ' as usize),
-        "a leading space must be rejected after '{{\"question\": \"' because the anchored branch starts with \\S"
+    assert_token_disallowed(
+        &mask,
+        b' ' as usize,
+        "a leading space must be rejected after '{{\"question\": \"' because the anchored branch starts with \\S",
     );
-    assert!(
-        token_allowed(&mask, b'W' as usize),
-        "a non-whitespace leading character should remain allowed after '{{\"question\": \"'"
+    assert_token_allowed(
+        &mask,
+        b'W' as usize,
+        "a non-whitespace leading character should remain allowed after '{{\"question\": \"'",
     );
 }

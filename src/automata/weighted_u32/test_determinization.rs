@@ -1,54 +1,16 @@
 //! Regression tests for weighted-automata determinization.
-//!
-//! Focuses on determinization behavior: edge cases, epsilon-explosion analysis,
-//! and weight-inflation regression tests.
 
 use super::determinize;
-use super::dwa::DWA;
 use super::nwa::{Label, NWA};
+use super::test_support::{weight_contains, weight_from_item};
 use crate::ds::weight::Weight;
 
-// Re-use helpers from the weighted automata test module.
-// Since we can't import from sibling test modules, we duplicate the minimal set.
-
-fn weight_from_item(n: u32) -> Weight {
-    Weight::from_compact_ranges(vec![(n..=n, vec![0..=0])])
+fn assert_determinizes(nwa: &NWA, context: &str) {
+    determinize::determinize(nwa)
+        .unwrap_or_else(|error| panic!("{context}: {error}"));
 }
 
-fn weight_from_iter<I: IntoIterator<Item = u32>>(items: I) -> Weight {
-    let mut sorted: Vec<u32> = items.into_iter().collect();
-    if sorted.is_empty() {
-        return Weight::empty();
-    }
-    sorted.sort_unstable();
-    sorted.dedup();
-    let mut ranges = Vec::new();
-    let mut start = sorted[0];
-    let mut end = sorted[0];
-    for &item in &sorted[1..] {
-        if item == end + 1 {
-            end = item;
-        } else {
-            ranges.push((start..=end, vec![0..=0]));
-            start = item;
-            end = item;
-        }
-    }
-    ranges.push((start..=end, vec![0..=0]));
-    Weight::from_compact_ranges(ranges)
-}
-
-fn weight_contains(w: &Weight, item: u32) -> bool {
-    !w.intersection(&weight_from_item(item)).is_empty()
-}
-
-fn count_transitions(dwa: &DWA) -> usize {
-    dwa.states.iter().map(|s| s.transitions.len()).sum()
-}
-
-// ============================================================================
 // Determinize Edge Cases
-// ============================================================================
 
 /// Adapted from `test_determinize_simple_divergence`.
 /// In the legacy suite this used `#[should_panic]` because the assertions on
@@ -85,16 +47,10 @@ fn test_determinize_simple_divergence() {
     assert!(dwa.states.len() <= 4);
 }
 
-// ============================================================================
 // Epsilon Explosion Analysis Tests
-// ============================================================================
-//
-// These are analytical tests that compare labeled-transition vs epsilon-transition
-// NWA structures to study determinization cost differences. They print statistics
-// but have no assertions — they exercise the determinize path on various structures.
 
 #[test]
-fn test_epsilon_explosion_minimal() {
+fn test_determinize_handles_minimal_epsilon_fanout() {
     const N: usize = 4;
     let char_label: Label = 'x' as Label;
 
@@ -111,7 +67,7 @@ fn test_epsilon_explosion_minimal() {
         nwa_labeled.set_final_weight(final_state, weight_from_item(i as u32));
     }
 
-    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
+    assert_determinizes(&nwa_labeled, "determinize labeled variant");
 
     // EPSILON: start --eps--> intermediate --char--> final
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -126,12 +82,11 @@ fn test_epsilon_explosion_minimal() {
         nwa_epsilon.set_final_weight(final_state, weight_from_item(i as u32));
     }
 
-    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-
+    assert_determinizes(&nwa_epsilon, "determinize epsilon variant");
 }
 
 #[test]
-fn test_epsilon_explosion_diverging_patterns() {
+fn test_determinize_handles_diverging_epsilon_paths() {
     const N: usize = 4;
     let shared_char: Label = 'a' as Label;
 
@@ -150,7 +105,7 @@ fn test_epsilon_explosion_diverging_patterns() {
         nwa_labeled.set_final_weight(f_i, weight_from_item(i as u32));
     }
 
-    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
+    assert_determinizes(&nwa_labeled, "determinize labeled variant");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -167,12 +122,11 @@ fn test_epsilon_explosion_diverging_patterns() {
         nwa_epsilon.set_final_weight(f_i, weight_from_item(i as u32));
     }
 
-    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-
+    assert_determinizes(&nwa_epsilon, "determinize epsilon variant");
 }
 
 #[test]
-fn test_epsilon_explosion_overlapping_alphabet() {
+fn test_determinize_handles_overlapping_epsilon_depths() {
     const N: usize = 4;
     let char_a: Label = 'a' as Label;
 
@@ -194,7 +148,7 @@ fn test_epsilon_explosion_overlapping_alphabet() {
         nwa_labeled.set_final_weight(final_state, weight_from_item(i as u32));
     }
 
-    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
+    assert_determinizes(&nwa_labeled, "determinize labeled variant");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -214,12 +168,11 @@ fn test_epsilon_explosion_overlapping_alphabet() {
         nwa_epsilon.set_final_weight(final_state, weight_from_item(i as u32));
     }
 
-    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-
+    assert_determinizes(&nwa_epsilon, "determinize epsilon variant");
 }
 
 #[test]
-fn test_epsilon_explosion_shared_second_hop() {
+fn test_determinize_handles_shared_second_hop() {
     const N: usize = 6;
     let char_x: Label = 'x' as Label;
 
@@ -235,7 +188,7 @@ fn test_epsilon_explosion_shared_second_hop() {
         nwa_labeled.add_transition(first_hop, char_x, shared_state, weight_from_item(i as u32));
     }
 
-    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
+    assert_determinizes(&nwa_labeled, "determinize labeled variant");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -249,12 +202,11 @@ fn test_epsilon_explosion_shared_second_hop() {
         nwa_epsilon.add_transition(first_hop, char_x, shared_state_eps, weight_from_item(i as u32));
     }
 
-    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-
+    assert_determinizes(&nwa_epsilon, "determinize epsilon variant");
 }
 
 #[test]
-fn test_epsilon_explosion_shared_then_diverge() {
+fn test_determinize_handles_shared_then_diverging_paths() {
     const N: usize = 5;
 
     // LABELED
@@ -272,7 +224,7 @@ fn test_epsilon_explosion_shared_then_diverge() {
         nwa_labeled.set_final_weight(unique_second, weight_from_item(i as u32));
     }
 
-    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
+    assert_determinizes(&nwa_labeled, "determinize labeled variant");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -289,12 +241,11 @@ fn test_epsilon_explosion_shared_then_diverge() {
         nwa_epsilon.set_final_weight(unique_second, weight_from_item(i as u32));
     }
 
-    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-
+    assert_determinizes(&nwa_epsilon, "determinize epsilon variant");
 }
 
 #[test]
-fn test_epsilon_explosion_paths_through_shared() {
+fn test_determinize_handles_shared_merge_points() {
     const N: usize = 6;
 
     // LABELED
@@ -318,7 +269,7 @@ fn test_epsilon_explosion_paths_through_shared() {
         nwa_labeled.add_transition(sh, 'f' as Label, final_state, Weight::all());
     }
 
-    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
+    assert_determinizes(&nwa_labeled, "determinize labeled variant");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -341,12 +292,11 @@ fn test_epsilon_explosion_paths_through_shared() {
         nwa_epsilon.add_transition(sh, 'f' as Label, final_state_eps, Weight::all());
     }
 
-    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-
+    assert_determinizes(&nwa_epsilon, "determinize epsilon variant");
 }
 
 #[test]
-fn test_epsilon_explosion_many_sources_same_label() {
+fn test_determinize_handles_many_sources_same_label() {
     const N: usize = 10;
     let shared_label: Label = 10;
 
@@ -362,7 +312,7 @@ fn test_epsilon_explosion_many_sources_same_label() {
         nwa_labeled.set_final_weight(target, weight_from_item(i as u32));
     }
 
-    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
+    assert_determinizes(&nwa_labeled, "determinize labeled variant");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -376,12 +326,11 @@ fn test_epsilon_explosion_many_sources_same_label() {
         nwa_epsilon.set_final_weight(target, weight_from_item(i as u32));
     }
 
-    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-
+    assert_determinizes(&nwa_epsilon, "determinize epsilon variant");
 }
 
 #[test]
-fn test_epsilon_explosion_many_sources_with_continuation() {
+fn test_determinize_handles_many_sources_with_shared_continuation() {
     const N: usize = 20;
     const K: usize = 15;
     let shared_label: Label = 'L' as Label;
@@ -406,7 +355,7 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
         }
     }
 
-    let _dwa_labeled = determinize::determinize(&nwa_labeled).expect("determinize labeled");
+    assert_determinizes(&nwa_labeled, "determinize labeled variant");
 
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
@@ -428,13 +377,10 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
         }
     }
 
-    let _dwa_epsilon = determinize::determinize(&nwa_epsilon).expect("determinize epsilon");
-
+    assert_determinizes(&nwa_epsilon, "determinize epsilon variant");
 }
 
-// ============================================================================
 // Weight Inflation Regression Test
-// ============================================================================
 
 /// Regression test for acyclic determinization weight inflation bug.
 ///

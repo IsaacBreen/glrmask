@@ -8,6 +8,143 @@ use std::collections::{BTreeSet, HashMap};
 
 use super::dfa::{DFA, DFAState, Label};
 
+fn collect_reachable_alphabet(dfa: &DFA, reachable: &[usize]) -> Vec<Label> {
+    let mut labels = BTreeSet::new();
+    for &state_id in reachable {
+        for &label in dfa.states[state_id].transitions.keys() {
+            labels.insert(label);
+        }
+    }
+    labels.into_iter().collect()
+}
+
+fn dense_reachable_states(reachable: &[usize]) -> (HashMap<usize, usize>, Vec<usize>) {
+    let mut state_to_dense = HashMap::new();
+    let mut dense_to_state = Vec::with_capacity(reachable.len());
+    for &state_id in reachable {
+        state_to_dense.insert(state_id, dense_to_state.len());
+        dense_to_state.push(state_id);
+    }
+    (state_to_dense, dense_to_state)
+}
+
+fn initial_partition(dfa: &DFA, dense_to_state: &[usize], dead: usize) -> Vec<usize> {
+    let mut class_of = vec![0usize; dense_to_state.len() + 1];
+    class_of[dead] = 0;
+
+    let mut next_class = 1usize;
+    let reject_class = (!dense_to_state.is_empty()).then(|| {
+        let class = next_class;
+        next_class += 1;
+        class
+    });
+    let accept_class = (!dense_to_state.is_empty()).then_some(next_class);
+
+    for (dense_id, &state_id) in dense_to_state.iter().enumerate() {
+        let class = if dfa.states[state_id].is_accepting {
+            accept_class.unwrap_or(0)
+        } else {
+            reject_class.unwrap_or(0)
+        };
+        class_of[dense_id] = class;
+    }
+
+    class_of
+}
+
+fn refine_partition(
+    class_of: &[usize],
+    dead: usize,
+    alphabet: &[Label],
+    dense_to_state: &[usize],
+    target_dense: impl Fn(usize, Label) -> usize,
+) -> Vec<usize> {
+    let mut signature_to_class = HashMap::<Vec<usize>, usize>::new();
+    let mut new_class_of = vec![0usize; dense_to_state.len() + 1];
+    let mut next_class = 0usize;
+
+    for dense_id in 0..=dead {
+        let mut signature = Vec::with_capacity(1 + alphabet.len());
+        signature.push(class_of[dense_id]);
+        if dense_id == dead {
+            signature.extend(std::iter::repeat(class_of[dead]).take(alphabet.len()));
+        } else {
+            for &label in alphabet {
+                signature.push(class_of[target_dense(dense_to_state[dense_id], label)]);
+            }
+        }
+
+        let class = if let Some(&existing) = signature_to_class.get(&signature) {
+            existing
+        } else {
+            let class = next_class;
+            next_class += 1;
+            signature_to_class.insert(signature, class);
+            class
+        };
+        new_class_of[dense_id] = class;
+    }
+
+    new_class_of
+}
+
+fn build_minimized_cyclic_dfa(
+    dfa: &DFA,
+    state_to_dense: &HashMap<usize, usize>,
+    dense_to_state: &[usize],
+    class_of: &[usize],
+    dead_class: usize,
+) -> DFA {
+    let start_class = class_of[state_to_dense[&(dfa.start_state as usize)]];
+    let mut class_to_new_state = HashMap::<usize, u32>::new();
+    let mut new_states = vec![DFAState::default()];
+    class_to_new_state.insert(start_class, 0);
+
+    for (dense_id, _) in dense_to_state.iter().enumerate() {
+        let class = class_of[dense_id];
+        if class == dead_class || class_to_new_state.contains_key(&class) {
+            continue;
+        }
+        let new_state = new_states.len() as u32;
+        class_to_new_state.insert(class, new_state);
+        new_states.push(DFAState::default());
+    }
+
+    let mut filled = vec![false; new_states.len()];
+    for (dense_id, &state_id) in dense_to_state.iter().enumerate() {
+        let class = class_of[dense_id];
+        if class == dead_class {
+            continue;
+        }
+
+        let new_state = class_to_new_state[&class] as usize;
+        if filled[new_state] {
+            continue;
+        }
+        filled[new_state] = true;
+
+        let original = &dfa.states[state_id];
+        new_states[new_state].is_accepting = original.is_accepting;
+        for (&label, &target) in &original.transitions {
+            let Some(&target_dense) = state_to_dense.get(&(target as usize)) else {
+                continue;
+            };
+            let target_class = class_of[target_dense];
+            if target_class == dead_class {
+                continue;
+            }
+            if let Some(&new_target) = class_to_new_state.get(&target_class) {
+                new_states[new_state].transitions.insert(label, new_target);
+            }
+        }
+    }
+
+    DFA {
+        states: new_states,
+        start_state: 0,
+    }
+}
+
 /// Minimize a (possibly cyclic) unweighted DFA via partition refinement.
 ///
 /// Unreachable states are pruned. The returned DFA is language-equivalent
@@ -23,24 +160,9 @@ pub fn minimize_cyclic(dfa: &DFA) -> DFA {
         return DFA::new();
     }
 
-    // ---- 2. Collect the alphabet (set of all labels) ----
-    let alphabet: Vec<Label> = {
-        let mut labels = BTreeSet::new();
-        for &sid in &reachable {
-            for &label in dfa.states[sid].transitions.keys() {
-                labels.insert(label);
-            }
-        }
-        labels.into_iter().collect()
-    };
+    let alphabet = collect_reachable_alphabet(dfa, &reachable);
 
-    // Map reachable state indices to dense ids for the partition.
-    let mut state_to_dense: HashMap<usize, usize> = HashMap::new();
-    let mut dense_to_state: Vec<usize> = Vec::new();
-    for &sid in &reachable {
-        state_to_dense.insert(sid, dense_to_state.len());
-        dense_to_state.push(sid);
-    }
+    let (state_to_dense, dense_to_state) = dense_reachable_states(&reachable);
     let n = dense_to_state.len();
 
     // Use an implicit DEAD sink for missing transitions (dense id = n).
@@ -55,146 +177,20 @@ pub fn minimize_cyclic(dfa: &DFA) -> DFA {
             .unwrap_or(dead)
     };
 
-    // ---- 3. Initial partition: {accepting ∩ reachable, non-accepting ∩ reachable} ----
-    // We also include DEAD as a separate class if any transition targets it.
-    let mut class_of = vec![0usize; n + 1]; // +1 for DEAD
-    let dead_class: usize = 0;
-    class_of[dead] = dead_class;
-
-    let mut accept_ids = Vec::new();
-    let mut reject_ids = Vec::new();
-    for i in 0..n {
-        if dfa.states[dense_to_state[i]].is_accepting {
-            accept_ids.push(i);
-        } else {
-            reject_ids.push(i);
-        }
-    }
-
-    // Assign initial class ids.
-    // Class 0 = dead, class 1 = non-accepting (or first non-empty), class 2 = accepting.
-    let mut next_class = 1usize;
-    let reject_class = if reject_ids.is_empty() {
-        dead_class // will be unused
-    } else {
-        let c = next_class;
-        next_class += 1;
-        c
-    };
-    let accept_class = if accept_ids.is_empty() {
-        dead_class
-    } else {
-        let c = next_class;
-        let _ = c; // suppress unused warning
-        c
-    };
-    for &i in &reject_ids {
-        class_of[i] = reject_class;
-    }
-    for &i in &accept_ids {
-        class_of[i] = accept_class;
-    }
+    let mut class_of = initial_partition(dfa, &dense_to_state, dead);
 
     // ---- 4. Partition refinement via composite signatures ----
-    // Each iteration computes a full signature per state:
-    //   (current_class, target_class_for_label_0, target_class_for_label_1, ...)
-    // States sharing the same signature stay in the same class.
     loop {
-        let mut signature_to_class: HashMap<Vec<usize>, usize> = HashMap::new();
-        let mut new_class_of = vec![0usize; n + 1];
-        let mut new_next_class = 0usize;
-
-        for i in 0..=dead {
-            let sig: Vec<usize> = if i == dead {
-                // DEAD: unique signature = (dead_class, dead_class for all labels)
-                let mut s = Vec::with_capacity(1 + alphabet.len());
-                s.push(class_of[dead]);
-                for _ in &alphabet {
-                    s.push(class_of[dead]);
-                }
-                s
-            } else {
-                let mut s = Vec::with_capacity(1 + alphabet.len());
-                s.push(class_of[i]);
-                for &label in &alphabet {
-                    s.push(class_of[target_dense(dense_to_state[i], label)]);
-                }
-                s
-            };
-
-            let class = if let Some(&c) = signature_to_class.get(&sig) {
-                c
-            } else {
-                let c = new_next_class;
-                new_next_class += 1;
-                signature_to_class.insert(sig, c);
-                c
-            };
-            new_class_of[i] = class;
-        }
+        let new_class_of = refine_partition(&class_of, dead, &alphabet, &dense_to_state, target_dense);
 
         if new_class_of == class_of {
             break;
         }
         class_of = new_class_of;
-        // Update dead_class tracking.
     }
     let dead_class = class_of[dead];
 
-    // ---- 5. Build minimized DFA ----
-    // Map class ids to new state ids.
-    let mut class_to_new_state: HashMap<usize, u32> = HashMap::new();
-    let mut new_states: Vec<DFAState> = Vec::new();
-
-    // Determine which classes are used (excluding dead).
-    let start_class = class_of[state_to_dense[&(dfa.start_state as usize)]];
-    // Ensure start class gets state 0 in the new DFA.
-    class_to_new_state.insert(start_class, 0);
-    new_states.push(DFAState::default());
-
-    for i in 0..n {
-        let c = class_of[i];
-        if c == dead_class {
-            continue;
-        }
-        if !class_to_new_state.contains_key(&c) {
-            let id = new_states.len() as u32;
-            class_to_new_state.insert(c, id);
-            new_states.push(DFAState::default());
-        }
-    }
-
-    // Fill in transitions and acceptance for each class representative.
-    let mut filled = vec![false; new_states.len()];
-    for i in 0..n {
-        let c = class_of[i];
-        if c == dead_class {
-            continue;
-        }
-        let new_id = class_to_new_state[&c] as usize;
-        if filled[new_id] {
-            continue;
-        }
-        filled[new_id] = true;
-        let orig = &dfa.states[dense_to_state[i]];
-        new_states[new_id].is_accepting = orig.is_accepting;
-        for (&label, &target) in &orig.transitions {
-            let target_usize = target as usize;
-            if let Some(&dense) = state_to_dense.get(&target_usize) {
-                let target_class = class_of[dense];
-                if target_class != dead_class {
-                    if let Some(&new_target) = class_to_new_state.get(&target_class) {
-                        new_states[new_id].transitions.insert(label, new_target);
-                    }
-                }
-            }
-        }
-    }
-
-    DFA {
-        states: new_states,
-        start_state: 0,
-    }
+    build_minimized_cyclic_dfa(dfa, &state_to_dense, &dense_to_state, &class_of, dead_class)
 }
 
 /// Collect indices of states reachable from `start_state`.
