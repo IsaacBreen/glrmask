@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::dwa::{DWA, DWAState};
@@ -733,21 +734,30 @@ fn build_incompatibility_graph_sparse(
         }
     }
 
-    for (i, j) in overlap_pairs {
-        if incompatible_pairs.contains(&(i, j)) {
-            continue;
-        }
-        if !are_compatible(
-            candidates[i],
-            candidates[j],
-            dwa,
-            needed,
-            old_to_new,
-            productive_transitions,
-            true,
-        ) {
-            incompatible_pairs.insert((i, j));
-        }
+    let additional_incompatible: Vec<(usize, usize)> = overlap_pairs
+        .par_iter()
+        .filter_map(|&(i, j)| {
+            if incompatible_pairs.contains(&(i, j)) {
+                return None;
+            }
+            if !are_compatible(
+                candidates[i],
+                candidates[j],
+                dwa,
+                needed,
+                old_to_new,
+                productive_transitions,
+                true,
+            ) {
+                Some((i, j))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for pair in additional_incompatible {
+        incompatible_pairs.insert(pair);
     }
 
     let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
