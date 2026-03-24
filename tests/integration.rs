@@ -1,6 +1,6 @@
 //! Integration tests: end-to-end from grammar → compile → mask → commit.
 
-use glrmask::{Constraint, Vocab};
+use glrmask::{Constraint, ConstraintState, Vocab};
 
 /// Build a vocabulary from string entries.
 fn make_vocab(entries: &[&str]) -> Vocab {
@@ -11,197 +11,212 @@ fn make_vocab(entries: &[&str]) -> Vocab {
         .collect();
     Vocab::new(entries, None)
 }
-/// Check whether a token id is set in a packed bitmask returned by `mask()`.
+
+fn ebnf_constraint(entries: &[&str], grammar: &str) -> Constraint {
+    let vocab = make_vocab(entries);
+    Constraint::from_ebnf(grammar, &vocab).unwrap()
+}
+
+fn lark_constraint(entries: &[&str], grammar: &str) -> Constraint {
+    let vocab = make_vocab(entries);
+    Constraint::from_lark(grammar, &vocab).unwrap()
+}
+
+fn json_schema_constraint(entries: &[&str], schema: &str) -> Constraint {
+    let vocab = make_vocab(entries);
+    Constraint::from_json_schema(schema, &vocab).unwrap()
+}
+
 fn token_allowed(mask: &[u32], id: usize) -> bool {
     let word = id / 32;
     if word >= mask.len() { return false; }
     (mask[word] >> (id % 32)) & 1 != 0
 }
 
-/// Collect all token ids set in a packed bitmask returned by `mask()`.
 fn iter_allowed(mask: &[u32]) -> Vec<usize> {
     mask.iter().enumerate().flat_map(|(w, &bits)| {
         (0..32u32).filter_map(move |b| if (bits >> b) & 1 != 0 { Some(w * 32 + b as usize) } else { None })
     }).collect()
 }
 
-// ====================================================================
-// EBNF integration tests
-// ====================================================================
+fn assert_mask_allows(mask: &[u32], ids: &[usize]) {
+    let allowed = iter_allowed(mask);
+    for &id in ids {
+        assert!(token_allowed(mask, id), "token {id} should be allowed; allowed={allowed:?}");
+    }
+}
+
+fn assert_mask_rejects(mask: &[u32], ids: &[usize]) {
+    let allowed = iter_allowed(mask);
+    for &id in ids {
+        assert!(!token_allowed(mask, id), "token {id} should not be allowed; allowed={allowed:?}");
+    }
+}
+
+fn assert_allowed_tokens(mask: &[u32], expected: &[usize]) {
+    assert_eq!(iter_allowed(mask), expected);
+}
+
+fn assert_empty_mask(mask: &[u32]) {
+    let allowed = iter_allowed(mask);
+    assert!(allowed.is_empty(), "mask should be empty: {allowed:?}");
+}
+
+fn commit_all(state: &mut ConstraintState<'_>, tokens: &[u32]) {
+    for &token in tokens {
+        state.commit_token(token).unwrap();
+    }
+}
 
 #[test]
 fn test_ebnf_simple_literal() {
-    let vocab = make_vocab(&["a", "b"]);
-    let c = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
-    let mut s = c.start();
+    let constraint = ebnf_constraint(&["a", "b"], r#"start ::= "a" "b""#);
+    let mut state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' should be allowed first");
-    assert!(!token_allowed(&mask, 1), "'b' should NOT be allowed first");
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+    assert_mask_rejects(&mask, &[1]);
 
-    s.commit_token(0).unwrap();
-    let mask = s.mask();
-    assert!(!token_allowed(&mask, 0), "'a' should NOT be allowed after 'a'");
-    assert!(token_allowed(&mask, 1), "'b' should be allowed after 'a'");
+    commit_all(&mut state, &[0]);
+    let mask = state.mask();
+    assert_mask_rejects(&mask, &[0]);
+    assert_mask_allows(&mask, &[1]);
 
-    s.commit_token(1).unwrap();
-    assert!(s.is_finished(), "should accept after 'ab'");
+    commit_all(&mut state, &[1]);
+    assert!(state.is_finished(), "should accept after 'ab'");
 }
 
 #[test]
 fn test_ebnf_choice() {
-    let vocab = make_vocab(&["x", "y", "z"]);
-    let c = Constraint::from_ebnf(r#"start ::= "x" | "y""#, &vocab).unwrap();
-    let mut s = c.start();
+    let constraint = ebnf_constraint(&["x", "y", "z"], r#"start ::= "x" | "y""#);
+    let mut state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'x' allowed");
-    assert!(token_allowed(&mask, 1), "'y' allowed");
-    assert!(!token_allowed(&mask, 2), "'z' not allowed");
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0, 1]);
+    assert_mask_rejects(&mask, &[2]);
 
-    s.commit_token(0).unwrap();
-    assert!(s.is_finished(), "accept after 'x'");
+    commit_all(&mut state, &[0]);
+    assert!(state.is_finished(), "accept after 'x'");
 }
 
 #[test]
 fn test_ebnf_multi_rule() {
-    let vocab = make_vocab(&["a", "b", "."]);
-    let c = Constraint::from_ebnf(
+    let constraint = ebnf_constraint(
+        &["a", "b", "."],
         r#"
         start ::= item "."
         item ::= "a" | "b"
         "#,
-        &vocab,
-    )
-    .unwrap();
-    let mut s = c.start();
+    );
+    let mut state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' allowed initially");
-    assert!(token_allowed(&mask, 1), "'b' allowed initially");
-    assert!(!token_allowed(&mask, 2), "'.' not allowed initially");
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0, 1]);
+    assert_mask_rejects(&mask, &[2]);
 
-    s.commit_token(0).unwrap(); // commit "a"
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 2), "'.' allowed after 'a'");
+    commit_all(&mut state, &[0]);
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[2]);
 
-    s.commit_token(2).unwrap(); // commit "."
-    assert!(s.is_finished(), "accept after 'a.'");
+    commit_all(&mut state, &[2]);
+    assert!(state.is_finished(), "accept after 'a.'");
 }
 
 #[test]
 fn test_ebnf_sequence_of_three() {
-    let vocab = make_vocab(&["a", "b", "c"]);
-    let c = Constraint::from_ebnf(r#"start ::= "a" "b" "c""#, &vocab).unwrap();
-    let mut s = c.start();
+    let constraint = ebnf_constraint(&["a", "b", "c"], r#"start ::= "a" "b" "c""#);
+    let mut state = constraint.start();
 
-    // Step through a → b → c.
-    let m = s.mask();
-    assert!(token_allowed(&m, 0) && !token_allowed(&m, 1) && !token_allowed(&m, 2));
-    s.commit_token(0).unwrap();
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+    assert_mask_rejects(&mask, &[1, 2]);
+    commit_all(&mut state, &[0]);
 
-    let m = s.mask();
-    assert!(!token_allowed(&m, 0) && token_allowed(&m, 1) && !token_allowed(&m, 2));
-    s.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[1]);
+    assert_mask_rejects(&mask, &[0, 2]);
+    commit_all(&mut state, &[1]);
 
-    let m = s.mask();
-    assert!(!token_allowed(&m, 0) && !token_allowed(&m, 1) && token_allowed(&m, 2));
-    s.commit_token(2).unwrap();
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[2]);
+    assert_mask_rejects(&mask, &[0, 1]);
+    commit_all(&mut state, &[2]);
 
-    assert!(s.is_finished());
+    assert!(state.is_finished());
 }
-
-// ====================================================================
-// Lark integration tests
-// ====================================================================
 
 #[test]
 fn test_lark_simple() {
-    let vocab = make_vocab(&["a", "b"]);
-    let c = Constraint::from_lark(
+    let constraint = lark_constraint(
+        &["a", "b"],
         r#"
         start: "a" "b"
         "#,
-        &vocab,
-    )
-    .unwrap();
-    let mut s = c.start();
+    );
+    let mut state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' allowed first");
-    s.commit_token(0).unwrap();
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+    commit_all(&mut state, &[0]);
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 1), "'b' allowed after 'a'");
-    s.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[1]);
+    commit_all(&mut state, &[1]);
 
-    assert!(s.is_finished());
+    assert!(state.is_finished());
 }
 
 #[test]
 fn test_lark_choice() {
-    let vocab = make_vocab(&["a", "b"]);
-    let c = Constraint::from_lark(r#"start: "a" | "b""#, &vocab).unwrap();
-    let s = c.start();
+    let constraint = lark_constraint(&["a", "b"], r#"start: "a" | "b""#);
+    let state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0) && token_allowed(&mask, 1));
+    assert_allowed_tokens(&state.mask(), &[0, 1]);
 }
 
 #[test]
 fn test_lark_singleton_char_class_initial_mask() {
-    let vocab = make_vocab(&["1"]);
-    let c = Constraint::from_lark(r#"start: /[1]/"#, &vocab).unwrap();
-    let s = c.start();
+    let constraint = lark_constraint(&["1"], r#"start: /[1]/"#);
+    let state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'1' should be allowed for /[1]/");
+    assert_mask_allows(&state.mask(), &[0]);
 }
 
 #[test]
 fn test_lark_single_quotes_and_literal_range() {
-    let vocab = make_vocab(&["5", "a"]);
-    let c = Constraint::from_lark(
+    let constraint = lark_constraint(
+        &["5", "a"],
         "?start: DIGIT\nDIGIT.2: '0'..'9'",
-        &vocab,
-    )
-    .unwrap();
-    let s = c.start();
+    );
+    let state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'5' should be allowed for '0'..'9'");
-    assert!(!token_allowed(&mask, 1), "'a' should not be allowed for '0'..'9'");
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+    assert_mask_rejects(&mask, &[1]);
 }
 
 #[test]
 fn test_lark_alias_syntax_is_ignored_semantically() {
-    let vocab = make_vocab(&["a", "b"]);
-    let c = Constraint::from_lark(
+    let constraint = lark_constraint(
+        &["a", "b"],
         "start: 'a' -> left | \"b\" -> right",
-        &vocab,
-    )
-    .unwrap();
-    let s = c.start();
+    );
+    let state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' should be allowed");
-    assert!(token_allowed(&mask, 1), "'b' should be allowed");
+    assert_allowed_tokens(&state.mask(), &[0, 1]);
 }
 
 #[test]
 fn test_lark_terminal_convention_inlines_uppercase_rules() {
-    let vocab = make_vocab(&["a", "b", "c"]);
-    let c = Constraint::from_lark(
+    let constraint = lark_constraint(
+        &["a", "b", "c"],
         "start: WORD\nWORD: LETTER+\nLETTER: 'a' | 'b'",
-        &vocab,
-    )
-    .unwrap();
-    let s = c.start();
+    );
+    let state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' should be allowed via uppercase terminal expansion");
-    assert!(token_allowed(&mask, 1), "'b' should be allowed via uppercase terminal expansion");
-    assert!(!token_allowed(&mask, 2), "'c' should not be allowed");
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0, 1]);
+    assert_mask_rejects(&mask, &[2]);
 }
 
 #[test]
@@ -215,82 +230,54 @@ fn test_lark_terminal_convention_rejects_parser_refs_inside_terminals() {
     );
 }
 
-// ====================================================================
-// JSON Schema integration tests
-// ====================================================================
-
 #[test]
 fn test_json_schema_boolean() {
-    // Vocabulary: tokens for each character in "true" and "false".
-    let vocab = make_vocab(&["t", "r", "u", "e", "f", "a", "l", "s"]);
-    let c = Constraint::from_json_schema(r#"{"type": "boolean"}"#, &vocab).unwrap();
-    let s = c.start();
-    let mask = s.mask();
-    // "t" (token 0) or "f" (token 4) should be allowed.
-    assert!(
-        token_allowed(&mask, 0) || token_allowed(&mask, 4),
-        "boolean start: 't' or 'f' should be allowed"
-    );
+    let constraint = json_schema_constraint(&["t", "r", "u", "e", "f", "a", "l", "s"], r#"{"type": "boolean"}"#);
+    let mask = constraint.start().mask();
+    assert_mask_allows(&mask, &[0, 4]);
 }
 
 #[test]
 fn test_json_schema_null() {
-    let vocab = make_vocab(&["n", "u", "l"]);
-    let c = Constraint::from_json_schema(r#"{"type": "null"}"#, &vocab).unwrap();
-    let mut s = c.start();
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'n' allowed for null");
+    let constraint = json_schema_constraint(&["n", "u", "l"], r#"{"type": "null"}"#);
+    let mut state = constraint.start();
+    assert_mask_allows(&state.mask(), &[0]);
 
-    // Commit "n", "u", "l", "l"
-    s.commit_token(0).unwrap(); // n
-    s.commit_token(1).unwrap(); // u
-    s.commit_token(2).unwrap(); // l
-    s.commit_token(2).unwrap(); // l
-    assert!(s.is_finished(), "accept after 'null'");
+    commit_all(&mut state, &[0, 1, 2, 2]);
+    assert!(state.is_finished(), "accept after 'null'");
 }
 
 #[test]
 fn test_json_schema_enum() {
-    let vocab = make_vocab(&["\"", "a", "b"]);
-    let c = Constraint::from_json_schema(r#"{"enum": ["\"a\"", "\"b\""]}"#, &vocab).unwrap();
-    let s = c.start();
-    let mask = s.mask();
-    // Note: the enum values are JSON strings, so they include quotes.
-    // The grammar should start with '"'.
-    assert!(token_allowed(&mask, 0), "'\"' allowed for enum start");
+    let constraint = json_schema_constraint(&["\"", "a", "b"], r#"{"enum": ["\"a\"", "\"b\""]}"#);
+    assert_mask_allows(&constraint.start().mask(), &[0]);
 }
 
 #[test]
 fn test_json_schema_bare_object_accepts_compact_empty_object_token() {
-    let vocab = make_vocab(&["{}", "true"]);
-    let c = Constraint::from_json_schema(r#"{"type": "object"}"#, &vocab).unwrap();
-    let mut s = c.start();
+    let constraint = json_schema_constraint(&["{}", "true"], r#"{"type": "object"}"#);
+    let mut state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'{{}}' should be allowed for bare object schema");
-    assert!(!token_allowed(&mask, 1), "'true' should not be allowed for bare object schema");
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+    assert_mask_rejects(&mask, &[1]);
 
-    s.commit_token(0).unwrap();
-    assert!(s.is_finished(), "should accept after compact '{{}}' token");
+    commit_all(&mut state, &[0]);
+    assert!(state.is_finished(), "should accept after compact '{{}}' token");
 }
 
 #[test]
 fn test_ebnf_empty_object_accepts_compact_empty_object_token() {
-    let vocab = make_vocab(&["{}", "true"]);
-    let c = Constraint::from_ebnf(r#"start ::= "{" "}""#, &vocab).unwrap();
-    let mut s = c.start();
+    let constraint = ebnf_constraint(&["{}", "true"], r#"start ::= "{" "}""#);
+    let mut state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'{{}}' should be allowed for empty-object grammar");
-    assert!(!token_allowed(&mask, 1), "'true' should not be allowed for empty-object grammar");
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+    assert_mask_rejects(&mask, &[1]);
 
-    s.commit_token(0).unwrap();
-    assert!(s.is_finished(), "should accept after compact '{{}}' token");
+    commit_all(&mut state, &[0]);
+    assert!(state.is_finished(), "should accept after compact '{{}}' token");
 }
-
-// ====================================================================
-// Error handling tests
-// ====================================================================
 
 #[test]
 fn test_ebnf_parse_error() {
@@ -306,94 +293,66 @@ fn test_json_schema_invalid_json() {
     assert!(result.is_err());
 }
 
-// ====================================================================
-// Complex grammar tests
-// ====================================================================
-
 #[test]
 #[should_panic(expected = "not in vocabulary")]
 fn test_commit_invalid_token() {
-    // Committing a token ID that does not exist in the vocabulary is a
-    // programming error and should panic (even in release builds).
-    let vocab = make_vocab(&["a", "b"]);
-    let c = Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
-    let mut s = c.start();
-
-    // Token 99 is not in the vocabulary — should panic.
-    s.commit_token(99).unwrap();
+    let constraint = ebnf_constraint(&["a", "b"], r#"start ::= "a""#);
+    constraint.start().commit_token(99).unwrap();
 }
 
 #[test]
 fn test_multiple_independent_sequences() {
-    // Token 0 = "a", Token 1 = "b", Token 2 = "c", Token 3 = "d"
-    let vocab = make_vocab(&["a", "b", "c", "d"]);
-    let c = Constraint::from_ebnf(r#"start ::= "a" "b" | "c" "d""#, &vocab).unwrap();
-    let mut s = c.start();
+    let constraint = ebnf_constraint(&["a", "b", "c", "d"], r#"start ::= "a" "b" | "c" "d""#);
+    let mut state = constraint.start();
 
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' allowed initially");
-    assert!(token_allowed(&mask, 2), "'c' allowed initially");
-    assert!(!token_allowed(&mask, 1), "'b' not allowed initially");
-    assert!(!token_allowed(&mask, 3), "'d' not allowed initially");
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0, 2]);
+    assert_mask_rejects(&mask, &[1, 3]);
 
-    // Choose "a" path.
-    s.commit_token(0).unwrap();
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 1), "'b' allowed after 'a'");
-    assert!(!token_allowed(&mask, 3), "'d' not allowed after 'a'");
+    commit_all(&mut state, &[0]);
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[1]);
+    assert_mask_rejects(&mask, &[3]);
 
-    s.commit_token(1).unwrap();
-    assert!(s.is_finished(), "accept after 'ab'");
+    commit_all(&mut state, &[1]);
+    assert!(state.is_finished(), "accept after 'ab'");
 }
-
-// ====================================================================
-// Serialization tests
-// ====================================================================
 
 #[test]
 fn test_save_load_roundtrip() {
-    let vocab = make_vocab(&["a", "b"]);
-    let c = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
+    let constraint = ebnf_constraint(&["a", "b"], r#"start ::= "a" "b""#);
 
-    // Serialize and deserialize.
-    let bytes = c.save();
+    let bytes = constraint.save();
     assert!(!bytes.is_empty());
     let c2 = Constraint::load(&bytes).unwrap();
 
-    // The reloaded constraint should behave identically.
-    let mut s = c2.start();
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0));
-    assert!(!token_allowed(&mask, 1));
+    let mut state = c2.start();
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+    assert_mask_rejects(&mask, &[1]);
 
-    s.commit_token(0).unwrap();
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 1));
+    commit_all(&mut state, &[0]);
+    assert_mask_allows(&state.mask(), &[1]);
 
-    s.commit_token(1).unwrap();
-    assert!(s.is_finished());
+    commit_all(&mut state, &[1]);
+    assert!(state.is_finished());
 }
 
 #[test]
 fn test_save_load_file_roundtrip() {
-    let vocab = make_vocab(&["x", "y", "z"]);
-    let c = Constraint::from_ebnf(r#"start ::= "x" "y" | "z""#, &vocab).unwrap();
+    let constraint = ebnf_constraint(&["x", "y", "z"], r#"start ::= "x" "y" | "z""#);
 
     let path = std::path::PathBuf::from("/tmp/glrmask_test_roundtrip.bin");
-    std::fs::write(&path, c.save()).unwrap();
+    std::fs::write(&path, constraint.save()).unwrap();
     let c2 = Constraint::load(&std::fs::read(&path).unwrap()).unwrap();
 
-    // Verify behavior matches.
-    let mut s = c2.start();
-    let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'x' allowed");
-    assert!(token_allowed(&mask, 2), "'z' allowed");
+    let mut state = c2.start();
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0, 2]);
 
-    // Take the "z" path.
-    s.commit_token(2).unwrap();
-    assert!(s.is_finished(), "accept after 'z'");
+    commit_all(&mut state, &[2]);
+    assert!(state.is_finished(), "accept after 'z'");
 
-    // Cleanup.
     let _ = std::fs::remove_file(&path);
 }
 
@@ -402,12 +361,6 @@ fn test_load_invalid_bytes() {
     let result = Constraint::load(b"not valid bincode");
     assert!(result.is_err());
 }
-
-// ====================================================================
-// Force token tests
-// ====================================================================
-
-
 
 #[test]
 fn test_string_backslash_tokens() {
@@ -514,256 +467,185 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     assert!(token_allowed(&mask4, 7), "',-' (id=7) should be allowed after '[1,1'");
 }
 
-// ====================================================================
 // Plan-conforming API surface tests
-// ====================================================================
 
-/// Verify `mask_len()`, `mask()`, `fill_mask()`, and `is_finished()`.
 #[test]
 fn test_plan_api_mask_and_is_finished() {
-    let vocab = Vocab::new(
-        vec![(0, b"a".to_vec()), (1, b"b".to_vec())],
-        None,
-    );
-    let c = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
+    let c = ebnf_constraint(&["a", "b"], r#"start ::= "a" "b""#);
     let mut s = c.start();
 
-    // mask_len() must cover every token index.
     let len = c.mask_len();
     assert!(len >= 1, "mask_len must be at least 1");
     assert!((len - 1) * 32 < 32 * len, "mask_len sanity");
 
-    // mask() returns the same information as compute_mask().
     let bitmask = s.mask();
     let words = s.mask();
     assert_eq!(words.len(), len);
-    assert!((words[0] >> 0) & 1 == 1, "token 0 ('a') should be set");
-    assert!((words[0] >> 1) & 1 == 0, "token 1 ('b') should not be set");
+    assert_mask_allows(&words, &[0]);
+    assert_mask_rejects(&words, &[1]);
 
-    // fill_mask() must agree with mask().
     let mut buf = vec![0u32; len];
     s.fill_mask(&mut buf);
     assert_eq!(buf, words);
 
-    // is_finished() before completion.
     assert!(!s.is_finished());
 
-    // Advance to completion.
-    s.commit_token(0).unwrap();
-    s.commit_token(1).unwrap();
+    commit_all(&mut s, &[0, 1]);
     assert!(s.is_finished());
     let _ = bitmask; // suppress unused warning
 }
 
-/// Verify `commit_bytes()` advances state correctly.
 #[test]
 fn test_plan_api_commit_bytes() {
-    let vocab = Vocab::new(
-        vec![(0, b"x".to_vec()), (1, b"y".to_vec())],
-        None,
-    );
-    let c = Constraint::from_ebnf(r#"start ::= "x" "y""#, &vocab).unwrap();
+    let c = ebnf_constraint(&["x", "y"], r#"start ::= "x" "y""#);
     let mut s = c.start();
 
-    // commit_bytes processes raw bytes directly.
     s.commit_bytes(b"x").unwrap();
     let mask = s.mask();
-    // After "x", only "y" (token 1) is allowed.
-    assert!((mask[0] >> 0) & 1 == 0, "token 0 ('x') must not be set after 'x'");
-    assert!((mask[0] >> 1) & 1 == 1, "token 1 ('y') must be set after 'x'");
+    assert_mask_rejects(&mask, &[0]);
+    assert_mask_allows(&mask, &[1]);
 
     s.commit_bytes(b"y").unwrap();
     assert!(s.is_finished());
 }
 
-/// Verify `commit_tokens()` is equivalent to sequential `commit()`.
 #[test]
 fn test_plan_api_commit_tokens() {
-    let vocab = Vocab::new(
-        vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
-        None,
-    );
-    let c = Constraint::from_ebnf(r#"start ::= "a" "b" "c""#, &vocab).unwrap();
+    let c = ebnf_constraint(&["a", "b", "c"], r#"start ::= "a" "b" "c""#);
     let mut s = c.start();
 
     s.commit_tokens(&[0, 1, 2]).unwrap();
     assert!(s.is_finished());
 }
 
-/// Verify `force()` returns the forced token sequence for a deterministic grammar.
 #[test]
 fn test_plan_api_force_deterministic() {
-    // Grammar: exactly "a" "b" "c" — all three tokens are forced in one call.
-    let vocab = Vocab::new(
-        vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
-        None,
-    );
-    let c = Constraint::from_ebnf(r#"start ::= "a" "b" "c""#, &vocab).unwrap();
+    let c = ebnf_constraint(&["a", "b", "c"], r#"start ::= "a" "b" "c""#);
     let s = c.start();
 
-    // force() greedily collects the entire deterministic sequence.
     let forced = s.force();
     assert_eq!(forced, vec![0, 1, 2], "all three tokens are forced in sequence");
 
-    // Committing the forced tokens reaches the finished state.
     let mut s2 = c.start();
     s2.commit_tokens(&forced).unwrap();
     assert!(s2.is_finished());
 }
 
-/// Verify `force()` returns empty when multiple tokens are possible.
 #[test]
 fn test_plan_api_force_nondeterministic() {
-    let vocab = Vocab::new(
-        vec![(0, b"x".to_vec()), (1, b"y".to_vec())],
-        None,
-    );
-    let c = Constraint::from_ebnf(r#"start ::= "x" | "y""#, &vocab).unwrap();
+    let c = ebnf_constraint(&["x", "y"], r#"start ::= "x" | "y""#);
     let s = c.start();
 
     let forced = s.force();
     assert!(forced.is_empty(), "no token forced when two are possible");
 }
 
-// ===========================================================================
-// Constraint regression tests
-// ===========================================================================
-
-/// Trivial 2-token grammar: s ::= A EOF; A ::= 'a'; EOF ::= '$'.
-/// Initial mask = {0("a")}; after commit "a" → {1("$")}; after commit "$" → is_finished().
 #[test]
-fn test_trivial() {
-    // IDs: "a"→0, "$"→1
-    let vocab = make_vocab(&["a", "$"]);
-
-    let c = Constraint::from_ebnf(
+fn test_literal_then_eof_sequence() {
+    let c = ebnf_constraint(
+        &["a", "$"] ,
         r#"s ::= A EOF
            A ::= 'a'
            EOF ::= '$'"#,
-        &vocab,
-    )
-    .unwrap();
+    );
 
     let mut s = c.start();
 
     let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
-    assert!(!token_allowed(&mask, 1), "'$' should NOT be allowed initially");
+    assert_mask_allows(&mask, &[0]);
+    assert_mask_rejects(&mask, &[1]);
 
-    s.commit_token(0).unwrap(); // commit "a"
+    commit_all(&mut s, &[0]);
     let mask = s.mask();
-    assert!(!token_allowed(&mask, 0), "'a' should NOT be allowed after 'a'");
-    assert!(token_allowed(&mask, 1), "'$' should be allowed after 'a'");
+    assert_mask_rejects(&mask, &[0]);
+    assert_mask_allows(&mask, &[1]);
 
-    s.commit_token(1).unwrap(); // commit "$"
+    commit_all(&mut s, &[1]);
     assert!(s.is_finished(), "should be finished after 'a$'");
 }
 
-/// Grammar with two paths: s ::= x EOF; x ::= A B_OR_C | AB.
-/// Multi-byte LLM tokens ("ab", "ac") each match a grammar token sequence.
 #[test]
-fn test_simple() {
-    // IDs: "ab"→0, "ac"→1, "$"→2
-    let vocab = make_vocab(&["ab", "ac", "$"]);
-    let c = Constraint::from_ebnf(
+fn test_multibyte_token_matches_two_grammar_paths() {
+    let c = ebnf_constraint(
+        &["ab", "ac", "$"] ,
         r#"s ::= x EOF
            x ::= A B_OR_C | AB
            A ::= 'a'
            AB ::= 'ab'
            B_OR_C ::= 'b' | 'c'
            EOF ::= '$'"#,
-        &vocab,
-    )
-    .unwrap();
+    );
     let mut s = c.start();
 
     let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'ab' should be allowed initially");
-    assert!(token_allowed(&mask, 1), "'ac' should be allowed initially");
-    assert!(!token_allowed(&mask, 2), "'$' should NOT be allowed initially");
+    assert_mask_allows(&mask, &[0, 1]);
+    assert_mask_rejects(&mask, &[2]);
 
-    s.commit_token(0).unwrap(); // commit "ab"
+    commit_all(&mut s, &[0]);
     let mask = s.mask();
-    assert!(!token_allowed(&mask, 0), "'ab' not allowed after 'ab'");
-    assert!(!token_allowed(&mask, 1), "'ac' not allowed after 'ab'");
-    assert!(token_allowed(&mask, 2), "'$' should be allowed after 'ab'");
+    assert_mask_rejects(&mask, &[0, 1]);
+    assert_mask_allows(&mask, &[2]);
 }
 
-/// Minimal path: s ::= x EOF; x ::= A — one token then EOF.
 #[test]
-fn test_simple_minimized() {
-    // IDs: "a"→0, "$"→1
-    let vocab = make_vocab(&["a", "$"]);
-    let c = Constraint::from_ebnf(
+fn test_single_literal_then_eof_compact_path() {
+    let c = ebnf_constraint(
+        &["a", "$"] ,
         r#"s ::= x EOF
            x ::= A
            A ::= 'a'
            EOF ::= '$'"#,
-        &vocab,
-    )
-    .unwrap();
+    );
     let mut s = c.start();
 
     let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' should be allowed initially");
-    assert!(!token_allowed(&mask, 1), "'$' should NOT be allowed initially");
+    assert_mask_allows(&mask, &[0]);
+    assert_mask_rejects(&mask, &[1]);
 
-    s.commit_token(0).unwrap();
+    commit_all(&mut s, &[0]);
     let mask = s.mask();
-    assert!(!token_allowed(&mask, 0), "'a' NOT allowed after 'a'");
-    assert!(token_allowed(&mask, 1), "'$' should be allowed after 'a'");
+    assert_mask_rejects(&mask, &[0]);
+    assert_mask_allows(&mask, &[1]);
 
-    s.commit_token(1).unwrap();
+    commit_all(&mut s, &[1]);
     assert!(s.is_finished());
 }
 
-/// Optional-statement grammar: program ::= expression_statement expression_statement? EOF.
-/// Verifies comma/semicolon/EOF interactions across multi-step sequences.
 #[test]
-fn test_x_semicolon_x() {
-    // IDs: "x"→0, ";"→1, "$"→2
-    let vocab = make_vocab(&["x", ";", "$"]);
-    let c = Constraint::from_ebnf(
+fn test_optional_semicolon_between_two_expressions() {
+    let c = ebnf_constraint(
+        &["x", ";", "$"] ,
         r#"program ::= expression_statement expression_statement? EOF
            expression_statement ::= expression ';'?
            expression ::= 'x'
            EOF ::= '$'"#,
-        &vocab,
-    )
-    .unwrap();
+    );
     let mut s = c.start();
 
     let mask0 = s.mask();
-    assert!(token_allowed(&mask0, 0), "x should be allowed initially");
-    assert!(!token_allowed(&mask0, 1), "';' NOT initially");
-    assert!(!token_allowed(&mask0, 2), "'$' NOT initially");
+    assert_mask_allows(&mask0, &[0]);
+    assert_mask_rejects(&mask0, &[1, 2]);
 
-    s.commit_token(0).unwrap(); // "x"
+    commit_all(&mut s, &[0]);
     let mask1 = s.mask();
-    assert!(token_allowed(&mask1, 1), "';' should be allowed after x");
-    assert!(token_allowed(&mask1, 0), "x should be allowed after x (second stmt)");
-    assert!(token_allowed(&mask1, 2), "'$' should be allowed after x");
+    assert_mask_allows(&mask1, &[0, 1, 2]);
 
-    s.commit_token(1).unwrap(); // ";"
+    commit_all(&mut s, &[1]);
     let mask2 = s.mask();
-    assert!(token_allowed(&mask2, 0), "x should be allowed after x;");
-    assert!(token_allowed(&mask2, 2), "'$' should be allowed after x;");
+    assert_mask_allows(&mask2, &[0, 2]);
 
-    s.commit_token(0).unwrap(); // second "x"
+    commit_all(&mut s, &[0]);
     let mask3 = s.mask();
-    assert!(token_allowed(&mask3, 2), "'$' should be allowed after x;x");
+    assert_mask_allows(&mask3, &[2]);
 
-    s.commit_token(2).unwrap(); // "$"
+    commit_all(&mut s, &[2]);
     assert!(s.is_finished(), "should be finished after x;x$");
 }
 
-/// Left-recursive expression grammar: e → e '+' t | t; t → t '*' f | f; f → '(' e ')' | 'i'.
-/// Verifies initial mask and mask after multi-byte token "(i".
 #[test]
-fn test_expression() {
-    // IDs: "i"→0, "+"→1, "*"→2, "("→3, ")"→4, "(i"→5, "+i"→6
-    let vocab = make_vocab(&["i", "+", "*", "(", ")", "(i", "+i"]);
-    let c = Constraint::from_ebnf(
+fn test_expression_mask_after_compact_open_paren_i_token() {
+    let c = ebnf_constraint(
+        &["i", "+", "*", "(", ")", "(i", "+i"] ,
         r#"s ::= e
            e ::= e PLUS t | t
            t ::= t TIMES f | f
@@ -773,31 +655,17 @@ fn test_expression() {
            LPAREN ::= '('
            RPAREN ::= ')'
            I ::= 'i'"#,
-        &vocab,
-    )
-    .unwrap();
+    );
     let mut s = c.start();
 
     let mask = s.mask();
-    // Can start with: "i" (0), "(" (3), "(i" (5)
-    assert!(token_allowed(&mask, 0), "'i' should be allowed initially");
-    assert!(!token_allowed(&mask, 1), "'+' should NOT be allowed initially");
-    assert!(!token_allowed(&mask, 2), "'*' should NOT be allowed initially");
-    assert!(token_allowed(&mask, 3), "'(' should be allowed initially");
-    assert!(!token_allowed(&mask, 4), "')' should NOT be allowed initially");
-    assert!(token_allowed(&mask, 5), "'(i' should be allowed initially");
-    assert!(!token_allowed(&mask, 6), "'+i' should NOT be allowed initially");
+    assert_mask_allows(&mask, &[0, 3, 5]);
+    assert_mask_rejects(&mask, &[1, 2, 4, 6]);
 
-    s.commit_token(5).unwrap(); // commit "(i"
+    commit_all(&mut s, &[5]);
     let mask = s.mask();
-    // After "(i": can follow with '+' (1), '*' (2), ')' (4), '+i' (6)
-    assert!(!token_allowed(&mask, 0), "'i' should NOT be allowed after '(i'");
-    assert!(token_allowed(&mask, 1), "'+' should be allowed after '(i'");
-    assert!(token_allowed(&mask, 2), "'*' should be allowed after '(i'");
-    assert!(!token_allowed(&mask, 3), "'(' should NOT be allowed after '(i'");
-    assert!(token_allowed(&mask, 4), "')' should be allowed after '(i'");
-    assert!(!token_allowed(&mask, 5), "'(i' should NOT be allowed after '(i'");
-    assert!(token_allowed(&mask, 6), "'+i' should be allowed after '(i'");
+    assert_mask_allows(&mask, &[1, 2, 4, 6]);
+    assert_mask_rejects(&mask, &[0, 3, 5]);
 }
 
 /// Grammar: s ::= A; A ::= 'a'+.
@@ -1106,9 +974,7 @@ fn test_trivial_direct_expression() {
     assert!(token_allowed(&mask, 3), "'$' should be allowed after '(i'");
 }
 
-// ===========================================================================
-// Constraint regression tests — second batch
-// ===========================================================================
+// Constraint regressions
 
 /// Sparse vocabulary: only token ID=2 ("(i") exists; IDs 0 and 1 are absent.
 /// Grammar: s ::= e EOF; e ::= LPAREN e | I.
@@ -1165,12 +1031,8 @@ fn test_shared_prefix_no_panic() {
     );
 }
 
-/// Grammar with repeated (expression ';') and optional unary '!'.
-/// Initial mask should allow "a"(0), "!\""(1), "\""(2).
-/// After committing "a", the parser needs ';' then EOF — none in vocab → empty mask.
 #[test]
-fn test_js_minimized_ebnf_string() {
-    // IDs: "a"→0, "!\""→1, "\""→2
+fn test_expression_list_without_separator_tokens_leaves_empty_mask() {
     let vocab = make_vocab(&["a", "!\"", "\""]);
     let c = Constraint::from_ebnf(
         r#"program ::= (expression ';')* EOF
@@ -1184,19 +1046,10 @@ fn test_js_minimized_ebnf_string() {
     let mut s = c.start();
 
     let mask = s.mask();
-    assert!(token_allowed(&mask, 0), "'a' (IDENTIFIER start) should be in initial mask");
-    assert!(token_allowed(&mask, 1), "'!\"' (unary + STRING_LITERAL start) should be in initial mask");
-    assert!(token_allowed(&mask, 2), "'\"' (STRING_LITERAL start) should be in initial mask");
+    assert_mask_allows(&mask, &[0, 1, 2]);
 
-    s.commit_token(0).unwrap(); // "a" — completes one IDENTIFIER expression
-    let mask = s.mask();
-    // Grammar now expects ';' then possibly more expressions or EOF ('$');
-    // none of the vocab tokens satisfy this → empty mask.
-    let allowed = iter_allowed(&mask);
-    assert!(
-        allowed.is_empty(),
-        "after 'a', only ';' or '$' valid but neither in vocab: {allowed:?}"
-    );
+    s.commit_token(0).unwrap();
+    assert_empty_mask(&s.mask());
 }
 
 /// Grammar s ::= x x '$'; x ::= ('!' x | 'a') ';'?.
@@ -1230,12 +1083,8 @@ fn test_js_like_mask_after_commit_bytes() {
     );
 }
 
-/// Grammar program ::= unary_expression unary_expression '$';
-/// unary_expression ::= ('!' unary_expression | 'X') ';'?.
-/// After commit_bytes("X") no vocab token (only ";;") should satisfy the grammar.
 #[test]
-fn test_js_like_mask_minimized() {
-    // IDs: ";;"→0  (the only token)
+fn test_double_semicolon_token_is_rejected_between_unary_expressions() {
     let vocab = make_vocab(&[";;"]);
     let c = Constraint::from_ebnf(
         r#"program ::= unary_expression unary_expression '$'
@@ -1247,14 +1096,7 @@ fn test_js_like_mask_minimized() {
 
     s.commit_bytes(b"X").unwrap(); // first unary_expression 'X' branch
 
-    let mask = s.mask();
-    // After 'X': need ';'? (opt) then second unary_expression ('!' or 'X') then '$'.
-    // ";;" → first ';' ok for ';'?, second ';' needs '!' or 'X' → invalid
-    let allowed = iter_allowed(&mask);
-    assert!(
-        allowed.is_empty(),
-        "no valid continuation with ';;' after 'X': {allowed:?}"
-    );
+    assert_empty_mask(&s.mask());
 }
 
 /// Grammar program ::= IGNORE; IGNORE ::= ' ' | '$@'.
@@ -1396,9 +1238,7 @@ fn test_force_partial_prefix() {
     assert_eq!(forced, vec![0u32], "only 'a' (id=0) is forced; second byte branches");
 }
 
-// ===========================================================================
-// force() regression tests — third batch (token-level, read-only, edge cases)
-// ===========================================================================
+// force() regressions
 
 /// After committing the single token "a" the grammar is complete.
 /// force() on the finished state returns empty (no more tokens to force).
@@ -1528,15 +1368,13 @@ fn test_force_only_multibyte_token() {
     assert_eq!(forced, vec![0u32], "only multi-byte 'ab' token; exactly one in mask → forced");
 }
 
-// =============================================================================
-// Batch 4: Span-token and false-positive regression tests
-// =============================================================================
+// Span-token and false-positive regressions
 
 /// After commit `"a"`, token `":x"` must be allowed but `":-"` must NOT.
 /// Grammar: `start: "a" ":" "x" STR_CHAR STR_CHAR "x"` where STR_CHAR = "a"|":"|"-".
 /// Regression for Super DWA specialization admitting tokens that skip required literals.
 #[test]
-fn test_super_dwa_fp_minimal() {
+fn test_super_dwa_rejects_false_positive_colon_dash_token() {
     let vocab = Vocab::new(
         vec![
             (0u32, b"a".to_vec()),
@@ -1556,11 +1394,9 @@ STR_CHAR: "a" | ":" | "-"
     assert!(!token_allowed(&mask, 2), "false-positive ':-' must NOT be allowed after 'a'");
 }
 
-/// Regression: after `{"name`, token `":"` must be allowed but `":[` and `":-` must NOT.
-/// Grammar: `start: ws object ws` where object has a QUOTE-wrapped name_pair.
 #[test]
 #[ignore]
-fn test_glr_fp_repro_minimal() {
+fn test_glr_object_pair_rejects_false_positive_colon_tokens() {
     let lark = r#"start: ws object ws
 object: "{" ws name_pair ws "}"
 name_pair: QUOTE "name" QUOTE ws ":" ws QUOTE name_val QUOTE
@@ -1591,13 +1427,7 @@ STR_CHAR: /[A-Za-z0-9 \[\]\-:{}@.]/
     assert!(!token_allowed(&mask, 4), r#"false-positive '":-' must NOT be allowed"#);
 }
 
-/// Regression: standalone UTF-8 continuation byte (0xA1) must NOT be allowed
-/// inside a JSON string character class after committing `{"`, while ASCII `a` IS allowed.
-/// Vocab includes `"`, `:`, and `}` so grammar completion is possible.
-///
-/// Tests that negated character classes like `/[^\x00-\x1F"\\]/` are handled
-/// in a UTF-8-aware manner: only valid UTF-8 sequences are matched, not arbitrary
-/// bytes.  In particular, standalone continuation bytes (0x80–0xBF) are rejected.
+/// Standalone UTF-8 continuation bytes must stay rejected inside JSON strings.
 #[test]
 fn test_json_string_rejects_invalid_utf8() {
     let lark = r#"start: "{" JSON_STRING ":" JSON_STRING "}"
@@ -1639,11 +1469,8 @@ fn test_span_token_in_mask() {
     assert!(token_allowed(&mask, 0), "span token ':a' must be in mask after commit_bytes('a')");
 }
 
-/// Grammar: `start: "{" pair "}"` where `pair: string ":" string "," string ":" "null"`.
-/// After committing `{"`, the span token `":\"\","` must be in the mask.
-/// (Tests span across string-close + ":" + string-open + string-close + ",".)
 #[test]
-fn test_json_value_span_token_fn_copy_minimized() {
+fn test_json_pair_span_token_survives_commit_and_commit_bytes() {
     let lark = r#"start: "{" pair "}"
 pair: string ":" string "," string ":" "null"
 string: QUOTE char* QUOTE
@@ -1673,10 +1500,8 @@ QUOTE: "\""
     assert!(token_allowed(&mask2, 1), "span token must be in mask after commit_bytes(b'{{\\\"')");
 }
 
-/// Minimal EBNF span-token test: `start ::= string ':' string ','` where `string ::= '"' '"'`.
-/// After commit_bytes(`"`), the token `":\""` (spanning string-end + : + string-start) must be allowed.
 #[test]
-fn test_json_value_span_token_fn_minimal() {
+fn test_minimal_json_string_span_token_is_allowed_after_commit_bytes() {
     let vocab = Vocab::new(vec![(0u32, b"\":\"".to_vec())], None);
     let c = Constraint::from_ebnf(
         r#"start ::= string ':' string ','
@@ -1693,10 +1518,8 @@ string ::= '"' '"'"#,
     );
 }
 
-/// Full JSON Lark grammar; after committing token b'{"' (ID 4895), the span-token
-/// b'":\"\","' (ID 34713) must be in the mask. Exercises sparse high-ID vocab.
 #[test]
-fn test_json_value_span_token_fn() {
+fn test_full_json_grammar_exposes_high_id_span_token() {
     let lark = r#"start: ws value ws
 value: object | array | string | number | "true" | "false" | "null"
 object: "{" ws members? ws "}"
@@ -1743,9 +1566,7 @@ DIGIT: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
     );
 }
 
-// =============================================================================
-// Batch 5: Indirect recursion + expression edge cases
-// =============================================================================
+// Indirect recursion and expression edge cases
 
 /// Grammar: `s_prime ::= s EOF; s ::= A e | B; e ::= s` (indirect recursion s ↔ e).
 /// Equivalent to `a* b $`. After `a` the state recurses through `e = s`; after `ab`
@@ -1754,7 +1575,7 @@ DIGIT: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
 /// Differs from `test_indirect_recursion` (which is `s ::= A s | B end`):
 /// here the recursive step goes through an intermediate non-terminal `e`.
 #[test]
-fn test_indirect_recursion_minimized() {
+fn test_indirect_recursion_through_intermediate_nonterminal() {
     let vocab = make_vocab(&["a", "b", "$"]);
     let c = Constraint::from_ebnf(
         r#"s_prime ::= s EOF
@@ -1796,7 +1617,7 @@ EOF ::= '$'"#,
 /// a valid continuation because acceptance of the full grammar requires another term after `+`,
 /// and we allow speculative extension (prefix-consistent).
 #[test]
-fn test_expression_minimized() {
+fn test_plus_token_is_allowed_after_identifier_byte_prefix() {
     let vocab = Vocab::new(vec![(0u32, b"+".to_vec())], None);
     let c = Constraint::from_ebnf(
         r#"s ::= e
@@ -1827,9 +1648,7 @@ I ::= 'i'"#,
     );
 }
 
-// =============================================================================
-// Batch 6: Expression grammar variants
-// =============================================================================
+// Expression grammar variants
 #[test]
 fn test_expression_no_times() {
     let vocab = Vocab::new(
@@ -2271,7 +2090,7 @@ fn test_nullable_string_no_alternation_works() {
 }
 
 #[test]
-fn test_github_easy_o63377_false_positive_a() {
+fn test_o63377_rejects_false_positive_b_after_double_a_prefix() {
     let vocab = Vocab::new(vec![(0u32, b"b".to_vec())], None);
     let c = Constraint::from_lark(
         r#"
@@ -2295,7 +2114,7 @@ fn test_github_easy_o63377_false_positive_a() {
 }
 
 #[test]
-fn test_mask_commit_consistency_minimal_repro() {
+fn test_nested_object_prefix_keeps_joint_comma_quote_token_allowed() {
     let lark = r#"
 PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/
 PATTERN_1: /[\xC2-\xDF]/
@@ -2360,7 +2179,7 @@ start: "{" obj_required_0_0 "}"
 }
 
 #[test]
-fn test_mask_commit_consistency_minimal_repro_minimized_copy() {
+fn test_minimal_lark_repro_compiles_without_panicking() {
     let vocab = Vocab::new(
         vec![(0u32, b"ay".to_vec()), (1u32, b"xa".to_vec())],
         None,
@@ -2370,7 +2189,7 @@ fn test_mask_commit_consistency_minimal_repro_minimized_copy() {
 }
 
 #[test]
-fn test_python_reported_bug_def_rep_space_f() {
+fn test_space_star_then_f_allows_joint_space_f_token() {
     let vocab = Vocab::new(
         vec![(0u32, b" ".to_vec()), (1u32, b" f".to_vec())],
         None,
@@ -2391,7 +2210,7 @@ fn test_python_reported_bug_def_rep_space_f() {
 }
 
 #[test]
-fn test_sentence_grammar_from_prompt_minimized() {
+fn test_adjacent_terminals_reject_middle_token_at_start() {
     let vocab = Vocab::new(vec![(0u32, b"b".to_vec())], None);
     let c = Constraint::from_ebnf(
         r#"
@@ -2404,7 +2223,7 @@ fn test_sentence_grammar_from_prompt_minimized() {
     .unwrap();
 
     let mask = c.start().mask();
-    assert!(iter_allowed(&mask).is_empty(), "token 'b' alone must not be allowed at the start of 'ab' 'bc'");
+    assert_empty_mask(&mask);
 }
 
 #[test]
@@ -2440,38 +2259,20 @@ fn test_sentence_grammar_from_prompt() {
     let mut s = c.start();
 
     let mask = s.mask();
-    assert_eq!(
-        iter_allowed(&mask),
-        vec![0, 1, 2, 3, 4],
-        "initial mask should allow exactly the A-side sentence starters"
-    );
+    assert_allowed_tokens(&mask, &[0, 1, 2, 3, 4]);
 
     s.commit_token(2).unwrap(); // "apple"
     let mask = s.mask();
-    assert_eq!(
-        iter_allowed(&mask),
-        vec![5],
-        "after 'apple' only the separating space should be allowed"
-    );
+    assert_allowed_tokens(&mask, &[5]);
 
     s.commit_token(5).unwrap(); // " "
     let mask = s.mask();
-    assert_eq!(
-        iter_allowed(&mask),
-        vec![0, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-        "after 'apple ' the mask should allow full B tokens plus the partial-prefix tokens 'a' and 'e'"
-    );
-    assert!(
-        !token_allowed(&mask, 15),
-        "'eth' should not be allowed because it is not a valid prefix of any B alternative"
-    );
+    assert_allowed_tokens(&mask, &[0, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    assert_mask_rejects(&mask, &[15]);
 
     s.commit_token(6).unwrap(); // "eats"
     assert!(s.is_finished(), "'apple eats' should finish the simple sentence grammar");
-    assert!(
-        iter_allowed(&s.mask()).is_empty(),
-        "without an explicit EOS token, the finished sentence grammar should expose an empty continuation mask"
-    );
+    assert_empty_mask(&s.mask());
 }
 
 #[test]
@@ -2507,19 +2308,9 @@ fn test_minimal_python_example_with_compiled_grammar() {
     assert!(!token_allowed(&mask, 10), "plus should not be allowed immediately after the second plus");
 }
 
-/// Regression test for the fast-vs-reference vocab equivalence mismatch
-/// originally found on Github_hard/o56012. Minimized by ddmin from 85 rules /
-/// 1302 nodes / 50257 tokens down to 1 rule / 3 nodes / 2 tokens.
-///
-/// Grammar: start: "{" "}"
-/// Vocab:   ["}:" (0x7d3a), "}}}" (0x7d7d7d)]
-///
-/// Previously the reference analysis failed to subtract disallowed follows
-/// through completion labels, causing it to incorrectly separate these tokens.
-/// The fix adds completion-label self-loops on the disallowed detector's accept
-/// state, so both analyses now correctly merge them.
+/// Minimal o56012 repro: fast and reference vocab equivalence must agree.
 #[test]
-fn test_equiv_mismatch_o56012_minimized() {
+fn test_reference_equivalence_matches_fast_analysis_for_o56012_repro() {
     // SAFETY: set_var is unsafe in edition 2024 due to potential races.
     unsafe { std::env::set_var("REFERENCE_EQUIV_VERIFICATION", "1"); }
     let vocab = Vocab::new(
