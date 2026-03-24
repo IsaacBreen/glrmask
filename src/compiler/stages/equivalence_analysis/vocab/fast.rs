@@ -143,8 +143,41 @@ fn vocab_batch_size_override() -> Option<usize> {
         .filter(|&value| value > 0)
 }
 
+fn diversity_state_order_enabled() -> bool {
+    !env_flag_enabled("GLRMASK_DISABLE_DIVERSITY_STATE_ORDER")
+}
+
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn states_by_transition_diversity(dfa: &Dfa, states: &[usize]) -> Vec<usize> {
+    let num_classes = dfa
+        .byte_to_class
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |max_class| max_class as usize + 1);
+
+    let mut ranked: Vec<(usize, usize)> = states
+        .iter()
+        .copied()
+        .map(|state_id| {
+            let mut targets = BTreeSet::new();
+            for class in 0..num_classes {
+                targets.insert(dfa.trans_by_class[class * dfa.num_states + state_id]);
+            }
+            (state_id, targets.len())
+        })
+        .collect();
+
+    ranked.sort_unstable_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    ranked.into_iter().map(|(state_id, _)| state_id).collect()
 }
 
 #[inline]
@@ -727,8 +760,13 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
 ) -> VocabEquivalenceResult {
     let profile_compile = compile_profile_enabled();
     let dfa = build_dfa(tokenizer, disallowed_follows);
+    let ordered_states = if diversity_state_order_enabled() {
+        states_by_transition_diversity(&dfa, initial_states)
+    } else {
+        initial_states.to_vec()
+    };
     let num_tokens = strings.len();
-    let num_initial_states = initial_states.len();
+    let num_initial_states = ordered_states.len();
 
     if num_initial_states == 0 || num_tokens == 0 {
         return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
@@ -751,7 +789,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         let batch_started_at = Instant::now();
         let active_before = active_indices.len();
         let batch_end = (batch_start + batch_size).min(num_initial_states);
-        let batch = &initial_states[batch_start..batch_end];
+        let batch = &ordered_states[batch_start..batch_end];
         let active_sigs: Vec<(usize, u64)> = active_indices
             .par_iter()
             .map_init(
