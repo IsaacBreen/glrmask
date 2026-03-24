@@ -374,6 +374,42 @@ fn store_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight, r
     });
 }
 
+fn with_memoized_weight_op(
+    kind: WeightOpKind,
+    left: &Weight,
+    right: &Weight,
+    build: impl FnOnce() -> Weight,
+) -> Weight {
+    if let Some(existing) = lookup_memoized_weight_op(kind, left, right) {
+        return existing;
+    }
+
+    let result = build();
+    store_memoized_weight_op(kind, left, right, &result);
+    result
+}
+
+enum NextMeaningfulWeight<'a> {
+    End,
+    Full,
+    Weight(&'a Weight),
+}
+
+fn next_meaningful_weight<'a, I>(iter: &mut I) -> NextMeaningfulWeight<'a>
+where
+    I: Iterator<Item = &'a Weight>,
+{
+    for weight in iter {
+        if weight.is_full() {
+            return NextMeaningfulWeight::Full;
+        }
+        if !weight.is_empty() {
+            return NextMeaningfulWeight::Weight(weight);
+        }
+    }
+    NextMeaningfulWeight::End
+}
+
 pub(crate) fn finalize_weight_map(map: WeightMap) -> Weight {
     if map.ranges().next().is_none() {
         EMPTY_WEIGHT.clone()
@@ -863,45 +899,32 @@ impl Weight {
         if Arc::ptr_eq(&self.0, &other.0) {
             return self.clone();
         }
-        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Union, self, other) {
-            return existing;
-        }
-        let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
-            combine_single_entries(&left, &right, union_token_sets)
-        } else {
-            combine_compact_entries(self, other, union_token_sets)
-        };
-        store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
-        result
+        with_memoized_weight_op(WeightOpKind::Union, self, other, || {
+            if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
+                combine_single_entries(&left, &right, union_token_sets)
+            } else {
+                combine_compact_entries(self, other, union_token_sets)
+            }
+        })
     }
 
     pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
         let mut iter = weights.into_iter();
 
-        // Fast path: collect first non-empty weight
-        let first = loop {
-            match iter.next() {
-                None => return Self::empty(),
-                Some(w) if w.is_full() => return Self::all(),
-                Some(w) if w.is_empty() => continue,
-                Some(w) => break w,
-            }
+        let first = match next_meaningful_weight(&mut iter) {
+            NextMeaningfulWeight::End => return Self::empty(),
+            NextMeaningfulWeight::Full => return Self::all(),
+            NextMeaningfulWeight::Weight(weight) => weight,
         };
 
-        // Find second non-empty weight
-        let second = loop {
-            match iter.next() {
-                None => return first.clone(), // Only one non-empty weight
-                Some(w) if w.is_full() => return Self::all(),
-                Some(w) if w.is_empty() => continue,
-                Some(w) => break w,
-            }
+        let second = match next_meaningful_weight(&mut iter) {
+            NextMeaningfulWeight::End => return first.clone(),
+            NextMeaningfulWeight::Full => return Self::all(),
+            NextMeaningfulWeight::Weight(weight) => weight,
         };
 
-        // Two weights: use compact union
         let mut acc = first.union(second);
 
-        // Three or more: chain unions
         for weight in iter {
             if weight.is_full() {
                 return Self::all();
@@ -927,20 +950,17 @@ impl Weight {
         if other.is_full() {
             return self.clone();
         }
-        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Intersection, self, other) {
-            return existing;
-        }
-        let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
-            combine_single_entries(&left, &right, intersect_token_sets)
-        } else if let Some(single) = single_compact_entry(self) {
-            intersect_single_entry_with_weight(&single, other)
-        } else if let Some(single) = single_compact_entry(other) {
-            intersect_single_entry_with_weight(&single, self)
-        } else {
-            intersect_weights(self, other)
-        };
-        store_memoized_weight_op(WeightOpKind::Intersection, self, other, &result);
-        result
+        with_memoized_weight_op(WeightOpKind::Intersection, self, other, || {
+            if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
+                combine_single_entries(&left, &right, intersect_token_sets)
+            } else if let Some(single) = single_compact_entry(self) {
+                intersect_single_entry_with_weight(&single, other)
+            } else if let Some(single) = single_compact_entry(other) {
+                intersect_single_entry_with_weight(&single, self)
+            } else {
+                intersect_weights(self, other)
+            }
+        })
     }
 
     pub fn difference(&self, other: &Self) -> Self {
@@ -960,12 +980,9 @@ impl Weight {
             // which returns empty() as a no-op sentinel instead.
             return Self::all();
         }
-        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Difference, self, other) {
-            return existing;
-        }
-        let result = combine_compact_entries(self, other, difference_token_sets);
-        store_memoized_weight_op(WeightOpKind::Difference, self, other, &result);
-        result
+        with_memoized_weight_op(WeightOpKind::Difference, self, other, || {
+            combine_compact_entries(self, other, difference_token_sets)
+        })
     }
 
     pub fn complement(&self) -> Self {

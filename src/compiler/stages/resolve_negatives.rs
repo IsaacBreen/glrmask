@@ -499,6 +499,12 @@ fn collect_initial_final_weights(nwa: &NWA) -> Vec<Option<Weight>> {
         .collect()
 }
 
+fn write_final_weights(nwa: &mut NWA, reachable_final_weights: Vec<Option<Weight>>) {
+    for (state_id, final_weight) in reachable_final_weights.into_iter().enumerate() {
+        nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
+    }
+}
+
 fn propagate_final_weights_to_predecessors(
     nwa: &NWA,
     preds: &[Vec<PredEdge>],
@@ -592,9 +598,7 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
         apply_finality_fixpoint_worklist(nwa, &preds, &mut reachable_final_weights);
     }
 
-    for (state_id, final_weight) in reachable_final_weights.into_iter().enumerate() {
-        nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
-    }
+    write_final_weights(nwa, reachable_final_weights);
 }
 
 pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
@@ -632,23 +636,15 @@ fn default_targets_are_terminal(state: &NWAState, terminal_states: &[bool]) -> b
     }
 }
 
-pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
-    let n = nwa.states.len();
-    let mut terminal_states: Vec<bool> = nwa.states.iter().map(is_terminal_candidate).collect();
-
+fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
     loop {
         let mut changed = false;
-        for state_id in 0..n {
-            if terminal_states[state_id] {
+        for (state_id, state) in nwa.states.iter().enumerate() {
+            if terminal_states[state_id] || !is_terminal_candidate(state) {
                 continue;
             }
 
-            let state = &nwa.states[state_id];
-            if !is_terminal_candidate(state) {
-                continue;
-            }
-
-            if default_targets_are_terminal(state, &terminal_states) {
+            if default_targets_are_terminal(state, terminal_states) {
                 terminal_states[state_id] = true;
                 changed = true;
             }
@@ -658,13 +654,22 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
             break;
         }
     }
+}
 
+fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
     for state in &mut nwa.states {
         if let Some(targets) = state.transitions.get_mut(&DEFAULT_LABEL) {
             targets.retain(|(target, _)| !terminal_states[*target as usize]);
         }
         state.transitions.retain(|_, targets| !targets.is_empty());
     }
+}
+
+pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
+    let mut terminal_states: Vec<bool> = nwa.states.iter().map(is_terminal_candidate).collect();
+
+    grow_terminal_state_set(nwa, &mut terminal_states);
+    prune_terminal_default_targets(nwa, &terminal_states);
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {

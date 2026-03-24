@@ -49,18 +49,9 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     let exprs: Vec<Expr> = grammar
         .terminals
         .iter()
-        .map(|terminal| match terminal {
-            Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
-            Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
-            Terminal::Expr { expr, .. } => expr.clone(),
-        })
+        .map(terminal_expr)
         .collect();
-    let regex = build_regex(&exprs);
-
-    Tokenizer {
-        dfa: regex.dfa,
-        num_terminals: grammar.num_terminals(),
-    }
+    build_tokenizer_from_exprs(&exprs)
 }
 
 pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
@@ -69,6 +60,14 @@ pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: exprs.len() as u32,
+    }
+}
+
+fn terminal_expr(terminal: &Terminal) -> Expr {
+    match terminal {
+        Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
+        Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
+        Terminal::Expr { expr, .. } => expr.clone(),
     }
 }
 

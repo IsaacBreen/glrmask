@@ -900,20 +900,17 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     loop {
         let snap = rules.clone();
 
-        // Inline null productions.
-        *rules = inline_null_productions(rules, next_nt.get());
-        resync_next_nonterminal(rules, &next_nt);
+        replace_rules_with_resync(rules, &next_nt, inline_null_productions);
 
-        // Eliminate right recursion.
-        eliminate_right_recursion(rules, &mut fresh_nt);
-        resync_next_nonterminal(rules, &next_nt);
+        with_resynced_next_nonterminal(rules, &next_nt, |rules| {
+            eliminate_right_recursion(rules, &mut fresh_nt);
+        });
 
-        // Expose hidden left recursion.
-        let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
-        eliminate_hidden_left_recursion(rules, &nullable);
-        resync_next_nonterminal(rules, &next_nt);
+        with_resynced_next_nonterminal(rules, &next_nt, |rules| {
+            let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
+            eliminate_hidden_left_recursion(rules, &nullable);
+        });
 
-        // Dedup before fixed-point check
         dedup_rules(rules);
 
         if *rules == snap {
@@ -921,16 +918,29 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         }
     }
 
-    // Final ε-elimination pass (right-recursion conversion may
-    // re-introduce ε-rules for fresh tail nonterminals)
-    *rules = inline_null_productions(rules, next_nt.get());
-    resync_next_nonterminal(rules, &next_nt);
+    replace_rules_with_resync(rules, &next_nt, inline_null_productions);
 
-    // Remove unreachable productions
     *rules = remove_unreachable_rules(rules, start);
 
-    // Final dedup
     dedup_rules(rules);
+}
+
+fn replace_rules_with_resync(
+    rules: &mut Vec<Rule>,
+    next_nt: &std::cell::Cell<u32>,
+    update: impl FnOnce(&[Rule], u32) -> Vec<Rule>,
+) {
+    *rules = update(rules, next_nt.get());
+    resync_next_nonterminal(rules, next_nt);
+}
+
+fn with_resynced_next_nonterminal(
+    rules: &mut Vec<Rule>,
+    next_nt: &std::cell::Cell<u32>,
+    update: impl FnOnce(&mut Vec<Rule>),
+) {
+    update(rules);
+    resync_next_nonterminal(rules, next_nt);
 }
 
 fn resync_next_nonterminal(rules: &[Rule], next_nt: &std::cell::Cell<u32>) {

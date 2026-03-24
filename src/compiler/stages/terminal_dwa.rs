@@ -204,20 +204,15 @@ fn deduplicate_roots(
         if bucket.len() < 2 {
             continue;
         }
-        // Within the bucket, group by exact equality.
-        // canonical_reps[i] = (representative_id, already matched)
         let mut canonical_reps: Vec<u32> = Vec::new();
         for &state_id in bucket {
-            let mut found = false;
-            for &rep in &canonical_reps {
-                if nwa.states[state_id as usize] == nwa.states[rep as usize] {
-                    remap[state_id as usize] = rep;
-                    dedup_count += 1;
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
+            if let Some(&rep) = canonical_reps
+                .iter()
+                .find(|&&rep| nwa.states[state_id as usize] == nwa.states[rep as usize])
+            {
+                remap[state_id as usize] = rep;
+                dedup_count += 1;
+            } else {
                 canonical_reps.push(state_id);
             }
         }
@@ -240,7 +235,6 @@ fn deduplicate_roots(
     }
     nwa.states[start_state as usize].epsilons = merged_epsilons
         .into_iter()
-        .map(|(target, weight)| (target, weight))
         .collect();
 
     // Prune now-unreachable duplicate root states.
@@ -367,22 +361,12 @@ fn topological_order(nwa: &NWA) -> Vec<usize> {
     order
 }
 
-fn collapse_always_allowed(
-    nwa: &mut NWA,
-    always_allowed_by_label: &[Vec<TerminalID>],
+fn propagate_collapse_context(
+    nwa: &NWA,
     terminals_count: usize,
-) -> bool {
-    if always_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states.is_empty() {
-        return false;
-    }
-
-    let topo_order = topological_order(nwa);
-    if topo_order.is_empty() {
-        return false;
-    }
-
-    let mut incoming: Vec<HashSet<TerminalID>> = vec![HashSet::new(); nwa.states.len()];
-    let mut domain: Vec<Weight> = vec![Weight::empty(); nwa.states.len()];
+) -> (Vec<HashSet<TerminalID>>, Vec<Weight>) {
+    let mut incoming = vec![HashSet::new(); nwa.states.len()];
+    let mut domain = vec![Weight::empty(); nwa.states.len()];
     let mut queue = VecDeque::new();
     let mut in_queue = vec![false; nwa.states.len()];
 
@@ -441,9 +425,17 @@ fn collapse_always_allowed(
         }
     }
 
-    let mut allowed_by_state: Vec<HashSet<TerminalID>> = vec![HashSet::new(); nwa.states.len()];
-    for state_id in 0..nwa.states.len() {
-        let Some(&first_label) = incoming[state_id].iter().next() else {
+    (incoming, domain)
+}
+
+fn allowed_labels_by_state(
+    incoming: &[HashSet<TerminalID>],
+    always_allowed_by_label: &[Vec<TerminalID>],
+) -> Vec<HashSet<TerminalID>> {
+    let mut allowed_by_state = vec![HashSet::new(); incoming.len()];
+
+    for (state_id, labels) in incoming.iter().enumerate() {
+        let Some(&first_label) = labels.iter().next() else {
             continue;
         };
         let Some(first_follows) = always_allowed_by_label.get(first_label as usize) else {
@@ -451,7 +443,7 @@ fn collapse_always_allowed(
         };
 
         let mut allowed: HashSet<TerminalID> = first_follows.iter().copied().collect();
-        for &label in incoming[state_id].iter().skip(1) {
+        for &label in labels.iter().skip(1) {
             let Some(follows) = always_allowed_by_label.get(label as usize) else {
                 continue;
             };
@@ -463,6 +455,16 @@ fn collapse_always_allowed(
         allowed_by_state[state_id] = allowed;
     }
 
+    allowed_by_state
+}
+
+fn collapse_single_allowed_transitions(
+    nwa: &mut NWA,
+    topo_order: &[usize],
+    domain: &[Weight],
+    allowed_by_state: &[HashSet<TerminalID>],
+    terminals_count: usize,
+) -> bool {
     let mut final_weights: Vec<Option<Weight>> =
         nwa.states.iter().map(|state| state.final_weight.clone()).collect();
     let mut changed = false;
@@ -528,6 +530,28 @@ fn collapse_always_allowed(
         state.final_weight = state_final_weight.clone();
         final_weights[state_id] = state_final_weight;
     }
+
+    changed
+}
+
+fn collapse_always_allowed(
+    nwa: &mut NWA,
+    always_allowed_by_label: &[Vec<TerminalID>],
+    terminals_count: usize,
+) -> bool {
+    if always_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states.is_empty() {
+        return false;
+    }
+
+    let topo_order = topological_order(nwa);
+    if topo_order.is_empty() {
+        return false;
+    }
+
+    let (incoming, domain) = propagate_collapse_context(nwa, terminals_count);
+    let allowed_by_state = allowed_labels_by_state(&incoming, always_allowed_by_label);
+    let mut changed =
+        collapse_single_allowed_transitions(nwa, &topo_order, &domain, &allowed_by_state, terminals_count);
 
     if prune_unreachable_states(nwa) {
         changed = true;
@@ -635,17 +659,6 @@ fn token_weight_all_tsids(num_tsids: u32, internal_token_id: u32) -> Weight {
     )
 }
 
-fn token_set_weight_all_tsids(num_tsids: u32, token_ids: &RangeSetBlaze<usize>) -> Weight {
-    if num_tsids == 0 || token_ids.is_empty() {
-        return Weight::empty();
-    }
-    Weight::from_uniform(0..=num_tsids - 1, RangeSetBlaze::from_iter(
-        token_ids
-            .ranges()
-            .map(|r| (*r.start() as u32)..=(*r.end() as u32)),
-    ))
-}
-
 fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     Weight::from_token_set_for_tsid(
         internal_tsid,
@@ -689,12 +702,16 @@ impl NodesByTokenizerState {
         self.active.is_empty()
     }
 
-    fn merge(&mut self, state: TokenizerState, nodes: &[NwaState]) {
+    fn slot_for(&mut self, state: TokenizerState) -> &mut Vec<NwaState> {
         let slot = &mut self.entries[state as usize];
         if slot.is_empty() {
             self.active.push(state);
         }
-        slot.extend_from_slice(nodes);
+        slot
+    }
+
+    fn merge(&mut self, state: TokenizerState, nodes: &[NwaState]) {
+        self.slot_for(state).extend_from_slice(nodes);
     }
 
     fn first(&self, state: TokenizerState) -> Option<NwaState> {
@@ -702,11 +719,7 @@ impl NodesByTokenizerState {
     }
 
     fn push_one(&mut self, state: TokenizerState, node: NwaState) {
-        let slot = &mut self.entries[state as usize];
-        if slot.is_empty() {
-            self.active.push(state);
-        }
-        slot.push(node);
+        self.slot_for(state).push(node);
     }
 
     fn iter(&self) -> impl Iterator<Item = (TokenizerState, &[NwaState])> {
@@ -761,13 +774,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     fn buffer_leaf_token_id(&mut self, source: u32, label: TerminalID, internal_token_id: u32) {
         self.leaf_token_ids_for(source, label).push(internal_token_id);
-    }
-
-    fn buffer_leaf_token_id_set(&mut self, source: u32, label: TerminalID, token_ids: &RangeSetBlaze<usize>) {
-        let token_buffer = self.leaf_token_ids_for(source, label);
-        for token_id in token_ids.iter() {
-            token_buffer.push(token_id as u32);
-        }
     }
 
     fn cached_reachable_weight(&mut self, token_ids: &RangeSetBlaze<usize>) -> Weight {
@@ -872,23 +878,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
         for &source in sources {
             self.buffer_leaf_token_id(source, label, internal_token_id);
-        }
-    }
-
-    fn add_leaf_token_set_from_sources(
-        &mut self,
-        sources: &[u32],
-        label: TerminalID,
-        token_ids: &RangeSetBlaze<usize>,
-    ) {
-        if self.ignore_terminal == Some(label) {
-            let weight = token_set_weight_all_tsids(self.num_tsids, token_ids);
-            self.add_match_from_sources(sources, label, self.leaf_state, &weight);
-            return;
-        }
-
-        for &source in sources {
-            self.buffer_leaf_token_id_set(source, label, token_ids);
         }
     }
 
