@@ -103,13 +103,25 @@ fn find_state_equivalence_classes_kstep(
     let mut prev_hashes = Vec::with_capacity(dfa.states.len());
 
     for state in &dfa.states {
-        let (targets, transition_label_hash) = build_state_shape(state);
+        let (targets, _) = build_state_shape(state);
         outgoing_targets.push(targets);
-        prev_hashes.push(mix_u64(hash_state_label(state) ^ transition_label_hash));
+        prev_hashes.push(hash_state_label(state));
     }
 
     let mut next_hashes = vec![0u64; dfa.states.len()];
-    for _ in 0..k {
+
+    for state_id in 0..dfa.states.len() {
+        let state = &dfa.states[state_id];
+        let (_, transition_label_hash) = build_state_shape(state);
+        next_hashes[state_id] = mix_u64(mix_u64(
+            prev_hashes[state_id]
+                ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes))
+            ^ transition_label_hash
+        );
+    }
+    std::mem::swap(&mut prev_hashes, &mut next_hashes);
+
+    for _ in 1..k {
         for state_id in 0..dfa.states.len() {
             next_hashes[state_id] = mix_u64(
                 prev_hashes[state_id]
