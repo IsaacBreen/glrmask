@@ -3188,10 +3188,7 @@ impl SchemaCtx {
             let ck_prefix = format!("{}_CK", base_name.to_uppercase());
             let extra_key_expr = self.build_excluding_key_colon_expr(
                 self.json_key_colon_ref(),
-                required_list
-                    .iter()
-                    .map(|key| self.json_key_colon_literal(key))
-                    .collect(),
+                Vec::new(),
                 &format!("{ck_prefix}_KEY_COLON"),
             );
             Some(self.build_object_pair_tail(
@@ -3455,12 +3452,22 @@ impl SchemaCtx {
             .transpose()?
             .map(str::to_string);
 
-        // Exclude all literal fixed keys from the free-form branch, even if their
-        // individual schema becomes unsatisfiable. A key named in `properties` is
-        // never an "additional" property.
+        // Exclude all literal fixed keys from the pattern-based free-form branch,
+        // even if their individual schema becomes unsatisfiable. A key named in
+        // `properties` is never a pattern-driven fallback property.
         let mut fixed_literal_keys = BTreeSet::<String>::new();
         fixed_literal_keys.extend(properties.keys().cloned());
         fixed_literal_keys.extend(required_list.iter().cloned());
+
+        // Additional properties are emitted only after the fixed object tree.
+        // Required keys therefore do not need to be subtracted from the
+        // additional-properties key recognizer; only optional declared keys must
+        // still be excluded there.
+        let additional_excluded_literal_keys = properties
+            .keys()
+            .filter(|key| !required_keys.contains(*key))
+            .cloned()
+            .collect::<BTreeSet<_>>();
 
         let mut ordered: Vec<(String, GrammarExpr, bool)> = Vec::new();
 
@@ -3536,6 +3543,8 @@ impl SchemaCtx {
 
         let base_key_colon_dfa = Self::scoped_key_colon_dfa(property_names)?;
         let fixed_key_union_dfa = Self::literal_key_colon_union_dfa(&fixed_literal_keys);
+        let additional_fixed_key_union_dfa =
+            Self::literal_key_colon_union_dfa(&additional_excluded_literal_keys);
         let pattern_key_colon_dfas = pattern_properties
             .iter()
             .map(|(pattern, _)| Self::pattern_key_colon_dfa(pattern))
@@ -3609,7 +3618,7 @@ impl SchemaCtx {
         let mut additional_pair_exprs = Vec::<GrammarExpr>::new();
         if let Some(schema) = additional_properties_schema {
             let mut additional_key_dfa = base_key_colon_dfa.clone();
-            if let Some(fixed_key_union_dfa) = &fixed_key_union_dfa {
+            if let Some(fixed_key_union_dfa) = &additional_fixed_key_union_dfa {
                 additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, fixed_key_union_dfa);
             }
             for pattern_dfa in &pattern_key_colon_dfas {
