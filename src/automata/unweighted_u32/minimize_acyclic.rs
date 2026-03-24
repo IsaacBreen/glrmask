@@ -5,7 +5,7 @@
 //! a shared implicit rejecting sink. Processing in reverse-topological order
 //! guarantees that children are classified before their parents.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::dfa::DFA;
 
@@ -37,39 +37,22 @@ fn reverse_topological_order(dfa: &DFA) -> Vec<usize> {
     order
 }
 
-fn reachable_labels(dfa: &DFA, topo: &[usize]) -> Vec<i32> {
-    topo.iter()
-        .flat_map(|&state_id| dfa.states[state_id].transitions.keys().copied())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 fn state_signature(
     state_id: usize,
     dfa: &DFA,
-    labels: &[i32],
-    reachable: &HashSet<usize>,
     class_of_state: &[usize],
     dead_class: usize,
 ) -> StateSignature {
     let state = &dfa.states[state_id];
-    let transitions = labels
+    let transitions = state
+        .transitions
         .iter()
-        .map(|&label| {
-            let target_class = state
-                .transitions
-                .get(&label)
-                .and_then(|&target| {
-                    let target = target as usize;
-                    if reachable.contains(&target) {
-                        Some(class_of_state[target])
-                    } else {
-                        None
-                    }
-                })
+        .filter_map(|(&label, &target)| {
+            let target_class = class_of_state
+                .get(target as usize)
+                .copied()
                 .unwrap_or(dead_class);
-            (label, target_class)
+            (target_class != dead_class).then_some((label, target_class))
         })
         .collect();
 
@@ -81,7 +64,6 @@ fn state_signature(
 
 fn build_minimized_acyclic_dfa(
     dfa: &DFA,
-    reachable: &HashSet<usize>,
     class_of_state: &[usize],
     class_representatives: &HashMap<usize, usize>,
     dead_class: usize,
@@ -111,11 +93,10 @@ fn build_minimized_acyclic_dfa(
             .transitions
             .iter()
             .filter_map(|(&label, &target)| {
-                let target = target as usize;
-                if !reachable.contains(&target) {
-                    return None;
-                }
-                let target_class = class_of_state[target];
+                let target_class = class_of_state
+                    .get(target as usize)
+                    .copied()
+                    .unwrap_or(dead_class);
                 if target_class == dead_class {
                     None
                 } else {
@@ -144,18 +125,15 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
 
     let topo = reverse_topological_order(dfa);
 
-    let reachable: HashSet<usize> = topo.iter().copied().collect();
-    let labels = reachable_labels(dfa, &topo);
-
     const DEAD_CLASS: usize = 0;
     let dead_signature = StateSignature {
         is_accepting: false,
-        transitions: labels.iter().map(|&label| (label, DEAD_CLASS)).collect(),
+        transitions: Vec::new(),
     };
 
     let mut signature_to_class = HashMap::<StateSignature, usize>::new();
     signature_to_class.insert(dead_signature.clone(), DEAD_CLASS);
-    let mut class_of_state = vec![usize::MAX; dfa.states.len()];
+    let mut class_of_state = vec![DEAD_CLASS; dfa.states.len()];
     let mut class_representatives = HashMap::<usize, usize>::new();
     let mut next_class_id = 1usize;
 
@@ -163,8 +141,6 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
         let signature = state_signature(
             state_id,
             dfa,
-            &labels,
-            &reachable,
             &class_of_state,
             DEAD_CLASS,
         );
@@ -183,7 +159,6 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
 
     build_minimized_acyclic_dfa(
         dfa,
-        &reachable,
         &class_of_state,
         &class_representatives,
         DEAD_CLASS,
@@ -272,5 +247,22 @@ mod tests {
         assert_eq!(minimized.num_states(), 1);
         assert!(minimized.states[0].is_accepting);
         assert!(minimized.states[0].transitions.is_empty());
+    }
+
+    #[test]
+    fn test_minimize_treats_missing_and_explicit_dead_as_equivalent() {
+        let mut dfa = DFA::new();
+        let reject_with_edge = dfa.add_state();
+        let reject_without_edge = dfa.add_state();
+        let explicit_dead = dfa.add_state();
+        let accepting_leaf = dfa.add_state();
+        dfa.set_accepting(accepting_leaf, true);
+        dfa.add_transition(0, 0, reject_with_edge);
+        dfa.add_transition(0, 1, reject_without_edge);
+        dfa.add_transition(0, 2, accepting_leaf);
+        dfa.add_transition(reject_with_edge, 7, explicit_dead);
+
+        let minimized = minimize_acyclic(&dfa);
+        assert_eq!(minimized.num_states(), 2);
     }
 }

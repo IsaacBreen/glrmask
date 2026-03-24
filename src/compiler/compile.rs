@@ -16,9 +16,10 @@ use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
+use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
 use crate::compiler::stages::terminal_dwa::{
-    compute_terminal_coloring,
     build_terminal_dwa_with_possible_matches_and_coloring,
+    compute_terminal_coloring,
     compute_ever_allowed_follows,
     TerminalColoring,
 };
@@ -210,9 +211,19 @@ fn compile_prepared_with_profile(
         },
         || {
             let templates_started_at = Instant::now();
-            let characterizations = characterize_terminals(&table, &analyzed_grammar);
-            let templates = Templates::from_characterizations(&characterizations);
-            (templates, elapsed_ms(templates_started_at))
+            if compile_profile_enabled() {
+                let characterize_started_at = Instant::now();
+                let characterizations = characterize_terminals(&table, &analyzed_grammar);
+                let characterize_ms = elapsed_ms(characterize_started_at);
+                let (templates, template_profile) =
+                    Templates::from_characterizations_profiled(&characterizations);
+                emit_template_profile_summary(characterize_ms, &template_profile);
+                (templates, elapsed_ms(templates_started_at))
+            } else {
+                let characterizations = characterize_terminals(&table, &analyzed_grammar);
+                let templates = Templates::from_characterizations(&characterizations);
+                (templates, elapsed_ms(templates_started_at))
+            }
         },
     );
     profile.id_map_ms = id_map_ms;
