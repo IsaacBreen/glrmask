@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 use range_set_blaze::RangeSetBlaze;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::Vocab;
@@ -239,6 +241,94 @@ fn deduplicate_roots(
 
     // Prune now-unreachable duplicate root states.
     prune_unreachable_states(nwa);
+}
+
+fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
+    if nwa.states.len() <= 1 {
+        return;
+    }
+
+    prune_unreachable_states(nwa);
+    let topo_order = topological_order(nwa);
+    if topo_order.len() != nwa.states.len() {
+        return;
+    }
+
+    let old_states = nwa.states.len();
+    let mut remap = vec![u32::MAX; old_states];
+    let mut canonical_states: Vec<NWAStateType> = Vec::with_capacity(old_states);
+    let mut hash_buckets: HashMap<u64, Vec<u32>> = HashMap::new();
+    let mut merged = 0usize;
+
+    for old_state_id in topo_order.into_iter().rev() {
+        let old_state = &nwa.states[old_state_id];
+
+        let mut epsilons: BTreeMap<u32, Weight> = BTreeMap::new();
+        for (target, weight) in &old_state.epsilons {
+            let canonical_target = remap[*target as usize];
+            epsilons
+                .entry(canonical_target)
+                .and_modify(|existing| *existing = existing.union(weight))
+                .or_insert_with(|| weight.clone());
+        }
+
+        let mut transitions = BTreeMap::new();
+        for (&label, targets) in &old_state.transitions {
+            let mut canonical_targets: BTreeMap<u32, Weight> = BTreeMap::new();
+            for (target, weight) in targets {
+                let canonical_target = remap[*target as usize];
+                canonical_targets
+                    .entry(canonical_target)
+                    .and_modify(|existing| *existing = existing.union(weight))
+                    .or_insert_with(|| weight.clone());
+            }
+            if !canonical_targets.is_empty() {
+                transitions.insert(label, canonical_targets.into_iter().collect());
+            }
+        }
+
+        let canonical_state = NWAStateType {
+            final_weight: old_state.final_weight.clone(),
+            transitions,
+            epsilons: epsilons.into_iter().collect(),
+        };
+
+        let state_hash = structural_hash_nwa_state(&canonical_state);
+        let mut canonical_id = None;
+        if let Some(candidates) = hash_buckets.get(&state_hash) {
+            for &candidate in candidates {
+                if canonical_states[candidate as usize] == canonical_state {
+                    canonical_id = Some(candidate);
+                    merged += 1;
+                    break;
+                }
+            }
+        }
+
+        let canonical_id = canonical_id.unwrap_or_else(|| {
+            let new_id = canonical_states.len() as u32;
+            canonical_states.push(canonical_state);
+            hash_buckets.entry(state_hash).or_default().push(new_id);
+            new_id
+        });
+        remap[old_state_id] = canonical_id;
+    }
+
+    if merged == 0 {
+        return;
+    }
+
+    let mut start_states = Vec::with_capacity(nwa.start_states.len());
+    let mut seen_start_states = HashSet::new();
+    for &start_state in &nwa.start_states {
+        let canonical_start = remap[start_state as usize];
+        if seen_start_states.insert(canonical_start) {
+            start_states.push(canonical_start);
+        }
+    }
+
+    nwa.states = canonical_states;
+    nwa.start_states = start_states;
 }
 
 fn prune_unreachable_states(nwa: &mut NWA) -> bool {
@@ -741,6 +831,7 @@ impl NodesByTokenizerState {
 
 struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     tokenizer: &'tok Tokenizer,
+    possible_future_terminals: Vec<Rc<[TerminalID]>>,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut NWA,
     num_tsids: u32,
@@ -752,8 +843,8 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
     leaf_weight_cache_raw: HashMap<LeafTokenIds, Weight>,
     leaf_weight_cache_canonical: HashMap<LeafTokenIds, Weight>,
-    transition_buffer: BTreeMap<(u32, i32, u32), Weight>,
-    epsilon_buffer: BTreeMap<(u32, u32), Weight>,
+    transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
+    epsilon_buffer: FxHashMap<(u32, u32), Weight>,
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
@@ -904,7 +995,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
         let accessible_weight = self.token_set_weight_fast(&accessible);
         for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
-            for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+            let future_terminals = Rc::clone(&self.possible_future_terminals[tokenizer_state as usize]);
+            for &terminal_id in future_terminals.iter() {
                 self.add_match_from_sources(source_nodes, terminal_id, self.leaf_state, &accessible_weight);
             }
         }
@@ -949,7 +1041,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
         }
 
-        for ((from, target), weight) in std::mem::take(&mut self.epsilon_buffer) {
+        let mut epsilon_entries: Vec<_> = std::mem::take(&mut self.epsilon_buffer).into_iter().collect();
+        epsilon_entries.sort_unstable_by_key(|((from, target), _)| (*from, *target));
+        for ((from, target), weight) in epsilon_entries {
             let state = self
                 .nwa
                 .states
@@ -957,7 +1051,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 .expect("buffered epsilon source state must exist");
             state.epsilons.push((target, weight));
         }
-        for ((from, label, target), weight) in std::mem::take(&mut self.transition_buffer) {
+
+        let mut transition_entries: Vec<_> = std::mem::take(&mut self.transition_buffer).into_iter().collect();
+        transition_entries.sort_unstable_by_key(|((from, label, target), _)| (*from, *label, *target));
+        for ((from, label, target), weight) in transition_entries {
             let state = self
                 .nwa
                 .states
@@ -1015,7 +1112,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
                     if let Some(end_state) = end_state {
                         if child_node.has_token() {
-                            for terminal_id in self.tokenizer.possible_future_terminals_iter(end_state) {
+                            let future_terminals = Rc::clone(&self.possible_future_terminals[end_state as usize]);
+                            for &terminal_id in future_terminals.iter() {
                                 self.add_leaf_token_from_sources(
                                     &source_nodes,
                                     terminal_id,
@@ -1198,12 +1296,21 @@ fn build_terminal_dwa_impl(
             .collect(),
     );
     let self_loop_bytes = build_self_loop_bytes(tokenizer);
+    let possible_future_terminals = (0..tokenizer.num_states())
+        .map(|state| {
+            tokenizer
+                .possible_future_terminals_iter(state)
+                .collect::<Vec<_>>()
+                .into()
+        })
+        .collect();
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
 
     let roots_by_tokenizer_state = seed_root_nodes(&mut nwa, start_state, tokenizer, id_map);
 
     let mut builder = TerminalNwaBuilder {
         tokenizer,
+        possible_future_terminals,
         possible_matches: &mut possible_matches,
         nwa: &mut nwa,
         num_tsids: id_map.num_tsids(),
@@ -1215,8 +1322,8 @@ fn build_terminal_dwa_impl(
         pruned_weight_cache: HashMap::new(),
         leaf_weight_cache_raw: HashMap::new(),
         leaf_weight_cache_canonical: HashMap::new(),
-        transition_buffer: BTreeMap::new(),
-        epsilon_buffer: BTreeMap::new(),
+        transition_buffer: FxHashMap::default(),
+        epsilon_buffer: FxHashMap::default(),
     };
     builder.build_from_trie(&vocab_tree.root, &roots_by_tokenizer_state);
     builder.flush_transition_buffer();
@@ -1233,6 +1340,8 @@ fn build_terminal_dwa_impl(
     apply_disallowed_follow_constraints(&mut nwa, grammar);
 
     deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize);
+
+    canonicalize_acyclic_nwa(&mut nwa);
 
     let determinized = determinize(&nwa)
         .expect("terminal NWA determinization failed despite acyclic token trie construction");
