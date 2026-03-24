@@ -1,6 +1,8 @@
 use im::{HashMap as IHashMap, OrdMap};
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
+use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::Arc;
 

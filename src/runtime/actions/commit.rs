@@ -150,10 +150,6 @@ pub struct CommitTrace {
     pub exec_calls: Vec<CommitExecTrace>,
 }
 
-pub type CommitDebugMetrics = CommitMetrics;
-
-pub type CommitDebugTrace = CommitTrace;
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommitExecTrace {
     pub phase: String,
@@ -1064,36 +1060,10 @@ impl<'a> ConstraintState<'a> {
         Ok(self.commit_bytes_trace(bytes))
     }
 
-    pub fn debug_commit_bytes_metrics(&self, bytes: &[u8]) -> CommitMetrics {
-        self.commit_bytes_metrics(bytes)
-    }
-
-    pub fn debug_commit_bytes_trace(&self, bytes: &[u8]) -> CommitTrace {
-        self.commit_bytes_trace(bytes)
-    }
-
-    pub fn debug_commit_token_metrics(
-        &self,
-        token_id: u32,
-    ) -> Result<CommitMetrics, String> {
-        self.commit_token_metrics(token_id)
-    }
-
-    pub fn debug_commit_token_trace(
-        &self,
-        token_id: u32,
-    ) -> Result<CommitTrace, String> {
-        self.commit_token_trace(token_id)
-    }
-
     pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {
         for &token in tokens {
             self.commit_token(token)?;
         }
         Ok(())
-    }
-
-    pub(crate) fn process_bytes_raw(&mut self, bytes: &[u8]) {
-        let _ = self.commit_bytes(bytes);
     }
 }

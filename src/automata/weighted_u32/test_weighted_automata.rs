@@ -3,7 +3,7 @@
 //! These exercise the weighted DWA/NWA/determinize/minimize stack directly,
 //! using glrmask's internal types.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::BTreeSet;
 
 use super::determinize;
 use super::dwa::DWA;

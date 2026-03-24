@@ -41,6 +41,7 @@ pub fn factor_named_grammar(grammar: NamedGrammar) -> NamedGrammar {
     }
 }
 
+#[cfg(test)]
 pub fn factor_grammar_rules(
     rules: Vec<NamedRule>,
     terminals: &HashSet<String>,

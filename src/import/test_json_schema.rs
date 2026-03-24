@@ -13,7 +13,7 @@
 //!   - test_object_schema_rejects_quote_at_empty_prefix: requires GPT-2 vocab file
 
 use crate::import::ast::GrammarExpr;
-use crate::import::json_schema::{json_schema_to_grammar, schema_to_named_grammar};
+use crate::import::json_schema::schema_to_named_grammar;
 use crate::runtime::Constraint;
 use crate::Vocab;
 use std::path::Path;

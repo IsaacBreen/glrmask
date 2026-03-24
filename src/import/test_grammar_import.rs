@@ -17,7 +17,7 @@
 //!   Lark (1):
 //!     - test_lark_ignore_directive: NamedGrammar has no ignore_symbol_name field
 
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
+use crate::import::ast::{GrammarExpr, NamedRule};
 use crate::import::ebnf::parse_ebnf_to_named;
 use crate::import::lark::parse_lark_to_named;
 use crate::grammar::ast::lower;

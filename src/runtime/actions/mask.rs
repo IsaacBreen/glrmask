@@ -272,8 +272,6 @@ pub struct MaskMetrics {
     pub internal_token_dense_words: usize,
 }
 
-pub type MaskDebugMetrics = MaskMetrics;
-
 impl<'a> ConstraintState<'a> {
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
@@ -300,10 +298,6 @@ impl<'a> ConstraintState<'a> {
         metrics
     }
 
-    pub fn debug_mask_metrics(&self) -> MaskMetrics {
-        self.mask_metrics()
-    }
-
     fn fill_mask_impl(&self, buf: &mut [u32], mut metrics: Option<&mut MaskMetrics>) {
         buf.fill(0);
 
@@ -312,7 +306,6 @@ impl<'a> ConstraintState<'a> {
             return;
         }
 
-        let dense_words = self.constraint.internal_token_dense_words;
         let precomputed = &self.constraint.weight_token_dense_masks;
         let timed = metrics.is_some();
 

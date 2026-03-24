@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::Vocab;
@@ -11,24 +6,21 @@ use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::compile::build_regex_with_profile_label;
 use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::nwa::NWA;
-use crate::compiler::debug::{AutomataDiagnostics, CompileDiagnostics, TerminalDiagnostics};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
-use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
-use crate::compiler::parser_dwa::build_parser_dwa_from_terminal_dwa;
-use crate::compiler::possible_matches::build_possible_matches_by_state;
+use crate::compiler::grammar::model::{GrammarDef, Terminal};
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::parser_dwa::{
     ParserDwaBuildReport,
-    build_parser_dwa_from_terminal_dwa_with_report,
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates_report,
+};
+use crate::compiler::stages::terminal_dwa::{
+    build_terminal_dwa_with_possible_matches_report,
+    compute_ever_allowed_follows,
+    TerminalDwaBuildReport,
 };
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_possible_matches_report, build_terminal_dwa_with_report};
-use crate::compiler::stages::terminal_dwa::compute_ever_allowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::runtime::Constraint;
@@ -173,7 +165,10 @@ fn build_internal_token_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u
         .collect()
 }
 
-use crate::compiler::grammar::transforms::{expand_nullable_terminals, compact_unused_terminals, inline_single_use_nonterminals, prepare_grammar_for_compile, prepare_owned_grammar_for_compile};
+use crate::compiler::grammar::transforms::{
+    prepare_grammar_for_compile,
+    prepare_owned_grammar_for_compile,
+};
 
 
 pub(crate) fn compile_profile_enabled() -> bool {
@@ -1358,119 +1353,16 @@ pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
     )
 }
 
-pub(crate) fn compile_with_diagnostics(
-    grammar: &GrammarDef,
-    vocab: &Vocab,
-) -> (Constraint, CompileDiagnostics) {
-    let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
-
-    let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
-
-    #[cfg(debug_assertions)]
-    if let Err(msg) = glr_grammar.debug_check_grammar_preconditions() {
-        panic!("[glrmask] grammar precondition violations:\n{}", msg);
-    }
-
-    let table = GLRTable::build(&glr_grammar);
-    let disallowed_follows = compute_disallowed_follows(&glr_grammar);
-    let id_map = InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, normalized.ignore_terminal);
-
-    let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
-    let internal_token_entries = build_internal_token_entries(vocab, &id_map);
-    let possible_matches_by_state =
-        crate::compiler::possible_matches::build_possible_matches_from_owned_token_entries(
-            &tokenizer,
-            internal_token_entries,
-        );
-
-    let characterizations = characterize_terminals(&table, &glr_grammar);
-    let templates = Templates::from_characterizations(&characterizations);
-    let terminal_dwa = build_terminal_dwa(
-        &glr_grammar,
-        &tokenizer,
-        vocab,
-        &id_map,
-        normalized.ignore_terminal,
-    );
-
-    log_terminal_dwa_sample_paths(&normalized, &terminal_dwa, vocab, &id_map);
-
-    let parser_dwa = build_parser_dwa_from_terminal_dwa(
-        &table,
-        &glr_grammar,
-        &tokenizer,
-        &terminal_dwa,
-    );
-
-    log_parser_dwa_sample_paths(&parser_dwa, vocab, &id_map);
-
-    let vocab_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(token_id, bytes)| (*token_id, bytes.clone())).collect();
-    let token_bytes = vocab.entries.clone();
-    let mut constraint = Constraint {
-        parser_dwa: parser_dwa.clone(),
-        table: table.clone(),
-        tokenizer: tokenizer.clone(),
-        ignore_terminal: normalized.ignore_terminal,
-        possible_matches: possible_matches_by_state.clone(),
-        state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
-        internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals_vecs(),
-        original_token_to_internal: id_map.vocab_tokens.original_to_internal.clone(),
-        internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals_vecs(),
-        eos_token_id: vocab.eos_token_id,
-        token_bytes: token_bytes.clone(),
-        internal_token_bytes,
-        token_bytes_dense: Vec::new(),
-        internal_token_buf_masks: Vec::new(),
-        internal_token_dense_words: 0,
-        weight_token_dense_masks: rustc_hash::FxHashMap::default(),
-        seed_terminal_dense: rustc_hash::FxHashMap::default(),
-        seed_universe_dense: Box::new([]),
-        dwa_fast_transitions: Vec::new(),
-    };
-    constraint.build_buf_masks();
-    constraint.build_dense_token_bytes();
-    constraint.build_dense_token_masks();
-    constraint.build_fast_transitions();
-    constraint.build_seed_dense_masks();
-
-    let diagnostics = CompileDiagnostics::from_parts(
-        grammar.clone(),
-        normalized.clone(),
-        glr_grammar.clone(),
-        table.clone(),
-        AutomataDiagnostics {
-            characterizations,
-            terminal_dwa: terminal_dwa.clone(),
-            terminal_diagnostics: TerminalDiagnostics {
-                nwa_after_build: NWA::new(0, 0),
-                nwa_after_collapse: NWA::new(0, 0),
-            },
-            templates,
-            parser_nwa_before_resolve: NWA::new(0, 0),
-            parser_nwa_after_resolve: NWA::new(0, 0),
-            parser_dwa_pre_minimize: parser_dwa.clone(),
-            parser_dwa: parser_dwa.clone(),
-            id_map: id_map.clone(),
-        },
-        vocab_entries,
-        vocab.eos_token_id,
-    );
-
-    (constraint, diagnostics)
-}
-
-pub(crate) fn compile_with_debug(
-    grammar: &GrammarDef,
-    vocab: &Vocab,
-) -> (Constraint, CompileDiagnostics) {
-    compile_with_diagnostics(grammar, vocab)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compiler::grammar::model::tests::*;
-    use crate::compiler::grammar::model::{Rule, Symbol, Terminal};
+    use crate::compiler::grammar::model::{NonterminalID, Rule, Symbol, Terminal};
+    use crate::compiler::grammar::transforms::{
+        compact_unused_terminals,
+        expand_nullable_terminals,
+        inline_single_use_nonterminals,
+    };
 
     fn mask_has_token(mask: &[u32], token: u32) -> bool {
         let word = token as usize / 32;
@@ -2226,17 +2118,17 @@ mod tests {
             None,
         );
 
-        let (constraint, debug) = compile_with_debug(&gdef, &vocab);
+        let (normalized, tokenizer) = prepare_grammar_for_compile(&gdef);
+        let constraint = compile_owned(gdef, &vocab);
 
         assert_eq!(
-            constraint.tokenizer.num_terminals,
+            tokenizer.num_terminals,
             2,
             "the final tokenizer should be built only from the live compacted terminals"
         );
-        assert_eq!(debug.normalized_grammar_def.terminals.len(), 2);
+        assert_eq!(normalized.terminals.len(), 2);
         assert_eq!(
-            debug
-                .normalized_grammar_def
+            normalized
                 .terminals
                 .iter()
                 .map(|terminal| terminal.name())
@@ -2245,7 +2137,7 @@ mod tests {
             "the dead middle terminal should be absent from the normalized grammar"
         );
         assert_eq!(
-            debug.normalized_grammar_def.rules,
+            normalized.rules,
             vec![Rule {
                 lhs: 0,
                 rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
@@ -2307,14 +2199,14 @@ mod tests {
             None,
         );
 
-        let (constraint, debug) = compile_with_debug(&gdef, &vocab);
+        let (normalized, _tokenizer) = prepare_grammar_for_compile(&gdef);
+        let constraint = compile_owned(gdef, &vocab);
 
         assert_eq!(constraint.ignore_terminal, Some(1));
-        assert_eq!(debug.normalized_grammar_def.terminals.len(), 3);
-        assert_eq!(debug.normalized_grammar_def.ignore_terminal, Some(1));
+        assert_eq!(normalized.terminals.len(), 3);
+        assert_eq!(normalized.ignore_terminal, Some(1));
         assert_eq!(
-            debug
-                .normalized_grammar_def
+            normalized
                 .terminals
                 .iter()
                 .map(|terminal| terminal.name())
@@ -2323,7 +2215,7 @@ mod tests {
             "the dead terminal should be removed while the ignore terminal is preserved"
         );
         assert_eq!(
-            debug.normalized_grammar_def.rules,
+            normalized.rules,
             vec![Rule {
                 lhs: 0,
                 rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],

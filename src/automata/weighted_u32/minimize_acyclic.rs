@@ -19,7 +19,7 @@ use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::dwa::{DWA, DWAState};
-use crate::ds::weight::{Weight, WeightBuilder};
+use crate::ds::weight::Weight;
 
 type Label = i32;
 

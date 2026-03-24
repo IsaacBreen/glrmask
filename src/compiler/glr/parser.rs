@@ -6,7 +6,6 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, LeveledGSSSummary, Merge};
 use smallvec::SmallVec;
-use rustc_hash::FxHashMap;
 
 pub type TerminalsDisallowed = BTreeMap<u32, BTreeSet<u32>>;
 

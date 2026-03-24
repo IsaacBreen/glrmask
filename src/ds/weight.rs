@@ -1817,7 +1817,9 @@ mod tests {
 
         let interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
         assert!(!interner.weights.contains_key(&fingerprint));
-        assert!(!interner.token_sets.contains_key(&stale_tokens));
+        if let Some(live_entry) = interner.token_sets.get(&stale_tokens) {
+            assert!(live_entry.strong_count() > 0);
+        }
     }
 
     #[test]

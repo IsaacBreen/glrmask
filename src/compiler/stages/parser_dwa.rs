@@ -18,7 +18,6 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::profile_stats::{
     UnweightedDfaStats,
@@ -28,9 +27,14 @@ use crate::compiler::stages::profile_stats::{
     collect_weighted_dwa_stats,
     collect_weighted_nwa_stats,
 };
+use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
+use crate::compiler::stages::terminal_dwa::{
+    build_terminal_dwa,
+    build_terminal_dwa_with_report,
+    TerminalDwaBuildReport,
+};
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::{characterize_terminals, TerminalCharacterization};
-use crate::compiler::terminal_dwa::{TerminalDwaBuildReport, build_terminal_dwa, build_terminal_dwa_with_report};
 use crate::ds::weight::Weight;
 
 type Bundle = BTreeMap<TerminalID, Weight>;

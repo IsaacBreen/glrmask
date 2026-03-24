@@ -671,14 +671,13 @@ fn test_ported_trivial() {
     // IDs: "a"→0, "$"→1
     let vocab = make_vocab(&["a", "$"]);
 
-    let (c, diagnostics) = Constraint::from_ebnf_with_diagnostics(
+    let c = Constraint::from_ebnf(
         r#"s ::= A EOF
            A ::= 'a'
            EOF ::= '$'"#,
         &vocab,
     )
     .unwrap();
-    assert!(diagnostics.glr_table.num_states > 0);
 
     let mut s = c.start();
 
@@ -730,7 +729,7 @@ fn test_ported_simple() {
 fn test_ported_simple_minimized() {
     // IDs: "a"→0, "$"→1
     let vocab = make_vocab(&["a", "$"]);
-    let (c, diagnostics) = Constraint::from_ebnf_with_diagnostics(
+    let c = Constraint::from_ebnf(
         r#"s ::= x EOF
            x ::= A
            A ::= 'a'
@@ -738,7 +737,6 @@ fn test_ported_simple_minimized() {
         &vocab,
     )
     .unwrap();
-    assert!(diagnostics.glr_table.num_states > 0);
     let mut s = c.start();
 
     let mask = s.mask();
