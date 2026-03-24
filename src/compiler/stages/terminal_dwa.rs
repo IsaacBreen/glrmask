@@ -522,6 +522,7 @@ fn collapse_always_allowed(
     always_allowed_by_label: &[Vec<TerminalID>],
     terminals_count: usize,
 ) -> bool {
+    let debug_always_allowed = std::env::var_os("GLRMASK_DEBUG_ALWAYS_ALLOWED").is_some();
     if always_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states.is_empty() {
         return false;
     }
@@ -619,6 +620,16 @@ fn collapse_always_allowed(
 
     for &state_id in topo_order.iter().rev() {
         let allowed = &allowed_by_state[state_id];
+        if debug_always_allowed {
+            eprintln!(
+                "[collapse_always_allowed] state={} incoming={:?} allowed={:?} final_before={:?} transitions={:?}",
+                state_id,
+                incoming[state_id],
+                allowed,
+                final_weights[state_id],
+                nwa.states[state_id].transitions,
+            );
+        }
         if allowed.len() != 1 {
             continue;
         }
@@ -644,12 +655,31 @@ fn collapse_always_allowed(
             let mut new_targets = Vec::new();
             for (dst, weight) in targets.iter() {
                 let Some(dst_final_weight) = final_weights[*dst as usize].as_ref() else {
+                    if debug_always_allowed {
+                        eprintln!(
+                            "[collapse_always_allowed] state={} label={} dst={} skip=no_final weight={:?}",
+                            state_id,
+                            label,
+                            dst,
+                            weight,
+                        );
+                    }
                     new_targets.push((*dst, weight.clone()));
                     continue;
                 };
 
                 let reach = domain_state.intersection(weight);
                 if !reach.is_empty() && reach.is_subset(dst_final_weight) {
+                    if debug_always_allowed {
+                        eprintln!(
+                            "[collapse_always_allowed] state={} label={} dst={} collapse reach={:?} dst_final={:?}",
+                            state_id,
+                            label,
+                            dst,
+                            reach,
+                            dst_final_weight,
+                        );
+                    }
                     let contrib = dst_final_weight.intersection(weight);
                     if !contrib.is_empty() {
                         state_final_weight = Some(match state_final_weight.take() {
@@ -661,6 +691,16 @@ fn collapse_always_allowed(
                     continue;
                 }
 
+                if debug_always_allowed {
+                    eprintln!(
+                        "[collapse_always_allowed] state={} label={} dst={} keep reach={:?} dst_final={:?}",
+                        state_id,
+                        label,
+                        dst,
+                        reach,
+                        dst_final_weight,
+                    );
+                }
                 new_targets.push((*dst, weight.clone()));
             }
 
@@ -1297,6 +1337,321 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 }
 
+struct TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
+    tokenizer: &'tok Tokenizer,
+    possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
+    nwa: &'nwa mut NWA,
+    num_tsids: u32,
+    leaf_state: u32,
+    ignore_terminal: Option<TerminalID>,
+    self_loop_bytes: Vec<U8Set>,
+    reachable_weight_cache: HashMap<usize, Weight>,
+    pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
+    node_state_cache: HashMap<(usize, u32, Option<TerminalID>), u32>,
+    segment_state_cache: HashMap<(usize, usize, usize, u32, Option<TerminalID>), u32>,
+    profile_enabled: bool,
+    profile_node_contexts: usize,
+    profile_segment_contexts: usize,
+    profile_tokenizer_execs: usize,
+    profile_exec_ms: std::time::Duration,
+}
+
+impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
+    fn token_set_weight_fast(&self, internal_token_ids: &RangeSetBlaze<usize>) -> Weight {
+        if self.num_tsids == 0 || internal_token_ids.is_empty() {
+            return Weight::empty();
+        }
+        let tokens: RangeSetBlaze<u32> = internal_token_ids
+            .ranges()
+            .map(|r| (*r.start() as u32)..=(*r.end() as u32))
+            .collect();
+        Weight::from_uniform(0..=self.num_tsids - 1, tokens)
+    }
+
+    fn cached_reachable_weight(&mut self, token_ids: &RangeSetBlaze<usize>) -> Weight {
+        let cache_key = token_ids as *const RangeSetBlaze<usize> as usize;
+        if let Some(weight) = self.reachable_weight_cache.get(&cache_key) {
+            return weight.clone();
+        }
+
+        let weight = self.token_set_weight_fast(token_ids);
+        self.reachable_weight_cache.insert(cache_key, weight.clone());
+        weight
+    }
+
+    fn can_skip_self_loop_subtree(
+        &self,
+        node: &VocabPrefixTreeNode,
+        tokenizer_state: TokenizerState,
+    ) -> bool {
+        U8Set::from_words(*node.subtree_bytes())
+            .is_subset(&self.self_loop_bytes[tokenizer_state as usize])
+    }
+
+    fn add_epsilon(&mut self, source: u32, target: u32, weight: Weight) {
+        if weight.is_empty() {
+            return;
+        }
+
+        let state = self
+            .nwa
+            .states
+            .get_mut(source as usize)
+            .expect("shared-context epsilon source state must exist");
+        if let Some((_, existing)) = state
+            .epsilons
+            .iter_mut()
+            .find(|(existing_target, _)| *existing_target == target)
+        {
+            *existing = existing.union(&weight);
+        } else {
+            state.epsilons.push((target, weight));
+        }
+    }
+
+    fn add_terminal_transition(
+        &mut self,
+        source: u32,
+        label: TerminalID,
+        target: u32,
+        weight: Weight,
+    ) {
+        if weight.is_empty() {
+            return;
+        }
+
+        if self.ignore_terminal == Some(label) {
+            self.add_epsilon(source, target, weight);
+            return;
+        }
+
+        let state = self
+            .nwa
+            .states
+            .get_mut(source as usize)
+            .expect("shared-context transition source state must exist");
+        let targets = state.transitions.entry(label as i32).or_default();
+        if let Some((_, existing)) = targets
+            .iter_mut()
+            .find(|(existing_target, _)| *existing_target == target)
+        {
+            *existing = existing.union(&weight);
+        } else {
+            targets.push((target, weight));
+        }
+    }
+
+    fn node_state(
+        &mut self,
+        node: &VocabPrefixTreeNode,
+        tokenizer_state: TokenizerState,
+        incoming_label: Option<TerminalID>,
+    ) -> u32 {
+        let key = (
+            node as *const VocabPrefixTreeNode as usize,
+            tokenizer_state,
+            incoming_label,
+        );
+        if let Some(&state) = self.node_state_cache.get(&key) {
+            return state;
+        }
+
+        let state = self.nwa.add_state();
+        self.node_state_cache.insert(key, state);
+        self.profile_node_contexts += 1;
+        self.build_node_state(state, node, tokenizer_state, incoming_label);
+        state
+    }
+
+    fn build_node_state(
+        &mut self,
+        state: u32,
+        node: &VocabPrefixTreeNode,
+        tokenizer_state: TokenizerState,
+        incoming_label: Option<TerminalID>,
+    ) {
+        if self.can_skip_self_loop_subtree(node, tokenizer_state) {
+            let mut accessible = node.reachable_token_ids().clone();
+            if node.has_token() {
+                accessible.remove(node.token_id() as usize);
+            }
+            if accessible.is_empty() {
+                return;
+            }
+
+            let accessible_weight = self.cached_reachable_weight(&accessible);
+            for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+                self.add_terminal_transition(
+                    state,
+                    terminal_id,
+                    self.leaf_state,
+                    accessible_weight.clone(),
+                );
+            }
+            return;
+        }
+
+        for (_segment_bytes, child) in node.iter_children() {
+            self.emit_segment_from_state(
+                state,
+                child,
+                node.prefix_length(),
+                0,
+                tokenizer_state,
+                incoming_label,
+            );
+        }
+    }
+
+    fn emit_segment_from_state(
+        &mut self,
+        state: u32,
+        child: &VocabPrefixTreeNode,
+        parent_prefix_length: usize,
+        pos: usize,
+        tokenizer_state: TokenizerState,
+        incoming_label: Option<TerminalID>,
+    ) {
+        let segment_bytes = &child.prefix()[parent_prefix_length..];
+        let segment_len = segment_bytes.len();
+        let exec_started = std::time::Instant::now();
+        let exec = self
+            .tokenizer
+            .execute_from_state(&segment_bytes[pos..], tokenizer_state);
+        self.profile_exec_ms += exec_started.elapsed();
+        self.profile_tokenizer_execs += 1;
+        let exec_end_state = exec.end_state;
+        let internal_child_token_id = child.token_id() as u32;
+        let mut possible_matches_at_end = None;
+
+        if let Some(end_state) = exec_end_state {
+            let child_state = self.node_state(child, end_state, incoming_label);
+            self.add_epsilon(state, child_state, Weight::all());
+
+            if child.has_token() {
+                let leaf_weight = token_weight_all_tsids(self.num_tsids, internal_child_token_id);
+                for terminal_id in self.tokenizer.possible_future_terminals_iter(end_state) {
+                    self.add_terminal_transition(
+                        state,
+                        terminal_id,
+                        self.leaf_state,
+                        leaf_weight.clone(),
+                    );
+                }
+            }
+        }
+
+        for matched in exec.matches {
+            let next_pos = pos + matched.width;
+
+            if next_pos == segment_len && child.has_token() {
+                let leaf_weight = token_weight_all_tsids(self.num_tsids, internal_child_token_id);
+                self.add_terminal_transition(state, matched.id, self.leaf_state, leaf_weight);
+            }
+
+            let continuation_weight = if next_pos == segment_len && child.has_token() {
+                let cache_key = (
+                    child as *const VocabPrefixTreeNode as usize,
+                    exec_end_state.unwrap_or(u32::MAX),
+                    matched.id,
+                );
+                if let Some(weight) = self.pruned_weight_cache.get(&cache_key) {
+                    weight.clone()
+                } else {
+                    let mut remaining = child.reachable_token_ids().clone();
+                    remaining.remove(internal_child_token_id as usize);
+                    if let Some(end_state) = exec_end_state {
+                        let matches_at_end = possible_matches_at_end.get_or_insert_with(|| {
+                            self.possible_matches
+                                .possible_matches_for_node(child, end_state)
+                        });
+                        if let Some(pm) = matches_at_end.get(&matched.id) {
+                            subtract_possible_matches(&mut remaining, pm);
+                        }
+                    }
+                    if remaining.is_empty() {
+                        continue;
+                    }
+                    let weight = self.token_set_weight_fast(&remaining);
+                    self.pruned_weight_cache.insert(cache_key, weight.clone());
+                    weight
+                }
+            } else {
+                self.cached_reachable_weight(child.reachable_token_ids())
+            };
+
+            if continuation_weight.is_empty() {
+                continue;
+            }
+
+            let destination = if next_pos == segment_len {
+                self.node_state(child, self.tokenizer.initial_state_id(), Some(matched.id))
+            } else {
+                self.segment_state(
+                    child,
+                    parent_prefix_length,
+                    next_pos,
+                    self.tokenizer.initial_state_id(),
+                    Some(matched.id),
+                )
+            };
+            self.add_terminal_transition(state, matched.id, destination, continuation_weight);
+        }
+    }
+
+    fn segment_state(
+        &mut self,
+        child: &VocabPrefixTreeNode,
+        parent_prefix_length: usize,
+        pos: usize,
+        tokenizer_state: TokenizerState,
+        incoming_label: Option<TerminalID>,
+    ) -> u32 {
+        let key = (
+            child as *const VocabPrefixTreeNode as usize,
+            parent_prefix_length,
+            pos,
+            tokenizer_state,
+            incoming_label,
+        );
+        if let Some(&state) = self.segment_state_cache.get(&key) {
+            return state;
+        }
+
+        let state = self.nwa.add_state();
+        self.segment_state_cache.insert(key, state);
+        self.profile_segment_contexts += 1;
+        self.build_segment_state(
+            state,
+            child,
+            parent_prefix_length,
+            pos,
+            tokenizer_state,
+            incoming_label,
+        );
+        state
+    }
+
+    fn build_segment_state(
+        &mut self,
+        state: u32,
+        child: &VocabPrefixTreeNode,
+        parent_prefix_length: usize,
+        pos: usize,
+        tokenizer_state: TokenizerState,
+        incoming_label: Option<TerminalID>,
+    ) {
+        self.emit_segment_from_state(
+            state,
+            child,
+            parent_prefix_length,
+            pos,
+            tokenizer_state,
+            incoming_label,
+        );
+    }
+}
+
 fn subtract_possible_matches(
     continuation_tokens: &mut RangeSetBlaze<usize>,
     possible_matches: &RangeSetBlaze<u32>,
@@ -1318,6 +1673,106 @@ fn continuation_state(
     let state = nwa.add_state();
     pending.push_one(tokenizer_state, state);
     state
+}
+
+fn terminal_direct_enabled() -> bool {
+    std::env::var_os("GLRMASK_DIRECT_TERMINAL_DWA").is_some()
+}
+
+fn debug_final_terminal_dwa_enabled() -> bool {
+    std::env::var_os("GLRMASK_DEBUG_FINAL_TERMINAL_DWA").is_some()
+}
+
+fn debug_weight_original_token_count(weight: &Weight, id_map: &InternalIdMap) -> usize {
+    let mut count = 0usize;
+    for internal_token_id in weight.token_union().iter() {
+        if let Some(original_ids) = id_map.vocab_tokens.original_ids_for_internal(internal_token_id) {
+            count += original_ids.len() as usize;
+        } else {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn debug_tracked_token_ids() -> Vec<u32> {
+    std::env::var("GLRMASK_DEBUG_TOKEN_IDS")
+        .ok()
+        .into_iter()
+        .flat_map(|raw| raw.split(',').map(str::trim).map(str::to_owned).collect::<Vec<_>>())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn debug_weight_tracked_tokens(
+    weight: &Weight,
+    id_map: &InternalIdMap,
+    tracked_ids: &[u32],
+) -> Vec<u32> {
+    if tracked_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let mut present = Vec::new();
+    for &tracked_id in tracked_ids {
+        let mut found = false;
+        for internal_token_id in weight.token_union().iter() {
+            if let Some(original_ids) = id_map.vocab_tokens.original_ids_for_internal(internal_token_id) {
+                if original_ids.contains(tracked_id) {
+                    found = true;
+                    break;
+                }
+            } else if internal_token_id == tracked_id {
+                found = true;
+                break;
+            }
+        }
+        if found {
+            present.push(tracked_id);
+        }
+    }
+    present
+}
+
+fn debug_print_final_terminal_dwa(
+    _grammar: &AnalyzedGrammar,
+    dwa: &DWA,
+    id_map: &InternalIdMap,
+) {
+    let tracked_ids = debug_tracked_token_ids();
+    eprintln!(
+        "[glrmask/debug_terminal_dwa] states={} transitions={} start={}",
+        dwa.states.len(),
+        dwa.num_transitions(),
+        dwa.start_state,
+    );
+    for (state_id, state) in dwa.states.iter().enumerate() {
+        let final_count = state
+            .final_weight
+            .as_ref()
+            .map(|weight| debug_weight_original_token_count(weight, id_map));
+        let final_tracked = state
+            .final_weight
+            .as_ref()
+            .map(|weight| debug_weight_tracked_tokens(weight, id_map, &tracked_ids))
+            .unwrap_or_default();
+        eprintln!(
+            "[glrmask/debug_terminal_dwa] state={} final_tokens={:?} tracked={:?}",
+            state_id,
+            final_count,
+            final_tracked,
+        );
+        for (&label, (target, weight)) in &state.transitions {
+            let tracked = debug_weight_tracked_tokens(weight, id_map, &tracked_ids);
+            eprintln!(
+                "[glrmask/debug_terminal_dwa]   on {} -> {} tokens={} tracked={:?}",
+                label,
+                target,
+                debug_weight_original_token_count(weight, id_map),
+                tracked,
+            );
+        }
+    }
 }
 
 fn terminal_profile_enabled() -> bool {
@@ -1433,6 +1888,92 @@ fn build_terminal_dwa_impl(
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
     report.build_vocab_trie_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "build_vocab_trie", phase_started_at);
+
+    if terminal_direct_enabled() {
+        let phase_started_at = std::time::Instant::now();
+        let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let leaf_state = nwa.add_state();
+        nwa.set_final_weight(leaf_state, Weight::all());
+        let start_state = nwa.add_state();
+        nwa.start_states.push(start_state);
+
+        let mut builder = TerminalSharedNwaBuilder {
+            tokenizer,
+            possible_matches: &mut possible_matches,
+            nwa: &mut nwa,
+            num_tsids: id_map.num_tsids(),
+            leaf_state,
+            ignore_terminal,
+            self_loop_bytes,
+            reachable_weight_cache: HashMap::new(),
+            pruned_weight_cache: HashMap::new(),
+            node_state_cache: HashMap::new(),
+            segment_state_cache: HashMap::new(),
+            profile_enabled,
+            profile_node_contexts: 0,
+            profile_segment_contexts: 0,
+            profile_tokenizer_execs: 0,
+            profile_exec_ms: std::time::Duration::ZERO,
+        };
+
+        for internal_tsid in 0..id_map.num_tsids() {
+            let representative_state = id_map
+                .tokenizer_states
+                .representative_original_id_for_internal(internal_tsid)
+                .expect("internal tokenizer state class must have a representative original state");
+            let root_state = builder.node_state(&vocab_tree.root, representative_state, None);
+            builder.add_epsilon(
+                start_state,
+                root_state,
+                all_token_weight(internal_tsid, id_map.max_internal_token_id()),
+            );
+        }
+
+        let direct_profile = (
+            builder.profile_node_contexts,
+            builder.profile_segment_contexts,
+            builder.profile_tokenizer_execs,
+            builder.profile_exec_ms,
+        );
+        drop(builder);
+
+        let possible_matches_started_at = std::time::Instant::now();
+        let possible_matches_by_state = collect_possible_matches_by_state(
+            tokenizer,
+            &vocab_tree.root,
+            &mut possible_matches,
+        );
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][terminal_dwa] collect_possible_matches_ms={:.3}",
+                possible_matches_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        report.build_nwa_from_trie_time = phase_started_at.elapsed();
+        if profile_enabled {
+            let (node_contexts, segment_contexts, tokenizer_execs, exec_ms) = direct_profile;
+            eprintln!(
+                "[glrmask/profile][terminal_dwa] build_direct_context_nwa_ms={:.3} node_contexts={} segment_contexts={} tokenizer_execs={} exec_ms={:.3}",
+                phase_started_at.elapsed().as_secs_f64() * 1000.0,
+                node_contexts,
+                segment_contexts,
+                tokenizer_execs,
+                exec_ms.as_secs_f64() * 1000.0,
+            );
+        }
+
+        return finalize_terminal_nwa(
+            grammar,
+            vocab,
+            id_map,
+            profile_enabled,
+            total_started_at,
+            report,
+            nwa,
+            None,
+            possible_matches_by_state,
+        );
+    }
 
     let phase_started_at = std::time::Instant::now();
     let mut assoc_by_state = AssocByState::new(tokenizer.num_states() as usize);
@@ -1554,6 +2095,30 @@ fn build_terminal_dwa_impl(
         );
     }
 
+    finalize_terminal_nwa(
+        grammar,
+        vocab,
+        id_map,
+        profile_enabled,
+        total_started_at,
+        report,
+        nwa,
+        Some(id_map.num_tsids() as usize),
+        possible_matches_by_state,
+    )
+}
+
+fn finalize_terminal_nwa(
+    grammar: &AnalyzedGrammar,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    profile_enabled: bool,
+    total_started_at: std::time::Instant,
+    mut report: TerminalDwaBuildReport,
+    mut nwa: NWA,
+    deduplicate_root_count: Option<usize>,
+    possible_matches_by_state: PossibleMatchesByState,
+) -> (DWA, PossibleMatchesByState, TerminalDwaBuildReport) {
     let phase_started_at = std::time::Instant::now();
     let always_allowed_by_label = compute_always_allowed_follows(grammar);
     let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
@@ -1576,9 +2141,12 @@ fn build_terminal_dwa_impl(
     report.subtract_disallowed_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "subtract_disallowed", phase_started_at);
 
-    let phase_started_at = std::time::Instant::now();
-    deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize, profile_enabled);
-    log_terminal_profile(profile_enabled, "deduplicate_roots", phase_started_at);
+    if let Some(root_count) = deduplicate_root_count {
+        let phase_started_at = std::time::Instant::now();
+        let start_state = nwa.start_states.first().copied().unwrap_or(0);
+        deduplicate_roots(&mut nwa, start_state, root_count, profile_enabled);
+        log_terminal_profile(profile_enabled, "deduplicate_roots", phase_started_at);
+    }
 
     let phase_started_at = std::time::Instant::now();
     canonicalize_acyclic_nwa(&mut nwa, profile_enabled);
@@ -1600,6 +2168,10 @@ fn build_terminal_dwa_impl(
     log_terminal_profile(profile_enabled, "minimize", phase_started_at);
     report.total_time = total_started_at.elapsed();
 
+    if debug_final_terminal_dwa_enabled() {
+        debug_print_final_terminal_dwa(grammar, &dwa, id_map);
+    }
+
     if profile_enabled {
         eprintln!(
             "[glrmask/profile][terminal_dwa] total_ms={:.3} vocab_entries={} internal_tsids={} {} {}",
@@ -1617,6 +2189,7 @@ fn build_terminal_dwa_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::compile::compile_with_debug;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
     use crate::compiler::grammar::model::tests::simple_ab_grammar;
@@ -1633,6 +2206,41 @@ mod tests {
             }
         }
         original_tokens
+    }
+
+    fn dump_terminal_dwa(terminal_dwa: &DWA, id_map: &InternalIdMap) {
+        for (state_id, state) in terminal_dwa.states.iter().enumerate() {
+            let final_tokens = state
+                .final_weight
+                .as_ref()
+                .map(|weight| expand_original_tokens(weight, id_map));
+            eprintln!("state {state_id} final={final_tokens:?}");
+            for (&label, (target, weight)) in &state.transitions {
+                let tokens = expand_original_tokens(weight, id_map);
+                eprintln!("  on {label} -> {target} tokens={tokens:?}");
+            }
+        }
+    }
+
+    fn dump_terminal_nwa(nwa: &NWA, id_map: &InternalIdMap) {
+        eprintln!("start_states={:?}", nwa.start_states);
+        for (state_id, state) in nwa.states.iter().enumerate() {
+            let final_tokens = state
+                .final_weight
+                .as_ref()
+                .map(|weight| expand_original_tokens(weight, id_map));
+            eprintln!("nwa state {state_id} final={final_tokens:?}");
+            for (target, weight) in &state.epsilons {
+                let tokens = expand_original_tokens(weight, id_map);
+                eprintln!("  eps -> {target} tokens={tokens:?}");
+            }
+            for (&label, targets) in &state.transitions {
+                for (target, weight) in targets {
+                    let tokens = expand_original_tokens(weight, id_map);
+                    eprintln!("  on {label} -> {target} tokens={tokens:?}");
+                }
+            }
+        }
     }
 
     fn build_literal_terminal_dwa(
@@ -1653,8 +2261,6 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let glr_grammar = AnalyzedGrammar::from_grammar_def(&grammar);
-        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
         let vocab = Vocab::new(
             vocab_entries
                 .into_iter()
@@ -1662,8 +2268,37 @@ mod tests {
                 .collect(),
             None,
         );
-        let id_map = InternalIdMap::build(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
-        (build_terminal_dwa(&glr_grammar, &tokenizer, &vocab, &id_map, None), id_map)
+        let (_constraint, debug) = compile_with_debug(&grammar, &vocab);
+        (debug.terminal_dwa, debug.id_map)
+    }
+
+    fn build_literal_terminal_debug(
+        rules: Vec<Rule>,
+        literals: &[&[u8]],
+        vocab_entries: Vec<(u32, &[u8])>,
+    ) -> crate::CompileDebug {
+        let grammar = GrammarDef {
+            rules,
+            start: 0,
+            terminals: literals
+                .iter()
+                .enumerate()
+                .map(|(id, bytes)| Terminal::Literal {
+                    id: id as u32,
+                    bytes: bytes.to_vec(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vocab_entries
+                .into_iter()
+                .map(|(id, bytes)| (id, bytes.to_vec()))
+                .collect(),
+            None,
+        );
+        let (_constraint, debug) = compile_with_debug(&grammar, &vocab);
+        debug
     }
 
     #[test]
@@ -1828,6 +2463,22 @@ mod tests {
             &[b"a", b"b", b"c"],
             vec![(0, b"a"), (1, b"ab"), (2, b"abc")],
         );
+
+        if std::env::var_os("GLRMASK_DEBUG_TERMINAL_TEST").is_some() {
+            dump_terminal_dwa(&terminal_dwa, &id_map);
+            let debug = build_literal_terminal_debug(
+                vec![Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2)],
+                }],
+                &[b"a", b"b", b"c"],
+                vec![(0, b"a"), (1, b"ab"), (2, b"abc")],
+            );
+            eprintln!("NWA after build");
+            dump_terminal_nwa(&debug.terminal_debug.nwa_after_build, &debug.id_map);
+            eprintln!("NWA after collapse");
+            dump_terminal_nwa(&debug.terminal_debug.nwa_after_collapse, &debug.id_map);
+        }
 
         let first_weight = terminal_dwa.eval_word(&[0]);
         let original_tokens = expand_original_tokens(&first_weight, &id_map);
