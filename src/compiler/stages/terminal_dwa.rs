@@ -1276,6 +1276,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn flush_transition_buffer(&mut self) {
+        let mut leaf_transition_buckets: Vec<FxHashMap<i32, Weight>> =
+            (0..self.nwa.states.len()).map(|_| FxHashMap::default()).collect();
+
         for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
             .into_iter()
             .enumerate()
@@ -1285,8 +1288,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     continue;
                 }
                 let (weight, _) = self.cached_leaf_weight(token_ids);
-                self.transition_buffer
-                    .entry((from as u32, label_idx as i32, self.leaf_state))
+                leaf_transition_buckets[from]
+                    .entry(label_idx as i32)
                     .and_modify(|existing| *existing = existing.union(&weight))
                     .or_insert(weight);
             }
@@ -1299,14 +1302,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 continue;
             }
             let (weight, _) = self.cached_leaf_weight(token_ids);
-            let terminals: SmallVec<[TerminalID; 4]> = self
-                .future_terminals_for_color(tokenizer_state, color)
-                .iter()
-                .copied()
-                .collect();
-            for terminal_id in terminals {
-                self.transition_buffer
-                    .entry((from, terminal_id as i32, self.leaf_state))
+            for &terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
+                leaf_transition_buckets[from as usize]
+                    .entry(terminal_id as i32)
                     .and_modify(|existing| *existing = existing.union(&weight))
                     .or_insert_with(|| weight.clone());
             }
@@ -1318,14 +1316,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             if weight.is_empty() {
                 continue;
             }
-            let terminals: SmallVec<[TerminalID; 4]> = self
-                .future_terminals_for_color(tokenizer_state, color)
-                .iter()
-                .copied()
-                .collect();
-            for terminal_id in terminals {
-                self.transition_buffer
-                    .entry((from, terminal_id as i32, self.leaf_state))
+            for &terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
+                leaf_transition_buckets[from as usize]
+                    .entry(terminal_id as i32)
                     .and_modify(|existing| *existing = existing.union(&weight))
                     .or_insert_with(|| weight.clone());
             }
@@ -1351,6 +1344,24 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 .get_mut(from as usize)
                 .expect("buffered transition source state must exist");
             state.transitions.entry(label).or_default().push((target, weight));
+        }
+
+        for (from, bucket) in leaf_transition_buckets.into_iter().enumerate() {
+            if bucket.is_empty() {
+                continue;
+            }
+
+            let mut entries: Vec<(i32, Weight)> = bucket.into_iter().collect();
+            entries.sort_unstable_by_key(|(label, _)| *label);
+
+            let state = self
+                .nwa
+                .states
+                .get_mut(from)
+                .expect("buffered leaf transition source state must exist");
+            for (label, weight) in entries {
+                state.transitions.entry(label).or_default().push((self.leaf_state, weight));
+            }
         }
     }
 
