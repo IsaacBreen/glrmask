@@ -4,12 +4,12 @@
 //! States that are equivalent can be merged, reducing the workload for subsequent
 //! vocab equivalence analysis.
 //!
-//! The algorithm uses a two-stage pipeline:
-//! 1. max-length bounded path hashing to collapse obviously equivalent states.
-//! 2. Full token-based analysis on the reduced representative set.
+//! The algorithm always runs:
+//! 1. max-length bounded path hashing to measure an approximate prepass partition.
+//! 2. Full token-based analysis on the original state set.
 //!
-//! This avoids scanning the full vocabulary for every state and collapses long
-//! bounded-repeat chains efficiently.
+//! The max-length pass is retained for profiling visibility and future optimization
+//! work, but it does not constrain the final partition returned by this module.
 
 use std::collections::BTreeSet;
 use rayon::prelude::*;
@@ -51,9 +51,9 @@ fn count_classes(mapping: &[usize]) -> usize {
 
 /// Find state equivalence classes for a tokenizer.
 ///
-/// Uses a pre-filter + refinement approach:
-/// 1. k-step inductive hashing to reduce the number of states.
-/// 2. Full token-based analysis only on the reduced set.
+/// Uses a prepass + refinement approach:
+/// 1. k-step inductive hashing to measure a coarse partition.
+/// 2. Full token-based analysis on the full state set.
 ///
 /// # Arguments
 /// * `regex` - The tokenizer DFA
@@ -80,8 +80,6 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
 
     let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
 
-    use std::collections::HashMap;
-
     let mut rep_set: BTreeSet<usize> = BTreeSet::new();
     for &rep in &pre_mapping {
         rep_set.insert(rep);
@@ -89,47 +87,12 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     let reduced_states: Vec<usize> = rep_set.into_iter().collect();
     let prepass_classes = reduced_states.len();
 
-    if reduced_states.len() == states.len() {
-        let refinement_started_at = std::time::Instant::now();
-        let mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, states);
-        let refinement_time = refinement_started_at.elapsed();
-
-        if profile_equivalence {
-            eprintln!(
-                "[glrmask/profile][state_equiv] max_length_ms={:.3} states={}→{} ({:.2}x)",
-                prepass_time.as_secs_f64() * 1000.0,
-                states.len(),
-                prepass_classes,
-                states.len() as f64 / prepass_classes.max(1) as f64,
-            );
-            eprintln!(
-                "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x)",
-                refinement_time.as_secs_f64() * 1000.0,
-                states.len(),
-                count_classes(&mapping),
-                states.len() as f64 / count_classes(&mapping).max(1) as f64,
-            );
-        }
-
-        return mapping;
-    }
-
     let refinement_started_at = std::time::Instant::now();
-    let reduced_mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, &reduced_states);
+    let mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, states);
     let refinement_time = refinement_started_at.elapsed();
-    let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
-    for (i, &rep_state) in reduced_states.iter().enumerate() {
-        rep_to_final.insert(rep_state, reduced_mapping[i]);
-    }
-
-    let mut mapping = vec![0usize; states.len()];
-    for (i, &pre_rep) in pre_mapping.iter().enumerate() {
-        mapping[i] = rep_to_final[&pre_rep];
-    }
 
     if profile_equivalence {
         let final_classes = count_classes(&mapping);
-        let refinement_classes = count_classes(&reduced_mapping);
         eprintln!(
             "[glrmask/profile][state_equiv] max_length_ms={:.3} states={}→{} ({:.2}x)",
             prepass_time.as_secs_f64() * 1000.0,
@@ -138,14 +101,12 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
             states.len() as f64 / prepass_classes.max(1) as f64,
         );
         eprintln!(
-            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x) input={}→{} ({:.2}x)",
+            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x) prepass_classes={}",
             refinement_time.as_secs_f64() * 1000.0,
             states.len(),
             final_classes,
             states.len() as f64 / final_classes.max(1) as f64,
-            reduced_states.len(),
-            refinement_classes,
-            reduced_states.len() as f64 / refinement_classes.max(1) as f64,
+            prepass_classes,
         );
     }
 
@@ -612,4 +573,42 @@ pub fn mapping_to_equivalence_classes(states: &[usize], mapping: &[usize]) -> St
     }
     
     rep_to_class.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        find_state_equivalence_classes,
+        find_state_equivalence_classes_token_based,
+    };
+    use crate::automata::lexer::ast::{bytes, choice, repeat, seq};
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+    use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
+
+    #[test]
+    fn full_refinement_matches_direct_token_analysis() {
+        let exprs = vec![
+            seq(vec![bytes(b"ab"), repeat(choice(vec![bytes(b"x"), bytes(b"y")]), 0, Some(3))]),
+            seq(vec![bytes(b"ac"), repeat(bytes(b"z"), 0, Some(2))]),
+        ];
+        let tokenizer = build_tokenizer_from_exprs(&exprs);
+        let sep1 = Sep1Tokenizer::new(&tokenizer);
+        let tokens: Vec<Vec<u8>> = vec![
+            b"ab".to_vec(),
+            b"abx".to_vec(),
+            b"abyy".to_vec(),
+            b"ac".to_vec(),
+            b"aczz".to_vec(),
+            b"zzz".to_vec(),
+        ];
+        let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+
+        let direct = find_state_equivalence_classes_token_based(&sep1, &tokens, &states);
+        let actual = find_state_equivalence_classes(&sep1, &tokens, &states);
+
+        assert_eq!(
+            actual, direct,
+            "full refinement should be determined solely by direct token-based analysis"
+        );
+    }
 }
