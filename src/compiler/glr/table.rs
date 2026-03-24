@@ -389,9 +389,7 @@ fn build_slr1_table(
     finish_table(grammar, pending, goto)
 }
 
-// ---------------------------------------------------------------------------
-// LR(1) item set construction
-// ---------------------------------------------------------------------------
+// LR(1) item set construction.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct LR1Item {
@@ -535,9 +533,7 @@ fn build_lr1_table(
     finish_table(grammar, pending, goto)
 }
 
-// ---------------------------------------------------------------------------
-// IELR-style merge
-// ---------------------------------------------------------------------------
+// IELR-style merge.
 
 fn lr1_core_key(items: &BTreeSet<LR1Item>) -> Vec<Item> {
     let mut core = BTreeSet::new();

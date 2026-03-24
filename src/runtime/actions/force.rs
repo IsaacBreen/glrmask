@@ -190,9 +190,7 @@ impl<'a> ConstraintState<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// Helpers.
 
 /// Check if a token ID is set in the bitmask.
 fn is_token_set(mask: &[u32], token_id: u32) -> bool {
@@ -231,9 +229,7 @@ fn for_each_set_bit(mask: &[u32], mut f: impl FnMut(u32)) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// Tests.
 
 #[cfg(test)]
 mod tests {
@@ -316,9 +312,7 @@ mod tests {
         assert!(forced.is_empty(), "ambiguous first byte, nothing forced");
     }
 
-    // ---------------------------------------------------------------------
-    // Additional force() regression tests
-    // ---------------------------------------------------------------------
+    // Additional force() regressions.
 
     #[test]
     fn test_force_greedy_picks_longest() {
@@ -538,9 +532,7 @@ mod tests {
         assert!(is_token_set(&mask, 3), "EOS must be visible in the mask after completing 'ab' byte by byte");
     }
 
-    // ---------------------------------------------------------------------
-    // compute_forced_byte_prefix regression tests
-    // ---------------------------------------------------------------------
+    // compute_forced_byte_prefix regressions.
 
     #[test]
     fn test_cfbp_deterministic_string() {
@@ -838,9 +830,7 @@ mod tests {
         assert_eq!(prefix, b"hello", "only the shared long prefix should be forced");
     }
 
-    // ---------------------------------------------------------------------
-    // tokenize_forced_with_stop regression tests
-    // ---------------------------------------------------------------------
+    // tokenize_forced_with_stop regressions.
 
     #[test]
     fn test_twfs_single_byte_tokens() {

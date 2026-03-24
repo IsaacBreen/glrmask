@@ -35,9 +35,7 @@ fn num_digits(n: i64) -> usize {
     n.abs().to_string().len()
 }
 
-// ---------------------------------------------------------------------------
-// Integer range
-// ---------------------------------------------------------------------------
+// Integer range.
 
 pub fn rx_int_range(left: Option<i64>, right: Option<i64>) -> Result<String> {
     match (left, right) {
@@ -138,9 +136,7 @@ pub fn rx_int_range(left: Option<i64>, right: Option<i64>) -> Result<String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Float range helpers (lexicographic fractional part comparisons)
-// ---------------------------------------------------------------------------
+// Float range helpers.
 
 fn lexi_x_to_9(x: &str, incl: bool) -> Result<String> {
     if incl {
@@ -440,9 +436,7 @@ fn collect_nonnegative_float_parts(
     Ok(parts)
 }
 
-// ---------------------------------------------------------------------------
-// Float range
-// ---------------------------------------------------------------------------
+// Float range.
 
 pub fn rx_float_range(
     left: Option<f64>,

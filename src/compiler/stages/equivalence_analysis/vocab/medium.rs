@@ -96,7 +96,7 @@ impl Dfa {
     }
 }
 
-// ---- Hashing ----
+// Hashing.
 
 static HASH_RANDOM_STATE: Lazy<RandomState> =
     Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
@@ -136,7 +136,7 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
     h.finish()
 }
 
-// ---- DFA build ----
+// DFA build.
 
 fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
     let dfa = tokenizer.dfa();
@@ -256,7 +256,7 @@ fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
         .unwrap_or(false)
 }
 
-// ---- Self-loop check helpers ----
+// Self-loop check helpers.
 
 /// Check if all states at (d_states, d_mp) can be bulk-assigned.
 /// Returns (can_bulk, bulk_hash) if possible.
@@ -416,7 +416,7 @@ fn advance_states(
     }
 }
 
-// ---- Per-token signature computation (reused from fast version) ----
+// Per-token signature computation.
 
 struct Scratch {
     current_states: Vec<usize>,
@@ -711,7 +711,7 @@ fn token_signature(
     sig
 }
 
-// ---- Recursive classification (sorted-slice approach) ----
+// Recursive classification.
 
 /// Recursively classify tokens by byte prefix, bulk-assigning where possible.
 /// `sorted` must be a lexicographically sorted slice of token indices that all share
@@ -808,7 +808,7 @@ fn classify_sorted_collect<S: AsRef<[u8]>>(
     }
 }
 
-// ---- Public API ----
+// Public API.
 
 /// Medium-cost vocab equivalence analysis with recursive byte-level bucketing.
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
@@ -845,7 +845,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         };
     }
 
-    // Phase 1: Pre-sort tokens lexicographically
+    // Pre-sort tokens lexicographically.
     let mut sorted_indices: Vec<usize> = (0..num_tokens).collect();
     sorted_indices.sort_unstable_by(|&a, &b| strings[a].as_ref().cmp(strings[b].as_ref()));
 
@@ -943,7 +943,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     }
 
 
-    // Phase 2: Process non-bulk tokens in parallel.
+    // Process non-bulk tokens in parallel.
     let non_bulk_hashes: Vec<(usize, u64)> = non_bulk_tokens
         .par_iter()
         .map_init(
@@ -967,5 +967,5 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     groups.into_values().collect()
 }
 
-// ---- Partition comparison (same as simple version) ----
+// Partition comparison.
 

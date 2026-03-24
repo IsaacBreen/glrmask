@@ -154,7 +154,7 @@ pub fn minimize_cyclic(dfa: &DFA) -> DFA {
         return dfa.clone();
     }
 
-    // ---- 1. Collect reachable states ----
+    // Collect reachable states.
     let reachable = reachable_states(dfa);
     if reachable.is_empty() {
         return DFA::new();
@@ -179,7 +179,7 @@ pub fn minimize_cyclic(dfa: &DFA) -> DFA {
 
     let mut class_of = initial_partition(dfa, &dense_to_state, dead);
 
-    // ---- 4. Partition refinement via composite signatures ----
+    // Refine partitions with composite signatures.
     loop {
         let new_class_of = refine_partition(&class_of, dead, &alphabet, &dense_to_state, target_dense);
 

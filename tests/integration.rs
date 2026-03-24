@@ -434,20 +434,20 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     let c = Constraint::from_lark(lark, &vocab).unwrap();
     let mut s = c.start();
 
-    // Step 0: should allow "[" 
+    // Before committing "[", only the opening bracket should be allowed.
     let mask0 = s.mask();
     assert!(token_allowed(&mask0, 0), "'[' should be allowed");
 
     // Commit "["
     s.commit_token(0).unwrap();
 
-    // Step 1: should allow digits and "-"
+    // After "[", the array can start with digits or "-".
     let mask1 = s.mask();
     assert!(token_allowed(&mask1, 3), "'1' should be allowed after '['");
 
     s.commit_token(3).unwrap();
 
-    // Step 2: should allow ",", "]", ",-", and digit tokens
+    // After the first integer, separators, closing brackets, and ",-" remain valid.
     let mask2 = s.mask();
     assert!(token_allowed(&mask2, 2), "',' (id=2) should be allowed after '[1'");
     assert!(token_allowed(&mask2, 1), "']' (id=1) should be allowed after '[1'");
@@ -1178,9 +1178,7 @@ fn test_right_recursive_item_bug() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// force() regression tests (token-level forcing: exactly one token in mask)
-// ---------------------------------------------------------------------------
+// force() regressions where exactly one token stays in the mask.
 
 /// Grammar: s ::= 'a' 'b' 'c' (fully deterministic single path).
 /// With single-byte vocab each token is forced one at a time: [0, 1, 2].

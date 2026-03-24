@@ -126,16 +126,13 @@ impl AnalyzedGrammar {
     }
 }
 
-/// Eliminate right recursion (both indirect and direct).
-///
-/// 1. Break indirect right-recursive cycles by inlining right ends.
-/// 2. Convert direct right recursion `A → α A` to left recursion
-///    using a fresh nonterminal.
+/// Eliminate right recursion by first inlining indirect cycles and then
+/// rewriting direct right recursion into left recursion.
 pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) {
-    // Step 1: Resolve indirect right recursion by inlining right ends
+    // Resolve indirect right recursion by inlining right ends.
     const MAX_INDIRECT_ROUNDS: usize = 200;
     for _ in 0..MAX_INDIRECT_ROUNDS {
         let num_nt = max_nt_id(rules) + 1;
@@ -151,7 +148,7 @@ pub(crate) fn eliminate_right_recursion(
         }
     }
 
-    // Step 2: Resolve direct right recursion for each nonterminal
+    // Resolve direct right recursion for each nonterminal.
     let all_nts: BTreeSet<NonterminalID> = rules.iter().map(|r| r.lhs).collect();
     for nt in all_nts {
         if rules.iter().any(|r| r.lhs == nt && is_direct_right_recursive(r)) {
@@ -880,29 +877,9 @@ pub(crate) fn merge_identical_nonterminals(
 //   3. No indirect left recursion — only direct left recursion (A → A α) is
 //      permitted (safe for GLR).
 //
-// The pipeline runs a fixed-point loop of three phases. Phase 1 is the
-// nullable-terminal transformation performed earlier in compile.rs:
-//
-//   ┌─────────────────────────────────────────────────┐
-//   │  Phase 2: Inline null productions               │
-//   │  (ε-elimination via power-set expansion)        │
-//   ├─────────────────────────────────────────────────┤
-//   │  Phase 3: Right-recursion elimination           │
-//   │  (indirect via right-end inlining, then         │
-//   │   direct via left-recursion conversion)         │
-//   ├─────────────────────────────────────────────────┤
-//   │  Phase 4: Hidden left-recursion elimination     │
-//   │  (expose hidden LR by removing nullable         │
-//   │   prefixes)                                     │
-//   └──────────────────────┬──────────────────────────┘
-//                          │ loop until fixed point
-//                          ▼
-//   ┌─────────────────────────────────────────────────┐
-//   │  Final: ε-elimination + unreachable pruning     │
-//   └─────────────────────────────────────────────────┘
-//
-// Each phase may introduce new productions or fresh nonterminals that
-// re-trigger earlier phases, hence the fixed-point loop.
+// The normalization loop repeatedly inlines null productions, eliminates
+// right recursion, and exposes hidden left recursion until the grammar stops
+// changing, then runs the final epsilon-elimination and unreachable pruning.
 
 /// Run the full grammar normalization pipeline (in place).
 ///
@@ -923,15 +900,15 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     loop {
         let snap = rules.clone();
 
-        // Phase 2: Inline null productions (ε-elimination)
+        // Inline null productions.
         *rules = inline_null_productions(rules, next_nt.get());
         resync_next_nonterminal(rules, &next_nt);
 
-        // Phase 3: Right-recursion elimination
+        // Eliminate right recursion.
         eliminate_right_recursion(rules, &mut fresh_nt);
         resync_next_nonterminal(rules, &next_nt);
 
-        // Phase 4: Hidden left-recursion elimination
+        // Expose hidden left recursion.
         let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
         eliminate_hidden_left_recursion(rules, &nullable);
         resync_next_nonterminal(rules, &next_nt);

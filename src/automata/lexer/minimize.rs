@@ -1,9 +1,7 @@
 //! Hopcroft-based DFA minimization for the lexer DFA.
 //!
 //! DFA minimization for byte-oriented lexer automata.
-//! Two–phase approach:
-//!   Phase 1: topology-aware pre-refinement (fast path for DAG portions)
-//!   Phase 2: Hopcroft refinement (handles cycles)
+//! Uses topology-aware pre-refinement before the final Hopcroft pass.
 
 use std::collections::VecDeque;
 

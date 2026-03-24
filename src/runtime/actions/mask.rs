@@ -10,9 +10,7 @@ use std::sync::Arc;
 type DenseTokenMaskCache = FxHashMap<usize, Box<[u64]>>;
 type MaskQueue = BTreeMap<u32, FxHashMap<u32, DenseMaskGSS>>;
 
-// ---------------------------------------------------------------------------
-// DenseMaskAcc — compact accumulator for mask traversal using dense bitmaps
-// ---------------------------------------------------------------------------
+// DenseMaskAcc keeps mask traversal in dense bitmaps.
 
 /// Dense bitmap accumulator for the mask BFS. Stores the set of allowed internal
 /// tokens as a fixed-size u64 bitmap, enabling O(1)-per-word intersection (AND),

@@ -664,9 +664,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         grammar.start.clone()
     };
 
-    // Step 1: Expand each Lark terminal rule (inlining sub-terminal refs).
-    // The expanded GrammarExpr is stored directly — lowering converts it
-    // to an Expr tree without a string intermediate.
+    // Expand each Lark terminal rule and keep the lowered expression directly.
     for rule in &grammar.rules {
         if !terminal_names.contains(&rule.name) {
             continue;
@@ -682,8 +680,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: true });
     }
 
-    // Step 2: Process parser rules.  Terminal references stay as Ref nodes
-    // so lower() resolves them to the nonterminal wrappers created above.
+    // Process parser rules while leaving terminal references as `Ref` nodes.
     for rule in &grammar.rules {
         if terminal_names.contains(&rule.name) {
             continue;

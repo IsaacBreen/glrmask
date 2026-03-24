@@ -246,7 +246,7 @@ impl ProgressReporter {
     }
 }
 
-// ---- Vocab Trie ----
+// Vocab trie.
 
 struct TrieNode {
     children: SmallVec<[(u8, u32); 4]>,
@@ -382,7 +382,7 @@ impl VocabTrie {
     }
 }
 
-// ---- Suffix DAG ----
+// Suffix DAG.
 
 /// Run DFA on a suffix from start_state, returning (end_state, edges to match positions).
 fn run_suffix(
@@ -521,7 +521,7 @@ fn hash_suffixes(dfa: &Dfa, slice: &[u8], scratch: &mut Scratch) {
     }
 }
 
-// ---- Scratch workspace ----
+// Scratch workspace.
 
 struct DagEntry {
     hash: u64,
@@ -593,7 +593,7 @@ impl Scratch {
     }
 }
 
-// ---- Core: recursive trie walk with inline signature computation ----
+// Recursive trie walk with inline signature computation.
 
 /// Assign the same hash to all tokens in a trie subtree.
 fn assign_hash_to_subtree(
@@ -835,7 +835,7 @@ fn walk_trie<S: AsRef<[u8]>>(
     }
 }
 
-// ---- Public API ----
+// Public API.
 
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     tokenizer: &TokenizerView,
@@ -901,7 +901,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     groups.into_values().collect()
 }
 
-// ---- Partition comparison utilities ----
+// Partition comparison utilities.
 
 /// Returns true if `finer` is at least as fine as `coarser`.
 ///
@@ -926,7 +926,7 @@ pub fn partitions_are_equivalent(a: &VocabEquivalenceResult, b: &VocabEquivalenc
     a == b
 }
 
-// ---- Tests ----
+// Tests.
 
 #[cfg(test)]
 mod tests {

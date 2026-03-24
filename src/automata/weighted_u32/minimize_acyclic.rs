@@ -84,9 +84,7 @@ fn memoized_intersection(
     value
 }
 
-// ---------------------------------------------------------------------------
-// Phase 0: Weight pushing (backward reachability pruning)
-// ---------------------------------------------------------------------------
+// Push weights backward before any topological analysis.
 
 /// Push weights: intersect each transition weight with the backward-reachable
 /// set of its target state.  This ensures transitions only carry tokens that
@@ -155,9 +153,7 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     (changed, Some(topo), reachable)
 }
 
-// ---------------------------------------------------------------------------
-// Phase 1-2: Topological analysis
-// ---------------------------------------------------------------------------
+// Topological analysis.
 
 fn compute_topo_order(dwa: &DWA) -> Option<Vec<usize>> {
     let n = dwa.states.len();
@@ -284,9 +280,7 @@ fn compute_productive_transitions(dwa: &DWA, needed: &[Weight]) -> Vec<Vec<Produ
     result
 }
 
-// ---------------------------------------------------------------------------
-// Phase 3: Incompatibility graph + graph coloring
-// ---------------------------------------------------------------------------
+// Incompatibility graph and coloring.
 
 /// Check if `w_a.intersection(domain) == w_b.intersection(domain)` without
 /// allocating intermediate Weight objects.  Three-way merge scan over the
@@ -908,7 +902,7 @@ fn greedy_coloring(adj: &[Vec<usize>]) -> Vec<usize> {
 /// Two candidates get the same color iff they have identical final weights and
 /// identical productive transitions (same labels, same mapped targets, same weights).
 ///
-/// Phase 2: Merge colors whose needed-set unions are disjoint and whose target
+/// Merge colors whose needed-set unions are disjoint and whose target
 /// profiles don't conflict on any shared label. This recovers the "diamond"
 /// optimization that exploits disjoint token domains.
 fn partition_refine_coloring(
@@ -923,7 +917,7 @@ fn partition_refine_coloring(
 
     let nc = candidates.len();
 
-    // --- Phase 1: Hash-based partition by exact signature ---
+    // Start from exact-signature partitions.
     let mut hash_groups: rustc_hash::FxHashMap<u64, Vec<usize>> =
         rustc_hash::FxHashMap::default();
 
@@ -983,7 +977,7 @@ fn partition_refine_coloring(
         return colors;
     }
 
-    // --- Phase 2: Merge colors with disjoint needed sets + compatible targets ---
+    // Merge colors with disjoint needed sets and compatible targets.
     // For each color, the target_profile is the sorted (label, mapped_target) list.
     // Two colors can merge if:
     //   1. No label conflict: no shared label has different mapped targets
@@ -1230,9 +1224,7 @@ fn try_all_compatible_height_0_coloring(
     Some(vec![0; candidates.len()])
 }
 
-// ---------------------------------------------------------------------------
-// Phase 4: Merge + Reconstruct
-// ---------------------------------------------------------------------------
+// Merge and reconstruct.
 
 struct MergedStateBuilder {
     final_weights_pending: Vec<Weight>,
@@ -1355,9 +1347,7 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// Public API.
 
 /// Default threshold: always use the full incompatibility graph approach.
 const PARTITION_REFINE_THRESHOLD: usize = usize::MAX;
@@ -1533,7 +1523,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     let mut next_new_id: u32 = 0;
     let mut any_merging = false;
 
-    // Phase 1: Coloring — assign new IDs via partition refinement.
+    // Assign new IDs via partition refinement.
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
         if candidates.is_empty() { continue; }
@@ -1557,7 +1547,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
         next_new_id = base_new_id + num_colors as u32;
     }
 
-    // Phase 2: Build output DWA.
+    // Build the output DWA.
     let minimized = if !any_merging {
         // Fast path: no merging happened — just remap state IDs without cloning weights.
         let total_new = next_new_id as usize;
