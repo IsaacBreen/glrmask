@@ -12,7 +12,7 @@ use crate::automata::lexer::compile::build_regex_with_profile_label;
 use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
+use crate::compiler::debug::{AutomataDiagnostics, CompileDiagnostics, TerminalDiagnostics};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
@@ -1304,7 +1304,10 @@ pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
     )
 }
 
-pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constraint, CompileDebug) {
+pub(crate) fn compile_with_diagnostics(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+) -> (Constraint, CompileDiagnostics) {
     let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
 
     let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
@@ -1376,15 +1379,15 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
     constraint.build_fast_transitions();
     constraint.build_seed_dense_masks();
 
-    let debug = CompileDebug::from_parts(
+    let diagnostics = CompileDiagnostics::from_parts(
         grammar.clone(),
         normalized.clone(),
         glr_grammar.clone(),
         table.clone(),
-        AutomataDebug {
+        AutomataDiagnostics {
             characterizations,
             terminal_dwa: terminal_dwa.clone(),
-            terminal_debug: TerminalDebug {
+            terminal_diagnostics: TerminalDiagnostics {
                 nwa_after_build: NWA::new(0, 0),
                 nwa_after_collapse: NWA::new(0, 0),
             },
@@ -1399,7 +1402,14 @@ pub(crate) fn compile_with_debug(grammar: &GrammarDef, vocab: &Vocab) -> (Constr
         vocab.eos_token_id,
     );
 
-    (constraint, debug)
+    (constraint, diagnostics)
+}
+
+pub(crate) fn compile_with_debug(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+) -> (Constraint, CompileDiagnostics) {
+    compile_with_diagnostics(grammar, vocab)
 }
 
 #[cfg(test)]

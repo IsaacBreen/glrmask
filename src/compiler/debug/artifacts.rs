@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 use std::collections::BTreeMap;
 
 use crate::automata::weighted::dwa::DWA;
@@ -16,17 +11,17 @@ use crate::compiler::stages::templates::Templates;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct TerminalDebug {
+pub struct TerminalDiagnostics {
     pub nwa_after_build: NWA,
     pub nwa_after_collapse: NWA,
 }
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct AutomataDebug {
+pub struct AutomataDiagnostics {
     pub characterizations: BTreeMap<TerminalID, TerminalCharacterization>,
     pub terminal_dwa: DWA,
-    pub terminal_debug: TerminalDebug,
+    pub terminal_diagnostics: TerminalDiagnostics,
     pub templates: Templates,
     pub parser_nwa_before_resolve: NWA,
     pub parser_nwa_after_resolve: NWA,
@@ -37,14 +32,14 @@ pub struct AutomataDebug {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct CompileDebug {
+pub struct CompileDiagnostics {
     pub grammar_def: GrammarDef,
     pub normalized_grammar_def: GrammarDef,
     pub glr_grammar: AnalyzedGrammar,
     pub glr_table: GLRTable,
     pub characterizations: BTreeMap<TerminalID, TerminalCharacterization>,
     pub terminal_dwa: DWA,
-    pub terminal_debug: TerminalDebug,
+    pub terminal_diagnostics: TerminalDiagnostics,
     pub templates: Templates,
     pub parser_nwa_before_resolve: NWA,
     pub parser_nwa_after_resolve: NWA,
@@ -55,13 +50,13 @@ pub struct CompileDebug {
     pub eos_token_id: Option<u32>,
 }
 
-impl CompileDebug {
+impl CompileDiagnostics {
     pub fn from_parts(
         grammar_def: GrammarDef,
         normalized_grammar_def: GrammarDef,
         glr_grammar: AnalyzedGrammar,
         glr_table: GLRTable,
-        automata: AutomataDebug,
+        automata: AutomataDiagnostics,
         vocab_entries: Vec<(u32, Vec<u8>)>,
         eos_token_id: Option<u32>,
     ) -> Self {
@@ -72,7 +67,7 @@ impl CompileDebug {
             glr_table,
             characterizations: automata.characterizations,
             terminal_dwa: automata.terminal_dwa,
-            terminal_debug: automata.terminal_debug,
+            terminal_diagnostics: automata.terminal_diagnostics,
             templates: automata.templates,
             parser_nwa_before_resolve: automata.parser_nwa_before_resolve,
             parser_nwa_after_resolve: automata.parser_nwa_after_resolve,
@@ -84,3 +79,9 @@ impl CompileDebug {
         }
     }
 }
+
+pub type TerminalDebug = TerminalDiagnostics;
+
+pub type AutomataDebug = AutomataDiagnostics;
+
+pub type CompileDebug = CompileDiagnostics;

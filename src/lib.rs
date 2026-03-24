@@ -14,6 +14,8 @@ pub(crate) mod import;
 pub(crate) mod runtime;
 mod vocab;
 
+pub use compiler::debug::{AutomataDiagnostics, CompileDiagnostics, TerminalDiagnostics};
+#[allow(deprecated)]
 pub use compiler::debug::{AutomataDebug, CompileDebug, TerminalDebug};
 pub use ds::weight::{
     clear_all_weights,
@@ -21,17 +23,19 @@ pub use ds::weight::{
     clear_weight_caches,
     clear_weight_op_caches,
 };
-pub use error::{GlrMaskError, Result};
+pub use error::{Error, Result};
+#[allow(deprecated)]
+pub use error::GlrMaskError;
 pub use runtime::{
-    CommitAdvanceCallBreakdown,
-    CommitBenchBreakdown,
-    CommitDebugMetrics,
-    CommitDebugTrace,
+    CommitMetrics,
+    CommitTrace,
     Constraint,
     ConstraintState,
     ConstraintStateSummary,
-    MaskDebugMetrics,
+    MaskMetrics,
 };
+#[allow(deprecated)]
+pub use runtime::{CommitDebugMetrics, CommitDebugTrace, MaskDebugMetrics};
 pub use vocab::Vocab;
 
 #[doc(hidden)]

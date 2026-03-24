@@ -1,6 +1,6 @@
 use crate::runtime::state::ConstraintState;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
-use crate::ds::weight::{Weight, WeightDebugStats, reset_weight_debug_stats, snapshot_weight_debug_stats};
+use crate::ds::weight::{Weight, WeightStats, reset_weight_stats, snapshot_weight_stats};
 use crate::runtime::state::ConstraintStateSummary;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -229,9 +229,9 @@ impl Merge for DenseMaskAcc {
 type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MaskDebugMetrics {
+pub struct MaskMetrics {
     pub state_summary: ConstraintStateSummary,
-    pub weight_ops: WeightDebugStats,
+    pub weight_ops: WeightStats,
     pub mask_words: usize,
     pub allowed_token_count: usize,
     pub seeded_entries: usize,
@@ -260,7 +260,7 @@ pub struct MaskDebugMetrics {
     pub positive_transitions_enqueued: usize,
     pub default_transitions_hit: usize,
     pub default_transitions_enqueued: usize,
-    /// Timing breakdown (nanoseconds), only populated by debug_mask_metrics.
+    /// Timing breakdown (nanoseconds), only populated by `mask_metrics`.
     pub seed_ns: u64,
     pub final_weight_ns: u64,
     pub transition_gss_ns: u64,
@@ -271,6 +271,8 @@ pub struct MaskDebugMetrics {
     pub total_ns: u64,
     pub internal_token_dense_words: usize,
 }
+
+pub type MaskDebugMetrics = MaskMetrics;
 
 impl<'a> ConstraintState<'a> {
     pub fn mask(&self) -> Vec<u32> {
@@ -283,22 +285,26 @@ impl<'a> ConstraintState<'a> {
         self.fill_mask_impl(buf, None);
     }
 
-    pub fn debug_mask_metrics(&self) -> MaskDebugMetrics {
-        let mut metrics = MaskDebugMetrics {
+    pub fn mask_metrics(&self) -> MaskMetrics {
+        let mut metrics = MaskMetrics {
             state_summary: self.summary(),
             mask_words: self.constraint.mask_len(),
-            ..MaskDebugMetrics::default()
+            ..MaskMetrics::default()
         };
         let mut buf = vec![0u32; self.constraint.mask_len()];
-        reset_weight_debug_stats();
+        reset_weight_stats();
         self.fill_mask_impl(&mut buf, Some(&mut metrics));
         metrics.allowed_token_count = buf.iter().map(|word| word.count_ones() as usize).sum();
-        metrics.weight_ops = snapshot_weight_debug_stats();
+        metrics.weight_ops = snapshot_weight_stats();
         metrics.internal_token_dense_words = self.constraint.internal_token_dense_words;
         metrics
     }
 
-    fn fill_mask_impl(&self, buf: &mut [u32], mut metrics: Option<&mut MaskDebugMetrics>) {
+    pub fn debug_mask_metrics(&self) -> MaskMetrics {
+        self.mask_metrics()
+    }
+
+    fn fill_mask_impl(&self, buf: &mut [u32], mut metrics: Option<&mut MaskMetrics>) {
         buf.fill(0);
 
         let parser_dwa = self.constraint.parser_dwa();

@@ -112,7 +112,7 @@ where
 
 fn commit_metrics_to_dict<'py>(
     py: Python<'py>,
-    metrics: glrmask::CommitDebugMetrics,
+    metrics: glrmask::CommitMetrics,
 ) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     out.set_item("bytes_len", metrics.bytes_len)?;
@@ -409,7 +409,7 @@ fn commit_metrics_to_dict<'py>(
 
 fn commit_trace_to_dict<'py>(
     py: Python<'py>,
-    trace: glrmask::CommitDebugTrace,
+    trace: glrmask::CommitTrace,
 ) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     let exec_calls = PyList::empty(py);
@@ -581,10 +581,10 @@ impl PyConstraintState {
         Ok(t0.elapsed().as_nanos() as u64)
     }
 
-    fn debug_mask_metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn mask_metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let metrics = self
             .inner
-            .with_dependent(|_owner, state| state.debug_mask_metrics());
+            .with_dependent(|_owner, state| state.mask_metrics());
 
         let state_summary = state_summary_to_dict(py, metrics.state_summary)?;
 
@@ -649,49 +649,49 @@ impl PyConstraintState {
         Ok(out)
     }
 
-    fn debug_commit_token_metrics<'py>(
+    fn commit_token_metrics<'py>(
         &self,
         py: Python<'py>,
         token_id: u32,
     ) -> PyResult<Bound<'py, PyDict>> {
         let metrics = self
             .inner
-            .with_dependent(|_owner, state| state.debug_commit_token_metrics(token_id))
+            .with_dependent(|_owner, state| state.commit_token_metrics(token_id))
             .map_err(PyValueError::new_err)?;
         commit_metrics_to_dict(py, metrics)
     }
 
-    fn debug_commit_bytes_metrics<'py>(
+    fn commit_bytes_metrics<'py>(
         &self,
         py: Python<'py>,
         data: &[u8],
     ) -> PyResult<Bound<'py, PyDict>> {
         let metrics = self
             .inner
-            .with_dependent(|_owner, state| state.debug_commit_bytes_metrics(data));
+            .with_dependent(|_owner, state| state.commit_bytes_metrics(data));
         commit_metrics_to_dict(py, metrics)
     }
 
-    fn debug_commit_token_trace<'py>(
+    fn commit_token_trace<'py>(
         &self,
         py: Python<'py>,
         token_id: u32,
     ) -> PyResult<Bound<'py, PyDict>> {
         let trace = self
             .inner
-            .with_dependent(|_owner, state| state.debug_commit_token_trace(token_id))
+            .with_dependent(|_owner, state| state.commit_token_trace(token_id))
             .map_err(PyValueError::new_err)?;
         commit_trace_to_dict(py, trace)
     }
 
-    fn debug_commit_bytes_trace<'py>(
+    fn commit_bytes_trace<'py>(
         &self,
         py: Python<'py>,
         data: &[u8],
     ) -> PyResult<Bound<'py, PyDict>> {
         let trace = self
             .inner
-            .with_dependent(|_owner, state| state.debug_commit_bytes_trace(data));
+            .with_dependent(|_owner, state| state.commit_bytes_trace(data));
         commit_trace_to_dict(py, trace)
     }
 

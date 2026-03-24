@@ -1,7 +1,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::compiler::debug::artifacts::CompileDebug;
+use crate::compiler::debug::artifacts::CompileDiagnostics;
 use crate::compiler::glr::analysis::EOF;
 
 const VOCAB_INLINE_LIMIT: usize = 32;
@@ -12,7 +12,7 @@ const ID_SAMPLE_TAIL: usize = 2;
 const TOKEN_SAMPLE_LIMIT: usize = 3;
 const TOKEN_REPR_CHAR_LIMIT: usize = 48;
 
-impl CompileDebug {
+impl CompileDiagnostics {
     fn terminal_name(
         &self,
         grammar: &crate::compiler::grammar::model::GrammarDef,
@@ -165,7 +165,7 @@ fn sample_token_reprs_set(
     sample_token_reprs(&values, vocab_by_id)
 }
 
-impl std::fmt::Display for CompileDebug {
+impl std::fmt::Display for CompileDiagnostics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let vocab_by_id: BTreeMap<u32, &[u8]> = self
             .vocab_entries
@@ -388,7 +388,7 @@ impl std::fmt::Display for CompileDebug {
         write!(
             f,
             "{}",
-            self.terminal_debug
+            self.terminal_diagnostics
                 .nwa_after_build
                 .display_with_all_maps(&terminal_symbols, &tsid_names, &token_names)
         )?;
@@ -397,7 +397,7 @@ impl std::fmt::Display for CompileDebug {
         write!(
             f,
             "{}",
-            self.terminal_debug
+            self.terminal_diagnostics
                 .nwa_after_collapse
                 .display_with_all_maps(&terminal_symbols, &tsid_names, &token_names)
         )?;

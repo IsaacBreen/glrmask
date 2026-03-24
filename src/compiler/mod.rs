@@ -12,7 +12,7 @@ pub mod stages;
 pub use crate::automata::lexer::tokenizer as tokenizer_dfa;
 pub use compile::compile;
 pub(crate) use compile::compile_owned;
-pub(crate) use compile::compile_with_debug;
+pub(crate) use compile::compile_with_diagnostics;
 pub use crate::grammar::flat as grammar_def;
 pub use glr::labels as parser_labels;
 pub use stages::equivalence_analysis;

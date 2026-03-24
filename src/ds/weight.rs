@@ -170,7 +170,7 @@ enum WeightOpKind {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WeightDebugStats {
+pub struct WeightStats {
     pub union_calls: usize,
     pub union_memo_hits: usize,
     pub intersection_calls: usize,
@@ -180,6 +180,9 @@ pub struct WeightDebugStats {
     pub single_intersection_calls: usize,
     pub single_intersection_range_overlaps: usize,
 }
+
+#[deprecated(note = "use WeightStats")]
+pub type WeightDebugStats = WeightStats;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct WeightOpKey {
@@ -234,11 +237,11 @@ impl WeightOpMemo {
 
 thread_local! {
     static WEIGHT_OP_MEMO: RefCell<WeightOpMemo> = RefCell::new(WeightOpMemo::default());
-    static WEIGHT_DEBUG_STATS: RefCell<WeightDebugStats> = RefCell::new(WeightDebugStats::default());
+    static WEIGHT_STATS: RefCell<WeightStats> = RefCell::new(WeightStats::default());
 }
 
-fn record_weight_debug_call(kind: WeightOpKind) {
-    WEIGHT_DEBUG_STATS.with(|stats| {
+fn record_weight_call(kind: WeightOpKind) {
+    WEIGHT_STATS.with(|stats| {
         let mut stats = stats.borrow_mut();
         match kind {
             WeightOpKind::Union => stats.union_calls += 1,
@@ -248,8 +251,8 @@ fn record_weight_debug_call(kind: WeightOpKind) {
     });
 }
 
-fn record_weight_debug_memo_hit(kind: WeightOpKind) {
-    WEIGHT_DEBUG_STATS.with(|stats| {
+fn record_weight_memo_hit(kind: WeightOpKind) {
+    WEIGHT_STATS.with(|stats| {
         let mut stats = stats.borrow_mut();
         match kind {
             WeightOpKind::Union => stats.union_memo_hits += 1,
@@ -260,13 +263,13 @@ fn record_weight_debug_memo_hit(kind: WeightOpKind) {
 }
 
 fn record_single_intersection_call() {
-    WEIGHT_DEBUG_STATS.with(|stats| {
+    WEIGHT_STATS.with(|stats| {
         stats.borrow_mut().single_intersection_calls += 1;
     });
 }
 
 fn record_single_intersection_overlap() {
-    WEIGHT_DEBUG_STATS.with(|stats| {
+    WEIGHT_STATS.with(|stats| {
         stats.borrow_mut().single_intersection_range_overlaps += 1;
     });
 }
@@ -294,14 +297,14 @@ pub fn clear_weight_caches() {
     clear_all_weights();
 }
 
-pub(crate) fn reset_weight_debug_stats() {
-    WEIGHT_DEBUG_STATS.with(|stats| {
-        *stats.borrow_mut() = WeightDebugStats::default();
+pub(crate) fn reset_weight_stats() {
+    WEIGHT_STATS.with(|stats| {
+        *stats.borrow_mut() = WeightStats::default();
     });
 }
 
-pub(crate) fn snapshot_weight_debug_stats() -> WeightDebugStats {
-    WEIGHT_DEBUG_STATS.with(|stats| *stats.borrow())
+pub(crate) fn snapshot_weight_stats() -> WeightStats {
+    WEIGHT_STATS.with(|stats| *stats.borrow())
 }
 
 fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
@@ -968,7 +971,7 @@ impl Weight {
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        record_weight_debug_call(WeightOpKind::Union);
+        record_weight_call(WeightOpKind::Union);
         if self.is_full() || other.is_full() {
             return Self::all();
         }
@@ -982,7 +985,7 @@ impl Weight {
             return self.clone();
         }
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Union, self, other) {
-            record_weight_debug_memo_hit(WeightOpKind::Union);
+            record_weight_memo_hit(WeightOpKind::Union);
             return existing;
         }
         let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
@@ -1054,7 +1057,7 @@ impl Weight {
     }
 
     pub fn intersection(&self, other: &Self) -> Self {
-        record_weight_debug_call(WeightOpKind::Intersection);
+        record_weight_call(WeightOpKind::Intersection);
         if self.is_empty() || other.is_empty() {
             return Self::empty();
         }
@@ -1068,7 +1071,7 @@ impl Weight {
             return self.clone();
         }
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Intersection, self, other) {
-            record_weight_debug_memo_hit(WeightOpKind::Intersection);
+            record_weight_memo_hit(WeightOpKind::Intersection);
             return existing;
         }
         let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
@@ -1095,7 +1098,7 @@ impl Weight {
     }
 
     pub fn difference(&self, other: &Self) -> Self {
-        record_weight_debug_call(WeightOpKind::Difference);
+        record_weight_call(WeightOpKind::Difference);
         if self.is_empty() || other.is_full() {
             return Self::empty();
         }
@@ -1113,7 +1116,7 @@ impl Weight {
             return Self::all();
         }
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Difference, self, other) {
-            record_weight_debug_memo_hit(WeightOpKind::Difference);
+            record_weight_memo_hit(WeightOpKind::Difference);
             return existing;
         }
         let result = combine_compact_entries(self, other, |left, right| match (left, right) {

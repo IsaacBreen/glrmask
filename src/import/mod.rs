@@ -1,8 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 pub use crate::grammar::ast as ast;
 pub mod ebnf;
 pub mod json_schema;
@@ -17,95 +12,83 @@ mod test_json_schema;
 
 pub use crate::grammar::ast as grammar_expr;
 
-use crate::compiler::debug::CompileDebug;
-use crate::compiler::{compile, compile_owned, compile_with_debug};
+use crate::compiler::debug::{CompileDebug, CompileDiagnostics};
+use crate::compiler::{compile_owned, compile_with_diagnostics};
+use crate::grammar::flat::GrammarDef;
 use crate::runtime::Constraint;
 
-fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
-    let grammar = ebnf::parse_ebnf(ebnf)?;
+type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
+
+fn compile_from_source(
+    source: &str,
+    vocab: &crate::Vocab,
+    parse: GrammarParser,
+) -> crate::Result<Constraint> {
+    let grammar = parse(source)?;
     Ok(compile_owned(grammar, vocab))
 }
 
-fn from_ebnf_with_debug(
-    ebnf: &str,
+fn compile_from_source_with_diagnostics(
+    source: &str,
     vocab: &crate::Vocab,
-) -> crate::Result<(Constraint, CompileDebug)> {
-    let grammar = ebnf::parse_ebnf(ebnf)?;
-    Ok(compile_with_debug(&grammar, vocab))
-}
-
-fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
-    let grammar = lark::parse_lark(lark)?;
-    Ok(compile_owned(grammar, vocab))
-}
-
-fn from_lark_with_debug(
-    lark: &str,
-    vocab: &crate::Vocab,
-) -> crate::Result<(Constraint, CompileDebug)> {
-    let grammar = lark::parse_lark(lark)?;
-    Ok(compile_with_debug(&grammar, vocab))
-}
-
-fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Constraint> {
-    let grammar = json_schema::json_schema_to_grammar(schema)?;
-    Ok(compile_owned(grammar, vocab))
-}
-
-fn from_json_schema_with_debug(
-    schema: &str,
-    vocab: &crate::Vocab,
-) -> crate::Result<(Constraint, CompileDebug)> {
-    let grammar = json_schema::json_schema_to_grammar(schema)?;
-    Ok(compile_with_debug(&grammar, vocab))
+    parse: GrammarParser,
+) -> crate::Result<(Constraint, CompileDiagnostics)> {
+    let grammar = parse(source)?;
+    Ok(compile_with_diagnostics(&grammar, vocab))
 }
 
 impl Constraint {
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        if std::env::var("GLRMASK_COMPILE_DEBUG").is_ok() {
-            let (constraint, debug) = from_ebnf_with_debug(ebnf, vocab)?;
-            eprintln!("{}", debug);
-            return Ok(constraint);
-        }
-        from_ebnf(ebnf, vocab)
+        compile_from_source(ebnf, vocab, ebnf::parse_ebnf)
+    }
+
+    pub fn from_ebnf_with_diagnostics(
+        ebnf: &str,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<(Self, CompileDiagnostics)> {
+        compile_from_source_with_diagnostics(ebnf, vocab, ebnf::parse_ebnf)
     }
 
     pub fn from_ebnf_with_debug(
         ebnf: &str,
         vocab: &crate::Vocab,
     ) -> crate::Result<(Self, CompileDebug)> {
-        from_ebnf_with_debug(ebnf, vocab)
+        Self::from_ebnf_with_diagnostics(ebnf, vocab)
     }
 
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        if std::env::var("GLRMASK_COMPILE_DEBUG").is_ok() {
-            let (constraint, debug) = from_lark_with_debug(lark, vocab)?;
-            eprintln!("{}", debug);
-            return Ok(constraint);
-        }
-        from_lark(lark, vocab)
+        compile_from_source(lark, vocab, lark::parse_lark)
+    }
+
+    pub(crate) fn from_lark_with_diagnostics(
+        lark: &str,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<(Self, CompileDiagnostics)> {
+        compile_from_source_with_diagnostics(lark, vocab, lark::parse_lark)
     }
 
     pub(crate) fn from_lark_with_debug(
         lark: &str,
         vocab: &crate::Vocab,
     ) -> crate::Result<(Self, CompileDebug)> {
-        from_lark_with_debug(lark, vocab)
+        Self::from_lark_with_diagnostics(lark, vocab)
     }
 
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        if std::env::var("GLRMASK_COMPILE_DEBUG").is_ok() {
-            let (constraint, debug) = from_json_schema_with_debug(schema, vocab)?;
-            eprintln!("{}", debug);
-            return Ok(constraint);
-        }
-        from_json_schema(schema, vocab)
+        compile_from_source(schema, vocab, json_schema::json_schema_to_grammar)
+    }
+
+    pub(crate) fn from_json_schema_with_diagnostics(
+        schema: &str,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<(Self, CompileDiagnostics)> {
+        compile_from_source_with_diagnostics(schema, vocab, json_schema::json_schema_to_grammar)
     }
 
     pub(crate) fn from_json_schema_with_debug(
         schema: &str,
         vocab: &crate::Vocab,
     ) -> crate::Result<(Self, CompileDebug)> {
-        from_json_schema_with_debug(schema, vocab)
+        Self::from_json_schema_with_diagnostics(schema, vocab)
     }
 }
