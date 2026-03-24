@@ -2,14 +2,8 @@
 name = "glrmask"
 version = "0.1.0"
 edition = "2024"
-description = "Grammar-constrained token masking for large language model decoding"
+description = "Efficient grammar-constrained decoding for large language models"
 license = "MIT OR Apache-2.0"
-readme = "README.md"
-documentation = "https://docs.rs/glrmask"
-repository = "https://github.com/IsaacBreen/grammars2024"
-keywords = ["grammar", "llm", "decoding", "parser", "json-schema"]
-categories = ["algorithms", "parsing"]
-exclude = [".benchmarks/**", ".cache/**", "glrmask-runtime/**", "python/**", "scripts/**", "target/**"]
 
 [dependencies]
 # Core
@@ -26,8 +20,8 @@ serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 
-# Parallelism
-rayon = "1"
+# Parallelism (optional)
+rayon = { version = "1", optional = true }
 
 # Logging
 tracing = "0.1"
@@ -39,3 +33,5 @@ thiserror = "1"
 [dev-dependencies]
 pretty_assertions = "1"
 
+[features]
+default = ["rayon"]

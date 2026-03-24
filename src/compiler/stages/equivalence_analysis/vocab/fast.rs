@@ -6,7 +6,7 @@
 
 // Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
 
-use super::super::compat::Sep1Tokenizer;
+use super::super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -46,6 +46,7 @@ struct Dfa {
     num_states: usize,
     /// Byte-to-class mapping (byte equivalence classes).
     byte_to_class: [u8; 256],
+    num_classes: usize,
     /// Transposed transition table: `trans_by_class[class * num_states + state]`.
     /// For a given byte class, all state transitions are contiguous in memory.
     trans_by_class: Vec<u32>,
@@ -201,7 +202,7 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
 
     for state in &dfa.states {
         let mut table = [NONE; 256];
-        for (byte_idx, &target) in state.transitions.iter().enumerate() {
+        for (byte_idx, &target) in state.transitions.iter().enumerate() { let byte = byte_idx as u8;
             table[byte_idx] = target;
         }
         transitions.push(table);
@@ -272,6 +273,7 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
         start_state: dfa.start_state,
         num_states: num_dfa_states,
         byte_to_class,
+        num_classes,
         trans_by_class,
         finalizers,
         is_dead_end,
@@ -923,10 +925,58 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::lexer::ast::{bytes, choice};
+    use crate::automata::lexer::ast::{bytes, choice, class};
     use crate::compiler::compile::build_tokenizer_from_exprs;
     use crate::compiler::stages::equivalence_analysis::compat::Sep1Tokenizer;
     use std::collections::BTreeMap;
+    use std::path::Path;
+    use crate::automata::regex::{opt, seq, star};
+    use crate::ds::u8set::U8Set;
+
+    fn build_gpt2_unicode_to_byte_map() -> BTreeMap<char, u8> {
+        let mut byte_values: Vec<u32> = (b'!' as u32..=b'~' as u32).collect();
+        byte_values.extend(0xA1u32..=0xACu32);
+        byte_values.extend(0xAEu32..=0xFFu32);
+
+        let mut unicode_values = byte_values.clone();
+        let mut extra = 0u32;
+        for byte in 0u32..=255u32 {
+            if !byte_values.contains(&byte) {
+                byte_values.push(byte);
+                unicode_values.push(256 + extra);
+                extra += 1;
+            }
+        }
+
+        let mut unicode_to_byte = BTreeMap::new();
+        for (byte, codepoint) in byte_values.into_iter().zip(unicode_values.into_iter()) {
+            let ch = char::from_u32(codepoint).expect("valid GPT-2 codepoint");
+            unicode_to_byte.insert(ch, byte as u8);
+        }
+        unicode_to_byte
+    }
+
+    fn load_cached_gpt2_vocab_bytes() -> Vec<Vec<u8>> {
+        let vocab_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../constraint-framework-analysis/.cache/vocab_cache/vocab.json");
+        let raw = std::fs::read_to_string(&vocab_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", vocab_path.display()));
+        let vocab: BTreeMap<String, u32> =
+            serde_json::from_str(&raw).expect("cached GPT-2 vocab should parse");
+        let unicode_to_byte = build_gpt2_unicode_to_byte_map();
+        let max_id = vocab.values().copied().max().unwrap_or(0) as usize;
+        let mut tokens = vec![Vec::new(); max_id + 1];
+
+        for (token_str, token_id) in vocab {
+            let token_bytes: Vec<u8> = token_str
+                .chars()
+                .map(|ch| unicode_to_byte[&ch])
+                .collect();
+            tokens[token_id as usize] = token_bytes;
+        }
+
+        tokens
+    }
 
     #[test]
     fn test_disallowed_follow_merges_ab_and_ac() {

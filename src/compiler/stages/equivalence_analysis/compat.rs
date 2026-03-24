@@ -17,10 +17,11 @@
 //! code can be adapted with minimal changes.
 
 
-#[cfg(test)]
 use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+
+pub type GroupID = usize;
 
 /// Pre-extracted DFA state data in sep1-compatible format.
 #[derive(Debug, Clone)]
@@ -74,7 +75,6 @@ impl FlatDfa {
         }
     }
 
-    #[cfg(test)]
     pub fn num_states(&self) -> usize {
         self.states.len()
     }
@@ -106,7 +106,6 @@ impl Sep1Tokenizer {
     }
 
     /// Run the DFA from a given state on input bytes using sep1-compatible execution semantics.
-    #[cfg(test)]
     pub fn execute_from_state_nonzero(&self, input: &[u8], start_state: usize) -> ExecuteResult {
         let dfa = &self.flat_dfa;
         if start_state >= dfa.states.len() {
@@ -154,12 +153,10 @@ impl Sep1Tokenizer {
     }
 }
 
-#[cfg(test)]
 fn state_is_done(state: &FlatDfaState) -> bool {
     state.transitions.iter().all(|&target| target == u32::MAX)
 }
 
-#[cfg(test)]
 fn collect_matches(match_positions: &BTreeMap<usize, usize>) -> Vec<ExecuteMatch> {
     match_positions
         .iter()
@@ -170,14 +167,12 @@ fn collect_matches(match_positions: &BTreeMap<usize, usize>) -> Vec<ExecuteMatch
 }
 
 /// Result of executing the DFA on input bytes.
-#[cfg(test)]
 pub struct ExecuteResult {
     pub matches: Vec<ExecuteMatch>,
     pub end_state: Option<usize>,
 }
 
 /// A single match: group ID and byte position.
-#[cfg(test)]
 pub struct ExecuteMatch {
     pub group_id: usize,
     pub position: usize,

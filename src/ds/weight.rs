@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 use range_set_blaze::{CheckSortedDisjoint, RangeMapBlaze, RangeSetBlaze, SortedDisjointMap};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -5,7 +10,7 @@ use once_cell::sync::Lazy;
 use rustc_hash::FxHashMap;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug, Clone)]
@@ -164,6 +169,18 @@ enum WeightOpKind {
     Difference,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WeightDebugStats {
+    pub union_calls: usize,
+    pub union_memo_hits: usize,
+    pub intersection_calls: usize,
+    pub intersection_memo_hits: usize,
+    pub difference_calls: usize,
+    pub difference_memo_hits: usize,
+    pub single_intersection_calls: usize,
+    pub single_intersection_range_overlaps: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct WeightOpKey {
     kind: WeightOpKind,
@@ -217,6 +234,41 @@ impl WeightOpMemo {
 
 thread_local! {
     static WEIGHT_OP_MEMO: RefCell<WeightOpMemo> = RefCell::new(WeightOpMemo::default());
+    static WEIGHT_DEBUG_STATS: RefCell<WeightDebugStats> = RefCell::new(WeightDebugStats::default());
+}
+
+fn record_weight_debug_call(kind: WeightOpKind) {
+    WEIGHT_DEBUG_STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        match kind {
+            WeightOpKind::Union => stats.union_calls += 1,
+            WeightOpKind::Intersection => stats.intersection_calls += 1,
+            WeightOpKind::Difference => stats.difference_calls += 1,
+        }
+    });
+}
+
+fn record_weight_debug_memo_hit(kind: WeightOpKind) {
+    WEIGHT_DEBUG_STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        match kind {
+            WeightOpKind::Union => stats.union_memo_hits += 1,
+            WeightOpKind::Intersection => stats.intersection_memo_hits += 1,
+            WeightOpKind::Difference => stats.difference_memo_hits += 1,
+        }
+    });
+}
+
+fn record_single_intersection_call() {
+    WEIGHT_DEBUG_STATS.with(|stats| {
+        stats.borrow_mut().single_intersection_calls += 1;
+    });
+}
+
+fn record_single_intersection_overlap() {
+    WEIGHT_DEBUG_STATS.with(|stats| {
+        stats.borrow_mut().single_intersection_range_overlaps += 1;
+    });
 }
 
 /// Clear the global interned-weight tables entirely.
@@ -240,6 +292,16 @@ pub fn clear_weight_op_caches() {
 pub fn clear_weight_caches() {
     clear_weight_op_caches();
     clear_all_weights();
+}
+
+pub(crate) fn reset_weight_debug_stats() {
+    WEIGHT_DEBUG_STATS.with(|stats| {
+        *stats.borrow_mut() = WeightDebugStats::default();
+    });
+}
+
+pub(crate) fn snapshot_weight_debug_stats() -> WeightDebugStats {
+    WEIGHT_DEBUG_STATS.with(|stats| *stats.borrow())
 }
 
 fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
@@ -337,16 +399,34 @@ fn rangeset_to_string(set: &RangeSetBlaze<u32>) -> String {
     format!("{{{}}}", parts.join(","))
 }
 
+fn rangeset_to_string_with_names(
+    set: &RangeSetBlaze<u32>,
+    names: &BTreeMap<u32, String>,
+) -> String {
+    let expanded: Vec<u32> = set.iter().collect();
+    if expanded.len() <= WEIGHT_NAME_EXPAND_LIMIT && expanded.iter().all(|id| names.contains_key(id)) {
+        return format!(
+            "{{{}}}",
+            expanded
+                .iter()
+                .map(|id| names.get(id).cloned().unwrap_or_else(|| id.to_string()))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    rangeset_to_string(set)
+}
+
 fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
     let mut map = WeightMap::new();
     let mut current_start: Option<u32> = None;
     let mut current_end = 0u32;
     let mut current_tokens = RangeSetBlaze::new();
 
-    let flush = |map: &mut WeightMap,
-                 current_start: &mut Option<u32>,
-                 current_end: &mut u32,
-                 current_tokens: &mut RangeSetBlaze<u32>| {
+    let mut flush = |map: &mut WeightMap,
+                     current_start: &mut Option<u32>,
+                     current_end: &mut u32,
+                     current_tokens: &mut RangeSetBlaze<u32>| {
         if let Some(start) = *current_start {
             let tokens = std::mem::replace(current_tokens, RangeSetBlaze::new());
             map.extend_simple(std::iter::once((start..=*current_end, shared_rangeset(tokens))));
@@ -356,9 +436,10 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
 
     for (&tsid, tokens) in expanded {
         match current_start {
-            Some(_)
+            Some(start)
                 if current_end.checked_add(1) == Some(tsid) && *tokens == current_tokens =>
             {
+                let _ = start;
                 current_end = tsid;
             }
             _ => {
@@ -508,9 +589,10 @@ fn push_compact_range(
     tokens: SharedTokenSet,
 ) {
     match *pending_start {
-        Some(_)
+        Some(existing_start)
             if pending_end.checked_add(1) == Some(start) && *pending_tokens == tokens =>
         {
+            let _ = existing_start;
             *pending_end = end;
         }
         _ => {
@@ -643,6 +725,7 @@ fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
 }
 
 fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight) -> Weight {
+    record_single_intersection_call();
     let mut map = WeightMap::new();
     let mut pending_start = None;
     let mut pending_end = 0u32;
@@ -654,6 +737,7 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
 
     let bounds = CheckSortedDisjoint::new([single.start..=single.end]);
     for (range, other_tokens) in other.0.range_values().map_and_set_intersection(bounds) {
+        record_single_intersection_overlap();
         let start = *range.start();
         let end = *range.end();
 
@@ -703,6 +787,72 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
 
     flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
     finalize_weight_map(map)
+}
+
+fn range_map_entries(weight: &Weight) -> Vec<(std::ops::RangeInclusive<u32>, RangeSetBlaze<u32>)> {
+    weight
+        .0
+        .range_values()
+    .map(|(range, tokens)| (range, tokens.as_ref().clone()))
+        .collect()
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WeightBuilder {
+    is_full: bool,
+    expanded: BTreeMap<u32, RangeSetBlaze<u32>>,
+}
+
+impl WeightBuilder {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.is_full
+    }
+
+    pub(crate) fn union_weight(&mut self, weight: &Weight) {
+        if self.is_full || weight.is_empty() {
+            return;
+        }
+        if weight.is_full() {
+            self.is_full = true;
+            self.expanded.clear();
+            return;
+        }
+
+        for (range, tokens_arc) in weight.0.range_values() {
+            for tsid in range {
+                match self.expanded.entry(tsid) {
+                    std::collections::btree_map::Entry::Occupied(mut e) => {
+                        let existing = e.get_mut();
+                        // Skip union if token sets are already identical
+                        if existing != tokens_arc.as_ref() {
+                            *existing |= tokens_arc.as_ref();
+                        }
+                    }
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(tokens_arc.as_ref().clone());
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.is_full && self.expanded.is_empty()
+    }
+
+    pub(crate) fn build(self) -> Weight {
+        if self.is_full {
+            Weight::all()
+        } else if self.expanded.is_empty() {
+            Weight::empty()
+        } else {
+            compress_expanded(&self.expanded)
+        }
+    }
 }
 
 impl Weight {
@@ -818,6 +968,7 @@ impl Weight {
     }
 
     pub fn union(&self, other: &Self) -> Self {
+        record_weight_debug_call(WeightOpKind::Union);
         if self.is_full() || other.is_full() {
             return Self::all();
         }
@@ -831,6 +982,7 @@ impl Weight {
             return self.clone();
         }
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Union, self, other) {
+            record_weight_debug_memo_hit(WeightOpKind::Union);
             return existing;
         }
         let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
@@ -902,6 +1054,7 @@ impl Weight {
     }
 
     pub fn intersection(&self, other: &Self) -> Self {
+        record_weight_debug_call(WeightOpKind::Intersection);
         if self.is_empty() || other.is_empty() {
             return Self::empty();
         }
@@ -915,6 +1068,7 @@ impl Weight {
             return self.clone();
         }
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Intersection, self, other) {
+            record_weight_debug_memo_hit(WeightOpKind::Intersection);
             return existing;
         }
         let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
@@ -941,6 +1095,7 @@ impl Weight {
     }
 
     pub fn difference(&self, other: &Self) -> Self {
+        record_weight_debug_call(WeightOpKind::Difference);
         if self.is_empty() || other.is_full() {
             return Self::empty();
         }
@@ -958,6 +1113,7 @@ impl Weight {
             return Self::all();
         }
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Difference, self, other) {
+            record_weight_debug_memo_hit(WeightOpKind::Difference);
             return existing;
         }
         let result = combine_compact_entries(self, other, |left, right| match (left, right) {
@@ -998,7 +1154,8 @@ impl Weight {
         if tokens.is_empty() {
             return Self::empty();
         }
-        Self::from_uniform(tsid..=tsid, tokens)
+        let token_ranges: Vec<_> = tokens.ranges().collect();
+        Self::from_compact_ranges(std::iter::once((tsid..=tsid, token_ranges)))
     }
 
     pub fn tokens_for_tsid(&self, tsid: u32) -> RangeSetBlaze<u32> {
@@ -1276,6 +1433,7 @@ impl std::hash::Hash for Weight {
 }
 
 impl std::fmt::Display for Weight {
+    
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_empty() {
             return write!(f, "∅");
@@ -1294,6 +1452,69 @@ impl std::fmt::Display for Weight {
                     format!("{}..={}", range.start(), range.end())
                 };
                 format!("{tsid}→{}", rangeset_to_string(tokens.as_ref()))
+            })
+            .collect();
+        write!(f, "{}", parts.join("; "))
+    }
+}
+
+const WEIGHT_NAME_EXPAND_LIMIT: usize = 64;
+
+pub struct WeightDisplayWithNames<'a> {
+    weight: &'a Weight,
+    tsid_names: &'a std::collections::BTreeMap<u32, String>,
+    token_names: &'a std::collections::BTreeMap<u32, String>,
+}
+
+impl Weight {
+    pub fn display_with_names<'a>(
+        &'a self,
+        tsid_names: &'a std::collections::BTreeMap<u32, String>,
+        token_names: &'a std::collections::BTreeMap<u32, String>,
+    ) -> WeightDisplayWithNames<'a> {
+        WeightDisplayWithNames {
+            weight: self,
+            tsid_names,
+            token_names,
+        }
+    }
+}
+
+impl std::fmt::Display for WeightDisplayWithNames<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.weight.is_empty() {
+            return write!(f, "∅");
+        }
+        if self.weight.is_full() {
+            return write!(f, "ALL");
+        }
+
+        let parts: Vec<String> = self
+            .weight
+            .0
+            .range_values()
+            .map(|(range, tokens)| {
+                let expanded: Vec<u32> = range.clone().collect();
+                let tsid = if expanded.len() <= WEIGHT_NAME_EXPAND_LIMIT
+                    && expanded.iter().all(|id| self.tsid_names.contains_key(id))
+                {
+                    expanded
+                        .iter()
+                        .map(|id| self.tsid_names.get(id).cloned().unwrap_or_else(|| id.to_string()))
+                        .collect::<Vec<_>>()
+                        .join("|")
+                } else if range.start() == range.end() {
+                    self.tsid_names
+                        .get(range.start())
+                        .cloned()
+                        .unwrap_or_else(|| range.start().to_string())
+                } else {
+                    format!("{}..={}", range.start(), range.end())
+                };
+                format!(
+                    "{tsid}→{}",
+                    rangeset_to_string_with_names(tokens.as_ref(), self.token_names)
+                )
             })
             .collect();
         write!(f, "{}", parts.join("; "))
@@ -1593,9 +1814,7 @@ mod tests {
 
         let interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
         assert!(!interner.weights.contains_key(&fingerprint));
-        if let Some(live_entry) = interner.token_sets.get(&stale_tokens) {
-            assert!(live_entry.strong_count() > 0);
-        }
+        assert!(!interner.token_sets.contains_key(&stale_tokens));
     }
 
     #[test]

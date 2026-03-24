@@ -4,7 +4,7 @@
 //! uses self-loop detection for bulk assignment. Non-bulk tokens are
 //! processed in parallel with rayon.
 
-use super::super::compat::Sep1Tokenizer;
+use super::super::compat::{Sep1Tokenizer, FlatDfa, FlatDfaState, GroupID};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -180,7 +180,7 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
 
     for state in &dfa.states {
         let mut table = [NONE; 256];
-        for (byte_idx, &target) in state.transitions.iter().enumerate() {
+        for (byte_idx, &target) in state.transitions.iter().enumerate() { let byte = byte_idx as u8;
             table[byte_idx] = target;
         }
         transitions.push(table);
@@ -945,3 +945,42 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
 
 // ---- Partition comparison (same as simple version) ----
 
+fn vocab_is_refinement(finer: &VocabEquivalenceResult, coarser: &VocabEquivalenceResult) -> bool {
+    let mut token_to_coarse: HashMap<usize, usize> = HashMap::new();
+    for (cid, class) in coarser.iter().enumerate() {
+        for &ti in class {
+            token_to_coarse.insert(ti, cid);
+        }
+    }
+    for class in finer {
+        let first_coarse = token_to_coarse.get(&class[0]).copied();
+        if !class
+            .iter()
+            .all(|&ti| token_to_coarse.get(&ti).copied() == first_coarse)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn partition_is_at_least_as_fine(
+    a: &VocabEquivalenceResult,
+    b: &VocabEquivalenceResult,
+) -> bool {
+    vocab_is_refinement(a, b)
+}
+
+pub fn partitions_are_comparable(
+    a: &VocabEquivalenceResult,
+    b: &VocabEquivalenceResult,
+) -> bool {
+    vocab_is_refinement(a, b) || vocab_is_refinement(b, a)
+}
+
+pub fn partitions_are_equivalent(
+    a: &VocabEquivalenceResult,
+    b: &VocabEquivalenceResult,
+) -> bool {
+    vocab_is_refinement(a, b) && vocab_is_refinement(b, a)
+}

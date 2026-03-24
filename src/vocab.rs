@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -34,6 +39,10 @@ impl Vocab {
     }
 
     pub fn max_token_id(&self) -> u32 {
-        self.entries.last_key_value().map_or(0, |(&token_id, _)| token_id)
+        self.entries
+            .iter()
+            .map(|(token_id, _)| *token_id)
+            .max()
+            .unwrap_or(0)
     }
 }

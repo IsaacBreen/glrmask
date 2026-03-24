@@ -1,7 +1,12 @@
-use thiserror::Error as ThisError;
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
-#[derive(ThisError, Debug)]
-pub enum Error {
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum GlrMaskError {
     #[error("Grammar parse error: {0}")]
     GrammarParse(String),
 
@@ -12,6 +17,4 @@ pub enum Error {
     Serialization(String),
 }
 
-pub type GlrMaskError = Error;
-
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, GlrMaskError>;

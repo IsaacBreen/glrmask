@@ -4,5 +4,4 @@
 //! - `fast`: token-based refinement on the surviving representative states
 
 pub mod fast;
-#[cfg(test)]
 pub mod max_length;

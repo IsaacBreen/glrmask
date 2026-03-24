@@ -1,3 +1,10 @@
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
+use std::collections::HashSet;
+
 use crate::GlrMaskError;
 use crate::compiler::grammar_def::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
@@ -14,7 +21,7 @@ enum Token {
     Star,
     Plus,
     Question,
-    Separator,
+    Separator, 
     Newline,
     Dot,
 }
@@ -192,22 +199,6 @@ fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
     }
 }
 
-fn choice_or_single(mut options: Vec<GrammarExpr>) -> GrammarExpr {
-    if options.len() == 1 {
-        options.pop().unwrap()
-    } else {
-        GrammarExpr::Choice(options)
-    }
-}
-
-fn sequence_or_single(mut items: Vec<GrammarExpr>) -> GrammarExpr {
-    match items.len() {
-        0 => GrammarExpr::Sequence(Vec::new()),
-        1 => items.pop().unwrap(),
-        _ => GrammarExpr::Sequence(items),
-    }
-}
-
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -281,7 +272,11 @@ impl Parser {
             self.advance();
             options.push(self.parse_sequence()?);
         }
-        Ok(choice_or_single(options))
+        Ok(if options.len() == 1 {
+            options.pop().unwrap()
+        } else {
+            GrammarExpr::Choice(options)
+        })
     }
 
     fn parse_sequence(&mut self) -> Result<GrammarExpr, GlrMaskError> {
@@ -289,7 +284,11 @@ impl Parser {
         while self.is_unit_start() {
             items.push(self.parse_unit()?);
         }
-        Ok(sequence_or_single(items))
+        Ok(match items.len() {
+            0 => GrammarExpr::Sequence(Vec::new()),
+            1 => items.pop().unwrap(),
+            _ => GrammarExpr::Sequence(items),
+        })
     }
 
     fn is_unit_start(&self) -> bool {
@@ -348,6 +347,8 @@ pub fn parse_ebnf(input: &str) -> Result<GrammarDef, GlrMaskError> {
     lower(&factored)
 }
 
+#[allow(dead_code)]
+    
 pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;

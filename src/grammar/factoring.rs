@@ -31,14 +31,6 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
     }
 }
 
-fn epsilon_expr() -> GrammarExpr {
-    GrammarExpr::Sequence(Vec::new())
-}
-
-fn colon_literal() -> GrammarExpr {
-    GrammarExpr::Literal(b":".to_vec())
-}
-
 pub fn factor_named_grammar(grammar: NamedGrammar) -> NamedGrammar {
     let terminal_names = grammar.terminal_names_set();
     let rules = ChoiceFactorer::new(grammar.rules, &terminal_names).factor_all();
@@ -49,7 +41,6 @@ pub fn factor_named_grammar(grammar: NamedGrammar) -> NamedGrammar {
     }
 }
 
-#[cfg(test)]
 pub fn factor_grammar_rules(
     rules: Vec<NamedRule>,
     terminals: &HashSet<String>,
@@ -59,44 +50,53 @@ pub fn factor_grammar_rules(
 
 struct ChoiceFactorer {
     rules: HashMap<String, GrammarExpr>,
-    ordered_rules: Vec<(String, bool)>,
+    rule_order: Vec<(String, bool)>, // (name, is_terminal)
     terminals: HashSet<String>,
     recursive_rules: HashSet<String>,
     new_rules: Vec<NamedRule>,
+    helper_counter: usize,
     factor_cache: HashMap<Vec<GrammarExpr>, String>,
 }
 
 impl ChoiceFactorer {
     fn new(rules: Vec<NamedRule>, terminals: &HashSet<String>) -> Self {
-        let ordered_rules: Vec<(String, bool)> = rules
+        let rule_order: Vec<(String, bool)> = rules
             .iter()
             .map(|r| (r.name.clone(), r.is_terminal))
             .collect();
-        let rules_by_name: HashMap<String, GrammarExpr> = rules
+        let rule_map: HashMap<String, GrammarExpr> = rules
             .into_iter()
             .map(|r| (r.name, r.expr))
             .collect();
-        let recursive_rules = Self::find_recursive_rules(&rules_by_name);
+        let recursive_rules = Self::find_recursive_rules(&rule_map);
 
         Self {
-            rules: rules_by_name,
-            ordered_rules,
+            rules: rule_map,
+            rule_order,
             terminals: terminals.clone(),
             recursive_rules,
             new_rules: Vec::new(),
+            helper_counter: 0,
             factor_cache: HashMap::new(),
         }
     }
 
     fn factor_all(mut self) -> Vec<NamedRule> {
-        for (name, is_terminal) in self.ordered_rules.clone() {
+        for (name, is_terminal) in self.rule_order.clone() {
             let expr = self
                 .rules
                 .get(&name)
                 .cloned()
                 .expect("rule order and rule map should stay aligned");
 
-            let factored_expr = if self.should_factor_rule(&name, &expr) {
+            // Factor internal nonterminal rules that don't contain regex features.
+            // "Internal" = names starting with '_' (Lark/EBNF convention).
+            // Terminal rules are left unchanged — they define token patterns.
+            let should_factor = name.starts_with('_')
+                && !self.terminals.contains(&name)
+                && !contains_regex_features(&expr);
+
+            let factored_expr = if should_factor {
                 self.factor_expr(expr, &name)
             } else {
                 expr
@@ -112,38 +112,32 @@ impl ChoiceFactorer {
         self.new_rules
     }
 
-    fn should_factor_rule(&self, name: &str, expr: &GrammarExpr) -> bool {
-        name.starts_with('_')
-            && !self.terminals.contains(name)
-            && !contains_regex_features(expr)
-    }
-
-    fn factor_expr(&mut self, expr: GrammarExpr, rule_name: &str) -> GrammarExpr {
+    fn factor_expr(&mut self, expr: GrammarExpr, context_name: &str) -> GrammarExpr {
         match expr {
             GrammarExpr::Choice(alternatives) if alternatives.len() > 1 => {
-                self.factor_choice(alternatives, rule_name)
+                self.factor_choice(alternatives, context_name)
             }
             GrammarExpr::Sequence(exprs) => GrammarExpr::Sequence(
                 exprs
                     .into_iter()
-                    .map(|expr| self.factor_expr(expr, rule_name))
+                    .map(|expr| self.factor_expr(expr, context_name))
                     .collect(),
             ),
             GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
-                expr: Box::new(self.factor_expr(*expr, rule_name)),
-                exclude: Box::new(self.factor_expr(*exclude, rule_name)),
+                expr: Box::new(self.factor_expr(*expr, context_name)),
+                exclude: Box::new(self.factor_expr(*exclude, context_name)),
             },
             GrammarExpr::Optional(expr) => {
-                GrammarExpr::Optional(Box::new(self.factor_expr(*expr, rule_name)))
+                GrammarExpr::Optional(Box::new(self.factor_expr(*expr, context_name)))
             }
             GrammarExpr::Repeat(expr) => {
-                GrammarExpr::Repeat(Box::new(self.factor_expr(*expr, rule_name)))
+                GrammarExpr::Repeat(Box::new(self.factor_expr(*expr, context_name)))
             }
             GrammarExpr::RepeatOne(expr) => {
-                GrammarExpr::RepeatOne(Box::new(self.factor_expr(*expr, rule_name)))
+                GrammarExpr::RepeatOne(Box::new(self.factor_expr(*expr, context_name)))
             }
             GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-                expr: Box::new(self.factor_expr(*expr, rule_name)),
+                expr: Box::new(self.factor_expr(*expr, context_name)),
                 min,
                 max,
             },
@@ -151,95 +145,102 @@ impl ChoiceFactorer {
         }
     }
 
-    fn factor_choice(&mut self, alternatives: Vec<GrammarExpr>, rule_name: &str) -> GrammarExpr {
+    fn factor_choice(&mut self, alternatives: Vec<GrammarExpr>, context_name: &str) -> GrammarExpr {
         if alternatives.len() < 2 {
-            return alternatives.into_iter().next().unwrap_or_else(epsilon_expr);
+            return alternatives
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| GrammarExpr::Sequence(vec![]));
         }
 
-        let (mut safe_alternatives, recursive_alternatives): (Vec<_>, Vec<_>) = alternatives
-            .into_iter()
-            .partition(|alternative| self.is_safe_alternative(alternative));
+        let mut safe_alts = Vec::new();
+        let mut unsafe_alts = Vec::new();
+
+        for alternative in alternatives {
+            if self.is_safe_alternative(&alternative) {
+                safe_alts.push(alternative);
+            } else {
+                unsafe_alts.push(alternative);
+            }
+        }
 
         let mut final_choices = Vec::new();
 
-        if safe_alternatives.len() > 1 {
-            let helper_name = self.create_helper_rule(
-                safe_alternatives,
-                format!("{}_safe", rule_name),
-            );
+        if safe_alts.len() > 1 {
+            let helper_name = self.create_helper_rule(safe_alts, format!("{}_safe", context_name));
             final_choices.push(GrammarExpr::Ref(helper_name));
-        } else if let Some(safe_alternative) = safe_alternatives.pop() {
-            final_choices.push(safe_alternative);
+        } else if let Some(safe_alt) = safe_alts.into_iter().next() {
+            final_choices.push(safe_alt);
         }
 
-        let tail_groups = self.group_by_tail(&recursive_alternatives);
+        let tail_groups = self.group_by_tail(&unsafe_alts);
         for (tail, heads) in tail_groups {
-            if heads.len() > 1 || Self::is_complex_head(&heads[0]) {
+            if heads.len() > 1 || self.is_complex_head(&heads[0]) {
                 let helper_name = if heads.len() == 1 {
-                    self.create_helper_rule(heads.clone(), format!("{}_key", rule_name))
+                    self.create_helper_rule(heads.clone(), format!("{}_key", context_name))
                 } else {
-                    self.create_helper_rule(heads.clone(), format!("{}_keys", rule_name))
+                    self.create_helper_rule(heads.clone(), format!("{}_keys", context_name))
                 };
 
                 final_choices.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Ref(helper_name),
-                    colon_literal(),
+                    GrammarExpr::Literal(b":".to_vec()),
                     tail,
                 ]));
             } else {
                 final_choices.push(GrammarExpr::Sequence(vec![
                     heads.into_iter().next().expect("single head should exist"),
-                    colon_literal(),
+                    GrammarExpr::Literal(b":".to_vec()),
                     tail,
                 ]));
             }
         }
 
-        for alternative in &recursive_alternatives {
-            if !Self::has_tail_pattern(alternative) {
+        for alternative in &unsafe_alts {
+            if !self.has_tail_pattern(alternative) {
                 final_choices.push(alternative.clone());
             }
         }
 
-        match final_choices.len() {
-            0 => epsilon_expr(),
-            1 => final_choices
-                .into_iter()
-                .next()
-                .expect("single factored choice should exist"),
-            _ => GrammarExpr::Choice(final_choices),
+        if final_choices.is_empty() {
+            GrammarExpr::Sequence(vec![])
+        } else if final_choices.len() == 1 {
+            final_choices.into_iter().next().expect("single factored choice should exist")
+        } else {
+            GrammarExpr::Choice(final_choices)
         }
     }
 
     fn is_safe_alternative(&self, expr: &GrammarExpr) -> bool {
-        let refs = Self::collect_refs(expr);
+        let refs = self.collect_refs(expr);
         !refs.iter().any(|name| self.recursive_rules.contains(name))
     }
 
-    fn collect_refs(expr: &GrammarExpr) -> HashSet<String> {
+    fn collect_refs(&self, expr: &GrammarExpr) -> HashSet<String> {
         let mut refs = HashSet::new();
-        Self::collect_refs_impl(expr, &mut refs);
+        self.collect_refs_impl(expr, &mut refs);
         refs
     }
 
-    fn collect_refs_impl(expr: &GrammarExpr, refs: &mut HashSet<String>) {
+    fn collect_refs_impl(&self, expr: &GrammarExpr, refs: &mut HashSet<String>) {
+        let _ = self;
         match expr {
             GrammarExpr::Ref(name) => {
                 refs.insert(name.clone());
             }
             GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
                 for expr in exprs {
-                    Self::collect_refs_impl(expr, refs);
+                    self.collect_refs_impl(expr, refs);
                 }
             }
             GrammarExpr::Exclude { expr, exclude } => {
-                Self::collect_refs_impl(expr, refs);
-                Self::collect_refs_impl(exclude, refs);
+                self.collect_refs_impl(expr, refs);
+                self.collect_refs_impl(exclude, refs);
             }
             GrammarExpr::Optional(expr)
             | GrammarExpr::Repeat(expr)
             | GrammarExpr::RepeatOne(expr)
-            | GrammarExpr::RepeatRange { expr, .. } => Self::collect_refs_impl(expr, refs),
+            | GrammarExpr::RepeatRange { expr, .. } => self.collect_refs_impl(expr, refs),
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
@@ -252,7 +253,7 @@ impl ChoiceFactorer {
         let mut groups = HashMap::<GrammarExpr, Vec<GrammarExpr>>::new();
 
         for alternative in alternatives {
-            if let Some((head, tail)) = Self::extract_tail_pattern(alternative) {
+            if let Some((head, tail)) = self.extract_tail_pattern(alternative) {
                 if self.is_safe_alternative(&head) {
                     groups.entry(tail).or_default().push(head);
                 }
@@ -262,34 +263,35 @@ impl ChoiceFactorer {
         groups
     }
 
-    fn has_tail_pattern(expr: &GrammarExpr) -> bool {
-        Self::extract_tail_pattern(expr).is_some()
+    fn has_tail_pattern(&self, expr: &GrammarExpr) -> bool {
+        self.extract_tail_pattern(expr).is_some()
     }
 
-    fn extract_tail_pattern(expr: &GrammarExpr) -> Option<(GrammarExpr, GrammarExpr)> {
-        let GrammarExpr::Sequence(parts) = expr else {
-            return None;
-        };
-        if parts.len() < 3 {
-            return None;
-        }
-
-        let (tail, prefix) = parts.split_last()?;
-        let (separator, head_parts) = prefix.split_last()?;
-        match separator {
-            GrammarExpr::Literal(literal) if literal == b":" && matches!(tail, GrammarExpr::Ref(_)) => {
-                let head = if head_parts.len() == 1 {
-                    head_parts[0].clone()
-                } else {
-                    GrammarExpr::Sequence(head_parts.to_vec())
-                };
-                Some((head, tail.clone()))
+    fn extract_tail_pattern(&self, expr: &GrammarExpr) -> Option<(GrammarExpr, GrammarExpr)> {
+        let _ = self;
+        if let GrammarExpr::Sequence(parts) = expr {
+            if parts.len() >= 3 {
+                let colon_index = parts.len() - 2;
+                if let GrammarExpr::Literal(literal) = &parts[colon_index] {
+                    if literal == b":" {
+                        let head = if colon_index == 1 {
+                            parts[0].clone()
+                        } else {
+                            GrammarExpr::Sequence(parts[..colon_index].to_vec())
+                        };
+                        let tail = parts[parts.len() - 1].clone();
+                        if matches!(tail, GrammarExpr::Ref(_)) {
+                            return Some((head, tail));
+                        }
+                    }
+                }
             }
-            _ => None,
         }
+        None
     }
 
-    fn is_complex_head(expr: &GrammarExpr) -> bool {
+    fn is_complex_head(&self, expr: &GrammarExpr) -> bool {
+        let _ = self;
         match expr {
             GrammarExpr::Sequence(parts) => parts.len() > 2,
             GrammarExpr::Choice(_) => true,
@@ -330,6 +332,7 @@ impl ChoiceFactorer {
             is_terminal: false,
         });
         self.factor_cache.insert(alternatives, helper_name.clone());
+        self.helper_counter += 1;
         helper_name
     }
 

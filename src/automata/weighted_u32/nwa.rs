@@ -1,4 +1,9 @@
-use std::collections::BTreeMap;
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use crate::ds::weight::Weight;
 
@@ -31,7 +36,8 @@ impl NwaBody {
 }
 
 impl NWA {
-    pub fn new(_num_tsids: u32, _max_token: u32) -> Self {
+    pub fn new(num_tsids: u32, max_token: u32) -> Self {
+        let _ = (num_tsids, max_token);
         Self {
             states: Vec::new(),
             start_states: Vec::new(),
@@ -263,6 +269,20 @@ impl NWA {
         }
         true
     }
+
+    pub fn display_with_all_maps<'a>(
+        &'a self,
+        symbols: &'a std::collections::BTreeMap<Label, String>,
+        tsid_names: &'a std::collections::BTreeMap<u32, String>,
+        token_names: &'a std::collections::BTreeMap<u32, String>,
+    ) -> NWADisplayWithAllMaps<'a> {
+        NWADisplayWithAllMaps {
+            nwa: self,
+            symbols,
+            tsid_names,
+            token_names,
+        }
+    }
 }
 
 fn fmt_nwa_states(
@@ -309,9 +329,32 @@ impl std::fmt::Display for NWA {
     }
 }
 
+pub struct NWADisplayWithAllMaps<'a> {
+    nwa: &'a NWA,
+    symbols: &'a std::collections::BTreeMap<Label, String>,
+    tsid_names: &'a std::collections::BTreeMap<u32, String>,
+    token_names: &'a std::collections::BTreeMap<u32, String>,
+}
+
+impl std::fmt::Display for NWADisplayWithAllMaps<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let nwa = self.nwa;
+        let syms = self.symbols;
+        let starts = nwa.start_states.iter().map(|s| format!("State {s}")).collect::<Vec<_>>().join(", ");
+        writeln!(f, "NWA: {} states, start={starts}", nwa.states.len())?;
+        fmt_nwa_states(
+            nwa,
+            f,
+            &|label| syms.get(&label).cloned().unwrap_or_else(|| label.to_string()),
+            &|weight| format!("{}", weight.display_with_names(self.tsid_names, self.token_names)),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use range_set_blaze::RangeSetBlaze;
 
     #[test]
     fn test_nwa_basic() {

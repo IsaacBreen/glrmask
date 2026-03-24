@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 use std::collections::{HashMap, HashSet};
 
 use crate::GlrMaskError;
@@ -7,10 +12,10 @@ use crate::grammar::factoring::factor_named_grammar;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Ident(String),
-    Terminal(String),
-    Literal(String),
-    Regex(String),
+    Ident(String),    
+    Terminal(String), 
+    Literal(String),  
+    Regex(String),    
     LParen,
     RParen,
     LBracket,
@@ -22,10 +27,10 @@ enum Token {
     Colon,
     Newline,
     Dot,
-    Tilde,
+    Tilde, 
     Number(usize),
     Comma,
-    Arrow,
+    Arrow, 
     Bang,
     PercentIgnore,
 }
@@ -293,22 +298,6 @@ fn bounded_repeat_expr(atom: GrammarExpr, min: usize, max: Option<usize>) -> Gra
         expr: Box::new(atom),
         min,
         max,
-    }
-}
-
-fn choice_or_single(mut options: Vec<GrammarExpr>) -> GrammarExpr {
-    if options.len() == 1 {
-        options.pop().unwrap()
-    } else {
-        GrammarExpr::Choice(options)
-    }
-}
-
-fn sequence_or_single(mut parts: Vec<GrammarExpr>) -> GrammarExpr {
-    match parts.len() {
-        0 => GrammarExpr::Sequence(Vec::new()),
-        1 => parts.pop().unwrap(),
-        _ => GrammarExpr::Sequence(parts),
     }
 }
 
@@ -770,7 +759,11 @@ impl Parser {
         let ignore = if ignore_exprs.is_empty() {
             None
         } else {
-            let ignore_body = choice_or_single(ignore_exprs);
+            let ignore_body = if ignore_exprs.len() == 1 {
+                ignore_exprs.into_iter().next().unwrap()
+            } else {
+                GrammarExpr::Choice(ignore_exprs)
+            };
             let name = "__IGNORE".to_string();
             rules.push(NamedRule { name: name.clone(), expr: ignore_body, is_terminal: true });
             Some(name)
@@ -784,32 +777,39 @@ impl Parser {
         self.consume_alias_if_present()?;
         let mut alts = vec![first];
 
-        while self.consume_alternative_separator() {
-            let alt = self.parse_sequence()?;
-            self.consume_alias_if_present()?;
-            alts.push(alt);
+        loop {
+            
+            if self.peek() == Some(&Token::Pipe) {
+                self.pos += 1;
+                let alt = self.parse_sequence()?;
+                self.consume_alias_if_present()?;
+                alts.push(alt);
+                continue;
+            }
+            
+            let saved = self.pos;
+            let mut saw_newline = false;
+            while self.peek() == Some(&Token::Newline) {
+                self.pos += 1;
+                saw_newline = true;
+            }
+            if saw_newline && self.peek() == Some(&Token::Pipe) {
+                self.pos += 1;
+                let alt = self.parse_sequence()?;
+                self.consume_alias_if_present()?;
+                alts.push(alt);
+                continue;
+            }
+            
+            self.pos = saved;
+            break;
         }
 
-        Ok(choice_or_single(alts))
-    }
-
-    fn consume_alternative_separator(&mut self) -> bool {
-        if self.peek() == Some(&Token::Pipe) {
-            self.pos += 1;
-            return true;
+        if alts.len() == 1 {
+            Ok(alts.into_iter().next().unwrap())
+        } else {
+            Ok(GrammarExpr::Choice(alts))
         }
-
-        let saved = self.pos;
-        while self.peek() == Some(&Token::Newline) {
-            self.pos += 1;
-        }
-        if self.pos > saved && self.peek() == Some(&Token::Pipe) {
-            self.pos += 1;
-            return true;
-        }
-
-        self.pos = saved;
-        false
     }
 
     fn consume_alias_if_present(&mut self) -> Result<(), GlrMaskError> {
@@ -837,7 +837,13 @@ impl Parser {
             parts.push(self.parse_unit()?);
         }
 
-        Ok(sequence_or_single(parts))
+        if parts.is_empty() {
+            Ok(GrammarExpr::Sequence(vec![]))
+        } else if parts.len() == 1 {
+            Ok(parts.into_iter().next().unwrap())
+        } else {
+            Ok(GrammarExpr::Sequence(parts))
+        }
     }
 
     fn is_unit_start(&self) -> bool {
@@ -927,7 +933,7 @@ impl Parser {
                 }
 
                 if s.is_empty() {
-                    Ok(sequence_or_single(Vec::new()))
+                    Ok(GrammarExpr::Sequence(vec![]))
                 } else {
                     Ok(GrammarExpr::Literal(s.into_bytes()))
                 }
@@ -960,6 +966,8 @@ pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     lower(&factored)
 }
 
+#[allow(dead_code)]
+    
 pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;

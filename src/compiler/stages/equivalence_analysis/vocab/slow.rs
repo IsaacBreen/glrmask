@@ -13,7 +13,7 @@
 
 // Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
 
-use super::super::compat::Sep1Tokenizer;
+use super::super::compat::{FlatDfa, FlatDfaState, GroupID, Sep1Tokenizer};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -35,10 +35,7 @@ const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
 const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
-const SLOW_VOCAB_EQUIV_PROGRESS_ENVS: &[&str] = &[
-    "GLRMASK_SLOW_VOCAB_EQUIV_PROGRESS",
-    "SLOW_VOCAB_EQUIV_PROGRESS",
-];
+const SLOW_VOCAB_EQUIV_PROGRESS_ENV: &str = "SLOW_VOCAB_EQUIV_PROGRESS";
 const SLOW_VOCAB_EQUIV_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
 // ---- Deterministic hashing ----
@@ -193,6 +190,7 @@ fn build_dfa(regex: &Sep1Tokenizer, disallowed_follows: &BTreeMap<u32, BitSet>) 
     for state in &dfa.states {
         let mut table = [NONE; 256];
         for (byte_idx, &target) in state.transitions.iter().enumerate() {
+            let byte = byte_idx as u8;
             table[byte_idx] = target;
         }
         transitions.push(table);
@@ -272,11 +270,13 @@ fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
 }
 
 #[inline]
-fn env_flag_enabled_any(names: &[&str]) -> bool {
-    names.iter().find_map(|name| std::env::var(name).ok()).map_or(false, |value| {
-        let trimmed = value.trim();
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
             !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-    })
+        })
+        .unwrap_or(false)
 }
 
 struct ProgressReporter {
@@ -291,7 +291,7 @@ impl ProgressReporter {
     fn new(total: usize) -> Self {
         let now = Instant::now();
         ProgressReporter {
-            enabled: env_flag_enabled_any(SLOW_VOCAB_EQUIV_PROGRESS_ENVS),
+            enabled: env_flag_enabled(SLOW_VOCAB_EQUIV_PROGRESS_ENV),
             total,
             processed: 0,
             started_at: now,
@@ -968,7 +968,6 @@ pub fn partitions_are_comparable(a: &VocabEquivalenceResult, b: &VocabEquivalenc
 }
 
 /// Returns true if both partitions have identical classes.
-#[cfg(test)]
 pub fn partitions_are_equivalent(a: &VocabEquivalenceResult, b: &VocabEquivalenceResult) -> bool {
     a == b
 }

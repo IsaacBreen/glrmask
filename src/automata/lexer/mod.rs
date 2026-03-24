@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+
 pub mod ast;
 pub mod compile;
 pub mod determinize;
@@ -6,3 +10,5 @@ pub mod minimize;
 pub mod nfa;
 pub mod tokenizer;
 pub mod regex;
+
+pub use ast as regex_ast;

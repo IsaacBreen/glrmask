@@ -13,7 +13,7 @@
 //!   - test_object_schema_rejects_quote_at_empty_prefix: requires GPT-2 vocab file
 
 use crate::import::ast::GrammarExpr;
-use crate::import::json_schema::schema_to_named_grammar;
+use crate::import::json_schema::{json_schema_to_grammar, schema_to_named_grammar};
 use crate::runtime::Constraint;
 use crate::Vocab;
 use std::path::Path;
@@ -616,6 +616,22 @@ fn test_conversion_enum() {
         .expect("schema should convert to named grammar");
     assert!(!named.rules.is_empty());
 
+    // Check that the grammar contains the literal strings somewhere in the rules
+    fn contains_literal(expr: &GrammarExpr, target: &[u8]) -> bool {
+        match expr {
+            GrammarExpr::Literal(bytes) => bytes == target,
+            GrammarExpr::Sequence(parts) => parts.iter().any(|p| contains_literal(p, target)),
+            GrammarExpr::Choice(options) => options.iter().any(|o| contains_literal(o, target)),
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => {
+                contains_literal(inner, target)
+            }
+            _ => false,
+        }
+    }
+
     let has_red = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"red\""));
     let has_green = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"green\""));
     let has_blue = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"blue\""));
@@ -737,7 +753,7 @@ fn test_conversion_allof_merges_object_properties() {
 }
 
 #[test]
-fn test_prefix_items_follow_optional_tuple_semantics() {
+fn test_prefix_items_default_to_required_like_cfa() {
     let schema = r#"{
         "type": "array",
         "prefixItems": [
@@ -759,22 +775,18 @@ fn test_prefix_items_follow_optional_tuple_semantics() {
     let mask = state.mask();
 
     assert!(
-        token_allowed(&mask, 0),
-        "prefixItems should allow omitting trailing tuple positions by default"
+        !token_allowed(&mask, 0),
+        "CFA-style prefixItems lowering should not allow omitting all prefix items"
     );
     assert!(
-        token_allowed(&mask, 1),
-        "prefixItems should allow consuming only the first tuple position by default"
+        !token_allowed(&mask, 1),
+        "CFA-style prefixItems lowering should not allow truncating required prefix items"
     );
     assert!(
         token_allowed(&mask, 2),
-        "prefixItems should allow the full tuple payload"
+        "CFA-style prefixItems lowering should allow the full tuple payload"
     );
 
-    state.commit_token(1).unwrap();
-    assert!(state.is_finished(), "[1] should finish successfully");
-
-    let mut state = c.start();
     state.commit_token(2).unwrap();
     assert!(state.is_finished(), "[1,2] should finish successfully");
 }

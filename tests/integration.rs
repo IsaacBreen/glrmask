@@ -49,6 +49,41 @@ fn test_ebnf_simple_literal() {
 }
 
 #[test]
+fn test_debug_commit_metrics_reports_parser_work_without_mutating_state() {
+    let vocab = make_vocab(&["a", "b"]);
+    let c = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
+    let mut s = c.start();
+
+    let mask_before = s.mask();
+    let metrics = s.debug_commit_token_metrics(0).unwrap();
+    let mask_after_debug = s.mask();
+
+    assert_eq!(mask_before, mask_after_debug, "debug commit metrics must not mutate state");
+    assert_eq!(metrics.bytes_len, 1);
+    assert_eq!(metrics.state_summary_before.tokenizer_state_count, 1);
+    assert_eq!(metrics.initial_tokenizer_states, 1);
+    assert_eq!(metrics.initial_exec_calls, 1);
+    assert_eq!(metrics.processing_exec_calls, 1);
+    assert_eq!(metrics.reused_initial_exec_results, 1);
+    assert_eq!(metrics.processing_matches_total, 1);
+    assert_eq!(metrics.processing_ignored_matches, 0);
+    assert_eq!(metrics.advance_stacks_calls, 1);
+    assert_eq!(metrics.advance_stacks_nonempty, 1);
+    assert_eq!(metrics.queue_offsets_processed, 1);
+    assert_eq!(metrics.queue_states_processed, 1);
+    assert_eq!(metrics.parser_final_pushes, 1);
+    assert!(metrics.fused_parser_states >= 1);
+    assert_eq!(
+        metrics.state_summary_after.tokenizer_state_count,
+        metrics.fused_parser_states,
+    );
+
+    s.commit_token(0).unwrap();
+    let mask_after_commit = s.mask();
+    assert!(token_allowed(&mask_after_commit, 1), "'b' should be allowed after committing 'a'");
+}
+
+#[test]
 fn test_ebnf_choice() {
     let vocab = make_vocab(&["x", "y", "z"]);
     let c = Constraint::from_ebnf(r#"start ::= "x" | "y""#, &vocab).unwrap();
@@ -441,6 +476,7 @@ start: JSON_STRING
     // Initial state: only " token should be allowed (to start the string)
     let state = constraint.start();
     let mask = state.mask();
+    eprintln!("Initial mask: {:?}", (1..=6).filter(|&i| token_allowed(&mask, i)).collect::<Vec<_>>());
     assert!(token_allowed(&mask, 1), "token 1 (\") should start string");
 
     // After committing ", we're inside the string
@@ -448,6 +484,9 @@ start: JSON_STRING
     state.commit_token(1).unwrap(); // commit "
 
     let mask = state.mask();
+    let active: Vec<usize> = (1..=6).filter(|&i| token_allowed(&mask, i)).collect();
+    eprintln!("After \": {:?}", active);
+
     assert!(token_allowed(&mask, 1), "closing quote should be valid");
     assert!(token_allowed(&mask, 2), "hello should be valid string content");
     assert!(token_allowed(&mask, 3), "\\n should be valid escape");
@@ -455,6 +494,10 @@ start: JSON_STRING
     assert!(!token_allowed(&mask, 5), "space+\\( should NOT be valid (invalid escape)");
     assert!(token_allowed(&mask, 6), "\\\" should be valid escape");
 }
+
+
+
+
 
 #[test]
 fn test_array_int_comma_after_digit() {
@@ -483,6 +526,7 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
 
     // Step 0: should allow "[" 
     let mask0 = s.mask();
+    eprintln!("Step 0 mask: {:?}", iter_allowed(&mask0));
     assert!(token_allowed(&mask0, 0), "'[' should be allowed");
 
     // Commit "["
@@ -490,12 +534,25 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
 
     // Step 1: should allow digits and "-"
     let mask1 = s.mask();
+    eprintln!("Step 1 mask: {:?}", iter_allowed(&mask1));
     assert!(token_allowed(&mask1, 3), "'1' should be allowed after '['");
 
+    // Commit "1" — trace what the tokenizer does
+    eprintln!("\n--- Tracing tokenizer for '1' ---");
+    
+    // Also trace ",", "]"
+    eprintln!("\n--- Tracing tokenizer for ',' ---");
+    eprintln!("\n--- Tracing tokenizer for ']' ---");
+    
+    // Debug dump to see terminal IDs and DFA structure
+    
     s.commit_token(3).unwrap();
 
     // Step 2: should allow ",", "]", ",-", and digit tokens
     let mask2 = s.mask();
+    let allowed = iter_allowed(&mask2);
+    eprintln!("\nStep 2 mask after '[1': {:?}", allowed);
+    
     assert!(token_allowed(&mask2, 2), "',' (id=2) should be allowed after '[1'");
     assert!(token_allowed(&mask2, 1), "']' (id=1) should be allowed after '[1'");
     assert!(token_allowed(&mask2, 7), "',-' (id=7) should be allowed after '[1'");
@@ -503,12 +560,15 @@ start: "[" "]" | "[" JSON_INTEGER ("," JSON_INTEGER)* "]"
     // Commit ","
     s.commit_token(2).unwrap();
     let mask3 = s.mask();
+    eprintln!("Step 3 mask after '[1,': {:?}", iter_allowed(&mask3));
     assert!(token_allowed(&mask3, 3), "'1' should be allowed after ','");
 
     // Commit "2" (using token "1" which is id=3 with bytes "1")
     // Actually, let's commit token 3 (bytes="1") representing a second digit
     s.commit_token(3).unwrap();
     let mask4 = s.mask();
+    let allowed4 = iter_allowed(&mask4);
+    eprintln!("Step 4 mask after '[1,1': {:?}", allowed4);
     assert!(token_allowed(&mask4, 2), "',' (id=2) should be allowed after '[1,1'");
     assert!(token_allowed(&mask4, 1), "']' (id=1) should be allowed after '[1,1'");
     assert!(token_allowed(&mask4, 7), "',-' (id=7) should be allowed after '[1,1'");
@@ -636,13 +696,15 @@ fn test_ported_trivial() {
     // IDs: "a"→0, "$"→1
     let vocab = make_vocab(&["a", "$"]);
 
-    let c = Constraint::from_ebnf(
+    // Print the debug bundle so we can inspect compilation stages.
+    let (c, debug) = Constraint::from_ebnf_with_debug(
         r#"s ::= A EOF
            A ::= 'a'
            EOF ::= '$'"#,
         &vocab,
     )
     .unwrap();
+    eprintln!("\n{debug}");
 
     let mut s = c.start();
 
@@ -694,7 +756,7 @@ fn test_ported_simple() {
 fn test_ported_simple_minimized() {
     // IDs: "a"→0, "$"→1
     let vocab = make_vocab(&["a", "$"]);
-    let c = Constraint::from_ebnf(
+    let (c, debug) = Constraint::from_ebnf_with_debug(
         r#"s ::= x EOF
            x ::= A
            A ::= 'a'
@@ -702,6 +764,7 @@ fn test_ported_simple_minimized() {
         &vocab,
     )
     .unwrap();
+    eprintln!("\n{debug}");
     let mut s = c.start();
 
     let mask = s.mask();

@@ -131,6 +131,11 @@ fn test_epsilon_explosion_minimal() {
     let epsilon_states = dwa_epsilon.states.len();
     let epsilon_trans = count_transitions(&dwa_epsilon);
 
+    println!("N = {}", N);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
 }
 
 #[test]
@@ -176,6 +181,11 @@ fn test_epsilon_explosion_diverging_patterns() {
     let epsilon_states = dwa_epsilon.states.len();
     let epsilon_trans = count_transitions(&dwa_epsilon);
 
+    println!("N = {} (diverging patterns)", N);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
 }
 
 #[test]
@@ -227,6 +237,11 @@ fn test_epsilon_explosion_overlapping_alphabet() {
     let epsilon_states = dwa_epsilon.states.len();
     let epsilon_trans = count_transitions(&dwa_epsilon);
 
+    println!("N = {} (different pattern lengths: 1, 2, 3, 4 'a's)", N);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
 }
 
 #[test]
@@ -266,6 +281,11 @@ fn test_epsilon_explosion_shared_second_hop() {
     let epsilon_states = dwa_epsilon.states.len();
     let epsilon_trans = count_transitions(&dwa_epsilon);
 
+    println!("N = {} (shared second-hop state)", N);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
 }
 
 #[test]
@@ -310,6 +330,11 @@ fn test_epsilon_explosion_shared_then_diverge() {
     let epsilon_states = dwa_epsilon.states.len();
     let epsilon_trans = count_transitions(&dwa_epsilon);
 
+    println!("N = {} (shared + diverging paths)", N);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
 }
 
 #[test]
@@ -366,6 +391,11 @@ fn test_epsilon_explosion_paths_through_shared() {
     let epsilon_states = dwa_epsilon.states.len();
     let epsilon_trans = count_transitions(&dwa_epsilon);
 
+    println!("N = {} (pairwise shared second-hops)", N);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
 }
 
 #[test]
@@ -405,6 +435,11 @@ fn test_epsilon_explosion_many_sources_same_label() {
     let epsilon_states = dwa_epsilon.states.len();
     let epsilon_trans = count_transitions(&dwa_epsilon);
 
+    println!("N = {} (many sources sharing one label)", N);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
 }
 
 #[test]
@@ -461,6 +496,11 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
     let epsilon_states = dwa_epsilon.states.len();
     let epsilon_trans = count_transitions(&dwa_epsilon);
 
+    println!("N = {}, K = {} sharing label L", N, K);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
 }
 
 // ============================================================================

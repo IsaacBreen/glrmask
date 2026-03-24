@@ -1,80 +1,124 @@
 # glrmask
 
-`glrmask` compiles grammars into immutable decoding constraints for tokenized LLM
-generation. A compiled `Constraint` can produce token masks, accept committed
-tokens incrementally, and serialize to bytes.
-
-## Supported Inputs
-
-- EBNF
-- Lark
-- JSON Schema
+Fast grammar-constrained decoding for LLMs. Compiles context-free grammars into a
+Deterministic Weighted Automaton (DWA) and produces token masks in microseconds.
 
 ## Quick Start
 
 ```rust
 use glrmask::{Constraint, Vocab};
 
-fn token_allowed(mask: &[u32], token_id: usize) -> bool {
-    let word = token_id / 32;
-    word < mask.len() && ((mask[word] >> (token_id % 32)) & 1) != 0
-}
+// Build a vocabulary (token_id, bytes).
+let vocab = Vocab::new(
+    vec![
+        (0, b"a".to_vec()),
+        (1, b"b".to_vec()),
+    ],
+    None,
+);
 
-fn main() {
-    let vocab = Vocab::new(
-        vec![
-            (0, b"hello".to_vec()),
-            (1, b" ".to_vec()),
-            (2, b"world".to_vec()),
-        ],
-        None,
-    );
+// Compile a grammar into a constraint.
+let constraint = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
 
-    let constraint = Constraint::from_ebnf(
-        r#"start ::= "hello" " " "world""#,
-        &vocab,
-    )
-    .unwrap();
+// Create mutable state and step through tokens.
+let mut state = constraint.start();
+let mask = state.mask();
+assert!(mask[0] & 1 != 0); // "a" allowed (token 0, bit 0)
 
-    let mut state = constraint.start();
-    assert!(token_allowed(&state.mask(), 0));
+state.commit(0); // commit "a"
+let mask = state.mask();
+assert!(mask[0] & 2 != 0); // "b" now allowed (token 1, bit 1)
 
-    state.commit_token(0).unwrap();
-    assert!(token_allowed(&state.mask(), 1));
+state.commit(1); // commit "b"
+assert!(state.is_finished());
+```
 
-    state.commit_token(1).unwrap();
-    assert!(token_allowed(&state.mask(), 2));
+## Grammar Formats
 
-    state.commit_token(2).unwrap();
-    assert!(state.is_finished());
-}
+### EBNF
+
+```rust
+let c = Constraint::from_ebnf(r#"
+    start ::= greeting " " name
+    greeting ::= "hello" | "hi"
+    name ::= "world" | "rust"
+"#, &vocab)?;
+```
+
+### Lark
+
+```rust
+let c = Constraint::from_lark(r#"
+    start: greeting " " name
+    greeting: "hello" | "hi"
+    name: "world" | "rust"
+"#, &vocab)?;
+```
+
+### JSON Schema
+
+```rust
+let c = Constraint::from_json_schema(r#"{"type": "boolean"}"#, &vocab)?;
 ```
 
 ## Serialization
 
-Compiled constraints can be cached and reloaded without recompilation.
+Compiled constraints can be saved and loaded to avoid recompilation:
 
 ```rust
+// Save
 let bytes = constraint.save();
-let restored = Constraint::load(&bytes).unwrap();
-assert_eq!(constraint.mask_len(), restored.mask_len());
+constraint.save_to_file(std::path::Path::new("grammar.bin"))?;
+
+// Load
+let c = Constraint::load(&bytes)?;
+let c = Constraint::load_from_file(std::path::Path::new("grammar.bin"))?;
 ```
 
-## State Helpers
+## Architecture
 
-- `state.mask()` returns the packed token bitmask.
-- `state.commit_token(token_id)` advances with one token.
-- `state.commit_tokens(&token_ids)` advances with a token slice.
-- `state.commit_bytes(bytes)` advances with raw bytes.
-- `state.force()` returns the currently forced token IDs.
+```
+Grammar (EBNF/Lark/JSON Schema)
+  → GrammarDef (flat CFG rules)
+  → GLR table (states, actions, gotos)
+  → NWA (Nested Word Automaton with weights)
+  → DWA (Deterministic Weighted Automaton)
+  → Constraint (compiled, serializable)
+       ↓
+  ConstraintState (per-sequence mutable state)
+       ↓
+  compute_mask() → BitSet  (microsecond-scale)
+  commit(token_id)
+  is_accepting()
+```
 
-## Examples
+### Key Types
 
-```bash
-cargo run --example ebnf
-cargo run --example json_schema
+| Type | Description |
+|------|-------------|
+| `Constraint` | Immutable compiled grammar. Thread-safe. |
+| `ConstraintState` | Mutable per-sequence state. |
+| `Vocab` | Token vocabulary mapping IDs to byte sequences. |
+| `BitSet` | Dense bit vector for token masks. |
+
+## Utilities
+
+```rust
+use glrmask::runtime::force::{forced_token, is_dead};
+
+let mask = state.compute_mask(&constraint);
+
+// Check if exactly one token is allowed (can skip sampling).
+if let Some(token) = forced_token(&mask) {
+    state.commit(&constraint, token)?;
+}
+
+// Check if no tokens are allowed (dead state).
+if is_dead(&mask) {
+    // Handle error
+}
 ```
 
 ## License
 
-MIT OR Apache-2.0
+MIT

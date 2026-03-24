@@ -3,6 +3,7 @@
 //! This module is concerned only with turning a regex pattern string into an
 //! `Expr` AST. Tokenizer construction and expression analysis live under the
 //! compiler module (`compiler::compile`).
+#![allow(unused_imports)]
 
 use crate::automata::regex::Expr;
 use crate::ds::u8set::U8Set;

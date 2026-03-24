@@ -14,20 +14,44 @@ use crate::ds::char_transitions::CharTransitions;
 
 use super::dfa::DFA;
 
+#[derive(Default)]
+struct LexerMinimizeProfile {
+    input_states: usize,
+    reachable_states: usize,
+    initial_blocks: usize,
+    topo_labels: usize,
+    final_blocks: usize,
+    remove_unreachable_ms: std::time::Duration,
+    initial_partition_ms: std::time::Duration,
+    topology_refine_ms: std::time::Duration,
+    hopcroft_setup_ms: std::time::Duration,
+    hopcroft_refine_ms: std::time::Duration,
+    rebuild_ms: std::time::Duration,
+}
+
 const TOPOLOGY_PREREFINE_MAX_STATES: usize = 4096;
 
 impl DFA {
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
     pub fn minimize(&self) -> DFA {
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LEXER_MINIMIZE").is_some();
+        let mut profile = profile_enabled.then(LexerMinimizeProfile::default);
+
         if self.states().is_empty() {
             return self.clone();
         }
 
         // --- Remove unreachable states ---
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let mut working = self.clone();
         working.remove_unreachable_states();
         let n = working.states().len();
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+            profile.input_states = self.states().len();
+            profile.reachable_states = n;
+            profile.remove_unreachable_ms = started_at.elapsed();
+        }
 
         if n <= 1 {
             working.recompute_possible_futures();
@@ -35,6 +59,7 @@ impl DFA {
         }
 
         // --- Initial partition: group states by their finalizer set ---
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         let mut partition = vec![0u32; n]; // partition[state] = block_id
         let mut blocks: Vec<Vec<u32>> = Vec::new();
 
@@ -51,12 +76,18 @@ impl DFA {
                 blocks[block_idx as usize].push(state_idx as u32);
             }
         }
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+            profile.initial_blocks = blocks.len();
+            profile.initial_partition_ms = started_at.elapsed();
+        }
 
         // --- Phase 1: Topology-aware pre-refinement ---
         // This only helps when it can prove the partition is already singleton.
         // For large cyclic lexer DFAs it tends to be pure overhead, so keep it on
         // only for smaller inputs where the early-exit path is plausible.
         if n <= TOPOLOGY_PREREFINE_MAX_STATES {
+            let phase_started_at = profile_enabled.then(std::time::Instant::now);
+
             let adj: Vec<Vec<usize>> = working
                 .states()
                 .iter()
@@ -168,6 +199,10 @@ impl DFA {
                 partition[state] = lbl;
                 blocks[lbl as usize].push(state as u32);
             }
+            if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+                profile.topo_labels = num_labels as usize;
+                profile.topology_refine_ms = started_at.elapsed();
+            }
 
             if num_labels as usize == n {
                 // Check for self-loops
@@ -180,7 +215,14 @@ impl DFA {
 
                 if !has_self_loop {
                     // All singletons AND true DAG: provably already minimal
-                    return working.rebuild_from_blocks(blocks);
+                    let rebuild_started_at = profile_enabled.then(std::time::Instant::now);
+                    let result = working.rebuild_from_blocks(blocks);
+                    if let (Some(profile), Some(started_at)) = (profile.as_mut(), rebuild_started_at) {
+                        profile.final_blocks = result.states().len();
+                        profile.rebuild_ms = started_at.elapsed();
+                        log_minimize_profile(profile);
+                    }
+                    return result;
                 }
                 // Self-loops: fall through to Hopcroft
                 partition = vec![0u32; n];
@@ -203,11 +245,19 @@ impl DFA {
 
         let non_singletons = blocks.iter().filter(|b| b.len() > 1).count();
         if non_singletons == 0 {
-            return working.rebuild_from_blocks(blocks);
+            let rebuild_started_at = profile_enabled.then(std::time::Instant::now);
+            let result = working.rebuild_from_blocks(blocks);
+            if let (Some(profile), Some(started_at)) = (profile.as_mut(), rebuild_started_at) {
+                profile.final_blocks = result.states().len();
+                profile.rebuild_ms = started_at.elapsed();
+                log_minimize_profile(profile);
+            }
+            return result;
         }
 
         // --- Phase 2: Hopcroft refinement ---
         // Rebuild initial partition from scratch
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         partition = vec![0u32; n];
         blocks = Vec::new();
         {
@@ -231,6 +281,9 @@ impl DFA {
                 inverse[target as usize].push((input, src as u32));
             }
         }
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+            profile.hopcroft_setup_ms = started_at.elapsed();
+        }
 
         let mut worklist: VecDeque<u32> = (0..blocks.len() as u32).collect();
         let mut in_worklist = vec![true; blocks.len()];
@@ -243,6 +296,7 @@ impl DFA {
         let mut input_sources: Vec<Vec<u32>> = vec![Vec::new(); 256];
         let mut touched_inputs: Vec<u8> = Vec::with_capacity(64);
 
+        let phase_started_at = profile_enabled.then(std::time::Instant::now);
         while let Some(splitter_block) = worklist.pop_front() {
             let splitter_idx = splitter_block as usize;
             if splitter_idx >= in_worklist.len() {
@@ -363,8 +417,18 @@ impl DFA {
                 touched_blocks.clear();
             }
         }
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), phase_started_at) {
+            profile.hopcroft_refine_ms = started_at.elapsed();
+        }
 
-        working.rebuild_from_blocks(blocks)
+        let rebuild_started_at = profile_enabled.then(std::time::Instant::now);
+        let result = working.rebuild_from_blocks(blocks);
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), rebuild_started_at) {
+            profile.final_blocks = result.states().len();
+            profile.rebuild_ms = started_at.elapsed();
+            log_minimize_profile(profile);
+        }
+        result
     }
 
     /// Remove states not reachable from state 0.
@@ -637,4 +701,21 @@ impl DFA {
         result.recompute_possible_futures();
         result
     }
+}
+
+fn log_minimize_profile(profile: &LexerMinimizeProfile) {
+    eprintln!(
+        "[glrmask/profile][lexer_minimize] input_states={} reachable_states={} initial_blocks={} topo_labels={} final_states={} remove_unreachable_ms={:.3} initial_partition_ms={:.3} topology_refine_ms={:.3} hopcroft_setup_ms={:.3} hopcroft_refine_ms={:.3} rebuild_ms={:.3}",
+        profile.input_states,
+        profile.reachable_states,
+        profile.initial_blocks,
+        profile.topo_labels,
+        profile.final_blocks,
+        profile.remove_unreachable_ms.as_secs_f64() * 1000.0,
+        profile.initial_partition_ms.as_secs_f64() * 1000.0,
+        profile.topology_refine_ms.as_secs_f64() * 1000.0,
+        profile.hopcroft_setup_ms.as_secs_f64() * 1000.0,
+        profile.hopcroft_refine_ms.as_secs_f64() * 1000.0,
+        profile.rebuild_ms.as_secs_f64() * 1000.0,
+    );
 }

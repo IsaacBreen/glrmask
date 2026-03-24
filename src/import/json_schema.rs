@@ -1,9 +1,14 @@
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde_json::{Map, Value};
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr as LexerExpr;
-use crate::automata::lexer::compile::build_regex;
+use crate::automata::lexer::compile::build_regex_with_profile_label;
 use crate::automata::lexer::dfa::DFA as LexerDfa;
 use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::grammar_def::GrammarDef;
@@ -1065,6 +1070,36 @@ fn json_date_time_body_expr() -> GrammarExpr {
     ])
 }
 
+fn simple_anchored_literal_pattern(pattern: &str) -> Option<(String, bool)> {
+    if !pattern.starts_with('^') {
+        return None;
+    }
+
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::new();
+    let mut i = 1usize;
+    let mut exact = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\' {
+            i += 1;
+            if i >= chars.len() {
+                return None;
+            }
+            out.push(chars[i]);
+        } else if ch == '$' && i == chars.len() - 1 {
+            exact = true;
+            break;
+        } else if matches!(ch, '.' | '^' | '$' | '*' | '+' | '?' | '{' | '}' | '[' | ']' | '|' | '(' | ')') {
+            return None;
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+    Some((out, exact))
+}
+
 fn simple_repeated_single_char_pattern(pattern: &str) -> Option<String> {
     // Only valid when the pattern is fully anchored (^...$), because JSON Schema
     // `pattern` is a search pattern. Without both anchors the string may contain
@@ -1462,6 +1497,16 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
     merged
 }
 
+fn merge_allof_schemas(base: &Map<String, Value>, sub_schemas: &[Value]) -> Map<String, Value> {
+    let mut merged = base.clone();
+    for schema in sub_schemas {
+        if let Some(object) = schema.as_object() {
+            merged = merge_two_schemas(&merged, object);
+        }
+    }
+    merged
+}
+
 pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskError> {
     let schema: Value = serde_json::from_str(schema_json)
         .map_err(|err| GlrMaskError::GrammarParse(err.to_string()))?;
@@ -1510,8 +1555,9 @@ struct SchemaCtx {
     used_rule_names: HashSet<String>,
     ref_rule_names: HashMap<String, String>,
     ref_compile_stack: HashSet<String>,
-    generated_object_rule_counter: usize,
-    generated_rule_counter: usize,
+    object_rule_counter: usize,
+    anon_rule_counter: usize,
+    ap_catch_all_cache: HashMap<String, (String, String)>,
     expr_dedup_cache: HashMap<String, String>,
     json_string_exact_cache: HashMap<usize, String>,
     json_string_upto_cache: HashMap<usize, String>,
@@ -1527,8 +1573,9 @@ impl SchemaCtx {
             used_rule_names: HashSet::new(),
             ref_rule_names: HashMap::new(),
             ref_compile_stack: HashSet::new(),
-            generated_object_rule_counter: 0,
-            generated_rule_counter: 0,
+            object_rule_counter: 0,
+            anon_rule_counter: 0,
+            ap_catch_all_cache: HashMap::new(),
             expr_dedup_cache: HashMap::new(),
             json_string_exact_cache: HashMap::new(),
             json_string_upto_cache: HashMap::new(),
@@ -1588,8 +1635,8 @@ impl SchemaCtx {
     fn fresh_rule_name(&mut self, prefix: &str) -> String {
         let prefix = sanitize_rule_name(prefix);
         loop {
-            let name = format!("{}_{}", prefix, self.generated_rule_counter);
-            self.generated_rule_counter += 1;
+            let name = format!("{}_{}", prefix, self.anon_rule_counter);
+            self.anon_rule_counter += 1;
             if !self.used_rule_names.contains(&name) {
                 return name;
             }
@@ -1917,10 +1964,10 @@ impl SchemaCtx {
 
         let base = self.stable_ref_rule_name(ref_value);
         let mut name = base.clone();
-        let mut suffix_index = 2;
+        let mut counter = 2;
         while self.used_rule_names.contains(&name) {
-            name = format!("{base}_{suffix_index}");
-            suffix_index += 1;
+            name = format!("{base}_{counter}");
+            counter += 1;
         }
         self.used_rule_names.insert(name.clone());
         self.ref_rule_names.insert(ref_value.to_string(), name.clone());
@@ -2394,6 +2441,19 @@ impl SchemaCtx {
         Ok(factor_common_affixes(options))
     }
 
+    fn is_nonneg_schema(schema: &Map<String, Value>) -> bool {
+        for key in ["minimum", "exclusiveMinimum"] {
+            if let Some(val) = schema.get(key) {
+                if let Some(n) = val.as_f64() {
+                    if n >= 0.0 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn build_numeric_ref(&mut self, type_name: &str, schema: &Map<String, Value>) -> GrammarExpr {
         fn integer_bounds_for_number_range(
             left: Option<f64>,
@@ -2630,10 +2690,18 @@ impl SchemaCtx {
         json_value_literal_expr(value)
     }
 
+    fn json_string_literal(&self, text: &str) -> GrammarExpr {
+        literal_expr(&json_string_literal_bytes(text))
+    }
+
     fn json_key_colon_literal(&self, text: &str) -> GrammarExpr {
         let mut bytes = json_string_literal_bytes(text);
         bytes.extend_from_slice(JSON_KEY_SEPARATOR);
         literal_expr(&bytes)
+    }
+
+    fn json_key_separator_expr(&self) -> GrammarExpr {
+        literal_expr(JSON_KEY_SEPARATOR)
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
@@ -2650,6 +2718,26 @@ impl SchemaCtx {
         GrammarExpr::Ref(rule_name)
     }
 
+    fn json_key_with_separator_expr(&mut self, key_expr: GrammarExpr, prefix: &str) -> GrammarExpr {
+        self.extract_terminal_rule(
+            sequence_or_single(vec![key_expr, self.json_key_separator_expr()]),
+            prefix,
+        )
+    }
+
+
+    fn scoped_key_colon_expr(
+        &mut self,
+        property_names: Option<&Value>,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        if let Some(property_names) = property_names {
+            return Ok(self.extract_terminal_rule(
+                json_wrapped_key_colon_pattern(Self::property_name_pattern(property_names)?),
+                "JSON_SCOPED_KEY_COLON",
+            ));
+        }
+        Ok(self.json_key_colon_ref())
+    }
 
     fn schema_all_of(schemas: Vec<Value>) -> Value {
         match schemas.len() {
@@ -2678,7 +2766,10 @@ impl SchemaCtx {
     }
 
     fn schema_pattern_matches_key(pattern: &str, key: &str) -> Result<bool, GlrMaskError> {
-        let regex = build_regex(&[parse_regex(&json_search_pattern(pattern), true)]);
+        let regex = build_regex_with_profile_label(
+            &[parse_regex(&json_search_pattern(pattern), true)],
+            "json_schema_pattern_match",
+        );
         let mut state = 0u32;
         for &byte in key.as_bytes() {
             let Some(next) = regex.step(state, byte) else {
@@ -2702,12 +2793,18 @@ impl SchemaCtx {
         } else {
             JSON_KEY_COLON_REGEX.to_string()
         };
-        Ok(build_regex(&[parse_regex(&pattern, true)]).dfa)
+        Ok(build_regex_with_profile_label(
+            &[parse_regex(&pattern, true)],
+            "json_schema_scoped_key_colon",
+        ).dfa)
     }
 
     fn pattern_key_colon_dfa(pattern: &str) -> LexerDfa {
         let inner = json_search_pattern(pattern);
-        build_regex(&[parse_regex(&format!(r#""(?:{})": "#, inner), true)]).dfa
+        build_regex_with_profile_label(
+            &[parse_regex(&format!(r#""(?:{})": "#, inner), true)],
+            "json_schema_pattern_key_colon",
+        ).dfa
     }
 
     fn literal_key_colon_union_dfa(keys: &BTreeSet<String>) -> Option<LexerDfa> {
@@ -2723,7 +2820,10 @@ impl SchemaCtx {
         } else {
             LexerExpr::Choice(exprs)
         };
-        Some(build_regex(&[expr]).dfa)
+        Some(build_regex_with_profile_label(
+            &[expr],
+            "json_schema_literal_key_union",
+        ).dfa)
     }
 
     fn dfa_accepts_any(dfa: &LexerDfa) -> bool {
@@ -3023,14 +3123,7 @@ impl SchemaCtx {
                 Some(Value::Bool(true)) | None => self.json_value_ref(),
                 _ => return Ok(self.json_object_ref()),
             };
-            let unmatched_key_colon_expr = if let Some(property_names) = property_names {
-                self.extract_terminal_rule(
-                    json_wrapped_key_colon_pattern(Self::property_name_pattern(property_names)?),
-                    "JSON_SCOPED_KEY_COLON",
-                )
-            } else {
-                self.json_key_colon_ref()
-            };
+            let unmatched_key_colon_expr = self.scoped_key_colon_expr(property_names)?;
             return self.build_mixed_pattern_named_object_expr(
                 &matched_property_names,
                 value_expr,
@@ -3054,7 +3147,7 @@ impl SchemaCtx {
         required_list: &[String],
         additional_properties_schema: Option<Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        let mut base_index = self.generated_object_rule_counter;
+        let mut base_index = self.object_rule_counter;
         let base_name = loop {
             let candidate = format!("obj_req_any_{base_index}");
             if !self.used_rule_names.contains(&format!("{candidate}_nc_0")) {
@@ -3062,7 +3155,7 @@ impl SchemaCtx {
             }
             base_index += 1;
         };
-        self.generated_object_rule_counter = base_index + 1;
+        self.object_rule_counter = base_index + 1;
 
         let full_mask: Vec<usize> = (0..required_list.len()).collect();
         let mut masks = Vec::<Vec<usize>>::new();
@@ -3167,39 +3260,49 @@ impl SchemaCtx {
         ]))
     }
 
-    fn build_array_item_sequence(
+    fn build_optional_array_sequence(
         &mut self,
         items: &[(GrammarExpr, bool)],
-        needs_separator: bool,
+        prefixed: bool,
         cache: &mut HashMap<(usize, bool), GrammarExpr>,
         index: usize,
     ) -> GrammarExpr {
-        if let Some(expr) = cache.get(&(index, needs_separator)) {
+        if let Some(expr) = cache.get(&(index, prefixed)) {
             return expr.clone();
         }
         if index >= items.len() {
             let result = empty_expr();
-            cache.insert((index, needs_separator), result.clone());
+            cache.insert((index, prefixed), result.clone());
             return result;
         }
 
         let (item_expr, required) = &items[index];
-        let remaining_with_separator = self.build_array_item_sequence(items, true, cache, index + 1);
-        let item_and_rest = if needs_separator {
-            sequence_or_single(vec![
+        let rest_prefixed = self.build_optional_array_sequence(items, true, cache, index + 1);
+        let result = match (prefixed, *required) {
+            (true, true) => sequence_or_single(vec![
                 self.json_item_separator_expr(),
                 item_expr.clone(),
-                remaining_with_separator,
-            ])
-        } else {
-            sequence_or_single(vec![item_expr.clone(), remaining_with_separator])
+                rest_prefixed,
+            ]),
+            (true, false) => choice_or_single(vec![
+                sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    item_expr.clone(),
+                    rest_prefixed.clone(),
+                ]),
+                rest_prefixed,
+            ]),
+            (false, true) => sequence_or_single(vec![item_expr.clone(), rest_prefixed]),
+            (false, false) => {
+                let rest_unprefixed =
+                    self.build_optional_array_sequence(items, false, cache, index + 1);
+                choice_or_single(vec![
+                    sequence_or_single(vec![item_expr.clone(), rest_prefixed]),
+                    rest_unprefixed,
+                ])
+            }
         };
-        let result = if *required {
-            item_and_rest
-        } else {
-            choice_or_single(vec![item_and_rest, empty_expr()])
-        };
-        cache.insert((index, needs_separator), result.clone());
+        cache.insert((index, prefixed), result.clone());
         result
     }
 
@@ -3454,7 +3557,7 @@ impl SchemaCtx {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
-        let mut base_index = self.generated_object_rule_counter;
+        let mut base_index = self.object_rule_counter;
         let base_name = loop {
             let candidate = format!("obj_ord_{base_index}");
             if !self.used_rule_names.contains(&format!("{candidate}_0_nc")) {
@@ -3462,7 +3565,7 @@ impl SchemaCtx {
             }
             base_index += 1;
         };
-        self.generated_object_rule_counter = base_index + 1;
+        self.object_rule_counter = base_index + 1;
 
         let base_key_colon_dfa = Self::scoped_key_colon_dfa(property_names)?;
         let fixed_key_union_dfa = Self::literal_key_colon_union_dfa(&fixed_literal_keys);
@@ -3602,9 +3705,9 @@ impl SchemaCtx {
             ]));
         }
 
-        let mut next_tree_rule_index = 0usize;
+        let mut tree_counter = 0usize;
         let (tree_expr, tree_can_be_empty) =
-            self.build_object_tree(&base_name, &ordered, &mut next_tree_rule_index)?;
+            self.build_object_tree(&base_name, &ordered, &mut tree_counter)?;
 
         let top_nc = format!("{base_name}_0_nc");
         let top_expr = if tree_can_be_empty {
@@ -3628,7 +3731,7 @@ impl SchemaCtx {
         &mut self,
         base_name: &str,
         items: &[(String, GrammarExpr, bool)],
-        next_rule_index: &mut usize,
+        counter: &mut usize,
     ) -> Result<(GrammarExpr, bool), GlrMaskError> {
         if items.len() == 1 {
             let (key, value_expr, is_required) = &items[0];
@@ -3637,17 +3740,16 @@ impl SchemaCtx {
                 return Ok((kv_expr, false));
             }
 
-            let rule_name = format!("{base_name}_t{}", *next_rule_index);
-            *next_rule_index += 1;
+            let rule_name = format!("{base_name}_t{}", *counter);
+            *counter += 1;
             self.insert_rule(rule_name.clone(), kv_expr);
             return Ok((GrammarExpr::Ref(rule_name), true));
         }
 
         let mid = items.len() / 2;
-        let (left_expr, left_can_be_empty) =
-            self.build_object_tree(base_name, &items[..mid], next_rule_index)?;
+        let (left_expr, left_can_be_empty) = self.build_object_tree(base_name, &items[..mid], counter)?;
         let (right_expr, right_can_be_empty) =
-            self.build_object_tree(base_name, &items[mid..], next_rule_index)?;
+            self.build_object_tree(base_name, &items[mid..], counter)?;
 
         let mut options = vec![sequence_or_single(vec![
             left_expr.clone(),
@@ -3665,8 +3767,8 @@ impl SchemaCtx {
             return Ok((options.pop().unwrap(), false));
         }
 
-        let rule_name = format!("{base_name}_t{}", *next_rule_index);
-        *next_rule_index += 1;
+        let rule_name = format!("{base_name}_t{}", *counter);
+        *counter += 1;
         self.insert_rule(rule_name.clone(), choice_or_single(options));
         Ok((GrammarExpr::Ref(rule_name), left_can_be_empty && right_can_be_empty))
     }
@@ -3771,11 +3873,12 @@ impl SchemaCtx {
                 },
             };
 
-            let mut array_items = Vec::<(GrammarExpr, bool)>::new();
+            let mut required_items = Vec::<GrammarExpr>::new();
+            let mut optional_items = Vec::<GrammarExpr>::new();
             let mut effective_max_items = max_items;
-            let item_count = effective_max_items.unwrap_or(prefix_items.len().max(min_items));
+            let n_to_add = effective_max_items.unwrap_or(prefix_items.len().max(min_items));
 
-            for index in 0..item_count {
+            for index in 0..n_to_add {
                 let item_expr = if index < prefix_items.len() {
                     match self.convert_schema(&prefix_items[index]) {
                         Ok(expr) => expr,
@@ -3793,7 +3896,11 @@ impl SchemaCtx {
                 } else {
                     break;
                 };
-                array_items.push((item_expr, index < min_items));
+                if index < min_items {
+                    required_items.push(item_expr);
+                } else {
+                    optional_items.push(item_expr);
+                }
             }
 
             if effective_max_items.is_none() {
@@ -3807,17 +3914,44 @@ impl SchemaCtx {
                             None,
                         ),
                     ]);
-                    array_items.push((tail, false));
+                    optional_items.push(tail);
                 }
             }
 
-            let mut sequence_cache = HashMap::new();
-            let body = self.build_array_item_sequence(&array_items, false, &mut sequence_cache, 0);
-            return Ok(sequence_or_single(vec![
-                literal_expr(b"["),
-                body,
-                literal_expr(b"]"),
-            ]));
+            let mut parts = vec![literal_expr(b"[")];
+            if !required_items.is_empty() {
+                parts.push(required_items[0].clone());
+                for item in required_items.iter().skip(1) {
+                    parts.push(self.json_item_separator_expr());
+                    parts.push(item.clone());
+                }
+            }
+
+            if !optional_items.is_empty() {
+                let mut tail = empty_expr();
+                for item in optional_items.iter().skip(1).rev() {
+                    tail = choice_or_single(vec![
+                        sequence_or_single(vec![
+                            self.json_item_separator_expr(),
+                            item.clone(),
+                            tail,
+                        ]),
+                        empty_expr(),
+                    ]);
+                }
+                let optional_head = sequence_or_single(vec![optional_items[0].clone(), tail]);
+                if !required_items.is_empty() {
+                    parts.push(choice_or_single(vec![
+                        sequence_or_single(vec![self.json_item_separator_expr(), optional_head]),
+                        empty_expr(),
+                    ]));
+                } else {
+                    parts.push(choice_or_single(vec![optional_head, empty_expr()]));
+                }
+            }
+
+            parts.push(literal_expr(b"]"));
+            return Ok(sequence_or_single(parts));
         }
 
         match items_schema {
@@ -3877,6 +4011,162 @@ impl SchemaCtx {
         } else {
             non_empty
         }
+    }
+
+    /// Build an UPPERCASE terminal rule that matches a quoted JSON string key
+    /// whose body is NOT any of the given exact keys.
+    ///
+    /// Returns `GrammarExpr::Ref(name)` to the created terminal rule.
+    ///
+    /// Uses a trie-based complement: at each trie node, we match characters
+    /// that differ from the excluded keys at that position.  UPPERCASE names
+    /// make glrmask compile these as DFA terminals (efficient) instead of
+    /// LR parser rules (which cause GLR state explosion).
+    fn build_complement_key_expr(&mut self, keys: &[String], prefix: &str) -> GrammarExpr {
+        if keys.is_empty() {
+            // No keys to exclude → use the standard JSON_STRING pattern
+            return self.json_string_ref();
+        }
+
+        // STRING_CONTENT = (STRING_CHAR | ESCAPE_SEQ)*
+        let string_content_regex = format!("({})*", JSON_STRING_CHAR_PATTERN);
+
+        // Build the trie complement body as a single nested expression (no intermediate rules).
+        let body_expr = Self::build_complement_trie_expr(keys, &string_content_regex);
+
+        // Wrap in quotes to form a single UPPERCASE terminal: `"` body `"`
+        let full_name = format!("{prefix}_FULL");
+        let full_expr = sequence_or_single(vec![
+            literal_expr(b"\""),
+            body_expr,
+            literal_expr(b"\""),
+        ]);
+        self.insert_rule(full_name.clone(), full_expr);
+
+        GrammarExpr::Ref(full_name)
+    }
+
+    fn build_excluding_prefix_key_expr(&mut self, prefix_text: &str, prefix: &str) -> GrammarExpr {
+        let full_name = format!("{prefix}_FULL");
+        let full_expr = sequence_or_single(vec![
+            literal_expr(b"\""),
+            Self::build_prefix_complement_expr(prefix_text),
+            literal_expr(b"\""),
+        ]);
+        self.insert_rule(full_name.clone(), full_expr);
+        GrammarExpr::Ref(full_name)
+    }
+
+    /// Recursively build trie complement as a single nested GrammarExpr (no named rules).
+    fn build_complement_trie_expr(
+        keys: &[String],
+        string_content_regex: &str,
+    ) -> GrammarExpr {
+        let mut by_first: std::collections::BTreeMap<char, Vec<String>> = std::collections::BTreeMap::new();
+        let mut has_empty = false;
+        for k in keys {
+            if k.is_empty() {
+                has_empty = true;
+            } else {
+                let first = k.chars().next().unwrap();
+                by_first
+                    .entry(first)
+                    .or_default()
+                    .push(k[first.len_utf8()..].to_string());
+            }
+        }
+
+        let mut alts: Vec<GrammarExpr> = Vec::new();
+
+        // Alt 1: first byte is a valid JSON string char that doesn't start any excluded key,
+        //        followed by any remaining string content.
+        let excluded_bytes: Vec<u8> = by_first.keys().map(|&c| c as u8).collect();
+        if !excluded_bytes.is_empty() {
+            let mut excluded_set = String::new();
+            excluded_set.push_str(r#"\x00-\x1f\x7f"\\"#);  // always excluded in JSON strings
+            for &b in &excluded_bytes {
+                if b == b'-' || b == b']' || b == b'^' || b == b'\\' {
+                    excluded_set.push('\\');
+                    excluded_set.push(b as char);
+                } else {
+                    excluded_set.push(b as char);
+                }
+            }
+            let char_minus_regex = format!("[^{}]", excluded_set);
+            alts.push(sequence_or_single(vec![
+                regex_expr(&char_minus_regex),
+                regex_expr(string_content_regex),
+            ]));
+        } else {
+            alts.push(sequence_or_single(vec![
+                regex_expr(JSON_STRING_CHAR_PATTERN),
+                regex_expr(string_content_regex),
+            ]));
+        }
+
+        // Alt 2: starts with an escape sequence (can't be an ASCII key)
+        alts.push(sequence_or_single(vec![
+            regex_expr(r#"\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#),
+            regex_expr(string_content_regex),
+        ]));
+
+        // Alt 3..N: for each trie-branch char, match it then recurse
+        for (&ch, suffixes) in &by_first {
+            let sub = Self::build_complement_trie_expr(suffixes, string_content_regex);
+            alts.push(sequence_or_single(vec![
+                literal_expr(&[ch as u8]),
+                sub,
+            ]));
+        }
+
+        // Final alt: empty string only when no excluded key ends at this node.
+        if !has_empty {
+            alts.push(empty_expr());
+        }
+
+        choice_or_single(alts)
+    }
+
+    fn build_prefix_complement_expr(prefix_text: &str) -> GrammarExpr {
+        if prefix_text.is_empty() {
+            return regex_expr(r#"[^\x00-\xFF]"#);
+        }
+
+        let chars: Vec<char> = prefix_text.chars().collect();
+        Self::build_prefix_complement_from_chars(&chars)
+    }
+
+    fn build_prefix_complement_from_chars(chars: &[char]) -> GrammarExpr {
+        if chars.is_empty() {
+            return regex_expr(r#"[^\x00-\xFF]"#);
+        }
+
+        let next = chars[0] as u8;
+        let mut excluded_set = String::from(r#"\x00-\x1f\x7f"\\"#);
+        if matches!(next, b'-' | b']' | b'^' | b'\\') {
+            excluded_set.push('\\');
+        }
+        excluded_set.push(next as char);
+        let char_minus_regex = format!("[^{}]", excluded_set);
+        let string_content_regex = format!("({})*", JSON_STRING_CHAR_PATTERN);
+
+        let mut alts = vec![
+            sequence_or_single(vec![
+                regex_expr(&char_minus_regex),
+                regex_expr(&string_content_regex),
+            ]),
+            sequence_or_single(vec![
+                regex_expr(r#"\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#),
+                regex_expr(&string_content_regex),
+            ]),
+            sequence_or_single(vec![
+                literal_expr(&[next]),
+                Self::build_prefix_complement_from_chars(&chars[1..]),
+            ]),
+            empty_expr(),
+        ];
+
+        choice_or_single(std::mem::take(&mut alts))
     }
 
     fn is_trivial_expr(expr: &GrammarExpr) -> bool {
@@ -4561,7 +4851,7 @@ mod tests {
     }
 
     #[test]
-    fn test_object_typed_property_rejects_non_object_value() {
+    fn test_temp1() {
         let schema = r##"{
             "type": "object",
             "properties": {
@@ -4575,7 +4865,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bare_object_schema_rejects_non_objects() {
+    fn test_temp2() {
         let schema = r##"{
             "type": "object"
         }"##;

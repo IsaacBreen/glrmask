@@ -1,5 +1,9 @@
 //! IMPORTANT: this should only be implemented for **acyclic** weighted
 //! automata. Cyclic input should panic rather than trying to determinize.
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::collections::VecDeque;
 use std::collections::hash_map::Entry as HashMapEntry;
@@ -10,6 +14,24 @@ use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::ds::weight::Weight;
 use crate::GlrMaskError;
+
+#[derive(Default)]
+struct DeterminizeProfile {
+    subsets_processed: usize,
+    epsilon_closure_calls: usize,
+    epsilon_closure_seed_states: usize,
+    epsilon_closure_output_states: usize,
+    raw_target_labels: usize,
+    raw_target_contributions: usize,
+    raw_target_edges: usize,
+    raw_target_collisions: usize,
+    final_weight_ms: std::time::Duration,
+    raw_targets_ms: std::time::Duration,
+    epsilon_closure_ms: std::time::Duration,
+    edge_weight_ms: std::time::Duration,
+    normalize_ms: std::time::Duration,
+    subset_lookup_ms: std::time::Duration,
+}
 
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     if !nwa.is_acyclic() {
@@ -63,6 +85,8 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
         closure
     }
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_WEIGHTED_DETERMINIZE").is_some();
+    let mut profile = profile_enabled.then(DeterminizeProfile::default);
 
     let mut dwa = DWA::new(0, 0);
     let start_id = dwa.start_state;
@@ -75,7 +99,15 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             .unwrap_or_else(Weight::empty);
         start_subset.insert(state_id, existing.union(&Weight::all()));
     }
+    let start_closure_started_at = profile_enabled.then(std::time::Instant::now);
+    let start_seed_len = start_subset.len();
     let start_subset = epsilon_closure(nwa, start_subset);
+    if let (Some(profile), Some(started_at)) = (profile.as_mut(), start_closure_started_at) {
+        profile.epsilon_closure_calls += 1;
+        profile.epsilon_closure_seed_states += start_seed_len;
+        profile.epsilon_closure_output_states += start_subset.len();
+        profile.epsilon_closure_ms += started_at.elapsed();
+    }
 
     if start_subset.is_empty() {
         return Ok(dwa);
@@ -91,18 +123,26 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
 
     while let Some((subset_key, subset_entries)) = worklist.pop_front() {
+        if let Some(profile) = profile.as_mut() {
+            profile.subsets_processed += 1;
+        }
         let from_state = subset_map[&subset_key];
 
+        let final_weight_started_at = profile_enabled.then(std::time::Instant::now);
         let mut final_weight = Weight::empty();
         for (nwa_state_id, path_weight) in &subset_entries {
             if let Some(state_final) = nwa.states[*nwa_state_id as usize].final_weight.as_ref() {
                 final_weight = final_weight.union(&path_weight.intersection(state_final));
             }
         }
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), final_weight_started_at) {
+            profile.final_weight_ms += started_at.elapsed();
+        }
         if !final_weight.is_empty() {
             dwa.set_final_weight(from_state, final_weight);
         }
 
+        let raw_targets_started_at = profile_enabled.then(std::time::Instant::now);
         for (nwa_state_id, path_weight) in &subset_entries {
             let state = &nwa.states[*nwa_state_id as usize];
             for (&label, targets) in &state.transitions {
@@ -112,9 +152,16 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                         continue;
                     }
 
+                    if let Some(profile) = profile.as_mut() {
+                        profile.raw_target_contributions += 1;
+                    }
+
                     let target_entry = raw_targets.entry(label).or_default();
                     match target_entry.entry(*dst) {
                         HashMapEntry::Occupied(mut occupied) => {
+                            if let Some(profile) = profile.as_mut() {
+                                profile.raw_target_collisions += 1;
+                            }
                             let existing = occupied.get_mut();
                             *existing = existing.union(&next_weight);
                         }
@@ -125,22 +172,42 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                 }
             }
         }
+        if let (Some(profile), Some(started_at)) = (profile.as_mut(), raw_targets_started_at) {
+            profile.raw_targets_ms += started_at.elapsed();
+        }
 
         for (label, target_subset) in raw_targets.drain() {
             if target_subset.is_empty() {
                 continue;
             }
+            if let Some(profile) = profile.as_mut() {
+                profile.raw_target_labels += 1;
+                profile.raw_target_edges += target_subset.len();
+            }
 
+            let edge_weight_started_at = profile_enabled.then(std::time::Instant::now);
             let edge_weight = Weight::union_all(target_subset.values());
+            if let (Some(profile), Some(started_at)) = (profile.as_mut(), edge_weight_started_at) {
+                profile.edge_weight_ms += started_at.elapsed();
+            }
             if edge_weight.is_empty() {
                 continue;
             }
 
+            let closure_started_at = profile_enabled.then(std::time::Instant::now);
+            let seed_len = target_subset.len();
             let expanded = epsilon_closure(nwa, target_subset);
+            if let (Some(profile), Some(started_at)) = (profile.as_mut(), closure_started_at) {
+                profile.epsilon_closure_calls += 1;
+                profile.epsilon_closure_seed_states += seed_len;
+                profile.epsilon_closure_output_states += expanded.len();
+                profile.epsilon_closure_ms += started_at.elapsed();
+            }
             if expanded.is_empty() {
                 continue;
             }
 
+            let normalize_started_at = profile_enabled.then(std::time::Instant::now);
             let edge_complement = edge_weight.complement();
             let normalized: FxHashMap<u32, Weight> = if edge_complement.is_empty() {
                 expanded
@@ -153,10 +220,14 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                     })
                     .collect()
             };
+            if let (Some(profile), Some(started_at)) = (profile.as_mut(), normalize_started_at) {
+                profile.normalize_ms += started_at.elapsed();
+            }
             let next_key = canonicalize(&normalized);
             if next_key.is_empty() {
                 continue;
             }
+            let subset_lookup_started_at = profile_enabled.then(std::time::Instant::now);
             let to_state = if let Some(existing) = subset_map.get(&next_key).copied() {
                 existing
             } else {
@@ -165,9 +236,42 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                 worklist.push_back((next_key.clone(), next_key));
                 new_id
             };
+            if let (Some(profile), Some(started_at)) = (profile.as_mut(), subset_lookup_started_at) {
+                profile.subset_lookup_ms += started_at.elapsed();
+            }
 
             dwa.add_transition(from_state, label, to_state, edge_weight);
         }
+    }
+
+    if let Some(profile) = profile {
+        let avg_seed_states = if profile.epsilon_closure_calls == 0 {
+            0.0
+        } else {
+            profile.epsilon_closure_seed_states as f64 / profile.epsilon_closure_calls as f64
+        };
+        let avg_closure_states = if profile.epsilon_closure_calls == 0 {
+            0.0
+        } else {
+            profile.epsilon_closure_output_states as f64 / profile.epsilon_closure_calls as f64
+        };
+        eprintln!(
+            "[glrmask/profile][weighted_determinize] subsets_processed={} epsilon_closure_calls={} avg_seed_states={:.3} avg_closure_states={:.3} raw_target_labels={} raw_target_contributions={} raw_target_edges={} raw_target_collisions={} final_weight_ms={:.3} raw_targets_ms={:.3} epsilon_closure_ms={:.3} edge_weight_ms={:.3} normalize_ms={:.3} subset_lookup_ms={:.3}",
+            profile.subsets_processed,
+            profile.epsilon_closure_calls,
+            avg_seed_states,
+            avg_closure_states,
+            profile.raw_target_labels,
+            profile.raw_target_contributions,
+            profile.raw_target_edges,
+            profile.raw_target_collisions,
+            profile.final_weight_ms.as_secs_f64() * 1000.0,
+            profile.raw_targets_ms.as_secs_f64() * 1000.0,
+            profile.epsilon_closure_ms.as_secs_f64() * 1000.0,
+            profile.edge_weight_ms.as_secs_f64() * 1000.0,
+            profile.normalize_ms.as_secs_f64() * 1000.0,
+            profile.subset_lookup_ms.as_secs_f64() * 1000.0,
+        );
     }
 
     Ok(dwa)

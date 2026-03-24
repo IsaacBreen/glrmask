@@ -4,7 +4,7 @@
 //! `minimize_acyclic`, this works on DFAs with cycles (self-loops,
 //! back-edges, etc.) at the cost of slightly higher constant factors.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use super::dfa::{DFA, DFAState, Label};
 
