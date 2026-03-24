@@ -9,6 +9,25 @@ pub struct U8Set {
     hi: u128,
 }
 
+#[inline]
+fn split_byte(byte: u8) -> (bool, u32) {
+    if byte < 128 {
+        (true, byte as u32)
+    } else {
+        (false, (byte - 128) as u32)
+    }
+}
+
+#[inline]
+fn pop_lowest_bit(word: &mut u128, offset: u8) -> Option<u8> {
+    if *word == 0 {
+        return None;
+    }
+    let trailing = word.trailing_zeros() as u8;
+    *word &= *word - 1;
+    Some(offset + trailing)
+}
+
 impl U8Set {
     pub const fn empty() -> Self {
         Self { lo: 0, hi: 0 }
@@ -26,15 +45,16 @@ impl U8Set {
     }
 
     pub fn from_byte(b: u8) -> Self {
-        if b < 128 {
+        let (is_low_word, bit_index) = split_byte(b);
+        if is_low_word {
             Self {
-                lo: 1u128 << b,
+                lo: 1u128 << bit_index,
                 hi: 0,
             }
         } else {
             Self {
                 lo: 0,
-                hi: 1u128 << (b - 128),
+                hi: 1u128 << bit_index,
             }
         }
     }
@@ -85,29 +105,32 @@ impl U8Set {
     }
 
     pub fn contains(&self, b: u8) -> bool {
-        if b < 128 {
-            (self.lo & (1u128 << b)) != 0
+        let (is_low_word, bit_index) = split_byte(b);
+        if is_low_word {
+            (self.lo & (1u128 << bit_index)) != 0
         } else {
-            (self.hi & (1u128 << (b - 128))) != 0
+            (self.hi & (1u128 << bit_index)) != 0
         }
     }
 
     pub fn insert(&mut self, b: u8) -> bool {
         let old = self.contains(b);
-        if b < 128 {
-            self.lo |= 1u128 << b;
+        let (is_low_word, bit_index) = split_byte(b);
+        if is_low_word {
+            self.lo |= 1u128 << bit_index;
         } else {
-            self.hi |= 1u128 << (b - 128);
+            self.hi |= 1u128 << bit_index;
         }
         !old
     }
 
     pub fn remove(&mut self, b: u8) -> bool {
         let old = self.contains(b);
-        if b < 128 {
-            self.lo &= !(1u128 << b);
+        let (is_low_word, bit_index) = split_byte(b);
+        if is_low_word {
+            self.lo &= !(1u128 << bit_index);
         } else {
-            self.hi &= !(1u128 << (b - 128));
+            self.hi &= !(1u128 << bit_index);
         }
         old
     }
@@ -152,7 +175,6 @@ impl U8Set {
         U8SetIter {
             lo: self.lo,
             hi: self.hi,
-            phase: 0,
         }
     }
 }
@@ -225,34 +247,13 @@ impl fmt::Display for U8Set {
 pub struct U8SetIter {
     lo: u128,
     hi: u128,
-    phase: u8,
 }
 
 impl Iterator for U8SetIter {
     type Item = u8;
 
     fn next(&mut self) -> Option<u8> {
-        loop {
-            match self.phase {
-                0 => {
-                    if self.lo != 0 {
-                        let tz = self.lo.trailing_zeros() as u8;
-                        self.lo &= self.lo - 1;
-                        return Some(tz);
-                    }
-                    self.phase = 1;
-                }
-                1 => {
-                    if self.hi != 0 {
-                        let tz = self.hi.trailing_zeros() as u8;
-                        self.hi &= self.hi - 1;
-                        return Some(128 + tz);
-                    }
-                    self.phase = 2;
-                }
-                _ => return None,
-            }
-        }
+        pop_lowest_bit(&mut self.lo, 0).or_else(|| pop_lowest_bit(&mut self.hi, 128))
     }
 }
 

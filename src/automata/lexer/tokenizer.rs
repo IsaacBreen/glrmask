@@ -28,6 +28,25 @@ pub struct TokenizerExecResult {
     pub matches: Vec<TokenizerMatch>,
 }
 
+fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, u32)>) -> Vec<TokenizerMatch> {
+    matches
+        .into_iter()
+        .map(|(id, (width, end_state))| TokenizerMatch {
+            id,
+            width,
+            end_state,
+        })
+        .collect()
+}
+
+fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<TerminalID>)> {
+    let mut grouped = std::collections::BTreeMap::<usize, BTreeSet<TerminalID>>::new();
+    for matched in matches {
+        grouped.entry(matched.width).or_default().insert(matched.id);
+    }
+    grouped.into_iter().collect()
+}
+
 impl Tokenizer {
     pub fn start_state(&self) -> u32 {
         0
@@ -54,15 +73,10 @@ impl Tokenizer {
     /// position 0.
     fn isolate_start_state(&mut self) {
         let start = self.start_state();
-        let has_incoming = self.dfa.states().iter().any(|st| {
-            st.transitions.values().any(|&target| target == start)
-        });
-        if !has_incoming {
+        if !self.has_incoming_start_transitions(start) {
             return;
         }
-        // Clone the start state as a new state.
         let clone_id = self.dfa.clone_state(start);
-        // Redirect every transition that points to start → clone.
         self.dfa.redirect_transitions(start, clone_id);
     }
 
@@ -82,11 +96,7 @@ impl Tokenizer {
     }
 
     pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
-        self.dfa
-            .finalizers(state)
-            .iter()
-            .map(|terminal| terminal as TerminalID)
-            .collect()
+        self.matched_terminals_iter(state).collect()
     }
 
     pub(crate) fn matched_terminals_iter(
@@ -130,73 +140,35 @@ impl Tokenizer {
         input: &[u8],
         start: u32,
     ) -> TokenizerExecResult {
-        let mut state = start;
         let mut matches = Vec::new();
-
-        for (index, &byte) in input.iter().enumerate() {
-            let Some(next) = self.step(state, byte) else {
-                return TokenizerExecResult {
-                    end_state: None,
-                    matches,
-                };
-            };
-            state = next;
-            for terminal in self.dfa.finalizers(state).iter() {
-                matches.push(TokenizerMatch {
-                    id: terminal as TerminalID,
-                    width: index + 1,
-                    end_state: state,
-                });
-            }
-        }
+        let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
+            tokenizer.record_all_matches(matches, state, width);
+        });
 
         TokenizerExecResult {
-            end_state: (!self.is_end(state)).then_some(state),
+            end_state: end_state.filter(|&state| !self.is_end(state)),
             matches,
         }
     }
 
     pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
-        let into_matches = |matches: FxHashMap<_, _>| {
-            matches
-                .into_iter()
-                .map(|(id, (width, end_state))| TokenizerMatch { id, width, end_state })
-                .collect()
-        };
-
-        let mut state = start;
         let mut matches = FxHashMap::<TerminalID, (usize, u32)>::default();
-
-        for (index, &byte) in input.iter().enumerate() {
-            let Some(next) = self.step(state, byte) else {
-                return TokenizerExecResult {
-                    end_state: None,
-                    matches: into_matches(matches),
-                };
-            };
-            state = next;
-
-            for terminal in self.dfa.finalizers(state).iter() {
-                matches.insert(terminal as TerminalID, (index + 1, state));
-            }
-        }
+        let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
+            tokenizer.record_longest_matches(matches, state, width);
+        });
 
         TokenizerExecResult {
-            end_state: Some(state),
-            matches: into_matches(matches),
+            end_state,
+            matches: into_longest_matches(matches),
         }
     }
 
     pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
         let exec = self.execute_from_state_all_widths(input, start);
         let end_state = exec.end_state.unwrap_or(start);
-        let mut grouped = std::collections::BTreeMap::<usize, BTreeSet<TerminalID>>::new();
-        for matched in exec.matches {
-            grouped.entry(matched.width).or_default().insert(matched.id);
-        }
         TokenizerResult {
             end_state,
-            matches: grouped.into_iter().collect(),
+            matches: group_matches_by_width(exec.matches),
         }
     }
 
@@ -210,6 +182,48 @@ impl Tokenizer {
 
     pub fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
         self.possible_future_terminals(state)
+    }
+
+    fn has_incoming_start_transitions(&self, start: u32) -> bool {
+        self.dfa
+            .states()
+            .iter()
+            .any(|state| state.transitions.values().any(|&target| target == start))
+    }
+
+    fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: u32, width: usize) {
+        matches.extend(self.matched_terminals_iter(state).map(|id| TokenizerMatch {
+            id,
+            width,
+            end_state: state,
+        }));
+    }
+
+    fn record_longest_matches(
+        &self,
+        matches: &mut FxHashMap<TerminalID, (usize, u32)>,
+        state: u32,
+        width: usize,
+    ) {
+        for terminal in self.matched_terminals_iter(state) {
+            matches.insert(terminal, (width, state));
+        }
+    }
+
+    fn scan_input<R>(
+        &self,
+        input: &[u8],
+        start: u32,
+        matches: &mut R,
+        mut record_matches: impl FnMut(&Self, &mut R, u32, usize),
+    ) -> Option<u32> {
+        let mut state = start;
+        for (index, &byte) in input.iter().enumerate() {
+            let next = self.step(state, byte)?;
+            state = next;
+            record_matches(self, matches, state, index + 1);
+        }
+        Some(state)
     }
 }
 

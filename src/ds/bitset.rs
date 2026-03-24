@@ -7,6 +7,16 @@ pub struct BitSet {
 }
 
 impl BitSet {
+    #[inline]
+    fn assert_same_len(&self, other: &Self) {
+        debug_assert_eq!(self.len, other.len);
+    }
+
+    #[inline]
+    fn bit_position(&self, index: usize) -> Option<(usize, u32)> {
+        (index < self.len).then_some((index / 64, (index % 64) as u32))
+    }
+
     pub fn new(len: usize) -> Self {
         Self {
             words: vec![0; len.div_ceil(64)],
@@ -36,12 +46,10 @@ impl BitSet {
     }
 
     pub fn get(&self, i: usize) -> bool {
-        if i >= self.len {
+        let Some((word_index, bit_index)) = self.bit_position(i) else {
             return false;
-        }
-        let word = i / 64;
-        let bit = i % 64;
-        (self.words[word] & (1u64 << bit)) != 0
+        };
+        (self.words[word_index] & (1u64 << bit_index)) != 0
     }
 
     pub fn contains(&self, i: usize) -> bool {
@@ -49,21 +57,15 @@ impl BitSet {
     }
 
     pub fn set(&mut self, i: usize) {
-        if i >= self.len {
-            return;
+        if let Some((word_index, bit_index)) = self.bit_position(i) {
+            self.words[word_index] |= 1u64 << bit_index;
         }
-        let word = i / 64;
-        let bit = i % 64;
-        self.words[word] |= 1u64 << bit;
     }
 
     pub fn clear(&mut self, i: usize) {
-        if i >= self.len {
-            return;
+        if let Some((word_index, bit_index)) = self.bit_position(i) {
+            self.words[word_index] &= !(1u64 << bit_index);
         }
-        let word = i / 64;
-        let bit = i % 64;
-        self.words[word] &= !(1u64 << bit);
     }
 
     pub fn clear_all(&mut self) {
@@ -79,35 +81,35 @@ impl BitSet {
     }
 
     pub fn union_with(&mut self, other: &BitSet) {
-        debug_assert_eq!(self.len, other.len);
+        self.assert_same_len(other);
         for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
             *lhs |= *rhs;
         }
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        debug_assert_eq!(self.len, other.len);
+        self.assert_same_len(other);
         let mut out = self.clone();
         out.union_with(other);
         out
     }
 
     fn intersect_with(&mut self, other: &BitSet) {
-        debug_assert_eq!(self.len, other.len);
+        self.assert_same_len(other);
         for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
             *lhs &= *rhs;
         }
     }
 
     pub fn intersection(&self, other: &Self) -> Self {
-        debug_assert_eq!(self.len, other.len);
+        self.assert_same_len(other);
         let mut out = self.clone();
         out.intersect_with(other);
         out
     }
 
     pub fn difference(&self, other: &Self) -> Self {
-        debug_assert_eq!(self.len, other.len);
+        self.assert_same_len(other);
         let mut out = self.clone();
         for (lhs, rhs) in out.words.iter_mut().zip(&other.words) {
             *lhs &= !*rhs;
@@ -126,7 +128,7 @@ impl BitSet {
     }
 
     pub fn is_disjoint(&self, other: &Self) -> bool {
-        debug_assert_eq!(self.len, other.len);
+        self.assert_same_len(other);
         self.words
             .iter()
             .zip(&other.words)
@@ -134,7 +136,7 @@ impl BitSet {
     }
 
     pub fn is_subset(&self, other: &Self) -> bool {
-        debug_assert_eq!(self.len, other.len);
+        self.assert_same_len(other);
         self.words
             .iter()
             .zip(&other.words)

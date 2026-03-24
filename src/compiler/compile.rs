@@ -86,11 +86,7 @@ fn build_internal_token_bytes(vocab: &Vocab, internal_ids: &InternalIdMap) -> BT
 }
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
-    constraint.build_buf_masks();
-    constraint.build_dense_token_bytes();
-    constraint.build_dense_token_masks();
-    constraint.build_fast_transitions();
-    constraint.build_seed_dense_masks();
+    constraint.rebuild_runtime_caches();
     constraint
 }
 

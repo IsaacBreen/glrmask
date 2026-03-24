@@ -116,6 +116,45 @@ impl VocabPrefixTreeNode {
     }
 }
 
+fn insert_bytes_into_mask(mask: &mut [u64; 4], bytes: &[u8]) {
+    for &byte in bytes {
+        mask[byte as usize >> 6] |= 1u64 << (byte & 63);
+    }
+}
+
+fn merge_reachable_token_ids(
+    reachable_token_ids: &mut RangeSetBlaze<usize>,
+    child: &VocabPrefixTreeNode,
+) {
+    for token_id in child.reachable_token_ids.iter() {
+        reachable_token_ids.insert(token_id);
+    }
+}
+
+fn merge_child_metadata(
+    reachable_token_ids: &mut RangeSetBlaze<usize>,
+    subtree_bytes: &mut [u64; 4],
+    parent_prefix_len: usize,
+    child: &VocabPrefixTreeNode,
+) {
+    insert_bytes_into_mask(subtree_bytes, &child.prefix[parent_prefix_len..]);
+    for (target_word, child_word) in subtree_bytes.iter_mut().zip(child.subtree_bytes.iter()) {
+        *target_word |= *child_word;
+    }
+    merge_reachable_token_ids(reachable_token_ids, child);
+}
+
+fn next_matching_child<'a>(
+    current: &'a VocabPrefixTreeNode,
+    remaining: &[u8],
+) -> Option<(&'a VocabPrefixTreeNode, &'a [u8])> {
+    let child = current.find_child(*remaining.first()?)?;
+    let edge = current.child_edge_label(child);
+    remaining
+        .starts_with(edge)
+        .then_some((child, &remaining[edge.len()..]))
+}
+
 impl fmt::Debug for VocabPrefixTreeNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn format_bytes(bytes: &[u8]) -> String {
@@ -169,6 +208,41 @@ impl VocabPrefixTree {
         Self::build_owned(tokens.iter().map(|(id, bytes)| (*id, bytes.clone())).collect())
     }
 
+    fn sort_and_dedup_tokens(tokens: &mut Vec<(usize, Vec<u8>)>) {
+        tokens.sort_unstable_by(|left, right| left.1.as_slice().cmp(right.1.as_slice()));
+
+        let mut write_index = 0usize;
+        for read_index in 0..tokens.len() {
+            if write_index > 0 && tokens[write_index - 1].1 == tokens[read_index].1 {
+                tokens[write_index - 1].0 = tokens[read_index].0;
+                continue;
+            }
+            if write_index != read_index {
+                tokens.swap(write_index, read_index);
+            }
+            write_index += 1;
+        }
+        tokens.truncate(write_index);
+    }
+
+    fn build_children(
+        entries: &[(usize, Vec<u8>)],
+        parent_prefix_len: usize,
+    ) -> Vec<VocabPrefixTreeNode> {
+        let mut children = Vec::new();
+        let mut index = 0usize;
+        while index < entries.len() {
+            let next_byte = entries[index].1[parent_prefix_len];
+            let group_start = index;
+            index += 1;
+            while index < entries.len() && entries[index].1[parent_prefix_len] == next_byte {
+                index += 1;
+            }
+            children.push(Self::build_subtree(&entries[group_start..index], parent_prefix_len));
+        }
+        children
+    }
+
     pub fn build_owned(mut tokens: Vec<(usize, Vec<u8>)>) -> Self {
         let mut tree = Self::new();
         tree.max_token_id = tokens.iter().map(|(id, _)| *id).max().unwrap_or(0);
@@ -177,24 +251,8 @@ impl VocabPrefixTree {
             return tree;
         }
 
-        // Fast sort for large inputs.
-        tokens.sort_unstable_by(|a, b| a.1.as_slice().cmp(b.1.as_slice()));
+        Self::sort_and_dedup_tokens(&mut tokens);
 
-        // In-place dedup by byte string.
-        let mut write = 0usize;
-        for read in 0..tokens.len() {
-            if write > 0 && tokens[write - 1].1 == tokens[read].1 {
-                tokens[write - 1].0 = tokens[read].0;
-            } else {
-                if write != read {
-                    tokens.swap(write, read);
-                }
-                write += 1;
-            }
-        }
-        tokens.truncate(write);
-
-        // Handle empty token if present.
         let mut start = 0usize;
         if !tokens.is_empty() && tokens[0].1.is_empty() {
             tree.root.token_id = tokens[0].0;
@@ -209,33 +267,15 @@ impl VocabPrefixTree {
         }
 
         let entries = &tokens[start..];
-        let mut children = Vec::new();
+        let children = Self::build_children(entries, 0);
         let mut root_subtree_bytes = [0u64; 4];
-
-        let mut i = 0usize;
-        while i < entries.len() {
-            let byte0 = entries[i].1[0];
-            let group_start = i;
-            i += 1;
-            while i < entries.len() && entries[i].1[0] == byte0 {
-                i += 1;
-            }
-
-            let child = Self::build_subtree(&entries[group_start..i], 0);
-
-            for token_id in child.reachable_token_ids.iter() {
-                tree.root.reachable_token_ids.insert(token_id);
-            }
-
-            let edge = &child.prefix[..];
-            for &b in edge {
-                root_subtree_bytes[b as usize >> 6] |= 1u64 << (b & 63);
-            }
-            for j in 0..4 {
-                root_subtree_bytes[j] |= child.subtree_bytes[j];
-            }
-
-            children.push(child);
+        for child in &children {
+            merge_child_metadata(
+                &mut tree.root.reachable_token_ids,
+                &mut root_subtree_bytes,
+                0,
+                child,
+            );
         }
 
         tree.root.children = children.into_boxed_slice();
@@ -268,21 +308,7 @@ impl VocabPrefixTree {
         let prefix = first[..prefix_len].to_vec().into_boxed_slice();
 
         let child_entries = if has_token { &entries[1..] } else { entries };
-        let mut children = Vec::new();
-
-        let mut i = 0usize;
-        while i < child_entries.len() {
-            let next_byte = child_entries[i].1[prefix_len];
-            let group_start = i;
-            i += 1;
-            while i < child_entries.len() && child_entries[i].1[prefix_len] == next_byte {
-                i += 1;
-            }
-            children.push(Self::build_subtree(
-                &child_entries[group_start..i],
-                prefix_len,
-            ));
-        }
+        let children = Self::build_children(child_entries, prefix_len);
 
         let mut reachable_token_ids = RangeSetBlaze::new();
         if has_token {
@@ -291,16 +317,7 @@ impl VocabPrefixTree {
 
         let mut subtree_bytes = [0u64; 4];
         for child in &children {
-            let edge = &child.prefix[prefix_len..];
-            for &b in edge {
-                subtree_bytes[b as usize >> 6] |= 1u64 << (b & 63);
-            }
-            for j in 0..4 {
-                subtree_bytes[j] |= child.subtree_bytes[j];
-            }
-            for token_id in child.reachable_token_ids.iter() {
-                reachable_token_ids.insert(token_id);
-            }
+            merge_child_metadata(&mut reachable_token_ids, &mut subtree_bytes, prefix_len, child);
         }
 
         VocabPrefixTreeNode {
@@ -323,14 +340,8 @@ impl VocabPrefixTree {
         let mut remaining = bytes;
 
         loop {
-            let child = current.find_child(remaining[0])?;
-            let edge = current.child_edge_label(child);
-
-            if !remaining.starts_with(edge) {
-                return None;
-            }
-
-            remaining = &remaining[edge.len()..];
+            let (child, next_remaining) = next_matching_child(current, remaining)?;
+            remaining = next_remaining;
             current = child;
 
             if remaining.is_empty() {
@@ -351,16 +362,11 @@ impl VocabPrefixTree {
         }
 
         while !remaining.is_empty() {
-            let Some(child) = current.find_child(remaining[0]) else {
+            let Some((child, next_remaining)) = next_matching_child(current, remaining) else {
                 break;
             };
 
-            let edge = current.child_edge_label(child);
-            if !remaining.starts_with(edge) {
-                break;
-            }
-
-            remaining = &remaining[edge.len()..];
+            remaining = next_remaining;
             current = child;
 
             if current.has_token {

@@ -14,6 +14,8 @@ type NtEscape = (NonterminalID, u32, u32, u32);
 
 type NtRereduce = (NonterminalID, u32, usize, NonterminalID);
 
+type NtAdjacency = BTreeMap<NonterminalID, BTreeSet<NonterminalID>>;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TerminalCharacterization {
     pub shifts: Vec<InitialShift>,
@@ -25,56 +27,161 @@ pub struct TerminalCharacterization {
 
 impl TerminalCharacterization {
     pub fn find_cycle(&self) -> Option<Vec<NonterminalID>> {
-        let mut adjacency = BTreeMap::<NonterminalID, BTreeSet<NonterminalID>>::new();
-        for (src_nt, _revealed_state, _pop_count, dst_nt) in &self.nt_rereduces {
-            adjacency.entry(*src_nt).or_default().insert(*dst_nt);
-        }
+        find_nonterminal_cycle(&build_rereduce_adjacency(&self.nt_rereduces))
+    }
+}
 
-        let mut colors = BTreeMap::<NonterminalID, u8>::new();
-        let mut path = Vec::new();
+fn build_rereduce_adjacency(nt_rereduces: &[NtRereduce]) -> NtAdjacency {
+    let mut adjacency = NtAdjacency::new();
+    for (source_nonterminal, _revealed_state, _pop_count, target_nonterminal) in nt_rereduces {
+        adjacency
+            .entry(*source_nonterminal)
+            .or_default()
+            .insert(*target_nonterminal);
+    }
+    adjacency
+}
 
-        fn dfs(
-            node: NonterminalID,
-            adjacency: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
-            colors: &mut BTreeMap<NonterminalID, u8>,
-            path: &mut Vec<NonterminalID>,
-        ) -> Option<Vec<NonterminalID>> {
-            colors.insert(node, 1);
-            path.push(node);
+fn dfs_nonterminal_cycle(
+    nonterminal: NonterminalID,
+    adjacency: &NtAdjacency,
+    colors: &mut BTreeMap<NonterminalID, u8>,
+    path: &mut Vec<NonterminalID>,
+) -> Option<Vec<NonterminalID>> {
+    colors.insert(nonterminal, 1);
+    path.push(nonterminal);
 
-            if let Some(neighbors) = adjacency.get(&node) {
-                for &neighbor in neighbors {
-                    match colors.get(&neighbor).copied().unwrap_or(0) {
-                        1 => {
-                            let cycle_start = path.iter().position(|nt| *nt == neighbor).unwrap_or(0);
-                            let mut cycle = path[cycle_start..].to_vec();
-                            cycle.push(neighbor);
-                            return Some(cycle);
-                        }
-                        0 => {
-                            if let Some(cycle) = dfs(neighbor, adjacency, colors, path) {
-                                return Some(cycle);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            path.pop();
-            colors.insert(node, 2);
-            None
-        }
-
-        for &nt in adjacency.keys() {
-            if colors.get(&nt).copied().unwrap_or(0) == 0 {
-                if let Some(cycle) = dfs(nt, &adjacency, &mut colors, &mut path) {
+    if let Some(neighbors) = adjacency.get(&nonterminal) {
+        for &neighbor in neighbors {
+            match colors.get(&neighbor).copied().unwrap_or(0) {
+                1 => {
+                    let cycle_start = path.iter().position(|nt| *nt == neighbor).unwrap_or(0);
+                    let mut cycle = path[cycle_start..].to_vec();
+                    cycle.push(neighbor);
                     return Some(cycle);
                 }
+                0 => {
+                    if let Some(cycle) = dfs_nonterminal_cycle(neighbor, adjacency, colors, path) {
+                        return Some(cycle);
+                    }
+                }
+                _ => {}
             }
         }
+    }
 
-        None
+    path.pop();
+    colors.insert(nonterminal, 2);
+    None
+}
+
+fn find_nonterminal_cycle(adjacency: &NtAdjacency) -> Option<Vec<NonterminalID>> {
+    let mut colors = BTreeMap::new();
+    let mut path = Vec::new();
+
+    for &nonterminal in adjacency.keys() {
+        if colors.get(&nonterminal).copied().unwrap_or(0) == 0 {
+            if let Some(cycle) = dfs_nonterminal_cycle(nonterminal, adjacency, &mut colors, &mut path) {
+                return Some(cycle);
+            }
+        }
+    }
+
+    None
+}
+
+fn reduce_rule_info(table: &GLRTable, rule_id: u32) -> (usize, NonterminalID) {
+    let rule = &table.rules[rule_id as usize];
+    (rule.rhs.len(), rule.lhs)
+}
+
+fn record_initial_action(
+    table: &GLRTable,
+    state: u32,
+    action: &Action,
+    shifts: &mut BTreeSet<InitialShift>,
+    reduces: &mut BTreeSet<InitialReduce>,
+) {
+    match action {
+        Action::Shift(shift_state) => {
+            shifts.insert((state, *shift_state));
+        }
+        Action::Reduce(rule_id) => {
+            let (rule_len, lhs) = reduce_rule_info(table, *rule_id);
+            if rule_len > 0 {
+                reduces.insert((state, rule_len - 1, lhs));
+            }
+        }
+        Action::Split {
+            shift,
+            reduces: split_reduces,
+            ..
+        } => {
+            if let Some(shift_state) = shift {
+                shifts.insert((state, *shift_state));
+            }
+            for &rule_id in split_reduces {
+                let (rule_len, lhs) = reduce_rule_info(table, rule_id);
+                if rule_len > 0 {
+                    reduces.insert((state, rule_len - 1, lhs));
+                }
+            }
+        }
+        Action::Accept => {}
+    }
+}
+
+fn record_goto_action(
+    table: &GLRTable,
+    stack_nt: NonterminalID,
+    revealed_state: u32,
+    current_state: u32,
+    action: &Action,
+    visited: &mut BTreeSet<u32>,
+    worklist: &mut VecDeque<u32>,
+    nt_escapes: &mut BTreeSet<NtEscape>,
+    nt_rereduces: &mut BTreeSet<NtRereduce>,
+) {
+    match action {
+        Action::Shift(shift_state) => {
+            nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+        }
+        Action::Reduce(rule_id) => {
+            let (rule_len, lhs) = reduce_rule_info(table, *rule_id);
+            handle_reduce(
+                table,
+                stack_nt,
+                revealed_state,
+                rule_len,
+                lhs,
+                visited,
+                worklist,
+                nt_rereduces,
+            );
+        }
+        Action::Split {
+            shift,
+            reduces: split_reduces,
+            ..
+        } => {
+            if let Some(shift_state) = shift {
+                nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+            }
+            for &rule_id in split_reduces {
+                let (rule_len, lhs) = reduce_rule_info(table, rule_id);
+                handle_reduce(
+                    table,
+                    stack_nt,
+                    revealed_state,
+                    rule_len,
+                    lhs,
+                    visited,
+                    worklist,
+                    nt_rereduces,
+                );
+            }
+        }
+        Action::Accept => {}
     }
 }
 
@@ -101,31 +208,7 @@ fn characterize_terminal(
         let Some(action) = table.action(state, terminal) else {
             continue;
         };
-        match action {
-            Action::Shift(shift_state) => {
-                shifts.insert((state, *shift_state));
-            }
-            Action::Reduce(rule_id) => {
-                let rule = &table.rules[*rule_id as usize];
-                let len = rule.rhs.len();
-                if len > 0 {
-                    reduces.insert((state, len - 1, rule.lhs));
-                }
-            }
-            Action::Split { shift, reduces: split_reduces, .. } => {
-                if let Some(shift_state) = shift {
-                    shifts.insert((state, *shift_state));
-                }
-                for rule_id in split_reduces {
-                    let rule = &table.rules[*rule_id as usize];
-                    let len = rule.rhs.len();
-                    if len > 0 {
-                        reduces.insert((state, len - 1, rule.lhs));
-                    }
-                }
-            }
-            Action::Accept => {}
-        }
+        record_initial_action(table, state, action, &mut shifts, &mut reduces);
     }
 
     for revealed_state in 0..table.num_states {
@@ -182,43 +265,17 @@ fn explore_from_goto(
         let Some(action) = table.action(current_state, terminal) else {
             continue;
         };
-        match action {
-            Action::Shift(shift_state) => {
-                nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
-            }
-            Action::Reduce(rule_id) => {
-                let rule = &table.rules[*rule_id as usize];
-                handle_reduce(
-                    table,
-                    stack_nt,
-                    revealed_state,
-                    rule.rhs.len(),
-                    rule.lhs,
-                    &mut visited,
-                    &mut worklist,
-                    nt_rereduces,
-                );
-            }
-            Action::Split { shift, reduces: split_reduces, .. } => {
-                if let Some(shift_state) = shift {
-                    nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
-                }
-                for rule_id in split_reduces {
-                    let rule = &table.rules[*rule_id as usize];
-                    handle_reduce(
-                        table,
-                        stack_nt,
-                        revealed_state,
-                        rule.rhs.len(),
-                        rule.lhs,
-                        &mut visited,
-                        &mut worklist,
-                        nt_rereduces,
-                    );
-                }
-            }
-            Action::Accept => {}
-        }
+        record_goto_action(
+            table,
+            stack_nt,
+            revealed_state,
+            current_state,
+            action,
+            &mut visited,
+            &mut worklist,
+            nt_escapes,
+            nt_rereduces,
+        );
     }
 }
 

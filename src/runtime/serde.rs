@@ -2,16 +2,36 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::runtime::Constraint;
 
-fn encode_ranges(set: &RangeSetBlaze<u32>) -> Vec<[u32; 2]> {
+type EncodedRanges = Vec<[u32; 2]>;
+
+fn encode_ranges(set: &RangeSetBlaze<u32>) -> EncodedRanges {
     set.ranges()
         .map(|range| [*range.start(), *range.end()])
         .collect()
 }
 
-fn decode_ranges(ranges: Vec<[u32; 2]>) -> RangeSetBlaze<u32> {
+fn decode_ranges(ranges: EncodedRanges) -> RangeSetBlaze<u32> {
     ranges
         .into_iter()
         .map(|[start, end]| start..=end)
+        .collect()
+}
+
+fn encode_terminal_ranges(
+    terminal_map: &std::collections::BTreeMap<u32, RangeSetBlaze<u32>>,
+) -> std::collections::BTreeMap<u32, EncodedRanges> {
+    terminal_map
+        .iter()
+        .map(|(&terminal, token_set)| (terminal, encode_ranges(token_set)))
+        .collect()
+}
+
+fn decode_terminal_ranges(
+    terminal_map: std::collections::BTreeMap<u32, EncodedRanges>,
+) -> std::collections::BTreeMap<u32, RangeSetBlaze<u32>> {
+    terminal_map
+        .into_iter()
+        .map(|(terminal, ranges)| (terminal, decode_ranges(ranges)))
         .collect()
 }
 
@@ -20,18 +40,16 @@ pub(in crate::runtime) mod serde_btreemap_rangeset {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
+    type EncodedPossibleMatches = BTreeMap<u32, BTreeMap<u32, super::EncodedRanges>>;
+
     pub(in crate::runtime) fn serialize<S: Serializer>(
         value: &BTreeMap<u32, BTreeMap<u32, RangeSetBlaze<u32>>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        let encoded: BTreeMap<u32, BTreeMap<u32, Vec<[u32; 2]>>> = value
+        let encoded: EncodedPossibleMatches = value
             .iter()
             .map(|(&tokenizer_state, terminal_map)| {
-                let encoded_terminal_map = terminal_map
-                    .iter()
-                    .map(|(&terminal, token_set)| (terminal, super::encode_ranges(token_set)))
-                    .collect();
-                (tokenizer_state, encoded_terminal_map)
+                (tokenizer_state, super::encode_terminal_ranges(terminal_map))
             })
             .collect();
         encoded.serialize(serializer)
@@ -40,15 +58,11 @@ pub(in crate::runtime) mod serde_btreemap_rangeset {
     pub(in crate::runtime) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<BTreeMap<u32, BTreeMap<u32, RangeSetBlaze<u32>>>, D::Error> {
-        let encoded = BTreeMap::<u32, BTreeMap<u32, Vec<[u32; 2]>>>::deserialize(deserializer)?;
+        let encoded = EncodedPossibleMatches::deserialize(deserializer)?;
         Ok(encoded
             .into_iter()
             .map(|(tokenizer_state, terminal_map)| {
-                let decoded_terminal_map = terminal_map
-                    .into_iter()
-                    .map(|(terminal, ranges)| (terminal, super::decode_ranges(ranges)))
-                    .collect();
-                (tokenizer_state, decoded_terminal_map)
+                (tokenizer_state, super::decode_terminal_ranges(terminal_map))
             })
             .collect())
     }
@@ -62,11 +76,7 @@ impl Constraint {
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
         let mut constraint: Self = bincode::deserialize(bytes)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-        constraint.build_buf_masks();
-        constraint.build_dense_token_bytes();
-        constraint.build_dense_token_masks();
-        constraint.build_fast_transitions();
-        constraint.build_seed_dense_masks();
+        constraint.rebuild_runtime_caches();
         Ok(constraint)
     }
 }

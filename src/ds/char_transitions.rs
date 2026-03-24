@@ -9,6 +9,11 @@ pub struct CharTransitions<T> {
 }
 
 impl<T> CharTransitions<T> {
+    #[inline]
+    fn entry_index(&self, key: u8) -> Result<usize, usize> {
+        self.entries.binary_search_by_key(&key, |(existing_key, _)| *existing_key)
+    }
+
     pub fn new() -> Self {
         Self { entries: Vec::new() }
     }
@@ -30,7 +35,7 @@ impl<T> CharTransitions<T> {
     }
 
     pub fn insert(&mut self, key: u8, value: T) -> Option<T> {
-        match self.entries.binary_search_by_key(&key, |(k, _)| *k) {
+        match self.entry_index(key) {
             Ok(index) => Some(std::mem::replace(&mut self.entries[index].1, value)),
             Err(index) => {
                 self.entries.insert(index, (key, value));
@@ -40,15 +45,13 @@ impl<T> CharTransitions<T> {
     }
 
     pub fn get(&self, key: u8) -> Option<&T> {
-        self.entries
-            .binary_search_by_key(&key, |(k, _)| *k)
+        self.entry_index(key)
             .ok()
             .map(|index| &self.entries[index].1)
     }
 
     pub fn get_mut(&mut self, key: u8) -> Option<&mut T> {
-        self.entries
-            .binary_search_by_key(&key, |(k, _)| *k)
+        self.entry_index(key)
             .ok()
             .map(move |index| &mut self.entries[index].1)
     }
@@ -57,12 +60,16 @@ impl<T> CharTransitions<T> {
         self.get(key).is_some()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (u8, &T)> {
-        self.entries.iter().map(|(k, v)| (*k, v))
+    pub fn iter(&self) -> CharTransitionsIter<'_, T> {
+        CharTransitionsIter {
+            inner: self.entries.iter(),
+        }
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u8, &mut T)> {
-        self.entries.iter_mut().map(|(k, v)| (*k, v))
+    pub fn iter_mut(&mut self) -> CharTransitionsIterMut<'_, T> {
+        CharTransitionsIterMut {
+            inner: self.entries.iter_mut(),
+        }
     }
 
     pub fn values(&self) -> impl Iterator<Item = &T> {
@@ -113,9 +120,7 @@ impl<'a, T> IntoIterator for &'a CharTransitions<T> {
     type IntoIter = CharTransitionsIter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        CharTransitionsIter {
-            inner: self.entries.iter(),
-        }
+        self.iter()
     }
 }
 
@@ -124,9 +129,7 @@ impl<'a, T> IntoIterator for &'a mut CharTransitions<T> {
     type IntoIter = CharTransitionsIterMut<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        CharTransitionsIterMut {
-            inner: self.entries.iter_mut(),
-        }
+        self.iter_mut()
     }
 }
 

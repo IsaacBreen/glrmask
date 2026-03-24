@@ -33,6 +33,15 @@ pub enum Symbol {
     Nonterminal(NonterminalID),
 }
 
+impl Symbol {
+    fn nonterminal_id(&self) -> Option<NonterminalID> {
+        match self {
+            Symbol::Nonterminal(nonterminal) => Some(*nonterminal),
+            Symbol::Terminal(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Terminal {
     /// An exact byte sequence (e.g., a keyword or punctuation).
@@ -41,6 +50,12 @@ pub enum Terminal {
     Pattern { id: TerminalID, pattern: String, utf8: bool },
     /// A pre-parsed regex expression.
     Expr { id: TerminalID, expr: Expr },
+}
+
+impl Rule {
+    fn nonterminal_ids(&self) -> impl Iterator<Item = NonterminalID> + '_ {
+        std::iter::once(self.lhs).chain(self.rhs.iter().filter_map(Symbol::nonterminal_id))
+    }
 }
 
 impl Terminal {
@@ -71,12 +86,7 @@ impl GrammarDef {
     pub fn num_nonterminals(&self) -> u32 {
         self.rules
             .iter()
-            .flat_map(|rule| {
-                std::iter::once(rule.lhs).chain(rule.rhs.iter().filter_map(|symbol| match symbol {
-                    Symbol::Nonterminal(nonterminal) => Some(*nonterminal),
-                    Symbol::Terminal(_) => None,
-                }))
-            })
+            .flat_map(|rule| rule.nonterminal_ids())
             .max()
             .map(|id| id + 1)
             .unwrap_or(0)
@@ -86,13 +96,14 @@ impl GrammarDef {
         self.terminal_names
             .get(&terminal)
             .cloned()
-            .or_else(|| {
-                self.terminals
-                    .iter()
-                    .find(|terminal_def| terminal_def.id() == terminal)
-                    .map(Terminal::name)
-            })
+            .or_else(|| self.terminal_by_id(terminal).map(Terminal::name))
             .unwrap_or_else(|| format!("T{terminal}"))
+    }
+
+    fn terminal_by_id(&self, terminal: TerminalID) -> Option<&Terminal> {
+        self.terminals
+            .iter()
+            .find(|terminal_def| terminal_def.id() == terminal)
     }
 }
 
@@ -107,21 +118,28 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn simple_ab_grammar() -> GrammarDef {
+    fn test_grammar(rules: Vec<Rule>, terminals: Vec<Terminal>) -> GrammarDef {
         GrammarDef {
-            rules: vec![Rule {
-                lhs: 0,
-                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
-            }],
+            rules,
             start: 0,
-            terminals: vec![literal(0, "a"), literal(1, "b")],
+            terminals,
             ..Default::default()
         }
     }
 
+    pub fn simple_ab_grammar() -> GrammarDef {
+        test_grammar(
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+            }],
+            vec![literal(0, "a"), literal(1, "b")],
+        )
+    }
+
     pub fn choice_grammar() -> GrammarDef {
-        GrammarDef {
-            rules: vec![
+        test_grammar(
+            vec![
                 Rule {
                     lhs: 0,
                     rhs: vec![Symbol::Terminal(0)],
@@ -131,15 +149,13 @@ pub(crate) mod tests {
                     rhs: vec![Symbol::Terminal(1)],
                 },
             ],
-            start: 0,
-            terminals: vec![literal(0, "a"), literal(1, "b")],
-            ..Default::default()
-        }
+            vec![literal(0, "a"), literal(1, "b")],
+        )
     }
 
     pub fn two_nt_grammar() -> GrammarDef {
-        GrammarDef {
-            rules: vec![
+        test_grammar(
+            vec![
                 Rule {
                     lhs: 0,
                     rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)],
@@ -149,15 +165,13 @@ pub(crate) mod tests {
                     rhs: vec![Symbol::Terminal(0)],
                 },
             ],
-            start: 0,
-            terminals: vec![literal(0, "a"), literal(1, "b")],
-            ..Default::default()
-        }
+            vec![literal(0, "a"), literal(1, "b")],
+        )
     }
 
     pub fn nested_nt_grammar() -> GrammarDef {
-        GrammarDef {
-            rules: vec![
+        test_grammar(
+            vec![
                 Rule {
                     lhs: 0,
                     rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)],
@@ -171,15 +185,13 @@ pub(crate) mod tests {
                     rhs: vec![Symbol::Terminal(1)],
                 },
             ],
-            start: 0,
-            terminals: vec![literal(0, "a"), literal(1, "b")],
-            ..Default::default()
-        }
+            vec![literal(0, "a"), literal(1, "b")],
+        )
     }
 
     pub fn three_terminal_grammar() -> GrammarDef {
-        GrammarDef {
-            rules: vec![Rule {
+        test_grammar(
+            vec![Rule {
                 lhs: 0,
                 rhs: vec![
                     Symbol::Terminal(0),
@@ -187,15 +199,13 @@ pub(crate) mod tests {
                     Symbol::Terminal(2),
                 ],
             }],
-            start: 0,
-            terminals: vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
-            ..Default::default()
-        }
+            vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
+        )
     }
 
     pub fn nested_two_rhs_grammar() -> GrammarDef {
-        GrammarDef {
-            rules: vec![
+        test_grammar(
+            vec![
                 Rule {
                     lhs: 0,
                     rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2)],
@@ -205,10 +215,8 @@ pub(crate) mod tests {
                     rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
                 },
             ],
-            start: 0,
-            terminals: vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
-            ..Default::default()
-        }
+            vec![literal(0, "a"), literal(1, "b"), literal(2, "c")],
+        )
     }
 
     #[test]

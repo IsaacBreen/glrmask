@@ -1,3 +1,5 @@
+//! Possible-match tables for tokenizer states and vocab-prefix subtrees.
+
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -10,6 +12,30 @@ use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
 pub(crate) type PossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
 type PossibleMatchMap = FxHashMap<TerminalID, RangeSetBlaze<u32>>;
+
+fn owned_token_entries(token_bytes: &BTreeMap<u32, Vec<u8>>) -> Vec<(u32, Vec<u8>)> {
+    token_bytes
+        .iter()
+        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
+        .collect()
+}
+
+fn clone_token_entries(token_entries: &[(u32, Vec<u8>)]) -> Vec<(u32, Vec<u8>)> {
+    token_entries
+        .iter()
+        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
+        .collect()
+}
+
+fn ordered_possible_matches(matches_for_state: Rc<PossibleMatchMap>) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
+    match Rc::try_unwrap(matches_for_state) {
+        Ok(map) => map.into_iter().collect(),
+        Err(shared) => shared
+            .iter()
+            .map(|(&terminal, token_ids)| (terminal, token_ids.clone()))
+            .collect(),
+    }
+}
 
 fn reachable_u32(node: &VocabPrefixTreeNode) -> RangeSetBlaze<u32> {
     let mut out = RangeSetBlaze::new();
@@ -79,24 +105,24 @@ impl<'a> PossibleMatchesComputer<'a> {
         }
 
         for (segment_bytes, child) in node.iter_children() {
-            let mut state = tokenizer_state;
-            let mut blocked = false;
+            let mut current_state = tokenizer_state;
+            let mut segment_blocked = false;
             let reachable = self.reachable_for_node(child);
 
             for &byte in segment_bytes {
-                let Some(next_state) = self.tokenizer.step(state, byte) else {
-                    blocked = true;
+                let Some(next_state) = self.tokenizer.step(current_state, byte) else {
+                    segment_blocked = true;
                     break;
                 };
-                state = next_state;
-                for matched in self.tokenizer.matched_terminals_iter(state) {
-                    let existing = result.entry(matched).or_default();
+                current_state = next_state;
+                for terminal in self.tokenizer.matched_terminals_iter(current_state) {
+                    let existing = result.entry(terminal).or_default();
                     merge_token_ids(existing, reachable.as_ref());
                 }
             }
 
-            if !blocked && !self.tokenizer.is_end(state) {
-                let child_matches = self.possible_matches_for_node(child, state);
+            if !segment_blocked && !self.tokenizer.is_end(current_state) {
+                let child_matches = self.possible_matches_for_node(child, current_state);
                 merge_possible_match_maps(&mut result, child_matches.as_ref());
             }
         }
@@ -111,10 +137,7 @@ pub(crate) fn build_possible_matches_by_state(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
 ) -> PossibleMatchesByState {
-    let token_entries: Vec<(u32, Vec<u8>)> = token_bytes
-        .iter()
-        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
-        .collect();
+    let token_entries = owned_token_entries(token_bytes);
     build_possible_matches_from_token_entries(tokenizer, &token_entries)
 }
 
@@ -122,10 +145,7 @@ pub(crate) fn build_possible_matches_from_token_bytes(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
 ) -> PossibleMatchesByState {
-    let token_entries: Vec<(u32, Vec<u8>)> = token_bytes
-        .iter()
-        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
-        .collect();
+    let token_entries = owned_token_entries(token_bytes);
     build_possible_matches_from_token_entries(tokenizer, &token_entries)
 }
 
@@ -133,10 +153,7 @@ pub(crate) fn build_possible_matches_from_token_entries(
     tokenizer: &Tokenizer,
     token_entries: &[(u32, Vec<u8>)],
 ) -> PossibleMatchesByState {
-    build_possible_matches_from_owned_token_entries(
-        tokenizer,
-        token_entries.iter().map(|(token_id, bytes)| (*token_id, bytes.clone())).collect(),
-    )
+    build_possible_matches_from_owned_token_entries(tokenizer, clone_token_entries(token_entries))
 }
 
 pub(crate) fn build_possible_matches_from_owned_token_entries(
@@ -168,18 +185,7 @@ pub(crate) fn collect_possible_matches_by_state(
             .cache
             .remove(&cache_key)
             .expect("root possible-match map should be cached");
-        let ordered_matches: BTreeMap<TerminalID, RangeSetBlaze<u32>> =
-            match Rc::try_unwrap(matches_for_state) {
-                Ok(map) => map.into_iter().collect(),
-                Err(shared) => shared
-                    .iter()
-                    .map(|(&terminal, token_ids)| (terminal, token_ids.clone()))
-                    .collect(),
-            };
-        possible_matches_by_state.insert(
-            tokenizer_state,
-            ordered_matches,
-        );
+        possible_matches_by_state.insert(tokenizer_state, ordered_possible_matches(matches_for_state));
     }
 
     possible_matches_by_state

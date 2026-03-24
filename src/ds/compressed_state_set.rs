@@ -1,5 +1,21 @@
 use std::hash::{Hash, Hasher};
 
+#[inline]
+fn hash_sparse_word(word_index: usize, word: u64) -> u64 {
+    (word_index as u64).wrapping_mul(0x517c_c1b7_2722_0a95)
+        ^ word.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
+#[inline]
+fn pop_lowest_state_bit(word: &mut u64, word_index: u32) -> Option<usize> {
+    if *word == 0 {
+        return None;
+    }
+    let trailing = word.trailing_zeros();
+    *word &= *word - 1;
+    Some(word_index as usize * 64 + trailing as usize)
+}
+
 /// Sparse bitset that tracks which words became non-zero so clearing is cheap.
 pub struct SparseStateSet {
     pub(crate) words: Vec<u64>,
@@ -83,11 +99,10 @@ impl CompressedStateSet {
         buffer.words.clear();
 
         let mut hash = 0u64;
-        for &idx in &sparse.dirty_words {
-            let word = sparse.words[idx];
-            buffer.words.push((idx as u32, word));
-            hash ^= (idx as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
-            hash ^= word.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for &word_index in &sparse.dirty_words {
+            let word = sparse.words[word_index];
+            buffer.words.push((word_index as u32, word));
+            hash ^= hash_sparse_word(word_index, word);
         }
 
         buffer.words.sort_unstable_by_key(|&(idx, _)| idx);
@@ -125,10 +140,9 @@ impl<'a> Iterator for CompressedStateSetIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.current_word != 0 {
-                let trailing = self.current_word.trailing_zeros();
-                self.current_word &= !(1u64 << trailing);
-                return Some(self.current_word_idx as usize * 64 + trailing as usize);
+            if let Some(state) = pop_lowest_state_bit(&mut self.current_word, self.current_word_idx)
+            {
+                return Some(state);
             }
 
             if self.idx >= self.set.words.len() {

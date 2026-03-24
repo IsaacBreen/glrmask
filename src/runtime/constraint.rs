@@ -8,12 +8,18 @@ use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalID;
+use crate::ds::weight::Weight;
 
 use super::state::ConstraintState;
 
 pub(crate) type TokenizerStateID = u32;
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
+type DenseWords = Box<[u64]>;
+type InternalTokenBufMasks = Vec<(u16, u32)>;
+type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
+type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
+type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
@@ -42,47 +48,53 @@ pub struct Constraint {
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
     /// for all original tokens that map to internal token `i`.
     #[serde(default)]
-    pub(crate) internal_token_buf_masks: Vec<Vec<(u16, u32)>>,
+    pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
     #[serde(skip)]
     pub(crate) internal_token_dense_words: usize,
     #[serde(skip)]
-    pub(crate) weight_token_dense_masks: FxHashMap<usize, Box<[u64]>>,
+    pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
     /// Precomputed dense bitmask for the seed phase: for each (tokenizer_state, terminal_id),
     /// the dense bitmap of internal tokens that terminal covers in that state.
     #[serde(skip)]
-    pub(crate) seed_terminal_dense: FxHashMap<(u32, TerminalID), Box<[u64]>>,
+    pub(crate) seed_terminal_dense: SeedTerminalDenseMasks,
     /// Dense bitmap of the full internal token universe.
     #[serde(skip)]
-    pub(crate) seed_universe_dense: Box<[u64]>,
+    pub(crate) seed_universe_dense: DenseWords,
     /// Fast DWA transition lookup (FxHashMap instead of BTreeMap).
     /// Built from parser_dwa.states at load/build time.
     #[serde(skip)]
-    pub(crate) dwa_fast_transitions: Vec<FxHashMap<i32, (u32, crate::ds::weight::Weight)>>,
+    pub(crate) dwa_fast_transitions: FastDwaTransitions,
 }
 
 impl Constraint {
+    pub(crate) fn rebuild_runtime_caches(&mut self) {
+        self.build_buf_masks();
+        self.build_dense_token_bytes();
+        self.build_dense_token_masks();
+        self.build_fast_transitions();
+        self.build_seed_dense_masks();
+    }
+
     /// Build precomputed bitmask fragments for each internal token.
     pub(crate) fn build_buf_masks(&mut self) {
         if self.internal_token_to_tokens.is_empty() {
             self.internal_token_buf_masks = Vec::new();
             return;
         }
-        self.internal_token_buf_masks = self.internal_token_to_tokens.iter().map(|originals| {
-            let mut word_map = BTreeMap::<u16, u32>::new();
-            for &original in originals {
-                let word = (original / 32) as u16;
-                let bit = original % 32;
-                *word_map.entry(word).or_default() |= 1u32 << bit;
-            }
-            word_map.into_iter().collect()
-        }).collect();
+
+        self.internal_token_buf_masks = self
+            .internal_token_to_tokens
+            .iter()
+            .map(|originals| Self::build_internal_token_buf_mask(originals))
+            .collect();
     }
 
     pub(crate) fn build_dense_token_bytes(&mut self) {
-        let Some(max_token_id) = self.token_bytes.keys().next_back().copied() else {
+        let Some(max_token_id) = self.max_original_token_id() else {
             self.token_bytes_dense.clear();
             return;
         };
+
         let mut dense = vec![None; max_token_id as usize + 1];
         for (&token_id, bytes) in &self.token_bytes {
             dense[token_id as usize] = Some(bytes.clone().into_boxed_slice());
@@ -92,11 +104,18 @@ impl Constraint {
 
     /// Build fast transition lookup tables from the DWA's BTreeMap transitions.
     pub(crate) fn build_fast_transitions(&mut self) {
-        self.dwa_fast_transitions = self.parser_dwa.states.iter().map(|state| {
-            state.transitions.iter().map(|(&label, (target, weight))| {
-                (label, (*target, weight.clone()))
-            }).collect()
-        }).collect();
+        self.dwa_fast_transitions = self
+            .parser_dwa
+            .states
+            .iter()
+            .map(|state| {
+                state
+                    .transitions
+                    .iter()
+                    .map(|(&label, (target, weight))| (label, (*target, weight.clone())))
+                    .collect()
+            })
+            .collect();
     }
 
     pub(crate) fn build_dense_token_masks(&mut self) {
@@ -106,7 +125,7 @@ impl Constraint {
             return;
         }
 
-        let mut dense_masks = FxHashMap::default();
+        let mut dense_masks = DenseWeightMaskCache::default();
         for state in &self.parser_dwa.states {
             if let Some(final_weight) = &state.final_weight {
                 self.collect_weight_dense_masks(final_weight, &mut dense_masks);
@@ -129,27 +148,16 @@ impl Constraint {
             return;
         }
 
-        // Universe bitmap.
         let universe = self.internal_token_universe();
         self.seed_universe_dense = self.dense_words_from_internal_set(&universe);
 
-        // Per-(state, terminal) bitmaps.
-        let mut terminal_masks = FxHashMap::default();
-        for (&tok_state, terminals) in &self.possible_matches {
-            for (&terminal_id, llm_tokens) in terminals {
-                terminal_masks.insert(
-                    (tok_state, terminal_id),
-                    self.dense_words_from_internal_set(llm_tokens),
-                );
-            }
-        }
-        self.seed_terminal_dense = terminal_masks;
+        self.seed_terminal_dense = self.build_seed_terminal_dense_masks();
     }
 
     fn collect_weight_dense_masks(
         &self,
-        weight: &crate::ds::weight::Weight,
-        dense_masks: &mut FxHashMap<usize, Box<[u64]>>,
+        weight: &Weight,
+        dense_masks: &mut DenseWeightMaskCache,
     ) {
         for token_set in weight.unique_token_sets() {
             let key = token_set as *const RangeSetBlaze<u32> as usize;
@@ -177,15 +185,14 @@ impl Constraint {
         right_words: &[u64],
         buf: &mut [u32],
     ) {
-        for (word_index, (&left_word, &right_word)) in left_words.iter().zip(right_words.iter()).enumerate() {
+        for (word_index, (&left_word, &right_word)) in
+            left_words.iter().zip(right_words.iter()).enumerate()
+        {
             let mut overlap = left_word & right_word;
             while overlap != 0 {
                 let bit = overlap.trailing_zeros() as usize;
                 let internal_token = word_index * 64 + bit;
-                let masks = &self.internal_token_buf_masks[internal_token];
-                for &(buf_word, mask) in masks {
-                    buf[buf_word as usize] |= mask;
-                }
+                self.or_internal_token_masks_to_buf(internal_token, buf);
                 overlap &= overlap - 1;
             }
         }
@@ -211,18 +218,11 @@ impl Constraint {
     ) {
         if !self.internal_token_buf_masks.is_empty() {
             for internal_token in internal_tokens.iter() {
-                let masks = &self.internal_token_buf_masks[internal_token as usize];
-                for &(word_idx, mask) in masks {
-                    buf[word_idx as usize] |= mask;
-                }
+                self.or_internal_token_masks_to_buf(internal_token as usize, buf);
             }
         } else {
             for token_id in internal_tokens.iter() {
-                let word = token_id as usize / 32;
-                let bit = token_id as usize % 32;
-                if let Some(slot) = buf.get_mut(word) {
-                    *slot |= 1u32 << bit;
-                }
+                self.or_original_token_to_buf(token_id, buf);
             }
         }
     }
@@ -275,12 +275,7 @@ impl Constraint {
         crate::ds::weight::clear_stale_weights();
         crate::ds::weight::clear_weight_op_caches();
 
-        let initial_parser_state = 0u32;
-        let initial_tok_state = self.tokenizer.initial_state();
-        let state = BTreeMap::from([(
-            initial_tok_state,
-            ParserGSS::from_stacks(&[(vec![initial_parser_state], BTreeMap::new())]),
-        )]);
+        let state = self.initial_state_map();
         ConstraintState { constraint: self, state }
     }
 
@@ -300,16 +295,10 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        let possible_matches = self.possible_matches
+        self.possible_matches
             .get(&tokenizer_state)
-            .cloned()
-            .unwrap_or_default();
-        possible_matches
-            .into_iter()
-            .map(|(terminal, internal_tokens)| {
-                (terminal, self.expand_internal_token_set(&internal_tokens))
-            })
-            .collect()
+            .map(|possible_matches| self.expand_possible_matches(possible_matches))
+            .unwrap_or_default()
     }
 
     pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: u32) -> u32 {
@@ -329,7 +318,7 @@ impl Constraint {
 
     pub(crate) fn internal_token_universe(&self) -> RangeSetBlaze<u32> {
         if self.internal_token_to_tokens.is_empty() {
-            let Some(max_token_id) = self.token_bytes.keys().next_back().copied() else {
+            let Some(max_token_id) = self.max_original_token_id() else {
                 return RangeSetBlaze::new();
             };
             return RangeSetBlaze::from_iter([0..=max_token_id]);
@@ -346,10 +335,82 @@ impl Constraint {
             return internal_tokens.clone();
         }
 
-        // Collect all original token IDs, sort, build ranges.
-        let total_estimate: usize = internal_tokens.iter()
-            .filter_map(|t| self.internal_token_to_tokens.get(t as usize))
-            .map(|v| v.len())
+        let all_ids = self.collect_original_token_ids(internal_tokens);
+        Self::range_set_from_sorted_ids(&all_ids)
+    }
+
+    pub(crate) fn possible_matches_for_state_internal(
+        &self,
+        tokenizer_state: u32,
+    ) -> Option<&BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
+        self.possible_matches.get(&tokenizer_state)
+    }
+
+    fn build_internal_token_buf_mask(originals: &[u32]) -> InternalTokenBufMasks {
+        let mut word_map = BTreeMap::<u16, u32>::new();
+        for &original in originals {
+            let word = (original / 32) as u16;
+            let bit = original % 32;
+            *word_map.entry(word).or_default() |= 1u32 << bit;
+        }
+        word_map.into_iter().collect()
+    }
+
+    fn max_original_token_id(&self) -> Option<u32> {
+        self.token_bytes.keys().next_back().copied()
+    }
+
+    fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
+        let mut terminal_masks = SeedTerminalDenseMasks::default();
+        for (&tokenizer_state, terminals) in &self.possible_matches {
+            for (&terminal_id, internal_tokens) in terminals {
+                terminal_masks.insert(
+                    (tokenizer_state, terminal_id),
+                    self.dense_words_from_internal_set(internal_tokens),
+                );
+            }
+        }
+        terminal_masks
+    }
+
+    fn or_internal_token_masks_to_buf(&self, internal_token: usize, buf: &mut [u32]) {
+        let masks = &self.internal_token_buf_masks[internal_token];
+        for &(word_idx, mask) in masks {
+            buf[word_idx as usize] |= mask;
+        }
+    }
+
+    fn or_original_token_to_buf(&self, token_id: u32, buf: &mut [u32]) {
+        let word = token_id as usize / 32;
+        let bit = token_id as usize % 32;
+        if let Some(slot) = buf.get_mut(word) {
+            *slot |= 1u32 << bit;
+        }
+    }
+
+    fn initial_state_map(&self) -> BTreeMap<u32, ParserGSS> {
+        let initial_tok_state = self.tokenizer.initial_state();
+        let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], BTreeMap::new())]);
+        BTreeMap::from([(initial_tok_state, parser_gss)])
+    }
+
+    fn expand_possible_matches(
+        &self,
+        possible_matches: &BTreeMap<TerminalID, RangeSetBlaze<u32>>,
+    ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
+        possible_matches
+            .iter()
+            .map(|(&terminal, internal_tokens)| {
+                (terminal, self.expand_internal_token_set(internal_tokens))
+            })
+            .collect()
+    }
+
+    fn collect_original_token_ids(&self, internal_tokens: &RangeSetBlaze<u32>) -> Vec<u32> {
+        let total_estimate: usize = internal_tokens
+            .iter()
+            .filter_map(|token| self.internal_token_to_tokens.get(token as usize))
+            .map(Vec::len)
             .sum();
         let mut all_ids = Vec::with_capacity(total_estimate);
         for internal_token in internal_tokens.iter() {
@@ -359,13 +420,18 @@ impl Constraint {
         }
         all_ids.sort_unstable();
         all_ids.dedup();
-        if all_ids.is_empty() {
+        all_ids
+    }
+
+    fn range_set_from_sorted_ids(ids: &[u32]) -> RangeSetBlaze<u32> {
+        let Some((&first, rest)) = ids.split_first() else {
             return RangeSetBlaze::new();
-        }
+        };
+
         let mut ranges = Vec::new();
-        let mut start = all_ids[0];
-        let mut end = all_ids[0];
-        for &id in &all_ids[1..] {
+        let mut start = first;
+        let mut end = first;
+        for &id in rest {
             if id == end + 1 {
                 end = id;
             } else {
@@ -376,12 +442,5 @@ impl Constraint {
         }
         ranges.push(start..=end);
         RangeSetBlaze::from_iter(ranges)
-    }
-
-    pub(crate) fn possible_matches_for_state_internal(
-        &self,
-        tokenizer_state: u32,
-    ) -> Option<&BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
-        self.possible_matches.get(&tokenizer_state)
     }
 }

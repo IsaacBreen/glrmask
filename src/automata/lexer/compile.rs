@@ -131,212 +131,201 @@ fn highest_power_of_two_leq(value: usize) -> usize {
     1usize << (usize::BITS - value.leading_zeros() - 1)
 }
 
-fn compile_repeat_power_cps(
-    expr: &Expr,
-    copies: usize,
-    nfa: &mut NFA,
-    end: u32,
-    cache: &mut HashMap<(usize, u32), u32>,
-) -> u32 {
-    debug_assert!(copies.is_power_of_two());
+struct RepeatCompiler<'expr, 'nfa> {
+    expr: &'expr Expr,
+    nfa: &'nfa mut NFA,
+    power_cache: HashMap<(usize, u32), u32>,
+    upto_cache: HashMap<(usize, u32), u32>,
+}
 
-    if let Some(&start) = cache.get(&(copies, end)) {
-        return start;
+impl<'expr, 'nfa> RepeatCompiler<'expr, 'nfa> {
+    fn new(expr: &'expr Expr, nfa: &'nfa mut NFA) -> Self {
+        Self {
+            expr,
+            nfa,
+            power_cache: HashMap::new(),
+            upto_cache: HashMap::new(),
+        }
     }
 
-    let start = if copies == 1 {
-        let start = nfa.add_state();
-        append_compiled_expr(expr, nfa, start, end);
+    fn compile_power(&mut self, copies: usize, end: u32) -> u32 {
+        debug_assert!(copies.is_power_of_two());
+
+        if let Some(&start) = self.power_cache.get(&(copies, end)) {
+            return start;
+        }
+
+        let start = if copies == 1 {
+            let start = self.nfa.add_state();
+            append_compiled_expr(self.expr, self.nfa, start, end);
+            start
+        } else {
+            let half = copies / 2;
+            let suffix_start = self.compile_power(half, end);
+            self.compile_power(half, suffix_start)
+        };
+
+        self.power_cache.insert((copies, end), start);
         start
-    } else {
-        let half = copies / 2;
-        let suffix_start = compile_repeat_power_cps(expr, half, nfa, end, cache);
-        compile_repeat_power_cps(expr, half, nfa, suffix_start, cache)
-    };
+    }
 
-    cache.insert((copies, end), start);
-    start
+    fn compile_exact(&mut self, copies: usize, end: u32) -> u32 {
+        if copies == 0 {
+            return end;
+        }
+
+        let largest_power = highest_power_of_two_leq(copies);
+        let suffix_start = self.compile_exact(copies - largest_power, end);
+        self.compile_power(largest_power, suffix_start)
+    }
+
+    fn compile_upto(&mut self, copies: usize, end: u32) -> u32 {
+        if copies == 0 {
+            return end;
+        }
+
+        if let Some(&start) = self.upto_cache.get(&(copies, end)) {
+            return start;
+        }
+
+        let largest_power = highest_power_of_two_leq(copies);
+        let split = self.nfa.add_state();
+
+        let smaller_start = self.compile_upto(largest_power - 1, end);
+        self.nfa.add_epsilon(split, smaller_start);
+
+        let suffix_start = self.compile_upto(copies - largest_power, end);
+        let power_start = self.compile_power(largest_power, suffix_start);
+        self.nfa.add_epsilon(split, power_start);
+
+        self.upto_cache.insert((copies, end), split);
+        split
+    }
 }
 
-fn compile_repeat_exact_cps(
-    expr: &Expr,
-    copies: usize,
-    nfa: &mut NFA,
-    end: u32,
-    power_cache: &mut HashMap<(usize, u32), u32>,
-) -> u32 {
-    if copies == 0 {
-        return end;
+fn append_byte_sequence_expr(bytes: &[u8], nfa: &mut NFA, start: u32, end: u32) {
+    let mut state = start;
+    for (index, &byte) in bytes.iter().enumerate() {
+        let next = if index + 1 == bytes.len() {
+            end
+        } else {
+            nfa.add_state()
+        };
+        nfa.add_transition(state, byte, next);
+        state = next;
     }
 
-    let largest_power = highest_power_of_two_leq(copies);
-    let suffix_start = compile_repeat_exact_cps(expr, copies - largest_power, nfa, end, power_cache);
-    compile_repeat_power_cps(expr, largest_power, nfa, suffix_start, power_cache)
+    if bytes.is_empty() {
+        nfa.add_epsilon(start, end);
+    }
 }
 
-fn compile_repeat_upto_cps(
+fn append_dfa_expr(dfa: &DFA, nfa: &mut NFA, start: u32, end: u32) {
+    let mut state_map = Vec::with_capacity(dfa.num_states());
+    for _ in 0..dfa.num_states() {
+        state_map.push(nfa.add_state());
+    }
+    nfa.add_epsilon(start, state_map[0]);
+
+    for (state_id, state) in dfa.states().iter().enumerate() {
+        let mapped_state = state_map[state_id];
+        for (byte, &target) in state.transitions.iter() {
+            nfa.add_transition(mapped_state, byte, state_map[target as usize]);
+        }
+        if !state.finalizers.is_empty() {
+            nfa.add_epsilon(mapped_state, end);
+        }
+    }
+}
+
+fn append_sequence_expr(parts: &[Expr], nfa: &mut NFA, start: u32, end: u32) {
+    let mut state = start;
+    for (index, part) in parts.iter().enumerate() {
+        let next = if index + 1 == parts.len() {
+            end
+        } else {
+            nfa.add_state()
+        };
+        append_compiled_expr(part, nfa, state, next);
+        state = next;
+    }
+
+    if parts.is_empty() {
+        nfa.add_epsilon(start, end);
+    }
+}
+
+fn append_choice_expr(options: &[Expr], nfa: &mut NFA, start: u32, end: u32) {
+    if options.is_empty() {
+        nfa.add_epsilon(start, end);
+        return;
+    }
+
+    for option in options {
+        append_compiled_expr(option, nfa, start, end);
+    }
+}
+
+fn append_bounded_repeat_expr(expr: &Expr, min: usize, max: usize, nfa: &mut NFA, start: u32, end: u32) {
+    if max < min {
+        return;
+    }
+
+    let mut repeat_compiler = RepeatCompiler::new(expr, nfa);
+    let optional = max - min;
+    let tail_start = repeat_compiler.compile_upto(optional, end);
+    let repeat_start = repeat_compiler.compile_exact(min, tail_start);
+    repeat_compiler.nfa.add_epsilon(start, repeat_start);
+}
+
+fn append_unbounded_repeat_expr(
     expr: &Expr,
-    copies: usize,
+    min: usize,
     nfa: &mut NFA,
+    start: u32,
     end: u32,
-    power_cache: &mut HashMap<(usize, u32), u32>,
-    upto_cache: &mut HashMap<(usize, u32), u32>,
-) -> u32 {
-    if copies == 0 {
-        return end;
+) {
+    let mut current = start;
+    for _ in 0..min {
+        let next = nfa.add_state();
+        append_compiled_expr(expr, nfa, current, next);
+        current = next;
     }
 
-    if let Some(&start) = upto_cache.get(&(copies, end)) {
-        return start;
+    if current == start {
+        let fresh = nfa.add_state();
+        nfa.add_epsilon(start, fresh);
+        current = fresh;
     }
 
-    let largest_power = highest_power_of_two_leq(copies);
-    let split = nfa.add_state();
-
-    let smaller_start = compile_repeat_upto_cps(
-        expr,
-        largest_power - 1,
-        nfa,
-        end,
-        power_cache,
-        upto_cache,
-    );
-    nfa.add_epsilon(split, smaller_start);
-
-    let suffix_start = compile_repeat_upto_cps(
-        expr,
-        copies - largest_power,
-        nfa,
-        end,
-        power_cache,
-        upto_cache,
-    );
-    let power_start = compile_repeat_power_cps(expr, largest_power, nfa, suffix_start, power_cache);
-    nfa.add_epsilon(split, power_start);
-
-    upto_cache.insert((copies, end), split);
-    split
+    nfa.add_epsilon(current, end);
+    let loop_state = nfa.add_state();
+    append_compiled_expr(expr, nfa, current, loop_state);
+    nfa.add_epsilon(loop_state, current);
+    if expr_accepts_empty(expr) {
+        nfa.add_epsilon(loop_state, end);
+    }
 }
 
 fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
     match expr {
-        Expr::U8Seq(bytes) => {
-            let mut state = start;
-            for (index, &byte) in bytes.iter().enumerate() {
-                let next = if index + 1 == bytes.len() {
-                    end
-                } else {
-                    nfa.add_state()
-                };
-                nfa.add_transition(state, byte, next);
-                state = next;
-            }
-            if bytes.is_empty() {
-                nfa.add_epsilon(start, end);
-            }
-        }
+        Expr::U8Seq(bytes) => append_byte_sequence_expr(bytes, nfa, start, end),
         Expr::U8Class(set) => {
             nfa.add_u8set_transition(start, *set, end);
         }
-        Expr::Dfa(dfa) => {
-            let mut state_map = Vec::with_capacity(dfa.num_states());
-            for _ in 0..dfa.num_states() {
-                state_map.push(nfa.add_state());
-            }
-            nfa.add_epsilon(start, state_map[0]);
-
-            for (state_id, state) in dfa.states().iter().enumerate() {
-                let mapped_state = state_map[state_id];
-                for (byte, &target) in state.transitions.iter() {
-                    nfa.add_transition(mapped_state, byte, state_map[target as usize]);
-                }
-                if !state.finalizers.is_empty() {
-                    nfa.add_epsilon(mapped_state, end);
-                }
-            }
-        }
-        Expr::Seq(parts) => {
-            let mut state = start;
-            for (index, part) in parts.iter().enumerate() {
-                let next = if index + 1 == parts.len() {
-                    end
-                } else {
-                    nfa.add_state()
-                };
-                append_compiled_expr(part, nfa, state, next);
-                state = next;
-            }
-            if parts.is_empty() {
-                nfa.add_epsilon(start, end);
-            }
-        }
-        Expr::Choice(options) => {
-            if options.is_empty() {
-                nfa.add_epsilon(start, end);
-            }
-            for option in options {
-                append_compiled_expr(option, nfa, start, end);
-            }
-        }
+        Expr::Dfa(dfa) => append_dfa_expr(dfa, nfa, start, end),
+        Expr::Seq(parts) => append_sequence_expr(parts, nfa, start, end),
+        Expr::Choice(options) => append_choice_expr(options, nfa, start, end),
         Expr::Exclude { .. } => {
             unreachable!("nested Expr::Exclude must be lowered before NFA compilation")
         }
-        Expr::Repeat { expr, min, max } => {
-            match max {
-                Some(max) => {
-                    if *max < *min {
-                        return;
-                    }
-
-                    let optional = max - min;
-                    let mut power_cache = HashMap::new();
-                    let mut upto_cache = HashMap::new();
-                    let tail_start = compile_repeat_upto_cps(
-                        expr,
-                        optional,
-                        nfa,
-                        end,
-                        &mut power_cache,
-                        &mut upto_cache,
-                    );
-                    let repeat_start =
-                        compile_repeat_exact_cps(expr, *min, nfa, tail_start, &mut power_cache);
-                    nfa.add_epsilon(start, repeat_start);
-                }
-                None => {
-                    let mut current = start;
-                    for _ in 0..*min {
-                        let next = nfa.add_state();
-                        append_compiled_expr(expr, nfa, current, next);
-                        current = next;
-                    }
-
-                    if current == start {
-                        let fresh = nfa.add_state();
-                        nfa.add_epsilon(start, fresh);
-                        current = fresh;
-                    }
-
-                    nfa.add_epsilon(current, end);
-                    let loop_state = nfa.add_state();
-                    append_compiled_expr(expr, nfa, current, loop_state);
-                    nfa.add_epsilon(loop_state, current);
-                    if expr_accepts_empty(expr) {
-                        nfa.add_epsilon(loop_state, end);
-                    }
-                }
-            }
-        }
+        Expr::Repeat { expr, min, max } => match max {
+            Some(max) => append_bounded_repeat_expr(expr, *min, *max, nfa, start, end),
+            None => append_unbounded_repeat_expr(expr, *min, nfa, start, end),
+        },
         Expr::Shared(inner) => append_compiled_expr(inner, nfa, start, end),
         Expr::Epsilon => nfa.add_epsilon(start, end),
     }
-}
-
-fn compile_expr(expr: &Expr) -> NFA {
-    let mut nfa = NFA::new(2);
-    append_compiled_expr(expr, &mut nfa, 0, 1);
-
-    nfa
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
