@@ -1345,10 +1345,13 @@ struct TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
     self_loop_bytes: Vec<U8Set>,
+    leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
-    node_state_cache: HashMap<(usize, u32, Option<TerminalID>), u32>,
-    segment_state_cache: HashMap<(usize, usize, usize, u32, Option<TerminalID>), u32>,
+    leaf_weight_cache_raw: HashMap<LeafTokenIds, Weight>,
+    leaf_weight_cache_canonical: HashMap<LeafTokenIds, Weight>,
+    node_state_cache: HashMap<(usize, u32, IncomingHistory), u32>,
+    segment_state_cache: HashMap<(usize, usize, usize, u32, IncomingHistory), u32>,
     profile_enabled: bool,
     profile_node_contexts: usize,
     profile_segment_contexts: usize,
@@ -1356,7 +1359,67 @@ struct TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
     profile_exec_ms: std::time::Duration,
 }
 
+type IncomingHistory = [Option<TerminalID>; 2];
+
+fn advance_incoming_history(
+    incoming_history: IncomingHistory,
+    label: TerminalID,
+) -> IncomingHistory {
+    [incoming_history[1], Some(label)]
+}
+
 impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
+    fn buffer_leaf_token_id(&mut self, source: u32, label: TerminalID, internal_token_id: u32) {
+        let source_idx = source as usize;
+        if source_idx >= self.leaf_token_ids_buffer.len() {
+            self.leaf_token_ids_buffer.resize_with(source_idx + 1, Vec::new);
+        }
+        let labels = &mut self.leaf_token_ids_buffer[source_idx];
+        let label_idx = label as usize;
+        if label_idx >= labels.len() {
+            labels.resize_with(label_idx + 1, SmallVec::new);
+        }
+        labels[label_idx].push(internal_token_id);
+    }
+
+    fn cached_leaf_weight(&mut self, token_ids: LeafTokenIds) -> Weight {
+        if let Some(weight) = self.leaf_weight_cache_raw.get(&token_ids) {
+            return weight.clone();
+        }
+
+        let mut canonical_token_ids = token_ids.clone();
+        canonical_token_ids.sort_unstable();
+        canonical_token_ids.dedup();
+
+        if let Some(weight) = self.leaf_weight_cache_canonical.get(&canonical_token_ids) {
+            let weight = weight.clone();
+            self.leaf_weight_cache_raw.insert(token_ids, weight.clone());
+            return weight;
+        }
+
+        let tokens = RangeSetBlaze::from_iter(canonical_token_ids.iter().copied().map(|id| id..=id));
+        let weight = Weight::from_uniform(0..=self.num_tsids - 1, tokens);
+        self.leaf_weight_cache_canonical
+            .insert(canonical_token_ids, weight.clone());
+        self.leaf_weight_cache_raw.insert(token_ids, weight.clone());
+        weight
+    }
+
+    fn flush_leaf_token_buffer(&mut self) {
+        for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
+            .into_iter()
+            .enumerate()
+        {
+            for (label_idx, token_ids) in labels_vec.into_iter().enumerate() {
+                if token_ids.is_empty() {
+                    continue;
+                }
+                let weight = self.cached_leaf_weight(token_ids);
+                self.add_terminal_transition(from as u32, label_idx as u32, self.leaf_state, weight);
+            }
+        }
+    }
+
     fn token_set_weight_fast(&self, internal_token_ids: &RangeSetBlaze<usize>) -> Weight {
         if self.num_tsids == 0 || internal_token_ids.is_empty() {
             return Weight::empty();
@@ -1445,12 +1508,12 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
         &mut self,
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
-        incoming_label: Option<TerminalID>,
+        incoming_history: IncomingHistory,
     ) -> u32 {
         let key = (
             node as *const VocabPrefixTreeNode as usize,
             tokenizer_state,
-            incoming_label,
+            incoming_history,
         );
         if let Some(&state) = self.node_state_cache.get(&key) {
             return state;
@@ -1459,7 +1522,7 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
         let state = self.nwa.add_state();
         self.node_state_cache.insert(key, state);
         self.profile_node_contexts += 1;
-        self.build_node_state(state, node, tokenizer_state, incoming_label);
+        self.build_node_state(state, node, tokenizer_state, incoming_history);
         state
     }
 
@@ -1468,7 +1531,17 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
         state: u32,
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
-        incoming_label: Option<TerminalID>,
+        incoming_history: IncomingHistory,
+    ) {
+        self.emit_node_from_state(state, node, tokenizer_state, incoming_history);
+    }
+
+    fn emit_node_from_state(
+        &mut self,
+        state: u32,
+        node: &VocabPrefixTreeNode,
+        tokenizer_state: TokenizerState,
+        incoming_history: IncomingHistory,
     ) {
         if self.can_skip_self_loop_subtree(node, tokenizer_state) {
             let mut accessible = node.reachable_token_ids().clone();
@@ -1498,7 +1571,7 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
                 node.prefix_length(),
                 0,
                 tokenizer_state,
-                incoming_label,
+                incoming_history,
             );
         }
     }
@@ -1510,7 +1583,7 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
         parent_prefix_length: usize,
         pos: usize,
         tokenizer_state: TokenizerState,
-        incoming_label: Option<TerminalID>,
+        incoming_history: IncomingHistory,
     ) {
         let segment_bytes = &child.prefix()[parent_prefix_length..];
         let segment_len = segment_bytes.len();
@@ -1525,28 +1598,35 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
         let mut possible_matches_at_end = None;
 
         if let Some(end_state) = exec_end_state {
-            let child_state = self.node_state(child, end_state, incoming_label);
-            self.add_epsilon(state, child_state, Weight::all());
-
             if child.has_token() {
-                let leaf_weight = token_weight_all_tsids(self.num_tsids, internal_child_token_id);
                 for terminal_id in self.tokenizer.possible_future_terminals_iter(end_state) {
-                    self.add_terminal_transition(
-                        state,
-                        terminal_id,
-                        self.leaf_state,
-                        leaf_weight.clone(),
-                    );
+                    if self.ignore_terminal == Some(terminal_id) {
+                        let leaf_weight = token_weight_all_tsids(self.num_tsids, internal_child_token_id);
+                        self.add_terminal_transition(
+                            state,
+                            terminal_id,
+                            self.leaf_state,
+                            leaf_weight,
+                        );
+                    } else {
+                        self.buffer_leaf_token_id(state, terminal_id, internal_child_token_id);
+                    }
                 }
             }
+
+            self.emit_node_from_state(state, child, end_state, incoming_history);
         }
 
         for matched in exec.matches {
             let next_pos = pos + matched.width;
 
             if next_pos == segment_len && child.has_token() {
-                let leaf_weight = token_weight_all_tsids(self.num_tsids, internal_child_token_id);
-                self.add_terminal_transition(state, matched.id, self.leaf_state, leaf_weight);
+                if self.ignore_terminal == Some(matched.id) {
+                    let leaf_weight = token_weight_all_tsids(self.num_tsids, internal_child_token_id);
+                    self.add_terminal_transition(state, matched.id, self.leaf_state, leaf_weight);
+                } else {
+                    self.buffer_leaf_token_id(state, matched.id, internal_child_token_id);
+                }
             }
 
             let continuation_weight = if next_pos == segment_len && child.has_token() {
@@ -1585,14 +1665,18 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
             }
 
             let destination = if next_pos == segment_len {
-                self.node_state(child, self.tokenizer.initial_state_id(), Some(matched.id))
+                self.node_state(
+                    child,
+                    self.tokenizer.initial_state_id(),
+                    advance_incoming_history(incoming_history, matched.id),
+                )
             } else {
                 self.segment_state(
                     child,
                     parent_prefix_length,
                     next_pos,
                     self.tokenizer.initial_state_id(),
-                    Some(matched.id),
+                    advance_incoming_history(incoming_history, matched.id),
                 )
             };
             self.add_terminal_transition(state, matched.id, destination, continuation_weight);
@@ -1605,14 +1689,14 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
         parent_prefix_length: usize,
         pos: usize,
         tokenizer_state: TokenizerState,
-        incoming_label: Option<TerminalID>,
+        incoming_history: IncomingHistory,
     ) -> u32 {
         let key = (
             child as *const VocabPrefixTreeNode as usize,
             parent_prefix_length,
             pos,
             tokenizer_state,
-            incoming_label,
+            incoming_history,
         );
         if let Some(&state) = self.segment_state_cache.get(&key) {
             return state;
@@ -1627,7 +1711,7 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
             parent_prefix_length,
             pos,
             tokenizer_state,
-            incoming_label,
+            incoming_history,
         );
         state
     }
@@ -1639,7 +1723,7 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
         parent_prefix_length: usize,
         pos: usize,
         tokenizer_state: TokenizerState,
-        incoming_label: Option<TerminalID>,
+        incoming_history: IncomingHistory,
     ) {
         self.emit_segment_from_state(
             state,
@@ -1647,7 +1731,7 @@ impl<'tok, 'pm, 'nwa> TerminalSharedNwaBuilder<'tok, 'pm, 'nwa> {
             parent_prefix_length,
             pos,
             tokenizer_state,
-            incoming_label,
+            incoming_history,
         );
     }
 }
@@ -1788,6 +1872,175 @@ fn log_terminal_profile(enabled: bool, phase: &str, started_at: std::time::Insta
     }
 }
 
+fn log_nwa_weight_profile(enabled: bool, nwa: &NWA, phase: &str) {
+    if !enabled {
+        return;
+    }
+
+    let mut transition_weights = 0usize;
+    let mut transition_ranges = 0usize;
+    let mut transition_bytes = 0usize;
+    let mut max_transition_ranges = 0usize;
+    let mut unique_transition_weights = HashSet::new();
+    let mut transition_token_ranges = 0usize;
+    let mut max_transition_token_ranges = 0usize;
+    let mut unique_transition_token_sets = HashSet::new();
+
+    let mut epsilon_weights = 0usize;
+    let mut epsilon_ranges = 0usize;
+    let mut max_epsilon_ranges = 0usize;
+    let mut unique_epsilon_weights = HashSet::new();
+
+    let mut final_weights = 0usize;
+    let mut final_ranges = 0usize;
+    let mut max_final_ranges = 0usize;
+    let mut unique_final_weights = HashSet::new();
+
+    for state in &nwa.states {
+        if let Some(weight) = state.final_weight.as_ref() {
+            final_weights += 1;
+            let ranges = weight.num_ranges();
+            final_ranges += ranges;
+            max_final_ranges = max_final_ranges.max(ranges);
+            unique_final_weights.insert(weight.ptr_key());
+        }
+
+        for (_, weight) in &state.epsilons {
+            epsilon_weights += 1;
+            let ranges = weight.num_ranges();
+            epsilon_ranges += ranges;
+            max_epsilon_ranges = max_epsilon_ranges.max(ranges);
+            unique_epsilon_weights.insert(weight.ptr_key());
+        }
+
+        for targets in state.transitions.values() {
+            for (_, weight) in targets {
+                transition_weights += 1;
+                let ranges = weight.num_ranges();
+                transition_ranges += ranges;
+                transition_bytes += weight.estimated_size_bytes();
+                max_transition_ranges = max_transition_ranges.max(ranges);
+                unique_transition_weights.insert(weight.ptr_key());
+                for token_set in weight.unique_token_sets() {
+                    let token_ranges = token_set.ranges().count();
+                    transition_token_ranges += token_ranges;
+                    max_transition_token_ranges = max_transition_token_ranges.max(token_ranges);
+                    unique_transition_token_sets.insert(token_set as *const _ as usize);
+                }
+            }
+        }
+    }
+
+    let avg_transition_ranges = if transition_weights == 0 {
+        0.0
+    } else {
+        transition_ranges as f64 / transition_weights as f64
+    };
+    let avg_transition_bytes = if transition_weights == 0 {
+        0.0
+    } else {
+        transition_bytes as f64 / transition_weights as f64
+    };
+    let avg_transition_token_ranges = if transition_weights == 0 {
+        0.0
+    } else {
+        transition_token_ranges as f64 / transition_weights as f64
+    };
+    let avg_epsilon_ranges = if epsilon_weights == 0 {
+        0.0
+    } else {
+        epsilon_ranges as f64 / epsilon_weights as f64
+    };
+    let avg_final_ranges = if final_weights == 0 {
+        0.0
+    } else {
+        final_ranges as f64 / final_weights as f64
+    };
+
+    eprintln!(
+        "[glrmask/profile][terminal_dwa][weights] phase={} trans_weights={} trans_unique={} trans_unique_token_sets={} trans_avg_ranges={:.3} trans_max_ranges={} trans_avg_token_ranges={:.3} trans_max_token_ranges={} trans_avg_bytes={:.1} eps_weights={} eps_unique={} eps_avg_ranges={:.3} eps_max_ranges={} final_weights={} final_unique={} final_avg_ranges={:.3} final_max_ranges={}",
+        phase,
+        transition_weights,
+        unique_transition_weights.len(),
+        unique_transition_token_sets.len(),
+        avg_transition_ranges,
+        max_transition_ranges,
+        avg_transition_token_ranges,
+        max_transition_token_ranges,
+        avg_transition_bytes,
+        epsilon_weights,
+        unique_epsilon_weights.len(),
+        avg_epsilon_ranges,
+        max_epsilon_ranges,
+        final_weights,
+        unique_final_weights.len(),
+        avg_final_ranges,
+        max_final_ranges,
+    );
+}
+
+fn log_nwa_leaf_split_weight_profile(enabled: bool, nwa: &NWA, leaf_state: u32, phase: &str) {
+    if !enabled {
+        return;
+    }
+
+    let mut leaf_weights = 0usize;
+    let mut leaf_token_ranges = 0usize;
+    let mut leaf_max_token_ranges = 0usize;
+    let mut leaf_unique_token_sets = HashSet::new();
+
+    let mut nonleaf_weights = 0usize;
+    let mut nonleaf_token_ranges = 0usize;
+    let mut nonleaf_max_token_ranges = 0usize;
+    let mut nonleaf_unique_token_sets = HashSet::new();
+
+    for state in &nwa.states {
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                let is_leaf = *target == leaf_state;
+                for token_set in weight.unique_token_sets() {
+                    let token_ranges = token_set.ranges().count();
+                    if is_leaf {
+                        leaf_weights += 1;
+                        leaf_token_ranges += token_ranges;
+                        leaf_max_token_ranges = leaf_max_token_ranges.max(token_ranges);
+                        leaf_unique_token_sets.insert(token_set as *const _ as usize);
+                    } else {
+                        nonleaf_weights += 1;
+                        nonleaf_token_ranges += token_ranges;
+                        nonleaf_max_token_ranges = nonleaf_max_token_ranges.max(token_ranges);
+                        nonleaf_unique_token_sets.insert(token_set as *const _ as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    let leaf_avg_token_ranges = if leaf_weights == 0 {
+        0.0
+    } else {
+        leaf_token_ranges as f64 / leaf_weights as f64
+    };
+    let nonleaf_avg_token_ranges = if nonleaf_weights == 0 {
+        0.0
+    } else {
+        nonleaf_token_ranges as f64 / nonleaf_weights as f64
+    };
+
+    eprintln!(
+        "[glrmask/profile][terminal_dwa][weights_split] phase={} leaf_weights={} leaf_unique_token_sets={} leaf_avg_token_ranges={:.3} leaf_max_token_ranges={} nonleaf_weights={} nonleaf_unique_token_sets={} nonleaf_avg_token_ranges={:.3} nonleaf_max_token_ranges={}",
+        phase,
+        leaf_weights,
+        leaf_unique_token_sets.len(),
+        leaf_avg_token_ranges,
+        leaf_max_token_ranges,
+        nonleaf_weights,
+        nonleaf_unique_token_sets.len(),
+        nonleaf_avg_token_ranges,
+        nonleaf_max_token_ranges,
+    );
+}
+
 fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
     id_map
         .vocab_tokens
@@ -1905,8 +2158,11 @@ fn build_terminal_dwa_impl(
             leaf_state,
             ignore_terminal,
             self_loop_bytes,
+            leaf_token_ids_buffer: Vec::new(),
             reachable_weight_cache: HashMap::new(),
             pruned_weight_cache: HashMap::new(),
+            leaf_weight_cache_raw: HashMap::new(),
+            leaf_weight_cache_canonical: HashMap::new(),
             node_state_cache: HashMap::new(),
             segment_state_cache: HashMap::new(),
             profile_enabled,
@@ -1921,7 +2177,11 @@ fn build_terminal_dwa_impl(
                 .tokenizer_states
                 .representative_original_id_for_internal(internal_tsid)
                 .expect("internal tokenizer state class must have a representative original state");
-            let root_state = builder.node_state(&vocab_tree.root, representative_state, None);
+            let root_state = builder.node_state(
+                &vocab_tree.root,
+                representative_state,
+                [None, None],
+            );
             builder.add_epsilon(
                 start_state,
                 root_state,
@@ -1935,6 +2195,7 @@ fn build_terminal_dwa_impl(
             builder.profile_tokenizer_execs,
             builder.profile_exec_ms,
         );
+        builder.flush_leaf_token_buffer();
         drop(builder);
 
         let possible_matches_started_at = std::time::Instant::now();
@@ -1961,6 +2222,7 @@ fn build_terminal_dwa_impl(
                 exec_ms.as_secs_f64() * 1000.0,
             );
         }
+        log_nwa_leaf_split_weight_profile(profile_enabled, &nwa, leaf_state, "after_build");
 
         return finalize_terminal_nwa(
             grammar,
@@ -2095,6 +2357,8 @@ fn build_terminal_dwa_impl(
         );
     }
 
+    log_nwa_leaf_split_weight_profile(profile_enabled, &nwa, leaf_state, "after_build");
+
     finalize_terminal_nwa(
         grammar,
         vocab,
@@ -2119,9 +2383,24 @@ fn finalize_terminal_nwa(
     deduplicate_root_count: Option<usize>,
     possible_matches_by_state: PossibleMatchesByState,
 ) -> (DWA, PossibleMatchesByState, TerminalDwaBuildReport) {
+    log_nwa_weight_profile(profile_enabled, &nwa, "after_build");
+
+    if deduplicate_root_count.is_none() {
+        let phase_started_at = std::time::Instant::now();
+        canonicalize_acyclic_nwa(&mut nwa, profile_enabled);
+        log_nwa_weight_profile(profile_enabled, &nwa, "after_precollapse_canonicalize");
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][terminal_dwa] canonicalize_before_collapse_ms={:.3}",
+                phase_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
     let phase_started_at = std::time::Instant::now();
     let always_allowed_by_label = compute_always_allowed_follows(grammar);
     let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    log_nwa_weight_profile(profile_enabled, &nwa, "after_collapse");
     report.collapse_always_allowed_applied = true;
     report.collapse_always_allowed_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "collapse_always_allowed", phase_started_at);
@@ -2138,6 +2417,7 @@ fn finalize_terminal_nwa(
             nwa = subtract_disallowed_dfa(&nwa, &disallowed_dfa);
         }
     }
+    log_nwa_weight_profile(profile_enabled, &nwa, "after_subtract");
     report.subtract_disallowed_time = phase_started_at.elapsed();
     log_terminal_profile(profile_enabled, "subtract_disallowed", phase_started_at);
 
@@ -2153,6 +2433,7 @@ fn finalize_terminal_nwa(
     log_terminal_profile(profile_enabled, "canonicalize_nwa", phase_started_at);
 
     report.terminal_nwa = collect_weighted_nwa_stats(&nwa);
+    log_nwa_weight_profile(profile_enabled, &nwa, "pre_determinize");
 
     let phase_started_at = std::time::Instant::now();
     let determinized = determinize(&nwa)

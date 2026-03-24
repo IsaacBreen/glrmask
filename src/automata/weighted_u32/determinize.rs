@@ -12,6 +12,7 @@ use rustc_hash::FxHashMap;
 
 use super::dwa::DWA;
 use super::nwa::NWA;
+use crate::ds::weight::{reset_weight_debug_stats, snapshot_weight_debug_stats};
 use crate::ds::weight::Weight;
 use crate::GlrMaskError;
 
@@ -87,6 +88,9 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     }
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_WEIGHTED_DETERMINIZE").is_some();
     let mut profile = profile_enabled.then(DeterminizeProfile::default);
+    if profile_enabled {
+        reset_weight_debug_stats();
+    }
 
     let mut dwa = DWA::new(0, 0);
     let start_id = dwa.start_state;
@@ -245,6 +249,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     }
 
     if let Some(profile) = profile {
+        let weight_stats = snapshot_weight_debug_stats();
         let avg_seed_states = if profile.epsilon_closure_calls == 0 {
             0.0
         } else {
@@ -271,6 +276,17 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             profile.edge_weight_ms.as_secs_f64() * 1000.0,
             profile.normalize_ms.as_secs_f64() * 1000.0,
             profile.subset_lookup_ms.as_secs_f64() * 1000.0,
+        );
+        eprintln!(
+            "[glrmask/profile][weighted_determinize][weights] union_calls={} union_memo_hits={} intersection_calls={} intersection_memo_hits={} difference_calls={} difference_memo_hits={} single_intersection_calls={} single_intersection_range_overlaps={}",
+            weight_stats.union_calls,
+            weight_stats.union_memo_hits,
+            weight_stats.intersection_calls,
+            weight_stats.intersection_memo_hits,
+            weight_stats.difference_calls,
+            weight_stats.difference_memo_hits,
+            weight_stats.single_intersection_calls,
+            weight_stats.single_intersection_range_overlaps,
         );
     }
 
