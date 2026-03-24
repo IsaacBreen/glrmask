@@ -60,6 +60,10 @@ fn constraint_result<T>(result: glrmask::Result<T>) -> PyResult<T> {
     result.map_err(|e| PyValueError::new_err(format!("{e}")))
 }
 
+fn string_result<T>(result: Result<T, String>) -> PyResult<T> {
+    result.map_err(PyValueError::new_err)
+}
+
 // ---------------------------------------------------------------------------
 // PyVocab
 // ---------------------------------------------------------------------------
@@ -192,17 +196,17 @@ impl PyConstraintState {
 
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| constraint_result(state.commit_token(token_id)))
+            .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
     }
 
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| constraint_result(state.commit_tokens(&token_ids)))
+            .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
     }
 
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| constraint_result(state.commit_bytes(data)))
+            .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
     }
 
     fn force(&self) -> Vec<u32> {
