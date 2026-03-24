@@ -33,6 +33,7 @@ const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
 const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
+const VOCAB_MATCH_POSITIONS_GROUP_BYTES: usize = 256 * 1024;
 
 /// Flat DFA with byte-class-compressed transposed transition tables.
 ///
@@ -107,6 +108,7 @@ struct Scratch {
     /// Used to avoid O(num_states * num_groups) memset and scan.
     dirty_groups: Vec<SmallVec<[usize; 16]>>,
     targets: Vec<usize>,
+    target_gids: HashMap<usize, SmallVec<[usize; 16]>>,
     // Suffix DAG
     dag: HashMap<usize, DagNode>,
     dag_queue: Vec<usize>,
@@ -117,6 +119,8 @@ struct Scratch {
 
 static HASH_RANDOM_STATE: Lazy<RandomState> =
     Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
+static VOCAB_UNGROUPED_BATCH: Lazy<bool> =
+    Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_UNGROUPED_BATCH"));
 
 #[inline]
 fn new_hasher() -> AHasher {
@@ -141,6 +145,16 @@ fn vocab_batch_size_override() -> Option<usize> {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
+}
+
+fn vocab_state_group_size(num_states: usize, num_groups: usize) -> usize {
+    if *VOCAB_UNGROUPED_BATCH || num_states <= 1 || num_groups == 0 {
+        return num_states;
+    }
+
+    let bytes_per_state = num_groups.saturating_mul(std::mem::size_of::<u32>());
+    let group_size = (VOCAB_MATCH_POSITIONS_GROUP_BYTES / bytes_per_state).max(1);
+    group_size.min(num_states)
 }
 
 fn diversity_state_order_enabled() -> bool {
@@ -345,6 +359,7 @@ impl Scratch {
             match_positions: vec![NONE; num_states * num_groups],
             dirty_groups: vec![SmallVec::new(); num_states],
             targets: Vec::new(),
+            target_gids: HashMap::new(),
             dag: HashMap::new(),
             dag_queue: Vec::new(),
             dag_disallowed: HashMap::new(),
@@ -354,25 +369,18 @@ impl Scratch {
     }
 }
 
-/// Run DFA from all initial states on a token, recording end states and match positions.
-/// Uses dirty_groups tracking to avoid O(num_states * num_groups) memset.
-/// INVARIANT: match_positions entries are NONE except for dirty entries from a previous
-/// call that must have been cleaned up by the caller (token_signature does this).
-/// Each `dirty_groups[i]` entry is unique within a run_batch call.
-fn run_batch(
+fn run_batch_inner(
     dfa: &Dfa,
     scratch: &mut Scratch,
     slice: &[u8],
-    initial_states: &[usize],
+    state_offset: usize,
+    num_states: usize,
 ) {
-    let num_states = initial_states.len();
     let num_groups = dfa.num_groups;
     let len = slice.len();
 
-    // Reset scratch — DON'T fill match_positions (maintained by dirty cleanup)
-    scratch.current_states[..num_states].clone_from_slice(initial_states);
     scratch.active_indices.clear();
-    for dg in scratch.dirty_groups[..num_states].iter_mut() {
+    for dg in scratch.dirty_groups[state_offset..state_offset + num_states].iter_mut() {
         dg.clear();
     }
 
@@ -380,7 +388,8 @@ fn run_batch(
     let first_byte = if has_bytes { slice[0] } else { 0 };
 
     // Process initial finalizers
-    for (i, &state) in initial_states.iter().enumerate() {
+    for i in state_offset..state_offset + num_states {
+        let state = scratch.current_states[i];
         let base = i * num_groups;
         for &gid in &dfa.finalizers[state] {
             if gid < num_groups && scratch.match_positions[base + gid] == NONE {
@@ -472,22 +481,75 @@ fn run_batch(
             }
         }
     }
+}
 
-    // Collect unique match target positions — only from dirty groups
-    scratch.targets.clear();
-    if num_groups > 0 {
-        for si in 0..num_states {
-            let base = si * num_groups;
-            for &gid in &scratch.dirty_groups[si] {
-                let pv = scratch.match_positions[base + gid];
-                if pv != NONE && pv > 0 && (pv as usize) <= len {
-                    scratch.targets.push(pv as usize);
-                }
+fn collect_targets(
+    scratch: &mut Scratch,
+    num_groups: usize,
+    len: usize,
+    state_offset: usize,
+    num_states: usize,
+) {
+    if num_groups == 0 {
+        return;
+    }
+
+    for i in state_offset..state_offset + num_states {
+        let base = i * num_groups;
+        for &gid in &scratch.dirty_groups[i] {
+            let pv = scratch.match_positions[base + gid];
+            if pv != NONE && pv > 0 && (pv as usize) <= len {
+                let pos = pv as usize;
+                scratch.targets.push(pos);
+                scratch.target_gids.entry(pos).or_default().push(gid);
             }
         }
     }
+}
+
+/// Run DFA from all initial states on a token, recording end states and match positions.
+/// Uses dirty_groups tracking to avoid O(num_states * num_groups) memset.
+/// INVARIANT: match_positions entries are NONE except for dirty entries from a previous
+/// call that must have been cleaned up by the caller (token_signature does this).
+/// Each `dirty_groups[i]` entry is unique within a run_batch call.
+fn run_batch(
+    dfa: &Dfa,
+    scratch: &mut Scratch,
+    slice: &[u8],
+    initial_states: &[usize],
+    state_group_size: usize,
+) {
+    let num_states = initial_states.len();
+    let num_groups = dfa.num_groups;
+    let len = slice.len();
+
+    if num_states == 0 {
+        scratch.targets.clear();
+        return;
+    }
+
+    scratch.current_states[..num_states].clone_from_slice(initial_states);
+    scratch.targets.clear();
+    scratch.target_gids.clear();
+
+    if state_group_size >= num_states {
+        run_batch_inner(dfa, scratch, slice, 0, num_states);
+        collect_targets(scratch, num_groups, len, 0, num_states);
+    } else {
+        for state_offset in (0..num_states).step_by(state_group_size) {
+            let group_len = (state_offset + state_group_size).min(num_states) - state_offset;
+            run_batch_inner(dfa, scratch, slice, state_offset, group_len);
+            collect_targets(scratch, num_groups, len, state_offset, group_len);
+        }
+    }
+
+    // Collect unique match target positions — only from dirty groups
     scratch.targets.sort_unstable();
     scratch.targets.dedup();
+    for gids in scratch.target_gids.values_mut() {
+        gids.sort_unstable();
+        gids.dedup();
+    }
 }
 
 /// Run DFA on a suffix from start_state, returning (end_state, edges to match positions).
@@ -559,14 +621,13 @@ fn hash_suffixes(
     scratch.dag_queue.clear();
     scratch.dag_disallowed.clear();
 
-    for si in 0..scratch.dirty_groups.len() {
-        let base = si * dfa.num_groups;
-        for dirty_idx in 0..scratch.dirty_groups[si].len() {
-            let gid = scratch.dirty_groups[si][dirty_idx];
-            let pv = scratch.match_positions[base + gid];
-            if pv != NONE && pv > 0 {
-                intersect_node_disallowed(scratch, pv as usize, dfa.disallowed_for(gid));
+    for (&pos, gids) in &scratch.target_gids {
+        if let Some((&first_gid, rest)) = gids.split_first() {
+            let mut combined = dfa.disallowed_for(first_gid).clone();
+            for &gid in rest {
+                combined = combined.intersection(dfa.disallowed_for(gid));
             }
+            scratch.dag_disallowed.insert(pos, combined);
         }
     }
 
@@ -742,9 +803,10 @@ fn token_signature(
     dfa: &Dfa,
     token: &[u8],
     chunk_states: &[usize],
+    state_group_size: usize,
     scratch: &mut Scratch,
 ) -> u64 {
-    run_batch(dfa, scratch, token, chunk_states);
+    run_batch(dfa, scratch, token, chunk_states, state_group_size);
     if !scratch.targets.is_empty() {
         hash_suffixes(dfa, token, scratch);
     }
@@ -790,13 +852,17 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         let active_before = active_indices.len();
         let batch_end = (batch_start + batch_size).min(num_initial_states);
         let batch = &ordered_states[batch_start..batch_end];
+        let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let active_sigs: Vec<(usize, u64)> = active_indices
             .par_iter()
             .map_init(
                 || Scratch::new(batch.len(), num_groups),
                 |scratch, &token_idx| {
                     let token = strings[token_idx].as_ref();
-                    (token_idx, token_signature(&dfa, token, batch, scratch))
+                    (
+                        token_idx,
+                        token_signature(&dfa, token, batch, state_group_size, scratch),
+                    )
                 },
             )
             .collect();
@@ -833,10 +899,13 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         active_indices = new_active;
 
         if profile_compile {
+            let state_group_count = batch.len().div_ceil(state_group_size.max(1));
             eprintln!(
-                "[glrmask/profile][vocab] batch={} states={} active_before={} active_after={} classes={} ms={:.3}",
+                "[glrmask/profile][vocab] batch={} states={} state_group_size={} state_groups={} active_before={} active_after={} classes={} ms={:.3}",
                 batch_index,
                 batch.len(),
+                state_group_size,
+                state_group_count,
                 active_before,
                 active_indices.len(),
                 next_class_id,
