@@ -1,10 +1,7 @@
-//! Fast vocab equivalence analysis: partition tokens by DFA behavior signatures.
+//! Fast vocab equivalence analysis based on DFA behavior signatures.
 //!
-//! For each token, computes a signature encoding its DFA behavior across all
-//! initial states (match positions, suffix DAG structure, end states).
-//! Tokens with identical signatures form equivalence classes.
-
-// Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
+//! Each token is classified by its match positions, suffix structure, and end
+//! states across all tokenizer starts.
 
 use super::super::compat::TokenizerView;
 use ahash::{AHasher, RandomState};
@@ -15,6 +12,7 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
 
+use crate::compiler::stages::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
@@ -81,10 +79,6 @@ impl Dfa {
         }
         let mut h = new_hasher();
         h.write_u8(2);
-        // h.write_u64(disallowed.len() as u64);
-        // for &word in disallowed.words() {
-        //     h.write_u64(word);
-        // }
         h.write_u64(hash_filtered_group_list(&self.possible_future_groups[state], disallowed));
         h.finish()
     }
@@ -158,27 +152,8 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
     h.finish()
 }
 
-fn normalize_disallowed_follows(
-    num_groups: usize,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> Vec<BitSet> {
-    let mut normalized = vec![BitSet::new(num_groups); num_groups];
-    for gid in 0..num_groups {
-        if let Some(bits) = disallowed_follows.get(&(gid as u32)) {
-            let mut out = BitSet::new(num_groups);
-            for bit in bits.iter() {
-                if bit < num_groups {
-                    out.set(bit);
-                }
-            }
-            normalized[gid] = out;
-        }
-    }
-    normalized
-}
-
-fn build_dfa(regex: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
-    let dfa = regex.dfa();
+fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
+    let dfa = tokenizer.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
     // Compute num_groups from all group IDs referenced in the DFA
@@ -720,32 +695,32 @@ fn token_signature(
 }
 
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
-    let dfa = build_dfa(regex, disallowed_follows);
+    let dfa = build_dfa(tokenizer, disallowed_follows);
     let num_tokens = strings.len();
-    let num_states = initial_states.len();
+    let num_initial_states = initial_states.len();
 
-    if num_states == 0 || num_tokens == 0 {
+    if num_initial_states == 0 || num_tokens == 0 {
         return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
     }
 
     let num_groups = dfa.num_groups;
-    // Use large batches now that dirty_groups tracking avoids O(batch_size * ng) memset.
-    // Memory per thread: batch_size * ng * 4 bytes for match_positions (allocated once, sparse use).
-    let batch_size = num_states.min(5000);
+    // Use large batches now that dirty-group tracking avoids clearing every group slot.
+    // Memory per thread is batch_size * num_groups * 4 bytes for match positions.
+    let batch_size = num_initial_states.min(5000);
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
 
-    for batch_start in (0..num_states).step_by(batch_size) {
+    for batch_start in (0..num_initial_states).step_by(batch_size) {
         if active_indices.is_empty() {
             break;
         }
-        let batch_end = (batch_start + batch_size).min(num_states);
+        let batch_end = (batch_start + batch_size).min(num_initial_states);
         let batch = &initial_states[batch_start..batch_end];
         let active_sigs: Vec<(usize, u64)> = active_indices
             .par_iter()

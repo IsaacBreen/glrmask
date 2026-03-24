@@ -13,6 +13,18 @@
 
 use crate::runtime::state::ConstraintState;
 
+enum ForcedFirstByte {
+    None,
+    Unique(u8),
+    Ambiguous,
+}
+
+enum GreedyTokenizationStep {
+    Match { token_id: u32, width: usize },
+    BlockedByLongerToken,
+    NoMatch,
+}
+
 impl<'a> ConstraintState<'a> {
     /// Compute the forced token sequence.
     ///
@@ -26,20 +38,18 @@ impl<'a> ConstraintState<'a> {
     ///    mask, force it directly.  Handles multibyte tokens that span
     ///    multiple grammar terminals (e.g. `"ab"` matching `'a' 'b'`).
     pub fn force(&self) -> Vec<u32> {
-        // If the parse is already complete, nothing to force.
         if self.is_complete() {
             return Vec::new();
         }
 
-        // Try byte-level first.
-        let forced_bytes = self.compute_forced_byte_prefix();
-        let byte_level = self.tokenize_forced_with_stop(&forced_bytes);
-        if !byte_level.is_empty() {
-            return byte_level;
-        }
+        self.force_by_bytes()
+            .unwrap_or_else(|| self.single_token_force())
+    }
 
-        // Fall back to single-token force.
-        self.single_token_force()
+    fn force_by_bytes(&self) -> Option<Vec<u32>> {
+        let forced_bytes = self.compute_forced_byte_prefix();
+        let tokens = self.tokenize_forced_with_stop(&forced_bytes);
+        (!tokens.is_empty()).then_some(tokens)
     }
 
     /// Single-token force: if there's exactly one allowed token at each step,
@@ -66,7 +76,6 @@ impl<'a> ConstraintState<'a> {
     /// Find the longest byte prefix where all allowed tokens agree on the
     /// first byte at each position.
     fn compute_forced_byte_prefix(&self) -> Vec<u8> {
-        let token_bytes = &self.constraint.token_bytes;
         let eos = self.constraint.eos_token_id;
         let mut bytes = Vec::new();
         let mut cursor = self.clone();
@@ -78,99 +87,106 @@ impl<'a> ConstraintState<'a> {
             }
 
             let mask = cursor.mask();
-
-            // Check EOS: if the parse can complete here, stop forcing.
             if let Some(eos_id) = eos {
                 if is_token_set(&mask, eos_id) {
                     break;
                 }
             }
 
-            // Find the unique first byte across all allowed tokens.
-            let mut forced_byte: Option<u8> = None;
-            let mut ambiguous = false;
-            let mut any_token = false;
-
-            for_each_set_bit(&mask, |token_id| {
-                let Some(tb) = token_bytes.get(&token_id) else {
-                    return; // token has no byte representation, skip
-                };
-                if tb.is_empty() {
-                    return; // skip empty tokens
-                }
-                any_token = true;
-                let fb = tb[0];
-                match forced_byte {
-                    None => forced_byte = Some(fb),
-                    Some(prev) if prev == fb => {} // same
-                    _ => ambiguous = true,
-                }
-            });
-
-            if ambiguous || !any_token {
-                break;
-            }
-
-            match forced_byte {
-                Some(b) => {
-                    bytes.push(b);
-                    let _ = cursor.commit_bytes(&[b]);
+            match cursor.forced_first_byte(&mask) {
+                ForcedFirstByte::Unique(byte) => {
+                    bytes.push(byte);
+                    let _ = cursor.commit_bytes(&[byte]);
                     if cursor.state.is_empty() {
-                        bytes.pop(); // last byte killed the state
+                        bytes.pop();
                         break;
                     }
                 }
-                None => break,
+                ForcedFirstByte::None | ForcedFirstByte::Ambiguous => break,
             }
         }
 
         bytes
     }
 
+    fn forced_first_byte(&self, mask: &[u32]) -> ForcedFirstByte {
+        let mut first_byte = None;
+        let mut ambiguous = false;
+        let mut saw_token = false;
+
+        for_each_set_bit(mask, |token_id| {
+            let Some(token_bytes) = self.constraint.token_bytes.get(&token_id) else {
+                return;
+            };
+            let Some(byte) = token_bytes.first().copied() else {
+                return;
+            };
+
+            saw_token = true;
+            match first_byte {
+                None => first_byte = Some(byte),
+                Some(existing) if existing == byte => {}
+                Some(_) => ambiguous = true,
+            }
+        });
+
+        if !saw_token {
+            ForcedFirstByte::None
+        } else if ambiguous {
+            ForcedFirstByte::Ambiguous
+        } else {
+            ForcedFirstByte::Unique(first_byte.expect("saw_token implies a first byte"))
+        }
+    }
+
     /// Greedy left-to-right tokenization of forced bytes, stopping when the
     /// tokenizer would need to look beyond the forced prefix to determine the
     /// longest match.
     fn tokenize_forced_with_stop(&self, forced_bytes: &[u8]) -> Vec<u32> {
-        let token_bytes = &self.constraint.token_bytes;
         let mut tokens = Vec::new();
         let mut pos = 0;
 
         while pos < forced_bytes.len() {
-            let remaining = &forced_bytes[pos..];
-            let mut best_match: Option<(u32, usize)> = None;
-            let mut could_extend_beyond = false;
-
-            for (&token_id, tb) in token_bytes {
-                if tb.is_empty() {
-                    continue;
-                }
-                if remaining.starts_with(tb) {
-                    // Full match at this position.
-                    match best_match {
-                        Some((_, prev_len)) if tb.len() <= prev_len => {}
-                        _ => best_match = Some((token_id, tb.len())),
-                    }
-                } else if tb.starts_with(remaining) && tb.len() > remaining.len() {
-                    // Token extends beyond the forced prefix — stop.
-                    could_extend_beyond = true;
-                }
-            }
-
-            if could_extend_beyond {
-                // Cannot determine the true longest match; stop here.
-                break;
-            }
-
-            match best_match {
-                Some((token_id, len)) => {
+            match self.greedy_tokenization_step(&forced_bytes[pos..]) {
+                GreedyTokenizationStep::Match { token_id, width } => {
                     tokens.push(token_id);
-                    pos += len;
+                    pos += width;
                 }
-                None => break, // No matching token at this position
+                GreedyTokenizationStep::BlockedByLongerToken
+                | GreedyTokenizationStep::NoMatch => break,
             }
         }
 
         tokens
+    }
+
+    fn greedy_tokenization_step(&self, remaining: &[u8]) -> GreedyTokenizationStep {
+        let mut best_match = None;
+        let mut blocked_by_longer_token = false;
+
+        for (&token_id, token_bytes) in &self.constraint.token_bytes {
+            if token_bytes.is_empty() {
+                continue;
+            }
+            if remaining.starts_with(token_bytes) {
+                match best_match {
+                    Some((_, best_width)) if token_bytes.len() <= best_width => {}
+                    _ => best_match = Some((token_id, token_bytes.len())),
+                }
+                continue;
+            }
+            if token_bytes.starts_with(remaining) && token_bytes.len() > remaining.len() {
+                blocked_by_longer_token = true;
+            }
+        }
+
+        if blocked_by_longer_token {
+            GreedyTokenizationStep::BlockedByLongerToken
+        } else if let Some((token_id, width)) = best_match {
+            GreedyTokenizationStep::Match { token_id, width }
+        } else {
+            GreedyTokenizationStep::NoMatch
+        }
     }
 }
 

@@ -1,8 +1,8 @@
-//! IMPORTANT: this should only be implemented for **acyclic** weighted
-//! automata. Cyclic input should panic rather than trying to determinize.
+//! Weighted determinization for acyclic NWAs.
+//!
+//! Cyclic inputs are rejected and must be handled by the caller.
 
-use std::collections::VecDeque;
-use std::collections::hash_map::Entry as HashMapEntry;
+use std::collections::{VecDeque, hash_map::Entry as HashMapEntry};
 
 use rustc_hash::FxHashMap;
 
@@ -10,6 +10,40 @@ use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::ds::weight::Weight;
 use crate::GlrMaskError;
+
+fn union_state_weight(weights: &mut FxHashMap<u32, Weight>, state_id: u32, add: Weight) {
+    if add.is_empty() {
+        return;
+    }
+
+    match weights.entry(state_id) {
+        HashMapEntry::Occupied(mut occupied) => {
+            let existing = occupied.get_mut();
+            *existing = existing.union(&add);
+        }
+        HashMapEntry::Vacant(vacant) => {
+            vacant.insert(add);
+        }
+    }
+}
+
+fn subset_final_weight(nwa: &NWA, subset_entries: &[(u32, Weight)]) -> Weight {
+    subset_entries.iter().fold(Weight::empty(), |final_weight, (state_id, path_weight)| {
+        let Some(state_final) = nwa.states[*state_id as usize].final_weight.as_ref() else {
+            return final_weight;
+        };
+
+        final_weight.union(&path_weight.intersection(state_final))
+    })
+}
+
+fn seed_start_subset(nwa: &NWA) -> FxHashMap<u32, Weight> {
+    let mut start_subset = FxHashMap::default();
+    for &state_id in &nwa.start_states {
+        union_state_weight(&mut start_subset, state_id, Weight::all());
+    }
+    start_subset
+}
 
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     if !nwa.is_acyclic() {
@@ -67,15 +101,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     let mut dwa = DWA::new(0, 0);
     let start_id = dwa.start_state;
 
-    let mut start_subset = FxHashMap::default();
-    for &state_id in &nwa.start_states {
-        let existing = start_subset
-            .get(&state_id)
-            .cloned()
-            .unwrap_or_else(Weight::empty);
-        start_subset.insert(state_id, existing.union(&Weight::all()));
-    }
-    let start_subset = epsilon_closure(nwa, start_subset);
+    let start_subset = epsilon_closure(nwa, seed_start_subset(nwa));
 
     if start_subset.is_empty() {
         return Ok(dwa);
@@ -93,12 +119,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     while let Some((subset_key, subset_entries)) = worklist.pop_front() {
         let from_state = subset_map[&subset_key];
 
-        let mut final_weight = Weight::empty();
-        for (nwa_state_id, path_weight) in &subset_entries {
-            if let Some(state_final) = nwa.states[*nwa_state_id as usize].final_weight.as_ref() {
-                final_weight = final_weight.union(&path_weight.intersection(state_final));
-            }
-        }
+        let final_weight = subset_final_weight(nwa, &subset_entries);
         if !final_weight.is_empty() {
             dwa.set_final_weight(from_state, final_weight);
         }
@@ -113,15 +134,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                     }
 
                     let target_entry = raw_targets.entry(label).or_default();
-                    match target_entry.entry(*dst) {
-                        HashMapEntry::Occupied(mut occupied) => {
-                            let existing = occupied.get_mut();
-                            *existing = existing.union(&next_weight);
-                        }
-                        HashMapEntry::Vacant(vacant) => {
-                            vacant.insert(next_weight);
-                        }
-                    }
+                    union_state_weight(target_entry, *dst, next_weight);
                 }
             }
         }

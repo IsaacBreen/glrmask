@@ -1,16 +1,19 @@
 //! Resolve negative parser-state labels in weighted NWAs.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet, VecDeque};
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::ds::weight::Weight;
 
 type QueryKey = (u32, i32);
+type CancellationTask = (u32, u32, i32);
+type QueryWeights = Vec<Option<FxHashMap<QueryKey, Weight>>>;
+type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
 
 fn merge_weight(entry: &mut Weight, add: Weight) -> bool {
     if add.is_empty() {
@@ -63,195 +66,151 @@ enum PredEdge {
 }
 
 pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
-    let n = nwa.states.len();
-    if n == 0 {
-        return Vec::new();
+    compute_cancellations_range(nwa, full_state_range(nwa))
+}
+
+fn full_state_range(nwa: &NWA) -> std::ops::Range<u32> {
+    0..nwa.states.len() as u32
+}
+
+fn enqueue_cancellation_task(
+    worklist: &mut VecDeque<CancellationTask>,
+    queued: &mut FxHashSet<CancellationTask>,
+    state: u32,
+    source_state: u32,
+    positive_label: i32,
+) {
+    let task = (state, source_state, positive_label);
+    if queued.insert(task) {
+        worklist.push_back(task);
     }
+}
 
-    let mut queries: HashMap<u32, HashMap<QueryKey, Weight>> = HashMap::new();
-    let mut worklist = VecDeque::<(u32, u32, i32)>::new();
-    let mut in_queue = vec![HashSet::<QueryKey>::new(); n];
-    let mut new_eps_from: HashMap<u32, HashMap<u32, Weight>> = HashMap::new();
+fn record_query_weight(
+    query_weights: &mut QueryWeights,
+    state: u32,
+    query_key: QueryKey,
+    add: Weight,
+) -> bool {
+    let entry = query_weights[state as usize]
+        .get_or_insert_with(FxHashMap::default)
+        .entry(query_key)
+        .or_insert_with(Weight::empty);
+    merge_weight(entry, add)
+}
 
-    let merge_into = |entry: &mut Weight, add: Weight| {
-        if add.is_empty() {
-            return false;
-        }
-        if entry.is_empty() {
-            *entry = add;
-            return true;
-        }
-        let updated = entry.union(&add);
-        if updated != *entry {
-            *entry = updated;
-            true
-        } else {
-            false
-        }
+fn queue_query_weight(
+    query_weights: &mut QueryWeights,
+    worklist: &mut VecDeque<CancellationTask>,
+    queued: &mut FxHashSet<CancellationTask>,
+    state: u32,
+    source_state: u32,
+    positive_label: i32,
+    add: Weight,
+) {
+    if record_query_weight(query_weights, state, (source_state, positive_label), add) {
+        enqueue_cancellation_task(worklist, queued, state, source_state, positive_label);
+    }
+}
+
+fn propagate_query_through_derived_epsilons(
+    query_weight_to_current: &Weight,
+    query_single: Option<&(u32, u32, Arc<RangeSetBlaze<u32>>)>,
+    current_state: u32,
+    source_state: u32,
+    positive_label: i32,
+    query_weights: &mut QueryWeights,
+    worklist: &mut VecDeque<CancellationTask>,
+    queued: &mut FxHashSet<CancellationTask>,
+    derived_epsilons: &DerivedEpsilons,
+) {
+    let Some(derived_from_current) = derived_epsilons[current_state as usize].as_ref() else {
+        return;
     };
 
-    for a in 0..n {
-        for (&label, targets) in &nwa.states[a].transitions {
-            if !is_negative_label(label) {
-                continue;
-            }
-            let c = negative_to_positive_label(label);
-            for (b, w_ab) in targets {
-                if *b as usize >= n || w_ab.is_empty() {
-                    continue;
-                }
-                let query_key = (a as u32, c);
-                let entry = queries
-                    .entry(*b)
-                    .or_default()
-                    .entry(query_key)
-                    .or_insert_with(Weight::empty);
-                if merge_into(entry, w_ab.clone()) {
-                    if in_queue[*b as usize].insert(query_key) {
-                        worklist.push_back((*b, a as u32, c));
-                    }
-                }
-            }
+    for (&target_state, epsilon_weight) in derived_from_current {
+        let propagated = intersect_with_single_weight_hint(
+            query_weight_to_current,
+            query_single,
+            epsilon_weight,
+        );
+        if propagated.is_empty() {
+            continue;
         }
+        queue_query_weight(
+            query_weights,
+            worklist,
+            queued,
+            target_state,
+            source_state,
+            positive_label,
+            propagated,
+        );
+    }
+}
+
+fn extend_derived_epsilons(
+    query_weight_to_current: &Weight,
+    query_single: Option<&(u32, u32, Arc<RangeSetBlaze<u32>>)>,
+    source_state: u32,
+    target_state: u32,
+    edge_weight: &Weight,
+    query_weights: &mut QueryWeights,
+    worklist: &mut VecDeque<CancellationTask>,
+    queued: &mut FxHashSet<CancellationTask>,
+    derived_epsilons: &mut DerivedEpsilons,
+) {
+    let new_derived_weight = intersect_with_single_weight_hint(
+        query_weight_to_current,
+        query_single,
+        edge_weight,
+    );
+    if new_derived_weight.is_empty() {
+        return;
     }
 
-    while let Some((s, a, c)) = worklist.pop_front() {
-        in_queue[s as usize].remove(&(a, c));
-        let Some(w_as) = queries.get(&s).and_then(|m| m.get(&(a, c))).cloned() else {
+    let derived_weight = derived_epsilons[source_state as usize]
+        .get_or_insert_with(FxHashMap::default)
+        .entry(target_state)
+        .or_insert_with(Weight::empty);
+    if !merge_weight(derived_weight, new_derived_weight) {
+        return;
+    }
+    let derived_weight = derived_weight.clone();
+
+    let Some(existing_queries) = query_weights[source_state as usize].clone() else {
+        return;
+    };
+
+    for ((upstream_source_state, upstream_label), upstream_weight) in existing_queries {
+        let propagated = intersect_or_clone_right_if_subset(&upstream_weight, &derived_weight);
+        if propagated.is_empty() {
+            continue;
+        }
+        queue_query_weight(
+            query_weights,
+            worklist,
+            queued,
+            target_state,
+            upstream_source_state,
+            upstream_label,
+            propagated,
+        );
+    }
+}
+
+fn collect_non_empty_derived_epsilons(
+    derived_epsilons: DerivedEpsilons,
+) -> Vec<(u32, u32, Weight)> {
+    let mut result = Vec::new();
+
+    for (from_state, targets) in derived_epsilons.into_iter().enumerate() {
+        let Some(targets) = targets else {
             continue;
         };
-        let w_as_single = w_as.single_compact_entry_parts();
-
-        if let Some(epsilons_from_s) = new_eps_from.get(&s) {
-            for (&target, eps_w) in epsilons_from_s {
-                let prop_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), eps_w);
-                if prop_w.is_empty() {
-                    continue;
-                }
-                let query_key = (a, c);
-                let entry = queries
-                    .entry(target)
-                    .or_default()
-                    .entry(query_key)
-                    .or_insert_with(Weight::empty);
-                if merge_into(entry, prop_w) {
-                    if in_queue[target as usize].insert(query_key) {
-                        worklist.push_back((target, a, c));
-                    }
-                }
-            }
-        }
-
-        let check_cancellations = |target: u32,
-                       w_st: &Weight,
-                       queries: &mut HashMap<u32, HashMap<QueryKey, Weight>>,
-                       worklist: &mut VecDeque<(u32, u32, i32)>,
-                       in_queue: &mut [HashSet<QueryKey>],
-                       new_eps_from: &mut HashMap<u32, HashMap<u32, Weight>>| {
-            let new_eps_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), w_st);
-            if new_eps_w.is_empty() {
-                return;
-            }
-
-            let eps_entry = new_eps_from
-                .entry(a)
-                .or_default()
-                .entry(target)
-                .or_insert_with(Weight::empty);
-            let delta_eps = if eps_entry.is_empty() {
-                *eps_entry = new_eps_w.clone();
-                new_eps_w
-            } else {
-                let delta_eps = new_eps_w.difference(eps_entry);
-                if delta_eps.is_empty() {
-                    return;
-                }
-                *eps_entry = eps_entry.union(&delta_eps);
-                delta_eps
-            };
-
-            let queries_at_a = queries.get(&a).cloned();
-
-            if let Some(queries_at_a) = queries_at_a {
-                for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
-                    let prop_w = intersect_or_clone_right_if_subset(&w_a_prime_a, &delta_eps);
-                    if prop_w.is_empty() {
-                        continue;
-                    }
-                    let query_key = (a_prime, c_prime);
-                    let entry = queries
-                        .entry(target)
-                        .or_default()
-                        .entry(query_key)
-                        .or_insert_with(Weight::empty);
-                    if merge_into(entry, prop_w) {
-                        if in_queue[target as usize].insert(query_key) {
-                            worklist.push_back((target, a_prime, c_prime));
-                        }
-                    }
-                }
-            }
-        };
-
-        if let Some(pos_targets) = nwa.states[s as usize].transitions.get(&c) {
-            for (t, w_st) in pos_targets {
-                if *t as usize >= n {
-                    continue;
-                }
-                check_cancellations(
-                    *t,
-                    w_st,
-                    &mut queries,
-                    &mut worklist,
-                    &mut in_queue,
-                    &mut new_eps_from,
-                );
-            }
-        }
-
-        if let Some(default_targets) = nwa.states[s as usize].transitions.get(&DEFAULT_LABEL) {
-            for (target, weight) in default_targets {
-                if *target as usize >= n {
-                    continue;
-                }
-                check_cancellations(
-                    *target,
-                    weight,
-                    &mut queries,
-                    &mut worklist,
-                    &mut in_queue,
-                    &mut new_eps_from,
-                );
-            }
-        }
-
-        for (t, w_st) in &nwa.states[s as usize].epsilons {
-            if *t as usize >= n {
-                continue;
-            }
-            let prop_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), w_st);
-            if prop_w.is_empty() {
-                continue;
-            }
-            let query_key = (a, c);
-            let entry = queries
-                .entry(*t)
-                .or_default()
-                .entry(query_key)
-                .or_insert_with(Weight::empty);
-            if merge_into(entry, prop_w) {
-                if in_queue[*t as usize].insert(query_key) {
-                    worklist.push_back((*t, a, c));
-                }
-            }
-        }
-    }
-
-    let mut result = Vec::new();
-    for (from, targets) in new_eps_from {
-        for (to, w) in targets {
-            if !w.is_empty() {
-                result.push((from, to, w));
+        for (to_state, weight) in targets {
+            if !weight.is_empty() {
+                result.push((from_state as u32, to_state, weight));
             }
         }
     }
@@ -263,168 +222,137 @@ pub(crate) fn compute_cancellations_range(
     nwa: &NWA,
     range: std::ops::Range<u32>,
 ) -> Vec<(u32, u32, Weight)> {
-    let n = nwa.states.len() as u32;
-    if n == 0 {
+    let state_count = nwa.states.len() as u32;
+    if state_count == 0 {
         return Vec::new();
     }
 
-    let mut queries: Vec<Option<FxHashMap<QueryKey, Weight>>> = vec![None; n as usize];
-    let mut worklist: VecDeque<(u32, u32, i32)> = VecDeque::new();
-    let mut in_queue: FxHashSet<(u32, u32, i32)> = FxHashSet::default();
-    let mut new_eps_from: Vec<Option<FxHashMap<u32, Weight>>> = vec![None; n as usize];
+    let mut query_weights: QueryWeights = vec![None; state_count as usize];
+    let mut worklist = VecDeque::<CancellationTask>::new();
+    let mut queued: FxHashSet<CancellationTask> = FxHashSet::default();
+    let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
 
-    let enqueue = |worklist: &mut VecDeque<(u32, u32, i32)>,
-                   in_queue: &mut FxHashSet<(u32, u32, i32)>,
-                   s: u32,
-                   a: u32,
-                   c: i32| {
-        let key = (s, a, c);
-        if in_queue.insert(key) {
-            worklist.push_back(key);
-        }
-    };
-
-    for a in range.clone() {
-        if a >= n {
+    for source_state in range {
+        if source_state >= state_count {
             continue;
         }
-        for (&label, targets) in &nwa.states[a as usize].transitions {
+
+        for (&label, targets) in &nwa.states[source_state as usize].transitions {
             if !is_negative_label(label) {
                 continue;
             }
-            let c = negative_to_positive_label(label);
-            for (b, w_ab) in targets {
-                if *b >= n || w_ab.is_empty() {
+            let positive_label = negative_to_positive_label(label);
+
+            for (target_state, weight) in targets {
+                if *target_state >= state_count || weight.is_empty() {
                     continue;
                 }
-                let query_key = (a, c);
-                let query_weight = queries[*b as usize]
-                    .get_or_insert_with(FxHashMap::default)
-                    .entry(query_key)
-                    .or_insert_with(Weight::empty);
-                if !w_ab.is_subset(query_weight) {
-                    *query_weight = query_weight.union(w_ab);
-                    enqueue(&mut worklist, &mut in_queue, *b, a, c);
-                }
+
+                queue_query_weight(
+                    &mut query_weights,
+                    &mut worklist,
+                    &mut queued,
+                    *target_state,
+                    source_state,
+                    positive_label,
+                    weight.clone(),
+                );
             }
         }
     }
 
-    while let Some((s, a, c)) = worklist.pop_front() {
-        in_queue.remove(&(s, a, c));
-        let Some(w_as) = queries[s as usize].as_ref().and_then(|m| m.get(&(a, c))).cloned() else {
+    while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
+        queued.remove(&(current_state, source_state, positive_label));
+        let Some(query_weight_to_current) = query_weights[current_state as usize]
+            .as_ref()
+            .and_then(|weights| weights.get(&(source_state, positive_label)))
+            .cloned()
+        else {
             continue;
         };
-        let w_as_single = w_as.single_compact_entry_parts();
+        let query_single = query_weight_to_current.single_compact_entry_parts();
 
-        if let Some(epsilons_from_s) = new_eps_from[s as usize].as_ref() {
-            let propagations: Vec<(u32, Weight)> = epsilons_from_s
-                .iter()
-                .filter_map(|(&target, eps_w): (&u32, &Weight)| {
-                    let prop_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), eps_w);
-                    (!prop_w.is_empty()).then_some((target, prop_w))
-                })
-                .collect();
-            for (target, prop_w) in propagations {
-                let query_key = (a, c);
-                let query_weight = queries[target as usize]
-                    .get_or_insert_with(FxHashMap::default)
-                    .entry(query_key)
-                    .or_insert_with(Weight::empty);
-                if !prop_w.is_subset(query_weight) {
-                    *query_weight = query_weight.union(&prop_w);
-                    enqueue(&mut worklist, &mut in_queue, target, a, c);
+        propagate_query_through_derived_epsilons(
+            &query_weight_to_current,
+            query_single.as_ref(),
+            current_state,
+            source_state,
+            positive_label,
+            &mut query_weights,
+            &mut worklist,
+            &mut queued,
+            &derived_epsilons,
+        );
+
+        if let Some(positive_targets) = nwa.states[current_state as usize]
+            .transitions
+            .get(&positive_label)
+        {
+            for (target_state, edge_weight) in positive_targets {
+                if *target_state < state_count {
+                    extend_derived_epsilons(
+                        &query_weight_to_current,
+                        query_single.as_ref(),
+                        source_state,
+                        *target_state,
+                        edge_weight,
+                        &mut query_weights,
+                        &mut worklist,
+                        &mut queued,
+                        &mut derived_epsilons,
+                    );
                 }
             }
         }
 
-        let check_cancellations = |target: u32,
-                       w_st: &Weight,
-                       queries: &mut Vec<Option<FxHashMap<QueryKey, Weight>>>,
-                       worklist: &mut VecDeque<(u32, u32, i32)>,
-                       in_queue: &mut FxHashSet<(u32, u32, i32)>,
-                       new_eps_from: &mut Vec<Option<FxHashMap<u32, Weight>>>| {
-            let new_eps_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), w_st);
-            if new_eps_w.is_empty() {
-                return;
-            }
-
-            let eps_weight = new_eps_from[a as usize]
-                .get_or_insert_with(FxHashMap::default)
-                .entry(target)
-                .or_insert_with(Weight::empty);
-            if !merge_weight(eps_weight, new_eps_w) {
-                return;
-            }
-
-            let queries_at_a = queries[a as usize].clone();
-
-            if let Some(queries_at_a) = queries_at_a {
-                for ((a_prime, c_prime), w_a_prime_a) in queries_at_a {
-                    let prop_w = intersect_or_clone_right_if_subset(&w_a_prime_a, eps_weight);
-                    if prop_w.is_empty() {
-                        continue;
-                    }
-                    let query_key = (a_prime, c_prime);
-                    let query_weight = queries[target as usize]
-                        .get_or_insert_with(FxHashMap::default)
-                        .entry(query_key)
-                        .or_insert_with(Weight::empty);
-                    if !prop_w.is_subset(query_weight) {
-                        *query_weight = query_weight.union(&prop_w);
-                        enqueue(worklist, in_queue, target, a_prime, c_prime);
-                    }
-                }
-            }
-        };
-
-        if let Some(pos_targets) = nwa.states[s as usize].transitions.get(&c) {
-            for (t, w_st) in pos_targets {
-                if *t < n {
-                    check_cancellations(*t, w_st, &mut queries, &mut worklist, &mut in_queue, &mut new_eps_from);
+        if let Some(default_targets) = nwa.states[current_state as usize]
+            .transitions
+            .get(&DEFAULT_LABEL)
+        {
+            for (target_state, edge_weight) in default_targets {
+                if *target_state < state_count {
+                    extend_derived_epsilons(
+                        &query_weight_to_current,
+                        query_single.as_ref(),
+                        source_state,
+                        *target_state,
+                        edge_weight,
+                        &mut query_weights,
+                        &mut worklist,
+                        &mut queued,
+                        &mut derived_epsilons,
+                    );
                 }
             }
         }
 
-        if let Some(default_targets) = nwa.states[s as usize].transitions.get(&DEFAULT_LABEL) {
-            for (target, weight) in default_targets {
-                if *target < n {
-                    check_cancellations(*target, weight, &mut queries, &mut worklist, &mut in_queue, &mut new_eps_from);
-                }
-            }
-        }
-
-        for (t, w_st) in &nwa.states[s as usize].epsilons {
-            if *t >= n {
+        for (target_state, epsilon_weight) in &nwa.states[current_state as usize].epsilons {
+            if *target_state >= state_count {
                 continue;
             }
-            let prop_w = intersect_with_single_weight_hint(&w_as, w_as_single.as_ref(), w_st);
-            if prop_w.is_empty() {
+
+            let propagated = intersect_with_single_weight_hint(
+                &query_weight_to_current,
+                query_single.as_ref(),
+                epsilon_weight,
+            );
+            if propagated.is_empty() {
                 continue;
             }
-            let query_key = (a, c);
-            let query_weight = queries[*t as usize]
-                .get_or_insert_with(FxHashMap::default)
-                .entry(query_key)
-                .or_insert_with(Weight::empty);
-            if !prop_w.is_subset(query_weight) {
-                *query_weight = query_weight.union(&prop_w);
-                enqueue(&mut worklist, &mut in_queue, *t, a, c);
-            }
+
+            queue_query_weight(
+                &mut query_weights,
+                &mut worklist,
+                &mut queued,
+                *target_state,
+                source_state,
+                positive_label,
+                propagated,
+            );
         }
     }
 
-    let mut result = Vec::new();
-    for (from, targets_opt) in new_eps_from.into_iter().enumerate() {
-        let Some(targets) = targets_opt else { continue; };
-        for (to, w) in targets {
-            if !w.is_empty() {
-                result.push((from as u32, to, w));
-            }
-        }
-    }
-
-    result
+    collect_non_empty_derived_epsilons(derived_epsilons)
 }
 
 pub(crate) fn apply_cancellations_range(nwa: &mut NWA, range: std::ops::Range<u32>) {
@@ -471,63 +399,71 @@ fn finality_edge_weight<'a>(nwa: &'a NWA, edge: PredEdge) -> (usize, &'a Weight)
     }
 }
 
-fn build_finality_predecessors(nwa: &NWA) -> Vec<Vec<PredEdge>> {
-    let n = nwa.states.len();
-    let mut preds = vec![Vec::<PredEdge>::new(); n];
+fn is_live_finality_edge(target_state: u32, weight: &Weight, state_count: usize) -> bool {
+    (target_state as usize) < state_count && !weight.is_empty()
+}
 
-    for (from, state) in nwa.states.iter().enumerate() {
-        for (eps_idx, (target, weight)) in state.epsilons.iter().enumerate() {
-            if *target as usize >= n || weight.is_empty() {
+fn for_each_live_finality_edge(
+    from_state: usize,
+    state: &NWAState,
+    state_count: usize,
+    mut visit: impl FnMut(usize, PredEdge),
+) {
+    for (eps_idx, (target_state, weight)) in state.epsilons.iter().enumerate() {
+        if !is_live_finality_edge(*target_state, weight, state_count) {
+            continue;
+        }
+        visit(*target_state as usize, PredEdge::Epsilon { from: from_state, eps_idx });
+    }
+
+    for (&label, targets) in &state.transitions {
+        if label != DEFAULT_LABEL && !is_negative_label(label) {
+            continue;
+        }
+
+        for (trans_idx, (target_state, weight)) in targets.iter().enumerate() {
+            if !is_live_finality_edge(*target_state, weight, state_count) {
                 continue;
             }
-            preds[*target as usize].push(PredEdge::Epsilon { from, eps_idx });
-        }
-        for (&label, targets) in &state.transitions {
-            if label != DEFAULT_LABEL && !is_negative_label(label) {
-                continue;
-            }
-            for (trans_idx, (target, weight)) in targets.iter().enumerate() {
-                if *target as usize >= n || weight.is_empty() {
-                    continue;
+
+            let edge = if label == DEFAULT_LABEL {
+                PredEdge::Default {
+                    from: from_state,
+                    trans_idx,
                 }
-                if label == DEFAULT_LABEL {
-                    preds[*target as usize].push(PredEdge::Default { from, trans_idx });
-                } else {
-                    preds[*target as usize].push(PredEdge::Negative {
-                        from,
-                        label,
-                        trans_idx,
-                    });
+            } else {
+                PredEdge::Negative {
+                    from: from_state,
+                    label,
+                    trans_idx,
                 }
-            }
+            };
+            visit(*target_state as usize, edge);
         }
+    }
+}
+
+fn build_finality_predecessors(nwa: &NWA) -> Vec<Vec<PredEdge>> {
+    let state_count = nwa.states.len();
+    let mut preds = vec![Vec::<PredEdge>::new(); state_count];
+
+    for (from_state, state) in nwa.states.iter().enumerate() {
+        for_each_live_finality_edge(from_state, state, state_count, |target_state, edge| {
+            preds[target_state].push(edge);
+        });
     }
 
     preds
 }
 
 fn build_finality_topo_order(nwa: &NWA) -> Option<Vec<usize>> {
-    let n = nwa.states.len();
-    let mut indegree = vec![0usize; n];
+    let state_count = nwa.states.len();
+    let mut indegree = vec![0usize; state_count];
 
-    for state in &nwa.states {
-        for (target, weight) in &state.epsilons {
-            if *target as usize >= n || weight.is_empty() {
-                continue;
-            }
-            indegree[*target as usize] += 1;
-        }
-        for (&label, targets) in &state.transitions {
-            if label != DEFAULT_LABEL && !is_negative_label(label) {
-                continue;
-            }
-            for (target, weight) in targets {
-                if *target as usize >= n || weight.is_empty() {
-                    continue;
-                }
-                indegree[*target as usize] += 1;
-            }
-        }
+    for (from_state, state) in nwa.states.iter().enumerate() {
+        for_each_live_finality_edge(from_state, state, state_count, |target_state, _| {
+            indegree[target_state] += 1;
+        });
     }
 
     let mut queue = VecDeque::new();
@@ -537,97 +473,101 @@ fn build_finality_topo_order(nwa: &NWA) -> Option<Vec<usize>> {
         }
     }
 
-    let mut topo_order = Vec::with_capacity(n);
+    let mut topo_order = Vec::with_capacity(state_count);
     while let Some(state_id) = queue.pop_front() {
         topo_order.push(state_id);
-        let state = &nwa.states[state_id];
-        for (target, weight) in &state.epsilons {
-            if *target as usize >= n || weight.is_empty() {
-                continue;
-            }
-            indegree[*target as usize] -= 1;
-            if indegree[*target as usize] == 0 {
-                queue.push_back(*target as usize);
-            }
-        }
-        for (&label, targets) in &state.transitions {
-            if label != DEFAULT_LABEL && !is_negative_label(label) {
-                continue;
-            }
-            for (target, weight) in targets {
-                if *target as usize >= n || weight.is_empty() {
-                    continue;
+        for_each_live_finality_edge(
+            state_id,
+            &nwa.states[state_id],
+            state_count,
+            |target_state, _| {
+                indegree[target_state] -= 1;
+                if indegree[target_state] == 0 {
+                    queue.push_back(target_state);
                 }
-                indegree[*target as usize] -= 1;
-                if indegree[*target as usize] == 0 {
-                    queue.push_back(*target as usize);
-                }
-            }
-        }
+            },
+        );
     }
 
-    (topo_order.len() == n).then_some(topo_order)
+    (topo_order.len() == state_count).then_some(topo_order)
+}
+
+fn collect_initial_final_weights(nwa: &NWA) -> Vec<Option<Weight>> {
+    nwa.states
+        .iter()
+        .map(|state| state.final_weight.clone().filter(|weight| !weight.is_empty()))
+        .collect()
+}
+
+fn propagate_final_weights_to_predecessors(
+    nwa: &NWA,
+    preds: &[Vec<PredEdge>],
+    reachable_final_weights: &mut [Option<Weight>],
+    state_id: usize,
+    mut on_change: impl FnMut(usize),
+) {
+    let Some(reachable_final) = reachable_final_weights[state_id].clone() else {
+        return;
+    };
+
+    for edge in preds[state_id].iter().copied() {
+        let (pred_state, edge_weight) = finality_edge_weight(nwa, edge);
+        let propagated = reachable_final.intersection(edge_weight);
+        if merge_final_weight(&mut reachable_final_weights[pred_state], propagated) {
+            on_change(pred_state);
+        }
+    }
 }
 
 fn apply_finality_fixpoint_worklist(
     nwa: &NWA,
     preds: &[Vec<PredEdge>],
-    future_final: &mut [Option<Weight>],
+    reachable_final_weights: &mut [Option<Weight>],
 ) {
     let n = nwa.states.len();
     let mut worklist = VecDeque::<usize>::new();
-    let mut in_queue = vec![false; n];
+    let mut queued = vec![false; n];
 
-    for state_id in 0..n {
-        if future_final[state_id]
-            .as_ref()
-            .map(|weight| !weight.is_empty())
-            .unwrap_or(false)
-        {
-            in_queue[state_id] = true;
+    for (state_id, final_weight) in reachable_final_weights.iter().enumerate() {
+        if final_weight.is_some() {
+            queued[state_id] = true;
             worklist.push_back(state_id);
         }
     }
 
     while let Some(state_id) = worklist.pop_front() {
-        in_queue[state_id] = false;
-        let Some(f_s) = future_final[state_id].clone() else {
-            continue;
-        };
-        if f_s.is_empty() {
-            continue;
-        }
+        queued[state_id] = false;
+        propagate_final_weights_to_predecessors(
+            nwa,
+            preds,
+            reachable_final_weights,
+            state_id,
+            |pred_state| {
+                if queued[pred_state] {
+                    return;
+                }
 
-        for edge in preds[state_id].iter().copied() {
-            let (pred_state, edge_weight) = finality_edge_weight(nwa, edge);
-            let add = f_s.intersection(edge_weight);
-            if merge_final_weight(&mut future_final[pred_state], add) && !in_queue[pred_state] {
-                in_queue[pred_state] = true;
+                queued[pred_state] = true;
                 worklist.push_back(pred_state);
-            }
-        }
+            },
+        );
     }
 }
 
 fn apply_finality_fixpoint_acyclic(
     nwa: &NWA,
     preds: &[Vec<PredEdge>],
-    future_final: &mut [Option<Weight>],
+    reachable_final_weights: &mut [Option<Weight>],
     topo_order: &[usize],
 ) {
     for &state_id in topo_order.iter().rev() {
-        let Some(f_s) = future_final[state_id].clone() else {
-            continue;
-        };
-        if f_s.is_empty() {
-            continue;
-        }
-
-        for edge in preds[state_id].iter().copied() {
-            let (pred_state, edge_weight) = finality_edge_weight(nwa, edge);
-            let add = f_s.intersection(edge_weight);
-            merge_final_weight(&mut future_final[pred_state], add);
-        }
+        propagate_final_weights_to_predecessors(
+            nwa,
+            preds,
+            reachable_final_weights,
+            state_id,
+            |_| {},
+        );
     }
 }
 
@@ -639,23 +579,20 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     let topo_order = build_finality_topo_order(nwa);
     let preds = build_finality_predecessors(nwa);
 
-    let mut future_final = vec![None::<Weight>; n];
-    for state_id in 0..n {
-        if let Some(fw) = nwa.states[state_id].final_weight.clone() {
-            if fw.is_empty() {
-                continue;
-            }
-            future_final[state_id] = Some(fw);
-        }
-    }
+    let mut reachable_final_weights = collect_initial_final_weights(nwa);
 
     if let Some(topo_order) = topo_order.as_deref() {
-        apply_finality_fixpoint_acyclic(nwa, &preds, &mut future_final, topo_order);
+        apply_finality_fixpoint_acyclic(
+            nwa,
+            &preds,
+            &mut reachable_final_weights,
+            topo_order,
+        );
     } else {
-        apply_finality_fixpoint_worklist(nwa, &preds, &mut future_final);
+        apply_finality_fixpoint_worklist(nwa, &preds, &mut reachable_final_weights);
     }
 
-    for (state_id, final_weight) in future_final.into_iter().enumerate() {
+    for (state_id, final_weight) in reachable_final_weights.into_iter().enumerate() {
         nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
     }
 }
@@ -666,58 +603,73 @@ pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
     }
 }
 
+fn has_live_final_weight(state: &NWAState) -> bool {
+    state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty())
+}
+
+fn has_non_default_transitions(state: &NWAState) -> bool {
+    state
+        .transitions
+        .iter()
+        .any(|(label, targets)| *label != DEFAULT_LABEL && !targets.is_empty())
+}
+
+fn is_terminal_candidate(state: &NWAState) -> bool {
+    !has_non_default_transitions(state)
+        && state.epsilons.is_empty()
+        && has_live_final_weight(state)
+}
+
+fn default_targets_are_terminal(state: &NWAState, terminal_states: &[bool]) -> bool {
+    match state.transitions.get(&DEFAULT_LABEL) {
+        None => true,
+        Some(targets) => targets.iter().all(|(target, _)| {
+            terminal_states
+                .get(*target as usize)
+                .copied()
+                .unwrap_or(false)
+        }),
+    }
+}
+
 pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
     let n = nwa.states.len();
-    let mut is_terminal = vec![false; n];
+    let mut terminal_states: Vec<bool> = nwa.states.iter().map(is_terminal_candidate).collect();
 
-    for state_id in 0..n {
-        let state = &nwa.states[state_id];
-        let has_non_default = state.transitions.iter().any(|(label, targets)| {
-            *label != DEFAULT_LABEL && !targets.is_empty()
-        });
-        let is_final = state.final_weight.as_ref().map(|weight| !weight.is_empty()).unwrap_or(false);
-        if !has_non_default && state.epsilons.is_empty() && is_final {
-            is_terminal[state_id] = true;
-        }
-    }
-
-    let mut changed = true;
-    while changed {
-        changed = false;
+    loop {
+        let mut changed = false;
         for state_id in 0..n {
-            if is_terminal[state_id] {
+            if terminal_states[state_id] {
                 continue;
             }
+
             let state = &nwa.states[state_id];
-            let has_non_default = state.transitions.iter().any(|(label, targets)| {
-                *label != DEFAULT_LABEL && !targets.is_empty()
-            });
-            let is_final = state.final_weight.as_ref().map(|weight| !weight.is_empty()).unwrap_or(false);
-            if has_non_default || !state.epsilons.is_empty() || !is_final {
+            if !is_terminal_candidate(state) {
                 continue;
             }
-            let default_targets_terminal = state
-                .transitions
-                .get(&DEFAULT_LABEL)
-                .map(|targets| targets.iter().all(|(target, _)| is_terminal[*target as usize]))
-                .unwrap_or(true);
-            if default_targets_terminal {
-                is_terminal[state_id] = true;
+
+            if default_targets_are_terminal(state, &terminal_states) {
+                terminal_states[state_id] = true;
                 changed = true;
             }
+        }
+
+        if !changed {
+            break;
         }
     }
 
     for state in &mut nwa.states {
         if let Some(targets) = state.transitions.get_mut(&DEFAULT_LABEL) {
-            targets.retain(|(target, _)| !is_terminal[*target as usize]);
+            targets.retain(|(target, _)| !terminal_states[*target as usize]);
         }
         state.transitions.retain(|_, targets| !targets.is_empty());
     }
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-    apply_cancellations_range(nwa, 0..nwa.states.len() as u32);
+    let state_range = full_state_range(nwa);
+    apply_cancellations_range(nwa, state_range);
     apply_finality_fixpoint(nwa);
     remove_negative_transitions(nwa);
     remove_redundant_default_transitions(nwa);
@@ -727,7 +679,7 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 mod tests {
     use super::*;
     use crate::compiler::glr::labels::{encode_negative_label, encode_positive_label};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     fn compute_cancellations_reference(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
         let n = nwa.states.len();

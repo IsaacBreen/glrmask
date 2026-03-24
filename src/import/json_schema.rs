@@ -1899,6 +1899,57 @@ impl SchemaCtx {
         merged
     }
 
+    fn schema_without_keys(
+        schema: &Map<String, Value>,
+        excluded: &[&str],
+    ) -> Map<String, Value> {
+        schema
+            .iter()
+            .filter(|(key, _)| !excluded.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    fn convert_schema_options(
+        &mut self,
+        options: &[Value],
+    ) -> Result<Vec<GrammarExpr>, GlrMaskError> {
+        options
+            .iter()
+            .map(|option| self.convert_schema(option))
+            .collect()
+    }
+
+    fn convert_structural_branches(
+        &mut self,
+        schema: &Map<String, Value>,
+        keyword: &str,
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        let Some(options) = schema.get(keyword).and_then(Value::as_array) else {
+            return Ok(None);
+        };
+        if options.is_empty() {
+            return Ok(None);
+        }
+
+        let option_exprs = if has_structural_keywords(schema) {
+            let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
+            options
+                .iter()
+                .map(|option| {
+                    let merged = Value::Object(
+                        self.merge_resolved_subschemas(&base, std::slice::from_ref(option)),
+                    );
+                    self.convert_schema(&merged)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            self.convert_schema_options(options)?
+        };
+
+        Ok(Some(factor_common_affixes(option_exprs)))
+    }
+
     fn stable_ref_rule_name(&self, ref_value: &str) -> String {
         let path = ref_value.strip_prefix("#/").unwrap_or(ref_value);
         let last_segment = path.rsplit('/').next().unwrap_or(path);
@@ -1992,65 +2043,17 @@ impl SchemaCtx {
                 }
             }
 
-            if let Some(options) = object.get("anyOf").and_then(Value::as_array) {
-                if !options.is_empty() {
-                    let base_has_structural = has_structural_keywords(object);
-                    let options = if base_has_structural {
-                        let base: Map<String, Value> = object
-                            .iter()
-                            .filter(|(key, _)| key.as_str() != "anyOf" && key.as_str() != "oneOf")
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        options
-                            .iter()
-                            .map(|option| {
-                                let merged = Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)));
-                                self.convert_schema(&merged)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
-                    } else {
-                        options
-                            .iter()
-                            .map(|option| self.convert_schema(option))
-                            .collect::<Result<Vec<_>, _>>()?
-                    };
-                    return Ok(factor_common_affixes(options));
-                }
+            if let Some(expr) = self.convert_structural_branches(object, "anyOf")? {
+                return Ok(expr);
             }
 
-            if let Some(options) = object.get("oneOf").and_then(Value::as_array) {
-                if !options.is_empty() {
-                    let base_has_structural = has_structural_keywords(object);
-                    let options = if base_has_structural {
-                        let base: Map<String, Value> = object
-                            .iter()
-                            .filter(|(key, _)| key.as_str() != "anyOf" && key.as_str() != "oneOf")
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        options
-                            .iter()
-                            .map(|option| {
-                                let merged = Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)));
-                                self.convert_schema(&merged)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
-                    } else {
-                        options
-                            .iter()
-                            .map(|option| self.convert_schema(option))
-                            .collect::<Result<Vec<_>, _>>()?
-                    };
-                    return Ok(factor_common_affixes(options));
-                }
+            if let Some(expr) = self.convert_structural_branches(object, "oneOf")? {
+                return Ok(expr);
             }
 
             if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
                 if !all_of.is_empty() {
-                    let base = object
-                        .iter()
-                        .filter(|(key, _)| key.as_str() != "allOf")
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect::<Map<String, Value>>();
+                    let base = Self::schema_without_keys(object, &["allOf"]);
                     let merged = self.merge_resolved_subschemas(&base, all_of);
                     return self.convert_schema(&Value::Object(merged));
                 }
@@ -2086,26 +2089,18 @@ impl SchemaCtx {
         object: &Map<String, Value>,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
         if let Some(value) = object.get("const") {
-            let remaining: Map<String, Value> = object
-                .iter()
-                .filter(|(key, _)| key.as_str() != "const")
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            if self.value_satisfies_schema(value, &Value::Object(remaining)) {
+            let remaining_schema = Value::Object(Self::schema_without_keys(object, &["const"]));
+            if self.value_satisfies_schema(value, &remaining_schema) {
                 return Ok(Some(self.json_literal(value)));
             }
             return Err(unsat_schema_error());
         }
 
         if let Some(values) = object.get("enum").and_then(Value::as_array) {
-            let remaining: Map<String, Value> = object
-                .iter()
-                .filter(|(key, _)| key.as_str() != "enum")
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
+            let remaining_schema = Value::Object(Self::schema_without_keys(object, &["enum"]));
             let options: Vec<GrammarExpr> = values
                 .iter()
-                .filter(|value| self.value_satisfies_schema(value, &Value::Object(remaining.clone())))
+                .filter(|value| self.value_satisfies_schema(value, &remaining_schema))
                 .map(|value| self.json_literal(value))
                 .collect();
             if !options.is_empty() {
@@ -2640,6 +2635,79 @@ impl SchemaCtx {
         literal_expr(JSON_ITEM_SEPARATOR)
     }
 
+    fn normalized_additional_properties_schema(
+        &mut self,
+        additional_properties: Option<&Value>,
+    ) -> Option<Value> {
+        let schema = match additional_properties {
+            Some(Value::Bool(false)) => None,
+            Some(Value::Object(map)) => Some(Value::Object(map.clone())),
+            _ => Some(serde_json::json!({})),
+        };
+
+        if schema
+            .as_ref()
+            .map(|schema| self.is_certainly_unsatisfiable(schema))
+            .unwrap_or(false)
+        {
+            None
+        } else {
+            schema
+        }
+    }
+
+    fn pattern_property_entries(
+        pattern_properties: Option<&Map<String, Value>>,
+    ) -> Vec<(String, Value)> {
+        pattern_properties
+            .map(|patterns| {
+                patterns
+                    .iter()
+                    .map(|(pattern, subschema)| (pattern.clone(), subschema.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn key_matches_property_names(
+        property_names_pattern: Option<&str>,
+        key: &str,
+    ) -> Result<bool, GlrMaskError> {
+        match property_names_pattern {
+            Some(pattern) => Self::schema_pattern_matches_key(pattern, key),
+            None => Ok(true),
+        }
+    }
+
+    fn matching_pattern_schemas_for_key(
+        pattern_properties: &[(String, Value)],
+        key: &str,
+    ) -> Result<Vec<Value>, GlrMaskError> {
+        let mut matching = Vec::new();
+        for (pattern, subschema) in pattern_properties {
+            if Self::schema_pattern_matches_key(pattern, key)? {
+                matching.push(subschema.clone());
+            }
+        }
+        Ok(matching)
+    }
+
+    fn build_repeated_object_pairs(&self, pair: GrammarExpr) -> GrammarExpr {
+        choice_or_single(vec![
+            sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
+            sequence_or_single(vec![
+                literal_expr(b"{"),
+                pair.clone(),
+                repeat_expr(
+                    sequence_or_single(vec![self.json_item_separator_expr(), pair]),
+                    0,
+                    None,
+                ),
+                literal_expr(b"}"),
+            ]),
+        ])
+    }
+
     fn extract_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
         if Self::is_trivial_expr(&expr) {
             return expr;
@@ -2928,26 +2996,9 @@ impl SchemaCtx {
                 }
             }
 
-            let pattern_property_entries = pattern_properties
-                .map(|pp| {
-                    pp.iter()
-                        .map(|(pattern, subschema)| (pattern.clone(), subschema.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            let mut additional_schema = match additional_properties {
-                Some(Value::Bool(false)) => None,
-                Some(Value::Object(map)) => Some(Value::Object(map.clone())),
-                _ => Some(serde_json::json!({})),
-            };
-            if additional_schema
-                .as_ref()
-                .map(|schema| self.is_certainly_unsatisfiable(schema))
-                .unwrap_or(false)
-            {
-                additional_schema = None;
-            }
+            let pattern_property_entries = Self::pattern_property_entries(pattern_properties);
+            let additional_schema =
+                self.normalized_additional_properties_schema(additional_properties);
 
             return self.build_ordered_properties_object_expr(
                 properties,
@@ -2959,30 +3010,13 @@ impl SchemaCtx {
             );
         }
 
-        let mut additional_schema = match additional_properties {
-            Some(Value::Bool(false)) => None,
-            Some(Value::Object(map)) => Some(Value::Object(map.clone())),
-            _ => Some(serde_json::json!({})),
-        };
-        if additional_schema
-            .as_ref()
-            .map(|schema| self.is_certainly_unsatisfiable(schema))
-            .unwrap_or(false)
-        {
-            additional_schema = None;
-        }
+        let additional_schema = self.normalized_additional_properties_schema(additional_properties);
 
         if !required_list.is_empty() && pattern_properties.is_none() && property_names.is_none() {
             return self.build_required_any_order_object_expr(&required_list, additional_schema);
         }
 
-        let pattern_property_entries = pattern_properties
-            .map(|pp| {
-                pp.iter()
-                    .map(|(pattern, subschema)| (pattern.clone(), subschema.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let pattern_property_entries = Self::pattern_property_entries(pattern_properties);
 
         let empty_props = Map::new();
 
@@ -3358,10 +3392,10 @@ impl SchemaCtx {
         additional_properties_schema: Option<Value>,
         property_names: Option<&Value>,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        let property_names_pattern = match property_names {
-            Some(value) => Some(Self::property_name_pattern(value)?.to_string()),
-            None => None,
-        };
+        let property_names_pattern = property_names
+            .map(Self::property_name_pattern)
+            .transpose()?
+            .map(str::to_string);
 
         // Exclude all literal fixed keys from the free-form branch, even if their
         // individual schema becomes unsatisfiable. A key named in `properties` is
@@ -3373,21 +3407,15 @@ impl SchemaCtx {
         let mut ordered: Vec<(String, GrammarExpr, bool)> = Vec::new();
 
         for (key, subschema) in properties {
-            if let Some(pattern) = &property_names_pattern {
-                if !Self::schema_pattern_matches_key(pattern, key)? {
-                    if required_keys.contains(key) {
-                        return Err(unsat_schema_error());
-                    }
-                    continue;
+            if !Self::key_matches_property_names(property_names_pattern.as_deref(), key)? {
+                if required_keys.contains(key) {
+                    return Err(unsat_schema_error());
                 }
+                continue;
             }
 
             let mut schemas = vec![subschema.clone()];
-            for (pattern, pattern_schema) in pattern_properties {
-                if Self::schema_pattern_matches_key(pattern, key)? {
-                    schemas.push(pattern_schema.clone());
-                }
-            }
+            schemas.extend(Self::matching_pattern_schemas_for_key(pattern_properties, key)?);
 
             let effective_schema = Self::schema_all_of(schemas);
             let value_expr = match self.convert_schema(&effective_schema) {
@@ -3409,18 +3437,12 @@ impl SchemaCtx {
                 continue;
             }
 
-            if let Some(pattern) = &property_names_pattern {
-                if !Self::schema_pattern_matches_key(pattern, key)? {
-                    return Err(unsat_schema_error());
-                }
+            if !Self::key_matches_property_names(property_names_pattern.as_deref(), key)? {
+                return Err(unsat_schema_error());
             }
 
-            let mut matching_pattern_schemas = Vec::new();
-            for (pattern, pattern_schema) in pattern_properties {
-                if Self::schema_pattern_matches_key(pattern, key)? {
-                    matching_pattern_schemas.push(pattern_schema.clone());
-                }
-            }
+            let matching_pattern_schemas =
+                Self::matching_pattern_schemas_for_key(pattern_properties, key)?;
 
             let effective_schema = if matching_pattern_schemas.is_empty() {
                 match &additional_properties_schema {
@@ -3440,15 +3462,8 @@ impl SchemaCtx {
             ordered.push((key.clone(), value_expr, true));
         }
 
-        let additional_properties_schema = if additional_properties_schema
-            .as_ref()
-            .map(|schema| self.is_certainly_unsatisfiable(schema))
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            additional_properties_schema
-        };
+        let additional_properties_schema =
+            self.normalized_additional_properties_schema(additional_properties_schema.as_ref());
 
         if ordered.is_empty() && additional_properties_schema.is_none() && pattern_properties.is_empty() {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
@@ -3699,19 +3714,8 @@ impl SchemaCtx {
         value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
-        let pair = sequence_or_single(vec![
-            json_wrapped_key_colon_pattern(pattern),
-            value_expr,
-        ]);
-        Ok(choice_or_single(vec![
-            sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
-            sequence_or_single(vec![
-                literal_expr(b"{"),
-                pair.clone(),
-                repeat_expr(sequence_or_single(vec![self.json_item_separator_expr(), pair]), 0, None),
-                literal_expr(b"}"),
-            ]),
-        ]))
+        let pair = sequence_or_single(vec![json_wrapped_key_colon_pattern(pattern), value_expr]);
+        Ok(self.build_repeated_object_pairs(pair))
     }
 
     fn build_mixed_pattern_named_object_expr(
@@ -3736,15 +3740,7 @@ impl SchemaCtx {
             unmatched_value_expr,
         ]);
         let pair = choice_or_single(vec![matched_pair, unmatched_pair]);
-        Ok(choice_or_single(vec![
-            sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
-            sequence_or_single(vec![
-                literal_expr(b"{"),
-                pair.clone(),
-                repeat_expr(sequence_or_single(vec![self.json_item_separator_expr(), pair]), 0, None),
-                literal_expr(b"}"),
-            ]),
-        ]))
+        Ok(self.build_repeated_object_pairs(pair))
     }
 
     fn build_array_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {

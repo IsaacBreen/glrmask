@@ -1,17 +1,7 @@
-//! Trie-based reference vocab equivalence analysis.
+//! Reference vocab equivalence analysis using a byte trie.
 //!
-//! Partitions tokens by DFA behavior using a byte-level trie and per-token hashing.
-//! The trie amortizes DFA transitions: tokens sharing a prefix share the walk.
-//!
-//! Algorithm:
-//! 1. Build flat DFA from tokenizer
-//! 2. Build byte-level trie from vocabulary
-//! 3. Walk the trie depth-first, carrying all initial DFA states simultaneously
-//! 4. At each token leaf, compute a signature from end states, match positions,
-//!    and suffix DAG structure
-//! 5. Group tokens by signature → equivalence classes
-
-// Do NOT add caching shortcuts that skip states/tokens. Full correctness mandatory.
+//! Tokens share trie walks where possible, and each leaf is classified by its
+//! DFA end states, match positions, and suffix structure.
 
 use super::super::compat::TokenizerView;
 use ahash::{AHasher, RandomState};
@@ -21,6 +11,7 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
 
+use crate::compiler::stages::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
@@ -34,14 +25,13 @@ const HASH_SEED3: u64 = 0x1656_67b1_9e37_9f9b;
 const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
-// ---- Deterministic hashing ----
 
-static HASH_STATE: Lazy<RandomState> =
+static HASH_RANDOM_STATE: Lazy<RandomState> =
     Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
 
 #[inline]
 fn new_hasher() -> AHasher {
-    HASH_STATE.build_hasher()
+    HASH_RANDOM_STATE.build_hasher()
 }
 
 #[inline]
@@ -54,8 +44,6 @@ fn hash_group_list(iter: impl ExactSizeIterator<Item = usize>) -> u64 {
     }
     h.finish()
 }
-
-// ---- Flat DFA ----
 
 struct Dfa {
     start_state: usize,
@@ -123,25 +111,6 @@ impl Dfa {
     }
 }
 
-fn normalize_disallowed_follows(
-    num_groups: usize,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> Vec<BitSet> {
-    let mut normalized = vec![BitSet::new(num_groups); num_groups];
-    for gid in 0..num_groups {
-        if let Some(bits) = disallowed_follows.get(&(gid as u32)) {
-            let mut out = BitSet::new(num_groups);
-            for bit in bits.iter() {
-                if bit < num_groups {
-                    out.set(bit);
-                }
-            }
-            normalized[gid] = out;
-        }
-    }
-    normalized
-}
-
 #[inline]
 fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
     let mut h = new_hasher();
@@ -161,8 +130,8 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
     h.finish()
 }
 
-fn build_dfa(regex: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
-    let dfa = regex.dfa();
+fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
+    let dfa = tokenizer.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
     let num_groups = dfa
@@ -420,16 +389,16 @@ fn run_suffix(
     dfa: &Dfa,
     slice: &[u8],
     base_pos: usize,
-    mp: &mut [u32],
+    match_positions: &mut [u32],
 ) -> (Option<usize>, EdgeList) {
-    let ng = dfa.num_groups;
-    mp[..ng].fill(NONE);
-    let mut cur = dfa.start_state;
-    let mut done = dfa.is_dead_end[cur];
+    let num_groups = dfa.num_groups;
+    match_positions[..num_groups].fill(NONE);
+    let mut current_state = dfa.start_state;
+    let mut done = dfa.is_dead_end[current_state];
 
-    for &gid in &dfa.finalizers[cur] {
-        if gid < ng && mp[gid] == NONE {
-            mp[gid] = 0;
+    for &gid in &dfa.finalizers[current_state] {
+        if gid < num_groups && match_positions[gid] == NONE {
+            match_positions[gid] = 0;
         }
     }
 
@@ -437,27 +406,27 @@ fn run_suffix(
         if done {
             break;
         }
-        let ns = dfa.transitions[cur][byte as usize];
-        if ns == NONE {
+        let next_state = dfa.transitions[current_state][byte as usize];
+        if next_state == NONE {
             done = true;
             break;
         }
-        cur = ns as usize;
+        current_state = next_state as usize;
         let pos = (i + 1) as u32;
-        for &gid in &dfa.finalizers[cur] {
-            if gid < ng {
-                mp[gid] = pos;
+        for &gid in &dfa.finalizers[current_state] {
+            if gid < num_groups {
+                match_positions[gid] = pos;
             }
         }
-        if dfa.is_dead_end[cur] {
+        if dfa.is_dead_end[current_state] {
             done = true;
         }
     }
 
-    let end = if done { None } else { Some(cur) };
-    let edges: EdgeList = (0..ng)
+    let end = if done { None } else { Some(current_state) };
+    let edges: EdgeList = (0..num_groups)
         .filter_map(|gid| {
-            let pv = mp[gid];
+            let pv = match_positions[gid];
             (pv != NONE && pv != 0).then(|| (gid, base_pos + pv as usize))
         })
         .collect();
@@ -574,7 +543,7 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new(ng: usize, max_token_len: usize) -> Self {
+    fn new(num_groups: usize, max_token_len: usize) -> Self {
         let cap = max_token_len + 2;
         let mut dag = Vec::with_capacity(cap);
         for _ in 0..cap {
@@ -589,12 +558,12 @@ impl Scratch {
             dag_end_states: vec![STATE_NONE; cap],
             dag_generation: 0,
             queue: Vec::new(),
-            tmp_mp: vec![NONE; ng],
+            tmp_mp: vec![NONE; num_groups],
             targets: Vec::new(),
             root_edges: Vec::new(),
-            dag_disallowed: vec![BitSet::new(ng); cap],
+            dag_disallowed: vec![BitSet::new(num_groups); cap],
             dag_disallowed_generation: vec![0; cap],
-            num_groups: ng,
+            num_groups,
         }
     }
 
@@ -647,36 +616,37 @@ fn assign_hash_to_subtree(
 /// Walk the trie depth-first, carrying DFA states for all initial states.
 /// At each token leaf, computes the token's signature and writes to `hashes`.
 ///
-/// Layout: `states[depth * ni + si]`, `mp[(depth * ni + si) * ng + gid]`
+/// Layout: `states[depth * num_initial_states + state_index]`,
+/// `match_positions[(depth * num_initial_states + state_index) * num_groups + gid]`
 fn walk_trie<S: AsRef<[u8]>>(
     trie: &VocabTrie,
     node: u32,
     dfa: &Dfa,
     states: &mut [u32],
-    mp: &mut [u32],
+    match_positions: &mut [u32],
     depth: usize,
-    ni: usize,
-    ng: usize,
+    num_initial_states: usize,
+    num_groups: usize,
     max_depth: usize,
     strings: &[S],
     scratch: &mut Scratch,
     hashes: &mut [u64],
     progress: &mut ProgressReporter,
 ) {
-    let n = &trie.nodes[node as usize];
+    let trie_node = &trie.nodes[node as usize];
 
     // At token leaf: compute signature
-    if n.token_idx != u32::MAX {
-        let ti = n.token_idx as usize;
-        let bytes = strings[ti].as_ref();
+    if trie_node.token_idx != u32::MAX {
+        let token_index = trie_node.token_idx as usize;
+        let bytes = strings[token_index].as_ref();
 
         // Collect suffix targets across all initial states
         scratch.targets.clear();
         scratch.root_edges.clear();
-        for si in 0..ni {
-            let base = (depth * ni + si) * ng;
-            for gid in 0..ng {
-                let pv = mp[base + gid];
+        for state_index in 0..num_initial_states {
+            let base = (depth * num_initial_states + state_index) * num_groups;
+            for gid in 0..num_groups {
+                let pv = match_positions[base + gid];
                 if pv != NONE && pv > 0 {
                     scratch.targets.push(pv as usize);
                     scratch.root_edges.push((gid, pv as usize));
@@ -692,21 +662,21 @@ fn walk_trie<S: AsRef<[u8]>>(
 
         // Fold per-state signatures into token hash
         let mut hash = HASH_SEED3;
-        for si in 0..ni {
-            let es = states[depth * ni + si];
-            let base = (depth * ni + si) * ng;
-            let mp_slice = &mp[base..base + ng];
+        for state_index in 0..num_initial_states {
+            let end_state = states[depth * num_initial_states + state_index];
+            let base = (depth * num_initial_states + state_index) * num_groups;
+            let match_slice = &match_positions[base..base + num_groups];
 
-            let completion = if es == NONE {
+            let completion = if end_state == NONE {
                 dfa.none_completion_hash
             } else {
-                dfa.completion_hash[es as usize]
+                dfa.completion_hash[end_state as usize]
             };
 
-            let sig = if mp_slice.iter().any(|&pv| pv != NONE) {
+            let sig = if match_slice.iter().any(|&pv| pv != NONE) {
                 let mut h = new_hasher();
                 h.write_u64(completion);
-                for (gid, &pv) in mp_slice.iter().enumerate() {
+                for (gid, &pv) in match_slice.iter().enumerate() {
                     if pv != NONE && pv > 0 {
                         h.write_u64(gid as u64);
                         h.write_u64(scratch.dag_get_hash(pv as usize));
@@ -719,40 +689,49 @@ fn walk_trie<S: AsRef<[u8]>>(
 
             hash = hash.wrapping_mul(HASH_SEED1).wrapping_add(sig);
         }
-        hashes[ti] = hash;
+        hashes[token_index] = hash;
         progress.record(1);
     }
 
     // Recurse into children
-    for &(byte, child) in &n.children {
-        let cd = depth + 1;
-        if cd >= max_depth {
+    for &(byte, child) in &trie_node.children {
+        let child_depth = depth + 1;
+        if child_depth >= max_depth {
             continue;
         }
 
-        for si in 0..ni {
-            let ps = states[depth * ni + si];
-            let parent_mp = (depth * ni + si) * ng;
-            let child_mp = (cd * ni + si) * ng;
+        for state_index in 0..num_initial_states {
+            let parent_state = states[depth * num_initial_states + state_index];
+            let parent_match_base = (depth * num_initial_states + state_index) * num_groups;
+            let child_match_base =
+                (child_depth * num_initial_states + state_index) * num_groups;
 
             // Copy parent match positions to child
-            mp.copy_within(parent_mp..parent_mp + ng, child_mp);
+            match_positions.copy_within(
+                parent_match_base..parent_match_base + num_groups,
+                child_match_base,
+            );
 
-            if ps == NONE {
-                states[cd * ni + si] = NONE;
+            if parent_state == NONE {
+                states[child_depth * num_initial_states + state_index] = NONE;
             } else {
-                let ns = dfa.transitions[ps as usize][byte as usize];
-                if ns == NONE {
-                    states[cd * ni + si] = NONE;
+                let next_state = dfa.transitions[parent_state as usize][byte as usize];
+                if next_state == NONE {
+                    states[child_depth * num_initial_states + state_index] = NONE;
                 } else {
-                    let ns_u = ns as usize;
+                    let next_state_index = next_state as usize;
                     // Apply finalizers at new state
-                    for &gid in &dfa.finalizers[ns_u] {
-                        if gid < ng {
-                            mp[child_mp + gid] = cd as u32;
+                    for &gid in &dfa.finalizers[next_state_index] {
+                        if gid < num_groups {
+                            match_positions[child_match_base + gid] = child_depth as u32;
                         }
                     }
-                    states[cd * ni + si] = if dfa.is_dead_end[ns_u] { NONE } else { ns };
+                    states[child_depth * num_initial_states + state_index] =
+                        if dfa.is_dead_end[next_state_index] {
+                            NONE
+                        } else {
+                            next_state
+                        };
                 }
             }
         }
@@ -765,11 +744,11 @@ fn walk_trie<S: AsRef<[u8]>>(
             // Intersect self_loop_bytes across all alive states at child depth
             let mut sl_inter = U8Set::all();
             let mut any_alive = false;
-            for si in 0..ni {
-                let cs = states[cd * ni + si];
-                if cs != NONE {
+            for state_index in 0..num_initial_states {
+                let child_state = states[child_depth * num_initial_states + state_index];
+                if child_state != NONE {
                     any_alive = true;
-                    sl_inter &= dfa.self_loop_bytes[cs as usize];
+                    sl_inter &= dfa.self_loop_bytes[child_state as usize];
                 }
             }
 
@@ -778,16 +757,16 @@ fn walk_trie<S: AsRef<[u8]>>(
                 // Check if bulk-assign is safe: every mp > 0 must be for a group
                 // where the current state has a greedy finalizer (so mp advances
                 // to token_length with empty suffix, producing the same hash).
-                let can_bulk = (0..ni).all(|si| {
-                    let cs = states[cd * ni + si];
-                    let base = (cd * ni + si) * ng;
-                    (0..ng).all(|gid| {
-                        let pv = mp[base + gid];
+                let can_bulk = (0..num_initial_states).all(|state_index| {
+                    let child_state = states[child_depth * num_initial_states + state_index];
+                    let base = (child_depth * num_initial_states + state_index) * num_groups;
+                    (0..num_groups).all(|gid| {
+                        let pv = match_positions[base + gid];
                         if pv > 0 && pv != NONE {
                             // For alive states: needs greedy finalizer to advance mp to L.
                             // For dead states: suffix depends on token content → NOT safe.
-                            cs != NONE
-                                && dfa.finalizers[cs as usize]
+                            child_state != NONE
+                                && dfa.finalizers[child_state as usize]
                                     .iter()
                                     .any(|&state_gid| state_gid == gid)
                         } else {
@@ -801,21 +780,23 @@ fn walk_trie<S: AsRef<[u8]>>(
                     // End states are the same (self-loop). Greedy mp → L (token length),
                     // suffix from L is empty → empty_suffix_hash.
                     let mut hash = HASH_SEED3;
-                    for si in 0..ni {
-                        let es = states[cd * ni + si];
-                        let base = (cd * ni + si) * ng;
-                        let completion = if es == NONE {
+                    for state_index in 0..num_initial_states {
+                        let end_state = states[child_depth * num_initial_states + state_index];
+                        let base =
+                            (child_depth * num_initial_states + state_index) * num_groups;
+                        let completion = if end_state == NONE {
                             dfa.none_completion_hash
                         } else {
-                            dfa.completion_hash[es as usize]
+                            dfa.completion_hash[end_state as usize]
                         };
 
-                        let has_any = (0..ng).any(|gid| mp[base + gid] != NONE);
+                        let has_any =
+                            (0..num_groups).any(|gid| match_positions[base + gid] != NONE);
                         let sig = if has_any {
                             let mut h = new_hasher();
                             h.write_u64(completion);
-                            for gid in 0..ng {
-                                let pv = mp[base + gid];
+                            for gid in 0..num_groups {
+                                let pv = match_positions[base + gid];
                                 if pv != NONE && pv > 0 {
                                     // Greedy finalizer: mp will advance to L,
                                     // suffix from L is empty.
@@ -837,7 +818,19 @@ fn walk_trie<S: AsRef<[u8]>>(
         }
 
         walk_trie(
-            trie, child, dfa, states, mp, cd, ni, ng, max_depth, strings, scratch, hashes, progress,
+            trie,
+            child,
+            dfa,
+            states,
+            match_positions,
+            child_depth,
+            num_initial_states,
+            num_groups,
+            max_depth,
+            strings,
+            scratch,
+            hashes,
+            progress,
         );
     }
 }
@@ -845,39 +838,43 @@ fn walk_trie<S: AsRef<[u8]>>(
 // ---- Public API ----
 
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
-    let dfa = build_dfa(regex, disallowed_follows);
-    let nt = strings.len();
-    let ni = initial_states.len();
+    let dfa = build_dfa(tokenizer, disallowed_follows);
+    let num_tokens = strings.len();
+    let num_initial_states = initial_states.len();
 
-    if ni == 0 || nt == 0 {
-        return BTreeSet::from_iter(vec![(0..nt).collect()]);
+    if num_initial_states == 0 || num_tokens == 0 {
+        return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
     }
 
-    let ng = dfa.num_groups;
+    let num_groups = dfa.num_groups;
     let trie = VocabTrie::build(strings);
     let max_depth: usize = 256;
 
-    let mut hashes = vec![HASH_SEED3; nt];
-    let mut states = vec![NONE; max_depth * ni];
-    let mut mp = vec![NONE; max_depth * ni * ng];
+    let mut hashes = vec![HASH_SEED3; num_tokens];
+    let mut states = vec![NONE; max_depth * num_initial_states];
+    let mut match_positions = vec![NONE; max_depth * num_initial_states * num_groups];
     let max_token_len = strings.iter().map(|s| s.as_ref().len()).max().unwrap_or(0);
-    let mut scratch = Scratch::new(ng, max_token_len);
-    let mut progress = ProgressReporter::new(nt);
+    let mut scratch = Scratch::new(num_groups, max_token_len);
+    let mut progress = ProgressReporter::new(num_tokens);
 
     // Initialize depth 0: set initial DFA states and their finalizers
-    for (si, &s) in initial_states.iter().enumerate() {
-        let mp_base = si * ng;
-        for &gid in &dfa.finalizers[s] {
-            if gid < ng && mp[mp_base + gid] == NONE {
-                mp[mp_base + gid] = 0;
+    for (state_index, &initial_state) in initial_states.iter().enumerate() {
+        let match_base = state_index * num_groups;
+        for &gid in &dfa.finalizers[initial_state] {
+            if gid < num_groups && match_positions[match_base + gid] == NONE {
+                match_positions[match_base + gid] = 0;
             }
         }
-        states[si] = if dfa.is_dead_end[s] { NONE } else { s as u32 };
+        states[state_index] = if dfa.is_dead_end[initial_state] {
+            NONE
+        } else {
+            initial_state as u32
+        };
     }
 
     walk_trie(
@@ -885,10 +882,10 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         0,
         &dfa,
         &mut states,
-        &mut mp,
+        &mut match_positions,
         0,
-        ni,
-        ng,
+        num_initial_states,
+        num_groups,
         max_depth,
         strings,
         &mut scratch,
@@ -897,7 +894,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     );
 
     // Group tokens by hash → equivalence classes
-    let mut groups: HashMap<u64, Vec<usize>> = HashMap::with_capacity(nt / 4);
+    let mut groups: HashMap<u64, Vec<usize>> = HashMap::with_capacity(num_tokens / 4);
     for (ti, &h) in hashes.iter().enumerate() {
         groups.entry(h).or_default().push(ti);
     }

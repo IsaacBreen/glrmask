@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -86,39 +86,60 @@ impl DWA {
         self.states
             .iter()
             .flat_map(|state| state.transitions.keys().copied())
-            .collect::<std::collections::BTreeSet<_>>()
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
     }
 
     pub fn is_acyclic(&self) -> bool {
+        fn for_each_successor(state: &DWAState, mut visit: impl FnMut(u32)) {
+            for (target, _) in state.transitions.values() {
+                visit(*target);
+            }
+        }
+
         let num_states = self.states.len();
 
         for (state_id, state) in self.states.iter().enumerate() {
-            for (target, _) in state.transitions.values() {
-                if *target as usize == state_id {
-                    return false;
+            let mut has_self_loop = false;
+            for_each_successor(state, |target| {
+                if target as usize == state_id {
+                    has_self_loop = true;
                 }
+            });
+            if has_self_loop {
+                return false;
             }
         }
 
         fn visit(state_id: usize, states: &[DWAState], colors: &mut [u8]) -> bool {
             colors[state_id] = 1;
-            for (target, _) in states[state_id].transitions.values() {
-                let target = *target as usize;
+
+            let mut acyclic = true;
+            for_each_successor(&states[state_id], |target| {
+                if !acyclic {
+                    return;
+                }
+
+                let target = target as usize;
                 if target >= colors.len() {
-                    continue;
+                    return;
                 }
                 match colors[target] {
-                    1 => return false,
+                    1 => acyclic = false,
                     0 => {
                         if !visit(target, states, colors) {
-                            return false;
+                            acyclic = false;
                         }
                     }
                     _ => {}
                 }
+            });
+
+            if !acyclic {
+                return false;
             }
+
             colors[state_id] = 2;
             true
         }
@@ -139,19 +160,19 @@ fn fmt_dwa_states(
     label_fn: &dyn Fn(Label) -> String,
     weight_fn: &dyn Fn(&Weight) -> String,
 ) -> std::fmt::Result {
-    for (i, st) in dwa.states.iter().enumerate() {
-        if st.transitions.is_empty() && st.final_weight.is_none() {
+    for (i, state) in dwa.states.iter().enumerate() {
+        if state.transitions.is_empty() && state.final_weight.is_none() {
             continue;
         }
 
         let start_mark = if i as u32 == dwa.start_state { " [START]" } else { "" };
         writeln!(f, "  State {i}{start_mark}")?;
 
-        if let Some(w) = &st.final_weight {
+        if let Some(w) = &state.final_weight {
             writeln!(f, "    final: {}", weight_fn(w))?;
         }
 
-        for (label, (tgt, w)) in &st.transitions {
+        for (label, (tgt, w)) in &state.transitions {
             let lbl = label_fn(*label);
             writeln!(f, "    {lbl} → State {tgt}")?;
             writeln!(f, "      weight: {}", weight_fn(w))?;

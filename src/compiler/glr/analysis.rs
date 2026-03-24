@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
@@ -8,7 +8,6 @@ pub const EOF: TerminalID = u32::MAX;
 pub struct AnalyzedGrammar {
     pub rules: Vec<Rule>,
     #[allow(dead_code)]
-    
     pub start: NonterminalID,
     pub num_terminals: u32,
     pub num_nonterminals: u32,
@@ -205,24 +204,48 @@ fn build_right_reachability_graph(
 fn find_indirect_rr_cycle(
     graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
 ) -> Option<Vec<NonterminalID>> {
+    find_cycle(graph, 1, false)
+}
+
+fn find_cycle(
+    graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+    min_cycle_len: usize,
+    skip_self_loops: bool,
+) -> Option<Vec<NonterminalID>> {
     fn dfs(
         node: NonterminalID,
         graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
         colors: &mut BTreeMap<NonterminalID, u8>,
         stack: &mut Vec<NonterminalID>,
+        min_cycle_len: usize,
+        skip_self_loops: bool,
     ) -> Option<Vec<NonterminalID>> {
         colors.insert(node, 1);
         stack.push(node);
         for &next in graph.get(&node).into_iter().flatten() {
+            if skip_self_loops && next == node {
+                continue;
+            }
+
             match colors.get(&next).copied().unwrap_or(0) {
                 0 => {
-                    if let Some(cycle) = dfs(next, graph, colors, stack) {
+                    if let Some(cycle) = dfs(
+                        next,
+                        graph,
+                        colors,
+                        stack,
+                        min_cycle_len,
+                        skip_self_loops,
+                    ) {
                         return Some(cycle);
                     }
                 }
                 1 => {
                     if let Some(start) = stack.iter().position(|&entry| entry == next) {
-                        return Some(stack[start..].to_vec());
+                        let cycle = stack[start..].to_vec();
+                        if cycle.len() >= min_cycle_len {
+                            return Some(cycle);
+                        }
                     }
                 }
                 _ => {}
@@ -237,7 +260,14 @@ fn find_indirect_rr_cycle(
     let mut stack = Vec::new();
     for &node in graph.keys() {
         if colors.get(&node).copied().unwrap_or(0) == 0 {
-            if let Some(cycle) = dfs(node, graph, &mut colors, &mut stack) {
+            if let Some(cycle) = dfs(
+                node,
+                graph,
+                &mut colors,
+                &mut stack,
+                min_cycle_len,
+                skip_self_loops,
+            ) {
                 return Some(cycle);
             }
         }
@@ -273,48 +303,7 @@ fn build_left_reachability_graph(
 fn find_indirect_lr_cycle(
     graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
 ) -> Option<Vec<NonterminalID>> {
-    // Reuse the same DFS as find_indirect_rr_cycle but filter to length ≥ 2.
-    fn dfs(
-        node: NonterminalID,
-        graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
-        colors: &mut BTreeMap<NonterminalID, u8>,
-        stack: &mut Vec<NonterminalID>,
-    ) -> Option<Vec<NonterminalID>> {
-        colors.insert(node, 1);
-        stack.push(node);
-        for &next in graph.get(&node).into_iter().flatten() {
-            match colors.get(&next).copied().unwrap_or(0) {
-                0 => {
-                    if let Some(cycle) = dfs(next, graph, colors, stack) {
-                        return Some(cycle);
-                    }
-                }
-                1 => {
-                    if let Some(start) = stack.iter().position(|&entry| entry == next) {
-                        let cycle = stack[start..].to_vec();
-                        if cycle.len() >= 2 {
-                            return Some(cycle);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        stack.pop();
-        colors.insert(node, 2);
-        None
-    }
-
-    let mut colors = BTreeMap::new();
-    let mut stack = Vec::new();
-    for &node in graph.keys() {
-        if colors.get(&node).copied().unwrap_or(0) == 0 {
-            if let Some(cycle) = dfs(node, graph, &mut colors, &mut stack) {
-                return Some(cycle);
-            }
-        }
-    }
-    None
+    find_cycle(graph, 2, false)
 }
 
 /// Find a cycle of length ≥ 2 in the graph (self-loops are skipped).
@@ -322,47 +311,7 @@ fn find_indirect_lr_cycle(
 fn find_cycle_excluding_self_loops(
     graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
 ) -> Option<Vec<NonterminalID>> {
-    fn dfs(
-        node: NonterminalID,
-        graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
-        colors: &mut BTreeMap<NonterminalID, u8>,
-        stack: &mut Vec<NonterminalID>,
-    ) -> Option<Vec<NonterminalID>> {
-        colors.insert(node, 1);
-        stack.push(node);
-        for &next in graph.get(&node).into_iter().flatten() {
-            if next == node {
-                continue; // skip self-loops
-            }
-            match colors.get(&next).copied().unwrap_or(0) {
-                0 => {
-                    if let Some(cycle) = dfs(next, graph, colors, stack) {
-                        return Some(cycle);
-                    }
-                }
-                1 => {
-                    if let Some(start) = stack.iter().position(|&entry| entry == next) {
-                        return Some(stack[start..].to_vec());
-                    }
-                }
-                _ => {}
-            }
-        }
-        stack.pop();
-        colors.insert(node, 2);
-        None
-    }
-
-    let mut colors = BTreeMap::new();
-    let mut stack = Vec::new();
-    for &node in graph.keys() {
-        if colors.get(&node).copied().unwrap_or(0) == 0 {
-            if let Some(cycle) = dfs(node, graph, &mut colors, &mut stack) {
-                return Some(cycle);
-            }
-        }
-    }
-    None
+    find_cycle(graph, 2, true)
 }
 
 /// Inline right-end: for rules `from_nt → α to_nt β` where β is all-nullable,
@@ -574,7 +523,7 @@ fn find_nullable_runs(
     runs
 }
 
-fn preprocess_balanced_tree_2(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
     let nullable = compute_nullable(rules, num_nt);
     if nullable.is_empty() {
         return rules.to_vec();
@@ -656,7 +605,7 @@ fn build_non_nullable_tree(
         .iter()
         .map(|symbol| match symbol {
             Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
-            Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(create_nn_nt(
+            Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(get_or_create_non_nullable_nt(
                 *nonterminal,
                 fresh_nt,
                 new_rules,
@@ -702,7 +651,7 @@ fn build_non_nullable_tree(
     build_non_nullable_tree(&chunk_symbols, k, fresh_nt, new_rules, nullable, by_lhs, nn_cache)
 }
 
-fn create_nn_nt(
+fn get_or_create_non_nullable_nt(
     nt: NonterminalID,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
     new_rules: &mut Vec<Rule>,
@@ -750,7 +699,7 @@ fn create_nn_nt(
 /// existing exhaustive elimination, to avoid the raw power-set blowups that
 /// occur when many nullable nonterminals appear consecutively.
 pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
-    let preprocessed = preprocess_balanced_tree_2(rules, num_nt);
+    let preprocessed = compress_nullable_runs_with_optional_tree(rules, num_nt);
     inline_null_productions_exhaustive(&preprocessed, max_nt_id(&preprocessed) + 1)
 }
 
@@ -779,14 +728,8 @@ fn eliminate_hidden_left_recursion(
             if !cycle_nodes.contains(&rule.lhs) {
                 continue;
             }
-            // Compute length of nullable prefix
-            let mut prefix_end = 0;
-            for sym in &rule.rhs {
-                match sym {
-                    Symbol::Nonterminal(nt) if nullable.contains(nt) => prefix_end += 1,
-                    _ => break,
-                }
-            }
+
+            let prefix_end = nullable_prefix_len(&rule.rhs, nullable);
             // For each skip length, if next symbol is a cycle member, add shortened rule
             for skip in 1..=prefix_end {
                 let suffix = &rule.rhs[skip..];
@@ -806,6 +749,12 @@ fn eliminate_hidden_left_recursion(
         }
         rules.extend(additions);
     }
+}
+
+fn nullable_prefix_len(rhs: &[Symbol], nullable: &BTreeSet<NonterminalID>) -> usize {
+    rhs.iter()
+        .take_while(|symbol| matches!(symbol, Symbol::Nonterminal(nt) if nullable.contains(nt)))
+        .count()
 }
 
 /// Remove rules for nonterminals not reachable from the start symbol.
@@ -976,18 +925,16 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
 
         // Phase 2: Inline null productions (ε-elimination)
         *rules = inline_null_productions(rules, next_nt.get());
-        // The null-inlining pipeline can allocate fresh helper NTs internally,
-        // so the outer allocator must resync before later phases request IDs.
-        next_nt.set(max_nt_id(rules) + 1);
+        resync_next_nonterminal(rules, &next_nt);
 
         // Phase 3: Right-recursion elimination
         eliminate_right_recursion(rules, &mut fresh_nt);
-        next_nt.set(max_nt_id(rules) + 1);
+        resync_next_nonterminal(rules, &next_nt);
 
         // Phase 4: Hidden left-recursion elimination
         let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
         eliminate_hidden_left_recursion(rules, &nullable);
-        next_nt.set(max_nt_id(rules) + 1);
+        resync_next_nonterminal(rules, &next_nt);
 
         // Dedup before fixed-point check
         dedup_rules(rules);
@@ -1000,13 +947,17 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     // Final ε-elimination pass (right-recursion conversion may
     // re-introduce ε-rules for fresh tail nonterminals)
     *rules = inline_null_productions(rules, next_nt.get());
-    next_nt.set(max_nt_id(rules) + 1);
+    resync_next_nonterminal(rules, &next_nt);
 
     // Remove unreachable productions
     *rules = remove_unreachable_rules(rules, start);
 
     // Final dedup
     dedup_rules(rules);
+}
+
+fn resync_next_nonterminal(rules: &[Rule], next_nt: &std::cell::Cell<u32>) {
+    next_nt.set(max_nt_id(rules) + 1);
 }
 
 fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {

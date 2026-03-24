@@ -1,16 +1,9 @@
-//! Graph-coloring-based acyclic DWA minimization.
+//! Acyclic weighted DWA minimization via weight pushing and height-layered coloring.
 //!
-//! Acyclic minimization for weighted DWAs.
-//!
-//! The algorithm works in these phases:
-//! 1. **Weight pushing** — intersect each transition weight with the backward
-//!    reachable set of its target, removing tokens that can never reach acceptance.
-//! 2. **Needed-set computation** — for each state, which token combinations can
-//!    flow from that state to any final state.
-//! 3. **Height-layered graph coloring** — process states bottom-up by topological
-//!    height. At each height, build an incompatibility graph and color it. States
-//!    with the same color get merged ("diamond" optimization).
-//! 4. **Reconstruction** — build the minimized DWA from merged state builders.
+//! The pipeline pushes weights backward to discard dead token flow, groups
+//! states by topological height, colors each height bucket subject to
+//! compatibility constraints, and reconstructs the minimized automaton from the
+//! merged buckets.
 use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
@@ -22,6 +15,35 @@ use crate::ds::weight::Weight;
 type Label = i32;
 
 const UNMAPPED: u32 = u32::MAX;
+
+fn mapped_target(old_to_new: &[u32], target: u32) -> Option<u32> {
+    let mapped = old_to_new.get(target as usize).copied().unwrap_or(UNMAPPED);
+    (mapped != UNMAPPED).then_some(mapped)
+}
+
+fn compute_reachable_from_start(dwa: &DWA, start_state: usize) -> Vec<bool> {
+    let mut reachable = vec![false; dwa.states.len()];
+    if start_state >= dwa.states.len() {
+        return reachable;
+    }
+
+    let mut stack = vec![start_state];
+    while let Some(state_id) = stack.pop() {
+        if reachable[state_id] {
+            continue;
+        }
+
+        reachable[state_id] = true;
+        for (target, _) in dwa.states[state_id].transitions.values() {
+            let target = *target as usize;
+            if target < dwa.states.len() && !reachable[target] {
+                stack.push(target);
+            }
+        }
+    }
+
+    reachable
+}
 
 fn weight_body_id(weight: &Weight) -> usize {
     Arc::as_ptr(&weight.0) as usize
@@ -89,11 +111,11 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let mut intersection_cache = FxHashMap::default();
     let mut changed = false;
     for &u in topo.iter().rev() {
-        let st = &dwa.states[u];
-        let mut acc = st.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
+        let state = &dwa.states[u];
+        let mut acc = state.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
         let mut acc_full = acc.is_full();
         let mut pushed: Vec<(Label, u32, Option<Weight>)> = Vec::new();
-        for (&lbl, (target, w)) in &st.transitions {
+        for (&lbl, (target, w)) in &state.transitions {
             let t = *target as usize;
             if t >= n {
                 continue;
@@ -140,8 +162,8 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
 fn compute_topo_order(dwa: &DWA) -> Option<Vec<usize>> {
     let n = dwa.states.len();
     let mut in_degree = vec![0u32; n];
-    for st in &dwa.states {
-        for (_, (target, _)) in &st.transitions {
+    for state in &dwa.states {
+        for (_, (target, _)) in &state.transitions {
             let t = *target as usize;
             if t < n {
                 in_degree[t] += 1;
@@ -186,9 +208,9 @@ fn compute_needed_sets(dwa: &DWA, topo: &[usize]) -> Vec<Weight> {
     let n = dwa.states.len();
     let mut needed = vec![Weight::empty(); n];
     for &u in topo.iter().rev() {
-        let st = &dwa.states[u];
-        let mut acc = st.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
-        for (_, (target, w)) in &st.transitions {
+        let state = &dwa.states[u];
+        let mut acc = state.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
+        for (_, (target, w)) in &state.transitions {
             let t = *target as usize;
             if t >= n {
                 continue;
@@ -514,18 +536,11 @@ fn are_compatible(
         };
 
         // Map targets to new IDs
-        let mapped_u = target_u.and_then(|t| {
-            let m = old_to_new[t];
-            (m != UNMAPPED).then_some(m)
-        });
-        let mapped_v = target_v.and_then(|t| {
-            let m = old_to_new[t];
-            (m != UNMAPPED).then_some(m)
-        });
+        let mapped_u = target_u.and_then(|target| mapped_target(old_to_new, target as u32));
+        let mapped_v = target_v.and_then(|target| mapped_target(old_to_new, target as u32));
 
-        // CRITICAL: if both have mapped targets that differ and either has
-        // non-empty weight, the builder can only store one target.
-        // The states must NOT be merged.
+        // If the remapped targets differ and either side still carries weight,
+        // the merged builder would need two targets for one label.
         match (mapped_u, mapped_v) {
             (Some(mu), Some(mv)) if mu != mv => {
                 let has_u = w_u_full.is_some_and(|w| !w.is_empty());
@@ -691,10 +706,9 @@ fn build_incompatibility_graph_sparse(
         rustc_hash::FxHashMap::default();
     for (candidate_idx, &state_id) in candidates.iter().enumerate() {
         for transition in &productive_transitions[state_id] {
-            let mapped = old_to_new[transition.target as usize];
-            if mapped == UNMAPPED {
+            let Some(mapped) = mapped_target(old_to_new, transition.target) else {
                 continue;
-            }
+            };
             label_targets
                 .entry(transition.label)
                 .or_default()
@@ -788,7 +802,7 @@ fn compute_state_signature(
     trans.len().hash(&mut hasher);
     for t in trans {
         t.label.hash(&mut hasher);
-        let mapped = old_to_new[t.target as usize];
+        let mapped = mapped_target(old_to_new, t.target).unwrap_or(UNMAPPED);
         mapped.hash(&mut hasher);
         t.weight.hash(&mut hasher);
     }
@@ -808,13 +822,11 @@ fn build_and_color_with_signature_dedup(
 ) -> Vec<usize> {
     let nc = candidates.len();
 
-    // Step 1: Compute signatures for all candidates
     let signatures: Vec<u64> = candidates
         .iter()
         .map(|&id| compute_state_signature(id, dwa, needed, old_to_new, productive_transitions))
         .collect();
 
-    // Step 2: Group by signature, keeping track of one representative per group
     let mut sig_to_rep_idx: FxHashMap<u64, usize> = FxHashMap::default();
     let mut unique_indices: Vec<usize> = Vec::new(); // indices into candidates
     for (idx, &sig) in signatures.iter().enumerate() {
@@ -825,10 +837,8 @@ fn build_and_color_with_signature_dedup(
         });
     }
 
-    // Step 3: Build sub-candidate list of unique representatives
     let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
 
-    // Step 4: Build and color the representative graph using sparse overlap
     let rep_adj = build_incompatibility_graph_sparse(
         dwa,
         &rep_candidates,
@@ -848,7 +858,6 @@ fn build_and_color_with_signature_dedup(
 
     let rep_coloring = greedy_coloring(&rep_adj);
 
-    // Step 5: Map all candidates back — each gets the color of its representative
     let mut coloring = vec![0usize; nc];
     for (idx, &sig) in signatures.iter().enumerate() {
         let rep = sig_to_rep_idx[&sig];
@@ -858,7 +867,7 @@ fn build_and_color_with_signature_dedup(
     coloring
 }
 
-/// Greedy graph coloring — O(V + E), good heuristic.
+/// Greedy graph coloring — O(V + E).
 fn greedy_coloring(adj: &[Vec<usize>]) -> Vec<usize> {
     let n = adj.len();
     if n == 0 {
@@ -1082,7 +1091,7 @@ fn states_signature_equal(
         if tu.label != tv.label {
             return false;
         }
-        if old_to_new[tu.target as usize] != old_to_new[tv.target as usize] {
+        if mapped_target(old_to_new, tu.target) != mapped_target(old_to_new, tv.target) {
             return false;
         }
         if tu.weight != tv.weight {
@@ -1112,8 +1121,9 @@ fn partition_refine_coloring_raw(
         dwa.states[c].final_weight.hash(&mut hasher);
         // Hash raw transitions (BTreeMap iterates in label order)
         for (&label, (target, weight)) in &dwa.states[c].transitions {
-            let mapped = old_to_new[*target as usize];
-            if mapped == UNMAPPED { continue; }
+            let Some(mapped) = mapped_target(old_to_new, *target) else {
+                continue;
+            };
             label.hash(&mut hasher);
             mapped.hash(&mut hasher);
             weight.hash(&mut hasher);
@@ -1178,7 +1188,7 @@ fn states_raw_equal(
     // BTreeMap iterates in key order, so we can zip
     for ((&lu, (tu, wu)), (&lv, (tv, wv))) in su.transitions.iter().zip(sv.transitions.iter()) {
         if lu != lv { return false; }
-        if old_to_new[*tu as usize] != old_to_new[*tv as usize] { return false; }
+        if mapped_target(old_to_new, *tu) != mapped_target(old_to_new, *tv) { return false; }
         if wu != wv { return false; }
     }
     true
@@ -1390,23 +1400,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
     let n = pushed.states.len();
     let start_state = pushed.start_state as usize;
 
-    // Compute forward reachability from start
-    let mut reachable_from_start = vec![false; n];
-    {
-        let mut stack = vec![start_state];
-        while let Some(u) = stack.pop() {
-            if reachable_from_start[u] {
-                continue;
-            }
-            reachable_from_start[u] = true;
-            for (_, (target, _)) in &pushed.states[u].transitions {
-                let t = *target as usize;
-                if t < n && !reachable_from_start[t] {
-                    stack.push(t);
-                }
-            }
-        }
-    }
+    let reachable_from_start = compute_reachable_from_start(&pushed, start_state);
 
     // Group states by height (only reachable states with non-empty needed sets)
     let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
@@ -1527,18 +1521,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     let n = dwa.states.len();
     let start_state = dwa.start_state as usize;
 
-    let mut reachable_from_start = vec![false; n];
-    {
-        let mut stack = vec![start_state];
-        while let Some(u) = stack.pop() {
-            if reachable_from_start[u] { continue; }
-            reachable_from_start[u] = true;
-            for (_, (target, _)) in &dwa.states[u].transitions {
-                let t = *target as usize;
-                if t < n && !reachable_from_start[t] { stack.push(t); }
-            }
-        }
-    }
+    let reachable_from_start = compute_reachable_from_start(dwa, start_state);
 
     let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
     for (id, &h) in heights.iter().enumerate() {

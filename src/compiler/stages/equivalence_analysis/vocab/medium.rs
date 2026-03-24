@@ -1,8 +1,7 @@
-//! Flat vocab equivalence analysis: classify tokens by first-byte DFA behavior.
+//! Medium-cost vocab equivalence analysis with first-byte bucketing.
 //!
-//! Instead of building a trie, groups tokens by their first byte(s) and
-//! uses self-loop detection for bulk assignment. Non-bulk tokens are
-//! processed in parallel with rayon.
+//! Tokens that share early byte structure are grouped together, with bulk
+//! handling for self-loop-heavy cases and per-token fallback work for the rest.
 
 use super::super::compat::TokenizerView;
 use ahash::{AHasher, RandomState};
@@ -13,6 +12,7 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
 
+use crate::compiler::stages::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
@@ -138,27 +138,8 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
 
 // ---- DFA build ----
 
-fn normalize_disallowed_follows(
-    num_groups: usize,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> Vec<BitSet> {
-    let mut normalized = vec![BitSet::new(num_groups); num_groups];
-    for gid in 0..num_groups {
-        if let Some(bits) = disallowed_follows.get(&(gid as u32)) {
-            let mut out = BitSet::new(num_groups);
-            for bit in bits.iter() {
-                if bit < num_groups {
-                    out.set(bit);
-                }
-            }
-            normalized[gid] = out;
-        }
-    }
-    normalized
-}
-
-fn build_dfa(regex: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
-    let dfa = regex.dfa();
+fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
+    let dfa = tokenizer.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
     let num_groups = dfa
@@ -281,20 +262,20 @@ fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
 /// Returns (can_bulk, bulk_hash) if possible.
 fn try_bulk_assign(
     dfa: &Dfa,
-    d_states: &[u32],
-    d_mp: &[u32],
-    ni: usize,
-    ng: usize,
+    depth_states: &[u32],
+    depth_match_positions: &[u32],
+    num_initial_states: usize,
+    num_groups: usize,
     subtree_bytes: &U8Set,
 ) -> Option<u64> {
     // Self-loop check: intersect self_loop_bytes for all alive states
     let mut sl_inter = U8Set::all();
     let mut any_alive = false;
-    for si in 0..ni {
-        let cs = d_states[si];
-        if cs != NONE {
+    for state_index in 0..num_initial_states {
+        let current_state = depth_states[state_index];
+        if current_state != NONE {
             any_alive = true;
-            sl_inter &= dfa.self_loop_bytes[cs as usize];
+            sl_inter &= dfa.self_loop_bytes[current_state as usize];
         }
     }
 
@@ -302,29 +283,34 @@ fn try_bulk_assign(
         return None;
     }
 
-    try_bulk_assign_no_selfloop(dfa, d_states, d_mp, ni, ng)
+    try_bulk_assign_no_selfloop(
+        dfa,
+        depth_states,
+        depth_match_positions,
+        num_initial_states,
+        num_groups,
+    )
 }
 
 /// Compute bulk hash after self-loop check already passed.
 /// Checks can_bulk (greedy match positions) and computes the hash.
 fn try_bulk_assign_no_selfloop(
     dfa: &Dfa,
-    d_states: &[u32],
-    d_mp: &[u32],
-    ni: usize,
-    ng: usize,
+    depth_states: &[u32],
+    depth_match_positions: &[u32],
+    num_initial_states: usize,
+    num_groups: usize,
 ) -> Option<u64> {
-
-    // can_bulk check: every mp > 0 must be for a group where
+    // can_bulk check: every match position > 0 must be for a group where
     // the current state has a greedy finalizer
-    let can_bulk = (0..ni).all(|si| {
-        let cs = d_states[si];
-        let base = si * ng;
-        (0..ng).all(|gid| {
-            let pv = d_mp[base + gid];
+    let can_bulk = (0..num_initial_states).all(|state_index| {
+        let current_state = depth_states[state_index];
+        let base = state_index * num_groups;
+        (0..num_groups).all(|gid| {
+            let pv = depth_match_positions[base + gid];
             if pv > 0 && pv != NONE {
-                cs != NONE
-                    && dfa.finalizers[cs as usize]
+                current_state != NONE
+                    && dfa.finalizers[current_state as usize]
                         .iter()
                         .any(|&state_gid| state_gid == gid)
             } else {
@@ -339,20 +325,20 @@ fn try_bulk_assign_no_selfloop(
 
     // Compute bulk hash
     let mut hash = HASH_SEED3;
-    for si in 0..ni {
-        let es = d_states[si];
-        let base = si * ng;
-        let completion = if es == NONE {
+    for state_index in 0..num_initial_states {
+        let end_state = depth_states[state_index];
+        let base = state_index * num_groups;
+        let completion = if end_state == NONE {
             dfa.none_completion_hash
         } else {
-            dfa.completion_hash[es as usize]
+            dfa.completion_hash[end_state as usize]
         };
-        let has_any = (0..ng).any(|gid| d_mp[base + gid] != NONE);
+        let has_any = (0..num_groups).any(|gid| depth_match_positions[base + gid] != NONE);
         let sig = if has_any {
             let mut h = new_hasher();
             h.write_u64(completion);
-            for gid in 0..ng {
-                let pv = d_mp[base + gid];
+            for gid in 0..num_groups {
+                let pv = depth_match_positions[base + gid];
                 if pv != NONE && pv > 0 {
                     h.write_u64(gid as u64);
                     h.write_u64(dfa.empty_suffix_hash_for(gid));
@@ -369,57 +355,62 @@ fn try_bulk_assign_no_selfloop(
 }
 
 /// Advance DFA states by one byte, updating states and match positions.
-/// Uses bitmap finalizers for fast inner loop when ng <= 32, falls back to
+/// Uses bitmap finalizers for fast inner loop when group counts stay small, and falls back to
 /// full finalizer list for larger group counts.
 fn advance_states(
     dfa: &Dfa,
     parent_states: &[u32],
-    parent_mp: &[u32],
+    parent_match_positions: &[u32],
     child_states: &mut [u32],
-    child_mp: &mut [u32],
+    child_match_positions: &mut [u32],
     byte: u8,
     depth: u32,
-    ni: usize,
-    ng: usize,
+    num_initial_states: usize,
+    num_groups: usize,
 ) {
-    child_mp[..ni * ng].copy_from_slice(&parent_mp[..ni * ng]);
-    let use_bitmap = ng <= 32;
-    for si in 0..ni {
-        let ps = parent_states[si];
-        let mp_base = si * ng;
-        if ps == NONE {
-            child_states[si] = NONE;
+    child_match_positions[..num_initial_states * num_groups]
+        .copy_from_slice(&parent_match_positions[..num_initial_states * num_groups]);
+    let use_bitmap = num_groups <= 32;
+    for state_index in 0..num_initial_states {
+        let parent_state = parent_states[state_index];
+        let match_base = state_index * num_groups;
+        if parent_state == NONE {
+            child_states[state_index] = NONE;
         } else {
-            let ns = dfa.transitions[ps as usize][byte as usize];
-            if ns == NONE {
-                child_states[si] = NONE;
+            let next_state = dfa.transitions[parent_state as usize][byte as usize];
+            if next_state == NONE {
+                child_states[state_index] = NONE;
             } else {
-                let ns_u = ns as usize;
+                let next_state_index = next_state as usize;
                 if use_bitmap {
-                    // Fast path: bitmap for ng <= 32
-                    let fin = dfa.finalizer_bits[ns_u];
-                    if fin != 0 {
-                        let greedy = dfa.greedy_bits[ns_u];
-                        let mut bits = fin;
+                    let finalizer_bits = dfa.finalizer_bits[next_state_index];
+                    if finalizer_bits != 0 {
+                        let greedy_bits = dfa.greedy_bits[next_state_index];
+                        let mut bits = finalizer_bits;
                         while bits != 0 {
                             let gid = bits.trailing_zeros() as usize;
                             bits &= bits - 1;
-                            if gid < ng {
-                                if (greedy >> gid) & 1 == 1 || child_mp[mp_base + gid] == NONE {
-                                    child_mp[mp_base + gid] = depth;
+                            if gid < num_groups {
+                                if (greedy_bits >> gid) & 1 == 1
+                                    || child_match_positions[match_base + gid] == NONE
+                                {
+                                    child_match_positions[match_base + gid] = depth;
                                 }
                             }
                         }
                     }
                 } else {
-                    // Full finalizer list for ng > 32
-                    for &gid in &dfa.finalizers[ns_u] {
-                        if gid < ng {
-                            child_mp[mp_base + gid] = depth;
+                    for &gid in &dfa.finalizers[next_state_index] {
+                        if gid < num_groups {
+                            child_match_positions[match_base + gid] = depth;
                         }
                     }
                 }
-                child_states[si] = if dfa.is_dead_end[ns_u] { NONE } else { ns };
+                child_states[state_index] = if dfa.is_dead_end[next_state_index] {
+                    NONE
+                } else {
+                    next_state
+                };
             }
         }
     }
@@ -571,13 +562,13 @@ fn run_suffix(
     base_pos: usize,
     match_positions: &mut [u32],
 ) -> (Option<usize>, EdgeList) {
-    let ng = dfa.num_groups;
-    match_positions[..ng].fill(NONE);
-    let mut current = dfa.start_state;
-    let mut done = dfa.is_dead_end[current];
+    let num_groups = dfa.num_groups;
+    match_positions[..num_groups].fill(NONE);
+    let mut current_state = dfa.start_state;
+    let mut done = dfa.is_dead_end[current_state];
 
-    for &gid in &dfa.finalizers[current] {
-        if gid < ng && match_positions[gid] == NONE {
+    for &gid in &dfa.finalizers[current_state] {
+        if gid < num_groups && match_positions[gid] == NONE {
             match_positions[gid] = 0;
         }
     }
@@ -586,25 +577,25 @@ fn run_suffix(
         if done {
             break;
         }
-        let ns = dfa.transitions[current][byte as usize];
-        if ns == NONE {
+        let next_state = dfa.transitions[current_state][byte as usize];
+        if next_state == NONE {
             done = true;
             break;
         }
-        current = ns as usize;
+        current_state = next_state as usize;
         let position = (idx + 1) as u32;
-        for &gid in &dfa.finalizers[current] {
-            if gid < ng {
+        for &gid in &dfa.finalizers[current_state] {
+            if gid < num_groups {
                 match_positions[gid] = position;
             }
         }
-        if dfa.is_dead_end[current] {
+        if dfa.is_dead_end[current_state] {
             done = true;
         }
     }
 
-    let end_state = if done { None } else { Some(current) };
-    let edges: EdgeList = (0..ng)
+    let end_state = if done { None } else { Some(current_state) };
+    let edges: EdgeList = (0..num_groups)
         .filter_map(|gid| {
             let pv = match_positions[gid];
             (pv != NONE && pv != 0).then(|| (gid, base_pos + pv as usize))
@@ -615,8 +606,8 @@ fn run_suffix(
 
 fn hash_suffixes(dfa: &Dfa, slice: &[u8], scratch: &mut Scratch) {
     let len = slice.len();
-    let ng = dfa.num_groups;
-    let mut suffix_mp = vec![NONE; ng];
+    let num_groups = dfa.num_groups;
+    let mut suffix_match_positions = vec![NONE; num_groups];
     scratch.dag.clear();
     scratch.dag_end_states.clear();
     scratch.dag_queue.clear();
@@ -629,8 +620,8 @@ fn hash_suffixes(dfa: &Dfa, slice: &[u8], scratch: &mut Scratch) {
         }
     }
 
-    for base in (0..scratch.current_states.len() * ng).step_by(ng) {
-        for gid in 0..ng {
+    for base in (0..scratch.current_states.len() * num_groups).step_by(num_groups) {
+        for gid in 0..num_groups {
             let pv = scratch.match_positions[base + gid];
             if pv != NONE && pv > 0 {
                 intersect_node_disallowed(scratch, pv as usize, dfa.disallowed_for(gid));
@@ -642,7 +633,8 @@ fn hash_suffixes(dfa: &Dfa, slice: &[u8], scratch: &mut Scratch) {
     while cursor < scratch.dag_queue.len() {
         let pos = scratch.dag_queue[cursor];
         cursor += 1;
-        let (end_state, edges) = run_suffix(dfa, &slice[pos..], pos, &mut suffix_mp);
+        let (end_state, edges) =
+            run_suffix(dfa, &slice[pos..], pos, &mut suffix_match_positions);
         for &(_, target) in &edges {
             if target <= len && !scratch.dag.contains_key(&target) {
                 scratch.dag_queue.push(target);
@@ -731,10 +723,10 @@ fn classify_sorted_collect<S: AsRef<[u8]>>(
     strings: &[S],
     sorted: &[usize],
     parent_states: &[u32],
-    parent_mp: &[u32],
+    parent_match_positions: &[u32],
     depth: usize,
-    ni: usize,
-    ng: usize,
+    num_initial_states: usize,
+    num_groups: usize,
     assignments: &mut Vec<(usize, u64)>,
     non_bulk: &mut Vec<usize>,
 ) {
@@ -753,8 +745,8 @@ fn classify_sorted_collect<S: AsRef<[u8]>>(
     }
     let longer = &sorted[pos..];
 
-    let mut child_states = vec![NONE; ni];
-    let mut child_mp = vec![NONE; ni * ng];
+    let mut child_states = vec![NONE; num_initial_states];
+    let mut child_match_positions = vec![NONE; num_initial_states * num_groups];
 
     // Iterate groups by byte[depth] — contiguous in sorted order
     let mut i = 0;
@@ -768,9 +760,15 @@ fn classify_sorted_collect<S: AsRef<[u8]>>(
         let group = &longer[group_start..i];
 
         advance_states(
-            dfa, parent_states, parent_mp,
-            &mut child_states, &mut child_mp,
-            b, (depth + 1) as u32, ni, ng,
+            dfa,
+            parent_states,
+            parent_match_positions,
+            &mut child_states,
+            &mut child_match_positions,
+            b,
+            (depth + 1) as u32,
+            num_initial_states,
+            num_groups,
         );
 
         // Compute byte_set for this group (all bytes at positions > depth)
@@ -781,7 +779,14 @@ fn classify_sorted_collect<S: AsRef<[u8]>>(
             }
         }
 
-        if let Some(hash) = try_bulk_assign(dfa, &child_states, &child_mp, ni, ng, &byte_set) {
+        if let Some(hash) = try_bulk_assign(
+            dfa,
+            &child_states,
+            &child_match_positions,
+            num_initial_states,
+            num_groups,
+            &byte_set,
+        ) {
             for &ti in group {
                 assignments.push((ti, hash));
             }
@@ -789,58 +794,60 @@ fn classify_sorted_collect<S: AsRef<[u8]>>(
         }
 
         classify_sorted_collect(
-            dfa, strings, group,
-            &child_states, &child_mp,
-            depth + 1, ni, ng, assignments, non_bulk,
+            dfa,
+            strings,
+            group,
+            &child_states,
+            &child_match_positions,
+            depth + 1,
+            num_initial_states,
+            num_groups,
+            assignments,
+            non_bulk,
         );
     }
 }
 
 // ---- Public API ----
 
-/// Flat vocab equivalence analysis with recursive byte-level classification.
-///
-/// Phase 1: Recursively group tokens by byte prefix. At each depth, advance
-/// DFA states and check if all alive states self-loop on all remaining bytes
-/// in the subtree. If so, bulk-assign a shared hash. Otherwise recurse deeper.
-///
-/// Phase 2: Process non-bulk tokens (leaves) in parallel with rayon.
+/// Medium-cost vocab equivalence analysis with recursive byte-level bucketing.
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
-    let dfa = build_dfa(regex, disallowed_follows);
-    let ni = initial_states.len();
-    let ng = dfa.num_groups;
-    let nt = strings.len();
+    let dfa = build_dfa(tokenizer, disallowed_follows);
+    let num_initial_states = initial_states.len();
+    let num_groups = dfa.num_groups;
+    let num_tokens = strings.len();
 
-    if ni == 0 || nt == 0 {
-        return BTreeSet::from_iter(vec![(0..nt).collect()]);
+    if num_initial_states == 0 || num_tokens == 0 {
+        return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
     }
 
-    let mut hashes = vec![0u64; nt];
+    let mut hashes = vec![0u64; num_tokens];
 
-    // Compute initial states/mp at depth 0
-    let mut d0_states = vec![NONE; ni];
-    let mut d0_mp = vec![NONE; ni * ng];
-    for si in 0..ni {
-        let s = initial_states[si];
-        let mp_base = si * ng;
-        for &gid in &dfa.finalizers[s] {
-            if gid < ng && d0_mp[mp_base + gid] == NONE {
-                d0_mp[mp_base + gid] = 0;
+    let mut depth0_states = vec![NONE; num_initial_states];
+    let mut depth0_match_positions = vec![NONE; num_initial_states * num_groups];
+    for state_index in 0..num_initial_states {
+        let initial_state = initial_states[state_index];
+        let match_base = state_index * num_groups;
+        for &gid in &dfa.finalizers[initial_state] {
+            if gid < num_groups && depth0_match_positions[match_base + gid] == NONE {
+                depth0_match_positions[match_base + gid] = 0;
             }
         }
-        d0_states[si] = if dfa.is_dead_end[s] { NONE } else { s as u32 };
+        depth0_states[state_index] = if dfa.is_dead_end[initial_state] {
+            NONE
+        } else {
+            initial_state as u32
+        };
     }
 
-
     // Phase 1: Pre-sort tokens lexicographically
-    let mut sorted_indices: Vec<usize> = (0..nt).collect();
+    let mut sorted_indices: Vec<usize> = (0..num_tokens).collect();
     sorted_indices.sort_unstable_by(|&a, &b| strings[a].as_ref().cmp(strings[b].as_ref()));
-
 
     // Handle empty tokens (leaves at depth 0) — they come first in sorted order
     let mut empty_end = 0;
@@ -872,12 +879,18 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             let group = &longer[start..end];
             let b = strings[group[0]].as_ref()[0];
 
-            let mut child_states = vec![NONE; ni];
-            let mut child_mp = vec![NONE; ni * ng];
+            let mut child_states = vec![NONE; num_initial_states];
+            let mut child_match_positions = vec![NONE; num_initial_states * num_groups];
             advance_states(
-                &dfa, &d0_states, &d0_mp,
-                &mut child_states, &mut child_mp,
-                b, 1, ni, ng,
+                &dfa,
+                &depth0_states,
+                &depth0_match_positions,
+                &mut child_states,
+                &mut child_match_positions,
+                b,
+                1,
+                num_initial_states,
+                num_groups,
             );
 
             let mut byte_set = U8Set::empty();
@@ -890,15 +903,29 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             let mut assignments = Vec::new();
             let mut non_bulk = Vec::new();
 
-            if let Some(hash) = try_bulk_assign(&dfa, &child_states, &child_mp, ni, ng, &byte_set) {
+            if let Some(hash) = try_bulk_assign(
+                &dfa,
+                &child_states,
+                &child_match_positions,
+                num_initial_states,
+                num_groups,
+                &byte_set,
+            ) {
                 for &ti in group {
                     assignments.push((ti, hash));
                 }
             } else {
                 classify_sorted_collect(
-                    &dfa, strings, group,
-                    &child_states, &child_mp,
-                    1, ni, ng, &mut assignments, &mut non_bulk,
+                    &dfa,
+                    strings,
+                    group,
+                    &child_states,
+                    &child_match_positions,
+                    1,
+                    num_initial_states,
+                    num_groups,
+                    &mut assignments,
+                    &mut non_bulk,
                 );
             }
 
@@ -916,11 +943,11 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     }
 
 
-    // Phase 2: Process non-bulk tokens in parallel
+    // Phase 2: Process non-bulk tokens in parallel.
     let non_bulk_hashes: Vec<(usize, u64)> = non_bulk_tokens
         .par_iter()
         .map_init(
-            || Scratch::new(ni, ng),
+            || Scratch::new(num_initial_states, num_groups),
             |scratch, &ti| {
                 let token = strings[ti].as_ref();
                 (ti, token_signature(&dfa, token, initial_states, scratch))
@@ -931,14 +958,11 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     for (ti, h) in non_bulk_hashes {
         hashes[ti] = h;
     }
-
-
     // Group by hash
-    let mut groups: HashMap<u64, Vec<usize>> = HashMap::with_capacity(nt / 4);
+    let mut groups: HashMap<u64, Vec<usize>> = HashMap::with_capacity(num_tokens / 4);
     for (ti, &h) in hashes.iter().enumerate() {
         groups.entry(h).or_default().push(ti);
     }
-
 
     groups.into_values().collect()
 }

@@ -27,12 +27,21 @@ pub struct CompactReport {
     pub token_perm: Vec<u32>,
 }
 
+struct DimensionCompaction {
+    tsid_perm: Vec<u32>,
+    ordered_num_tsids: usize,
+    token_perm: Vec<u32>,
+    ordered_num_tokens: usize,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct UniqueStorageCounts {
     weight_ranges: usize,
     token_ranges: usize,
 }
 
+#[cfg(test)]
 impl UniqueStorageCounts {
     fn total_ranges(self) -> usize {
         self.weight_ranges + self.token_ranges
@@ -96,63 +105,74 @@ pub fn compact_dwa_dimensions(
     let num_tsids = id_map.num_tsids();
     let num_tokens = id_map.num_internal_tokens();
 
-    let old_storage = count_unique_storage(dwa);
-    let old_ranges = old_storage.total_ranges();
-
-    // Step 1  — collect unique weights (by Arc pointer)
     let unique_weights = collect_unique_weights(dwa);
+    let compaction = build_dimension_compaction(&unique_weights, num_tsids as usize, num_tokens);
 
-    // Step 2 — merge TSIDs once by exact per-weight RangeSet equivalence.
-    let weight_refs: Vec<&Weight> = unique_weights.iter().collect();
-    let tsid_merge_profiles = build_tsid_profiles(&weight_refs, num_tsids as usize);
-    let (tsid_merge_perm, merged_num_tsids) = merge_sort_perm(&tsid_merge_profiles);
-    let merged_weights = apply_permutations_to_weight_set(
+    apply_permutations_to_dwa(
+        dwa,
         &unique_weights,
-        &tsid_merge_perm,
-        &identity_perm(num_tokens as usize),
+        &compaction.tsid_perm,
+        &compaction.token_perm,
     );
-    let merged_weight_refs: Vec<&Weight> = merged_weights.iter().collect();
-
-    // Step 3 — reorder only the surviving IDs.
-    let tsid_order_profiles = build_tsid_order_profiles(&merged_weight_refs, merged_num_tsids);
-    let (tsid_order_perm, ordered_num_tsids) = merge_sort_perm(&tsid_order_profiles);
-    let tsid_perm = compose_perm(&tsid_merge_perm, &tsid_order_perm);
-
-    let original_weight_refs: Vec<&Weight> = unique_weights.iter().collect();
-    let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
-    let (token_perm, ordered_num_tokens) = merge_sort_perm(&token_profiles);
-    let merged_unique_token_sets = collect_merged_unique_token_sets(&unique_weights, &token_perm);
-    let token_perm = optimize_token_order_locally(
-        &merged_unique_token_sets,
-        token_perm,
-        ordered_num_tokens,
+    apply_perm_to_id_map(
+        &mut id_map.tokenizer_states,
+        &compaction.tsid_perm,
+        compaction.ordered_num_tsids,
+    );
+    apply_perm_to_id_map(
+        &mut id_map.vocab_tokens,
+        &compaction.token_perm,
+        compaction.ordered_num_tokens,
     );
 
-    // Step 4  — apply permutations to every weight in the DWA
-    apply_permutations_to_dwa(dwa, &unique_weights, &tsid_perm, &token_perm);
-
-    // Step 5  — update id_map so the runtime still maps correctly
-    apply_perm_to_id_map(&mut id_map.tokenizer_states, &tsid_perm, ordered_num_tsids);
-    apply_perm_to_id_map(&mut id_map.vocab_tokens, &token_perm, ordered_num_tokens);
-
-    let new_storage = count_unique_storage(dwa);
-    let new_ranges = new_storage.total_ranges();
-
-    let _ = (
-        num_tsids,
-        num_tokens,
-        old_ranges,
-        new_ranges,
-        old_storage,
-        new_storage,
-        ordered_num_tsids,
-        ordered_num_tokens,
-    );
-
-    CompactReport { token_perm }
+    CompactReport {
+        token_perm: compaction.token_perm,
+    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+fn build_dimension_compaction(
+    unique_weights: &[Weight],
+    num_tsids: usize,
+    num_tokens: u32,
+) -> DimensionCompaction {
+    let original_weight_refs = weight_refs(unique_weights);
+
+    let tsid_merge_profiles = build_tsid_context_profiles(&original_weight_refs, num_tsids);
+    let (tsid_merge_perm, merged_num_tsids) = build_profile_merge_permutation(&tsid_merge_profiles);
+    let merged_tsid_weights = apply_permutations_to_weight_set(
+        unique_weights,
+        &tsid_merge_perm,
+        &identity_perm(num_tokens as usize),
+    );
+
+    let merged_tsid_refs = weight_refs(&merged_tsid_weights);
+    let tsid_order_profiles = build_tsid_context_profiles(&merged_tsid_refs, merged_num_tsids);
+    let (tsid_order_perm, ordered_num_tsids) =
+        build_profile_merge_permutation(&tsid_order_profiles);
+
+    let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
+    let (token_group_perm, ordered_num_tokens) =
+        build_profile_merge_permutation(&token_profiles);
+    let merged_token_sets = collect_token_sets_after_permutation(unique_weights, &token_group_perm);
+    let token_perm = optimize_token_group_order(
+        &merged_token_sets,
+        token_group_perm,
+        ordered_num_tokens,
+    );
+
+    DimensionCompaction {
+        tsid_perm: compose_perm(&tsid_merge_perm, &tsid_order_perm),
+        ordered_num_tsids,
+        token_perm,
+        ordered_num_tokens,
+    }
+}
+
+fn weight_refs(weights: &[Weight]) -> Vec<&Weight> {
+    weights.iter().collect()
+}
 
 fn collect_unique_weights(dwa: &DWA) -> Vec<Weight> {
     let mut seen = std::collections::HashSet::new();
@@ -172,7 +192,7 @@ fn collect_unique_weights(dwa: &DWA) -> Vec<Weight> {
     unique
 }
 
-fn dedup_weights(weights: Vec<Weight>) -> Vec<Weight> {
+fn dedup_weights_by_storage_ptr(weights: Vec<Weight>) -> Vec<Weight> {
     let mut seen = std::collections::HashSet::new();
     let mut unique = Vec::new();
     for weight in weights {
@@ -196,7 +216,7 @@ fn apply_permutations_to_weight_set(
     tsid_perm: &[u32],
     token_perm: &[u32],
 ) -> Vec<Weight> {
-    dedup_weights(
+    dedup_weights_by_storage_ptr(
         weights
             .iter()
             .map(|weight| permute_weight(weight, tsid_perm, token_perm))
@@ -210,15 +230,10 @@ fn rangeset_key(set: &RangeSetBlaze<u32>) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// For each tsid, list the (weight, entry) context indices where it appears.
-fn build_tsid_profiles(weights: &[&Weight], num_tsids: usize) -> Vec<Vec<u32>> {
-    build_tsid_order_profiles(weights, num_tsids)
-}
-
-/// For ordering only: treat repeated equal token sets within the same weight as
-/// the same context so semantically similar TSIDs can become adjacent even when
-/// they must remain distinct IDs.
-fn build_tsid_order_profiles(weights: &[&Weight], num_tsids: usize) -> Vec<Vec<u32>> {
+/// Treat repeated equal token sets within the same weight as the same context.
+/// This lets identical TSIDs merge cleanly and also keeps semantically similar
+/// TSIDs near each other when only their ordering changes.
+fn build_tsid_context_profiles(weights: &[&Weight], num_tsids: usize) -> Vec<Vec<u32>> {
     let mut profiles = vec![Vec::new(); num_tsids];
     let mut ctx = 0u32;
     for w in weights {
@@ -263,7 +278,9 @@ fn build_token_profiles(weights: &[&Weight], num_tokens: u32) -> Vec<Vec<u32>> {
 /// Merge elements with identical profiles, then sort by profile.
 /// Returns `(perm, new_count)` where `perm[old_id] = new_id` (many-to-one)
 /// and `new_count` is the number of unique merged IDs.
-fn merge_sort_perm<P: Ord + std::hash::Hash + Eq>(profiles: &[P]) -> (Vec<u32>, usize) {
+fn build_profile_merge_permutation<P: Ord + std::hash::Hash + Eq>(
+    profiles: &[P],
+) -> (Vec<u32>, usize) {
     let n = profiles.len();
     if n == 0 {
         return (vec![], 0);
@@ -308,12 +325,15 @@ fn unique_storage_better(candidate: UniqueStorageCounts, current: UniqueStorageC
                     && candidate.weight_ranges < current.weight_ranges)))
 }
 
-fn collect_merged_unique_token_sets(weights: &[Weight], merge_token_perm: &[u32]) -> Vec<RangeSetBlaze<u32>> {
+fn collect_token_sets_after_permutation(
+    weights: &[Weight],
+    token_perm: &[u32],
+) -> Vec<RangeSetBlaze<u32>> {
     let mut seen = std::collections::HashSet::new();
     let mut unique_sets = Vec::new();
     for weight in weights {
         for (_, token_set) in weight.0.range_values() {
-            let merged = permute_rangeset(token_set, merge_token_perm);
+            let merged = permute_rangeset(token_set, token_perm);
             let key = rangeset_key(&merged);
             if seen.insert(key) {
                 unique_sets.push(merged);
@@ -342,10 +362,10 @@ fn layout_to_group_positions(layout: &[u32]) -> Vec<u32> {
     group_positions
 }
 
-fn run_adjacent_swap_passes(
+fn improve_layout_with_adjacent_swaps(
     scorer: &TokenOrderScorer,
     layout: &mut Vec<u32>,
-    current_token_ranges: &mut usize,
+    current_score: &mut usize,
 ) {
     for _ in 0..TOKEN_ORDER_LOCAL_SEARCH_PASSES {
         let mut improved = false;
@@ -353,9 +373,9 @@ fn run_adjacent_swap_passes(
             let right_pos = left_pos + 1;
 
             layout.swap(left_pos, right_pos);
-            let candidate_token_ranges = scorer.score_layout(layout);
-            if candidate_token_ranges < *current_token_ranges {
-                *current_token_ranges = candidate_token_ranges;
+            let candidate_score = scorer.score_layout(layout);
+            if candidate_score < *current_score {
+                *current_score = candidate_score;
                 improved = true;
             } else {
                 layout.swap(left_pos, right_pos);
@@ -367,7 +387,7 @@ fn run_adjacent_swap_passes(
     }
 }
 
-fn finish_token_order_with_seeded_search(
+fn finish_layout_with_seeded_search(
     scorer: &TokenOrderScorer,
     initial_layout: Vec<u32>,
 ) -> Vec<u32> {
@@ -377,22 +397,22 @@ fn finish_token_order_with_seeded_search(
 
     let mut rng = StdRng::seed_from_u64(TOKEN_ORDER_FINISH_SEED);
     let mut current_layout = initial_layout.clone();
-    let mut current_token_ranges = scorer.score_layout(&current_layout);
+    let mut current_score = scorer.score_layout(&current_layout);
     let mut best_layout = current_layout.clone();
-    let mut best_token_ranges = current_token_ranges;
+    let mut best_score = current_score;
 
     let mut temperature = 8.0f64;
     for _ in 0..TOKEN_ORDER_FINISH_ITERS {
         let mut candidate_layout = current_layout.clone();
-        apply_random_token_move(&mut candidate_layout, &mut rng);
-        let candidate_token_ranges = scorer.score_layout(&candidate_layout);
+        apply_random_layout_move(&mut candidate_layout, &mut rng);
+        let candidate_score = scorer.score_layout(&candidate_layout);
 
-        if candidate_token_ranges < best_token_ranges {
-            best_token_ranges = candidate_token_ranges;
+        if candidate_score < best_score {
+            best_score = candidate_score;
             best_layout = candidate_layout.clone();
         }
 
-        let delta = candidate_token_ranges as i64 - current_token_ranges as i64;
+        let delta = candidate_score as i64 - current_score as i64;
         let accept = if delta <= 0 {
             true
         } else {
@@ -402,7 +422,7 @@ fn finish_token_order_with_seeded_search(
 
         if accept {
             current_layout = candidate_layout;
-            current_token_ranges = candidate_token_ranges;
+            current_score = candidate_score;
         }
 
         temperature *= 0.995;
@@ -411,7 +431,7 @@ fn finish_token_order_with_seeded_search(
     best_layout
 }
 
-fn optimize_token_order_locally(
+fn optimize_token_group_order(
     merged_unique_token_sets: &[RangeSetBlaze<u32>],
     initial_token_perm: Vec<u32>,
     new_num_tokens: usize,
@@ -422,15 +442,11 @@ fn optimize_token_order_locally(
 
     let scorer = TokenOrderScorer::new(merged_unique_token_sets, new_num_tokens);
     let mut layout: Vec<u32> = (0..new_num_tokens as u32).collect();
-    let mut current_token_ranges = scorer.score_layout(&layout);
+    let mut current_score = scorer.score_layout(&layout);
 
-    run_adjacent_swap_passes(
-        &scorer,
-        &mut layout,
-        &mut current_token_ranges,
-    );
+    improve_layout_with_adjacent_swaps(&scorer, &mut layout, &mut current_score);
 
-    layout = finish_token_order_with_seeded_search(&scorer, layout);
+    layout = finish_layout_with_seeded_search(&scorer, layout);
     let group_positions = layout_to_group_positions(&layout);
 
     initial_token_perm
@@ -469,35 +485,35 @@ fn apply_permutations_to_dwa(
     }
 }
 
-fn apply_random_token_move(perm: &mut [u32], rng: &mut StdRng) {
-    if perm.len() < 2 {
+fn apply_random_layout_move(layout: &mut [u32], rng: &mut StdRng) {
+    if layout.len() < 2 {
         return;
     }
 
     match rng.gen_range(0..3) {
         0 => {
-            let left = rng.gen_range(0..perm.len());
-            let mut right = rng.gen_range(0..perm.len());
+            let left = rng.gen_range(0..layout.len());
+            let mut right = rng.gen_range(0..layout.len());
             if left == right {
-                right = (right + 1) % perm.len();
+                right = (right + 1) % layout.len();
             }
-            perm.swap(left, right);
+            layout.swap(left, right);
         }
         1 => {
-            let left = rng.gen_range(0..perm.len() - 1);
-            perm.swap(left, left + 1);
+            let left = rng.gen_range(0..layout.len() - 1);
+            layout.swap(left, left + 1);
         }
         _ => {
-            let from = rng.gen_range(0..perm.len());
-            let to = rng.gen_range(0..perm.len());
+            let from = rng.gen_range(0..layout.len());
+            let to = rng.gen_range(0..layout.len());
             if from != to {
-                let value = perm[from];
+                let value = layout[from];
                 if from < to {
-                    perm.copy_within((from + 1)..=to, from);
+                    layout.copy_within((from + 1)..=to, from);
                 } else {
-                    perm.copy_within(to..from, to + 1);
+                    layout.copy_within(to..from, to + 1);
                 }
-                perm[to] = value;
+                layout[to] = value;
             }
         }
     }
@@ -640,11 +656,13 @@ fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: us
     id_map.representative_original_ids = new_representatives;
 }
 
+#[cfg(test)]
 fn count_unique_storage(dwa: &DWA) -> UniqueStorageCounts {
     let unique_weights = collect_unique_weights(dwa);
     count_unique_storage_for_weights(&unique_weights)
 }
 
+#[cfg(test)]
 fn count_unique_storage_for_weights(weights: &[Weight]) -> UniqueStorageCounts {
     let mut seen_token_sets = std::collections::HashSet::new();
     let mut storage = UniqueStorageCounts::default();
@@ -690,8 +708,8 @@ mod tests {
         ]);
         let weights = vec![&weight];
 
-        let profiles = build_tsid_profiles(&weights, 3);
-        let (perm, new_count) = merge_sort_perm(&profiles);
+        let profiles = build_tsid_context_profiles(&weights, 3);
+        let (perm, new_count) = build_profile_merge_permutation(&profiles);
 
         assert_eq!(new_count, 2);
         assert_eq!(perm[0], perm[2]);
@@ -739,10 +757,11 @@ mod tests {
             Weight::from_uniform(0..=0, RangeSetBlaze::from_iter([1..=1])),
         ];
         let initial_token_perm = vec![0, 1, 2];
-        let merged_unique_token_sets = collect_merged_unique_token_sets(&weights, &initial_token_perm);
+        let merged_unique_token_sets =
+            collect_token_sets_after_permutation(&weights, &initial_token_perm);
 
         let baseline = score_permuted_weights(&weights, &[0], &initial_token_perm);
-        let optimized = optimize_token_order_locally(&merged_unique_token_sets, initial_token_perm, 3);
+        let optimized = optimize_token_group_order(&merged_unique_token_sets, initial_token_perm, 3);
         let improved = score_permuted_weights(&weights, &[0], &optimized);
 
         assert!(unique_storage_better(improved, baseline));

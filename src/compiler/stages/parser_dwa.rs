@@ -8,7 +8,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
-use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -25,7 +25,16 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::ds::weight::Weight;
 
-type Bundle = BTreeMap<TerminalID, Weight>;
+type TerminalBundle = BTreeMap<TerminalID, Weight>;
+type BundleSignature = Vec<(TerminalID, Weight)>;
+type ComposeMemo = Vec<Option<Option<NwaBody>>>;
+type ConcatMemo = HashMap<(usize, u32), Option<NwaBody>>;
+
+#[derive(Debug, Clone, Copy)]
+struct PendingBranch {
+    target: u32,
+    bundle_id: usize,
+}
 
 #[derive(Debug, Clone)]
 struct Branch {
@@ -68,18 +77,18 @@ fn group_terminal_edges_by_target(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
     state_id: u32,
-) -> BTreeMap<u32, Bundle> {
+) -> BTreeMap<u32, TerminalBundle> {
     let Some(state) = terminal_dwa.states.get(state_id as usize) else {
         return BTreeMap::new();
     };
 
-    let mut groups = BTreeMap::<u32, Bundle>::new();
+    let mut bundles_by_target = BTreeMap::<u32, TerminalBundle>::new();
     for (&label, (target, weight)) in &state.transitions {
         if label < 0 || label as u32 >= grammar.num_terminals {
             continue;
         }
 
-        groups
+        bundles_by_target
             .entry(*target)
             .or_default()
             .entry(label as TerminalID)
@@ -87,7 +96,14 @@ fn group_terminal_edges_by_target(
             .or_insert_with(|| weight.clone());
     }
 
-    groups
+    bundles_by_target
+}
+
+fn bundle_signature(bundle: &TerminalBundle) -> BundleSignature {
+    bundle
+        .iter()
+        .map(|(&terminal, weight)| (terminal, weight.clone()))
+        .collect()
 }
 
 fn build_state_summaries(
@@ -95,35 +111,34 @@ fn build_state_summaries(
     grammar: &AnalyzedGrammar,
     templates: &Templates,
 ) -> Vec<StateSummary> {
-    let mut state_groups: Vec<Vec<(u32, Vec<(TerminalID, Weight)>, Bundle)>> = Vec::with_capacity(terminal_dwa.states.len());
-    let mut unique_keys: HashMap<Vec<(TerminalID, Weight)>, usize> = HashMap::new();
-    let mut unique_bundles_ordered: Vec<(usize, Vec<(TerminalID, Weight)>, Bundle)> = Vec::new();
+    let mut pending_branches_by_state: Vec<Vec<PendingBranch>> =
+        Vec::with_capacity(terminal_dwa.states.len());
+    let mut bundle_ids_by_signature: HashMap<BundleSignature, usize> = HashMap::new();
+    let mut unique_bundles: Vec<TerminalBundle> = Vec::new();
 
     for (state_id, _state) in terminal_dwa.states.iter().enumerate() {
-        let groups = group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32);
-        let mut state_entries = Vec::with_capacity(groups.len());
-        for (target, bundle) in groups {
-            let bundle_key: Vec<(TerminalID, Weight)> = bundle
-                .iter()
-                .map(|(&terminal, weight)| (terminal, weight.clone()))
-                .collect();
-            if unique_keys.contains_key(&bundle_key) {
-                state_entries.push((target, bundle_key, bundle));
+        let bundles_by_target = group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32);
+        let mut pending_branches = Vec::with_capacity(bundles_by_target.len());
+        for (target, bundle) in bundles_by_target {
+            let signature = bundle_signature(&bundle);
+            let bundle_id = if let Some(&bundle_id) = bundle_ids_by_signature.get(&signature) {
+                bundle_id
             } else {
-                let id = unique_bundles_ordered.len();
-                unique_keys.insert(bundle_key.clone(), id);
-                unique_bundles_ordered.push((id, bundle_key.clone(), bundle.clone()));
-                state_entries.push((target, bundle_key, bundle));
-            }
+                let bundle_id = unique_bundles.len();
+                bundle_ids_by_signature.insert(signature, bundle_id);
+                unique_bundles.push(bundle.clone());
+                bundle_id
+            };
+            pending_branches.push(PendingBranch { target, bundle_id });
         }
-        state_groups.push(state_entries);
+        pending_branches_by_state.push(pending_branches);
     }
 
     let built_bundles: Vec<Arc<NWA>> = {
         use rayon::prelude::*;
-        unique_bundles_ordered
+        unique_bundles
             .par_iter()
-            .map(|(_id, _key, bundle)| Arc::new(templates.build_bundle(bundle)))
+            .map(|bundle| Arc::new(templates.build_bundle(bundle)))
             .collect()
     };
 
@@ -132,14 +147,13 @@ fn build_state_summaries(
         .iter()
         .enumerate()
         .map(|(state_id, state)| {
-            let branches = state_groups[state_id]
+            let branches = pending_branches_by_state[state_id]
                 .iter()
-                .map(|(target, bundle_key, _bundle)| {
-                    let bundle_id = unique_keys[bundle_key];
-                    let built_bundle = Arc::clone(&built_bundles[bundle_id]);
+                .map(|pending| {
+                    let built_bundle = Arc::clone(&built_bundles[pending.bundle_id]);
                     Branch {
-                        target: *target,
-                        bundle_id,
+                        target: pending.target,
+                        bundle_id: pending.bundle_id,
                         bundle: built_bundle,
                     }
                 })
@@ -157,10 +171,10 @@ fn compose_state(
     state_id: u32,
     states: &[StateSummary],
     arena: &mut NWA,
-    memo: &mut Vec<Option<Option<crate::automata::weighted::nwa::NwaBody>>>,
-    concat_memo: &mut HashMap<(usize, u32), Option<crate::automata::weighted::nwa::NwaBody>>,
-) -> Option<crate::automata::weighted::nwa::NwaBody> {
-    if let Some(Some(cached)) = memo.get(state_id as usize) {
+    body_memo: &mut ComposeMemo,
+    concatenated_branches: &mut ConcatMemo,
+) -> Option<NwaBody> {
+    if let Some(Some(cached)) = body_memo.get(state_id as usize) {
         return cached.clone();
     }
 
@@ -168,7 +182,7 @@ fn compose_state(
         return None;
     };
 
-    let mut composed = state
+    let mut composed_body = state
         .final_weight
         .as_ref()
         .and_then(accepting_nwa)
@@ -179,34 +193,34 @@ fn compose_state(
             branch.target,
             states,
             arena,
-            memo,
-            concat_memo,
+            body_memo,
+            concatenated_branches,
         ) else {
             continue;
         };
 
         let concat_key = (branch.bundle_id, branch.target);
-        let branch_with_continuation = if let Some(cached) = concat_memo.get(&concat_key) {
+        let branch_with_continuation = if let Some(cached) = concatenated_branches.get(&concat_key) {
             cached.clone()
         } else {
             let built = Some(arena.concatenate_in_place(branch.bundle.as_ref(), &continuation));
-            concat_memo.insert(concat_key, built.clone());
+            concatenated_branches.insert(concat_key, built.clone());
             built
         };
         let Some(branch_with_continuation) = branch_with_continuation else {
             continue;
         };
 
-        composed = Some(match composed {
-            Some(existing) => crate::automata::weighted::nwa::NwaBody::union(&existing, &branch_with_continuation),
+        composed_body = Some(match composed_body {
+            Some(existing) => NwaBody::union(&existing, &branch_with_continuation),
             None => branch_with_continuation,
         });
     }
 
-    if let Some(entry) = memo.get_mut(state_id as usize) {
-        *entry = Some(composed.clone());
+    if let Some(entry) = body_memo.get_mut(state_id as usize) {
+        *entry = Some(composed_body.clone());
     }
-    composed
+    composed_body
 }
 
 fn union_final_weight(slot: &mut Option<Weight>, add: Weight) -> bool {
@@ -739,6 +753,27 @@ fn optimize_parser_default_transitions(
     any_changed
 }
 
+fn build_parser_nwa_from_terminal_dwa(
+    terminal_dwa: &DWA,
+    grammar: &AnalyzedGrammar,
+    templates: Templates,
+) -> Option<NWA> {
+    let states = build_state_summaries(terminal_dwa, grammar, &templates);
+    let mut arena = NWA::new(0, 0);
+    let mut body_memo = vec![None; states.len()];
+    let mut concatenated_branches = HashMap::new();
+    let parser_body = compose_state(
+        terminal_dwa.start_state,
+        &states,
+        &mut arena,
+        &mut body_memo,
+        &mut concatenated_branches,
+    )?;
+
+    arena.start_states = parser_body.start_states.clone();
+    Some(arena)
+}
+
 #[cfg(test)]
 pub(crate) fn build_parser_dwa(
     table: &GLRTable,
@@ -772,22 +807,9 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     terminal_dwa: &DWA,
     templates: Templates,
 ) -> DWA {
-    let states = build_state_summaries(terminal_dwa, grammar, &templates);
-    let mut arena = NWA::new(0, 0);
-    let mut memo = vec![None; states.len()];
-    let mut concat_memo = HashMap::new();
-    let Some(parser_body) = compose_state(
-        terminal_dwa.start_state,
-        &states,
-        &mut arena,
-        &mut memo,
-        &mut concat_memo,
-    )
-    else {
+    let Some(mut parser_nwa) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
         return DWA::new(0, 0);
     };
-    arena.start_states = parser_body.start_states.clone();
-    let mut parser_nwa = arena;
 
     resolve_negative_codes_in_nwa(&mut parser_nwa);
 

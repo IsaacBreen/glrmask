@@ -40,12 +40,28 @@ static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
     finalize_weight_map(map)
 });
 
+fn with_interner<R>(f: impl FnOnce(&mut GlobalWeightInterner) -> R) -> R {
+    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
+    f(&mut interner)
+}
+
 impl GlobalWeightInterner {
+    fn prune_dead_token_sets(&mut self) {
+        self.token_sets.retain(|_, weak| weak.strong_count() > 0);
+    }
+
+    fn prune_dead_weights(&mut self) {
+        self.weights.retain(|_, bucket| {
+            bucket.retain(|weak| weak.strong_count() > 0);
+            !bucket.is_empty()
+        });
+    }
+
     fn maybe_cleanup_token_sets(&mut self) {
         if self.token_inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
             return;
         }
-        self.token_sets.retain(|_, weak| weak.strong_count() > 0);
+        self.prune_dead_token_sets();
         self.token_inserts_since_cleanup = 0;
     }
 
@@ -53,10 +69,7 @@ impl GlobalWeightInterner {
         if self.weight_inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
             return;
         }
-        self.weights.retain(|_, bucket| {
-            bucket.retain(|weak| weak.strong_count() > 0);
-            !bucket.is_empty()
-        });
+        self.prune_dead_weights();
         self.weight_inserts_since_cleanup = 0;
     }
 
@@ -68,11 +81,8 @@ impl GlobalWeightInterner {
     }
 
     fn clear_stale(&mut self) {
-        self.token_sets.retain(|_, weak| weak.strong_count() > 0);
-        self.weights.retain(|_, bucket| {
-            bucket.retain(|weak| weak.strong_count() > 0);
-            !bucket.is_empty()
-        });
+        self.prune_dead_token_sets();
+        self.prune_dead_weights();
         self.token_inserts_since_cleanup = 0;
         self.weight_inserts_since_cleanup = 0;
     }
@@ -83,17 +93,18 @@ fn intern_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
         return Arc::clone(&EMPTY_RANGESET);
     }
 
-    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
-    if let Some(existing) = interner.token_sets.get(&tokens).and_then(Weak::upgrade) {
-        return existing;
-    }
+    with_interner(|interner| {
+        if let Some(existing) = interner.token_sets.get(&tokens).and_then(Weak::upgrade) {
+            return existing;
+        }
 
-    interner.maybe_cleanup_token_sets();
-    let key = tokens.clone();
-    let shared = Arc::new(tokens);
-    interner.token_sets.insert(key, Arc::downgrade(&shared));
-    interner.token_inserts_since_cleanup += 1;
-    shared
+        interner.maybe_cleanup_token_sets();
+        let key = tokens.clone();
+        let shared = Arc::new(tokens);
+        interner.token_sets.insert(key, Arc::downgrade(&shared));
+        interner.token_inserts_since_cleanup += 1;
+        shared
+    })
 }
 
 fn weight_map_fingerprint(map: &WeightMap) -> u64 {
@@ -118,9 +129,7 @@ fn weight_map_eq(left: &WeightMap, right: &WeightMap) -> bool {
                 if left_range != right_range {
                     return false;
                 }
-                if !Arc::ptr_eq(left_tokens, right_tokens)
-                    && left_tokens.as_ref() != right_tokens.as_ref()
-                {
+                if !same_shared_token_set(left_tokens, right_tokens) {
                     return false;
                 }
             }
@@ -131,30 +140,111 @@ fn weight_map_eq(left: &WeightMap, right: &WeightMap) -> bool {
 
 fn intern_weight_map(map: WeightMap) -> Arc<WeightMap> {
     let fingerprint = weight_map_fingerprint(&map);
-    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
-    if let Some(bucket) = interner.weights.get_mut(&fingerprint) {
-        let mut idx = 0usize;
-        while idx < bucket.len() {
-            let Some(existing) = bucket[idx].upgrade() else {
-                bucket.swap_remove(idx);
-                continue;
-            };
-            if weight_map_eq(existing.as_ref(), &map) {
-                return existing;
+    with_interner(|interner| {
+        if let Some(bucket) = interner.weights.get_mut(&fingerprint) {
+            let mut idx = 0usize;
+            while idx < bucket.len() {
+                let Some(existing) = bucket[idx].upgrade() else {
+                    bucket.swap_remove(idx);
+                    continue;
+                };
+                if weight_map_eq(existing.as_ref(), &map) {
+                    return existing;
+                }
+                idx += 1;
             }
-            idx += 1;
         }
-    }
 
-    interner.maybe_cleanup_weights();
-    let shared = Arc::new(map);
-    interner
-        .weights
-        .entry(fingerprint)
-        .or_default()
-        .push(Arc::downgrade(&shared));
-    interner.weight_inserts_since_cleanup += 1;
-    shared
+        interner.maybe_cleanup_weights();
+        let shared = Arc::new(map);
+        interner
+            .weights
+            .entry(fingerprint)
+            .or_default()
+            .push(Arc::downgrade(&shared));
+        interner.weight_inserts_since_cleanup += 1;
+        shared
+    })
+}
+
+fn same_shared_token_set(left: &SharedTokenSet, right: &SharedTokenSet) -> bool {
+    Arc::ptr_eq(left, right) || left.as_ref() == right.as_ref()
+}
+
+fn shared_token_union(left: &SharedTokenSet, right: &SharedTokenSet) -> SharedTokenSet {
+    if same_shared_token_set(left, right) || left.as_ref().is_subset(right.as_ref()) {
+        Arc::clone(right)
+    } else if right.as_ref().is_subset(left.as_ref()) {
+        Arc::clone(left)
+    } else {
+        shared_rangeset(left.as_ref().clone() | right.as_ref().clone())
+    }
+}
+
+fn shared_token_intersection(
+    left: &SharedTokenSet,
+    right: &SharedTokenSet,
+) -> Option<SharedTokenSet> {
+    if same_shared_token_set(left, right) || left.as_ref().is_subset(right.as_ref()) {
+        Some(Arc::clone(left))
+    } else if right.as_ref().is_subset(left.as_ref()) {
+        Some(Arc::clone(right))
+    } else {
+        let overlap = left.as_ref() & right.as_ref();
+        (!overlap.is_empty()).then(|| shared_rangeset(overlap))
+    }
+}
+
+fn shared_token_difference(
+    left: &SharedTokenSet,
+    right: &SharedTokenSet,
+) -> Option<SharedTokenSet> {
+    if same_shared_token_set(left, right) || left.as_ref().is_subset(right.as_ref()) {
+        None
+    } else if left.as_ref().is_disjoint(right.as_ref()) {
+        Some(Arc::clone(left))
+    } else {
+        let difference = left.as_ref().clone() - right.as_ref().clone();
+        (!difference.is_empty()).then(|| shared_rangeset(difference))
+    }
+}
+
+fn union_token_sets(
+    left: Option<&SharedTokenSet>,
+    right: Option<&SharedTokenSet>,
+) -> Option<SharedTokenSet> {
+    match (left, right) {
+        (Some(left_tokens), Some(right_tokens)) => {
+            Some(shared_token_union(left_tokens, right_tokens))
+        }
+        (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
+        (None, None) => None,
+    }
+}
+
+fn intersect_token_sets(
+    left: Option<&SharedTokenSet>,
+    right: Option<&SharedTokenSet>,
+) -> Option<SharedTokenSet> {
+    match (left, right) {
+        (Some(left_tokens), Some(right_tokens)) => {
+            shared_token_intersection(left_tokens, right_tokens)
+        }
+        _ => None,
+    }
+}
+
+fn difference_token_sets(
+    left: Option<&SharedTokenSet>,
+    right: Option<&SharedTokenSet>,
+) -> Option<SharedTokenSet> {
+    match (left, right) {
+        (Some(left_tokens), Some(right_tokens)) => {
+            shared_token_difference(left_tokens, right_tokens)
+        }
+        (Some(left_tokens), None) => Some(Arc::clone(left_tokens)),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -181,6 +271,10 @@ impl WeightOpKey {
             },
             _ => Self { kind, left, right },
         }
+    }
+
+    fn for_weights(kind: WeightOpKind, left: &Weight, right: &Weight) -> Self {
+        Self::new(kind, left.ptr_key(), right.ptr_key())
     }
 }
 
@@ -213,27 +307,55 @@ impl WeightOpMemo {
         self.results.clear();
         self.inserts_since_cleanup = 0;
     }
+
+    fn lookup(&mut self, key: WeightOpKey) -> Option<Weight> {
+        let entry = self.results.get(&key)?;
+        if entry.left_operand.strong_count() == 0 || entry.right_operand.strong_count() == 0 {
+            self.results.remove(&key);
+            return None;
+        }
+
+        entry.result.upgrade().map(Weight)
+    }
+
+    fn store(&mut self, key: WeightOpKey, left: &Weight, right: &Weight, result: &Weight) {
+        self.maybe_cleanup();
+        self.results.insert(
+            key,
+            WeightOpMemoEntry {
+                result: Arc::downgrade(&result.0),
+                left_operand: Arc::downgrade(&left.0),
+                right_operand: Arc::downgrade(&right.0),
+            },
+        );
+        self.inserts_since_cleanup += 1;
+    }
 }
 
 thread_local! {
     static WEIGHT_OP_MEMO: RefCell<WeightOpMemo> = RefCell::new(WeightOpMemo::default());
 }
 
+fn with_weight_op_memo<R>(f: impl FnOnce(&mut WeightOpMemo) -> R) -> R {
+    WEIGHT_OP_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        f(&mut memo)
+    })
+}
+
 /// Clear the global interned-weight tables entirely.
 pub fn clear_all_weights() {
-    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
-    interner.clear_all();
+    with_interner(|interner| interner.clear_all());
 }
 
 /// Prune only dead entries from the global weight interner.
 pub fn clear_stale_weights() {
-    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
-    interner.clear_stale();
+    with_interner(|interner| interner.clear_stale());
 }
 
 /// Clear the current thread's weight-operation memo caches.
 pub fn clear_weight_op_caches() {
-    WEIGHT_OP_MEMO.with(|memo| memo.borrow_mut().clear_all());
+    with_weight_op_memo(|memo| memo.clear_all());
 }
 
 /// Compatibility wrapper retaining the previous behavior.
@@ -243,32 +365,12 @@ pub fn clear_weight_caches() {
 }
 
 fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
-    let key = WeightOpKey::new(kind, left.ptr_key(), right.ptr_key());
-    WEIGHT_OP_MEMO.with(|memo| {
-        let mut memo = memo.borrow_mut();
-        let entry = memo.results.get(&key)?;
-        // Guard against ABA: if either operand's Arc was dropped and an address
-        // was reused, the weak operand refs will fail to upgrade.
-        if entry.left_operand.strong_count() == 0 || entry.right_operand.strong_count() == 0 {
-            memo.results.remove(&key);
-            return None;
-        }
-        let result = entry.result.upgrade()?;
-        Some(Weight(result))
-    })
+    with_weight_op_memo(|memo| memo.lookup(WeightOpKey::for_weights(kind, left, right)))
 }
 
 fn store_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight, result: &Weight) {
-    let key = WeightOpKey::new(kind, left.ptr_key(), right.ptr_key());
-    WEIGHT_OP_MEMO.with(|memo| {
-        let mut memo = memo.borrow_mut();
-        memo.maybe_cleanup();
-        memo.results.insert(key, WeightOpMemoEntry {
-            result: Arc::downgrade(&result.0),
-            left_operand: Arc::downgrade(&left.0),
-            right_operand: Arc::downgrade(&right.0),
-        });
-        memo.inserts_since_cleanup += 1;
+    with_weight_op_memo(|memo| {
+        memo.store(WeightOpKey::for_weights(kind, left, right), left, right, result)
     });
 }
 
@@ -338,21 +440,10 @@ fn rangeset_to_string(set: &RangeSetBlaze<u32>) -> String {
 }
 
 fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
-    let mut map = WeightMap::new();
+    let mut builder = CompactRangeBuilder::new();
     let mut current_start: Option<u32> = None;
     let mut current_end = 0u32;
     let mut current_tokens = RangeSetBlaze::new();
-
-    let flush = |map: &mut WeightMap,
-                 current_start: &mut Option<u32>,
-                 current_end: &mut u32,
-                 current_tokens: &mut RangeSetBlaze<u32>| {
-        if let Some(start) = *current_start {
-            let tokens = std::mem::replace(current_tokens, RangeSetBlaze::new());
-            map.extend_simple(std::iter::once((start..=*current_end, shared_rangeset(tokens))));
-        }
-        *current_start = None;
-    };
 
     for (&tsid, tokens) in expanded {
         match current_start {
@@ -362,7 +453,13 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
                 current_end = tsid;
             }
             _ => {
-                flush(&mut map, &mut current_start, &mut current_end, &mut current_tokens);
+                if let Some(start) = current_start.take() {
+                    builder.push(
+                        start,
+                        current_end,
+                        shared_rangeset(std::mem::take(&mut current_tokens)),
+                    );
+                }
                 current_start = Some(tsid);
                 current_end = tsid;
                 current_tokens = tokens.clone();
@@ -370,8 +467,11 @@ fn compress_expanded(expanded: &BTreeMap<u32, RangeSetBlaze<u32>>) -> Weight {
         }
     }
 
-    flush(&mut map, &mut current_start, &mut current_end, &mut current_tokens);
-    finalize_weight_map(map)
+    if let Some(start) = current_start {
+        builder.push(start, current_end, shared_rangeset(current_tokens));
+    }
+
+    builder.finish()
 }
 
 #[derive(Clone)]
@@ -379,6 +479,54 @@ struct WeightRangeEntry {
     start: u32,
     end: u32,
     tokens: SharedTokenSet,
+}
+
+struct CompactRangeBuilder {
+    map: WeightMap,
+    pending_start: Option<u32>,
+    pending_end: u32,
+    pending_tokens: SharedTokenSet,
+}
+
+impl CompactRangeBuilder {
+    fn new() -> Self {
+        Self {
+            map: WeightMap::new(),
+            pending_start: None,
+            pending_end: 0,
+            pending_tokens: Arc::clone(&EMPTY_RANGESET),
+        }
+    }
+
+    fn push(&mut self, start: u32, end: u32, tokens: SharedTokenSet) {
+        match self.pending_start {
+            Some(_)
+                if self.pending_end.checked_add(1) == Some(start)
+                    && same_shared_token_set(&self.pending_tokens, &tokens) =>
+            {
+                self.pending_end = end;
+            }
+            _ => {
+                self.flush();
+                self.pending_start = Some(start);
+                self.pending_end = end;
+                self.pending_tokens = tokens;
+            }
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Some(start) = self.pending_start.take() {
+            let tokens = std::mem::replace(&mut self.pending_tokens, Arc::clone(&EMPTY_RANGESET));
+            self.map
+                .extend_simple(std::iter::once((start..=self.pending_end, tokens)));
+        }
+    }
+
+    fn finish(mut self) -> Weight {
+        self.flush();
+        finalize_weight_map(self.map)
+    }
 }
 
 fn compact_entries(weight: &Weight) -> SmallVec<[WeightRangeEntry; 16]> {
@@ -445,10 +593,7 @@ where
         return Weight::empty();
     }
 
-    let mut map = WeightMap::new();
-    let mut pending_start = None;
-    let mut pending_end = 0u32;
-    let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
+    let mut builder = CompactRangeBuilder::new();
 
     for i in 0..(len - 1) {
         let start = boundaries[i] as u32;
@@ -456,22 +601,13 @@ where
         let left_tokens = (left.start <= start && start <= left.end).then_some(&left.tokens);
         let right_tokens = (right.start <= start && start <= right.end).then_some(&right.tokens);
         let Some(tokens) = combine(left_tokens, right_tokens) else {
-            flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
+            builder.flush();
             continue;
         };
-        push_compact_range(
-            &mut map,
-            &mut pending_start,
-            &mut pending_end,
-            &mut pending_tokens,
-            start,
-            end,
-            tokens,
-        );
+        builder.push(start, end, tokens);
     }
 
-    flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-    finalize_weight_map(map)
+    builder.finish()
 }
 
 fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> SmallVec<[u64; 32]> {
@@ -498,43 +634,6 @@ fn active_tokens<'a>(
     })
 }
 
-fn push_compact_range(
-    map: &mut WeightMap,
-    pending_start: &mut Option<u32>,
-    pending_end: &mut u32,
-    pending_tokens: &mut SharedTokenSet,
-    start: u32,
-    end: u32,
-    tokens: SharedTokenSet,
-) {
-    match *pending_start {
-        Some(_)
-            if pending_end.checked_add(1) == Some(start) && *pending_tokens == tokens =>
-        {
-            *pending_end = end;
-        }
-        _ => {
-            flush_compact_range(map, pending_start, pending_end, pending_tokens);
-            *pending_start = Some(start);
-            *pending_end = end;
-            *pending_tokens = tokens;
-        }
-    }
-}
-
-fn flush_compact_range(
-    map: &mut WeightMap,
-    pending_start: &mut Option<u32>,
-    pending_end: &mut u32,
-    pending_tokens: &mut SharedTokenSet,
-) {
-    if let Some(start) = *pending_start {
-        let tokens = std::mem::replace(pending_tokens, shared_rangeset(RangeSetBlaze::new()));
-        map.extend_simple(std::iter::once((start..=*pending_end, tokens)));
-        *pending_start = None;
-    }
-}
-
 fn combine_compact_entries<F>(left: &Weight, right: &Weight, mut combine: F) -> Weight
 where
     F: FnMut(
@@ -551,10 +650,7 @@ where
 
     let mut left_index = 0usize;
     let mut right_index = 0usize;
-    let mut map = WeightMap::new();
-    let mut pending_start = None;
-    let mut pending_end = 0u32;
-    let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
+    let mut builder = CompactRangeBuilder::new();
 
     for window in boundaries.windows(2) {
         let start = window[0] as u32;
@@ -562,22 +658,13 @@ where
         let left_tokens = active_tokens(&left_entries, &mut left_index, start);
         let right_tokens = active_tokens(&right_entries, &mut right_index, start);
         let Some(tokens) = combine(left_tokens, right_tokens) else {
-            flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
+            builder.flush();
             continue;
         };
-        push_compact_range(
-            &mut map,
-            &mut pending_start,
-            &mut pending_end,
-            &mut pending_tokens,
-            start,
-            end,
-            tokens,
-        );
+        builder.push(start, end, tokens);
     }
 
-    flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-    finalize_weight_map(map)
+    builder.finish()
 }
 
 fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
@@ -586,41 +673,15 @@ fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
     let mut left_entry = left_iter.next();
     let mut right_entry = right_iter.next();
 
-    let mut map = WeightMap::new();
-    let mut pending_start = None;
-    let mut pending_end = 0u32;
-    let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
+    let mut builder = CompactRangeBuilder::new();
 
     while let (Some((left_range, left_tokens)), Some((right_range, right_tokens))) = (left_entry, right_entry) {
         let start = (*left_range.start()).max(*right_range.start());
         let end = (*left_range.end()).min(*right_range.end());
 
         if start <= end {
-            let left_tokens_ref = left_tokens.as_ref();
-            let right_tokens_ref = right_tokens.as_ref();
-            let tokens = if Arc::ptr_eq(left_tokens, right_tokens)
-                || left_tokens_ref == right_tokens_ref
-            {
-                Some(Arc::clone(left_tokens))
-            } else {
-                let overlap = left_tokens_ref & right_tokens_ref;
-                if overlap.is_empty() {
-                    None
-                } else {
-                    Some(shared_rangeset(overlap))
-                }
-            };
-
-            if let Some(tokens) = tokens {
-                push_compact_range(
-                    &mut map,
-                    &mut pending_start,
-                    &mut pending_end,
-                    &mut pending_tokens,
-                    start,
-                    end,
-                    tokens,
-                );
+            if let Some(tokens) = shared_token_intersection(left_tokens, right_tokens) {
+                builder.push(start, end, tokens);
             }
         }
 
@@ -638,15 +699,11 @@ fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
         }
     }
 
-    flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-    finalize_weight_map(map)
+    builder.finish()
 }
 
 fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight) -> Weight {
-    let mut map = WeightMap::new();
-    let mut pending_start = None;
-    let mut pending_end = 0u32;
-    let mut pending_tokens = shared_rangeset(RangeSetBlaze::new());
+    let mut builder = CompactRangeBuilder::new();
     let mut overlap_cache: SmallVec<[(
         *const RangeSetBlaze<u32>,
         Option<SharedTokenSet>,
@@ -657,52 +714,28 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
         let start = *range.start();
         let end = *range.end();
 
-        let tokens = if Arc::ptr_eq(&single.tokens, other_tokens)
-            || single.tokens.as_ref() == other_tokens.as_ref()
-        {
-            Arc::clone(&single.tokens)
+        let tokens = if same_shared_token_set(&single.tokens, other_tokens) {
+            Some(Arc::clone(&single.tokens))
         } else {
             let cache_key = Arc::as_ptr(other_tokens);
             if let Some((_, cached)) = overlap_cache.iter().find(|(ptr, _)| *ptr == cache_key) {
-                let Some(cached_tokens) = cached else {
-                    continue;
-                };
-                Arc::clone(cached_tokens)
+                cached.clone()
             } else {
-                if single.tokens.as_ref().is_subset(other_tokens.as_ref()) {
-                    let subset_tokens = Arc::clone(&single.tokens);
-                    overlap_cache.push((cache_key, Some(Arc::clone(&subset_tokens))));
-                    subset_tokens
-                } else if other_tokens.as_ref().is_subset(single.tokens.as_ref()) {
-                    let subset_tokens = Arc::clone(other_tokens);
-                    overlap_cache.push((cache_key, Some(Arc::clone(&subset_tokens))));
-                    subset_tokens
-                } else {
-                    let overlap = single.tokens.as_ref() & other_tokens.as_ref();
-                    if overlap.is_empty() {
-                        overlap_cache.push((cache_key, None));
-                        continue;
-                    }
-                    let overlap_tokens = shared_rangeset(overlap);
-                    overlap_cache.push((cache_key, Some(Arc::clone(&overlap_tokens))));
-                    overlap_tokens
-                }
+                let overlap = shared_token_intersection(&single.tokens, other_tokens);
+                overlap_cache.push((cache_key, overlap.clone()));
+                overlap
             }
         };
 
-        push_compact_range(
-            &mut map,
-            &mut pending_start,
-            &mut pending_end,
-            &mut pending_tokens,
-            start,
-            end,
-            tokens,
-        );
+        let Some(tokens) = tokens else {
+            builder.flush();
+            continue;
+        };
+
+        builder.push(start, end, tokens);
     }
 
-    flush_compact_range(&mut map, &mut pending_start, &mut pending_end, &mut pending_tokens);
-    finalize_weight_map(map)
+    builder.finish()
 }
 
 impl Weight {
@@ -834,29 +867,9 @@ impl Weight {
             return existing;
         }
         let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
-            combine_single_entries(&left, &right, |left, right| match (left, right) {
-                (Some(left_tokens), Some(right_tokens)) => {
-                    if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
-                        Some(Arc::clone(left_tokens))
-                    } else {
-                        Some(shared_rangeset(left_tokens.as_ref().clone() | right_tokens.as_ref().clone()))
-                    }
-                }
-                (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
-                (None, None) => None,
-            })
+            combine_single_entries(&left, &right, union_token_sets)
         } else {
-            combine_compact_entries(self, other, |left, right| match (left, right) {
-                (Some(left_tokens), Some(right_tokens)) => {
-                    if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
-                        Some(Arc::clone(left_tokens))
-                    } else {
-                        Some(shared_rangeset(left_tokens.as_ref().clone() | right_tokens.as_ref().clone()))
-                    }
-                }
-                (Some(tokens), None) | (None, Some(tokens)) => Some(Arc::clone(tokens)),
-                (None, None) => None,
-            })
+            combine_compact_entries(self, other, union_token_sets)
         };
         store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
         result
@@ -918,17 +931,7 @@ impl Weight {
             return existing;
         }
         let result = if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
-            combine_single_entries(&left, &right, |left, right| match (left, right) {
-                (Some(left_tokens), Some(right_tokens)) => {
-                    if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
-                        Some(Arc::clone(left_tokens))
-                    } else {
-                        let tokens = left_tokens.as_ref() & right_tokens.as_ref();
-                        (!tokens.is_empty()).then(|| shared_rangeset(tokens))
-                    }
-                }
-                _ => None,
-            })
+            combine_single_entries(&left, &right, intersect_token_sets)
         } else if let Some(single) = single_compact_entry(self) {
             intersect_single_entry_with_weight(&single, other)
         } else if let Some(single) = single_compact_entry(other) {
@@ -960,18 +963,7 @@ impl Weight {
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Difference, self, other) {
             return existing;
         }
-        let result = combine_compact_entries(self, other, |left, right| match (left, right) {
-            (Some(left_tokens), Some(right_tokens)) => {
-                if Arc::ptr_eq(left_tokens, right_tokens) || left_tokens.as_ref() == right_tokens.as_ref() {
-                    None
-                } else {
-                    let tokens = left_tokens.as_ref().clone() - right_tokens.as_ref().clone();
-                    (!tokens.is_empty()).then(|| shared_rangeset(tokens))
-                }
-            }
-            (Some(left_tokens), None) => Some(Arc::clone(left_tokens)),
-            _ => None,
-        });
+        let result = combine_compact_entries(self, other, difference_token_sets);
         store_memoized_weight_op(WeightOpKind::Difference, self, other, &result);
         result
     }

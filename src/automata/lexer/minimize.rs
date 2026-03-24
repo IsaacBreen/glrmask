@@ -16,6 +16,395 @@ use super::dfa::DFA;
 
 const TOPOLOGY_PREREFINE_MAX_STATES: usize = 4096;
 
+enum TopologyPrerefine {
+    AlreadyMinimal(Vec<Vec<u32>>),
+    Refined {
+        partition: Vec<u32>,
+        blocks: Vec<Vec<u32>>,
+    },
+    Skip,
+}
+
+fn partition_by_finalizers(dfa: &DFA) -> (Vec<u32>, Vec<Vec<u32>>) {
+    let num_states = dfa.states().len();
+    let mut partition = vec![0u32; num_states];
+    let mut blocks: Vec<Vec<u32>> = Vec::new();
+    let mut finalizer_to_block: FxHashMap<BitSet, u32> = FxHashMap::default();
+
+    for (state_idx, state) in dfa.states().iter().enumerate() {
+        let key = state.finalizers.clone();
+        let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
+            let idx = blocks.len() as u32;
+            blocks.push(Vec::new());
+            idx
+        });
+        partition[state_idx] = block_idx;
+        blocks[block_idx as usize].push(state_idx as u32);
+    }
+
+    (partition, blocks)
+}
+
+fn dedup_adjacency(dfa: &DFA) -> Vec<Vec<usize>> {
+    dfa.states()
+        .iter()
+        .map(|state| {
+            let mut targets: Vec<usize> =
+                state.transitions.iter().map(|(_, &target)| target as usize).collect();
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        })
+        .collect()
+}
+
+fn compute_post_order(adj: &[Vec<usize>]) -> Vec<usize> {
+    let num_states = adj.len();
+    let mut post_order = Vec::with_capacity(num_states);
+    let mut visited = vec![0u8; num_states];
+    let mut dfs_stack: Vec<(usize, usize)> = Vec::new();
+
+    for root in 0..num_states {
+        if visited[root] != 0 {
+            continue;
+        }
+        dfs_stack.push((root, 0));
+        visited[root] = 1;
+
+        while let Some((state, edge_index)) = dfs_stack.last_mut() {
+            let state = *state;
+            if *edge_index < adj[state].len() {
+                let target = adj[state][*edge_index];
+                *edge_index += 1;
+                if visited[target] == 0 {
+                    visited[target] = 1;
+                    dfs_stack.push((target, 0));
+                }
+            } else {
+                visited[state] = 2;
+                post_order.push(state);
+                dfs_stack.pop();
+            }
+        }
+    }
+
+    post_order
+}
+
+fn reverse_adjacency(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut reverse_adj = vec![Vec::new(); adj.len()];
+    for (state, targets) in adj.iter().enumerate() {
+        for &target in targets {
+            reverse_adj[target].push(state);
+        }
+    }
+    reverse_adj
+}
+
+fn compute_kosaraju_scc_ids(adj: &[Vec<usize>], post_order: &[usize]) -> Vec<u32> {
+    let reverse_adj = reverse_adjacency(adj);
+    let mut scc_id = vec![u32::MAX; adj.len()];
+    let mut current_scc = 0u32;
+
+    for &state in post_order.iter().rev() {
+        if scc_id[state] != u32::MAX {
+            continue;
+        }
+
+        let mut scc_stack = vec![state];
+        scc_id[state] = current_scc;
+        while let Some(node) = scc_stack.pop() {
+            for &pred in &reverse_adj[node] {
+                if scc_id[pred] == u32::MAX {
+                    scc_id[pred] = current_scc;
+                    scc_stack.push(pred);
+                }
+            }
+        }
+
+        current_scc += 1;
+    }
+
+    scc_id
+}
+
+fn build_blocks_from_labels(labels: &[u32], num_labels: u32) -> (Vec<u32>, Vec<Vec<u32>>) {
+    let mut partition = vec![0u32; labels.len()];
+    let mut blocks = vec![Vec::new(); num_labels as usize];
+
+    for (state, &label) in labels.iter().enumerate() {
+        partition[state] = label;
+        blocks[label as usize].push(state as u32);
+    }
+
+    (partition, blocks)
+}
+
+fn has_self_loops(dfa: &DFA) -> bool {
+    dfa.states().iter().enumerate().any(|(state_idx, state)| {
+        state
+            .transitions
+            .iter()
+            .any(|(_, &target)| target as usize == state_idx)
+    })
+}
+
+fn topology_prerefine_partition(dfa: &DFA, partition: &[u32]) -> TopologyPrerefine {
+    let adj = dedup_adjacency(dfa);
+    let post_order = compute_post_order(&adj);
+    let scc_id = compute_kosaraju_scc_ids(&adj, &post_order);
+
+    let mut labels = vec![u32::MAX; dfa.states().len()];
+    let mut label_map: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
+    label_map.reserve(dfa.states().len().min(200_000));
+    let mut next_label = 0u32;
+    let mut signature = Vec::with_capacity(32);
+
+    for &state in &post_order {
+        signature.clear();
+        signature.push(partition[state]);
+
+        for (byte, &target) in dfa.states()[state].transitions.iter() {
+            let target = target as usize;
+            signature.push(byte as u32);
+            if scc_id[state] == scc_id[target] {
+                signature.push(partition[target]);
+            } else if labels[target] != u32::MAX {
+                signature.push(labels[target] | 0x8000_0000);
+            } else {
+                signature.push(partition[target]);
+            }
+        }
+
+        let label = *label_map.entry(signature.clone()).or_insert_with(|| {
+            let label = next_label;
+            next_label += 1;
+            label
+        });
+        labels[state] = label;
+    }
+
+    let (partition, blocks) = build_blocks_from_labels(&labels, next_label);
+    if next_label as usize == dfa.states().len() {
+        if has_self_loops(dfa) {
+            TopologyPrerefine::Skip
+        } else {
+            TopologyPrerefine::AlreadyMinimal(blocks)
+        }
+    } else {
+        TopologyPrerefine::Refined { partition, blocks }
+    }
+}
+
+fn build_inverse_transitions(dfa: &DFA) -> Vec<Vec<(u8, u32)>> {
+    let mut inverse = vec![Vec::new(); dfa.states().len()];
+    for (src, state) in dfa.states().iter().enumerate() {
+        for (input, &target) in state.transitions.iter() {
+            inverse[target as usize].push((input, src as u32));
+        }
+    }
+    inverse
+}
+
+fn hopcroft_refine_partition(
+    dfa: &DFA,
+    mut partition: Vec<u32>,
+    mut blocks: Vec<Vec<u32>>,
+) -> Vec<Vec<u32>> {
+    let num_states = dfa.states().len();
+    let inverse = build_inverse_transitions(dfa);
+
+    let mut worklist: VecDeque<u32> = (0..blocks.len() as u32).collect();
+    let mut in_worklist = vec![true; blocks.len()];
+
+    let mut source_set = vec![false; num_states];
+    let mut sources_to_clear: Vec<u32> = Vec::with_capacity(num_states.min(10_000));
+    let mut touched_blocks: Vec<u32> = Vec::with_capacity(1024);
+    let mut block_touched = vec![false; blocks.len()];
+    let mut block_sources: Vec<Vec<u32>> = vec![Vec::new(); blocks.len()];
+    let mut input_sources: Vec<Vec<u32>> = vec![Vec::new(); 256];
+    let mut touched_inputs: Vec<u8> = Vec::with_capacity(64);
+
+    while let Some(splitter_block) = worklist.pop_front() {
+        let splitter_idx = splitter_block as usize;
+        if splitter_idx >= in_worklist.len() {
+            continue;
+        }
+        in_worklist[splitter_idx] = false;
+
+        if splitter_idx >= blocks.len() || blocks[splitter_idx].is_empty() {
+            continue;
+        }
+        let splitter_states = blocks[splitter_idx].clone();
+
+        touched_inputs.clear();
+        for &target in &splitter_states {
+            for &(input, src) in &inverse[target as usize] {
+                let bucket = &mut input_sources[input as usize];
+                if bucket.is_empty() {
+                    touched_inputs.push(input);
+                }
+                bucket.push(src);
+            }
+        }
+
+        if touched_inputs.is_empty() {
+            continue;
+        }
+
+        for &input in &touched_inputs {
+            sources_to_clear.clear();
+            let bucket = &mut input_sources[input as usize];
+            for &src in bucket.iter() {
+                if !source_set[src as usize] {
+                    source_set[src as usize] = true;
+                    sources_to_clear.push(src);
+
+                    let block_id = partition[src as usize] as usize;
+                    if block_id < block_touched.len() && !block_touched[block_id] {
+                        block_touched[block_id] = true;
+                        touched_blocks.push(block_id as u32);
+                    }
+                    block_sources[block_id].push(src);
+                }
+            }
+            bucket.clear();
+
+            for &block_id in &touched_blocks {
+                let block_idx = block_id as usize;
+                if block_idx >= blocks.len() {
+                    continue;
+                }
+                let block_len = blocks[block_idx].len();
+                if block_len <= 1 {
+                    continue;
+                }
+
+                let source_count = block_sources[block_idx].len();
+                if source_count == 0 || source_count == block_len {
+                    continue;
+                }
+
+                let new_block_idx = blocks.len();
+                let move_sources = source_count <= block_len - source_count;
+                let old_block = std::mem::take(&mut blocks[block_idx]);
+
+                let (remaining, new_block) = if move_sources {
+                    let mut remaining = Vec::with_capacity(block_len - source_count);
+                    for state in old_block {
+                        if !source_set[state as usize] {
+                            remaining.push(state);
+                        }
+                    }
+                    (remaining, std::mem::take(&mut block_sources[block_idx]))
+                } else {
+                    let mut new_block = Vec::with_capacity(block_len - source_count);
+                    for state in old_block {
+                        if !source_set[state as usize] {
+                            new_block.push(state);
+                        }
+                    }
+                    (std::mem::take(&mut block_sources[block_idx]), new_block)
+                };
+
+                for &state in &new_block {
+                    partition[state as usize] = new_block_idx as u32;
+                }
+
+                blocks[block_idx] = remaining;
+                blocks.push(new_block);
+
+                in_worklist.push(false);
+                block_touched.push(false);
+                block_sources.push(Vec::new());
+
+                if in_worklist[block_idx] {
+                    in_worklist[new_block_idx] = true;
+                    worklist.push_back(new_block_idx as u32);
+                } else if blocks[block_idx].len() <= blocks[new_block_idx].len() {
+                    in_worklist[block_idx] = true;
+                    worklist.push_back(block_idx as u32);
+                } else {
+                    in_worklist[new_block_idx] = true;
+                    worklist.push_back(new_block_idx as u32);
+                }
+            }
+
+            for &src in &sources_to_clear {
+                source_set[src as usize] = false;
+            }
+
+            for &block_id in &touched_blocks {
+                if (block_id as usize) < block_touched.len() {
+                    block_touched[block_id as usize] = false;
+                    block_sources[block_id as usize].clear();
+                }
+            }
+            touched_blocks.clear();
+        }
+    }
+
+    blocks
+}
+
+fn compute_tarjan_scc_ids(adj: &[Vec<usize>]) -> (Vec<u32>, u32) {
+    let num_states = adj.len();
+    let mut scc_id = vec![u32::MAX; num_states];
+    let mut scc_count: u32 = 0;
+    let mut index_counter: u32 = 0;
+    let mut stack: Vec<usize> = Vec::new();
+    let mut on_stack = vec![false; num_states];
+    let mut lowlink = vec![0u32; num_states];
+    let mut disc = vec![u32::MAX; num_states];
+    let mut dfs_stack: Vec<(usize, usize)> = Vec::new();
+
+    for root in 0..num_states {
+        if disc[root] != u32::MAX {
+            continue;
+        }
+        dfs_stack.push((root, 0));
+        disc[root] = index_counter;
+        lowlink[root] = index_counter;
+        index_counter += 1;
+        stack.push(root);
+        on_stack[root] = true;
+
+        while let Some(&mut (state, ref mut edge_index)) = dfs_stack.last_mut() {
+            if *edge_index < adj[state].len() {
+                let target = adj[state][*edge_index];
+                *edge_index += 1;
+                if disc[target] == u32::MAX {
+                    disc[target] = index_counter;
+                    lowlink[target] = index_counter;
+                    index_counter += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    dfs_stack.push((target, 0));
+                } else if on_stack[target] {
+                    lowlink[state] = lowlink[state].min(disc[target]);
+                }
+            } else {
+                if lowlink[state] == disc[state] {
+                    while let Some(member) = stack.pop() {
+                        on_stack[member] = false;
+                        scc_id[member] = scc_count;
+                        if member == state {
+                            break;
+                        }
+                    }
+                    scc_count += 1;
+                }
+                dfs_stack.pop();
+                if let Some(&mut (parent, _)) = dfs_stack.last_mut() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[state]);
+                }
+            }
+        }
+    }
+
+    (scc_id, scc_count)
+}
+
 impl DFA {
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
@@ -24,7 +413,6 @@ impl DFA {
             return self.clone();
         }
 
-        // --- Remove unreachable states ---
         let mut working = self.clone();
         working.remove_unreachable_states();
         let n = working.states().len();
@@ -34,335 +422,30 @@ impl DFA {
             return working;
         }
 
-        // --- Initial partition: group states by their finalizer set ---
-        let mut partition = vec![0u32; n]; // partition[state] = block_id
-        let mut blocks: Vec<Vec<u32>> = Vec::new();
+        let (mut partition, mut blocks) = partition_by_finalizers(&working);
 
-        {
-            let mut finalizer_to_block: FxHashMap<BitSet, u32> = FxHashMap::default();
-            for (state_idx, state) in working.states().iter().enumerate() {
-                let key = state.finalizers.clone();
-                let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
-                    let idx = blocks.len() as u32;
-                    blocks.push(Vec::new());
-                    idx
-                });
-                partition[state_idx] = block_idx;
-                blocks[block_idx as usize].push(state_idx as u32);
-            }
-        }
-
-        // --- Phase 1: Topology-aware pre-refinement ---
-        // This only helps when it can prove the partition is already singleton.
-        // For large cyclic lexer DFAs it tends to be pure overhead, so keep it on
-        // only for smaller inputs where the early-exit path is plausible.
         if n <= TOPOLOGY_PREREFINE_MAX_STATES {
-            let adj: Vec<Vec<usize>> = working
-                .states()
-                .iter()
-                .map(|state| {
-                    let mut targets: Vec<usize> =
-                        state.transitions.iter().map(|(_, &t)| t as usize).collect();
-                    targets.sort_unstable();
-                    targets.dedup();
-                    targets
-                })
-                .collect();
-
-            // Iterative DFS for post-order
-            let mut post_order: Vec<usize> = Vec::with_capacity(n);
-            let mut visited = vec![0u8; n]; // 0=unvisited, 1=in_stack, 2=done
-            let mut dfs_stack: Vec<(usize, usize)> = Vec::new();
-
-            for root in 0..n {
-                if visited[root] != 0 {
-                    continue;
-                }
-                dfs_stack.push((root, 0));
-                visited[root] = 1;
-
-                while let Some((state, ai)) = dfs_stack.last_mut() {
-                    let state = *state;
-                    if *ai < adj[state].len() {
-                        let target = adj[state][*ai];
-                        *ai += 1;
-                        if visited[target] == 0 {
-                            visited[target] = 1;
-                            dfs_stack.push((target, 0));
-                        }
-                    } else {
-                        visited[state] = 2;
-                        post_order.push(state);
-                        dfs_stack.pop();
-                    }
-                }
-            }
-
-            // Kosaraju's pass 2: compute SCCs
-            let mut reverse_adj: Vec<Vec<usize>> = vec![vec![]; n];
-            for (state, targets) in adj.iter().enumerate() {
-                for &target in targets {
-                    reverse_adj[target].push(state);
-                }
-            }
-            let mut scc_id = vec![u32::MAX; n];
-            let mut current_scc: u32 = 0;
-            for &state in post_order.iter().rev() {
-                if scc_id[state] != u32::MAX {
-                    continue;
-                }
-                let mut scc_stack = vec![state];
-                scc_id[state] = current_scc;
-                while let Some(u) = scc_stack.pop() {
-                    for &pred in &reverse_adj[u] {
-                        if scc_id[pred] == u32::MAX {
-                            scc_id[pred] = current_scc;
-                            scc_stack.push(pred);
-                        }
-                    }
-                }
-                current_scc += 1;
-            }
-
-            // Compute labels in post-order
-            let mut label = vec![u32::MAX; n];
-            let mut label_map: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
-            label_map.reserve(n.min(200_000));
-            let mut num_labels: u32 = 0;
-            let mut sig_buf: Vec<u32> = Vec::with_capacity(32);
-
-            for &state in post_order.iter() {
-                sig_buf.clear();
-                sig_buf.push(partition[state]);
-
-                for (byte, &target) in working.states()[state].transitions.iter() {
-                    let target = target as usize;
-                    sig_buf.push(byte as u32);
-                    if scc_id[state] == scc_id[target] {
-                        sig_buf.push(partition[target]);
-                    } else if label[target] != u32::MAX {
-                        sig_buf.push(label[target] | 0x8000_0000);
-                    } else {
-                        sig_buf.push(partition[target]);
-                    }
-                }
-
-                let lbl = match label_map.get(&sig_buf) {
-                    Some(&l) => l,
-                    None => {
-                        let l = num_labels;
-                        num_labels += 1;
-                        label_map.insert(sig_buf.clone(), l);
-                        l
-                    }
-                };
-                label[state] = lbl;
-            }
-
-            // Rebuild partition and blocks from labels
-            partition = vec![0u32; n];
-            blocks = Vec::new();
-            blocks.resize(num_labels as usize, Vec::new());
-            for state in 0..n {
-                let lbl = label[state];
-                partition[state] = lbl;
-                blocks[lbl as usize].push(state as u32);
-            }
-
-            if num_labels as usize == n {
-                // Check for self-loops
-                let has_self_loop = (0..n).any(|s| {
-                    working.states()[s]
-                        .transitions
-                        .iter()
-                        .any(|(_, &t)| t as usize == s)
-                });
-
-                if !has_self_loop {
-                    // All singletons AND true DAG: provably already minimal
+            match topology_prerefine_partition(&working, &partition) {
+                TopologyPrerefine::AlreadyMinimal(blocks) => {
                     return working.rebuild_from_blocks(blocks);
                 }
-                // Self-loops: fall through to Hopcroft
-                partition = vec![0u32; n];
-                blocks = Vec::new();
-                {
-                    let mut finalizer_to_block: FxHashMap<BitSet, u32> = FxHashMap::default();
-                    for (state_idx, state) in working.states().iter().enumerate() {
-                        let key = state.finalizers.clone();
-                        let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
-                            let idx = blocks.len() as u32;
-                            blocks.push(Vec::new());
-                            idx
-                        });
-                        partition[state_idx] = block_idx;
-                        blocks[block_idx as usize].push(state_idx as u32);
-                    }
+                TopologyPrerefine::Refined {
+                    partition: refined_partition,
+                    blocks: refined_blocks,
+                } => {
+                    partition = refined_partition;
+                    blocks = refined_blocks;
                 }
+                TopologyPrerefine::Skip => {}
             }
         }
 
-        let non_singletons = blocks.iter().filter(|b| b.len() > 1).count();
-        if non_singletons == 0 {
+        if blocks.iter().all(|block| block.len() <= 1) {
             return working.rebuild_from_blocks(blocks);
         }
 
-        // --- Phase 2: Hopcroft refinement ---
-        // Rebuild initial partition from scratch
-        partition = vec![0u32; n];
-        blocks = Vec::new();
-        {
-            let mut finalizer_to_block: FxHashMap<BitSet, u32> = FxHashMap::default();
-            for (state_idx, state) in working.states().iter().enumerate() {
-                let key = state.finalizers.clone();
-                let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
-                    let idx = blocks.len() as u32;
-                    blocks.push(Vec::new());
-                    idx
-                });
-                partition[state_idx] = block_idx;
-                blocks[block_idx as usize].push(state_idx as u32);
-            }
-        }
-
-        // Build inverse transition table
-        let mut inverse: Vec<Vec<(u8, u32)>> = vec![Vec::new(); n];
-        for (src, state) in working.states().iter().enumerate() {
-            for (input, &target) in state.transitions.iter() {
-                inverse[target as usize].push((input, src as u32));
-            }
-        }
-
-        let mut worklist: VecDeque<u32> = (0..blocks.len() as u32).collect();
-        let mut in_worklist = vec![true; blocks.len()];
-
-        let mut source_set = vec![false; n];
-        let mut sources_to_clear: Vec<u32> = Vec::with_capacity(n.min(10000));
-        let mut touched_blocks: Vec<u32> = Vec::with_capacity(1024);
-        let mut block_touched = vec![false; blocks.len()];
-        let mut block_sources: Vec<Vec<u32>> = vec![Vec::new(); blocks.len()];
-        let mut input_sources: Vec<Vec<u32>> = vec![Vec::new(); 256];
-        let mut touched_inputs: Vec<u8> = Vec::with_capacity(64);
-
-        while let Some(splitter_block) = worklist.pop_front() {
-            let splitter_idx = splitter_block as usize;
-            if splitter_idx >= in_worklist.len() {
-                continue;
-            }
-            in_worklist[splitter_idx] = false;
-
-            if splitter_idx >= blocks.len() || blocks[splitter_idx].is_empty() {
-                continue;
-            }
-            let splitter_states: Vec<u32> = blocks[splitter_idx].clone();
-
-            touched_inputs.clear();
-            for &target in &splitter_states {
-                for &(input, src) in &inverse[target as usize] {
-                    let bucket = &mut input_sources[input as usize];
-                    if bucket.is_empty() {
-                        touched_inputs.push(input);
-                    }
-                    bucket.push(src);
-                }
-            }
-
-            if touched_inputs.is_empty() {
-                continue;
-            }
-
-            for &input in &touched_inputs {
-                sources_to_clear.clear();
-                let bucket = &mut input_sources[input as usize];
-                for &src in bucket.iter() {
-                    if !source_set[src as usize] {
-                        source_set[src as usize] = true;
-                        sources_to_clear.push(src);
-
-                        let block_id = partition[src as usize] as usize;
-                        if block_id < block_touched.len() && !block_touched[block_id] {
-                            block_touched[block_id] = true;
-                            touched_blocks.push(block_id as u32);
-                        }
-                        block_sources[block_id].push(src);
-                    }
-                }
-                bucket.clear();
-
-                for &block_id in &touched_blocks {
-                    let block_idx = block_id as usize;
-                    if block_idx >= blocks.len() {
-                        continue;
-                    }
-                    let block_len = blocks[block_idx].len();
-                    if block_len <= 1 {
-                        continue;
-                    }
-
-                    let source_count = block_sources[block_idx].len();
-
-                    if source_count == 0 || source_count == block_len {
-                        continue;
-                    }
-
-                    let new_block_idx = blocks.len();
-                    let move_sources = source_count <= block_len - source_count;
-
-                    let old_block = std::mem::take(&mut blocks[block_idx]);
-
-                    let (remaining, new_block) = if move_sources {
-                        let mut remaining = Vec::with_capacity(block_len - source_count);
-                        for state in old_block {
-                            if !source_set[state as usize] {
-                                remaining.push(state);
-                            }
-                        }
-                        (remaining, std::mem::take(&mut block_sources[block_idx]))
-                    } else {
-                        let mut new_block = Vec::with_capacity(block_len - source_count);
-                        for state in old_block {
-                            if !source_set[state as usize] {
-                                new_block.push(state);
-                            }
-                        }
-                        (std::mem::take(&mut block_sources[block_idx]), new_block)
-                    };
-
-                    for &state in &new_block {
-                        partition[state as usize] = new_block_idx as u32;
-                    }
-
-                    blocks[block_idx] = remaining;
-                    blocks.push(new_block);
-
-                    in_worklist.push(false);
-                    block_touched.push(false);
-                    block_sources.push(Vec::new());
-
-                    if in_worklist[block_idx] {
-                        in_worklist[new_block_idx] = true;
-                        worklist.push_back(new_block_idx as u32);
-                    } else if blocks[block_idx].len() <= blocks[new_block_idx].len() {
-                        in_worklist[block_idx] = true;
-                        worklist.push_back(block_idx as u32);
-                    } else {
-                        in_worklist[new_block_idx] = true;
-                        worklist.push_back(new_block_idx as u32);
-                    }
-                }
-
-                for &src in &sources_to_clear {
-                    source_set[src as usize] = false;
-                }
-
-                for &block_id in &touched_blocks {
-                    if (block_id as usize) < block_touched.len() {
-                        block_touched[block_id as usize] = false;
-                        block_sources[block_id as usize].clear();
-                    }
-                }
-                touched_blocks.clear();
-            }
-        }
+        let (partition, blocks) = partition_by_finalizers(&working);
+        let blocks = hopcroft_refine_partition(&working, partition, blocks);
 
         working.rebuild_from_blocks(blocks)
     }
@@ -423,78 +506,8 @@ impl DFA {
             return;
         }
 
-        // SCC-based O(n+m) algorithm:
-        // 1. Compute SCCs via Tarjan's
-        // 2. All states in an SCC share the same futures (mutually reachable)
-        // 3. Process DAG of SCCs in reverse topological order (sinks first)
-
-        // Pre-collect adjacency lists for indexed access in Tarjan's
-        let adj: Vec<Vec<usize>> = self
-            .states()
-            .iter()
-            .map(|s| {
-                let mut targets: Vec<usize> = s.transitions.iter().map(|(_, &t)| t as usize).collect();
-                targets.sort_unstable();
-                targets.dedup();
-                targets
-            })
-            .collect();
-
-        // Tarjan's SCC (iterative)
-        let mut scc_id = vec![u32::MAX; n];
-        let mut scc_count: u32 = 0;
-        let mut index_counter: u32 = 0;
-        let mut stack: Vec<usize> = Vec::new();
-        let mut on_stack = vec![false; n];
-        let mut lowlink = vec![0u32; n];
-        let mut disc = vec![u32::MAX; n]; // discovery index; u32::MAX = undefined
-        let mut dfs_stack: Vec<(usize, usize)> = Vec::new(); // (node, adj_idx)
-
-        for root in 0..n {
-            if disc[root] != u32::MAX {
-                continue;
-            }
-            dfs_stack.push((root, 0));
-            disc[root] = index_counter;
-            lowlink[root] = index_counter;
-            index_counter += 1;
-            stack.push(root);
-            on_stack[root] = true;
-
-            while let Some(&mut (v, ref mut ci)) = dfs_stack.last_mut() {
-                if *ci < adj[v].len() {
-                    let w = adj[v][*ci];
-                    *ci += 1;
-                    if disc[w] == u32::MAX {
-                        disc[w] = index_counter;
-                        lowlink[w] = index_counter;
-                        index_counter += 1;
-                        stack.push(w);
-                        on_stack[w] = true;
-                        dfs_stack.push((w, 0));
-                    } else if on_stack[w] {
-                        lowlink[v] = lowlink[v].min(disc[w]);
-                    }
-                } else {
-                    // Backtrack
-                    if lowlink[v] == disc[v] {
-                        // v is root of SCC
-                        while let Some(w) = stack.pop() {
-                            on_stack[w] = false;
-                            scc_id[w] = scc_count;
-                            if w == v {
-                                break;
-                            }
-                        }
-                        scc_count += 1;
-                    }
-                    dfs_stack.pop();
-                    if let Some(&mut (parent, _)) = dfs_stack.last_mut() {
-                        lowlink[parent] = lowlink[parent].min(lowlink[v]);
-                    }
-                }
-            }
-        }
+        let adj = dedup_adjacency(self);
+        let (scc_id, scc_count) = compute_tarjan_scc_ids(&adj);
 
         // `possible_future_group_ids` is strict: it should include only
         // groups reachable after consuming at least one more byte. That means

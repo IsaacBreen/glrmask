@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::automata::lexer::tokenizer::TokenizerExecResult;
 use crate::compiler::glr::parser::{
     ParserGSS,
     TerminalsDisallowed,
@@ -10,6 +11,15 @@ use crate::compiler::glr::parser::{
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::ConstraintState;
 use rustc_hash::{FxHashMap, FxHashSet};
+
+type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
+type AdvanceResultCache = FxHashMap<(usize, u32), ParserGSS>;
+
+struct InitialCommitScan {
+    exec_results: FxHashMap<u32, TokenizerExecResult>,
+    remapped_tokenizer_states: FxHashMap<u32, u32>,
+    accepted_terminals: FxHashMap<u32, FxHashSet<u32>>,
+}
 
 fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
     constraint
@@ -52,18 +62,191 @@ impl ActionableTerminals {
     }
 }
 
-fn merge_state(states: &mut FxHashMap<u32, ParserGSS>, tokenizer_state: u32, gss: ParserGSS) {
+impl InitialCommitScan {
+    fn collect(
+        constraint: &Constraint,
+        state: &BTreeMap<u32, ParserGSS>,
+        bytes: &[u8],
+    ) -> Self {
+        let ignore_terminal = constraint.ignore_terminal;
+        let mut exec_results = FxHashMap::default();
+        let mut remapped_tokenizer_states = FxHashMap::default();
+        let mut accepted_terminals = FxHashMap::<u32, FxHashSet<u32>>::default();
+
+        for (&tokenizer_state, parser_gss) in state {
+            let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
+            let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
+
+            if let Some(end_state) = exec_result.end_state {
+                remapped_tokenizer_states.insert(tokenizer_state, end_state);
+            }
+
+            for matched in &exec_result.matches {
+                if is_ignored_terminal(ignore_terminal, matched.id)
+                    || !is_actionable_terminal(
+                        actionable_terminals.as_ref(),
+                        constraint,
+                        matched.id,
+                    )
+                {
+                    continue;
+                }
+
+                accepted_terminals
+                    .entry(tokenizer_state)
+                    .or_default()
+                    .insert(matched.id);
+            }
+
+            exec_results.insert(tokenizer_state, exec_result);
+        }
+
+        Self {
+            exec_results,
+            remapped_tokenizer_states,
+            accepted_terminals,
+        }
+    }
+
+    fn take_exec_result(&mut self, tokenizer_state: u32) -> Option<TokenizerExecResult> {
+        self.exec_results.remove(&tokenizer_state)
+    }
+}
+
+fn is_ignored_terminal(ignore_terminal: Option<u32>, terminal: u32) -> bool {
+    Some(terminal) == ignore_terminal
+}
+
+fn is_actionable_terminal(
+    actionable_terminals: Option<&ActionableTerminals>,
+    constraint: &Constraint,
+    terminal: u32,
+) -> bool {
+    !actionable_terminals
+        .is_some_and(|actionable| !actionable.contains(constraint, terminal))
+}
+
+fn prune_initial_states(
+    state: &mut BTreeMap<u32, ParserGSS>,
+    accepted_terminals: &FxHashMap<u32, FxHashSet<u32>>,
+    remapped_tokenizer_states: &FxHashMap<u32, u32>,
+) {
+    for parser_state in state.values_mut() {
+        *parser_state = parser_state.apply_and_prune_no_promote(
+            |terminals_disallowed: &TerminalsDisallowed| {
+                for (tokenizer_state, matched_terminals) in accepted_terminals {
+                    if let Some(disallowed) = terminals_disallowed.get(tokenizer_state) {
+                        if !matched_terminals.is_empty()
+                            && matched_terminals
+                                .iter()
+                                .all(|terminal| disallowed.contains(terminal))
+                        {
+                            return None;
+                        }
+                    }
+                }
+
+                let mut remapped = BTreeMap::new();
+                for (old_state, new_state) in remapped_tokenizer_states {
+                    if let Some(disallowed) = terminals_disallowed.get(old_state) {
+                        remapped
+                            .entry(*new_state)
+                            .or_insert_with(BTreeSet::new)
+                            .extend(disallowed.iter().copied());
+                    }
+                }
+                Some(remapped)
+            },
+        );
+    }
+}
+
+fn merge_parser_state(
+    states: &mut ParserStatesByTokenizer,
+    tokenizer_state: u32,
+    gss: ParserGSS,
+) {
     states
         .entry(tokenizer_state)
         .and_modify(|existing| *existing = existing.merge(&gss))
         .or_insert(gss);
 }
 
-fn merge_cloned_state(states: &mut FxHashMap<u32, ParserGSS>, tokenizer_state: u32, gss: &ParserGSS) {
-    states
-        .entry(tokenizer_state)
-        .and_modify(|existing| *existing = existing.merge(gss))
-        .or_insert_with(|| gss.clone());
+fn queue_parser_state(
+    processing_queue: &mut [ParserStatesByTokenizer],
+    pending_state: &mut ParserStatesByTokenizer,
+    new_offset: usize,
+    total_len: usize,
+    tokenizer_state: u32,
+    gss: ParserGSS,
+) {
+    if new_offset == total_len {
+        merge_parser_state(pending_state, tokenizer_state, gss);
+    } else {
+        merge_parser_state(&mut processing_queue[new_offset], tokenizer_state, gss);
+    }
+}
+
+fn apply_future_terminal_disallow(
+    constraint: &Constraint,
+    exec_result: &TokenizerExecResult,
+    terminal: u32,
+    gss: ParserGSS,
+) -> ParserGSS {
+    if gss.is_empty() {
+        return gss;
+    }
+
+    let Some(end_state) = exec_result.end_state else {
+        return gss;
+    };
+    if !constraint
+        .tokenizer
+        .dfa
+        .possible_future_group_ids(end_state)
+        .contains(terminal as usize)
+    {
+        return gss;
+    }
+
+    gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
+        let mut updated = terminals_disallowed.clone();
+        updated.entry(end_state).or_default().insert(terminal);
+        updated
+    })
+}
+
+fn advance_terminal_match(
+    constraint: &Constraint,
+    gss_at_offset: &ParserGSS,
+    terminal: u32,
+    exec_result: &TokenizerExecResult,
+    advance_result_cache: &mut AdvanceResultCache,
+    terminal_result_cache: &mut FxHashMap<u32, ParserGSS>,
+) -> Option<ParserGSS> {
+    if let Some(cached) = terminal_result_cache.get(&terminal) {
+        return (!cached.is_empty()).then(|| cached.clone());
+    }
+
+    let advance_cache_key = (gss_at_offset.ptr_key(), terminal);
+    let advanced = if let Some(cached) = advance_result_cache.get(&advance_cache_key) {
+        cached.clone()
+    } else {
+        if !stack_may_advance_on(&constraint.table, gss_at_offset, terminal) {
+            let empty = ParserGSS::empty();
+            advance_result_cache.insert(advance_cache_key, empty.clone());
+            terminal_result_cache.insert(terminal, empty);
+            return None;
+        }
+
+        let advanced = advance_stacks(&constraint.table, gss_at_offset, terminal);
+        advance_result_cache.insert(advance_cache_key, advanced.clone());
+        advanced
+    };
+
+    let advanced = apply_future_terminal_disallow(constraint, exec_result, terminal, advanced);
+    terminal_result_cache.insert(terminal, advanced.clone());
+    (!advanced.is_empty()).then_some(advanced)
 }
 
 fn commit_bytes_impl(
@@ -76,73 +259,19 @@ fn commit_bytes_impl(
     }
 
     let ignore_terminal = constraint.ignore_terminal;
-    let mut initial_exec_results = FxHashMap::default();
-    let mut remapped_tokenizer_states = FxHashMap::default();
-    let mut accepted_terminals = FxHashMap::<u32, FxHashSet<u32>>::default();
-
-    for (&tokenizer_state, parser_gss) in state.iter() {
-        let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
-        let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
-
-        if let Some(end_state) = exec_result.end_state {
-            remapped_tokenizer_states.insert(tokenizer_state, end_state);
-        }
-
-        for matched in &exec_result.matches {
-            let ignored = Some(matched.id) == ignore_terminal;
-            let actionable = !ignored
-                && !actionable_terminals
-                    .as_ref()
-                    .is_some_and(|actionable| !actionable.contains(constraint, matched.id));
-
-            if ignored || !actionable {
-                continue;
-            }
-
-            accepted_terminals
-                .entry(tokenizer_state)
-                .or_default()
-                .insert(matched.id);
-        }
-
-        initial_exec_results.insert(tokenizer_state, exec_result);
-    }
-
-    for parser_state in state.values_mut() {
-        *parser_state = parser_state.apply_and_prune_no_promote(
-            |terminals_disallowed: &TerminalsDisallowed| {
-                for (state_id, matched_terminals) in &accepted_terminals {
-                    if let Some(disallowed) = terminals_disallowed.get(state_id) {
-                        if !matched_terminals.is_empty()
-                            && matched_terminals
-                                .iter()
-                                .all(|terminal| disallowed.contains(terminal))
-                        {
-                            return None;
-                        }
-                    }
-                }
-
-                let mut remapped = BTreeMap::new();
-                for (old_state, new_state) in &remapped_tokenizer_states {
-                    if let Some(disallowed) = terminals_disallowed.get(old_state) {
-                        remapped
-                            .entry(*new_state)
-                            .or_insert_with(BTreeSet::new)
-                            .extend(disallowed.iter().copied());
-                    }
-                }
-                Some(remapped)
-            },
-        );
-    }
+    let mut initial_scan = InitialCommitScan::collect(constraint, state, bytes);
+    prune_initial_states(
+        state,
+        &initial_scan.accepted_terminals,
+        &initial_scan.remapped_tokenizer_states,
+    );
 
     state.retain(|_, parser_state| !parser_state.is_empty());
 
-    let mut pending_state = FxHashMap::<u32, ParserGSS>::default();
-    let mut advance_result_cache = FxHashMap::<(usize, u32), ParserGSS>::default();
-    let mut processing_queue: Vec<FxHashMap<u32, ParserGSS>> =
-        (0..=bytes.len()).map(|_| FxHashMap::default()).collect();
+    let mut pending_state = ParserStatesByTokenizer::default();
+    let mut advance_result_cache = AdvanceResultCache::default();
+    let mut processing_queue: Vec<ParserStatesByTokenizer> =
+        (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
     processing_queue[0] = std::mem::take(state).into_iter().collect();
 
     let mut offset = 0usize;
@@ -156,7 +285,7 @@ fn commit_bytes_impl(
         for (tokenizer_state, gss_at_offset) in states_to_process {
             let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
             let exec_result = if offset == 0 {
-                initial_exec_results.remove(&tokenizer_state).unwrap_or_else(|| {
+                initial_scan.take_exec_result(tokenizer_state).unwrap_or_else(|| {
                     constraint
                         .tokenizer
                         .execute_from_state(&bytes[offset..], tokenizer_state)
@@ -172,13 +301,15 @@ fn commit_bytes_impl(
 
             for matched in &exec_result.matches {
                 let new_offset = offset + matched.width;
-                let ignored = Some(matched.id) == ignore_terminal;
-                let actionable = !ignored
-                    && !actionable_terminals
-                        .as_ref()
-                        .is_some_and(|actionable| !actionable.contains(constraint, matched.id));
+                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
 
-                if !ignored && !actionable {
+                if !ignored
+                    && !is_actionable_terminal(
+                        actionable_terminals.as_ref(),
+                        constraint,
+                        matched.id,
+                    )
+                {
                     continue;
                 }
                 if !seen_matches.insert((matched.width, matched.id)) {
@@ -186,66 +317,36 @@ fn commit_bytes_impl(
                 }
 
                 if ignored {
-                    let next_tsid = constraint.tokenizer.initial_state();
-                    if new_offset == bytes.len() {
-                        merge_cloned_state(&mut pending_state, next_tsid, &gss_at_offset);
-                    } else {
-                        merge_cloned_state(&mut processing_queue[new_offset], next_tsid, &gss_at_offset);
-                    }
+                    queue_parser_state(
+                        &mut processing_queue,
+                        &mut pending_state,
+                        new_offset,
+                        bytes.len(),
+                        constraint.tokenizer.initial_state(),
+                        gss_at_offset.clone(),
+                    );
                     continue;
                 }
 
-                let gss = if let Some(cached) = terminal_result_cache.get(&matched.id) {
-                    cached.clone()
-                } else {
-                    let advance_cache_key = (gss_at_offset.ptr_key(), matched.id);
-                    let mut gss = if let Some(cached) = advance_result_cache.get(&advance_cache_key)
-                    {
-                        cached.clone()
-                    } else {
-                        if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
-                            let empty = ParserGSS::empty();
-                            advance_result_cache.insert(advance_cache_key, empty.clone());
-                            terminal_result_cache.insert(matched.id, empty);
-                            continue;
-                        }
-
-                        let gss = advance_stacks(&constraint.table, &gss_at_offset, matched.id);
-                        advance_result_cache.insert(advance_cache_key, gss.clone());
-                        gss
-                    };
-
-                    if !gss.is_empty() {
-                        if let Some(end_state) = exec_result.end_state {
-                            if constraint
-                                .tokenizer
-                                .dfa
-                                .possible_future_group_ids(end_state)
-                                .contains(matched.id as usize)
-                            {
-                                gss = gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
-                                    let mut updated = terminals_disallowed.clone();
-                                    updated.entry(end_state).or_default().insert(matched.id);
-                                    updated
-                                });
-                            }
-                        }
-                    }
-
-                    terminal_result_cache.insert(matched.id, gss.clone());
-                    gss
+                let Some(gss) = advance_terminal_match(
+                    constraint,
+                    &gss_at_offset,
+                    matched.id,
+                    &exec_result,
+                    &mut advance_result_cache,
+                    &mut terminal_result_cache,
+                ) else {
+                    continue;
                 };
 
-                if gss.is_empty() {
-                    continue;
-                }
-
-                let next_tsid = constraint.tokenizer.initial_state();
-                if new_offset == bytes.len() {
-                    merge_state(&mut pending_state, next_tsid, gss);
-                } else {
-                    merge_state(&mut processing_queue[new_offset], next_tsid, gss);
-                }
+                queue_parser_state(
+                    &mut processing_queue,
+                    &mut pending_state,
+                    new_offset,
+                    bytes.len(),
+                    constraint.tokenizer.initial_state(),
+                    gss,
+                );
             }
 
             if let Some(end_state) = exec_result.end_state {
@@ -255,7 +356,14 @@ fn commit_bytes_impl(
                     continue;
                 }
 
-                merge_state(&mut pending_state, end_state, gss_at_offset);
+                queue_parser_state(
+                    &mut processing_queue,
+                    &mut pending_state,
+                    bytes.len(),
+                    bytes.len(),
+                    end_state,
+                    gss_at_offset,
+                );
             }
         }
     }

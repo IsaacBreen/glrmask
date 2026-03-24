@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Vocab;
 use crate::automata::lexer::compile::build_regex;
@@ -25,10 +25,10 @@ use crate::runtime::Constraint;
 pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<u32, BitSet> {
     let ever_allowed = compute_ever_allowed_follows(grammar);
     let num_terminals = grammar.num_terminals as usize;
-    let mut result = BTreeMap::new();
+    let mut disallowed_by_terminal = BTreeMap::new();
 
     for (terminal_id, allowed) in ever_allowed.iter().enumerate() {
-        let allowed_set: std::collections::BTreeSet<u32> = allowed.iter().copied().collect();
+        let allowed_set: BTreeSet<u32> = allowed.iter().copied().collect();
         let mut disallowed = BitSet::new(num_terminals);
 
         for other in 0..num_terminals {
@@ -38,11 +38,11 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
         }
 
         if !disallowed.is_zero() {
-            result.insert(terminal_id as u32, disallowed);
+            disallowed_by_terminal.insert(terminal_id as u32, disallowed);
         }
     }
 
-    result
+    disallowed_by_terminal
 }
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
@@ -72,8 +72,8 @@ pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
     }
 }
 
-fn build_internal_token_bytes(vocab: &Vocab, id_map: &InternalIdMap) -> BTreeMap<u32, Vec<u8>> {
-    id_map
+fn build_internal_token_bytes(vocab: &Vocab, internal_ids: &InternalIdMap) -> BTreeMap<u32, Vec<u8>> {
+    internal_ids
         .vocab_tokens
         .representative_original_ids
         .iter()
@@ -85,64 +85,73 @@ fn build_internal_token_bytes(vocab: &Vocab, id_map: &InternalIdMap) -> BTreeMap
         .collect()
 }
 
-fn compile_prepared(normalized: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab) -> Constraint {
-    let glr_grammar = AnalyzedGrammar::from_grammar_def(&normalized);
+fn finalize_constraint(mut constraint: Constraint) -> Constraint {
+    constraint.build_buf_masks();
+    constraint.build_dense_token_bytes();
+    constraint.build_dense_token_masks();
+    constraint.build_fast_transitions();
+    constraint.build_seed_dense_masks();
+    constraint
+}
+
+fn compile_prepared(prepared_grammar: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab) -> Constraint {
+    let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
 
     #[cfg(debug_assertions)]
-    if let Err(message) = glr_grammar.debug_check_grammar_preconditions() {
+    if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
         panic!("[glrmask] grammar precondition violations:\n{}", message);
     }
 
-    let table = GLRTable::build(&glr_grammar);
-    let disallowed_follows = compute_disallowed_follows(&glr_grammar);
-    let mut id_map =
-        InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, normalized.ignore_terminal);
+    let table = GLRTable::build(&analyzed_grammar);
+    let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
+    let mut internal_ids =
+        InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal);
     let token_bytes = vocab.entries.clone();
 
     let ((mut terminal_dwa, mut possible_matches), templates) = rayon::join(
         || {
             build_terminal_dwa_with_possible_matches(
-                &glr_grammar,
+                &analyzed_grammar,
                 &tokenizer,
                 vocab,
-                &id_map,
-                normalized.ignore_terminal,
+                &internal_ids,
+                prepared_grammar.ignore_terminal,
             )
         },
         || {
-            let characterizations = characterize_terminals(&table, &glr_grammar);
+            let characterizations = characterize_terminals(&table, &analyzed_grammar);
             Templates::from_characterizations(&characterizations)
         },
     );
 
-    let token_perm = crate::compiler::stages::compact::compact_dwa_dimensions(
+    let token_permutation = crate::compiler::stages::compact::compact_dwa_dimensions(
         &mut terminal_dwa,
-        &mut id_map,
+        &mut internal_ids,
     )
     .token_perm;
     crate::compiler::possible_matches::permute_possible_matches_in_place(
         &mut possible_matches,
-        &token_perm,
+        &token_permutation,
     );
 
-    let internal_token_bytes = build_internal_token_bytes(vocab, &id_map);
+    let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
     let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         &table,
-        &glr_grammar,
+        &analyzed_grammar,
         &terminal_dwa,
         templates,
     );
 
-    let mut constraint = Constraint {
+    finalize_constraint(Constraint {
         parser_dwa,
         table,
         tokenizer,
-        ignore_terminal: normalized.ignore_terminal,
+        ignore_terminal: prepared_grammar.ignore_terminal,
         possible_matches,
-        state_to_internal_tsid: id_map.tokenizer_states.original_to_internal.clone(),
-        internal_tsid_to_states: id_map.tokenizer_states.internal_to_originals_vecs(),
-        original_token_to_internal: id_map.vocab_tokens.original_to_internal.clone(),
-        internal_token_to_tokens: id_map.vocab_tokens.internal_to_originals_vecs(),
+        state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
+        internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
+        original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
+        internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
         eos_token_id: vocab.eos_token_id,
         token_bytes,
         internal_token_bytes,
@@ -153,25 +162,18 @@ fn compile_prepared(normalized: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab)
         seed_terminal_dense: rustc_hash::FxHashMap::default(),
         seed_universe_dense: Box::new([]),
         dwa_fast_transitions: Vec::new(),
-    };
-
-    constraint.build_buf_masks();
-    constraint.build_dense_token_bytes();
-    constraint.build_dense_token_masks();
-    constraint.build_fast_transitions();
-    constraint.build_seed_dense_masks();
-    constraint
+    })
 }
 
 #[cfg(test)]
 pub(crate) fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    let (normalized, tokenizer) = prepare_grammar_for_compile(grammar);
-    compile_prepared(normalized, tokenizer, vocab)
+    let (prepared_grammar, tokenizer) = prepare_grammar_for_compile(grammar);
+    compile_prepared(prepared_grammar, tokenizer, vocab)
 }
 
 pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
-    let (normalized, tokenizer) = prepare_owned_grammar_for_compile(grammar);
-    compile_prepared(normalized, tokenizer, vocab)
+    let (prepared_grammar, tokenizer) = prepare_owned_grammar_for_compile(grammar);
+    compile_prepared(prepared_grammar, tokenizer, vocab)
 }
 
 #[cfg(test)]
@@ -193,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_compile_simple_ab() {
-        let gdef = simple_ab_grammar(); 
+        let gdef = simple_ab_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
@@ -251,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_compile_choice() {
-        let gdef = choice_grammar(); 
+        let gdef = choice_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
@@ -260,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_compile_two_nt() {
-        let gdef = two_nt_grammar(); 
+        let gdef = two_nt_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
         let constraint = compile(&gdef, &vocab);
@@ -370,7 +372,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_simple_ab() {
-        
         let gdef = simple_ab_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -399,7 +400,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_choice() {
-        
         let gdef = choice_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -420,7 +420,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_two_nt() {
-        
         let gdef = two_nt_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -449,7 +448,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_nested_nt() {
-        
         let gdef = nested_nt_grammar();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
 
@@ -475,7 +473,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_three_terminals() {
-        
         let gdef = three_terminal_grammar();
         let vocab = Vocab::new(
             vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],
@@ -510,7 +507,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_nested_two_rhs() {
-        
         let gdef = nested_two_rhs_grammar();
         let vocab = Vocab::new(
             vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec())],

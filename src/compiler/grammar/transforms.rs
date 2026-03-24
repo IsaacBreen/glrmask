@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
@@ -8,11 +8,7 @@ use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
 use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
 use crate::automata::lexer::tokenizer::Tokenizer;
 
-const DEFAULT_MAX_RUNTIME_REDUCTION_LEN: usize = 5;
-
-fn max_runtime_reduction_len() -> usize {
-    DEFAULT_MAX_RUNTIME_REDUCTION_LEN
-}
+const MAX_RUNTIME_REDUCTION_LEN: usize = 5;
 
 // ── Nullable terminal expansion ─────────────────────────────────────────────
 
@@ -25,7 +21,7 @@ fn max_runtime_reduction_len() -> usize {
 /// for `T` is assumed to already be drained before this function is called.
 pub(crate) fn expand_nullable_terminals(
     rules: &mut Vec<Rule>,
-    nullable_terminals: &std::collections::BTreeSet<TerminalID>,
+    nullable_terminals: &BTreeSet<TerminalID>,
 ) {
     if nullable_terminals.is_empty() {
         return;
@@ -45,7 +41,7 @@ pub(crate) fn expand_nullable_terminals(
         .unwrap_or(0);
 
     // Map: nullable terminal id → fresh nonterminal id.
-    let mut nt_for_terminal = std::collections::BTreeMap::<TerminalID, NonterminalID>::new();
+    let mut nt_for_terminal = BTreeMap::<TerminalID, NonterminalID>::new();
     let mut extra_rules = Vec::new();
 
     for &tid in nullable_terminals {
@@ -105,7 +101,7 @@ fn terminal_is_nullable(terminal: &Terminal) -> bool {
     }
 }
 
-fn nullable_terminals_for_grammar(grammar: &GrammarDef) -> std::collections::BTreeSet<TerminalID> {
+fn nullable_terminals_for_grammar(grammar: &GrammarDef) -> BTreeSet<TerminalID> {
     grammar
         .terminals
         .iter()
@@ -142,7 +138,7 @@ fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
 /// merge identical terminals, and compact the remaining terminal IDs to a
 /// dense 0..N-1 range.  Mutates the grammar in place.
 pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
-    let mut used = std::collections::BTreeSet::<TerminalID>::new();
+    let mut used = BTreeSet::<TerminalID>::new();
     for rule in grammar.rules.iter() {
         for symbol in &rule.rhs {
             if let Symbol::Terminal(terminal_id) = symbol {
@@ -154,7 +150,7 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
         used.insert(ignore_terminal);
     }
 
-    let mut remap = std::collections::BTreeMap::<TerminalID, TerminalID>::new();
+    let mut remap = BTreeMap::<TerminalID, TerminalID>::new();
     let mut compacted = Vec::with_capacity(used.len());
     let mut canonical_ids = HashMap::<TerminalIdentity, TerminalID>::new();
 
@@ -190,9 +186,9 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
 }
 
 fn remap_terminal_names(
-    terminal_names: &std::collections::BTreeMap<TerminalID, String>,
-    remap: &std::collections::BTreeMap<TerminalID, TerminalID>,
-) -> std::collections::BTreeMap<TerminalID, String> {
+    terminal_names: &BTreeMap<TerminalID, String>,
+    remap: &BTreeMap<TerminalID, TerminalID>,
+) -> BTreeMap<TerminalID, String> {
     terminal_names
         .iter()
         .filter_map(|(old_id, name)| remap.get(old_id).map(|new_id| (*new_id, name.clone())))
@@ -201,25 +197,24 @@ fn remap_terminal_names(
 
 pub(crate) fn inline_single_use_nonterminals(
     rules: &mut Vec<Rule>,
-    protected_nonterminals: &std::collections::BTreeSet<NonterminalID>,
+    protected_nonterminals: &BTreeSet<NonterminalID>,
 ) {
     loop {
         // Build indexes
-        let mut productions_by_lhs = std::collections::BTreeMap::<NonterminalID, Vec<usize>>::new();
-        let mut consumer_occurrences = std::collections::BTreeMap::<NonterminalID, usize>::new();
+        let mut productions_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
+        let mut use_counts = BTreeMap::<NonterminalID, usize>::new();
 
         for (index, rule) in rules.iter().enumerate() {
             productions_by_lhs.entry(rule.lhs).or_default().push(index);
             for symbol in &rule.rhs {
                 if let Symbol::Nonterminal(nonterminal) = symbol {
-                    *consumer_occurrences.entry(*nonterminal).or_default() += 1;
+                    *use_counts.entry(*nonterminal).or_default() += 1;
                 }
             }
         }
 
-        // Collect ALL candidates at once
-        let mut candidates: std::collections::BTreeMap<NonterminalID, (usize, Vec<Symbol>)> =
-            std::collections::BTreeMap::new();
+        // Collect inline candidates in one pass.
+        let mut inline_candidates = BTreeMap::<NonterminalID, (usize, Vec<Symbol>)>::new();
 
         for (&nonterminal, production_indexes) in &productions_by_lhs {
             if protected_nonterminals.contains(&nonterminal) || production_indexes.len() != 1 {
@@ -236,8 +231,8 @@ pub(crate) fn inline_single_use_nonterminals(
                 continue;
             }
 
-            let consumer_count = consumer_occurrences.get(&nonterminal).copied().unwrap_or(0);
-            let should_inline = rule.rhs.len() == 1 || consumer_count == 1;
+            let use_count = use_counts.get(&nonterminal).copied().unwrap_or(0);
+            let should_inline = rule.rhs.len() == 1 || use_count == 1;
             if !should_inline {
                 continue;
             }
@@ -257,33 +252,33 @@ pub(crate) fn inline_single_use_nonterminals(
                 continue;
             }
 
-            candidates.insert(nonterminal, (production_indexes[0], rule.rhs.clone()));
+            inline_candidates.insert(nonterminal, (production_indexes[0], rule.rhs.clone()));
         }
 
-        if candidates.is_empty() {
+        if inline_candidates.is_empty() {
             break;
         }
 
         // Transitively expand candidate RHS: if a candidate's RHS references
         // another candidate, substitute it. Iterate until stable.
-        let candidate_nts: std::collections::BTreeSet<NonterminalID> =
-            candidates.keys().copied().collect();
+        let inline_candidate_ids: BTreeSet<NonterminalID> =
+            inline_candidates.keys().copied().collect();
         let mut expanded = true;
         while expanded {
             expanded = false;
-            let snapshot: Vec<(NonterminalID, Vec<Symbol>)> = candidates
+            let snapshot: Vec<(NonterminalID, Vec<Symbol>)> = inline_candidates
                 .iter()
                 .map(|(&nt, (_, rhs))| (nt, rhs.clone()))
                 .collect();
             for (nt, rhs) in snapshot {
                 if rhs.iter().any(|s| {
-                    matches!(s, Symbol::Nonterminal(id) if candidate_nts.contains(id) && *id != nt)
+                    matches!(s, Symbol::Nonterminal(id) if inline_candidate_ids.contains(id) && *id != nt)
                 }) {
                     let mut new_rhs = Vec::with_capacity(rhs.len());
                     for symbol in &rhs {
                         if let Symbol::Nonterminal(id) = symbol {
                             if *id != nt {
-                                if let Some((_, sub_rhs)) = candidates.get(id) {
+                                if let Some((_, sub_rhs)) = inline_candidates.get(id) {
                                     new_rhs.extend(sub_rhs.iter().cloned());
                                     continue;
                                 }
@@ -292,7 +287,10 @@ pub(crate) fn inline_single_use_nonterminals(
                         new_rhs.push(symbol.clone());
                     }
                     if new_rhs != rhs {
-                        candidates.get_mut(&nt).unwrap().1 = new_rhs;
+                        inline_candidates
+                            .get_mut(&nt)
+                            .expect("inline candidate should still exist")
+                            .1 = new_rhs;
                         expanded = true;
                     }
                 }
@@ -300,8 +298,8 @@ pub(crate) fn inline_single_use_nonterminals(
         }
 
         // Collect production indexes to remove
-        let remove_indexes: std::collections::BTreeSet<usize> =
-            candidates.values().map(|(idx, _)| *idx).collect();
+        let remove_indexes: BTreeSet<usize> =
+            inline_candidates.values().map(|(idx, _)| *idx).collect();
 
         // Rewrite all rules in one pass
         let mut rewritten = Vec::with_capacity(rules.len());
@@ -311,14 +309,14 @@ pub(crate) fn inline_single_use_nonterminals(
             }
 
             let has_candidate = rule.rhs.iter().any(|s| {
-                matches!(s, Symbol::Nonterminal(id) if candidates.contains_key(id))
+                matches!(s, Symbol::Nonterminal(id) if inline_candidates.contains_key(id))
             });
 
             if has_candidate {
                 let mut new_rhs = Vec::with_capacity(rule.rhs.len());
                 for symbol in &rule.rhs {
                     if let Symbol::Nonterminal(id) = symbol {
-                        if let Some((_, replacement_rhs)) = candidates.get(id) {
+                        if let Some((_, replacement_rhs)) = inline_candidates.get(id) {
                             new_rhs.extend(replacement_rhs.iter().cloned());
                             continue;
                         }
@@ -407,6 +405,15 @@ pub(crate) fn bound_runtime_reduction_length(
     grammar.rules = rewritten;
 }
 
+fn collect_protected_nonterminals(grammar: &GrammarDef) -> BTreeSet<NonterminalID> {
+    grammar
+        .nonterminal_names
+        .keys()
+        .copied()
+        .chain(std::iter::once(grammar.start))
+        .collect()
+}
+
 pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) {
     // Probe nullability against the original terminal set first; nullable
     // terminals are expanded into optional grammar structure before we compact
@@ -427,24 +434,18 @@ pub(crate) fn prepare_owned_grammar_for_compile(grammar: GrammarDef) -> (Grammar
 
 fn prepare_owned_grammar_for_compile_impl(
     normalized: &mut GrammarDef,
-    nullable_terminals: &std::collections::BTreeSet<TerminalID>,
+    nullable_terminals: &BTreeSet<TerminalID>,
 ) -> (GrammarDef, Tokenizer) {
     expand_nullable_terminals(&mut normalized.rules, nullable_terminals);
 
     normalize_grammar(&mut normalized.rules, normalized.start);
 
-    let protected_nonterminals = normalized
-        .nonterminal_names
-        .keys()
-        .copied()
-        .chain(std::iter::once(normalized.start))
-        .collect::<std::collections::BTreeSet<_>>();
+    let protected_nonterminals = collect_protected_nonterminals(normalized);
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
 
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
 
-    let max_rhs_len = max_runtime_reduction_len();
-    bound_runtime_reduction_length(normalized, max_rhs_len);
+    bound_runtime_reduction_length(normalized, MAX_RUNTIME_REDUCTION_LEN);
 
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
 

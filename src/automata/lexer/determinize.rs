@@ -181,6 +181,232 @@ fn compute_reachable_groups(nfa: &NFA, group_count: usize) -> Vec<BitSet> {
         .collect()
 }
 
+fn build_remapped_transitions(nfa: &NFA, class_map: &[u8]) -> Vec<Vec<(U8Set, u32)>> {
+    let mut remapped_set_cache: FxHashMap<U8Set, U8Set> = FxHashMap::default();
+
+    nfa.states
+        .iter()
+        .map(|state| {
+            state
+                .transitions
+                .iter()
+                .map(|(set, target)| {
+                    let class_set = *remapped_set_cache.entry(*set).or_insert_with(|| {
+                        let mut class_set = U8Set::empty();
+                        for byte in set.iter() {
+                            class_set.insert(class_map[byte as usize]);
+                        }
+                        class_set
+                    });
+                    (class_set, *target)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn dfs_selective_post_order(
+    state: usize,
+    compact_nfa: &CompactNFA,
+    out_degree: &[u32],
+    threshold: u32,
+    visited: &mut [bool],
+    post_order: &mut Vec<usize>,
+) {
+    if visited[state] {
+        return;
+    }
+    visited[state] = true;
+
+    let start = compact_nfa.epsilon_offsets[state] as usize;
+    let end = compact_nfa.epsilon_offsets[state + 1] as usize;
+    for &target in &compact_nfa.epsilon_targets[start..end] {
+        dfs_selective_post_order(
+            target as usize,
+            compact_nfa,
+            out_degree,
+            threshold,
+            visited,
+            post_order,
+        );
+    }
+
+    if out_degree[state] >= threshold {
+        post_order.push(state);
+    }
+}
+
+fn precompute_epsilon_closures(
+    compact_nfa: &CompactNFA,
+    out_degree: &[u32],
+) -> Vec<Option<Vec<u32>>> {
+    let num_states = out_degree.len();
+    let mut high_degree_closures = vec![None; num_states];
+    let mut visited = vec![false; num_states];
+    let mut post_order = Vec::with_capacity(num_states);
+
+    for state in 0..num_states {
+        if out_degree[state] < EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD {
+            continue;
+        }
+
+        dfs_selective_post_order(
+            state,
+            compact_nfa,
+            out_degree,
+            EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD,
+            &mut visited,
+            &mut post_order,
+        );
+    }
+
+    let mut epsilon_stack = Vec::with_capacity(num_states);
+    let mut closure = SparseStateSet::new(num_states);
+    for &state in &post_order {
+        closure.clear();
+        closure.insert(state);
+        epsilon_stack.push(state);
+
+        while let Some(current) = epsilon_stack.pop() {
+            let start = compact_nfa.epsilon_offsets[current] as usize;
+            let end = compact_nfa.epsilon_offsets[current + 1] as usize;
+            for index in start..end {
+                let next = compact_nfa.epsilon_targets[index] as usize;
+                if closure.insert(next) {
+                    if let Some(ref precomputed) = high_degree_closures[next] {
+                        closure.insert_many(precomputed);
+                    } else if out_degree[next] > 0 {
+                        epsilon_stack.push(next);
+                    }
+                }
+            }
+        }
+
+        high_degree_closures[state] = Some(sparse_to_sorted_vec(&closure));
+    }
+
+    high_degree_closures
+}
+
+fn build_start_closure(
+    compact_nfa: &CompactNFA,
+    start_state: usize,
+    out_degree: &[u32],
+) -> SparseStateSet {
+    let num_states = out_degree.len();
+    let mut closure = SparseStateSet::new(num_states);
+    let mut epsilon_stack = Vec::with_capacity(num_states);
+
+    closure.insert(start_state);
+    if out_degree[start_state] > 0 {
+        epsilon_stack.push(start_state);
+    }
+
+    while let Some(current) = epsilon_stack.pop() {
+        let start = compact_nfa.epsilon_offsets[current] as usize;
+        let end = compact_nfa.epsilon_offsets[current + 1] as usize;
+        for index in start..end {
+            let next = compact_nfa.epsilon_targets[index] as usize;
+            if closure.insert(next) && out_degree[next] > 0 {
+                epsilon_stack.push(next);
+            }
+        }
+    }
+
+    closure
+}
+
+fn collect_transition_targets(
+    subset: &CompressedStateSet,
+    remapped_transitions: &[Vec<(U8Set, u32)>],
+    transition_targets: &mut [SparseStateSet],
+    used_classes: &mut Vec<usize>,
+    seen_class: &mut [bool],
+) {
+    for state in subset.iter() {
+        for (class_set, next_state) in &remapped_transitions[state] {
+            for class_id in class_set.iter() {
+                let class_index = class_id as usize;
+                if !seen_class[class_index] {
+                    seen_class[class_index] = true;
+                    used_classes.push(class_index);
+                }
+                transition_targets[class_index].insert(*next_state as usize);
+            }
+        }
+    }
+}
+
+fn fast_singleton_without_epsilon(
+    target_set: &SparseStateSet,
+    out_degree: &[u32],
+    precomputed_closures: &[Option<Vec<u32>>],
+) -> Option<usize> {
+    if target_set.dirty_words.len() != 1 {
+        return None;
+    }
+
+    let word_index = target_set.dirty_words[0];
+    let word = target_set.words[word_index];
+    if word == 0 || (word & (word - 1)) != 0 {
+        return None;
+    }
+
+    let bit = word.trailing_zeros() as usize;
+    let state = word_index * 64 + bit;
+    (out_degree[state] == 0 && precomputed_closures[state].is_none()).then_some(state)
+}
+
+fn expand_transition_closure(
+    target_set: &SparseStateSet,
+    compact_nfa: &CompactNFA,
+    out_degree: &[u32],
+    precomputed_closures: &[Option<Vec<u32>>],
+    closure: &mut SparseStateSet,
+    epsilon_stack: &mut Vec<usize>,
+) {
+    closure.clear();
+    let mut needs_bfs = false;
+
+    for &word_index in &target_set.dirty_words {
+        let mut word = target_set.words[word_index];
+        while word != 0 {
+            let bit = word.trailing_zeros() as usize;
+            word &= !(1u64 << bit);
+            let next_state = word_index * 64 + bit;
+
+            if let Some(ref precomputed) = precomputed_closures[next_state] {
+                closure.insert_many(precomputed);
+            } else {
+                closure.insert(next_state);
+                if out_degree[next_state] > 0 {
+                    needs_bfs = true;
+                    epsilon_stack.push(next_state);
+                }
+            }
+        }
+    }
+
+    if !needs_bfs {
+        return;
+    }
+
+    while let Some(current) = epsilon_stack.pop() {
+        let start = compact_nfa.epsilon_offsets[current] as usize;
+        let end = compact_nfa.epsilon_offsets[current + 1] as usize;
+        for index in start..end {
+            let next = compact_nfa.epsilon_targets[index] as usize;
+            if closure.insert(next) {
+                if let Some(ref precomputed) = precomputed_closures[next] {
+                    closure.insert_many(precomputed);
+                } else if out_degree[next] > 0 {
+                    epsilon_stack.push(next);
+                }
+            }
+        }
+    }
+}
+
 impl NFA {
     pub fn to_dfa(&self) -> DFA {
         let group_count = self
@@ -197,125 +423,22 @@ impl NFA {
         dfa.ensure_group_capacity(group_count);
 
         let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
-        let mut remapped_set_cache: FxHashMap<U8Set, U8Set> = FxHashMap::default();
-        let remapped_transitions: Vec<Vec<(U8Set, u32)>> = self
-            .states
-            .iter()
-            .map(|state| {
-                state
-                    .transitions
-                    .iter()
-                    .map(|(set, target)| {
-                        let class_set = *remapped_set_cache.entry(*set).or_insert_with(|| {
-                            let mut class_set = U8Set::empty();
-                            for byte in set.iter() {
-                                class_set.insert(class_map[byte as usize]);
-                            }
-                            class_set
-                        });
-                        (class_set, *target)
-                    })
-                    .collect()
-            })
-            .collect();
+        let remapped_transitions = build_remapped_transitions(self, &class_map);
 
         let compact_nfa = self.build_compact_nfa();
         let num_nfa_states = self.states.len();
-        let mut stack: Vec<usize> = Vec::with_capacity(num_nfa_states);
+        let mut epsilon_stack = Vec::with_capacity(num_nfa_states);
 
         let out_degree: Vec<u32> = (0..num_nfa_states)
             .map(|state| compact_nfa.epsilon_offsets[state + 1] - compact_nfa.epsilon_offsets[state])
             .collect();
 
-        let mut high_degree_closures: Vec<Option<Vec<u32>>> = vec![None; num_nfa_states];
-        let mut visited = vec![false; num_nfa_states];
-        let mut post_order = Vec::with_capacity(num_nfa_states);
-
-        fn dfs_postorder_selective(
-            state: usize,
-            compact_nfa: &CompactNFA,
-            out_degree: &[u32],
-            threshold: u32,
-            visited: &mut [bool],
-            post_order: &mut Vec<usize>,
-        ) {
-            if visited[state] {
-                return;
-            }
-            visited[state] = true;
-
-            let start = compact_nfa.epsilon_offsets[state] as usize;
-            let end = compact_nfa.epsilon_offsets[state + 1] as usize;
-            for &target in &compact_nfa.epsilon_targets[start..end] {
-                dfs_postorder_selective(
-                    target as usize,
-                    compact_nfa,
-                    out_degree,
-                    threshold,
-                    visited,
-                    post_order,
-                );
-            }
-
-            if out_degree[state] >= threshold {
-                post_order.push(state);
-            }
-        }
-
-        for state in 0..num_nfa_states {
-            if out_degree[state] >= EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD {
-                dfs_postorder_selective(
-                    state,
-                    &compact_nfa,
-                    &out_degree,
-                    EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD,
-                    &mut visited,
-                    &mut post_order,
-                );
-            }
-        }
-
-        let mut temp_set = SparseStateSet::new(num_nfa_states);
-        for &state in &post_order {
-            temp_set.clear();
-            temp_set.insert(state);
-            stack.push(state);
-
-            while let Some(current) = stack.pop() {
-                let start = compact_nfa.epsilon_offsets[current] as usize;
-                let end = compact_nfa.epsilon_offsets[current + 1] as usize;
-                for index in start..end {
-                    let next = compact_nfa.epsilon_targets[index] as usize;
-                    if temp_set.insert(next) {
-                        if let Some(ref closure) = high_degree_closures[next] {
-                            temp_set.insert_many(closure);
-                        } else if out_degree[next] > 0 {
-                            stack.push(next);
-                        }
-                    }
-                }
-            }
-
-            high_degree_closures[state] = Some(sparse_to_sorted_vec(&temp_set));
-        }
-
-        let mut start_closure = SparseStateSet::new(num_nfa_states);
-        start_closure.insert(self.start_state as usize);
-        if out_degree[self.start_state as usize] > 0 {
-            stack.push(self.start_state as usize);
-            while let Some(current) = stack.pop() {
-                let start = compact_nfa.epsilon_offsets[current] as usize;
-                let end = compact_nfa.epsilon_offsets[current + 1] as usize;
-                for index in start..end {
-                    let next = compact_nfa.epsilon_targets[index] as usize;
-                    if start_closure.insert(next) {
-                        if out_degree[next] > 0 {
-                            stack.push(next);
-                        }
-                    }
-                }
-            }
-        }
+        let high_degree_closures = precompute_epsilon_closures(&compact_nfa, &out_degree);
+        let start_closure = build_start_closure(
+            &compact_nfa,
+            self.start_state as usize,
+            &out_degree,
+        );
 
         let start_key = CompressedStateSet::from_sparse(&start_closure);
         let (start_finalizers, start_future) =
@@ -338,78 +461,23 @@ impl NFA {
         while let Some(current_set) = worklist.pop() {
             let current_dfa_state = subset_map[&current_set];
 
-            for state in current_set.iter() {
-                for (class_set, next_state) in &remapped_transitions[state] {
-                    for class_id in class_set.iter() {
-                        let idx = class_id as usize;
-                        if !seen_class[idx] {
-                            seen_class[idx] = true;
-                            used_classes.push(idx);
-                        }
-                        transition_targets[idx].insert(*next_state as usize);
-                    }
-                }
-            }
+            collect_transition_targets(
+                &current_set,
+                &remapped_transitions,
+                &mut transition_targets,
+                &mut used_classes,
+                &mut seen_class,
+            );
 
             let mut dfa_transitions_vec = Vec::with_capacity(used_classes.len() * 2);
             for &class_id in &used_classes {
                 let target_set = &transition_targets[class_id];
 
-                let mut fast_singleton_state = None;
-                if target_set.dirty_words.len() == 1 {
-                    let word_idx = target_set.dirty_words[0];
-                    let word = target_set.words[word_idx];
-                    if word != 0 && (word & (word - 1)) == 0 {
-                        let bit = word.trailing_zeros() as usize;
-                        let state = word_idx * 64 + bit;
-                        if out_degree[state] == 0 && high_degree_closures[state].is_none() {
-                            fast_singleton_state = Some(state);
-                        }
-                    }
-                }
-
-                if fast_singleton_state.is_none() {
-                    closure_set.clear();
-                    let mut needs_bfs = false;
-
-                    for &word_idx in &target_set.dirty_words {
-                        let mut word = target_set.words[word_idx];
-                        while word != 0 {
-                            let bit = word.trailing_zeros() as usize;
-                            word &= !(1u64 << bit);
-                            let next_state = word_idx * 64 + bit;
-
-                            if let Some(ref closure) = high_degree_closures[next_state] {
-                                closure_set.insert_many(closure);
-                            } else {
-                                closure_set.insert(next_state);
-                                if out_degree[next_state] > 0 {
-                                    needs_bfs = true;
-                                    stack.push(next_state);
-                                }
-                            }
-                        }
-                    }
-
-                    if needs_bfs {
-                        while let Some(current) = stack.pop() {
-                            let start = compact_nfa.epsilon_offsets[current] as usize;
-                            let end = compact_nfa.epsilon_offsets[current + 1] as usize;
-                            for index in start..end {
-                                let next = compact_nfa.epsilon_targets[index] as usize;
-                                if closure_set.insert(next) {
-                                    if let Some(ref closure) = high_degree_closures[next] {
-                                        closure_set.insert_many(closure);
-                                    } else if out_degree[next] > 0 {
-                                        stack.push(next);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if let Some(state) = fast_singleton_state {
+                if let Some(state) = fast_singleton_without_epsilon(
+                    target_set,
+                    &out_degree,
+                    &high_degree_closures,
+                ) {
                     scratch_closure.words.clear();
                     let word_idx = (state >> 6) as u32;
                     let mask = 1u64 << (state & 0x3f);
@@ -417,6 +485,14 @@ impl NFA {
                     scratch_closure.hash = (word_idx as u64).wrapping_mul(0x517c_c1b7_2722_0a95)
                         ^ mask.wrapping_mul(0x9e37_79b9_7f4a_7c15);
                 } else {
+                    expand_transition_closure(
+                        target_set,
+                        &compact_nfa,
+                        &out_degree,
+                        &high_degree_closures,
+                        &mut closure_set,
+                        &mut epsilon_stack,
+                    );
                     CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
                 }
 

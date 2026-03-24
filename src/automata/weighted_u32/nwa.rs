@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ds::weight::Weight;
 
@@ -31,6 +31,14 @@ impl NwaBody {
 }
 
 impl NWA {
+    fn prune_empty_outgoing(state: &mut NWAState) {
+        state.epsilons.retain(|(_, weight)| !weight.is_empty());
+        for targets in state.transitions.values_mut() {
+            targets.retain(|(_, weight)| !weight.is_empty());
+        }
+        state.transitions.retain(|_, targets| !targets.is_empty());
+    }
+
     pub fn new(_num_tsids: u32, _max_token: u32) -> Self {
         Self {
             states: Vec::new(),
@@ -88,12 +96,7 @@ impl NWA {
                     *w = w.difference(&final_weight);
                 }
             }
-            // Remove empty transitions
-            state.epsilons.retain(|(_, w)| !w.is_empty());
-            for targets in state.transitions.values_mut() {
-                targets.retain(|(_, w)| !w.is_empty());
-            }
-            state.transitions.retain(|_, targets| !targets.is_empty());
+            Self::prune_empty_outgoing(state);
         }
     }
 
@@ -197,22 +200,25 @@ impl NWA {
     }
 
     pub fn is_acyclic(&self) -> bool {
+        fn for_each_successor(state: &NWAState, mut visit: impl FnMut(u32)) {
+            for (target, _) in state.transitions.values().flatten() {
+                visit(*target);
+            }
+            for (target, _) in &state.epsilons {
+                visit(*target);
+            }
+        }
+
         let num_states = self.states.len();
 
         for (state_id, state) in self.states.iter().enumerate() {
-            if state
-                .transitions
-                .values()
-                .flatten()
-                .any(|(target, _)| *target as usize == state_id)
-            {
-                return false;
-            }
-            if state
-                .epsilons
-                .iter()
-                .any(|(target, _)| *target as usize == state_id)
-            {
+            let mut has_self_loop = false;
+            for_each_successor(state, |target| {
+                if target as usize == state_id {
+                    has_self_loop = true;
+                }
+            });
+            if has_self_loop {
                 return false;
             }
         }
@@ -220,36 +226,29 @@ impl NWA {
         fn visit(state_id: usize, states: &[NWAState], colors: &mut [u8]) -> bool {
             colors[state_id] = 1;
 
-            for (target, _) in states[state_id].transitions.values().flatten() {
-                let target = *target as usize;
-                if target >= colors.len() {
-                    continue;
+            let mut acyclic = true;
+            for_each_successor(&states[state_id], |target| {
+                if !acyclic {
+                    return;
                 }
-                match colors[target] {
-                    1 => return false,
-                    0 => {
-                        if !visit(target, states, colors) {
-                            return false;
-                        }
-                    }
-                    _ => {}
-                }
-            }
 
-            for (target, _) in &states[state_id].epsilons {
-                let target = *target as usize;
+                let target = target as usize;
                 if target >= colors.len() {
-                    continue;
+                    return;
                 }
                 match colors[target] {
-                    1 => return false,
+                    1 => acyclic = false,
                     0 => {
                         if !visit(target, states, colors) {
-                            return false;
+                            acyclic = false;
                         }
                     }
                     _ => {}
                 }
+            });
+
+            if !acyclic {
+                return false;
             }
 
             colors[state_id] = 2;
@@ -272,7 +271,7 @@ fn fmt_nwa_states(
     label_fn: &dyn Fn(Label) -> String,
     weight_fn: &dyn Fn(&Weight) -> String,
 ) -> std::fmt::Result {
-    let start_set: std::collections::BTreeSet<u32> = nwa.start_states.iter().copied().collect();
+    let start_set: BTreeSet<u32> = nwa.start_states.iter().copied().collect();
 
     for (i, st) in nwa.states.iter().enumerate() {
         if st.transitions.is_empty() && st.epsilons.is_empty() && st.final_weight.is_none() {

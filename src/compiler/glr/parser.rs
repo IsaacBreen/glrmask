@@ -66,6 +66,21 @@ fn dedup_stacks(stacks: impl IntoIterator<Item = Vec<u32>>) -> Vec<Vec<u32>> {
     out
 }
 
+fn shift_target(action: Option<&Action>) -> Option<u32> {
+    match action {
+        Some(Action::Shift(target)) => Some(*target),
+        Some(Action::Split {
+            shift: Some(target),
+            ..
+        }) => Some(*target),
+        _ => None,
+    }
+}
+
+fn stack_vectors(stack: &ParserGSS) -> Vec<Vec<u32>> {
+    stack.to_stacks().into_iter().map(|(stack, _)| stack).collect()
+}
+
 fn reduce_closure_for_lookahead(
     table: &GLRTable,
     stacks: &[Vec<u32>],
@@ -127,18 +142,10 @@ fn advance_stack_vectors(
         let Some(&state) = stack.last() else {
             continue;
         };
-        match table.action(state, token) {
-            Some(Action::Shift(target)) => {
-                let mut shifted = stack.clone();
-                shifted.push(*target);
-                next.push(shifted);
-            }
-            Some(Action::Split { shift: Some(target), .. }) => {
-                let mut shifted = stack.clone();
-                shifted.push(*target);
-                next.push(shifted);
-            }
-            _ => {}
+        if let Some(target) = shift_target(table.action(state, token)) {
+            let mut shifted = stack.clone();
+            shifted.push(target);
+            next.push(shifted);
         }
     }
     dedup_stacks(next)
@@ -304,12 +311,7 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
 
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
     let mut handle_shift_state = |state: u32| {
-        let shift_target = match table.action(state, token) {
-            Some(Action::Shift(target)) => Some(*target),
-            Some(Action::Split { shift: Some(target), .. }) => Some(*target),
-            _ => None,
-        };
-        if let Some(target) = shift_target {
+        if let Some(target) = shift_target(table.action(state, token)) {
             shift_pairs.push((state, target));
         }
     };
@@ -364,14 +366,12 @@ pub(crate) fn stack_may_advance_on_any(
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
-    let stacks: Vec<Vec<u32>> = stack.to_stacks().into_iter().map(|(stack, _)| stack).collect();
-    stacks_accept(table, &stacks)
+    stacks_accept(table, &stack_vectors(stack))
 }
 
 #[cfg(test)]
 pub(crate) fn valid_terminals_for_stacks(table: &GLRTable, stack: &ParserGSS) -> Vec<TerminalID> {
-    let stacks: Vec<Vec<u32>> = stack.to_stacks().into_iter().map(|(stack, _)| stack).collect();
-    valid_terminals_for_stack_vectors(table, &stacks)
+    valid_terminals_for_stack_vectors(table, &stack_vectors(stack))
 }
 
 #[cfg(test)]
