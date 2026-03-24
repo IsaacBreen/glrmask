@@ -914,7 +914,7 @@ fn test_dotted_required_property_name_restricts_token_vocab_prefix() {
 }
 
 #[test]
-fn test_required_only_untyped_object_allows_extra_keys_but_not_early_closure() {
+fn test_required_only_untyped_object_delays_extra_keys_until_required_keys_are_satisfied() {
     let schema = r#"{
         "type": "array",
         "items": {
@@ -930,8 +930,18 @@ fn test_required_only_untyped_object_allows_extra_keys_but_not_early_closure() {
     let key_mask = key_state.mask();
     assert_token_allowed(
         &key_mask,
+        b'h' as usize,
+        "the required host key should remain available at object start",
+    );
+    assert_token_allowed(
+        &key_mask,
+        b'p' as usize,
+        "the required port key should remain available at object start",
+    );
+    assert_token_disallowed(
+        &key_mask,
         b'!' as usize,
-        "free-form object keys should remain allowed before required keys are satisfied",
+        "free-form object keys should be delayed until the required keys are satisfied",
     );
 
     let mut value_state = c.start();
@@ -941,6 +951,15 @@ fn test_required_only_untyped_object_allows_extra_keys_but_not_early_closure() {
         &value_mask,
         b'}' as usize,
         "object closure should remain invalid until the required port key appears",
+    );
+
+    let mut extra_key_state = c.start();
+    advance_byte_prefix(&mut extra_key_state, b"[{\"host\": \"\", \"port\": 1, \"");
+    let extra_key_mask = extra_key_state.mask();
+    assert_token_allowed(
+        &extra_key_mask,
+        b'!' as usize,
+        "free-form object keys should become available once all required keys are satisfied",
     );
 }
 

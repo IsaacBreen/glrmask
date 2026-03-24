@@ -2739,6 +2739,46 @@ impl SchemaCtx {
         ])
     }
 
+    fn build_object_pair_tail(
+        &mut self,
+        base_name: &str,
+        suffix: &str,
+        pair_exprs: Vec<GrammarExpr>,
+        next_nc: GrammarExpr,
+        next_c: GrammarExpr,
+    ) -> (String, String) {
+        let nc_name = format!("{base_name}_{suffix}_nc");
+        let c_name = format!("{base_name}_{suffix}_c");
+
+        if pair_exprs.is_empty() {
+            self.insert_rule(nc_name.clone(), next_nc);
+            self.insert_rule(c_name.clone(), next_c);
+            return (nc_name, c_name);
+        }
+
+        let pair_expr = choice_or_single(pair_exprs);
+        self.insert_rule(
+            nc_name.clone(),
+            choice_or_single(vec![
+                sequence_or_single(vec![pair_expr.clone(), GrammarExpr::Ref(c_name.clone())]),
+                next_nc,
+            ]),
+        );
+        self.insert_rule(
+            c_name.clone(),
+            choice_or_single(vec![
+                sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    pair_expr,
+                    GrammarExpr::Ref(c_name.clone()),
+                ]),
+                next_c,
+            ]),
+        );
+
+        (nc_name, c_name)
+    }
+
     fn extract_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
         if Self::is_trivial_expr(&expr) {
             return expr;
@@ -3143,7 +3183,7 @@ impl SchemaCtx {
             }
         }
 
-        let extra_pair_expr = if let Some(schema) = additional_properties_schema {
+        let extra_tail = if let Some(schema) = additional_properties_schema {
             let extra_value_expr = self.convert_schema(&schema)?;
             let ck_prefix = format!("{}_CK", base_name.to_uppercase());
             let extra_key_expr = self.build_excluding_key_colon_expr(
@@ -3154,10 +3194,13 @@ impl SchemaCtx {
                     .collect(),
                 &format!("{ck_prefix}_KEY_COLON"),
             );
-            Some(sequence_or_single(vec![
-                extra_key_expr,
-                extra_value_expr,
-            ]))
+            Some(self.build_object_pair_tail(
+                &base_name,
+                "ap",
+                vec![sequence_or_single(vec![extra_key_expr, extra_value_expr])],
+                empty_expr(),
+                empty_expr(),
+            ))
         } else {
             None
         };
@@ -3192,21 +3235,14 @@ impl SchemaCtx {
                 ]));
             }
 
-            if let Some(extra_pair_expr) = extra_pair_expr.clone() {
-                nc_alts.push(sequence_or_single(vec![
-                    extra_pair_expr.clone(),
-                    GrammarExpr::Ref(c_name.clone()),
-                ]));
-                c_alts.push(sequence_or_single(vec![
-                    self.json_item_separator_expr(),
-                    extra_pair_expr,
-                    GrammarExpr::Ref(c_name.clone()),
-                ]));
-            }
-
             if mask.is_empty() {
-                nc_alts.push(empty_expr());
-                c_alts.push(empty_expr());
+                if let Some((extra_nc, extra_c)) = &extra_tail {
+                    nc_alts.push(GrammarExpr::Ref(extra_nc.clone()));
+                    c_alts.push(GrammarExpr::Ref(extra_c.clone()));
+                } else {
+                    nc_alts.push(empty_expr());
+                    c_alts.push(empty_expr());
+                }
             }
 
             self.insert_rule(nc_name, choice_or_single(nc_alts));
@@ -3505,7 +3541,7 @@ impl SchemaCtx {
             .map(|(pattern, _)| Self::pattern_key_colon_dfa(pattern))
             .collect::<Vec<_>>();
 
-        let mut free_pair_exprs = Vec::<GrammarExpr>::new();
+        let mut pattern_pair_exprs = Vec::<GrammarExpr>::new();
 
         if !pattern_properties.is_empty() {
             let mut subsets = Vec::<Vec<usize>>::new();
@@ -3566,10 +3602,11 @@ impl SchemaCtx {
                     Err(err) => return Err(err),
                 };
 
-                free_pair_exprs.push(sequence_or_single(vec![key_expr, value_expr]));
+                pattern_pair_exprs.push(sequence_or_single(vec![key_expr, value_expr]));
             }
         }
 
+        let mut additional_pair_exprs = Vec::<GrammarExpr>::new();
         if let Some(schema) = additional_properties_schema {
             let mut additional_key_dfa = base_key_colon_dfa.clone();
             if let Some(fixed_key_union_dfa) = &fixed_key_union_dfa {
@@ -3589,49 +3626,32 @@ impl SchemaCtx {
                 );
 
                 let additional_value_expr = self.convert_schema(&schema)?;
-                free_pair_exprs.push(sequence_or_single(vec![
+                additional_pair_exprs.push(sequence_or_single(vec![
                     additional_key_expr,
                     additional_value_expr,
                 ]));
             }
         }
 
-        let (term_nc, term_c) = if free_pair_exprs.is_empty() {
-            let term_nc = format!("{base_name}_ap_nc");
-            let term_c = format!("{base_name}_ap_c");
-            self.insert_rule(term_nc.clone(), empty_expr());
-            self.insert_rule(term_c.clone(), empty_expr());
-            (term_nc, term_c)
-        } else {
-            let pair_expr = choice_or_single(free_pair_exprs);
-
-            let term_nc = format!("{base_name}_ap_nc");
-            let term_c = format!("{base_name}_ap_c");
-            self.insert_rule(
-                term_nc.clone(),
-                choice_or_single(vec![
-                    sequence_or_single(vec![pair_expr.clone(), GrammarExpr::Ref(term_c.clone())]),
-                    empty_expr(),
-                ]),
-            );
-            self.insert_rule(
-                term_c.clone(),
-                choice_or_single(vec![
-                    sequence_or_single(vec![
-                        self.json_item_separator_expr(),
-                        pair_expr,
-                        GrammarExpr::Ref(term_c.clone()),
-                    ]),
-                    empty_expr(),
-                ]),
-            );
-            (term_nc, term_c)
-        };
+        let (additional_nc, additional_c) = self.build_object_pair_tail(
+            &base_name,
+            "ap",
+            additional_pair_exprs,
+            empty_expr(),
+            empty_expr(),
+        );
+        let (free_nc, free_c) = self.build_object_pair_tail(
+            &base_name,
+            "free",
+            pattern_pair_exprs,
+            GrammarExpr::Ref(additional_nc.clone()),
+            GrammarExpr::Ref(additional_c.clone()),
+        );
 
         if ordered.is_empty() {
             return Ok(sequence_or_single(vec![
                 literal_expr(b"{"),
-                GrammarExpr::Ref(term_nc),
+                GrammarExpr::Ref(free_nc),
                 literal_expr(b"}"),
             ]));
         }
@@ -3643,11 +3663,11 @@ impl SchemaCtx {
         let top_nc = format!("{base_name}_0_nc");
         let top_expr = if tree_can_be_empty {
             choice_or_single(vec![
-                sequence_or_single(vec![tree_expr, GrammarExpr::Ref(term_c.clone())]),
-                GrammarExpr::Ref(term_nc.clone()),
+                sequence_or_single(vec![tree_expr, GrammarExpr::Ref(free_c.clone())]),
+                GrammarExpr::Ref(free_nc.clone()),
             ])
         } else {
-            sequence_or_single(vec![tree_expr, GrammarExpr::Ref(term_c.clone())])
+            sequence_or_single(vec![tree_expr, GrammarExpr::Ref(free_c.clone())])
         };
         self.insert_rule(top_nc.clone(), top_expr);
 
@@ -3758,8 +3778,26 @@ impl SchemaCtx {
             ),
             unmatched_value_expr,
         ]);
-        let pair = choice_or_single(vec![matched_pair, unmatched_pair]);
-        Ok(self.build_repeated_object_pairs(pair))
+        let base_name = self.fresh_rule_name("obj_pat_mix");
+        let (additional_nc, additional_c) = self.build_object_pair_tail(
+            &base_name,
+            "ap",
+            vec![unmatched_pair],
+            empty_expr(),
+            empty_expr(),
+        );
+        let (matched_nc, _) = self.build_object_pair_tail(
+            &base_name,
+            "pp",
+            vec![matched_pair],
+            GrammarExpr::Ref(additional_nc),
+            GrammarExpr::Ref(additional_c),
+        );
+        Ok(sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(matched_nc),
+            literal_expr(b"}"),
+        ]))
     }
 
     fn build_array_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
