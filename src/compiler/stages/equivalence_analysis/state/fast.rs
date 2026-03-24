@@ -45,6 +45,111 @@ fn count_classes(mapping: &[usize]) -> usize {
     mapping.iter().copied().collect::<BTreeSet<_>>().len()
 }
 
+#[inline(always)]
+fn mix_tagged(hash: u128, tag: u128, value: u128) -> u128 {
+    mix_u128(hash ^ tag.wrapping_add(value.rotate_left(17)))
+}
+
+fn hash_future_groups(future_groups: &[usize]) -> u128 {
+    let mut hash = mix_u128(0xF0C7_F0C7_F0C7_F0C7 ^ future_groups.len() as u128);
+    for &gid in future_groups {
+        hash = mix_tagged(hash, 0x9E37_79B9_7F4A_7C15, gid as u128);
+    }
+    hash
+}
+
+fn hash_trellis_node_from_positions(
+    end_state: Option<usize>,
+    positions: &[i32],
+    token_len: usize,
+    suffix_hashes: &[u128],
+    future_group_hashes: &[u128],
+) -> u128 {
+    const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
+    const ACCEPT_SINK_HASH: u128 = 0xA11C_EA5E_A11C_EA5E;
+    const EDGE_COUNT_TAG: u128 = 0xEDEC_EDEC_EDEC_EDEC;
+    const EDGE_GID_TAG: u128 = 0xE001_E001_E001_E001;
+    const EDGE_POS_TAG: u128 = 0xE002_E002_E002_E002;
+    const EDGE_CHILD_TAG: u128 = 0xE003_E003_E003_E003;
+
+    let mut edge_count = 0usize;
+    let mut hash = match end_state {
+        Some(state) => mix_tagged(0x51A7_E000_0000_0001, 0xF070_F070_F070_F070, future_group_hashes[state]),
+        None => mix_u128(DEAD_NODE_TAG),
+    };
+
+    for (gid, &target_pos) in positions.iter().enumerate() {
+        if target_pos < 0 {
+            continue;
+        }
+        edge_count += 1;
+        let target_pos = target_pos as usize;
+        let child_hash = if target_pos >= token_len {
+            ACCEPT_SINK_HASH
+        } else {
+            suffix_hashes[target_pos]
+        };
+        hash = mix_tagged(hash, EDGE_GID_TAG, gid as u128);
+        hash = mix_tagged(hash, EDGE_POS_TAG, target_pos as u128);
+        hash = mix_tagged(hash, EDGE_CHILD_TAG, child_hash);
+    }
+
+    mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
+}
+
+fn build_start_state_suffix_hashes(
+    token: &[u8],
+    tokenizer_start: usize,
+    dfa_transitions: &[[u32; 256]],
+    dfa_finalizers: &[Vec<usize>],
+    dfa_future_groups: &[Vec<usize>],
+    future_group_hashes: &[u128],
+    num_groups: usize,
+) -> Vec<u128> {
+    let len = token.len();
+    let mut suffix_hashes = vec![0u128; len];
+    let mut positions = vec![-1i32; num_groups];
+
+    for pos in (0..len).rev() {
+        positions.fill(-1);
+
+        let mut current = tokenizer_start;
+        let mut done = dfa_future_groups[current].is_empty();
+
+        for (offset, &byte) in token[pos..].iter().enumerate() {
+            if done {
+                break;
+            }
+            let next = dfa_transitions[current][byte as usize];
+            if next == u32::MAX {
+                done = true;
+                break;
+            }
+            current = next as usize;
+            let absolute_pos = (pos + offset + 1) as i32;
+            for &gid in &dfa_finalizers[current] {
+                if gid < num_groups {
+                    positions[gid] = absolute_pos;
+                }
+            }
+            if dfa_future_groups[current].is_empty() {
+                done = true;
+            }
+        }
+
+        let end_state = (!done).then_some(current);
+        suffix_hashes[pos] = hash_trellis_node_from_positions(
+            end_state,
+            &positions,
+            len,
+            &suffix_hashes,
+            future_group_hashes,
+        );
+    }
+
+    suffix_hashes
+}
+
 /// Find state equivalence classes for a tokenizer.
 ///
 /// # Arguments
@@ -121,6 +226,14 @@ fn find_state_equivalence_classes_token_based(
         .iter()
         .map(|state| state.finalizers.iter().copied().collect())
         .collect();
+    let dfa_future_groups: Vec<Vec<usize>> = dfa.states
+        .iter()
+        .map(|state| state.possible_future_group_ids.iter().copied().collect())
+        .collect();
+    let future_group_hashes: Vec<u128> = dfa_future_groups
+        .iter()
+        .map(|future_groups| hash_future_groups(future_groups))
+        .collect();
 
     let mut max_gid: Option<usize> = None;
     for finals in &dfa_finalizers {
@@ -136,27 +249,6 @@ fn find_state_equivalence_classes_token_based(
     // We test tokens in batches, but only on states that haven't been uniquely
     // identified yet. Once a state is in a singleton group, it stays there.
 
-    // Precompute end state hashes
-    // CRITICAL: Must include the COUNT of possible futures in the hash!
-    // Otherwise sets like [0, 6] and [6] would hash the same because mix(0) = 0.
-    let end_state_hashes: Vec<u128> = dfa.states
-        .iter()
-        .map(|state| {
-            // Seed with the length to distinguish sets of different sizes
-            let futures = &state.possible_future_group_ids;
-            let mut h = mix_u128(futures.len() as u128 | (1u128 << 48));
-            // Add (not XOR!) each element's hash for commutativity and collision resistance
-            // NOTE: Match reference by NOT adding extra bits to gid
-            for &gid in futures {
-                h = h.wrapping_add(mix_u128(gid as u128));
-            }
-            // Flag to distinguish from dead state hash
-            h | (1u128 << 127)
-        })
-        .collect();
-
-    // Precomputed non-greedy flags for proper position tracking
-
     // Process tokens in lexicographic order and reuse prefix simulations per state.
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
     sorted_indices.sort_by(|&a, &b| tokens[a].cmp(&tokens[b]));
@@ -167,6 +259,21 @@ fn find_state_equivalence_classes_token_based(
         sorted_tokens.push(tokens[idx].as_slice());
         sorted_weights.push(mix_u128((idx + 1) as u128));
     }
+    let tokenizer_start = regex.initial_state_id();
+    let suffix_hashes_by_token: Vec<Vec<u128>> = sorted_tokens
+        .iter()
+        .map(|token| {
+            build_start_state_suffix_hashes(
+                token,
+                tokenizer_start,
+                &dfa_transitions,
+                &dfa_finalizers,
+                &dfa_future_groups,
+                &future_group_hashes,
+                num_groups,
+            )
+        })
+        .collect();
 
     let common_prefix_len = |a: &[u8], b: &[u8]| -> usize {
         let len = a.len().min(b.len());
@@ -213,16 +320,18 @@ fn find_state_equivalence_classes_token_based(
         first_byte_ranges[byte] = (start, idx);
     }
 
-    let dead_hash_depth1 = {
-        let structure = mix_u128(1_u128 ^ 0xDEAD_DEAD_DEAD_DEAD);
-        let end = mix_u128(0xDEADBEEF_u128);
-        end.wrapping_add(structure)
-    };
-
     let early_stop = std::env::var("STATE_EQUIV_EARLY_STOP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let batch_size = 5000usize;
+    let dead_positions = vec![-1i32; num_groups];
+    let fully_dead_token_hash = hash_trellis_node_from_positions(
+        None,
+        &dead_positions,
+        0,
+        &[],
+        &future_group_hashes,
+    );
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
     let mut next_group_ids: Vec<usize> = vec![0usize; states.len()];
@@ -258,7 +367,6 @@ fn find_state_equivalence_classes_token_based(
                 let mut hash_delta: u128 = 0;
                 let state_transitions = &dfa_transitions[state as usize];
 
-                let mut dead_weight_sum: u128 = 0;
                 let mut live_ranges: Vec<(usize, usize)> = Vec::new();
 
                 if empty_range.0 < empty_range.1 {
@@ -282,21 +390,15 @@ fn find_state_equivalence_classes_token_based(
 
                     if state_transitions[byte] == NONE_STATE {
                         let weight_sum = weight_prefix[end].wrapping_sub(weight_prefix[start]);
-                        dead_weight_sum = dead_weight_sum.wrapping_add(weight_sum);
+                        hash_delta = hash_delta.wrapping_add(
+                            fully_dead_token_hash.wrapping_mul(weight_sum),
+                        );
                     } else {
                         live_ranges.push((start, end));
                     }
                 }
 
-                if dead_weight_sum != 0 {
-                    hash_delta = hash_delta.wrapping_add(
-                        dead_hash_depth1.wrapping_mul(dead_weight_sum),
-                    );
-                }
-
                 let (state_stack, dead_depth_stack, depth_marks, positions, changes) = scratch;
-                let mut matches_len: usize;
-                let mut matches_hash_sum: u128;
 
                 for (range_start, range_end) in live_ranges {
                     if range_start >= range_end {
@@ -313,8 +415,6 @@ fn find_state_equivalence_classes_token_based(
                         positions.fill(-1);
                     }
                     changes.clear();
-                    matches_len = 0;
-                    matches_hash_sum = 0;
 
                     for token_idx in range_start..range_end {
                         let token = sorted_tokens[token_idx];
@@ -334,18 +434,9 @@ fn find_state_equivalence_classes_token_based(
                                 let (gid, prev_pos) = changes.pop().unwrap();
                                 let cur_pos = positions[gid];
                                 if cur_pos >= 0 {
-                                    let cur_pos_u = cur_pos as u32;
-                                    matches_hash_sum = matches_hash_sum.wrapping_sub(mix_u128(
-                                        (gid as u128) | ((cur_pos_u as u128) << 32),
-                                    ));
                                     if prev_pos < 0 {
-                                        matches_len -= 1;
                                         positions[gid] = -1;
                                     } else {
-                                        let prev_pos_u = prev_pos as u32;
-                                        matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
-                                            (gid as u128) | ((prev_pos_u as u128) << 32),
-                                        ));
                                         positions[gid] = prev_pos;
                                     }
                                 } else {
@@ -388,18 +479,8 @@ fn find_state_equivalence_classes_token_based(
                                         let prev = positions[gid];
                                         if prev != pos_i32 {
                                             if prev < 0 {
-                                                matches_len += 1;
-                                                matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
-                                                    (gid as u128) | ((position as u128) << 32),
-                                                ));
                                                 changes.push((gid, -1));
                                             } else {
-                                                matches_hash_sum = matches_hash_sum.wrapping_sub(mix_u128(
-                                                    (gid as u128) | ((prev as u128) << 32),
-                                                ));
-                                                matches_hash_sum = matches_hash_sum.wrapping_add(mix_u128(
-                                                    (gid as u128) | ((position as u128) << 32),
-                                                ));
                                                 changes.push((gid, prev));
                                             }
                                             positions[gid] = pos_i32;
@@ -412,19 +493,24 @@ fn find_state_equivalence_classes_token_based(
                             }
                         }
 
-                        let (structure_hash, end_hash) = if let Some(dead_depth) = dead_at_depth {
-                            (
-                                mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD),
-                                mix_u128(0xDEADBEEF_u128),
+                        let token_hash = if dead_at_depth.is_some() {
+                            hash_trellis_node_from_positions(
+                                None,
+                                positions,
+                                token.len(),
+                                &suffix_hashes_by_token[token_idx],
+                                &future_group_hashes,
                             )
                         } else {
-                            let sh = mix_u128(matches_len as u128 | (1u128 << 48))
-                                .wrapping_add(matches_hash_sum);
                             let current = *state_stack.last().unwrap();
-                            (sh, end_state_hashes[current as usize])
+                            hash_trellis_node_from_positions(
+                                Some(current as usize),
+                                positions,
+                                token.len(),
+                                &suffix_hashes_by_token[token_idx],
+                                &future_group_hashes,
+                            )
                         };
-
-                        let token_hash = end_hash.wrapping_add(structure_hash);
                         hash_delta = hash_delta.wrapping_add(
                             token_hash.wrapping_mul(sorted_weights[token_idx]),
                         );
