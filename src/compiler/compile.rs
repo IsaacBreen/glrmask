@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::build_regex;
@@ -21,6 +22,80 @@ use crate::compiler::stages::terminal_dwa::{
 };
 use crate::ds::bitset::BitSet;
 use crate::runtime::Constraint;
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn compile_profile_summary_enabled() -> bool {
+    env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
+}
+
+pub(crate) fn compile_profile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_PROFILE_COMPILE") || compile_profile_summary_enabled()
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CompilePhaseProfile {
+    pub(crate) prepare_ms: f64,
+    pub(crate) analyze_grammar_ms: f64,
+    pub(crate) glr_table_ms: f64,
+    pub(crate) disallowed_follows_ms: f64,
+    pub(crate) id_map_ms: f64,
+    pub(crate) terminal_dwa_ms: f64,
+    pub(crate) templates_ms: f64,
+    pub(crate) compact_ms: f64,
+    pub(crate) permute_possible_matches_ms: f64,
+    pub(crate) internal_token_bytes_ms: f64,
+    pub(crate) parser_dwa_ms: f64,
+    pub(crate) finalize_ms: f64,
+    pub(crate) compile_ms: f64,
+    pub(crate) total_ms: f64,
+}
+
+pub(crate) fn emit_compile_profile_summary(
+    source_kind: Option<&str>,
+    import_ms: Option<f64>,
+    profile: &CompilePhaseProfile,
+) {
+    if !compile_profile_summary_enabled() {
+        return;
+    }
+
+    let source = source_kind.unwrap_or("grammar");
+    let import_fragment = import_ms
+        .map(|ms| format!(" import_ms={ms:.3}"))
+        .unwrap_or_default();
+
+    eprintln!(
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} disallowed_follows_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} permute_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        source,
+        import_fragment,
+        profile.prepare_ms,
+        profile.analyze_grammar_ms,
+        profile.glr_table_ms,
+        profile.disallowed_follows_ms,
+        profile.id_map_ms,
+        profile.terminal_dwa_ms,
+        profile.templates_ms,
+        profile.compact_ms,
+        profile.permute_possible_matches_ms,
+        profile.internal_token_bytes_ms,
+        profile.parser_dwa_ms,
+        profile.finalize_ms,
+        profile.compile_ms,
+        profile.total_ms,
+    );
+}
 
 pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<u32, BitSet> {
     let ever_allowed = compute_ever_allowed_follows(grammar);
@@ -89,55 +164,89 @@ fn finalize_constraint(mut constraint: Constraint) -> Constraint {
     constraint
 }
 
-fn compile_prepared(prepared_grammar: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab) -> Constraint {
+fn compile_prepared_with_profile(
+    prepared_grammar: GrammarDef,
+    tokenizer: Tokenizer,
+    vocab: &Vocab,
+) -> (Constraint, CompilePhaseProfile) {
+    let compile_started_at = Instant::now();
+    let mut profile = CompilePhaseProfile::default();
+
+    let analyze_grammar_started_at = Instant::now();
     let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+    profile.analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
 
     #[cfg(debug_assertions)]
     if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
         panic!("[glrmask] grammar precondition violations:\n{}", message);
     }
 
+    let table_started_at = Instant::now();
     let table = GLRTable::build(&analyzed_grammar);
+    profile.glr_table_ms = elapsed_ms(table_started_at);
+
+    let disallowed_follows_started_at = Instant::now();
     let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
+    profile.disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
+
+    let id_map_started_at = Instant::now();
     let mut internal_ids =
         InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal);
+    profile.id_map_ms = elapsed_ms(id_map_started_at);
     let token_bytes = vocab.entries.clone();
 
-    let ((mut terminal_dwa, mut possible_matches), templates) = rayon::join(
+    let (((mut terminal_dwa, mut possible_matches), terminal_dwa_ms), (templates, templates_ms)) = rayon::join(
         || {
-            build_terminal_dwa_with_possible_matches(
+            let terminal_dwa_started_at = Instant::now();
+            let result = build_terminal_dwa_with_possible_matches(
                 &analyzed_grammar,
                 &tokenizer,
                 vocab,
                 &internal_ids,
                 prepared_grammar.ignore_terminal,
-            )
+            );
+            (result, elapsed_ms(terminal_dwa_started_at))
         },
         || {
+            let templates_started_at = Instant::now();
             let characterizations = characterize_terminals(&table, &analyzed_grammar);
-            Templates::from_characterizations(&characterizations)
+            let templates = Templates::from_characterizations(&characterizations);
+            (templates, elapsed_ms(templates_started_at))
         },
     );
+    profile.terminal_dwa_ms = terminal_dwa_ms;
+    profile.templates_ms = templates_ms;
 
+    let compact_started_at = Instant::now();
     let token_permutation = crate::compiler::stages::compact::compact_dwa_dimensions(
         &mut terminal_dwa,
         &mut internal_ids,
     )
     .token_perm;
+    profile.compact_ms = elapsed_ms(compact_started_at);
+
+    let permute_possible_matches_started_at = Instant::now();
     crate::compiler::possible_matches::permute_possible_matches_in_place(
         &mut possible_matches,
         &token_permutation,
     );
+    profile.permute_possible_matches_ms = elapsed_ms(permute_possible_matches_started_at);
 
+    let internal_token_bytes_started_at = Instant::now();
     let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
+    profile.internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
+
+    let parser_dwa_started_at = Instant::now();
     let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         &table,
         &analyzed_grammar,
         &terminal_dwa,
         templates,
     );
+    profile.parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
 
-    finalize_constraint(Constraint {
+    let finalize_started_at = Instant::now();
+    let constraint = finalize_constraint(Constraint {
         parser_dwa,
         table,
         tokenizer,
@@ -157,7 +266,15 @@ fn compile_prepared(prepared_grammar: GrammarDef, tokenizer: Tokenizer, vocab: &
         seed_terminal_dense: rustc_hash::FxHashMap::default(),
         seed_universe_dense: Box::new([]),
         dwa_fast_transitions: Vec::new(),
-    })
+    });
+    profile.finalize_ms = elapsed_ms(finalize_started_at);
+    profile.compile_ms = elapsed_ms(compile_started_at);
+
+    (constraint, profile)
+}
+
+fn compile_prepared(prepared_grammar: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab) -> Constraint {
+    compile_prepared_with_profile(prepared_grammar, tokenizer, vocab).0
 }
 
 #[cfg(test)]
@@ -167,8 +284,29 @@ pub(crate) fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 }
 
 pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
+    if compile_profile_enabled() {
+        let (constraint, profile) = compile_owned_profiled(grammar, vocab);
+        emit_compile_profile_summary(None, None, &profile);
+        return constraint;
+    }
+
     let (prepared_grammar, tokenizer) = prepare_owned_grammar_for_compile(grammar);
     compile_prepared(prepared_grammar, tokenizer, vocab)
+}
+
+pub(crate) fn compile_owned_profiled(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+) -> (Constraint, CompilePhaseProfile) {
+    let total_started_at = Instant::now();
+    let prepare_started_at = Instant::now();
+    let (prepared_grammar, tokenizer) = prepare_owned_grammar_for_compile(grammar);
+    let prepare_ms = elapsed_ms(prepare_started_at);
+
+    let (constraint, mut profile) = compile_prepared_with_profile(prepared_grammar, tokenizer, vocab);
+    profile.prepare_ms = prepare_ms;
+    profile.total_ms = elapsed_ms(total_started_at);
+    (constraint, profile)
 }
 
 #[cfg(test)]

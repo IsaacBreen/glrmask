@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
+use std::time::Instant;
 
 use crate::compiler::stages::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
@@ -120,6 +121,30 @@ static HASH_RANDOM_STATE: Lazy<RandomState> =
 #[inline]
 fn new_hasher() -> AHasher {
     HASH_RANDOM_STATE.build_hasher()
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn compile_profile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_PROFILE_COMPILE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
+}
+
+fn vocab_batch_size_override() -> Option<usize> {
+    std::env::var("GLRMASK_VOCAB_EQUIV_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
 }
 
 #[inline]
@@ -700,6 +725,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
+    let profile_compile = compile_profile_enabled();
     let dfa = build_dfa(tokenizer, disallowed_follows);
     let num_tokens = strings.len();
     let num_initial_states = initial_states.len();
@@ -711,15 +737,19 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     let num_groups = dfa.num_groups;
     // Use large batches now that dirty-group tracking avoids clearing every group slot.
     // Memory per thread is batch_size * num_groups * 4 bytes for match positions.
-    let batch_size = num_initial_states.min(5000);
+    let batch_size = vocab_batch_size_override()
+        .unwrap_or_else(|| num_initial_states.min(5000));
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
 
-    for batch_start in (0..num_initial_states).step_by(batch_size) {
+    for (batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
         if active_indices.is_empty() {
             break;
         }
+
+        let batch_started_at = Instant::now();
+        let active_before = active_indices.len();
         let batch_end = (batch_start + batch_size).min(num_initial_states);
         let batch = &initial_states[batch_start..batch_end];
         let active_sigs: Vec<(usize, u64)> = active_indices
@@ -763,11 +793,23 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             }
         }
         active_indices = new_active;
+
+        if profile_compile {
+            eprintln!(
+                "[glrmask/profile][vocab] batch={} states={} active_before={} active_after={} classes={} ms={:.3}",
+                batch_index,
+                batch.len(),
+                active_before,
+                active_indices.len(),
+                next_class_id,
+                elapsed_ms(batch_started_at),
+            );
+        }
     }
 
     let mut groups = vec![Vec::new(); next_class_id.max(1)];
-    for (ti, &cid) in partition.iter().enumerate() {
-        groups[cid].push(ti);
+    for (token_idx, &class_id) in partition.iter().enumerate() {
+        groups[class_id].push(token_idx);
     }
     groups.into_iter().filter(|group| !group.is_empty()).collect()
 }

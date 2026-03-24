@@ -9,6 +9,23 @@ use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
 use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis;
 use crate::ds::bitset::BitSet;
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn compile_profile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_PROFILE_COMPILE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
+}
+
+fn elapsed_ms(started_at: std::time::Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
+}
+
 fn adjust_disallowed_follows(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
@@ -116,12 +133,20 @@ fn analyze_equivalences_impl(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> InternalIdMap {
+    let profile_compile = compile_profile_enabled();
+    let total_started_at = std::time::Instant::now();
+
+    let adjust_started_at = std::time::Instant::now();
     let adjusted_disallowed = adjust_disallowed_follows(disallowed_follows, ignore_terminal);
     let effective_disallowed = adjusted_disallowed.as_ref().unwrap_or(disallowed_follows);
+    let adjust_ms = elapsed_ms(adjust_started_at);
 
+    let tokenizer_view_started_at = std::time::Instant::now();
     let tokenizer_view = TokenizerView::new(tokenizer);
+    let tokenizer_view_ms = elapsed_ms(tokenizer_view_started_at);
 
     // Extract vocab tokens as byte slices, ordered by token ID.
+    let vocab_extract_started_at = std::time::Instant::now();
     let max_token_id = vocab.max_token_id();
     let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
@@ -129,10 +154,14 @@ fn analyze_equivalences_impl(
         token_ids.push(tid);
         token_bytes.push(bytes.as_slice());
     }
+    let vocab_extract_ms = elapsed_ms(vocab_extract_started_at);
 
     // All DFA states as initial states
+    let initial_states_started_at = std::time::Instant::now();
     let initial_states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+    let initial_states_ms = elapsed_ms(initial_states_started_at);
 
+    let combined_started_at = std::time::Instant::now();
     let result = combined_equivalence_analysis::compute_combined_equivalence(
         &tokenizer_view,
         &token_bytes,
@@ -140,15 +169,35 @@ fn analyze_equivalences_impl(
         effective_disallowed,
         ignore_terminal,
     );
+    let combined_ms = elapsed_ms(combined_started_at);
 
+    let state_map_started_at = std::time::Instant::now();
     let num_dfa_states = tokenizer.num_states() as usize;
     let state_map = build_state_map(&result.state_classes, num_dfa_states);
+    let state_map_ms = elapsed_ms(state_map_started_at);
+
+    let vocab_map_started_at = std::time::Instant::now();
     let vocab_map = build_vocab_map(
         &result.vocab_classes,
         &token_bytes,
         &token_ids,
         max_token_id,
     );
+    let vocab_map_ms = elapsed_ms(vocab_map_started_at);
+
+    if profile_compile {
+        eprintln!(
+            "[glrmask/profile][id_map] adjust_disallowed_ms={:.3} tokenizer_view_ms={:.3} vocab_extract_ms={:.3} initial_states_ms={:.3} combined_equiv_ms={:.3} build_state_map_ms={:.3} build_vocab_map_ms={:.3} total_ms={:.3}",
+            adjust_ms,
+            tokenizer_view_ms,
+            vocab_extract_ms,
+            initial_states_ms,
+            combined_ms,
+            state_map_ms,
+            vocab_map_ms,
+            elapsed_ms(total_started_at),
+        );
+    }
 
     InternalIdMap {
         tokenizer_states: state_map,

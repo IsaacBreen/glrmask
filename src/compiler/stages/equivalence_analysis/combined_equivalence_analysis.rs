@@ -15,6 +15,7 @@ use super::vocab::slow::partition_is_at_least_as_fine;
 const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
 const SKIP_MAX_LENGTH_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV";
 const SKIP_TOKEN_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_TOKEN_STATE_EQUIV";
+const USE_SLOW_VOCAB_EQUIV_ENV: &str = "GLRMASK_USE_SLOW_VOCAB_EQUIV";
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -32,6 +33,14 @@ fn env_flag_enabled(name: &str) -> bool {
             !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
         })
         .unwrap_or(false)
+}
+
+fn compile_profile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_PROFILE_COMPILE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
+}
+
+fn elapsed_ms(started_at: std::time::Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
 }
 
 fn verify_state_partition_reference(
@@ -96,14 +105,19 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
 ) -> CombinedEquivalenceResult {
     let skip_max_length = env_flag_enabled(SKIP_MAX_LENGTH_STATE_EQUIV_ENV);
     let skip_token_state = env_flag_enabled(SKIP_TOKEN_STATE_EQUIV_ENV);
+    let profile_compile = compile_profile_enabled();
+    let combined_started_at = std::time::Instant::now();
 
+    let max_length_started_at = std::time::Instant::now();
     let pre_state_reps = if skip_max_length {
         initial_states.to_vec()
     } else {
         super::state::max_length::find_state_equivalence_classes(tokenizer, tokens, initial_states)
     };
+    let max_length_ms = elapsed_ms(max_length_started_at);
 
     let pre_reduced_states = collect_representative_states(&pre_state_reps);
+    let token_state_started_at = std::time::Instant::now();
     let representative_states = if skip_token_state {
         pre_state_reps
     } else {
@@ -122,6 +136,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             .map(|pre_rep| rep_to_final[pre_rep])
             .collect()
     };
+    let token_state_ms = elapsed_ms(token_state_started_at);
 
     let reduced_states = collect_representative_states(&representative_states);
     let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(
@@ -129,12 +144,23 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         &representative_states,
     );
 
-    let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
-        tokenizer,
-        tokens,
-        &reduced_states,
-        disallowed_follows,
-    );
+    let vocab_started_at = std::time::Instant::now();
+    let vocab_classes = if env_flag_enabled(USE_SLOW_VOCAB_EQUIV_ENV) {
+        super::vocab::slow::find_vocab_equivalence_classes_with_follow(
+            tokenizer,
+            tokens,
+            &reduced_states,
+            disallowed_follows,
+        )
+    } else {
+        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
+            tokenizer,
+            tokens,
+            &reduced_states,
+            disallowed_follows,
+        )
+    };
+    let vocab_ms = elapsed_ms(vocab_started_at);
 
     if env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV) {
         let reference = super::reference::find_equivalence_classes(
@@ -146,6 +172,21 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         );
         verify_state_partition_reference(&state_classes, &reference.state_classes);
         verify_vocab_partition_reference(&vocab_classes, &reference.vocab_classes);
+    }
+
+    if profile_compile {
+        eprintln!(
+            "[glrmask/profile][equiv] max_length_ms={:.3} pre_states={} pre_reduced_states={} token_state_ms={:.3} reduced_states={} vocab_ms={:.3} state_classes={} vocab_classes={} total_ms={:.3}",
+            max_length_ms,
+            initial_states.len(),
+            pre_reduced_states.len(),
+            token_state_ms,
+            reduced_states.len(),
+            vocab_ms,
+            state_classes.len(),
+            vocab_classes.len(),
+            elapsed_ms(combined_started_at),
+        );
     }
 
     CombinedEquivalenceResult {
