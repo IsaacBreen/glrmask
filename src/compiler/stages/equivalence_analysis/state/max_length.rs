@@ -90,7 +90,7 @@ fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
 }
 
 fn find_state_equivalence_classes_kstep(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     states: &[usize],
     k: usize,
 ) -> Vec<usize> {
@@ -98,7 +98,7 @@ fn find_state_equivalence_classes_kstep(
         return Vec::new();
     }
 
-    let dfa = regex.dfa();
+    let dfa = tokenizer.dfa();
     let mut outgoing_targets = Vec::with_capacity(dfa.states.len());
     let mut prev_hashes = Vec::with_capacity(dfa.states.len());
 
@@ -123,10 +123,10 @@ fn find_state_equivalence_classes_kstep(
 }
 
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
-    find_state_equivalence_classes_kstep(regex, states, max_len)
+    find_state_equivalence_classes_kstep(tokenizer, states, max_len)
 }

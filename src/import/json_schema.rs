@@ -1876,11 +1876,7 @@ impl SchemaCtx {
             return object.clone();
         };
         let mut merged = resolved.as_object().cloned().unwrap_or_default();
-        let siblings: Map<String, Value> = object
-            .iter()
-            .filter(|(key, _)| key.as_str() != "$ref")
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
+        let siblings = Self::schema_without_keys(object, &["$ref"]);
         if !siblings.is_empty() {
             merged = merge_two_schemas(&merged, &siblings);
         }
@@ -2033,16 +2029,6 @@ impl SchemaCtx {
                 return Ok(expr);
             }
 
-            if let Some(value) = object.get("const") {
-                return Ok(self.json_literal(value));
-            }
-
-            if let Some(values) = object.get("enum").and_then(Value::as_array) {
-                if !values.is_empty() {
-                    return Ok(choice_or_single(values.iter().map(|value| self.json_literal(value)).collect()));
-                }
-            }
-
             if let Some(expr) = self.convert_structural_branches(object, "anyOf")? {
                 return Ok(expr);
             }
@@ -2110,6 +2096,160 @@ impl SchemaCtx {
         }
 
         Ok(None)
+    }
+
+    fn string_value_satisfies_schema(
+        &self,
+        text: &str,
+        schema: &Map<String, Value>,
+    ) -> bool {
+        if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64) {
+            if text.chars().count() < min_length as usize {
+                return false;
+            }
+        }
+        if let Some(max_length) = schema.get("maxLength").and_then(Value::as_u64) {
+            if text.chars().count() > max_length as usize {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn object_value_satisfies_schema(
+        &self,
+        entries: &Map<String, Value>,
+        schema: &Map<String, Value>,
+    ) -> bool {
+        if let Some(min_properties) = schema.get("minProperties").and_then(Value::as_u64) {
+            if entries.len() < min_properties as usize {
+                return false;
+            }
+        }
+        if let Some(max_properties) = schema.get("maxProperties").and_then(Value::as_u64) {
+            if entries.len() > max_properties as usize {
+                return false;
+            }
+        }
+
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for key in required.iter().filter_map(Value::as_str) {
+                if !entries.contains_key(key) {
+                    return false;
+                }
+            }
+        }
+
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if let Some(properties) = properties {
+            for (key, subschema) in properties {
+                if let Some(item) = entries.get(key) {
+                    if !self.value_satisfies_schema(item, subschema) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        match schema.get("additionalProperties") {
+            Some(Value::Bool(false)) => {
+                if let Some(properties) = properties {
+                    if entries.keys().any(|key| !properties.contains_key(key)) {
+                        return false;
+                    }
+                }
+            }
+            Some(Value::Object(additional_schema)) => {
+                for (key, item) in entries {
+                    if properties.map(|props| props.contains_key(key)).unwrap_or(false) {
+                        continue;
+                    }
+                    if !self.value_satisfies_schema(item, &Value::Object(additional_schema.clone())) {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        true
+    }
+
+    fn array_value_satisfies_schema(
+        &self,
+        items: &[Value],
+        schema: &Map<String, Value>,
+    ) -> bool {
+        let (prefix_items, items_schema, min_items, max_items) =
+            self.normalize_array_keywords(schema);
+        if items.len() < min_items {
+            return false;
+        }
+        if max_items.map(|max| items.len() > max).unwrap_or(false) {
+            return false;
+        }
+
+        if !prefix_items.is_empty() {
+            for (index, subschema) in prefix_items.iter().enumerate() {
+                if let Some(item) = items.get(index) {
+                    if !self.value_satisfies_schema(item, subschema) {
+                        return false;
+                    }
+                }
+            }
+            if matches!(items_schema, Some(Value::Bool(false))) && items.len() > prefix_items.len() {
+                return false;
+            }
+            if let Some(item_schema) = items_schema.as_ref() {
+                for item in items.iter().skip(prefix_items.len()) {
+                    if !self.value_satisfies_schema(item, item_schema) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        if matches!(items_schema, Some(Value::Bool(false))) {
+            return items.is_empty();
+        }
+        if let Some(item_schema) = items_schema.as_ref() {
+            for item in items {
+                if !self.value_satisfies_schema(item, item_schema) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn numeric_value_satisfies_schema(
+        &self,
+        number: f64,
+        schema: &Map<String, Value>,
+    ) -> bool {
+        let (left, left_inclusive, right, right_inclusive) = normalize_numeric_bounds(schema);
+        if left
+            .map(|bound| number < bound || (!left_inclusive && number <= bound))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if right
+            .map(|bound| number > bound || (!right_inclusive && number >= bound))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if let Some(multiple_of) = schema.get("multipleOf").and_then(Value::as_f64) {
+            if multiple_of != 0.0 {
+                let quotient = number / multiple_of;
+                if (quotient - quotient.round()).abs() > 1e-9 {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn value_satisfies_schema(&self, value: &Value, schema: &Value) -> bool {
@@ -2188,135 +2328,26 @@ impl SchemaCtx {
         }
 
         if let Some(text) = value.as_str() {
-            if let Some(min_length) = object.get("minLength").and_then(Value::as_u64) {
-                if text.chars().count() < min_length as usize {
-                    return false;
-                }
-            }
-            if let Some(max_length) = object.get("maxLength").and_then(Value::as_u64) {
-                if text.chars().count() > max_length as usize {
-                    return false;
-                }
+            if !self.string_value_satisfies_schema(text, object) {
+                return false;
             }
         }
 
         if let Some(entries) = value.as_object() {
-            if let Some(min_properties) = object.get("minProperties").and_then(Value::as_u64) {
-                if entries.len() < min_properties as usize {
-                    return false;
-                }
-            }
-            if let Some(max_properties) = object.get("maxProperties").and_then(Value::as_u64) {
-                if entries.len() > max_properties as usize {
-                    return false;
-                }
-            }
-
-            if let Some(required) = object.get("required").and_then(Value::as_array) {
-                for key in required.iter().filter_map(Value::as_str) {
-                    if !entries.contains_key(key) {
-                        return false;
-                    }
-                }
-            }
-
-            let properties = object.get("properties").and_then(Value::as_object);
-            if let Some(properties) = properties {
-                for (key, subschema) in properties {
-                    if let Some(item) = entries.get(key) {
-                        if !self.value_satisfies_schema(item, subschema) {
-                            return false;
-                        }
-                    }
-                }
-            }
-
-            match object.get("additionalProperties") {
-                Some(Value::Bool(false)) => {
-                    if let Some(properties) = properties {
-                        if entries.keys().any(|key| !properties.contains_key(key)) {
-                            return false;
-                        }
-                    }
-                }
-                Some(Value::Object(schema)) => {
-                    for (key, item) in entries {
-                        if properties.map(|props| props.contains_key(key)).unwrap_or(false) {
-                            continue;
-                        }
-                        if !self.value_satisfies_schema(item, &Value::Object(schema.clone())) {
-                            return false;
-                        }
-                    }
-                }
-                _ => {}
+            if !self.object_value_satisfies_schema(entries, object) {
+                return false;
             }
         }
 
         if let Some(items) = value.as_array() {
-            let (prefix_items, items_schema, min_items, max_items) = self.normalize_array_keywords(object);
-            if items.len() < min_items {
+            if !self.array_value_satisfies_schema(items, object) {
                 return false;
-            }
-            if max_items.map(|max| items.len() > max).unwrap_or(false) {
-                return false;
-            }
-
-            if !prefix_items.is_empty() {
-                for (index, subschema) in prefix_items.iter().enumerate() {
-                    if let Some(item) = items.get(index) {
-                        if !self.value_satisfies_schema(item, subschema) {
-                            return false;
-                        }
-                    }
-                }
-                if matches!(items_schema, Some(Value::Bool(false))) && items.len() > prefix_items.len() {
-                    return false;
-                }
-                if let Some(item_schema) = items_schema.as_ref() {
-                    for item in items.iter().skip(prefix_items.len()) {
-                        if !self.value_satisfies_schema(item, item_schema) {
-                            return false;
-                        }
-                    }
-                }
-            } else if matches!(items_schema, Some(Value::Bool(false))) {
-                if !items.is_empty() {
-                    return false;
-                }
-            } else if let Some(item_schema) = items_schema.as_ref() {
-                for item in items {
-                    if !self.value_satisfies_schema(item, item_schema) {
-                        return false;
-                    }
-                }
             }
         }
 
         if let Some(number) = value.as_f64() {
-            if value.is_boolean() {
-                return true;
-            }
-            let (left, left_inclusive, right, right_inclusive) = normalize_numeric_bounds(object);
-            if left
-                .map(|bound| number < bound || (!left_inclusive && number <= bound))
-                .unwrap_or(false)
-            {
+            if !self.numeric_value_satisfies_schema(number, object) {
                 return false;
-            }
-            if right
-                .map(|bound| number > bound || (!right_inclusive && number >= bound))
-                .unwrap_or(false)
-            {
-                return false;
-            }
-            if let Some(multiple_of) = object.get("multipleOf").and_then(Value::as_f64) {
-                if multiple_of != 0.0 {
-                    let quotient = number / multiple_of;
-                    if (quotient - quotient.round()).abs() > 1e-9 {
-                        return false;
-                    }
-                }
             }
         }
 
@@ -2718,7 +2749,6 @@ impl SchemaCtx {
         GrammarExpr::Ref(rule_name)
     }
 
-
     fn schema_all_of(schemas: Vec<Value>) -> Value {
         match schemas.len() {
             0 => serde_json::json!({}),
@@ -2798,10 +2828,18 @@ impl SchemaCtx {
         dfa.states().iter().any(|state| !state.finalizers.is_empty())
     }
 
-    fn subtract_lexer_dfa(left: &LexerDfa, right: &LexerDfa) -> LexerDfa {
-        let start = (0u32, Some(0u32));
-        let mut state_ids = HashMap::<(u32, Option<u32>), usize>::new();
-        let mut worklist = VecDeque::<(u32, Option<u32>)>::new();
+    fn build_product_lexer_dfa<State, IsAccepting, Transitions>(
+        start: State,
+        mut is_accepting: IsAccepting,
+        mut transitions_for: Transitions,
+    ) -> LexerDfa
+    where
+        State: Copy + Eq + std::hash::Hash,
+        IsAccepting: FnMut(State) -> bool,
+        Transitions: FnMut(State) -> Vec<(u8, State)>,
+    {
+        let mut state_ids = HashMap::<State, usize>::new();
+        let mut worklist = VecDeque::<State>::new();
         let mut transitions = Vec::<Vec<(u8, u32)>>::new();
         let mut accepting = Vec::<bool>::new();
 
@@ -2810,24 +2848,18 @@ impl SchemaCtx {
         transitions.push(Vec::new());
         accepting.push(false);
 
-        while let Some((left_state_id, right_state_id)) = worklist.pop_front() {
-            let result_state_id = state_ids[&(left_state_id, right_state_id)];
-            let left_state = &left.states()[left_state_id as usize];
-            let right_accepting = right_state_id
-                .map(|state_id| !right.states()[state_id as usize].finalizers.is_empty())
-                .unwrap_or(false);
-            accepting[result_state_id] = !left_state.finalizers.is_empty() && !right_accepting;
+        while let Some(product_state) = worklist.pop_front() {
+            let result_state_id = state_ids[&product_state];
+            accepting[result_state_id] = is_accepting(product_state);
 
             let mut entries = Vec::new();
-            for (byte, &left_next) in left_state.transitions.iter() {
-                let right_next = right_state_id.and_then(|state_id| right.step(state_id, byte));
-                let next = (left_next, right_next);
-                let next_result_state_id = if let Some(&existing) = state_ids.get(&next) {
+            for (byte, next_state) in transitions_for(product_state) {
+                let next_result_state_id = if let Some(&existing) = state_ids.get(&next_state) {
                     existing
                 } else {
                     let new_state_id = state_ids.len();
-                    state_ids.insert(next, new_state_id);
-                    worklist.push_back(next);
+                    state_ids.insert(next_state, new_state_id);
+                    worklist.push_back(next_state);
                     transitions.push(Vec::new());
                     accepting.push(false);
                     new_state_id
@@ -2852,59 +2884,49 @@ impl SchemaCtx {
         dfa.minimize()
     }
 
+    fn subtract_lexer_dfa(left: &LexerDfa, right: &LexerDfa) -> LexerDfa {
+        Self::build_product_lexer_dfa(
+            (0u32, Some(0u32)),
+            |(left_state_id, right_state_id)| {
+                let left_accepting = !left.states()[left_state_id as usize].finalizers.is_empty();
+                let right_accepting = right_state_id
+                    .map(|state_id| !right.states()[state_id as usize].finalizers.is_empty())
+                    .unwrap_or(false);
+                left_accepting && !right_accepting
+            },
+            |(left_state_id, right_state_id)| {
+                left.states()[left_state_id as usize]
+                    .transitions
+                    .iter()
+                    .map(|(byte, &left_next)| {
+                        let right_next =
+                            right_state_id.and_then(|state_id| right.step(state_id, *byte));
+                        (*byte, (left_next, right_next))
+                    })
+                    .collect()
+            },
+        )
+    }
+
     fn intersect_lexer_dfa(left: &LexerDfa, right: &LexerDfa) -> LexerDfa {
-        let start = (0u32, 0u32);
-        let mut state_ids = HashMap::<(u32, u32), usize>::new();
-        let mut worklist = VecDeque::<(u32, u32)>::new();
-        let mut transitions = Vec::<Vec<(u8, u32)>>::new();
-        let mut accepting = Vec::<bool>::new();
-
-        state_ids.insert(start, 0);
-        worklist.push_back(start);
-        transitions.push(Vec::new());
-        accepting.push(false);
-
-        while let Some((left_state_id, right_state_id)) = worklist.pop_front() {
-            let result_state_id = state_ids[&(left_state_id, right_state_id)];
-            let left_state = &left.states()[left_state_id as usize];
-            let right_state = &right.states()[right_state_id as usize];
-            accepting[result_state_id] =
-                !left_state.finalizers.is_empty() && !right_state.finalizers.is_empty();
-
-            let mut entries = Vec::new();
-            for (byte, &left_next) in left_state.transitions.iter() {
-                let Some(right_next) = right.step(right_state_id, byte) else {
-                    continue;
-                };
-                let next = (left_next, right_next);
-                let next_result_state_id = if let Some(&existing) = state_ids.get(&next) {
-                    existing
-                } else {
-                    let new_state_id = state_ids.len();
-                    state_ids.insert(next, new_state_id);
-                    worklist.push_back(next);
-                    transitions.push(Vec::new());
-                    accepting.push(false);
-                    new_state_id
-                };
-                entries.push((byte, next_result_state_id as u32));
-            }
-            transitions[result_state_id] = entries;
-        }
-
-        let mut dfa = LexerDfa::new(transitions.len());
-        dfa.ensure_group_capacity(1);
-        for (state_id, entries) in transitions.into_iter().enumerate() {
-            dfa.set_transitions_from_sorted_entries(state_id as u32, entries);
-            let mut finalizers = BitSet::new(1);
-            if accepting[state_id] {
-                finalizers.set(0);
-            }
-            dfa.overwrite_state_metadata(state_id as u32, finalizers, BitSet::new(1));
-        }
-        let start_u8set = dfa.get_u8set(0);
-        dfa.set_group_u8set(0, start_u8set);
-        dfa.minimize()
+        Self::build_product_lexer_dfa(
+            (0u32, 0u32),
+            |(left_state_id, right_state_id)| {
+                !left.states()[left_state_id as usize].finalizers.is_empty()
+                    && !right.states()[right_state_id as usize].finalizers.is_empty()
+            },
+            |(left_state_id, right_state_id)| {
+                left.states()[left_state_id as usize]
+                    .transitions
+                    .iter()
+                    .filter_map(|(byte, &left_next)| {
+                        right
+                            .step(right_state_id, *byte)
+                            .map(|right_next| (*byte, (left_next, right_next)))
+                    })
+                    .collect()
+            },
+        )
     }
 
     fn build_lexer_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {

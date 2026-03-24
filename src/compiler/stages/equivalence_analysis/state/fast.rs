@@ -1,29 +1,17 @@
-//! State Equivalence Analysis
+//! State equivalence analysis for tokenizer DFAs.
 //!
-//! Determines which tokenizer states behave identically for all tokens in a vocabulary.
-//! States that are equivalent can be merged, reducing the workload for subsequent
-//! vocab equivalence analysis.
-//!
-//! The algorithm uses a two-stage pipeline:
-//! 1. max-length bounded path hashing to collapse obviously equivalent states.
-//! 2. Full token-based analysis on the reduced representative set.
-//!
-//! This avoids scanning the full vocabulary for every state and collapses long
-//! bounded-repeat chains efficiently.
+//! A max-length prepass collapses obviously equivalent states before a full
+//! token-based refinement on the surviving representatives.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(test)]
-use rayon::prelude::*;
 #[cfg(test)]
 use super::super::compat::TokenizerView;
+#[cfg(test)]
+use rayon::prelude::*;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
-
-// -----------------------------------------------------------------------------
-// Hashing Utilities (128-bit)
-// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[inline(always)]
@@ -43,7 +31,7 @@ fn mix_u128(mut x: u128) -> u128 {
 /// 2. Full token-based analysis only on the reduced set.
 ///
 /// # Arguments
-/// * `regex` - The tokenizer DFA
+/// * `tokenizer` - The tokenizer DFA
 /// * `tokens` - Vocabulary tokens to consider
 /// * `states` - List of state IDs to analyze
 ///
@@ -52,7 +40,7 @@ fn mix_u128(mut x: u128) -> u128 {
 /// States with the same representative are equivalent.
 #[cfg(test)]
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
@@ -60,23 +48,20 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
         return Vec::new();
     }
 
-    let pre_mapping = super::max_length::find_state_equivalence_classes(regex, tokens, states);
+    let pre_mapping = super::max_length::find_state_equivalence_classes(tokenizer, tokens, states);
 
     let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
 
     use std::collections::HashMap;
 
-    let mut rep_set: BTreeSet<usize> = BTreeSet::new();
-    for &rep in &pre_mapping {
-        rep_set.insert(rep);
-    }
-    let reduced_states: Vec<usize> = rep_set.into_iter().collect();
+    let reduced_states = collect_reduced_states(&pre_mapping);
 
     if reduced_states.len() == states.len() {
-        return find_state_equivalence_classes_token_based(regex, &owned_tokens, states);
+        return find_state_equivalence_classes_token_based(tokenizer, &owned_tokens, states);
     }
 
-    let reduced_mapping = find_state_equivalence_classes_token_based(regex, &owned_tokens, &reduced_states);
+    let reduced_mapping =
+        find_state_equivalence_classes_token_based(tokenizer, &owned_tokens, &reduced_states);
     let mut rep_to_final: HashMap<usize, usize> = HashMap::new();
     for (i, &rep_state) in reduced_states.iter().enumerate() {
         rep_to_final.insert(rep_state, reduced_mapping[i]);
@@ -91,14 +76,19 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
 }
 
 #[cfg(test)]
+fn collect_reduced_states(pre_mapping: &[usize]) -> Vec<usize> {
+    pre_mapping.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+#[cfg(test)]
 fn find_state_equivalence_classes_token_based(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
     use std::collections::HashMap;
 
-    let dfa = regex.dfa();
+    let dfa = tokenizer.dfa();
 
     // Keep the full token pass here; sampled state equivalence was unsound.
 
@@ -128,32 +118,24 @@ fn find_state_equivalence_classes_token_based(
     }
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
 
-    // =========================================================================
-    // PHASE 1: Token testing with early exit for singletons
-    // =========================================================================
     // We test tokens in batches, but only on states that haven't been uniquely
     // identified yet. Once a state is in a singleton group, it stays there.
 
     // Precompute end state hashes
-    // CRITICAL: Must include the COUNT of possible futures in the hash!
-    // Otherwise sets like [0, 6] and [6] would hash the same because mix(0) = 0.
+    // Include the number of possible futures so sets like [0, 6] and [6]
+    // do not collide when their element hashes sum to the same value.
     let end_state_hashes: Vec<u128> = dfa.states
         .iter()
         .map(|state| {
-            // Seed with the length to distinguish sets of different sizes
             let futures = &state.possible_future_group_ids;
             let mut h = mix_u128(futures.len() as u128 | (1u128 << 48));
-            // Add (not XOR!) each element's hash for commutativity and collision resistance
-            // NOTE: Match reference by NOT adding extra bits to gid
+            // Match the reference hash shape so the refinement stays comparable.
             for &gid in futures {
                 h = h.wrapping_add(mix_u128(gid as u128));
             }
-            // Flag to distinguish from dead state hash
             h | (1u128 << 127)
         })
         .collect();
-
-    // Precomputed non-greedy flags for proper position tracking
 
     // Process tokens in lexicographic order and reuse prefix simulations per state.
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
@@ -517,12 +499,15 @@ fn find_state_equivalence_classes_token_based(
 ///
 /// # Returns
 /// A set of equivalence classes, where each class is a set of state IDs.
-pub fn mapping_to_equivalence_classes(states: &[usize], mapping: &[usize]) -> StateEquivalenceResult {
-    let mut rep_to_class: std::collections::BTreeMap<usize, BTreeSet<usize>> = std::collections::BTreeMap::new();
-    
+pub fn mapping_to_equivalence_classes(
+    states: &[usize],
+    mapping: &[usize],
+) -> StateEquivalenceResult {
+    let mut rep_to_class: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+
     for (i, &rep) in mapping.iter().enumerate() {
         rep_to_class.entry(rep).or_default().insert(states[i]);
     }
-    
+
     rep_to_class.into_values().collect()
 }

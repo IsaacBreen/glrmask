@@ -131,7 +131,7 @@ impl<'a> Lexer<'a> {
     fn lex_ident(&mut self, first: u8) -> String {
         let mut ident = String::from(first as char);
         while let Some(byte) = self.peek() {
-            if (byte as char).is_ascii_alphanumeric() || byte == b'_' {
+            if is_ebnf_ident_continue(byte) {
                 ident.push(byte as char);
                 self.pos += 1;
             } else {
@@ -139,6 +139,27 @@ impl<'a> Lexer<'a> {
             }
         }
         ident
+    }
+
+    fn lex_separator(&mut self) {
+        if self.peek() == Some(b':') && self.input.get(self.pos + 1) == Some(&b'=') {
+            self.pos += 2;
+        } else if self.peek() == Some(b'=') {
+            self.pos += 1;
+        }
+    }
+
+    fn lex_literal_token(&mut self, quote: u8) -> Result<Token, GlrMaskError> {
+        Ok(Token::Literal(self.lex_string(quote)?))
+    }
+
+    fn lex_char_class_token(&mut self) -> Result<Token, GlrMaskError> {
+        let (def, negate) = self.lex_char_class()?;
+        Ok(Token::CharClass { def, negate })
+    }
+
+    fn lex_ident_token(&mut self, first: u8) -> Token {
+        Token::Ident(self.lex_ident(first))
     }
 
     fn tokenize(&mut self) -> Result<Vec<Token>, GlrMaskError> {
@@ -156,21 +177,12 @@ impl<'a> Lexer<'a> {
                 b'?' => tokens.push(Token::Question),
                 b'.' => tokens.push(Token::Dot),
                 b':' => {
-                    if self.peek() == Some(b':') && self.input.get(self.pos + 1) == Some(&b'=') {
-                        self.pos += 2;
-                    } else if self.peek() == Some(b'=') {
-                        self.pos += 1;
-                    }
+                    self.lex_separator();
                     tokens.push(Token::Separator);
                 }
-                b'"' | b'\'' => tokens.push(Token::Literal(self.lex_string(byte)?)),
-                b'[' => {
-                    let (def, negate) = self.lex_char_class()?;
-                    tokens.push(Token::CharClass { def, negate });
-                }
-                b if (b as char).is_ascii_alphabetic() || b == b'_' => {
-                    tokens.push(Token::Ident(self.lex_ident(b)));
-                }
+                b'"' | b'\'' => tokens.push(self.lex_literal_token(byte)?),
+                b'[' => tokens.push(self.lex_char_class_token()?),
+                b if is_ebnf_ident_start(b) => tokens.push(self.lex_ident_token(b)),
                 _ => {
                     return Err(GlrMaskError::GrammarParse(format!(
                         "unexpected character '{}'",
@@ -192,6 +204,14 @@ fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
     }
 }
 
+fn is_ebnf_ident_start(byte: u8) -> bool {
+    (byte as char).is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_ebnf_ident_continue(byte: u8) -> bool {
+    (byte as char).is_ascii_alphanumeric() || byte == b'_'
+}
+
 fn choice_or_single(mut options: Vec<GrammarExpr>) -> GrammarExpr {
     if options.len() == 1 {
         options.pop().unwrap()
@@ -205,6 +225,15 @@ fn sequence_or_single(mut items: Vec<GrammarExpr>) -> GrammarExpr {
         0 => GrammarExpr::Sequence(Vec::new()),
         1 => items.pop().unwrap(),
         _ => GrammarExpr::Sequence(items),
+    }
+}
+
+fn apply_postfix_operator(atom: GrammarExpr, token: Option<&Token>) -> GrammarExpr {
+    match token {
+        Some(Token::Question) => GrammarExpr::Optional(Box::new(atom)),
+        Some(Token::Star) => GrammarExpr::Repeat(Box::new(atom)),
+        Some(Token::Plus) => GrammarExpr::RepeatOne(Box::new(atom)),
+        _ => atom,
     }
 }
 
@@ -248,23 +277,35 @@ impl Parser {
         }
     }
 
+    fn parse_rule_name(&mut self) -> Result<String, GlrMaskError> {
+        match self.advance() {
+            Some(Token::Ident(name)) => Ok(name),
+            Some(token) => Err(GlrMaskError::GrammarParse(format!(
+                "expected rule name, found {:?}",
+                token
+            ))),
+            None => Err(GlrMaskError::GrammarParse(
+                "expected rule name, found end of input".into(),
+            )),
+        }
+    }
+
+    fn parse_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
+        let name = self.parse_rule_name()?;
+        self.expect(&Token::Separator)?;
+        let expr = self.parse_alternatives()?;
+        Ok(NamedRule {
+            name,
+            expr,
+            is_terminal: false,
+        })
+    }
+
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
         self.skip_newlines();
         let mut rules = Vec::new();
         while self.peek().is_some() {
-            let name = match self.advance() {
-                Some(Token::Ident(name)) => name,
-                Some(token) => {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "expected rule name, found {:?}",
-                        token
-                    )));
-                }
-                None => break,
-            };
-            self.expect(&Token::Separator)?;
-            let expr = self.parse_alternatives()?;
-            rules.push(NamedRule { name, expr, is_terminal: false });
+            rules.push(self.parse_rule()?);
             self.skip_newlines();
         }
 
@@ -305,21 +346,20 @@ impl Parser {
 
     fn parse_unit(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         let atom = self.parse_atom()?;
-        Ok(match self.peek() {
-            Some(Token::Question) => {
-                self.advance();
-                GrammarExpr::Optional(Box::new(atom))
-            }
-            Some(Token::Star) => {
-                self.advance();
-                GrammarExpr::Repeat(Box::new(atom))
-            }
-            Some(Token::Plus) => {
-                self.advance();
-                GrammarExpr::RepeatOne(Box::new(atom))
-            }
-            _ => atom,
-        })
+        let quantifier = self.peek().cloned();
+        if matches!(
+            quantifier,
+            Some(Token::Question) | Some(Token::Star) | Some(Token::Plus)
+        ) {
+            self.advance();
+        }
+        Ok(apply_postfix_operator(atom, quantifier.as_ref()))
+    }
+
+    fn parse_group(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+        let expr = self.parse_alternatives()?;
+        self.expect(&Token::RParen)?;
+        Ok(expr)
     }
 
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
@@ -328,11 +368,7 @@ impl Parser {
             Some(Token::Literal(literal)) => Ok(GrammarExpr::Literal(literal.into_bytes())),
             Some(Token::CharClass { def, negate }) => Ok(GrammarExpr::CharClass { def, negate, utf8: true }),
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
-            Some(Token::LParen) => {
-                let expr = self.parse_alternatives()?;
-                self.expect(&Token::RParen)?;
-                Ok(expr)
-            }
+            Some(Token::LParen) => self.parse_group(),
             Some(token) => Err(GlrMaskError::GrammarParse(format!(
                 "unexpected token {:?}",
                 token

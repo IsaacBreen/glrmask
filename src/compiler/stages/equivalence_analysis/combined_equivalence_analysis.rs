@@ -1,15 +1,7 @@
-//! Combined Equivalence Analysis
+//! Combined state and vocab equivalence analysis.
 //!
-//! This module orchestrates both state equivalence analysis and vocab equivalence
-//! analysis in an efficient manner:
-//!
-//! 1. First, applies state equivalence analysis to reduce the number of unique
-//!    tokenizer states that need to be considered.
-//!
-//! 2. Then, performs vocab equivalence analysis on the reduced state set.
-//!
-//! This combined approach significantly improves performance for grammars with
-//! large DFAs by reducing the workload of the expensive vocab analysis.
+//! State representatives are computed first, then vocab equivalence runs only
+//! on the surviving representative set.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,6 +45,10 @@ fn verify_state_partition_reference(
     );
 }
 
+fn collect_representative_states(states: &[usize]) -> Vec<usize> {
+    states.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
+}
+
 /// Compute combined state and vocab equivalence analysis.
 ///
 /// This function:
@@ -60,14 +56,14 @@ fn verify_state_partition_reference(
 /// 2. Runs vocab equivalence analysis only on representative states
 ///
 /// # Arguments
-/// * `regex` - The tokenizer DFA
+/// * `tokenizer` - The tokenizer DFA
 /// * `tokens` - Vocabulary tokens to analyze
 /// * `initial_states` - Initial tokenizer state IDs to consider
 ///
 /// # Returns
 /// Combined result containing vocab classes and state classes.
 pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
-    regex: &TokenizerView,
+    tokenizer: &TokenizerView,
     tokens: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -77,20 +73,15 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     // follow-constrained schema surface exercised by the publication tests.
     // Keep the identity partition for now so vocab equivalence runs over the
     // full state set without collapsing distinguishable tokenizer states.
-    let state_reps: Vec<usize> = initial_states.to_vec();
+    let representative_states = initial_states.to_vec();
+    let reduced_states = collect_representative_states(&representative_states);
+    let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(
+        initial_states,
+        &representative_states,
+    );
 
-    let mut rep_set: BTreeSet<usize> = BTreeSet::new();
-    for &rep in &state_reps {
-        rep_set.insert(rep);
-    }
-
-    let reduced_states: Vec<usize> = rep_set.into_iter().collect();
-    let state_classes =
-        state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
-
-    // Step 2: Vocab equivalence analysis on reduced states
     let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
-        regex,
+        tokenizer,
         tokens,
         &reduced_states,
         disallowed_follows,

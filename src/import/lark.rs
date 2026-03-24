@@ -364,6 +364,122 @@ fn is_lark_terminal_name(name: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
 }
 
+fn lark_start_rule_name(rules: &[NamedRule]) -> String {
+    if rules.iter().any(|rule| rule.name == "start") {
+        "start".to_string()
+    } else {
+        rules[0].name.clone()
+    }
+}
+
+fn mark_lark_terminal_rules(rules: &mut [NamedRule]) {
+    for rule in rules {
+        rule.is_terminal = is_lark_terminal_name(&rule.name);
+    }
+}
+
+fn synthesize_lark_ignore_rule(
+    rules: &mut Vec<NamedRule>,
+    ignore_exprs: Vec<GrammarExpr>,
+) -> Option<String> {
+    if ignore_exprs.is_empty() {
+        return None;
+    }
+
+    let ignore_name = "__IGNORE".to_string();
+    rules.push(NamedRule {
+        name: ignore_name.clone(),
+        expr: choice_or_single(ignore_exprs),
+        is_terminal: true,
+    });
+    Some(ignore_name)
+}
+
+fn expand_lark_expr_list(
+    exprs: &[GrammarExpr],
+    in_terminal_rule: bool,
+    rule_map: &HashMap<String, GrammarExpr>,
+    terminal_names: &HashSet<String>,
+    parser_names: &HashSet<String>,
+    memo: &mut HashMap<String, GrammarExpr>,
+    visiting: &mut HashSet<String>,
+) -> Result<Vec<GrammarExpr>, GlrMaskError> {
+    exprs
+        .iter()
+        .map(|expr| {
+            expand_lark_expr(
+                expr,
+                in_terminal_rule,
+                rule_map,
+                terminal_names,
+                parser_names,
+                memo,
+                visiting,
+            )
+        })
+        .collect()
+}
+
+fn expand_lark_boxed_expr(
+    expr: &GrammarExpr,
+    in_terminal_rule: bool,
+    rule_map: &HashMap<String, GrammarExpr>,
+    terminal_names: &HashSet<String>,
+    parser_names: &HashSet<String>,
+    memo: &mut HashMap<String, GrammarExpr>,
+    visiting: &mut HashSet<String>,
+) -> Result<Box<GrammarExpr>, GlrMaskError> {
+    Ok(Box::new(expand_lark_expr(
+        expr,
+        in_terminal_rule,
+        rule_map,
+        terminal_names,
+        parser_names,
+        memo,
+        visiting,
+    )?))
+}
+
+fn validate_lark_terminal_refs(
+    expr: &GrammarExpr,
+    rule_name: &str,
+    terminal_names: &HashSet<String>,
+    rule_map: &HashMap<String, GrammarExpr>,
+) -> Result<(), GlrMaskError> {
+    match expr {
+        GrammarExpr::Ref(target) => {
+            if !rule_map.contains_key(target) {
+                return Err(GlrMaskError::GrammarParse(format!(
+                    "terminal rule {rule_name} references undefined rule {target}"
+                )));
+            }
+            if !terminal_names.contains(target) {
+                return Err(GlrMaskError::GrammarParse(format!(
+                    "terminal rule {rule_name} references nonterminal {target}"
+                )));
+            }
+            Ok(())
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            for part in parts {
+                validate_lark_terminal_refs(part, rule_name, terminal_names, rule_map)?;
+            }
+            Ok(())
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            validate_lark_terminal_refs(expr, rule_name, terminal_names, rule_map)?;
+            validate_lark_terminal_refs(exclude, rule_name, terminal_names, rule_map)
+        }
+        GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => {
+            validate_lark_terminal_refs(inner, rule_name, terminal_names, rule_map)
+        }
+        _ => Ok(()),
+    }
+}
+
 fn expand_lark_terminal_rule(
     name: &str,
     rule_map: &HashMap<String, GrammarExpr>,
@@ -431,40 +547,26 @@ fn expand_lark_expr(
                 )));
             }
         }
-        GrammarExpr::Sequence(parts) => GrammarExpr::Sequence(
-            parts
-                .iter()
-                .map(|part| {
-                    expand_lark_expr(
-                        part,
-                        in_terminal_rule,
-                        rule_map,
-                        terminal_names,
-                        parser_names,
-                        memo,
-                        visiting,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        GrammarExpr::Choice(options) => GrammarExpr::Choice(
-            options
-                .iter()
-                .map(|option| {
-                    expand_lark_expr(
-                        option,
-                        in_terminal_rule,
-                        rule_map,
-                        terminal_names,
-                        parser_names,
-                        memo,
-                        visiting,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
+        GrammarExpr::Sequence(parts) => GrammarExpr::Sequence(expand_lark_expr_list(
+            parts,
+            in_terminal_rule,
+            rule_map,
+            terminal_names,
+            parser_names,
+            memo,
+            visiting,
+        )?),
+        GrammarExpr::Choice(options) => GrammarExpr::Choice(expand_lark_expr_list(
+            options,
+            in_terminal_rule,
+            rule_map,
+            terminal_names,
+            parser_names,
+            memo,
+            visiting,
+        )?),
         GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
-            expr: Box::new(expand_lark_expr(
+            expr: expand_lark_boxed_expr(
                 expr,
                 in_terminal_rule,
                 rule_map,
@@ -472,8 +574,8 @@ fn expand_lark_expr(
                 parser_names,
                 memo,
                 visiting,
-            )?),
-            exclude: Box::new(expand_lark_expr(
+            )?,
+            exclude: expand_lark_boxed_expr(
                 exclude,
                 in_terminal_rule,
                 rule_map,
@@ -481,9 +583,9 @@ fn expand_lark_expr(
                 parser_names,
                 memo,
                 visiting,
-            )?),
+            )?,
         },
-        GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(expand_lark_expr(
+        GrammarExpr::Optional(inner) => GrammarExpr::Optional(expand_lark_boxed_expr(
             inner,
             in_terminal_rule,
             rule_map,
@@ -491,8 +593,8 @@ fn expand_lark_expr(
             parser_names,
             memo,
             visiting,
-        )?)),
-        GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(expand_lark_expr(
+        )?),
+        GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(expand_lark_boxed_expr(
             inner,
             in_terminal_rule,
             rule_map,
@@ -500,8 +602,8 @@ fn expand_lark_expr(
             parser_names,
             memo,
             visiting,
-        )?)),
-        GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(Box::new(expand_lark_expr(
+        )?),
+        GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(expand_lark_boxed_expr(
             inner,
             in_terminal_rule,
             rule_map,
@@ -509,9 +611,9 @@ fn expand_lark_expr(
             parser_names,
             memo,
             visiting,
-        )?)),
+        )?),
         GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-            expr: Box::new(expand_lark_expr(
+            expr: expand_lark_boxed_expr(
                 expr,
                 in_terminal_rule,
                 rule_map,
@@ -519,7 +621,7 @@ fn expand_lark_expr(
                 parser_names,
                 memo,
                 visiting,
-            )?),
+            )?,
             min: *min,
             max: *max,
         },
@@ -545,51 +647,9 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         .filter(|name| !terminal_names.contains(name))
         .collect();
 
-    // Validate invariant: inside terminal definitions, every Ref must
-    // resolve to another terminal (not a nonterminal, and not missing).
-    fn validate_terminal_refs(
-        expr: &GrammarExpr,
-        rule_name: &str,
-        terminal_names: &HashSet<String>,
-        rule_map: &HashMap<String, GrammarExpr>,
-    ) -> Result<(), GlrMaskError> {
-        match expr {
-            GrammarExpr::Ref(target) => {
-                if !rule_map.contains_key(target) {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "terminal rule {rule_name} references undefined rule {target}"
-                    )));
-                }
-                if !terminal_names.contains(target) {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "terminal rule {rule_name} references nonterminal {target}"
-                    )));
-                }
-                Ok(())
-            }
-            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
-                for p in parts {
-                    validate_terminal_refs(p, rule_name, terminal_names, rule_map)?;
-                }
-                Ok(())
-            }
-            GrammarExpr::Exclude { expr, exclude } => {
-                validate_terminal_refs(expr, rule_name, terminal_names, rule_map)?;
-                validate_terminal_refs(exclude, rule_name, terminal_names, rule_map)
-            }
-            GrammarExpr::Optional(inner)
-            | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner)
-            | GrammarExpr::RepeatRange { expr: inner, .. } => {
-                validate_terminal_refs(inner, rule_name, terminal_names, rule_map)
-            }
-            _ => Ok(()),
-        }
-    }
-
     for rule in &grammar.rules {
         if terminal_names.contains(&rule.name) {
-            validate_terminal_refs(&rule.expr, &rule.name, &terminal_names, &rule_map)?;
+            validate_lark_terminal_refs(&rule.expr, &rule.name, &terminal_names, &rule_map)?;
         }
     }
 
@@ -702,52 +762,118 @@ impl Parser {
         }
     }
 
+    fn parse_rule_name(&mut self) -> Result<String, GlrMaskError> {
+        while matches!(self.peek(), Some(Token::Question) | Some(Token::Bang)) {
+            self.pos += 1;
+        }
+
+        match self.advance() {
+            Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(name),
+            Some(other) => Err(GlrMaskError::GrammarParse(format!(
+                "expected rule name, got {:?}",
+                other
+            ))),
+            None => Err(GlrMaskError::GrammarParse(
+                "expected rule name, got end of input".into(),
+            )),
+        }
+    }
+
+    fn skip_rule_priority(&mut self) {
+        if self.peek() == Some(&Token::Dot) && matches!(self.peek_nth(1), Some(Token::Number(_))) {
+            self.pos += 2;
+        }
+    }
+
+    fn parse_bounded_repeat(&mut self, atom: GrammarExpr) -> Result<GrammarExpr, GlrMaskError> {
+        let min = match self.advance() {
+            Some(Token::Number(value)) => value,
+            _ => return Err(GlrMaskError::GrammarParse("expected number after ~".into())),
+        };
+
+        let max = if self.peek() == Some(&Token::Dot) {
+            let saved = self.pos;
+            self.pos += 1;
+            if self.peek() == Some(&Token::Dot) {
+                self.pos += 1;
+                match self.advance() {
+                    Some(Token::Number(value)) => Some(value),
+                    _ => {
+                        return Err(GlrMaskError::GrammarParse(
+                            "expected number after ..".into(),
+                        ));
+                    }
+                }
+            } else {
+                self.pos = saved;
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(bounded_repeat_expr(atom, min, max))
+    }
+
+    fn parse_literal_or_range(&mut self, literal: String) -> Result<GrammarExpr, GlrMaskError> {
+        if self.peek() == Some(&Token::Dot) && self.peek_nth(1) == Some(&Token::Dot) {
+            self.pos += 2;
+            return match self.advance() {
+                Some(Token::Literal(end)) => literal_range_expr(&literal, &end),
+                Some(other) => Err(GlrMaskError::GrammarParse(format!(
+                    "expected literal after .. in Lark literal range, got {:?}",
+                    other
+                ))),
+                None => Err(GlrMaskError::GrammarParse(
+                    "expected literal after .. in Lark literal range, got end of input".into(),
+                )),
+            };
+        }
+
+        if literal.is_empty() {
+            Ok(sequence_or_single(Vec::new()))
+        } else {
+            Ok(GrammarExpr::Literal(literal.into_bytes()))
+        }
+    }
+
+    fn parse_ignore_directive(
+        &mut self,
+        ignore_exprs: &mut Vec<GrammarExpr>,
+    ) -> Result<bool, GlrMaskError> {
+        if self.peek() != Some(&Token::PercentIgnore) {
+            return Ok(false);
+        }
+
+        self.pos += 1;
+        ignore_exprs.push(self.parse_atom()?);
+        self.skip_newlines();
+        Ok(true)
+    }
+
+    fn parse_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
+        let name = self.parse_rule_name()?;
+        self.skip_rule_priority();
+        self.expect_token(&Token::Colon)?;
+        let expr = self.parse_alternatives()?;
+        Ok(NamedRule {
+            name,
+            expr,
+            is_terminal: false,
+        })
+    }
+
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
         let mut rules: Vec<NamedRule> = Vec::new();
         let mut ignore_exprs: Vec<GrammarExpr> = Vec::new();
 
         self.skip_newlines();
         while self.pos < self.tokens.len() {
-            // Handle %ignore directives
-            if self.peek() == Some(&Token::PercentIgnore) {
-                self.pos += 1;
-                let expr = self.parse_atom()?;
-                ignore_exprs.push(expr);
-                self.skip_newlines();
+            if self.parse_ignore_directive(&mut ignore_exprs)? {
                 continue;
             }
 
-            while matches!(self.peek(), Some(Token::Question) | Some(Token::Bang)) {
-                self.pos += 1;
-            }
-
-            let name = match self.advance() {
-                Some(Token::Ident(s)) => s,
-                Some(Token::Terminal(s)) => s,
-                Some(other) => {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "expected rule name, got {:?}",
-                        other
-                    )));
-                }
-                None => break,
-            };
-
-            if self.peek() == Some(&Token::Dot)
-                && matches!(self.peek_nth(1), Some(Token::Number(_)))
-            {
-                self.pos += 2;
-            }
-
-            self.expect_token(&Token::Colon)?;
-
-            let expr = self.parse_alternatives()?;
-
-            rules.push(NamedRule {
-                name,
-                expr,
-                is_terminal: false, // set correctly below
-            });
+            rules.push(self.parse_rule()?);
             self.skip_newlines();
         }
 
@@ -755,26 +881,9 @@ impl Parser {
             return Err(GlrMaskError::GrammarParse("empty grammar".into()));
         }
 
-        let start = if rules.iter().any(|r| r.name == "start") {
-            "start".to_string()
-        } else {
-            rules[0].name.clone()
-        };
-
-        // Mark terminal rules based on Lark naming convention
-        for rule in &mut rules {
-            rule.is_terminal = is_lark_terminal_name(&rule.name);
-        }
-
-        // Synthesize an __IGNORE terminal if %ignore directives were found
-        let ignore = if ignore_exprs.is_empty() {
-            None
-        } else {
-            let ignore_body = choice_or_single(ignore_exprs);
-            let name = "__IGNORE".to_string();
-            rules.push(NamedRule { name: name.clone(), expr: ignore_body, is_terminal: true });
-            Some(name)
-        };
+        let start = lark_start_rule_name(&rules);
+        mark_lark_terminal_rules(&mut rules);
+        let ignore = synthesize_lark_ignore_rule(&mut rules, ignore_exprs);
 
         Ok(NamedGrammar { rules, start, ignore })
     }
@@ -871,33 +980,7 @@ impl Parser {
             }
             Some(Token::Tilde) => {
                 self.pos += 1;
-                let min = match self.advance() {
-                    Some(Token::Number(n)) => n,
-                    _ => return Err(GlrMaskError::GrammarParse("expected number after ~".into())),
-                };
-                
-                let max = if self.peek() == Some(&Token::Dot) {
-                    let saved = self.pos;
-                    self.pos += 1;
-                    if self.peek() == Some(&Token::Dot) {
-                        self.pos += 1;
-                        match self.advance() {
-                            Some(Token::Number(m)) => Some(m),
-                            _ => {
-                                return Err(GlrMaskError::GrammarParse(
-                                    "expected number after ..".into(),
-                                ))
-                            }
-                        }
-                    } else {
-                        
-                        self.pos = saved;
-                        None
-                    }
-                } else {
-                    None
-                };
-                Ok(bounded_repeat_expr(atom, min, max))
+                self.parse_bounded_repeat(atom)
             }
             _ => Ok(atom),
         }
@@ -906,35 +989,8 @@ impl Parser {
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         match self.advance() {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
-            Some(Token::Literal(s)) => {
-                if self.peek() == Some(&Token::Dot) && self.peek_nth(1) == Some(&Token::Dot) {
-                    self.pos += 2;
-                    match self.advance() {
-                        Some(Token::Literal(end)) => return literal_range_expr(&s, &end),
-                        Some(other) => {
-                            return Err(GlrMaskError::GrammarParse(format!(
-                                "expected literal after .. in Lark literal range, got {:?}",
-                                other
-                            )))
-                        }
-                        None => {
-                            return Err(GlrMaskError::GrammarParse(
-                                "expected literal after .. in Lark literal range, got end of input"
-                                    .into(),
-                            ))
-                        }
-                    }
-                }
-
-                if s.is_empty() {
-                    Ok(sequence_or_single(Vec::new()))
-                } else {
-                    Ok(GrammarExpr::Literal(s.into_bytes()))
-                }
-            }
-            Some(Token::Regex(rx)) => {
-                Ok(GrammarExpr::RawRegex(rx))
-            }
+            Some(Token::Literal(literal)) => self.parse_literal_or_range(literal),
+            Some(Token::Regex(regex)) => Ok(GrammarExpr::RawRegex(regex)),
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
             Some(Token::LParen) => {
                 let expr = self.parse_alternatives()?;

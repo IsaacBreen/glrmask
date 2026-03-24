@@ -1,5 +1,4 @@
-
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use range_set_blaze::RangeSetBlaze;
 
@@ -9,6 +8,93 @@ use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMa
 use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
 use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis;
 use crate::ds::bitset::BitSet;
+
+fn adjust_disallowed_follows(
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+) -> Option<BTreeMap<u32, BitSet>> {
+    let ignore_terminal = ignore_terminal?;
+    let mut adjusted = disallowed_follows.clone();
+    adjusted.remove(&ignore_terminal);
+    for bits in adjusted.values_mut() {
+        if (ignore_terminal as usize) < bits.len() {
+            bits.clear(ignore_terminal as usize);
+        }
+    }
+    adjusted.retain(|_, bits| !bits.is_zero());
+    Some(adjusted)
+}
+
+fn build_state_map(
+    state_classes: &BTreeSet<BTreeSet<usize>>,
+    num_dfa_states: usize,
+) -> ManyToOneIdMap {
+    let mut original_to_internal = vec![u32::MAX; num_dfa_states];
+    let mut internal_to_originals = Vec::new();
+    let mut representative_original_ids = Vec::new();
+
+    for class in state_classes {
+        let internal_id = internal_to_originals.len() as u32;
+        let originals: Vec<u32> = class.iter().map(|&state| state as u32).collect();
+        for &state in &originals {
+            original_to_internal[state as usize] = internal_id;
+        }
+        representative_original_ids
+            .push(*originals.first().expect("state class must be non-empty"));
+        internal_to_originals.push(RangeSetBlaze::from_iter(originals.iter().copied()));
+    }
+
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids,
+    }
+}
+
+fn build_vocab_map(
+    vocab_classes: &BTreeSet<Vec<usize>>,
+    token_bytes: &[&[u8]],
+    token_ids: &[u32],
+    max_token_id: u32,
+) -> ManyToOneIdMap {
+    let mut ordered_vocab_classes: Vec<(usize, Vec<u32>)> = vocab_classes
+        .map(|class| {
+            let mut indices: Vec<usize> = class.iter().copied().collect();
+            indices.sort_unstable_by(|&left, &right| {
+                token_bytes[left]
+                    .cmp(&token_bytes[right])
+                    .then_with(|| token_ids[left].cmp(&token_ids[right]))
+            });
+            let representative_idx = *indices.first().expect("vocab class must be non-empty");
+            let originals = indices.into_iter().map(|idx| token_ids[idx]).collect();
+            (representative_idx, originals)
+        })
+        .collect();
+    ordered_vocab_classes.sort_unstable_by(|(left_rep_idx, _), (right_rep_idx, _)| {
+        token_bytes[*left_rep_idx]
+            .cmp(&token_bytes[*right_rep_idx])
+            .then_with(|| token_ids[*left_rep_idx].cmp(&token_ids[*right_rep_idx]))
+    });
+
+    let mut original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
+    let mut internal_to_originals = Vec::with_capacity(ordered_vocab_classes.len());
+    let mut representative_original_ids = Vec::with_capacity(ordered_vocab_classes.len());
+
+    for (internal_id, (_, originals)) in ordered_vocab_classes.into_iter().enumerate() {
+        let representative = *originals.first().expect("vocab class must be non-empty");
+        for &token_id in &originals {
+            original_to_internal[token_id as usize] = internal_id as u32;
+        }
+        representative_original_ids.push(representative);
+        internal_to_originals.push(RangeSetBlaze::from_iter(originals.into_iter()));
+    }
+
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids,
+    }
+}
 
 pub(crate) fn analyze_equivalences(
     tokenizer: &Tokenizer,
@@ -29,30 +115,12 @@ fn analyze_equivalences_impl(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> InternalIdMap {
-    // Adjust disallowed_follows for the ignore terminal:
-    // - The ignore terminal can be followed by anything (remove its entry)
-    // - Any terminal can be followed by the ignore terminal (clear it from all sets)
-    let adjusted_disallowed;
-    let effective_disallowed = if let Some(ign) = ignore_terminal {
-        let mut adj = disallowed_follows.clone();
-        adj.remove(&ign);
-        for (_tid, bits) in adj.iter_mut() {
-            if (ign as usize) < bits.len() {
-                bits.clear(ign as usize);
-            }
-        }
-        // Remove entries that became empty after clearing
-        adj.retain(|_, bits| !bits.is_zero());
-        adjusted_disallowed = adj;
-        &adjusted_disallowed
-    } else {
-        disallowed_follows
-    };
+    let adjusted_disallowed = adjust_disallowed_follows(disallowed_follows, ignore_terminal);
+    let effective_disallowed = adjusted_disallowed.as_ref().unwrap_or(disallowed_follows);
 
     let tokenizer_view = TokenizerView::new(tokenizer);
 
     // Extract vocab tokens as byte slices, ordered by token ID.
-    // Vocab entries is a BTreeMap<u32, Vec<u8>>, so we need to handle sparse IDs.
     let max_token_id = vocab.max_token_id();
     let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
@@ -72,71 +140,14 @@ fn analyze_equivalences_impl(
         ignore_terminal,
     );
 
-    // Convert state equivalence classes to ManyToOneIdMap
     let num_dfa_states = tokenizer.num_states() as usize;
-    let mut state_original_to_internal = vec![u32::MAX; num_dfa_states];
-    let mut state_internal_to_originals: Vec<RangeSetBlaze<u32>> = Vec::new();
-    let mut state_representative_original_ids = Vec::new();
-
-    for class in &result.state_classes {
-        let internal_id = state_internal_to_originals.len() as u32;
-        let originals: Vec<u32> = class.iter().map(|&s| s as u32).collect();
-        for &s in &originals {
-            state_original_to_internal[s as usize] = internal_id;
-        }
-        state_representative_original_ids.push(*originals.first().expect("state class must be non-empty"));
-        state_internal_to_originals.push(RangeSetBlaze::from_iter(originals.iter().copied()));
-    }
-
-    let state_map = ManyToOneIdMap {
-        original_to_internal: state_original_to_internal,
-        internal_to_originals: state_internal_to_originals,
-        representative_original_ids: state_representative_original_ids,
-    };
-
-    // Convert vocab equivalence classes to ManyToOneIdMap
-    // The equivalence result uses indices into our token_bytes array, but we need
-    // to map back to original token IDs.
-    let mut ordered_vocab_classes: Vec<(usize, Vec<u32>)> = result
-        .vocab_classes
-        .iter()
-        .map(|class| {
-            let mut indices: Vec<usize> = class.iter().copied().collect();
-            indices.sort_unstable_by(|&left, &right| {
-                token_bytes[left]
-                    .cmp(&token_bytes[right])
-                    .then_with(|| token_ids[left].cmp(&token_ids[right]))
-            });
-            let representative_idx = *indices.first().expect("vocab class must be non-empty");
-            let originals = indices.into_iter().map(|idx| token_ids[idx]).collect();
-            (representative_idx, originals)
-        })
-        .collect();
-    ordered_vocab_classes.sort_unstable_by(|(left_rep_idx, _), (right_rep_idx, _)| {
-        token_bytes[*left_rep_idx]
-            .cmp(&token_bytes[*right_rep_idx])
-            .then_with(|| token_ids[*left_rep_idx].cmp(&token_ids[*right_rep_idx]))
-    });
-
-    let mut vocab_original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
-    let mut vocab_internal_to_originals: Vec<RangeSetBlaze<u32>> =
-        Vec::with_capacity(ordered_vocab_classes.len());
-    let mut vocab_representative_original_ids = Vec::with_capacity(ordered_vocab_classes.len());
-
-    for (internal_id, (_, originals)) in ordered_vocab_classes.into_iter().enumerate() {
-        let representative = *originals.first().expect("vocab class must be non-empty");
-        for &tid in &originals {
-            vocab_original_to_internal[tid as usize] = internal_id as u32;
-        }
-        vocab_representative_original_ids.push(representative);
-        vocab_internal_to_originals.push(RangeSetBlaze::from_iter(originals.into_iter()));
-    }
-
-    let vocab_map = ManyToOneIdMap {
-        original_to_internal: vocab_original_to_internal,
-        internal_to_originals: vocab_internal_to_originals,
-        representative_original_ids: vocab_representative_original_ids,
-    };
+    let state_map = build_state_map(&result.state_classes, num_dfa_states);
+    let vocab_map = build_vocab_map(
+        &result.vocab_classes,
+        &token_bytes,
+        &token_ids,
+        max_token_id,
+    );
 
     InternalIdMap {
         tokenizer_states: state_map,
@@ -179,78 +190,108 @@ mod tests {
         assert_eq!(id_map.max_token_id(), 2);
     }
 
-        #[test]
-        fn test_json_schema_equivalence_classes() {
-            use crate::import::json_schema::json_schema_to_grammar;
-            // Schema: {"type": "object", "properties": {"name": {"type": "string"}}}
-            let schema = r#"{
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                }
-            }"#;
-            let grammar = json_schema_to_grammar(schema).expect("Schema should convert");
-            let tok = build_tokenizer(&grammar);
-            let vocab_strs = vec![
-                "{", "}", "\"", ":", ",", "n", "a", "m", "e", "s", "t", "r", "i", "g", "{\"", "\":"
-            ];
-            let vocab_entries: Vec<(u32, Vec<u8>)> = vocab_strs.iter().enumerate().map(|(i, s)| (i as u32, s.as_bytes().to_vec())).collect();
-            let vocab = Vocab::new(vocab_entries, None);
-            let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
-            let classes = &id_map.vocab_tokens.internal_to_originals;
-            // Combined state+vocab equivalence analysis groups tokens by their
-            // behavior across all tokenizer states. Tokens "i" and "g" behave
-            // identically (both are single-char string characters with the same
-            // DFA transitions from every state), so they are merged into one class.
-            let expected: Vec<Vec<usize>> = vec![
-                vec![0],           // "{"
-                vec![1],           // "}"
-                vec![2],           // "\""
-                vec![3],           // ":"
-                vec![4],           // ","
-                vec![5],           // "n"
-                vec![6],           // "a"
-                vec![7],           // "m"
-                vec![8],           // "e"
-                vec![9],           // "s"
-                vec![10],          // "t"
-                vec![11],          // "r"
-                vec![12, 13],      // "i", "g" - equivalent string chars
-                vec![14],          // "{\""
-                vec![15],          // "\":"
-            ];
-            let mut expected_sorted: Vec<Vec<usize>> = expected.iter().map(|c| { let mut v = c.clone(); v.sort(); v }).collect();
-            expected_sorted.sort();
-            let mut actual_sorted: Vec<Vec<usize>> = classes.iter().map(|c| { let mut v: Vec<usize> = c.iter().map(|id| id as usize).collect(); v.sort(); v }).collect();
-            actual_sorted.sort();
-            assert_eq!(actual_sorted, expected_sorted,
-                "Equivalence classes don't match expected!\n\
-                 Expected: {:?}\n\
-                 Actual:   {:?}",
-                expected_sorted, actual_sorted);
-        }
+    #[test]
+    fn test_json_schema_equivalence_classes() {
+        use crate::import::json_schema::json_schema_to_grammar;
 
-        #[test]
-        fn test_json_schema_equivalence_classes_simpler() {
-            // Simple EBNF: root ::= '{' '}'
-            let ebnf = "root ::= '{' '}'";
-            let grammar = crate::import::ebnf::parse_ebnf(ebnf).expect("Grammar should build");
-            let tok = build_tokenizer(&grammar);
-            let vocab_strs = vec!["{", "}"];
-            let vocab_entries: Vec<(u32, Vec<u8>)> = vocab_strs.iter().enumerate().map(|(i, s)| (i as u32, s.as_bytes().to_vec())).collect();
-            let vocab = Vocab::new(vocab_entries, None);
-            let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
-            let classes = &id_map.vocab_tokens.internal_to_originals;
-            let expected: Vec<Vec<usize>> = vec![vec![0], vec![1]];
-            let mut expected_sorted: Vec<Vec<usize>> = expected.iter().map(|c| { let mut v = c.clone(); v.sort(); v }).collect();
-            expected_sorted.sort();
-            let mut actual_sorted: Vec<Vec<usize>> = classes.iter().map(|c| { let mut v: Vec<usize> = c.iter().map(|id| id as usize).collect(); v.sort(); v }).collect();
-            actual_sorted.sort();
-            assert_eq!(actual_sorted, expected_sorted,
-                "Equivalence classes don't match expected!\n\
-                 Expected: {:?}\n\
-                 Actual:   {:?}",
-                expected_sorted, actual_sorted);
-        }
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            }
+        }"#;
+        let grammar = json_schema_to_grammar(schema).expect("Schema should convert");
+        let tok = build_tokenizer(&grammar);
+        let vocab_strs = vec![
+            "{", "}", "\"", ":", ",", "n", "a", "m", "e", "s", "t", "r", "i", "g",
+            "{\"", "\":",
+        ];
+        let vocab_entries: Vec<(u32, Vec<u8>)> = vocab_strs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as u32, s.as_bytes().to_vec()))
+            .collect();
+        let vocab = Vocab::new(vocab_entries, None);
+        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
+        let classes = &id_map.vocab_tokens.internal_to_originals;
+        let expected: Vec<Vec<usize>> = vec![
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![3],
+            vec![4],
+            vec![5],
+            vec![6],
+            vec![7],
+            vec![8],
+            vec![9],
+            vec![10],
+            vec![11],
+            vec![12, 13],
+            vec![14],
+            vec![15],
+        ];
+        let mut expected_sorted: Vec<Vec<usize>> = expected
+            .iter()
+            .map(|class| {
+                let mut sorted = class.clone();
+                sorted.sort();
+                sorted
+            })
+            .collect();
+        expected_sorted.sort();
+        let mut actual_sorted: Vec<Vec<usize>> = classes
+            .iter()
+            .map(|class| {
+                let mut sorted: Vec<usize> = class.iter().map(|id| *id as usize).collect();
+                sorted.sort();
+                sorted
+            })
+            .collect();
+        actual_sorted.sort();
+        assert_eq!(
+            actual_sorted,
+            expected_sorted,
+            "Equivalence classes don't match expected!\nExpected: {:?}\nActual:   {:?}",
+            expected_sorted,
+            actual_sorted,
+        );
     }
+
+    #[test]
+    fn test_json_schema_equivalence_classes_simpler() {
+        let grammar = crate::import::ebnf::parse_ebnf("root ::= '{' '}'")
+            .expect("Grammar should build");
+        let tok = build_tokenizer(&grammar);
+        let vocab_entries = vec![(0, b"{".to_vec()), (1, b"}".to_vec())];
+        let vocab = Vocab::new(vocab_entries, None);
+        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
+        let classes = &id_map.vocab_tokens.internal_to_originals;
+        let expected = vec![vec![0], vec![1]];
+        let mut expected_sorted: Vec<Vec<usize>> = expected
+            .into_iter()
+            .map(|mut class| {
+                class.sort();
+                class
+            })
+            .collect();
+        expected_sorted.sort();
+        let mut actual_sorted: Vec<Vec<usize>> = classes
+            .iter()
+            .map(|class| {
+                let mut sorted: Vec<usize> = class.iter().map(|id| *id as usize).collect();
+                sorted.sort();
+                sorted
+            })
+            .collect();
+        actual_sorted.sort();
+        assert_eq!(
+            actual_sorted,
+            expected_sorted,
+            "Equivalence classes don't match expected!\nExpected: {:?}\nActual:   {:?}",
+            expected_sorted,
+            actual_sorted,
+        );
+    }
+}
 
