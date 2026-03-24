@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::rc::Rc;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -13,6 +12,7 @@ use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::analysis::EOF;
+use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::Symbol;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{PossibleMatchesByState, PossibleMatchesComputer, collect_possible_matches_by_state};
@@ -24,12 +24,125 @@ use crate::compiler::stages::equivalence_analysis::disallowed_follows::{
 type NwaState = u32;
 /// Tokenizer state identifier.
 type TokenizerState = u32;
+type ColorId = u32;
 type LeafTokenIds = SmallVec<[u32; 8]>;
+type FutureTerminalColorGroups = SmallVec<[(ColorId, SmallVec<[TerminalID; 4]>); 8]>;
 use crate::compiler::compile::compute_disallowed_follows;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
+
+#[derive(Debug, Clone)]
+pub(crate) struct TerminalColoring {
+    terminal_to_color: Vec<ColorId>,
+    num_colors: usize,
+}
+
+impl TerminalColoring {
+    pub(crate) fn identity(num_terminals: usize) -> Self {
+        Self {
+            terminal_to_color: (0..num_terminals as ColorId).collect(),
+            num_colors: num_terminals,
+        }
+    }
+
+    #[inline]
+    fn color_for(&self, terminal_id: TerminalID) -> ColorId {
+        self.terminal_to_color
+            .get(terminal_id as usize)
+            .copied()
+            .unwrap_or(terminal_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TerminalDwaBuildProfile {
+    future_terminal_additions: u64,
+    match_transition_additions: u64,
+}
+
+fn terminal_dwa_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_TERMINAL_DWA").is_some()
+}
+
+pub(crate) fn compute_terminal_coloring(table: &GLRTable) -> TerminalColoring {
+    let num_terminals = table.num_terminals as usize;
+    if num_terminals <= 1 {
+        return TerminalColoring::identity(num_terminals);
+    }
+
+    let mut adjacency = vec![BitSet::new(num_terminals); num_terminals];
+    for row in &table.action {
+        let terminals: Vec<usize> = row.keys().map(|&terminal| terminal as usize).collect();
+        for left_idx in 0..terminals.len() {
+            let left = terminals[left_idx];
+            for &right in &terminals[left_idx + 1..] {
+                adjacency[left].set(right);
+                adjacency[right].set(left);
+            }
+        }
+    }
+
+    let degrees: Vec<usize> = adjacency.iter().map(BitSet::count_ones).collect();
+    let mut terminal_to_color = vec![ColorId::MAX; num_terminals];
+    let mut neighbor_colors = vec![BitSet::new(num_terminals); num_terminals];
+    let mut num_colors = 0usize;
+
+    for _ in 0..num_terminals {
+        let next_terminal = (0..num_terminals)
+            .filter(|&terminal| terminal_to_color[terminal] == ColorId::MAX)
+            .max_by(|&left, &right| {
+                neighbor_colors[left]
+                    .count_ones()
+                    .cmp(&neighbor_colors[right].count_ones())
+                    .then_with(|| degrees[left].cmp(&degrees[right]))
+                    .then_with(|| right.cmp(&left))
+            })
+            .expect("there should always be an uncolored terminal");
+
+        let mut color = 0usize;
+        while neighbor_colors[next_terminal].contains(color) {
+            color += 1;
+        }
+        terminal_to_color[next_terminal] = color as ColorId;
+        num_colors = num_colors.max(color + 1);
+
+        for neighbor in adjacency[next_terminal].iter_ones() {
+            if terminal_to_color[neighbor] == ColorId::MAX {
+                neighbor_colors[neighbor].set(color);
+            }
+        }
+    }
+
+    TerminalColoring {
+        terminal_to_color,
+        num_colors,
+    }
+}
+
+fn build_future_terminal_color_groups(
+    tokenizer: &Tokenizer,
+    terminal_coloring: &TerminalColoring,
+    ignore_terminal: Option<TerminalID>,
+) -> Vec<FutureTerminalColorGroups> {
+    let mut by_state = Vec::with_capacity(tokenizer.num_states() as usize);
+    for tokenizer_state in 0..tokenizer.num_states() {
+        let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
+        for terminal_id in tokenizer.possible_future_terminals_iter(tokenizer_state) {
+            if Some(terminal_id) == ignore_terminal {
+                continue;
+            }
+            groups
+                .entry(terminal_coloring.color_for(terminal_id))
+                .or_default()
+                .push(terminal_id);
+        }
+        by_state.push(groups.into_iter().collect());
+    }
+    by_state
+}
 
 pub(crate) fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
     let mut ever_allowed = vec![BTreeSet::new(); grammar.num_terminals as usize];
@@ -831,20 +944,25 @@ impl NodesByTokenizerState {
 
 struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     tokenizer: &'tok Tokenizer,
-    possible_future_terminals: Vec<Rc<[TerminalID]>>,
+    possible_future_terminals: Vec<Vec<TerminalID>>,
+    future_terminal_color_groups: Vec<FutureTerminalColorGroups>,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut NWA,
     num_tsids: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
+    use_terminal_coloring: bool,
     self_loop_bytes: Vec<U8Set>,
     leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
+    future_leaf_token_ids_buffer: FxHashMap<(u32, TokenizerState, ColorId), LeafTokenIds>,
+    future_leaf_weight_buffer: FxHashMap<(u32, TokenizerState, ColorId), Weight>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
     leaf_weight_cache_raw: HashMap<LeafTokenIds, Weight>,
     leaf_weight_cache_canonical: HashMap<LeafTokenIds, Weight>,
     transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
     epsilon_buffer: FxHashMap<(u32, u32), Weight>,
+    profile: TerminalDwaBuildProfile,
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
@@ -865,6 +983,133 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     fn buffer_leaf_token_id(&mut self, source: u32, label: TerminalID, internal_token_id: u32) {
         self.leaf_token_ids_for(source, label).push(internal_token_id);
+    }
+
+    fn future_terminals_for_color(
+        &self,
+        tokenizer_state: TokenizerState,
+        color: ColorId,
+    ) -> &[TerminalID] {
+        self.future_terminal_color_groups[tokenizer_state as usize]
+            .iter()
+            .find_map(|(group_color, terminals)| (*group_color == color).then_some(terminals.as_slice()))
+            .unwrap_or(&[])
+    }
+
+    fn buffer_future_leaf_token_id(
+        &mut self,
+        source: u32,
+        tokenizer_state: TokenizerState,
+        color: ColorId,
+        internal_token_id: u32,
+    ) {
+        self.profile.future_terminal_additions += 1;
+        self.future_leaf_token_ids_buffer
+            .entry((source, tokenizer_state, color))
+            .or_default()
+            .push(internal_token_id);
+    }
+
+    fn add_future_match_from_sources_by_color(
+        &mut self,
+        sources: &[u32],
+        tokenizer_state: TokenizerState,
+        color: ColorId,
+        target: u32,
+        weight: &Weight,
+    ) {
+        if weight.is_empty() {
+            return;
+        }
+        debug_assert_eq!(target, self.leaf_state);
+
+        for &source in sources {
+            self.profile.future_terminal_additions += 1;
+            self.future_leaf_weight_buffer
+                .entry((source, tokenizer_state, color))
+                .and_modify(|existing| *existing = existing.union(weight))
+                .or_insert_with(|| weight.clone());
+        }
+    }
+
+    fn add_future_leaf_token_from_sources(
+        &mut self,
+        sources: &[u32],
+        tokenizer_state: TokenizerState,
+        internal_token_id: u32,
+    ) {
+        if !self.use_terminal_coloring {
+            let future_terminals = self.possible_future_terminals[tokenizer_state as usize].clone();
+            self.profile.future_terminal_additions +=
+                (sources.len() * future_terminals.len()) as u64;
+            for terminal_id in future_terminals {
+                self.add_leaf_token_from_sources(sources, terminal_id, internal_token_id);
+            }
+            return;
+        }
+
+        if let Some(ignore_terminal) = self.ignore_terminal {
+            if self
+                .tokenizer
+                .possible_future_terminals(tokenizer_state)
+                .contains(ignore_terminal as usize)
+            {
+                self.profile.future_terminal_additions += sources.len() as u64;
+                self.add_leaf_token_from_sources(sources, ignore_terminal, internal_token_id);
+            }
+        }
+
+        let color_groups = self.future_terminal_color_groups[tokenizer_state as usize].clone();
+        for (color, terminals) in color_groups {
+            if terminals.is_empty() {
+                continue;
+            }
+            for &source in sources {
+                self.buffer_future_leaf_token_id(source, tokenizer_state, color, internal_token_id);
+            }
+        }
+    }
+
+    fn add_future_weighted_match_from_sources(
+        &mut self,
+        sources: &[u32],
+        tokenizer_state: TokenizerState,
+        weight: &Weight,
+    ) {
+        if !self.use_terminal_coloring {
+            let future_terminals = self.possible_future_terminals[tokenizer_state as usize].clone();
+            self.profile.future_terminal_additions +=
+                (sources.len() * future_terminals.len()) as u64;
+            for terminal_id in future_terminals {
+                self.add_match_from_sources(sources, terminal_id, self.leaf_state, weight);
+            }
+            return;
+        }
+
+        if let Some(ignore_terminal) = self.ignore_terminal {
+            if self
+                .tokenizer
+                .possible_future_terminals(tokenizer_state)
+                .contains(ignore_terminal as usize)
+            {
+                self.profile.future_terminal_additions += sources.len() as u64;
+                self.add_match_from_sources(sources, ignore_terminal, self.leaf_state, weight);
+            }
+        }
+
+        let color_groups = self.future_terminal_color_groups[tokenizer_state as usize].clone();
+        for (color, terminals) in color_groups {
+            if terminals.is_empty() {
+                continue;
+            }
+            self.add_future_match_from_sources_by_color(
+                sources,
+                tokenizer_state,
+                color,
+                self.leaf_state,
+                weight,
+            );
+        }
     }
 
     fn cached_reachable_weight(&mut self, token_ids: &RangeSetBlaze<usize>) -> Weight {
@@ -995,10 +1240,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
         let accessible_weight = self.token_set_weight_fast(&accessible);
         for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
-            let future_terminals = Rc::clone(&self.possible_future_terminals[tokenizer_state as usize]);
-            for &terminal_id in future_terminals.iter() {
-                self.add_match_from_sources(source_nodes, terminal_id, self.leaf_state, &accessible_weight);
-            }
+            self.add_future_weighted_match_from_sources(
+                source_nodes,
+                tokenizer_state,
+                &accessible_weight,
+            );
         }
     }
 
@@ -1038,6 +1284,45 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     .entry((from as u32, label_idx as i32, self.leaf_state))
                     .and_modify(|existing| *existing = existing.union(&weight))
                     .or_insert(weight);
+            }
+        }
+
+        for ((from, tokenizer_state, color), token_ids) in
+            std::mem::take(&mut self.future_leaf_token_ids_buffer)
+        {
+            if token_ids.is_empty() {
+                continue;
+            }
+            let (weight, _) = self.cached_leaf_weight(token_ids);
+            let terminals: SmallVec<[TerminalID; 4]> = self
+                .future_terminals_for_color(tokenizer_state, color)
+                .iter()
+                .copied()
+                .collect();
+            for terminal_id in terminals {
+                self.transition_buffer
+                    .entry((from, terminal_id as i32, self.leaf_state))
+                    .and_modify(|existing| *existing = existing.union(&weight))
+                    .or_insert_with(|| weight.clone());
+            }
+        }
+
+        for ((from, tokenizer_state, color), weight) in
+            std::mem::take(&mut self.future_leaf_weight_buffer)
+        {
+            if weight.is_empty() {
+                continue;
+            }
+            let terminals: SmallVec<[TerminalID; 4]> = self
+                .future_terminals_for_color(tokenizer_state, color)
+                .iter()
+                .copied()
+                .collect();
+            for terminal_id in terminals {
+                self.transition_buffer
+                    .entry((from, terminal_id as i32, self.leaf_state))
+                    .and_modify(|existing| *existing = existing.union(&weight))
+                    .or_insert_with(|| weight.clone());
             }
         }
 
@@ -1112,14 +1397,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
                     if let Some(end_state) = end_state {
                         if child_node.has_token() {
-                            let future_terminals = Rc::clone(&self.possible_future_terminals[end_state as usize]);
-                            for &terminal_id in future_terminals.iter() {
-                                self.add_leaf_token_from_sources(
-                                    &source_nodes,
-                                    terminal_id,
-                                    leaf_token_id,
-                                );
-                            }
+                            self.add_future_leaf_token_from_sources(
+                                &source_nodes,
+                                end_state,
+                                leaf_token_id,
+                            );
                         }
 
                         next_level_nodes.merge(end_state, &source_nodes);
@@ -1129,6 +1411,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         let next_offset = offset + matched.width;
 
                         if next_offset == segment_bytes.len() && child_node.has_token() {
+                            self.profile.match_transition_additions += source_nodes.len() as u64;
                             self.add_leaf_token_from_sources(
                                 &source_nodes,
                                 matched.id,
@@ -1158,6 +1441,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             self.nwa,
                         );
 
+                        self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_match_from_sources(
                             &source_nodes,
                             matched.id,
@@ -1266,11 +1550,34 @@ pub(crate) fn build_terminal_dwa_with_possible_matches(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> (DWA, PossibleMatchesByState) {
+    let terminal_coloring = TerminalColoring::identity(grammar.num_terminals as usize);
+    build_terminal_dwa_with_possible_matches_and_coloring(
+        grammar,
+        tokenizer,
+        vocab,
+        id_map,
+        &terminal_coloring,
+        false,
+        ignore_terminal,
+    )
+}
+
+pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+) -> (DWA, PossibleMatchesByState) {
     build_terminal_dwa_impl(
         grammar,
         tokenizer,
         vocab,
         id_map,
+        terminal_coloring,
+        use_terminal_coloring,
         ignore_terminal,
     )
 }
@@ -1280,6 +1587,8 @@ fn build_terminal_dwa_impl(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
 ) -> (DWA, PossibleMatchesByState) {
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
@@ -1296,14 +1605,15 @@ fn build_terminal_dwa_impl(
             .collect(),
     );
     let self_loop_bytes = build_self_loop_bytes(tokenizer);
-    let possible_future_terminals = (0..tokenizer.num_states())
-        .map(|state| {
-            tokenizer
-                .possible_future_terminals_iter(state)
-                .collect::<Vec<_>>()
-                .into()
-        })
+    let possible_future_terminals: Vec<Vec<TerminalID>> = (0..tokenizer.num_states())
+        .map(|state| tokenizer.possible_future_terminals_iter(state).collect())
         .collect();
+    let future_terminal_color_groups = if use_terminal_coloring {
+        build_future_terminal_color_groups(tokenizer, terminal_coloring, ignore_terminal)
+    } else {
+        vec![FutureTerminalColorGroups::new(); tokenizer.num_states() as usize]
+    };
+    let profile_enabled = terminal_dwa_profile_enabled();
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
 
     let roots_by_tokenizer_state = seed_root_nodes(&mut nwa, start_state, tokenizer, id_map);
@@ -1311,22 +1621,28 @@ fn build_terminal_dwa_impl(
     let mut builder = TerminalNwaBuilder {
         tokenizer,
         possible_future_terminals,
+        future_terminal_color_groups,
         possible_matches: &mut possible_matches,
         nwa: &mut nwa,
         num_tsids: id_map.num_tsids(),
         leaf_state,
         ignore_terminal,
+        use_terminal_coloring,
         self_loop_bytes,
         leaf_token_ids_buffer: Vec::new(),
+        future_leaf_token_ids_buffer: FxHashMap::default(),
+        future_leaf_weight_buffer: FxHashMap::default(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),
         leaf_weight_cache_raw: HashMap::new(),
         leaf_weight_cache_canonical: HashMap::new(),
         transition_buffer: FxHashMap::default(),
         epsilon_buffer: FxHashMap::default(),
+        profile: TerminalDwaBuildProfile::default(),
     };
     builder.build_from_trie(&vocab_tree.root, &roots_by_tokenizer_state);
     builder.flush_transition_buffer();
+    let profile = builder.profile;
     drop(builder);
     let possible_matches_by_state = collect_possible_matches_by_state(
         tokenizer,
@@ -1347,6 +1663,15 @@ fn build_terminal_dwa_impl(
         .expect("terminal NWA determinization failed despite acyclic token trie construction");
 
     let dwa = minimize(&determinized);
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa] colors={} future_terminal_additions={} match_transition_additions={}",
+            terminal_coloring.num_colors,
+            profile.future_terminal_additions,
+            profile.match_transition_additions,
+        );
+    }
 
     (dwa, possible_matches_by_state)
 }

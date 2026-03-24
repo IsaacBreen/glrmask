@@ -17,8 +17,10 @@ use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::terminal_dwa::{
-    build_terminal_dwa_with_possible_matches,
+    compute_terminal_coloring,
+    build_terminal_dwa_with_possible_matches_and_coloring,
     compute_ever_allowed_follows,
+    TerminalColoring,
 };
 use crate::ds::bitset::BitSet;
 use crate::runtime::Constraint;
@@ -184,6 +186,12 @@ fn compile_prepared_with_profile(
     let table_started_at = Instant::now();
     let table = GLRTable::build(&analyzed_grammar);
     profile.glr_table_ms = elapsed_ms(table_started_at);
+    let terminal_coloring_enabled = !env_flag_enabled("GLRMASK_DISABLE_TERMINAL_COLORING");
+    let terminal_coloring = if terminal_coloring_enabled {
+        compute_terminal_coloring(&table)
+    } else {
+        TerminalColoring::identity(table.num_terminals as usize)
+    };
 
     let disallowed_follows_started_at = Instant::now();
     let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
@@ -198,11 +206,13 @@ fn compile_prepared_with_profile(
     let (((mut terminal_dwa, mut possible_matches), terminal_dwa_ms), (templates, templates_ms)) = rayon::join(
         || {
             let terminal_dwa_started_at = Instant::now();
-            let result = build_terminal_dwa_with_possible_matches(
+            let result = build_terminal_dwa_with_possible_matches_and_coloring(
                 &analyzed_grammar,
                 &tokenizer,
                 vocab,
                 &internal_ids,
+                &terminal_coloring,
+                terminal_coloring_enabled,
                 prepared_grammar.ignore_terminal,
             );
             (result, elapsed_ms(terminal_dwa_started_at))
