@@ -7,18 +7,18 @@ fn byte_vocab() -> Vocab {
 
 fn main() {
     let schema = r#"{
-        \"type\": \"object\",
-        \"properties\": {
-            \"ok\": { \"type\": \"boolean\" }
+        "type": "object",
+        "properties": {
+            "ok": { "type": "boolean" }
         },
-        \"required\": [\"ok\"],
-        \"additionalProperties\": false
+        "required": ["ok"],
+        "additionalProperties": false
     }"#;
 
     let constraint = Constraint::from_json_schema(schema, &byte_vocab()).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(br#"{\"ok\":true}"#).unwrap();
+    state.commit_bytes(br#"{"ok": true}"#).unwrap();
 
     assert!(state.is_finished());
-    println!("accepted: {{\"ok\":true}}");
+    println!("accepted: {{\"ok\": true}}");
 }

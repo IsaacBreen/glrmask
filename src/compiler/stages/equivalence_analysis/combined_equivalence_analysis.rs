@@ -531,15 +531,11 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
-    // State equivalence remains a safe reduction even with disallowed follows:
-    // the unrestricted tokenizer behavior that this pass hashes is a refinement
-    // of any follow-constrained behavior, so later follow filtering can split
-    // classes further but cannot invalidate these merges.
-    let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
-        regex,
-        tokens,
-        initial_states,
-    );
+    // The fast state-equivalence reduction is not yet sound across the full
+    // follow-constrained schema surface exercised by the publication tests.
+    // Keep the identity partition for now so vocab equivalence runs over the
+    // full state set without collapsing distinguishable tokenizer states.
+    let state_reps: Vec<usize> = initial_states.to_vec();
 
     let mut rep_set: BTreeSet<usize> = BTreeSet::new();
     for &rep in &state_reps {

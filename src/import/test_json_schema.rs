@@ -753,7 +753,7 @@ fn test_conversion_allof_merges_object_properties() {
 }
 
 #[test]
-fn test_prefix_items_default_to_required_like_cfa() {
+fn test_prefix_items_follow_optional_tuple_semantics() {
     let schema = r#"{
         "type": "array",
         "prefixItems": [
@@ -775,18 +775,22 @@ fn test_prefix_items_default_to_required_like_cfa() {
     let mask = state.mask();
 
     assert!(
-        !token_allowed(&mask, 0),
-        "CFA-style prefixItems lowering should not allow omitting all prefix items"
+        token_allowed(&mask, 0),
+        "prefixItems should allow omitting trailing tuple positions by default"
     );
     assert!(
-        !token_allowed(&mask, 1),
-        "CFA-style prefixItems lowering should not allow truncating required prefix items"
+        token_allowed(&mask, 1),
+        "prefixItems should allow consuming only the first tuple position by default"
     );
     assert!(
         token_allowed(&mask, 2),
-        "CFA-style prefixItems lowering should allow the full tuple payload"
+        "prefixItems should allow the full tuple payload"
     );
 
+    state.commit_token(1).unwrap();
+    assert!(state.is_finished(), "[1] should finish successfully");
+
+    let mut state = c.start();
     state.commit_token(2).unwrap();
     assert!(state.is_finished(), "[1,2] should finish successfully");
 }
