@@ -361,6 +361,13 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
 }
 
 pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> Regex {
+    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false);
+    let total_started_at = std::time::Instant::now();
     let plan = build_exclusion_compile_plan(exprs);
     let group_sets: Vec<U8Set> = plan
         .compiled_exprs
@@ -368,11 +375,47 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
         .map(|expr| expr_u8set(expr))
         .collect();
 
+    let build_nfa_started_at = std::time::Instant::now();
     let mut nfa = build_regex_nfa(&plan.compiled_exprs);
+    let build_nfa_ms = build_nfa_started_at.elapsed().as_secs_f64() * 1000.0;
+    let nfa_states_after_build = nfa.states.len();
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][prepare_regex] label={} stage=build_nfa num_exprs={} ms={:.3} nfa_states={}",
+            _profile_label,
+            plan.compiled_exprs.len(),
+            build_nfa_ms,
+            nfa_states_after_build,
+        );
+    }
 
+    let condense_started_at = std::time::Instant::now();
     nfa.condense_epsilon_sccs();
+    let condense_ms = condense_started_at.elapsed().as_secs_f64() * 1000.0;
+    let nfa_states_after_condense = nfa.states.len();
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][prepare_regex] label={} stage=condense num_exprs={} ms={:.3} nfa_states={}",
+            _profile_label,
+            plan.compiled_exprs.len(),
+            condense_ms,
+            nfa_states_after_condense,
+        );
+    }
 
+    let determinize_started_at = std::time::Instant::now();
     let mut dfa = nfa.to_dfa();
+    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let dfa_states_after_determinize = dfa.num_states();
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][prepare_regex] label={} stage=determinize num_exprs={} ms={:.3} dfa_states={}",
+            _profile_label,
+            plan.compiled_exprs.len(),
+            determinize_ms,
+            dfa_states_after_determinize,
+        );
+    }
 
     dfa.ensure_group_capacity(group_sets.len());
     for (group_id, set) in group_sets.into_iter().enumerate() {
@@ -389,15 +432,68 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
         dfa
     };
 
+    let minimize_started_at = std::time::Instant::now();
     let dfa = dfa.minimize();
+    let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][prepare_regex] label={} stage=minimize num_exprs={} ms={:.3} dfa_states={}",
+            _profile_label,
+            plan.compiled_exprs.len(),
+            minimize_ms,
+            dfa.num_states(),
+        );
+    }
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][prepare_regex] label={} build_nfa_ms={:.3} nfa_states_build={} condense_ms={:.3} nfa_states_condensed={} determinize_ms={:.3} dfa_states_determinized={} minimize_ms={:.3} dfa_states_minimized={} total_ms={:.3}",
+            _profile_label,
+            build_nfa_ms,
+            nfa_states_after_build,
+            condense_ms,
+            nfa_states_after_condense,
+            determinize_ms,
+            dfa_states_after_determinize,
+            minimize_ms,
+            dfa.num_states(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
     Regex { dfa }
+}
+
+fn debug_profile_enabled() -> bool {
+    std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
 }
 
 /// Compile multiple expressions into a single NFA (without determinization).
 ///
 /// Each expression's index becomes its group ID.
 pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
+    build_regex_nfa_impl(exprs, true)
+}
+
+fn build_regex_nfa_impl(exprs: &[Expr], probe_single_exprs: bool) -> NFA {
     let optimized_exprs: Vec<Expr> = exprs.iter().cloned().map(Expr::optimize).collect();
+
+    if probe_single_exprs && debug_profile_enabled() {
+        for (index, expr) in optimized_exprs.iter().enumerate() {
+            let single_nfa = build_regex_nfa_impl(std::slice::from_ref(expr), false);
+            eprintln!(
+                "[glrmask/debug][regex_nfa] expr={} nfa_states={}",
+                index,
+                single_nfa.states.len(),
+            );
+        }
+    }
+
     let mut nfa = NFA::new(1);
 
     if let Some((prefix, remainders)) = common_prefix_factor(&optimized_exprs) {

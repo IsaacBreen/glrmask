@@ -2567,21 +2567,20 @@ impl SchemaCtx {
         }
 
         let bounded_body = match max_len {
-            Some(max_len) if min_len == max_len => self.json_string_char_exact_ref(min_len),
-            Some(max_len) => {
-                let mut parts = Vec::new();
-                if min_len > 0 {
-                    parts.push(self.json_string_char_exact_ref(min_len));
-                }
-                if max_len > min_len {
-                    parts.push(self.json_string_char_upto_ref(max_len - min_len));
-                }
-                sequence_or_single(parts)
-            }
+            Some(0) if min_len == 0 => empty_expr(),
+            Some(max_len) => GrammarExpr::RepeatRange {
+                expr: Box::new(self.json_string_char_ref()),
+                min: min_len,
+                max: max_len,
+            },
             None => {
                 let mut parts = Vec::new();
                 if min_len > 0 {
-                    parts.push(self.json_string_char_exact_ref(min_len));
+                    parts.push(GrammarExpr::RepeatRange {
+                        expr: Box::new(self.json_string_char_ref()),
+                        min: min_len,
+                        max: min_len,
+                    });
                 }
                 parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
                 sequence_or_single(parts)
@@ -4514,6 +4513,17 @@ mod tests {
             }
             other => panic!("expected bounded string start to be a terminal ref, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_bounded_string_does_not_emit_exact_upto_ladders() {
+        let schema: Value = serde_json::from_str(r#"{"type": "string", "minLength": 1, "maxLength": 5}"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+
+        assert!(grammar.rules.iter().all(|rule| {
+            !rule.name.starts_with("JSON_STRING_CHAR_EXACT_")
+                && !rule.name.starts_with("JSON_STRING_CHAR_UPTO_")
+        }));
     }
 
     #[test]

@@ -124,6 +124,22 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 }
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
+    if std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+    {
+        for (index, _) in grammar.terminals.iter().enumerate() {
+            eprintln!(
+                "[glrmask/debug][tokenizer_terminal] expr={} name={}",
+                index,
+                grammar.terminal_display_name(index as u32),
+            );
+        }
+    }
+
     let exprs: Vec<Expr> = grammar
         .terminals
         .iter()
