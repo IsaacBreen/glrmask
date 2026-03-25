@@ -1515,8 +1515,6 @@ struct SchemaCtx {
     expr_dedup_cache: HashMap<String, String>,
     json_string_exact_cache: HashMap<usize, String>,
     json_string_upto_cache: HashMap<usize, String>,
-    repeated_unit_exact_cache: HashMap<(String, usize), String>,
-    repeated_unit_upto_cache: HashMap<(String, usize), String>,
     draft_stack: Vec<JsonSchemaDraft>,
 }
 
@@ -1534,8 +1532,6 @@ impl SchemaCtx {
             expr_dedup_cache: HashMap::new(),
             json_string_exact_cache: HashMap::new(),
             json_string_upto_cache: HashMap::new(),
-            repeated_unit_exact_cache: HashMap::new(),
-            repeated_unit_upto_cache: HashMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
         };
         ctx.ensure_base_rules();
@@ -1678,86 +1674,6 @@ impl SchemaCtx {
                 let rule = self.extract_rule(expr, &format!("JSON_STRING_CHAR_UPTO_{max}"));
                 if let GrammarExpr::Ref(rule_name) = &rule {
                     self.json_string_upto_cache.insert(max, rule_name.clone());
-                }
-                rule
-            }
-        }
-    }
-
-    fn repeated_unit_exact_ref(
-        &mut self,
-        unit_ref: GrammarExpr,
-        cache_prefix: &str,
-        count: usize,
-    ) -> GrammarExpr {
-        match count {
-            0 => empty_expr(),
-            1 => unit_ref,
-            _ => {
-                if let GrammarExpr::Ref(rule_name) = &unit_ref {
-                    if let Some(cached) = self.repeated_unit_exact_cache.get(&(rule_name.clone(), count)) {
-                        return GrammarExpr::Ref(cached.clone());
-                    }
-                }
-
-                let chunk = highest_power_of_two_leq(count);
-                let expr = if chunk == count {
-                    let left = self.repeated_unit_exact_ref(unit_ref.clone(), cache_prefix, count / 2);
-                    let right = self.repeated_unit_exact_ref(unit_ref.clone(), cache_prefix, count / 2);
-                    sequence_or_single(vec![left, right])
-                } else {
-                    sequence_or_single(vec![
-                        self.repeated_unit_exact_ref(unit_ref.clone(), cache_prefix, chunk),
-                        self.repeated_unit_exact_ref(unit_ref.clone(), cache_prefix, count - chunk),
-                    ])
-                };
-
-                let rule = self.extract_rule(expr, &format!("{cache_prefix}_EXACT_{count}"));
-                if let (GrammarExpr::Ref(unit_rule_name), GrammarExpr::Ref(rule_name)) = (&unit_ref, &rule) {
-                    self.repeated_unit_exact_cache
-                        .insert((unit_rule_name.clone(), count), rule_name.clone());
-                }
-                rule
-            }
-        }
-    }
-
-    fn repeated_unit_upto_ref(
-        &mut self,
-        unit_ref: GrammarExpr,
-        cache_prefix: &str,
-        max: usize,
-    ) -> GrammarExpr {
-        match max {
-            0 => empty_expr(),
-            1 => GrammarExpr::Optional(Box::new(unit_ref)),
-            _ => {
-                if let GrammarExpr::Ref(rule_name) = &unit_ref {
-                    if let Some(cached) = self.repeated_unit_upto_cache.get(&(rule_name.clone(), max)) {
-                        return GrammarExpr::Ref(cached.clone());
-                    }
-                }
-
-                let chunk = highest_power_of_two_leq(max);
-                let expr = if chunk == max {
-                    choice_or_single(vec![
-                        self.repeated_unit_upto_ref(unit_ref.clone(), cache_prefix, max - 1),
-                        self.repeated_unit_exact_ref(unit_ref.clone(), cache_prefix, max),
-                    ])
-                } else {
-                    choice_or_single(vec![
-                        self.repeated_unit_upto_ref(unit_ref.clone(), cache_prefix, chunk - 1),
-                        sequence_or_single(vec![
-                            self.repeated_unit_exact_ref(unit_ref.clone(), cache_prefix, chunk),
-                            self.repeated_unit_upto_ref(unit_ref.clone(), cache_prefix, max - chunk),
-                        ]),
-                    ])
-                };
-
-                let rule = self.extract_rule(expr, &format!("{cache_prefix}_UPTO_{max}"));
-                if let (GrammarExpr::Ref(unit_rule_name), GrammarExpr::Ref(rule_name)) = (&unit_ref, &rule) {
-                    self.repeated_unit_upto_cache
-                        .insert((unit_rule_name.clone(), max), rule_name.clone());
                 }
                 rule
             }
@@ -2652,23 +2568,19 @@ impl SchemaCtx {
 
         let bounded_body = match max_len {
             Some(0) if min_len == 0 => empty_expr(),
-            Some(max_len) if max_len <= GRAMMAR_REPEAT_THRESHOLD => GrammarExpr::RepeatRange {
+            Some(max_len) => GrammarExpr::RepeatRange {
                 expr: Box::new(self.json_string_char_ref()),
                 min: min_len,
                 max: max_len,
             },
-            Some(max_len) => {
-                let mut parts = Vec::new();
-                if min_len > 0 {
-                    parts.push(self.json_string_char_exact_ref(min_len));
-                }
-                parts.push(self.json_string_char_upto_ref(max_len - min_len));
-                sequence_or_single(parts)
-            }
             None => {
                 let mut parts = Vec::new();
                 if min_len > 0 {
-                    parts.push(self.json_string_char_exact_ref(min_len));
+                    parts.push(GrammarExpr::RepeatRange {
+                        expr: Box::new(self.json_string_char_ref()),
+                        min: min_len,
+                        max: min_len,
+                    });
                 }
                 parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
                 sequence_or_single(parts)
@@ -2695,29 +2607,22 @@ impl SchemaCtx {
             regex_expr(unit_pattern.to_string()),
             "JSON_STRING_PATTERN_CHAR",
         );
-        let unit_rule_prefix = match &unit_expr {
-            GrammarExpr::Ref(rule_name) => rule_name.clone(),
-            _ => "JSON_STRING_PATTERN_CHAR".to_string(),
-        };
         let bounded_body = match max_len {
-            Some(0) if min_len == 0 => empty_expr(),
-            Some(max_len) if max_len <= GRAMMAR_REPEAT_THRESHOLD => {
-                repeat_expr(unit_expr, min_len, Some(max_len))
-            }
+            Some(max_len) if min_len == max_len => repeat_expr(unit_expr, min_len, Some(min_len)),
             Some(max_len) => {
                 let mut parts = Vec::new();
                 if min_len > 0 {
-                    parts.push(self.repeated_unit_exact_ref(unit_expr.clone(), &unit_rule_prefix, min_len));
+                    parts.push(repeat_expr(unit_expr.clone(), min_len, Some(min_len)));
                 }
                 if max_len > min_len {
-                    parts.push(self.repeated_unit_upto_ref(unit_expr, &unit_rule_prefix, max_len - min_len));
+                    parts.push(repeat_expr(unit_expr, 0, Some(max_len - min_len)));
                 }
                 sequence_or_single(parts)
             }
             None => {
                 let mut parts = Vec::new();
                 if min_len > 0 {
-                    parts.push(self.repeated_unit_exact_ref(unit_expr.clone(), &unit_rule_prefix, min_len));
+                    parts.push(repeat_expr(unit_expr.clone(), min_len, Some(min_len)));
                 }
                 parts.push(GrammarExpr::Repeat(Box::new(unit_expr)));
                 sequence_or_single(parts)
@@ -4095,8 +4000,6 @@ fn highest_power_of_two_leq(value: usize) -> usize {
     debug_assert!(value > 0);
     1usize << (usize::BITS - 1 - value.leading_zeros())
 }
-
-const GRAMMAR_REPEAT_THRESHOLD: usize = 64;
 
 fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
     match (min, max) {
