@@ -8,6 +8,15 @@ use std::collections::HashMap;
 
 use super::super::compat::{FlatDfaState, TokenizerView};
 
+fn debug_max_length_enabled() -> bool {
+    std::env::var("GLRMASK_DEBUG_MAX_LENGTH")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
 #[inline(always)]
 fn mix_u64(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -128,5 +137,20 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     states: &[usize],
 ) -> Vec<usize> {
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
-    find_state_equivalence_classes_kstep(tokenizer, states, max_len)
+    let mapping = find_state_equivalence_classes_kstep(tokenizer, states, max_len);
+
+    if debug_max_length_enabled() {
+        let mut representatives = mapping.clone();
+        representatives.sort_unstable();
+        representatives.dedup();
+        eprintln!(
+            "[glrmask/debug][max_length] max_token_len={} input_states={} tokenizer_dfa_states={} representative_states={}",
+            max_len,
+            states.len(),
+            tokenizer.dfa().states.len(),
+            representatives.len(),
+        );
+    }
+
+    mapping
 }

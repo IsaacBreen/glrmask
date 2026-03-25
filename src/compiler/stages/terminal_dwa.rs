@@ -15,7 +15,11 @@ use crate::compiler::glr::analysis::EOF;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::Symbol;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::possible_matches::{PossibleMatchesByState, PossibleMatchesComputer, collect_possible_matches_by_state};
+use crate::compiler::possible_matches::{
+    PossibleMatchesByState,
+    PossibleMatchesComputer,
+    collect_possible_matches_by_internal_tsid,
+};
 use crate::compiler::stages::equivalence_analysis::disallowed_follows::{
     build_disallowed_follow_dfa, normalize_disallowed_follows,
 };
@@ -65,6 +69,15 @@ struct TerminalDwaBuildProfile {
 
 fn terminal_dwa_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_TERMINAL_DWA").is_some()
+}
+
+fn debug_profile_enabled() -> bool {
+    std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn compute_terminal_coloring(table: &GLRTable) -> TerminalColoring {
@@ -125,28 +138,6 @@ pub(crate) fn compute_terminal_coloring(table: &GLRTable) -> TerminalColoring {
         terminal_to_color,
         num_colors,
     }
-}
-
-fn build_future_terminal_color_groups(
-    tokenizer: &Tokenizer,
-    terminal_coloring: &TerminalColoring,
-    ignore_terminal: Option<TerminalID>,
-) -> Vec<FutureTerminalColorGroups> {
-    let mut by_state = Vec::with_capacity(tokenizer.num_states() as usize);
-    for tokenizer_state in 0..tokenizer.num_states() {
-        let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
-        for terminal_id in tokenizer.possible_future_terminals_iter(tokenizer_state) {
-            if Some(terminal_id) == ignore_terminal {
-                continue;
-            }
-            groups
-                .entry(terminal_coloring.color_for(terminal_id))
-                .or_default()
-                .push(terminal_id);
-        }
-        by_state.push(groups.into_iter().collect());
-    }
-    by_state
 }
 
 pub(crate) fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
@@ -874,48 +865,24 @@ fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     )
 }
 
-fn build_self_loop_bytes(tokenizer: &Tokenizer) -> Vec<U8Set> {
-    tokenizer
-        .dfa
-        .states()
-        .iter()
-        .enumerate()
-        .map(|(state_id, state)| {
-            let mut bytes = U8Set::empty();
-            for (byte, &target) in state.transitions.iter() {
-                if target == state_id as u32 {
-                    bytes.insert(byte);
-                }
-            }
-            bytes
-        })
-        .collect()
-}
-
 #[derive(Clone)]
 struct NodesByTokenizerState {
-    entries: Vec<Vec<NwaState>>,
-    active: Vec<TokenizerState>,
+    entries: FxHashMap<TokenizerState, Vec<NwaState>>,
 }
 
 impl NodesByTokenizerState {
-    fn new(num_states: usize) -> Self {
+    fn new(_num_states: usize) -> Self {
         Self {
-            entries: vec![Vec::new(); num_states],
-            active: Vec::new(),
+            entries: FxHashMap::default(),
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.active.is_empty()
+        self.entries.is_empty()
     }
 
     fn slot_for(&mut self, state: TokenizerState) -> &mut Vec<NwaState> {
-        let slot = &mut self.entries[state as usize];
-        if slot.is_empty() {
-            self.active.push(state);
-        }
-        slot
+        self.entries.entry(state).or_default()
     }
 
     fn merge(&mut self, state: TokenizerState, nodes: &[NwaState]) {
@@ -923,7 +890,7 @@ impl NodesByTokenizerState {
     }
 
     fn first(&self, state: TokenizerState) -> Option<NwaState> {
-        self.entries[state as usize].first().copied()
+        self.entries.get(&state).and_then(|nodes| nodes.first().copied())
     }
 
     fn push_one(&mut self, state: TokenizerState, node: NwaState) {
@@ -931,33 +898,28 @@ impl NodesByTokenizerState {
     }
 
     fn iter(&self) -> impl Iterator<Item = (TokenizerState, &[NwaState])> {
-        self.active
+        self.entries
             .iter()
-            .copied()
-            .map(|state| (state, self.entries[state as usize].as_slice()))
+            .map(|(&state, nodes)| (state, nodes.as_slice()))
     }
 
     fn drain_pairs(&mut self) -> Vec<(TokenizerState, Vec<NwaState>)> {
-        let active = std::mem::take(&mut self.active);
-        let mut pairs = Vec::with_capacity(active.len());
-        for state in active {
-            pairs.push((state, std::mem::take(&mut self.entries[state as usize])));
-        }
-        pairs
+        std::mem::take(&mut self.entries).into_iter().collect()
     }
 }
 
 struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     tokenizer: &'tok Tokenizer,
-    possible_future_terminals: Vec<Vec<TerminalID>>,
-    future_terminal_color_groups: Vec<FutureTerminalColorGroups>,
+    terminal_coloring: TerminalColoring,
+    possible_future_terminals: FxHashMap<TokenizerState, Vec<TerminalID>>,
+    future_terminal_color_groups: FxHashMap<TokenizerState, FutureTerminalColorGroups>,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut NWA,
     num_tsids: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
     use_terminal_coloring: bool,
-    self_loop_bytes: Vec<U8Set>,
+    self_loop_bytes: FxHashMap<TokenizerState, U8Set>,
     leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
     future_leaf_token_ids_buffer: FxHashMap<(u32, TokenizerState, ColorId), LeafTokenIds>,
     future_leaf_weight_buffer: FxHashMap<(u32, TokenizerState, ColorId), Weight>,
@@ -990,27 +952,62 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         self.leaf_token_ids_for(source, label).push(internal_token_id);
     }
 
+    fn possible_future_terminals_for_state(&mut self, tokenizer_state: TokenizerState) -> Vec<TerminalID> {
+        self.possible_future_terminals
+            .entry(tokenizer_state)
+            .or_insert_with(|| {
+                self.tokenizer
+                    .possible_future_terminals_iter(tokenizer_state)
+                    .collect()
+            })
+            .clone()
+    }
+
+    fn future_terminal_color_groups_for_state(
+        &mut self,
+        tokenizer_state: TokenizerState,
+    ) -> FutureTerminalColorGroups {
+        if let Some(groups) = self.future_terminal_color_groups.get(&tokenizer_state) {
+            return groups.clone();
+        }
+
+        let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
+        for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+            if Some(terminal_id) == self.ignore_terminal {
+                continue;
+            }
+            groups
+                .entry(self.terminal_coloring.color_for(terminal_id))
+                .or_default()
+                .push(terminal_id);
+        }
+        let groups: FutureTerminalColorGroups = groups.into_iter().collect();
+        self.future_terminal_color_groups
+            .insert(tokenizer_state, groups.clone());
+        groups
+    }
+
     fn future_terminals_for_color(
-        &self,
+        &mut self,
         tokenizer_state: TokenizerState,
         color: ColorId,
-    ) -> &[TerminalID] {
-        self.future_terminal_color_groups[tokenizer_state as usize]
+    ) -> Vec<TerminalID> {
+        self.future_terminal_color_groups_for_state(tokenizer_state)
             .iter()
-            .find_map(|(group_color, terminals)| (*group_color == color).then_some(terminals.as_slice()))
-            .unwrap_or(&[])
+            .find_map(|(group_color, terminals)| (*group_color == color).then_some(terminals.to_vec()))
+            .unwrap_or_default()
     }
 
     fn buffer_future_leaf_token_id(
         &mut self,
         source: u32,
-        tokenizer_state: TokenizerState,
+        internal_tsid: TokenizerState,
         color: ColorId,
         internal_token_id: u32,
     ) {
         self.profile.future_terminal_additions += 1;
         self.future_leaf_token_ids_buffer
-            .entry((source, tokenizer_state, color))
+            .entry((source, internal_tsid, color))
             .or_default()
             .push(internal_token_id);
     }
@@ -1018,7 +1015,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn add_future_match_from_sources_by_color(
         &mut self,
         sources: &[u32],
-        tokenizer_state: TokenizerState,
+        internal_tsid: TokenizerState,
         color: ColorId,
         target: u32,
         weight: &Weight,
@@ -1031,7 +1028,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         for &source in sources {
             self.profile.future_terminal_additions += 1;
             self.future_leaf_weight_buffer
-                .entry((source, tokenizer_state, color))
+                .entry((source, internal_tsid, color))
                 .and_modify(|existing| *existing = existing.union(weight))
                 .or_insert_with(|| weight.clone());
         }
@@ -1044,7 +1041,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         internal_token_id: u32,
     ) {
         if !self.use_terminal_coloring {
-            let future_terminals = self.possible_future_terminals[tokenizer_state as usize].clone();
+            let future_terminals = self.possible_future_terminals_for_state(tokenizer_state);
             self.profile.future_terminal_additions +=
                 (sources.len() * future_terminals.len()) as u64;
             for terminal_id in future_terminals {
@@ -1055,16 +1052,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
         if let Some(ignore_terminal) = self.ignore_terminal {
             if self
-                .tokenizer
-                .possible_future_terminals(tokenizer_state)
-                .contains(ignore_terminal as usize)
+                .possible_future_terminals_for_state(tokenizer_state)
+                .contains(&ignore_terminal)
             {
                 self.profile.future_terminal_additions += sources.len() as u64;
                 self.add_leaf_token_from_sources(sources, ignore_terminal, internal_token_id);
             }
         }
 
-        let color_groups = self.future_terminal_color_groups[tokenizer_state as usize].clone();
+        let color_groups = self.future_terminal_color_groups_for_state(tokenizer_state);
         for (color, terminals) in color_groups {
             if terminals.is_empty() {
                 continue;
@@ -1082,7 +1078,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         weight: &Weight,
     ) {
         if !self.use_terminal_coloring {
-            let future_terminals = self.possible_future_terminals[tokenizer_state as usize].clone();
+            let future_terminals = self.possible_future_terminals_for_state(tokenizer_state);
             self.profile.future_terminal_additions +=
                 (sources.len() * future_terminals.len()) as u64;
             for terminal_id in future_terminals {
@@ -1093,16 +1089,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
         if let Some(ignore_terminal) = self.ignore_terminal {
             if self
-                .tokenizer
-                .possible_future_terminals(tokenizer_state)
-                .contains(ignore_terminal as usize)
+                .possible_future_terminals_for_state(tokenizer_state)
+                .contains(&ignore_terminal)
             {
                 self.profile.future_terminal_additions += sources.len() as u64;
                 self.add_match_from_sources(sources, ignore_terminal, self.leaf_state, weight);
             }
         }
 
-        let color_groups = self.future_terminal_color_groups[tokenizer_state as usize].clone();
+        let color_groups = self.future_terminal_color_groups_for_state(tokenizer_state);
         for (color, terminals) in color_groups {
             if terminals.is_empty() {
                 continue;
@@ -1223,12 +1218,24 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn can_skip_self_loop_subtree(
-        &self,
+        &mut self,
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
-        U8Set::from_words(*node.subtree_bytes())
-            .is_subset(&self.self_loop_bytes[tokenizer_state as usize])
+        let self_loop_bytes = if let Some(bytes) = self.self_loop_bytes.get(&tokenizer_state) {
+            bytes.clone()
+        } else {
+            let state = &self.tokenizer.dfa.states()[tokenizer_state as usize];
+            let mut bytes = U8Set::empty();
+            for (byte, &target) in state.transitions.iter() {
+                if target == tokenizer_state {
+                    bytes.insert(byte);
+                }
+            }
+            self.self_loop_bytes.insert(tokenizer_state, bytes.clone());
+            bytes
+        };
+        U8Set::from_words(*node.subtree_bytes()).is_subset(&self_loop_bytes)
     }
 
     fn emit_self_loop_leaf_only_subtree(
@@ -1244,10 +1251,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return;
         }
         let accessible_weight = self.token_set_weight_fast(&accessible);
-        for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
+        for (internal_tsid, source_nodes) in assoc_by_state.iter() {
             self.add_future_weighted_match_from_sources(
                 source_nodes,
-                tokenizer_state,
+                internal_tsid,
                 &accessible_weight,
             );
         }
@@ -1302,7 +1309,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 continue;
             }
             let (weight, _) = self.cached_leaf_weight(token_ids);
-            for &terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
+            for terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
                 leaf_transition_buckets[from as usize]
                     .entry(terminal_id as i32)
                     .and_modify(|existing| *existing = existing.union(&weight))
@@ -1316,7 +1323,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             if weight.is_empty() {
                 continue;
             }
-            for &terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
+            for terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
                 leaf_transition_buckets[from as usize]
                     .entry(terminal_id as i32)
                     .and_modify(|existing| *existing = existing.union(&weight))
@@ -1370,7 +1377,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         assoc_by_state: &NodesByTokenizerState,
     ) {
-        let assoc_capacity = self.tokenizer.num_states() as usize;
+        let assoc_capacity = self.num_tsids as usize;
         let mut recursive_nodes = NodesByTokenizerState::new(assoc_capacity);
         let mut self_loop_only_nodes = NodesByTokenizerState::new(assoc_capacity);
         for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
@@ -1515,10 +1522,9 @@ fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Ve
 fn seed_root_nodes(
     nwa: &mut NWA,
     start_state: u32,
-    tokenizer: &Tokenizer,
     id_map: &InternalIdMap,
 ) -> NodesByTokenizerState {
-    let mut roots_by_tokenizer_state = NodesByTokenizerState::new(tokenizer.num_states() as usize);
+    let mut roots_by_tokenizer_state = NodesByTokenizerState::new(id_map.num_tsids() as usize);
 
     for internal_tsid in 0..id_map.num_tsids() {
         let root = nwa.add_state();
@@ -1528,10 +1534,7 @@ fn seed_root_nodes(
             all_token_weight(internal_tsid, id_map.max_internal_token_id()),
         );
 
-        let representative_state = id_map
-            .tokenizer_states
-            .representative_original_id_for_internal(internal_tsid)
-            .expect("internal tokenizer state class must have a representative original state");
+        let representative_state = id_map.tokenizer_states.representative_original_ids[internal_tsid as usize];
         roots_by_tokenizer_state.merge(representative_state, &[root]);
     }
 
@@ -1607,44 +1610,65 @@ fn build_terminal_dwa_impl(
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
 ) -> (DWA, PossibleMatchesByState) {
+    let debug_profile = debug_profile_enabled();
+    let total_started_at = std::time::Instant::now();
     let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
     let start_state = nwa.add_state();
     nwa.start_states.push(start_state);
 
+    let setup_started_at = std::time::Instant::now();
     let internal_vocab = internal_vocab_entries(vocab, id_map);
+    let internal_vocab_len = internal_vocab.len();
     let vocab_tree = VocabPrefixTree::build_owned(
         internal_vocab
             .into_iter()
             .map(|(token_id, bytes)| (token_id as usize, bytes))
             .collect(),
     );
-    let self_loop_bytes = build_self_loop_bytes(tokenizer);
-    let possible_future_terminals: Vec<Vec<TerminalID>> = (0..tokenizer.num_states())
-        .map(|state| tokenizer.possible_future_terminals_iter(state).collect())
-        .collect();
-    let future_terminal_color_groups = if use_terminal_coloring {
-        build_future_terminal_color_groups(tokenizer, terminal_coloring, ignore_terminal)
-    } else {
-        vec![FutureTerminalColorGroups::new(); tokenizer.num_states() as usize]
-    };
+    let setup_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
     let profile_enabled = terminal_dwa_profile_enabled();
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
 
-    let roots_by_tokenizer_state = seed_root_nodes(&mut nwa, start_state, tokenizer, id_map);
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] start grammar_rules={} grammar_terminals={} grammar_nonterminals={} tokenizer_states={} internal_tokenizer_states={} vocab_entries={} setup_ms={:.3}",
+            grammar.rules.len(),
+            grammar.num_terminals,
+            grammar.num_nonterminals,
+            tokenizer.num_states(),
+            id_map.num_tsids(),
+            internal_vocab_len,
+            setup_ms,
+        );
+    }
 
+    let seed_started_at = std::time::Instant::now();
+    let roots_by_tokenizer_state = seed_root_nodes(&mut nwa, start_state, id_map);
+    let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] stage=seed roots={} ms={:.3}",
+            roots_by_tokenizer_state.entries.len(),
+            seed_ms,
+        );
+    }
+
+    let build_trie_started_at = std::time::Instant::now();
     let mut builder = TerminalNwaBuilder {
         tokenizer,
-        possible_future_terminals,
-        future_terminal_color_groups,
+        terminal_coloring: terminal_coloring.clone(),
+        possible_future_terminals: FxHashMap::default(),
+        future_terminal_color_groups: FxHashMap::default(),
         possible_matches: &mut possible_matches,
         nwa: &mut nwa,
         num_tsids: id_map.num_tsids(),
         leaf_state,
         ignore_terminal,
         use_terminal_coloring,
-        self_loop_bytes,
+        self_loop_bytes: FxHashMap::default(),
         leaf_token_ids_buffer: Vec::new(),
         future_leaf_token_ids_buffer: FxHashMap::default(),
         future_leaf_weight_buffer: FxHashMap::default(),
@@ -1659,26 +1683,71 @@ fn build_terminal_dwa_impl(
     builder.build_from_trie(&vocab_tree.root, &roots_by_tokenizer_state);
     builder.flush_transition_buffer();
     let profile = builder.profile;
+    let build_trie_ms = build_trie_started_at.elapsed().as_secs_f64() * 1000.0;
     drop(builder);
-    let possible_matches_by_state = collect_possible_matches_by_state(
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] stage=build_trie nwa_states={} nwa_transitions={} ms={:.3}",
+            nwa.num_states(),
+            nwa.num_transitions(),
+            build_trie_ms,
+        );
+    }
+
+    let possible_matches_started_at = std::time::Instant::now();
+    let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
         tokenizer,
         &vocab_tree.root,
         &mut possible_matches,
+        &id_map.tokenizer_states,
     );
+    let possible_matches_ms = possible_matches_started_at.elapsed().as_secs_f64() * 1000.0;
+    let possible_matches_profile = possible_matches.profile();
 
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] stage=possible_matches states={} cache_entries={} reachable_cache_entries={} ms={:.3}",
+            possible_matches_by_state.len(),
+            possible_matches_profile.cache_entries,
+            possible_matches_profile.reachable_cache_entries,
+            possible_matches_ms,
+        );
+    }
+
+    let always_allowed_started_at = std::time::Instant::now();
     let always_allowed_by_label = compute_always_allowed_follows(grammar);
+    let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let collapse_started_at = std::time::Instant::now();
     let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let disallowed_started_at = std::time::Instant::now();
     apply_disallowed_follow_constraints(&mut nwa, grammar);
+    let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let dedup_started_at = std::time::Instant::now();
     deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize);
+    let dedup_ms = dedup_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let canonicalize_started_at = std::time::Instant::now();
     canonicalize_acyclic_nwa(&mut nwa);
+    let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let nwa_states = nwa.num_states();
+    let nwa_transitions = nwa.num_transitions();
+
+    let determinize_started_at = std::time::Instant::now();
     let determinized = determinize(&nwa)
         .expect("terminal NWA determinization failed despite acyclic token trie construction");
+    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let determinized_states = determinized.num_states();
+    let determinized_transitions = determinized.num_transitions();
 
+    let minimize_started_at = std::time::Instant::now();
     let dwa = minimize(&determinized);
+    let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if profile_enabled {
         eprintln!(
@@ -1686,6 +1755,51 @@ fn build_terminal_dwa_impl(
             terminal_coloring.num_colors,
             profile.future_terminal_additions,
             profile.match_transition_additions,
+        );
+    }
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] tokenizer_states={} internal_tokenizer_states={} vocab_entries={} roots={} possible_matches_states={} possible_matches_cache_entries={} reachable_cache_entries={} nwa_states={} nwa_transitions={} determinized_states={} determinized_transitions={} minimized_states={}",
+            tokenizer.num_states(),
+            id_map.num_tsids(),
+            internal_vocab_len,
+            roots_by_tokenizer_state.entries.len(),
+            possible_matches_by_state.len(),
+            possible_matches_profile.cache_entries,
+            possible_matches_profile.reachable_cache_entries,
+            nwa_states,
+            nwa_transitions,
+            determinized_states,
+            determinized_transitions,
+            dwa.num_states(),
+        );
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] setup_ms={:.3} seed_ms={:.3} build_trie_ms={:.3} possible_matches_ms={:.3} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} dedup_ms={:.3} canonicalize_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            setup_ms,
+            seed_ms,
+            build_trie_ms,
+            possible_matches_ms,
+            always_allowed_ms,
+            collapse_ms,
+            disallowed_ms,
+            dedup_ms,
+            canonicalize_ms,
+            determinize_ms,
+            minimize_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] possible_matches cache_hits={} cache_misses={} reachable_hits={} reachable_misses={} child_segments={} byte_steps={} blocked_segments={} recursive_descents={} terminal_insertions={}",
+            possible_matches_profile.cache_hits,
+            possible_matches_profile.cache_misses,
+            possible_matches_profile.reachable_cache_hits,
+            possible_matches_profile.reachable_cache_misses,
+            possible_matches_profile.child_segments_visited,
+            possible_matches_profile.byte_steps,
+            possible_matches_profile.blocked_segments,
+            possible_matches_profile.recursive_descents,
+            possible_matches_profile.terminal_insertions,
         );
     }
 

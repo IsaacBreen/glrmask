@@ -363,8 +363,9 @@ impl<'a> ConstraintState<'a> {
 
                 let mut dense: Vec<u64> = universe.to_vec();
                 for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed {
+                    let internal_tsid = self.constraint.internal_tsid_for_state(orig_tokenizer_state);
                     for &terminal_id in disallowed_in_state {
-                        if let Some(mask) = terminal_masks.get(&(orig_tokenizer_state, terminal_id)) {
+                        if let Some(mask) = terminal_masks.get(&(internal_tsid, terminal_id)) {
                             for (dense_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
                                 *dense_word &= !mask_word;
                             }

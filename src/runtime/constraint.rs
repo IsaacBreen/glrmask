@@ -295,8 +295,9 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
+        let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
         self.possible_matches
-            .get(&tokenizer_state)
+            .get(&internal_tsid)
             .map(|possible_matches| self.expand_possible_matches(possible_matches))
             .unwrap_or_default()
     }
@@ -343,7 +344,8 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> Option<&BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
-        self.possible_matches.get(&tokenizer_state)
+        let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
+        self.possible_matches.get(&internal_tsid)
     }
 
     fn build_internal_token_buf_mask(originals: &[u32]) -> InternalTokenBufMasks {
@@ -362,10 +364,10 @@ impl Constraint {
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
         let mut terminal_masks = SeedTerminalDenseMasks::default();
-        for (&tokenizer_state, terminals) in &self.possible_matches {
+        for (&internal_tsid, terminals) in &self.possible_matches {
             for (&terminal_id, internal_tokens) in terminals {
                 terminal_masks.insert(
-                    (tokenizer_state, terminal_id),
+                    (internal_tsid, terminal_id),
                     self.dense_words_from_internal_set(internal_tokens),
                 );
             }

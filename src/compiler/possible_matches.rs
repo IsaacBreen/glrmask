@@ -2,16 +2,42 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::grammar::model::TerminalID;
+use crate::compiler::stages::equivalence_analysis::ManyToOneIdMap;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
 pub(crate) type PossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
 type PossibleMatchMap = FxHashMap<TerminalID, RangeSetBlaze<u32>>;
+
+fn debug_profile_enabled() -> bool {
+    std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PossibleMatchesProfile {
+    pub(crate) cache_hits: u64,
+    pub(crate) cache_misses: u64,
+    pub(crate) reachable_cache_hits: u64,
+    pub(crate) reachable_cache_misses: u64,
+    pub(crate) child_segments_visited: u64,
+    pub(crate) byte_steps: u64,
+    pub(crate) blocked_segments: u64,
+    pub(crate) recursive_descents: u64,
+    pub(crate) terminal_insertions: u64,
+    pub(crate) cache_entries: usize,
+    pub(crate) reachable_cache_entries: usize,
+}
 
 fn owned_token_entries(token_bytes: &BTreeMap<u32, Vec<u8>>) -> Vec<(u32, Vec<u8>)> {
     token_bytes
@@ -60,6 +86,7 @@ pub(crate) struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
     cache: FxHashMap<(usize, u32), Rc<PossibleMatchMap>>,
     reachable_cache: FxHashMap<usize, Rc<RangeSetBlaze<u32>>>,
+    profile: PossibleMatchesProfile,
 }
 
 impl<'a> PossibleMatchesComputer<'a> {
@@ -68,15 +95,26 @@ impl<'a> PossibleMatchesComputer<'a> {
             tokenizer,
             cache: FxHashMap::default(),
             reachable_cache: FxHashMap::default(),
+            profile: PossibleMatchesProfile::default(),
+        }
+    }
+
+    pub(crate) fn profile(&self) -> PossibleMatchesProfile {
+        PossibleMatchesProfile {
+            cache_entries: self.cache.len(),
+            reachable_cache_entries: self.reachable_cache.len(),
+            ..self.profile
         }
     }
 
     fn reachable_for_node(&mut self, node: &VocabPrefixTreeNode) -> Rc<RangeSetBlaze<u32>> {
         let cache_key = node as *const VocabPrefixTreeNode as usize;
         if let Some(cached) = self.reachable_cache.get(&cache_key) {
+            self.profile.reachable_cache_hits += 1;
             return Rc::clone(cached);
         }
 
+        self.profile.reachable_cache_misses += 1;
         let reachable = Rc::new(reachable_u32(node));
         self.reachable_cache.insert(cache_key, Rc::clone(&reachable));
         reachable
@@ -89,8 +127,10 @@ impl<'a> PossibleMatchesComputer<'a> {
     ) -> Rc<PossibleMatchMap> {
         let cache_key = (node as *const VocabPrefixTreeNode as usize, tokenizer_state);
         if let Some(cached) = self.cache.get(&cache_key) {
+            self.profile.cache_hits += 1;
             return Rc::clone(cached);
         }
+        self.profile.cache_misses += 1;
 
         let mut result = PossibleMatchMap::default();
 
@@ -101,15 +141,18 @@ impl<'a> PossibleMatchesComputer<'a> {
             let token_id = node.token_id() as u32;
             for terminal in self.tokenizer.matched_terminals_iter(tokenizer_state) {
                 result.entry(terminal).or_default().insert(token_id);
+                self.profile.terminal_insertions += 1;
             }
         }
 
         for (segment_bytes, child) in node.iter_children() {
+            self.profile.child_segments_visited += 1;
             let mut current_state = tokenizer_state;
             let mut segment_blocked = false;
             let reachable = self.reachable_for_node(child);
 
             for &byte in segment_bytes {
+                self.profile.byte_steps += 1;
                 let Some(next_state) = self.tokenizer.step(current_state, byte) else {
                     segment_blocked = true;
                     break;
@@ -118,10 +161,15 @@ impl<'a> PossibleMatchesComputer<'a> {
                 for terminal in self.tokenizer.matched_terminals_iter(current_state) {
                     let existing = result.entry(terminal).or_default();
                     merge_token_ids(existing, reachable.as_ref());
+                    self.profile.terminal_insertions += 1;
                 }
             }
 
+            if segment_blocked {
+                self.profile.blocked_segments += 1;
+            }
             if !segment_blocked && !self.tokenizer.is_end(current_state) {
+                self.profile.recursive_descents += 1;
                 let child_matches = self.possible_matches_for_node(child, current_state);
                 merge_possible_match_maps(&mut result, child_matches.as_ref());
             }
@@ -176,16 +224,71 @@ pub(crate) fn collect_possible_matches_by_state(
     root: &VocabPrefixTreeNode,
     computer: &mut PossibleMatchesComputer<'_>,
 ) -> PossibleMatchesByState {
+    collect_possible_matches_by_keys(
+        tokenizer,
+        root,
+        computer,
+        (0..tokenizer.num_states()).map(|state| (state, state)),
+        tokenizer.num_states(),
+    )
+}
+
+pub(crate) fn collect_possible_matches_by_internal_tsid(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    computer: &mut PossibleMatchesComputer<'_>,
+    tokenizer_state_ids: &ManyToOneIdMap,
+) -> PossibleMatchesByState {
+    collect_possible_matches_by_keys(
+        tokenizer,
+        root,
+        computer,
+        tokenizer_state_ids
+            .iter_representative_ids()
+            .enumerate()
+            .map(|(internal_tsid, representative_state)| (internal_tsid as u32, representative_state)),
+        tokenizer_state_ids.num_internal_ids(),
+    )
+}
+
+fn collect_possible_matches_by_keys(
+    _tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    computer: &mut PossibleMatchesComputer<'_>,
+    keyed_states: impl Iterator<Item = (u32, u32)>,
+    total_keys: u32,
+) -> PossibleMatchesByState {
     let mut possible_matches_by_state = BTreeMap::new();
     let root_key = root as *const VocabPrefixTreeNode as usize;
-    for tokenizer_state in 0..tokenizer.num_states() {
-        let cache_key = (root_key, tokenizer_state);
-        let _ = computer.possible_matches_for_node(root, tokenizer_state);
+    let debug_profile = debug_profile_enabled();
+    let started_at = Instant::now();
+    for (index, (result_state_id, representative_state)) in keyed_states.enumerate() {
+        let cache_key = (root_key, representative_state);
+        let _ = computer.possible_matches_for_node(root, representative_state);
         let matches_for_state = computer
             .cache
             .remove(&cache_key)
             .expect("root possible-match map should be cached");
-        possible_matches_by_state.insert(tokenizer_state, ordered_possible_matches(matches_for_state));
+        possible_matches_by_state.insert(result_state_id, ordered_possible_matches(matches_for_state));
+
+        let states_done = index as u32 + 1;
+        if debug_profile && ((states_done % 100_000 == 0) || states_done == total_keys) {
+            let profile = computer.profile();
+            eprintln!(
+                "[glrmask/debug][possible_matches] states_done={} total_states={} elapsed_ms={:.3} cache_entries={} reachable_cache_entries={} cache_hits={} cache_misses={} child_segments={} byte_steps={} recursive_descents={} terminal_insertions={}",
+                states_done,
+                total_keys,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                profile.cache_entries,
+                profile.reachable_cache_entries,
+                profile.cache_hits,
+                profile.cache_misses,
+                profile.child_segments_visited,
+                profile.byte_steps,
+                profile.recursive_descents,
+                profile.terminal_insertions,
+            );
+        }
     }
 
     possible_matches_by_state
@@ -206,6 +309,29 @@ pub(crate) fn permute_possible_matches_in_place(
             *token_ids = RangeSetBlaze::from_iter(mapped.into_iter().map(|token_id| token_id..=token_id));
         }
     }
+}
+
+pub(crate) fn permute_possible_match_state_ids_in_place(
+    possible_matches_by_state: &mut PossibleMatchesByState,
+    state_perm: &[u32],
+) {
+    let mut remapped = BTreeMap::new();
+
+    for (&state_id, matches_by_terminal) in possible_matches_by_state.iter() {
+        let Some(&new_state_id) = state_perm.get(state_id as usize) else {
+            continue;
+        };
+
+        let target = remapped
+            .entry(new_state_id)
+            .or_insert_with(BTreeMap::<TerminalID, RangeSetBlaze<u32>>::new);
+        for (&terminal_id, token_ids) in matches_by_terminal {
+            let existing = target.entry(terminal_id).or_default();
+            *existing |= token_ids;
+        }
+    }
+
+    *possible_matches_by_state = remapped;
 }
 
 #[cfg(test)]

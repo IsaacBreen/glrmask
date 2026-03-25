@@ -259,17 +259,20 @@ fn compile_prepared_with_profile(
     profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
 
     let compact_started_at = Instant::now();
-    let token_permutation = crate::compiler::stages::compact::compact_dwa_dimensions(
+    let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
         &mut terminal_dwa,
         &mut internal_ids,
-    )
-    .token_perm;
+    );
     profile.compact_ms = elapsed_ms(compact_started_at);
 
     let permute_possible_matches_started_at = Instant::now();
+    crate::compiler::possible_matches::permute_possible_match_state_ids_in_place(
+        &mut possible_matches,
+        &compact_report.tsid_perm,
+    );
     crate::compiler::possible_matches::permute_possible_matches_in_place(
         &mut possible_matches,
-        &token_permutation,
+        &compact_report.token_perm,
     );
     profile.permute_possible_matches_ms = elapsed_ms(permute_possible_matches_started_at);
 

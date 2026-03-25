@@ -24,6 +24,7 @@ const TOKEN_ORDER_FINISH_ITERS: usize = 20000;
 const TOKEN_ORDER_FINISH_SEED: u64 = 7;
 
 pub struct CompactReport {
+    pub tsid_perm: Vec<u32>,
     pub token_perm: Vec<u32>,
 }
 
@@ -126,6 +127,7 @@ pub fn compact_dwa_dimensions(
     );
 
     CompactReport {
+        tsid_perm: compaction.tsid_perm,
         token_perm: compaction.token_perm,
     }
 }
