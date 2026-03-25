@@ -1,68 +1,92 @@
 //! Max-length bounded state equivalence prepass.
 //!
-//! Two states are equivalent up to length `k` iff for every byte string of
-//! length `0..=k`, either:
-//! - that path exists from both states and ends in states with identical
-//!   `finalizers` and identical `possible_future_group_ids`, or
-//! - that path exists from neither state.
-//!
-//! This pass must be conservative: it may keep distinguishable states separate,
-//! but it must never merge states that differ under the bounded view. To keep
-//! the partition exact, we intern structural keys directly instead of relying on
-//! 64-bit hashes.
+//! Depth 0 hashes each state's own label data plus its outgoing label layout.
+//! Each later depth only mixes in the previous hashes of that state's unique
+//! outgoing destinations.
 
 use std::collections::HashMap;
-use std::hash::Hash;
 
-use rayon::prelude::*;
+use super::super::compat::{FlatDfaState, TokenizerView};
 
-use super::super::compat::TokenizerView;
-
-fn build_classes_from_keys<K>(keys: impl IntoIterator<Item = K>, expected_len: usize) -> (Vec<usize>, usize)
-where
-    K: Eq + Hash,
-{
-    let mut class_of_key: HashMap<K, usize> = HashMap::with_capacity(expected_len);
-    let mut classes = Vec::with_capacity(expected_len);
-    let mut next_class = 0usize;
-
-    for key in keys {
-        let class_id = match class_of_key.get(&key) {
-            Some(&existing) => existing,
-            None => {
-                let new_id = next_class;
-                class_of_key.insert(key, new_id);
-                next_class += 1;
-                new_id
-            }
-        };
-        classes.push(class_id);
-    }
-
-    (classes, next_class)
+#[inline(always)]
+fn mix_u64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+    x
 }
 
 #[inline(always)]
-fn build_subset_mapping(states: &[usize], classes: &[usize]) -> Vec<usize> {
-    let mut rep_for_class: HashMap<usize, usize> = HashMap::new();
+fn hash_sorted_set(values: &[usize], tag: u64) -> u64 {
+    let mut hash = mix_u64((values.len() as u64) ^ tag);
+    for &value in values {
+        hash = hash.wrapping_add(mix_u64((value as u64) ^ tag.rotate_left(17)));
+    }
+    hash
+}
+
+#[inline(always)]
+fn hash_state_label(state: &FlatDfaState) -> u64 {
+    let finalizers = hash_sorted_set(&state.finalizers, 0xF11A_F11A_F11A_F11A);
+    let futures = hash_sorted_set(&state.possible_future_group_ids, 0xF0C7_F0C7_F0C7_F0C7);
+    mix_u64(finalizers.wrapping_add(futures))
+}
+
+#[inline(always)]
+fn hash_transition_labels(label_hashes: &[u64]) -> u64 {
+    let mut hash = mix_u64((label_hashes.len() as u64) ^ 0x7F4A_7C15_9E37_79B9);
+    for &label_hash in label_hashes {
+        hash = mix_u64(hash ^ label_hash.wrapping_add(0xA24B_AED4_963E_E407));
+    }
+    hash
+}
+
+#[inline(always)]
+fn hash_transition_targets(targets: &[usize], prev_hashes: &[u64]) -> u64 {
+    let mut hash = mix_u64((targets.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
+    for &target in targets {
+        hash = mix_u64(hash ^ prev_hashes[target].rotate_left(17));
+    }
+    hash
+}
+
+fn build_state_shape(state: &FlatDfaState) -> (Vec<usize>, u64) {
+    let mut targets: Vec<usize> = Vec::new();
+    let mut label_hashes: Vec<u64> = Vec::new();
+    let mut index_by_target: HashMap<usize, usize> = HashMap::new();
+
+    for (byte, &target) in state.transitions.iter().enumerate() {
+        if target == u32::MAX {
+            continue;
+        }
+
+        let byte_hash = mix_u64((byte as u64) ^ 0xD6E8_FD93_5E6C_A271);
+        let target = target as usize;
+
+        if let Some(&index) = index_by_target.get(&target) {
+            label_hashes[index] = label_hashes[index].wrapping_add(byte_hash);
+        } else {
+            index_by_target.insert(target, targets.len());
+            targets.push(target);
+            label_hashes.push(byte_hash);
+        }
+    }
+
+    (targets, hash_transition_labels(&label_hashes))
+}
+
+fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
+    let mut rep_for_hash = HashMap::new();
     let mut mapping = Vec::with_capacity(states.len());
 
     for &state_id in states {
-        let rep = *rep_for_class.entry(classes[state_id]).or_insert(state_id);
+        let rep = *rep_for_hash.entry(hashes[state_id]).or_insert(state_id);
         mapping.push(rep);
     }
 
     mapping
-}
-
-fn build_label_classes(tokenizer: &TokenizerView) -> (Vec<usize>, usize) {
-    let dfa = tokenizer.dfa();
-    build_classes_from_keys(
-        dfa.states
-            .iter()
-            .map(|state| (state.finalizers.clone(), state.possible_future_group_ids.clone())),
-        dfa.states.len(),
-    )
 }
 
 fn find_state_equivalence_classes_kstep(
@@ -75,146 +99,27 @@ fn find_state_equivalence_classes_kstep(
     }
 
     let dfa = tokenizer.dfa();
-    let num_states = dfa.states.len();
+    let mut outgoing_targets = Vec::with_capacity(dfa.states.len());
+    let mut prev_hashes = Vec::with_capacity(dfa.states.len());
 
-    if num_states == 0 {
-        return states.to_vec();
+    for state in &dfa.states {
+        let (targets, transition_label_hash) = build_state_shape(state);
+        outgoing_targets.push(targets);
+        prev_hashes.push(mix_u64(hash_state_label(state) ^ transition_label_hash));
     }
 
-    let transitions: Vec<Vec<(u8, usize)>> = dfa
-        .states
-        .iter()
-        .map(|state| {
-            state
-                .transitions
-                .iter()
-                .enumerate()
-                .filter(|(_, target)| **target != u32::MAX)
-                .map(|(byte, &target)| (byte as u8, target as usize))
-                .collect()
-        })
-        .collect();
-
-    let mut class_reps: Vec<usize> = Vec::new();
-    let class_for_state: Vec<usize>;
-    let mut use_trans_class_cache = false;
-
-    {
-        let mut trans_pattern_to_class: HashMap<Vec<(u8, usize)>, usize> = HashMap::new();
-        let mut tmp_class_for_state = vec![0usize; num_states];
-
-        for (state_id, trans) in transitions.iter().enumerate() {
-            let class_id = match trans_pattern_to_class.get(trans) {
-                Some(&existing) => existing,
-                None => {
-                    let new_id = class_reps.len();
-                    trans_pattern_to_class.insert(trans.clone(), new_id);
-                    class_reps.push(state_id);
-                    new_id
-                }
-            };
-            tmp_class_for_state[state_id] = class_id;
+    let mut next_hashes = vec![0u64; dfa.states.len()];
+    for _ in 0..k {
+        for state_id in 0..dfa.states.len() {
+            next_hashes[state_id] = mix_u64(
+                prev_hashes[state_id]
+                    ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
+            );
         }
-
-        let num_classes = class_reps.len();
-        let shared = num_states.saturating_sub(num_classes);
-
-        if num_states > 0 && shared * 2 >= num_states {
-            use_trans_class_cache = true;
-            class_for_state = tmp_class_for_state;
-        } else {
-            class_reps.clear();
-            class_for_state = Vec::new();
-        }
+        std::mem::swap(&mut prev_hashes, &mut next_hashes);
     }
 
-    let (label_classes, _) = build_label_classes(tokenizer);
-    let (mut prev_classes, mut prev_num_classes) = build_label_classes(tokenizer);
-
-    if k == 0 {
-        return build_subset_mapping(states, &prev_classes);
-    }
-
-    for _depth in 0..k {
-        let transition_signature_ids = if use_trans_class_cache {
-            let class_signatures: Vec<Vec<(u8, usize)>> = (0..class_reps.len())
-                .into_par_iter()
-                .map(|class_id| {
-                    transitions[class_reps[class_id]]
-                        .iter()
-                        .map(|(byte, target)| (*byte, prev_classes[*target]))
-                        .collect()
-                })
-                .collect();
-
-            let mut signature_to_id: HashMap<Vec<(u8, usize)>, usize> =
-                HashMap::with_capacity(class_signatures.len());
-            let mut next_signature_id = 0usize;
-            let mut signature_ids_for_class = vec![0usize; class_signatures.len()];
-
-            for (class_id, signature) in class_signatures.into_iter().enumerate() {
-                let signature_id = match signature_to_id.get(&signature) {
-                    Some(&existing) => existing,
-                    None => {
-                        let new_id = next_signature_id;
-                        signature_to_id.insert(signature, new_id);
-                        next_signature_id += 1;
-                        new_id
-                    }
-                };
-                signature_ids_for_class[class_id] = signature_id;
-            }
-
-            (0..num_states)
-                .map(|state_id| signature_ids_for_class[class_for_state[state_id]])
-                .collect::<Vec<_>>()
-        } else {
-            let state_signatures: Vec<Vec<(u8, usize)>> = transitions
-                .par_iter()
-                .map(|state_transitions| {
-                    state_transitions
-                        .iter()
-                        .map(|(byte, target)| (*byte, prev_classes[*target]))
-                        .collect()
-                })
-                .collect();
-
-            let mut signature_to_id: HashMap<Vec<(u8, usize)>, usize> =
-                HashMap::with_capacity(state_signatures.len());
-            let mut next_signature_id = 0usize;
-            let mut signature_ids = vec![0usize; num_states];
-
-            for (state_id, signature) in state_signatures.into_iter().enumerate() {
-                let signature_id = match signature_to_id.get(&signature) {
-                    Some(&existing) => existing,
-                    None => {
-                        let new_id = next_signature_id;
-                        signature_to_id.insert(signature, new_id);
-                        next_signature_id += 1;
-                        new_id
-                    }
-                };
-                signature_ids[state_id] = signature_id;
-            }
-
-            signature_ids
-        };
-
-        let (new_classes, new_num_classes) = build_classes_from_keys(
-            (0..num_states).map(|state_id| (label_classes[state_id], transition_signature_ids[state_id])),
-            num_states,
-        );
-
-        if new_num_classes == prev_num_classes {
-            prev_classes = new_classes;
-            break;
-        }
-
-        prev_classes = new_classes;
-        prev_num_classes = new_num_classes;
-    }
-
-    build_subset_mapping(states, &prev_classes)
+    build_subset_mapping(states, &prev_hashes)
 }
 
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
@@ -222,11 +127,6 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
-    let max_len = tokens
-        .iter()
-        .map(|token| token.as_ref().len())
-        .max()
-        .unwrap_or(0);
-
+    let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
     find_state_equivalence_classes_kstep(tokenizer, states, max_len)
 }
