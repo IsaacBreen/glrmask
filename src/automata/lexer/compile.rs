@@ -682,7 +682,10 @@ impl ProductComponent {
     }
 }
 
-fn compile_product_component(expr: &Expr, profile_label: &str) -> ProductComponent {
+fn compile_product_component(
+    expr: &Expr,
+    profile_label: &str,
+) -> ProductComponent {
     match expr {
         Expr::Shared(inner) => compile_product_component(inner, profile_label),
         Expr::Repeat {
