@@ -114,7 +114,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     subset_map.insert(start_key.clone(), start_id);
     worklist.push_back((start_key, start_entries));
 
-    let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
+    let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Vec<Weight>>> = FxHashMap::default();
 
     while let Some((subset_key, subset_entries)) = worklist.pop_front() {
         let from_state = subset_map[&subset_key];
@@ -133,13 +133,24 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                         continue;
                     }
 
-                    let target_entry = raw_targets.entry(label).or_default();
-                    union_state_weight(target_entry, *dst, next_weight);
+                    raw_targets.entry(label).or_default().entry(*dst).or_default().push(next_weight);
                 }
             }
         }
 
-        for (label, target_subset) in raw_targets.drain() {
+        for (label, target_contributions) in raw_targets.drain() {
+            if target_contributions.is_empty() {
+                continue;
+            }
+
+            let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
+            for (dst, weights) in target_contributions {
+                let combined = Weight::union_all(weights.iter());
+                if !combined.is_empty() {
+                    target_subset.insert(dst, combined);
+                }
+            }
+
             if target_subset.is_empty() {
                 continue;
             }

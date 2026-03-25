@@ -646,6 +646,28 @@ where
     builder.finish()
 }
 
+fn union_all_single_tsid_entries(weights: &[&Weight]) -> Option<Weight> {
+    let mut per_tsid: BTreeMap<u32, SharedTokenSet> = BTreeMap::new();
+
+    for weight in weights {
+        let entry = single_compact_entry(weight)?;
+        if entry.start != entry.end || entry.start == WEIGHT_ALL_SENTINEL {
+            return None;
+        }
+
+        per_tsid
+            .entry(entry.start)
+            .and_modify(|existing| *existing = shared_token_union(existing, &entry.tokens))
+            .or_insert(entry.tokens);
+    }
+
+    let mut builder = CompactRangeBuilder::new();
+    for (tsid, tokens) in per_tsid {
+        builder.push(tsid, tsid, tokens);
+    }
+    Some(builder.finish())
+}
+
 fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> SmallVec<[u64; 32]> {
     let mut boundaries = SmallVec::<[u64; 32]>::with_capacity((left.len() + right.len()) * 2);
     for entry in left.iter().chain(right.iter()) {
@@ -909,29 +931,30 @@ impl Weight {
     }
 
     pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
-        let mut iter = weights.into_iter();
-
-        let first = match next_meaningful_weight(&mut iter) {
-            NextMeaningfulWeight::End => return Self::empty(),
-            NextMeaningfulWeight::Full => return Self::all(),
-            NextMeaningfulWeight::Weight(weight) => weight,
-        };
-
-        let second = match next_meaningful_weight(&mut iter) {
-            NextMeaningfulWeight::End => return first.clone(),
-            NextMeaningfulWeight::Full => return Self::all(),
-            NextMeaningfulWeight::Weight(weight) => weight,
-        };
-
-        let mut acc = first.union(second);
-
-        for weight in iter {
+        let mut meaningful = SmallVec::<[&Weight; 8]>::new();
+        for weight in weights {
             if weight.is_full() {
                 return Self::all();
             }
             if weight.is_empty() {
                 continue;
             }
+            meaningful.push(weight);
+        }
+
+        match meaningful.len() {
+            0 => return Self::empty(),
+            1 => return meaningful[0].clone(),
+            _ => {}
+        }
+
+        if let Some(result) = union_all_single_tsid_entries(&meaningful) {
+            return result;
+        }
+
+        let mut iter = meaningful.into_iter();
+        let mut acc = iter.next().unwrap().clone();
+        for weight in iter {
             acc = acc.union(weight);
         }
         acc
