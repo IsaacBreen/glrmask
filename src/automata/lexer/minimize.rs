@@ -12,8 +12,6 @@ use crate::ds::char_transitions::CharTransitions;
 
 use super::dfa::DFA;
 
-const TOPOLOGY_PREREFINE_MAX_STATES: usize = 4096;
-
 enum TopologyPrerefine {
     AlreadyMinimal(Vec<Vec<u32>>),
     Refined {
@@ -423,16 +421,14 @@ impl DFA {
         let (partition, blocks) = partition_by_finalizers(&working);
         let mut minimality_check_blocks = blocks.clone();
 
-        if n <= TOPOLOGY_PREREFINE_MAX_STATES {
-            match topology_prerefine_partition(&working, &partition) {
-                TopologyPrerefine::AlreadyMinimal(blocks) => {
-                    return working.rebuild_from_blocks(blocks);
-                }
-                TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
-                    minimality_check_blocks = refined_blocks;
-                }
-                TopologyPrerefine::Skip => {}
+        match topology_prerefine_partition(&working, &partition) {
+            TopologyPrerefine::AlreadyMinimal(blocks) => {
+                return working.rebuild_from_blocks(blocks);
             }
+            TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
+                minimality_check_blocks = refined_blocks;
+            }
+            TopologyPrerefine::Skip => {}
         }
 
         if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
@@ -493,7 +489,7 @@ impl DFA {
     }
 
     /// Recompute `possible_future_group_ids` for all states via fixpoint.
-    fn recompute_possible_futures(&mut self) {
+    pub(crate) fn recompute_possible_futures(&mut self) {
         let n = self.states().len();
         let num_groups = self.num_groups();
         if n == 0 {

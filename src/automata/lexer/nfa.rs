@@ -1,6 +1,8 @@
 //! Byte-oriented lexer NFA used as the determinization input.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
+
+use rustc_hash::FxHashSet;
 
 use crate::ds::u8set::U8Set;
 
@@ -188,7 +190,7 @@ impl NFA {
 
     pub(crate) fn compute_equivalence_classes(&self) -> (Vec<u8>, usize, Vec<Vec<u8>>) {
         let mut partitions = vec![U8Set::all()];
-        let mut seen_sets = HashSet::new();
+        let mut seen_sets = FxHashSet::default();
 
         for state in &self.states {
             for (set, _) in &state.transitions {

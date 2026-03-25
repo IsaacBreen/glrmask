@@ -124,7 +124,7 @@ impl Nfa {
         } else {
             let lexer_nfa = self.to_lexer_nfa();
             let lexer_dfa = lexer_nfa.to_dfa();
-            Self::from_lexer_dfa(&lexer_dfa, false)
+            Self::from_lexer_dfa_impl(&lexer_dfa, false)
         }
     }
 
@@ -134,9 +134,91 @@ impl Nfa {
         }
 
         let deterministic = self.as_deterministic();
-        let lexer_dfa = deterministic.to_lexer_dfa();
+        let lexer_dfa = deterministic.to_lexer_dfa_impl();
         let minimized = lexer_dfa.minimize();
-        Self::from_lexer_dfa(&minimized, true)
+        Self::from_lexer_dfa_impl(&minimized, true)
+    }
+
+    pub fn epsilon() -> Self {
+        Self::with_flags(
+            vec![State {
+                transitions: Vec::new(),
+                epsilon_transitions: Vec::new(),
+                is_end: true,
+            }],
+            0,
+            true,
+            true,
+        )
+    }
+
+    pub fn from_minimal_lexer_dfa(dfa: &LexerDfa) -> Self {
+        Self::from_lexer_dfa_impl(dfa, true)
+    }
+
+    pub fn to_lexer_dfa(&self) -> LexerDfa {
+        self.to_lexer_dfa_impl()
+    }
+
+    pub fn concatenate(&self, rhs: &Self) -> Self {
+        let lhs = self.as_minimal();
+        let rhs = rhs.as_minimal();
+
+        let rhs_offset = lhs.states.len() as u32;
+        let rhs_start = rhs.start_state + rhs_offset;
+        let mut states = lhs.states.clone();
+        states.extend(rhs.states.iter().cloned().map(|mut state| {
+            for (_, target) in &mut state.transitions {
+                *target += rhs_offset;
+            }
+            for target in &mut state.epsilon_transitions {
+                *target += rhs_offset;
+            }
+            state
+        }));
+
+        for state in &mut states[..lhs.states.len()] {
+            if state.is_end {
+                state.is_end = false;
+                state.epsilon_transitions.push(rhs_start);
+            }
+        }
+
+        Self::with_flags(states, lhs.start_state, false, false)
+    }
+
+    pub fn union(&self, rhs: &Self) -> Self {
+        let lhs = self.as_minimal();
+        let rhs = rhs.as_minimal();
+
+        let lhs_offset = 1u32;
+        let rhs_offset = lhs_offset + lhs.states.len() as u32;
+        let lhs_start = lhs.start_state + lhs_offset;
+        let rhs_start = rhs.start_state + rhs_offset;
+
+        let mut states = vec![State::default()];
+        states.extend(lhs.states.iter().cloned().map(|mut state| {
+            for (_, target) in &mut state.transitions {
+                *target += lhs_offset;
+            }
+            for target in &mut state.epsilon_transitions {
+                *target += lhs_offset;
+            }
+            state
+        }));
+        states.extend(rhs.states.iter().cloned().map(|mut state| {
+            for (_, target) in &mut state.transitions {
+                *target += rhs_offset;
+            }
+            for target in &mut state.epsilon_transitions {
+                *target += rhs_offset;
+            }
+            state
+        }));
+        states[0].epsilon_transitions.push(lhs_start);
+        states[0].epsilon_transitions.push(rhs_start);
+
+        Self::with_flags(states, 0, false, false)
     }
 
     pub fn subtract(&self, rhs: &Self) -> Self {
@@ -213,7 +295,7 @@ impl Nfa {
         nfa
     }
 
-    fn to_lexer_dfa(&self) -> LexerDfa {
+    fn to_lexer_dfa_impl(&self) -> LexerDfa {
         debug_assert!(self.deterministic);
 
         let mut dfa = LexerDfa::new(self.states.len());
@@ -237,7 +319,7 @@ impl Nfa {
         dfa
     }
 
-    fn from_lexer_dfa(dfa: &LexerDfa, minimal: bool) -> Self {
+    fn from_lexer_dfa_impl(dfa: &LexerDfa, minimal: bool) -> Self {
         let mut states = Vec::with_capacity(dfa.num_states());
         for (state_id, state) in dfa.states().iter().enumerate() {
             let mut transitions = Self::group_dfa_transition_bytes(state)

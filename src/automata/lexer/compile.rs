@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
-use crate::ds::u8set::U8Set;
+use crate::ds::{bitset::BitSet, u8set::U8Set};
 
 use super::ast::Expr;
-use super::dfa::DFA;
+use super::dfa::{DFA, DEAD};
 use super::nfa::NFA;
 
 fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
@@ -238,6 +239,30 @@ fn append_dfa_expr(dfa: &DFA, nfa: &mut NFA, start: u32, end: u32) {
     }
 }
 
+fn append_group_dfa_expr(dfa: &DFA, nfa: &mut NFA, start: u32, group_id: u32) {
+    let mut state_map = Vec::with_capacity(dfa.num_states());
+    state_map.push(start);
+    for _ in 1..dfa.num_states() {
+        state_map.push(nfa.add_state());
+    }
+
+    for (state_id, state) in dfa.states().iter().enumerate() {
+        let mapped_state = state_map[state_id];
+        for (byte, &target) in state.transitions.iter() {
+            nfa.add_transition(mapped_state, byte, state_map[target as usize]);
+        }
+        if !state.finalizers.is_empty() {
+            nfa.add_finalizer(mapped_state, group_id);
+        }
+    }
+}
+
+fn dfa_start_is_entry_only(dfa: &DFA) -> bool {
+    dfa.states()
+        .iter()
+        .all(|state| state.transitions.iter().all(|(_, &target)| target != 0))
+}
+
 fn append_sequence_expr(parts: &[Expr], nfa: &mut NFA, start: u32, end: u32) {
     let mut state = start;
     for (index, part) in parts.iter().enumerate() {
@@ -266,8 +291,113 @@ fn append_choice_expr(options: &[Expr], nfa: &mut NFA, start: u32, end: u32) {
     }
 }
 
+const DIRECT_BOUNDED_REPEAT_THRESHOLD: usize = 32;
+
+fn compile_expr_to_dfa(expr: &Expr) -> DFA {
+    let mut nfa = build_regex_nfa_impl(std::slice::from_ref(expr), false);
+    nfa.condense_epsilon_sccs();
+    nfa.to_dfa().minimize()
+}
+
+fn productive_dfa_states(dfa: &DFA) -> Vec<bool> {
+    let mut reverse_edges = vec![Vec::new(); dfa.num_states()];
+    for (state_id, state) in dfa.states().iter().enumerate() {
+        for (_, &target) in state.transitions.iter() {
+            reverse_edges[target as usize].push(state_id as u32);
+        }
+    }
+
+    let mut productive = vec![false; dfa.num_states()];
+    let mut stack = Vec::new();
+    for state_id in 0..dfa.num_states() as u32 {
+        if !dfa.finalizers(state_id).is_empty() {
+            productive[state_id as usize] = true;
+            stack.push(state_id);
+        }
+    }
+
+    while let Some(state_id) = stack.pop() {
+        for &pred in &reverse_edges[state_id as usize] {
+            if !productive[pred as usize] {
+                productive[pred as usize] = true;
+                stack.push(pred);
+            }
+        }
+    }
+
+    productive
+}
+
+fn dfa_is_nonnullable_and_prefix_free(dfa: &DFA) -> bool {
+    if !dfa.finalizers(0).is_empty() {
+        return false;
+    }
+
+    let productive = productive_dfa_states(dfa);
+    for state in dfa.states() {
+        if state.finalizers.is_empty() {
+            continue;
+        }
+        for (_, &target) in state.transitions.iter() {
+            if productive[target as usize] {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> {
+    if max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
+        return None;
+    }
+
+    let base_dfa = compile_expr_to_dfa(expr);
+    if base_dfa.num_states() == 0 || !dfa_is_nonnullable_and_prefix_free(&base_dfa) {
+        return None;
+    }
+
+    let base_states = base_dfa.states();
+    let base_state_count = base_states.len();
+    let total_states = (max + 1).checked_mul(base_state_count)?;
+    let mut dfa = DFA::new(total_states);
+    dfa.ensure_group_capacity(1);
+
+    for copies_done in 0..=max {
+        for (state_id, state) in base_states.iter().enumerate() {
+            let mapped_state = (copies_done * base_state_count + state_id) as u32;
+            let mut finalizers = crate::ds::bitset::BitSet::new(1);
+            if state_id == 0 && copies_done >= min {
+                finalizers.set(0);
+            }
+            dfa.overwrite_state_metadata(mapped_state, finalizers, crate::ds::bitset::BitSet::new(1));
+
+            if copies_done == max || !base_dfa.finalizers(state_id as u32).is_empty() {
+                continue;
+            }
+
+            for (byte, &target) in state.transitions.iter() {
+                let mapped_target = if !base_dfa.finalizers(target).is_empty() {
+                    ((copies_done + 1) * base_state_count) as u32
+                } else {
+                    (copies_done * base_state_count + target as usize) as u32
+                };
+                dfa.add_transition(mapped_state, byte, mapped_target);
+            }
+        }
+    }
+
+    Some(dfa)
+}
+
 fn append_bounded_repeat_expr(expr: &Expr, min: usize, max: usize, nfa: &mut NFA, start: u32, end: u32) {
     if max < min {
+        return;
+    }
+
+    if let Some(dfa) = build_bounded_repeat_dfa(expr, min, max) {
+        append_dfa_expr(&dfa, nfa, start, end);
         return;
     }
 
@@ -360,6 +490,226 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
     build_regex_with_profile_label(exprs, "default")
 }
 
+fn product_state_metadata(component_dfas: &[DFA], state_tuple: &[u32]) -> (BitSet, BitSet) {
+    let num_groups = component_dfas.len();
+    let mut finalizers = BitSet::new(num_groups);
+    let mut future = BitSet::new(num_groups);
+
+    for (group_id, (&state, dfa)) in state_tuple.iter().zip(component_dfas.iter()).enumerate() {
+        if state == DEAD {
+            continue;
+        }
+        if dfa.finalizers(state).contains(0) {
+            finalizers.set(group_id);
+        }
+        if dfa.possible_future_group_ids(state).contains(0) {
+            future.set(group_id);
+        }
+    }
+
+    (finalizers, future)
+}
+
+fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -> DFA {
+    let component_dfas: Vec<DFA> = exprs
+        .iter()
+        .enumerate()
+        .map(|(group_id, expr)| {
+            let dfa = build_regex_with_profile_label(std::slice::from_ref(expr), profile_label).dfa;
+            if debug_profile {
+                eprintln!(
+                    "[glrmask/debug][product] group={} dfa_states={}",
+                    group_id,
+                    dfa.num_states(),
+                );
+            }
+            dfa
+        })
+        .collect();
+    let num_groups = component_dfas.len();
+    let (class_map, class_members) = compute_product_equivalence_classes(&component_dfas);
+    let num_classes = class_members.len();
+    let component_class_transitions = build_product_class_transitions(&component_dfas, &class_map);
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][product] alphabet_classes={}",
+            num_classes,
+        );
+    }
+
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(num_groups);
+
+    let start_tuple = vec![0u32; num_groups];
+    let (start_finalizers, start_future) = product_state_metadata(&component_dfas, &start_tuple);
+    dfa.overwrite_state_metadata(0, start_finalizers, start_future);
+
+    let mut state_map = FxHashMap::<Vec<u32>, u32>::default();
+    let mut worklist = Vec::new();
+    let mut transitions_by_class = vec![None::<Vec<u32>>; num_classes];
+    let mut used_classes = Vec::<usize>::new();
+    let mut live_state_counts = vec![0u64; num_groups];
+    let mut processed_product_states = 0u64;
+    let mut total_live_groups = 0u64;
+    let mut max_live_groups = 0usize;
+    state_map.insert(start_tuple.clone(), 0);
+    worklist.push((0, start_tuple));
+
+    while let Some((current_state, state_tuple)) = worklist.pop() {
+        processed_product_states += 1;
+        let mut live_groups = 0usize;
+        for (group_id, &component_state) in state_tuple.iter().enumerate() {
+            if component_state == DEAD {
+                continue;
+            }
+            live_state_counts[group_id] += 1;
+            live_groups += 1;
+
+            for &(class_id, target) in &component_class_transitions[group_id][component_state as usize] {
+                let class_index = class_id as usize;
+                if transitions_by_class[class_index].is_none() {
+                    transitions_by_class[class_index] = Some(vec![DEAD; num_groups]);
+                    used_classes.push(class_index);
+                }
+                let next_tuple = transitions_by_class[class_index]
+                    .as_mut()
+                    .expect("class transition bucket initialized");
+                next_tuple[group_id] = target;
+            }
+        }
+        total_live_groups += live_groups as u64;
+        max_live_groups = max_live_groups.max(live_groups);
+
+        let mut transitions = Vec::new();
+        for &class_index in &used_classes {
+            let next_tuple = transitions_by_class[class_index]
+                .take()
+                .expect("used class transition bucket populated");
+            let next_state = if let Some(&existing) = state_map.get(&next_tuple) {
+                existing
+            } else {
+                let new_state = dfa.add_state();
+                let (finalizers, future) = product_state_metadata(&component_dfas, &next_tuple);
+                dfa.overwrite_state_metadata(new_state, finalizers, future);
+                state_map.insert(next_tuple.clone(), new_state);
+                worklist.push((new_state, next_tuple));
+                new_state
+            };
+
+            for &byte in &class_members[class_index] {
+                transitions.push((byte, next_state));
+            }
+        }
+        used_classes.clear();
+
+        if transitions.len() > 1 {
+            transitions.sort_unstable_by_key(|entry| entry.0);
+        }
+        dfa.set_transitions_from_sorted_entries(current_state, transitions);
+    }
+
+    if debug_profile {
+        let avg_live_groups = if processed_product_states == 0 {
+            0.0
+        } else {
+            total_live_groups as f64 / processed_product_states as f64
+        };
+        eprintln!(
+            "[glrmask/debug][product] reachable_states={} avg_live_groups={:.2} max_live_groups={}",
+            processed_product_states,
+            avg_live_groups,
+            max_live_groups,
+        );
+        for (group_id, alive_states) in live_state_counts.iter().enumerate() {
+            let alive_ratio = if processed_product_states == 0 {
+                0.0
+            } else {
+                *alive_states as f64 / processed_product_states as f64
+            };
+            eprintln!(
+                "[glrmask/debug][product] group={} alive_states={} alive_ratio={:.4}",
+                group_id,
+                alive_states,
+                alive_ratio,
+            );
+        }
+    }
+
+    dfa
+}
+
+fn compute_product_equivalence_classes(component_dfas: &[DFA]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let mut partitions = vec![U8Set::all()];
+    let mut seen_sets = FxHashSet::default();
+
+    for dfa in component_dfas {
+        for state in dfa.states() {
+            let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
+            for (byte, &target) in state.transitions.iter() {
+                bytes_by_target
+                    .entry(target)
+                    .and_modify(|set| {
+                        set.insert(byte);
+                    })
+                    .or_insert_with(|| U8Set::single(byte));
+            }
+
+            for byte_set in bytes_by_target.into_values() {
+                if seen_sets.insert(byte_set) {
+                    partitions = refine_u8_partitions(partitions, byte_set);
+                }
+            }
+        }
+    }
+
+    let mut class_map = vec![0u8; 256];
+    let mut class_members = vec![Vec::new(); partitions.len()];
+    for (class_id, partition) in partitions.iter().enumerate() {
+        for byte in partition.iter() {
+            class_map[byte as usize] = class_id as u8;
+            class_members[class_id].push(byte);
+        }
+    }
+
+    (class_map, class_members)
+}
+
+fn build_product_class_transitions(component_dfas: &[DFA], class_map: &[u8]) -> Vec<Vec<Vec<(u8, u32)>>> {
+    component_dfas
+        .iter()
+        .map(|dfa| {
+            dfa.states()
+                .iter()
+                .map(|state| {
+                    let mut target_by_class = FxHashMap::<u8, u32>::default();
+                    for (byte, &target) in state.transitions.iter() {
+                        target_by_class.insert(class_map[byte as usize], target);
+                    }
+                    let mut entries: Vec<(u8, u32)> = target_by_class.into_iter().collect();
+                    entries.sort_unstable_by_key(|entry| entry.0);
+                    entries
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
+    let mut next_partitions = Vec::with_capacity(partitions.len() * 2);
+    for partition in partitions {
+        let intersection = partition.intersection(&split);
+        let difference = partition.difference(&split);
+        if !intersection.is_empty() {
+            next_partitions.push(intersection);
+        }
+        if !difference.is_empty() {
+            next_partitions.push(difference);
+        }
+    }
+    next_partitions
+}
+
 pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> Regex {
     let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
         .map(|value| {
@@ -374,37 +724,44 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
         .iter()
         .map(|expr| expr_u8set(expr))
         .collect();
-
-    let build_nfa_started_at = std::time::Instant::now();
-    let mut nfa = build_regex_nfa(&plan.compiled_exprs);
-    let build_nfa_ms = build_nfa_started_at.elapsed().as_secs_f64() * 1000.0;
-    let nfa_states_after_build = nfa.states.len();
-    if debug_profile {
-        eprintln!(
-            "[glrmask/debug][prepare_regex] label={} stage=build_nfa num_exprs={} ms={:.3} nfa_states={}",
-            _profile_label,
-            plan.compiled_exprs.len(),
-            build_nfa_ms,
-            nfa_states_after_build,
-        );
-    }
-
-    let condense_started_at = std::time::Instant::now();
-    nfa.condense_epsilon_sccs();
-    let condense_ms = condense_started_at.elapsed().as_secs_f64() * 1000.0;
-    let nfa_states_after_condense = nfa.states.len();
-    if debug_profile {
-        eprintln!(
-            "[glrmask/debug][prepare_regex] label={} stage=condense num_exprs={} ms={:.3} nfa_states={}",
-            _profile_label,
-            plan.compiled_exprs.len(),
-            condense_ms,
-            nfa_states_after_condense,
-        );
-    }
-
+    let used_product_dfa = plan.compiled_exprs.len() > 1;
     let determinize_started_at = std::time::Instant::now();
-    let mut dfa = nfa.to_dfa();
+
+    let (mut dfa, build_nfa_ms, nfa_states_after_build, condense_ms, nfa_states_after_condense) =
+        if used_product_dfa {
+            (build_product_dfa(&plan.compiled_exprs, _profile_label, debug_profile), 0.0, 0, 0.0, 0)
+        } else {
+            let build_nfa_started_at = std::time::Instant::now();
+            let mut nfa = build_regex_nfa(&plan.compiled_exprs);
+            let build_nfa_ms = build_nfa_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nfa_states_after_build = nfa.states.len();
+            if debug_profile {
+                eprintln!(
+                    "[glrmask/debug][prepare_regex] label={} stage=build_nfa num_exprs={} ms={:.3} nfa_states={}",
+                    _profile_label,
+                    plan.compiled_exprs.len(),
+                    build_nfa_ms,
+                    nfa_states_after_build,
+                );
+            }
+
+            let condense_started_at = std::time::Instant::now();
+            nfa.condense_epsilon_sccs();
+            let condense_ms = condense_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nfa_states_after_condense = nfa.states.len();
+            if debug_profile {
+                eprintln!(
+                    "[glrmask/debug][prepare_regex] label={} stage=condense num_exprs={} ms={:.3} nfa_states={}",
+                    _profile_label,
+                    plan.compiled_exprs.len(),
+                    condense_ms,
+                    nfa_states_after_condense,
+                );
+            }
+
+            (nfa.to_dfa(), build_nfa_ms, nfa_states_after_build, condense_ms, nfa_states_after_condense)
+        };
+
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
     let dfa_states_after_determinize = dfa.num_states();
     if debug_profile {
@@ -433,8 +790,25 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
     };
 
     let minimize_started_at = std::time::Instant::now();
-    let dfa = dfa.minimize();
-    let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let skip_minimize_for_product = used_product_dfa
+        && plan.exclusions.is_empty()
+        && plan.visible_groups == plan.compiled_exprs.len();
+    let mut dfa = if skip_minimize_for_product {
+        // A reachable product of independently minimized component DFAs is already
+        // minimal: any difference in a component state yields a distinguishing
+        // suffix in that component, which also distinguishes the full product tuple.
+        dfa
+    } else {
+        dfa.minimize()
+    };
+    if skip_minimize_for_product {
+        dfa.recompute_possible_futures();
+    }
+    let minimize_ms = if skip_minimize_for_product {
+        0.0
+    } else {
+        minimize_started_at.elapsed().as_secs_f64() * 1000.0
+    };
     if debug_profile {
         eprintln!(
             "[glrmask/debug][prepare_regex] label={} stage=minimize num_exprs={} ms={:.3} dfa_states={}",
@@ -501,17 +875,41 @@ fn build_regex_nfa_impl(exprs: &[Expr], probe_single_exprs: bool) -> NFA {
         append_compiled_expr(&prefix, &mut nfa, 0, split);
 
         for (group_id, remainder) in remainders.iter().enumerate() {
-            let accept = nfa.add_state();
-            append_compiled_expr(remainder, &mut nfa, split, accept);
-            nfa.add_finalizer(accept, group_id as u32);
+            match remainder {
+                Expr::Dfa(dfa) if dfa_start_is_entry_only(dfa) => {
+                    append_group_dfa_expr(dfa, &mut nfa, split, group_id as u32)
+                }
+                Expr::Dfa(dfa) => {
+                    let accept = nfa.add_state();
+                    append_dfa_expr(dfa, &mut nfa, split, accept);
+                    nfa.add_finalizer(accept, group_id as u32);
+                }
+                _ => {
+                    let accept = nfa.add_state();
+                    append_compiled_expr(remainder, &mut nfa, split, accept);
+                    nfa.add_finalizer(accept, group_id as u32);
+                }
+            }
         }
         return nfa;
     }
 
     for (group_id, expr) in optimized_exprs.iter().enumerate() {
-        let accept = nfa.add_state();
-        append_compiled_expr(expr, &mut nfa, 0, accept);
-        nfa.add_finalizer(accept, group_id as u32);
+        match expr {
+            Expr::Dfa(dfa) if dfa_start_is_entry_only(dfa) => {
+                append_group_dfa_expr(dfa, &mut nfa, 0, group_id as u32)
+            }
+            Expr::Dfa(dfa) => {
+                let accept = nfa.add_state();
+                append_dfa_expr(dfa, &mut nfa, 0, accept);
+                nfa.add_finalizer(accept, group_id as u32);
+            }
+            _ => {
+                let accept = nfa.add_state();
+                append_compiled_expr(expr, &mut nfa, 0, accept);
+                nfa.add_finalizer(accept, group_id as u32);
+            }
+        }
     }
     nfa
 }
@@ -564,6 +962,27 @@ mod tests {
         }
         assert!(!accepts(&regex, b"aaaaaaaa"));
         assert!(!accepts(&regex, b"aaaab"));
+    }
+
+    #[test]
+    fn test_large_bounded_repeat_accepts_expected_lengths() {
+        let regex = repeat(byte(b'a'), 0, Some(130)).build();
+
+        assert!(accepts(&regex, b""));
+        assert!(accepts(&regex, &vec![b'a'; 130]));
+        assert!(!accepts(&regex, &vec![b'a'; 131]));
+    }
+
+    #[test]
+    fn test_top_level_dfa_expr_avoids_boundary_epsilons() {
+        let base = byte(b'a').build();
+        let nfa = build_regex_nfa(&[Expr::Dfa(base.dfa.clone())]);
+
+        assert!(nfa
+            .states
+            .iter()
+            .all(|state| state.epsilon_transitions.is_empty()));
+        assert!(nfa.states.iter().any(|state| !state.finalizers.is_empty()));
     }
 
     #[test]

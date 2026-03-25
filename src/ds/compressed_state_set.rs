@@ -99,13 +99,21 @@ impl CompressedStateSet {
         buffer.words.clear();
 
         let mut hash = 0u64;
-        for &word_index in &sparse.dirty_words {
+        let mut prev_word_index = 0usize;
+        let mut needs_sort = false;
+        for (position, &word_index) in sparse.dirty_words.iter().enumerate() {
+            if position > 0 && word_index < prev_word_index {
+                needs_sort = true;
+            }
+            prev_word_index = word_index;
             let word = sparse.words[word_index];
             buffer.words.push((word_index as u32, word));
             hash ^= hash_sparse_word(word_index, word);
         }
 
-        buffer.words.sort_unstable_by_key(|&(idx, _)| idx);
+        if needs_sort {
+            buffer.words.sort_unstable_by_key(|&(idx, _)| idx);
+        }
         buffer.hash = hash;
     }
 
