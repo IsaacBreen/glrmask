@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -510,6 +510,57 @@ fn product_state_metadata(component_dfas: &[DFA], state_tuple: &[u32]) -> (BitSe
     (finalizers, future)
 }
 
+fn product_dfa_locality_metrics(dfa: &DFA) -> (f64, f64, f64) {
+    let mut total_transition_distance = 0u64;
+    let mut total_transition_count = 0u64;
+    let mut total_modal_distance = 0u64;
+    let mut modal_state_count = 0u64;
+    let mut adjacent_modal_count = 0u64;
+
+    for (state_id, state) in dfa.states().iter().enumerate() {
+        let mut target_counts = FxHashMap::<u32, usize>::default();
+        for (_, &target) in state.transitions.iter() {
+            total_transition_distance += state_id.abs_diff(target as usize) as u64;
+            total_transition_count += 1;
+            *target_counts.entry(target).or_insert(0) += 1;
+        }
+
+        if let Some((&modal_target, _)) = target_counts
+            .iter()
+            .max_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
+        {
+            let modal_distance = state_id.abs_diff(modal_target as usize) as u64;
+            total_modal_distance += modal_distance;
+            modal_state_count += 1;
+            if modal_distance <= 1 {
+                adjacent_modal_count += 1;
+            }
+        }
+    }
+
+    let avg_transition_distance = if total_transition_count == 0 {
+        0.0
+    } else {
+        total_transition_distance as f64 / total_transition_count as f64
+    };
+    let avg_modal_distance = if modal_state_count == 0 {
+        0.0
+    } else {
+        total_modal_distance as f64 / modal_state_count as f64
+    };
+    let adjacent_modal_ratio = if modal_state_count == 0 {
+        0.0
+    } else {
+        adjacent_modal_count as f64 / modal_state_count as f64
+    };
+
+    (
+        avg_transition_distance,
+        avg_modal_distance,
+        adjacent_modal_ratio,
+    )
+}
+
 fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -> DFA {
     let component_dfas: Vec<DFA> = exprs
         .iter()
@@ -546,7 +597,7 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
     dfa.overwrite_state_metadata(0, start_finalizers, start_future);
 
     let mut state_map = FxHashMap::<Vec<u32>, u32>::default();
-    let mut worklist = Vec::new();
+    let mut worklist = VecDeque::new();
     let mut transitions_by_class = vec![None::<Vec<u32>>; num_classes];
     let mut used_classes = Vec::<usize>::new();
     let mut live_state_counts = vec![0u64; num_groups];
@@ -554,9 +605,9 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
     let mut total_live_groups = 0u64;
     let mut max_live_groups = 0usize;
     state_map.insert(start_tuple.clone(), 0);
-    worklist.push((0, start_tuple));
+    worklist.push_back((0, start_tuple));
 
-    while let Some((current_state, state_tuple)) = worklist.pop() {
+    while let Some((current_state, state_tuple)) = worklist.pop_front() {
         processed_product_states += 1;
         let mut live_groups = 0usize;
         for (group_id, &component_state) in state_tuple.iter().enumerate() {
@@ -593,7 +644,7 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                 let (finalizers, future) = product_state_metadata(&component_dfas, &next_tuple);
                 dfa.overwrite_state_metadata(new_state, finalizers, future);
                 state_map.insert(next_tuple.clone(), new_state);
-                worklist.push((new_state, next_tuple));
+                worklist.push_back((new_state, next_tuple));
                 new_state
             };
 
@@ -620,6 +671,14 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
             processed_product_states,
             avg_live_groups,
             max_live_groups,
+        );
+        let (avg_transition_distance, avg_modal_distance, adjacent_modal_ratio) =
+            product_dfa_locality_metrics(&dfa);
+        eprintln!(
+            "[glrmask/debug][product] locality avg_transition_target_distance={:.2} avg_modal_target_distance={:.2} adjacent_modal_ratio={:.4}",
+            avg_transition_distance,
+            avg_modal_distance,
+            adjacent_modal_ratio,
         );
         for (group_id, alive_states) in live_state_counts.iter().enumerate() {
             let alive_ratio = if processed_product_states == 0 {

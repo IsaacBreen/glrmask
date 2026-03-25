@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
+
 use super::super::compat::{FlatDfaState, TokenizerView};
 
 fn debug_max_length_enabled() -> bool {
@@ -87,12 +89,26 @@ fn build_state_shape(state: &FlatDfaState) -> (Vec<usize>, u64) {
 }
 
 fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
-    let mut rep_for_hash = HashMap::new();
-    let mut mapping = Vec::with_capacity(states.len());
+    let mut indexed_hashes: Vec<(u64, usize, usize)> = states
+        .par_iter()
+        .enumerate()
+        .map(|(position, &state_id)| (hashes[state_id], state_id, position))
+        .collect();
+    indexed_hashes.par_sort_unstable_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+    });
 
-    for &state_id in states {
-        let rep = *rep_for_hash.entry(hashes[state_id]).or_insert(state_id);
-        mapping.push(rep);
+    let mut mapping = vec![0usize; states.len()];
+    let mut current_hash = None;
+    let mut current_rep = 0usize;
+    for (hash, state_id, position) in indexed_hashes {
+        if current_hash != Some(hash) {
+            current_hash = Some(hash);
+            current_rep = state_id;
+        }
+        mapping[position] = current_rep;
     }
 
     mapping
@@ -108,23 +124,27 @@ fn find_state_equivalence_classes_kstep(
     }
 
     let dfa = tokenizer.dfa();
-    let mut outgoing_targets = Vec::with_capacity(dfa.states.len());
-    let mut prev_hashes = Vec::with_capacity(dfa.states.len());
-
-    for state in &dfa.states {
-        let (targets, transition_label_hash) = build_state_shape(state);
-        outgoing_targets.push(targets);
-        prev_hashes.push(mix_u64(hash_state_label(state) ^ transition_label_hash));
-    }
+    let state_shapes: Vec<(Vec<usize>, u64)> = dfa
+        .states
+        .par_iter()
+        .map(|state| {
+            let (targets, transition_label_hash) = build_state_shape(state);
+            (targets, mix_u64(hash_state_label(state) ^ transition_label_hash))
+        })
+        .collect();
+    let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
 
     let mut next_hashes = vec![0u64; dfa.states.len()];
     for _ in 0..k {
-        for state_id in 0..dfa.states.len() {
-            next_hashes[state_id] = mix_u64(
-                prev_hashes[state_id]
-                    ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
-            );
-        }
+        next_hashes
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(state_id, next_hash)| {
+                *next_hash = mix_u64(
+                    prev_hashes[state_id]
+                        ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
+                );
+            });
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
     }
 
