@@ -296,7 +296,6 @@ fn append_choice_expr(options: &[Expr], nfa: &mut NFA, start: u32, end: u32) {
 }
 
 const DIRECT_BOUNDED_REPEAT_THRESHOLD: usize = 32;
-const TOKENIZER_MAX_TOKEN_BYTES: usize = 128;
 
 fn compile_expr_to_dfa(expr: &Expr) -> DFA {
     let mut nfa = build_regex_nfa_impl(std::slice::from_ref(expr), false);
@@ -364,32 +363,6 @@ fn compile_direct_bounded_repeat_base_dfa(expr: &Expr, max: usize) -> Option<DFA
     }
 
     Some(base_dfa)
-}
-
-fn cap_repeat_bounds(expr: &Expr, max_bytes: usize) -> Expr {
-    match expr {
-        Expr::U8Seq(bytes) => Expr::U8Seq(bytes.clone()),
-        Expr::U8Class(set) => Expr::U8Class(*set),
-        Expr::Dfa(dfa) => Expr::Dfa(dfa.clone()),
-        Expr::Seq(parts) => Expr::Seq(parts.iter().map(|part| cap_repeat_bounds(part, max_bytes)).collect()),
-        Expr::Choice(options) => Expr::Choice(
-            options
-                .iter()
-                .map(|option| cap_repeat_bounds(option, max_bytes))
-                .collect(),
-        ),
-        Expr::Exclude { expr, exclude } => Expr::Exclude {
-            expr: Box::new(cap_repeat_bounds(expr, max_bytes)),
-            exclude: Box::new(cap_repeat_bounds(exclude, max_bytes)),
-        },
-        Expr::Repeat { expr, min, max } => Expr::Repeat {
-            expr: Box::new(cap_repeat_bounds(expr, max_bytes)),
-            min: *min,
-            max: max.map(|bound| bound.min(max_bytes)),
-        },
-        Expr::Shared(inner) => Expr::Shared(std::sync::Arc::new(cap_repeat_bounds(inner, max_bytes))),
-        Expr::Epsilon => Expr::Epsilon,
-    }
 }
 
 fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> {
@@ -713,15 +686,14 @@ fn compile_product_component(
     expr: &Expr,
     profile_label: &str,
 ) -> ProductComponent {
-    let capped_expr = cap_repeat_bounds(expr, TOKENIZER_MAX_TOKEN_BYTES);
-    match &capped_expr {
+    match expr {
         Expr::Shared(inner) => compile_product_component(inner, profile_label),
         Expr::Repeat {
-            expr: repeat_expr,
+            expr,
             min,
             max: Some(max),
         } => {
-            if let Some(base_dfa) = compile_direct_bounded_repeat_base_dfa(repeat_expr, *max) {
+            if let Some(base_dfa) = compile_direct_bounded_repeat_base_dfa(expr, *max) {
                 return ProductComponent::VirtualBoundedRepeat {
                     base_dfa,
                     min: *min as u32,
@@ -729,9 +701,9 @@ fn compile_product_component(
                 };
             }
 
-            ProductComponent::Materialized(compile_product_component_dfa(&capped_expr, profile_label))
+            ProductComponent::Materialized(compile_product_component_dfa(expr, profile_label))
         }
-        _ => ProductComponent::Materialized(compile_product_component_dfa(&capped_expr, profile_label)),
+        _ => ProductComponent::Materialized(compile_product_component_dfa(expr, profile_label)),
     }
 }
 
