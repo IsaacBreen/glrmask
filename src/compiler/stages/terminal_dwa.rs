@@ -560,6 +560,125 @@ fn topological_order(nwa: &NWA) -> Vec<usize> {
     order
 }
 
+fn compute_coreachable_nwa(nwa: &NWA) -> Vec<bool> {
+    if nwa.states.is_empty() {
+        return Vec::new();
+    }
+
+    let mut reverse_edges: Vec<Vec<usize>> = vec![Vec::new(); nwa.states.len()];
+    for (state_id, state) in nwa.states.iter().enumerate() {
+        for (dst, weight) in &state.epsilons {
+            if !weight.is_empty() {
+                reverse_edges[*dst as usize].push(state_id);
+            }
+        }
+        for targets in state.transitions.values() {
+            for (dst, weight) in targets {
+                if !weight.is_empty() {
+                    reverse_edges[*dst as usize].push(state_id);
+                }
+            }
+        }
+    }
+
+    let mut coreachable = vec![false; nwa.states.len()];
+    let mut queue = VecDeque::new();
+    for (state_id, state) in nwa.states.iter().enumerate() {
+        if state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty()) {
+            coreachable[state_id] = true;
+            queue.push_back(state_id);
+        }
+    }
+
+    while let Some(state_id) = queue.pop_front() {
+        for &pred in &reverse_edges[state_id] {
+            if !coreachable[pred] {
+                coreachable[pred] = true;
+                queue.push_back(pred);
+            }
+        }
+    }
+
+    coreachable
+}
+
+fn count_coreachable_nwa_states(nwa: &NWA, coreachable: &[bool]) -> (usize, usize) {
+    if nwa.states.is_empty() {
+        return (0, 0);
+    }
+
+    let state_count = coreachable.iter().filter(|&&flag| flag).count();
+    let mut transition_count = 0usize;
+    for (state_id, state) in nwa.states.iter().enumerate() {
+        if !coreachable[state_id] {
+            continue;
+        }
+        transition_count += state
+            .epsilons
+            .iter()
+            .filter(|(dst, weight)| !weight.is_empty() && coreachable[*dst as usize])
+            .count();
+        transition_count += state
+            .transitions
+            .values()
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter(|(dst, weight)| !weight.is_empty() && coreachable[*dst as usize])
+                    .count()
+            })
+            .sum::<usize>();
+    }
+
+    (state_count, transition_count)
+}
+
+fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
+    if nwa.states.is_empty() {
+        return false;
+    }
+
+    let coreachable = compute_coreachable_nwa(nwa);
+    if coreachable.iter().all(|&flag| flag) {
+        return false;
+    }
+
+    let mut remap = vec![u32::MAX; nwa.states.len()];
+    let mut new_states = Vec::with_capacity(coreachable.iter().filter(|&&flag| flag).count());
+
+    for (old_id, state) in nwa.states.iter().enumerate() {
+        if coreachable[old_id] {
+            remap[old_id] = new_states.len() as u32;
+            new_states.push(state.clone());
+        }
+    }
+
+    for state in &mut new_states {
+        state.epsilons.retain(|(target, weight)| !weight.is_empty() && coreachable[*target as usize]);
+        for (target, _) in &mut state.epsilons {
+            *target = remap[*target as usize];
+        }
+
+        for targets in state.transitions.values_mut() {
+            targets.retain(|(target, weight)| !weight.is_empty() && coreachable[*target as usize]);
+            for (target, _) in targets.iter_mut() {
+                *target = remap[*target as usize];
+            }
+        }
+        state.transitions.retain(|_, targets| !targets.is_empty());
+    }
+
+    nwa.start_states = nwa
+        .start_states
+        .iter()
+        .copied()
+        .filter(|state_id| coreachable[*state_id as usize])
+        .map(|state_id| remap[state_id as usize])
+        .collect();
+    nwa.states = new_states;
+    true
+}
+
 fn propagate_collapse_context(
     nwa: &NWA,
     terminals_count: usize,
@@ -1758,9 +1877,31 @@ fn build_terminal_dwa_impl(
     deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize);
     let dedup_ms = dedup_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let coreachable_prune_started_at = std::time::Instant::now();
+    let coreachable_before_states = nwa.num_states() as usize;
+    let coreachable_before_transitions = nwa.num_transitions();
+    let coreachable_before = compute_coreachable_nwa(&nwa);
+    let (coreachable_before_count, coreachable_before_transition_count) =
+        count_coreachable_nwa_states(&nwa, &coreachable_before);
+    let coreachable_pruned = prune_non_coreachable_states(&mut nwa);
+    let coreachable_prune_ms = coreachable_prune_started_at.elapsed().as_secs_f64() * 1000.0;
+
     let canonicalize_started_at = std::time::Instant::now();
     canonicalize_acyclic_nwa(&mut nwa);
     let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] coreachable_nwa before_states={} before_transitions={} coreachable_states={} coreachable_transitions={} after_states={} after_transitions={} pruned={}",
+            coreachable_before_states,
+            coreachable_before_transitions,
+            coreachable_before_count,
+            coreachable_before_transition_count,
+            nwa.num_states(),
+            nwa.num_transitions(),
+            coreachable_pruned,
+        );
+    }
 
     let nwa_states = nwa.num_states();
     let nwa_transitions = nwa.num_transitions();
@@ -1802,7 +1943,7 @@ fn build_terminal_dwa_impl(
             dwa.num_states(),
         );
         eprintln!(
-            "[glrmask/debug][terminal_dwa] setup_ms={:.3} seed_ms={:.3} build_trie_ms={:.3} possible_matches_ms={:.3} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} dedup_ms={:.3} canonicalize_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/debug][terminal_dwa] setup_ms={:.3} seed_ms={:.3} build_trie_ms={:.3} possible_matches_ms={:.3} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} dedup_ms={:.3} coreachable_prune_ms={:.3} canonicalize_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             setup_ms,
             seed_ms,
             build_trie_ms,
@@ -1811,6 +1952,7 @@ fn build_terminal_dwa_impl(
             collapse_ms,
             disallowed_ms,
             dedup_ms,
+            coreachable_prune_ms,
             canonicalize_ms,
             determinize_ms,
             minimize_ms,
