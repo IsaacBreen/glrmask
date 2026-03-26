@@ -1081,30 +1081,53 @@ fn finish_token_signature(
     let dag = &scratch.dag;
     let single_target_hash_pos = scratch.single_target_hash_pos;
     let single_target_hash = scratch.single_target_hash;
+    let use_masked_dirty_iteration = num_groups <= u64::BITS as usize;
     let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
         let completion = dfa.completion(scratch.current_states[i]);
         let base = i * num_groups;
 
         let dirty = &mut scratch.dirty_groups[i];
-        dirty.sort_unstable();
-
         let state_sig = if !dirty.is_empty() {
             let mut h = new_hasher();
             h.write_u64(completion);
-            for &gid in dirty.iter() {
-                let pv = scratch.match_positions[base + gid];
-                if pv != NONE && pv > 0 {
-                    h.write_u64(gid as u64);
-                    let target = pv as usize;
-                    let target_hash = if single_target_hash_pos == target {
-                        single_target_hash
-                    } else {
-                        dag.get(&target).map_or(0, |node| node.hash)
-                    };
-                    h.write_u64(target_hash);
+            if use_masked_dirty_iteration {
+                let mut dirty_mask = 0u64;
+                for &gid in dirty.iter() {
+                    dirty_mask |= 1u64 << gid;
                 }
-                scratch.match_positions[base + gid] = NONE;
+                while dirty_mask != 0 {
+                    let gid = dirty_mask.trailing_zeros() as usize;
+                    dirty_mask &= dirty_mask - 1;
+                    let pv = scratch.match_positions[base + gid];
+                    if pv != NONE && pv > 0 {
+                        h.write_u64(gid as u64);
+                        let target = pv as usize;
+                        let target_hash = if single_target_hash_pos == target {
+                            single_target_hash
+                        } else {
+                            dag.get(&target).map_or(0, |node| node.hash)
+                        };
+                        h.write_u64(target_hash);
+                    }
+                    scratch.match_positions[base + gid] = NONE;
+                }
+            } else {
+                dirty.sort_unstable();
+                for &gid in dirty.iter() {
+                    let pv = scratch.match_positions[base + gid];
+                    if pv != NONE && pv > 0 {
+                        h.write_u64(gid as u64);
+                        let target = pv as usize;
+                        let target_hash = if single_target_hash_pos == target {
+                            single_target_hash
+                        } else {
+                            dag.get(&target).map_or(0, |node| node.hash)
+                        };
+                        h.write_u64(target_hash);
+                    }
+                    scratch.match_positions[base + gid] = NONE;
+                }
             }
             h.finish()
         } else {
