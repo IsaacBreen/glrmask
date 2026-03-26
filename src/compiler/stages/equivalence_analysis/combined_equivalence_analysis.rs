@@ -244,52 +244,66 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     let max_length_ms = elapsed_ms(max_length_started_at);
 
     let pre_reduced_states = collect_representative_states(&pre_state_reps);
-    let token_state_started_at = std::time::Instant::now();
-    let representative_states = if skip_token_state {
-        pre_state_reps
-    } else {
-        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
-            tokenizer,
-            &dedup.representative_tokens,
-            &pre_reduced_states,
-        );
-        let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
-            .iter()
-            .copied()
-            .zip(reduced_state_reps)
-            .collect();
-        pre_state_reps
-            .iter()
-            .map(|pre_rep| rep_to_final[pre_rep])
-            .collect()
-    };
-    let token_state_ms = elapsed_ms(token_state_started_at);
+
+    // Run token_state and vocab in parallel. Vocab uses pre_reduced_states
+    // instead of the fully-reduced states. This is sound because the extra
+    // states that token_state would merge are equivalent (identical token
+    // behavior), so they add no new distinguishing power to the vocab
+    // partition -- the result is identical to running on reduced_states.
+    let use_slow_vocab = env_flag_enabled(USE_SLOW_VOCAB_EQUIV_ENV);
+    let ((representative_states, token_state_ms), (dedup_vocab_classes, vocab_ms)) = rayon::join(
+        || {
+            let token_state_started_at = std::time::Instant::now();
+            let result = if skip_token_state {
+                pre_state_reps.clone()
+            } else {
+                let reduced_state_reps =
+                    state_equivalence_analysis::find_state_equivalence_classes(
+                        tokenizer,
+                        &dedup.representative_tokens,
+                        &pre_reduced_states,
+                    );
+                let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
+                    .iter()
+                    .copied()
+                    .zip(reduced_state_reps)
+                    .collect();
+                pre_state_reps
+                    .iter()
+                    .map(|pre_rep| rep_to_final[pre_rep])
+                    .collect()
+            };
+            (result, elapsed_ms(token_state_started_at))
+        },
+        || {
+            let vocab_started_at = std::time::Instant::now();
+            let result = if use_slow_vocab {
+                super::vocab::slow::find_vocab_equivalence_classes_with_follow(
+                    tokenizer,
+                    &dedup.representative_tokens,
+                    &pre_reduced_states,
+                    disallowed_follows,
+                )
+            } else {
+                vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
+                    tokenizer,
+                    &dedup.representative_tokens,
+                    &pre_reduced_states,
+                    disallowed_follows,
+                )
+            };
+            (result, elapsed_ms(vocab_started_at))
+        },
+    );
+
+    // Expand dedup vocab classes back to original token indices.
+    let vocab_classes = expand_vocab_classes(dedup_vocab_classes, &dedup.repr_to_originals);
 
     let reduced_states = collect_representative_states(&representative_states);
     let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(
         initial_states,
         &representative_states,
     );
-
-    let vocab_started_at = std::time::Instant::now();
-    let dedup_vocab_classes = if env_flag_enabled(USE_SLOW_VOCAB_EQUIV_ENV) {
-        super::vocab::slow::find_vocab_equivalence_classes_with_follow(
-            tokenizer,
-            &dedup.representative_tokens,
-            &reduced_states,
-            disallowed_follows,
-        )
-    } else {
-        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
-            tokenizer,
-            &dedup.representative_tokens,
-            &reduced_states,
-            disallowed_follows,
-        )
-    };
-    // Expand dedup vocab classes back to original token indices.
-    let vocab_classes = expand_vocab_classes(dedup_vocab_classes, &dedup.repr_to_originals);
-    let vocab_ms = elapsed_ms(vocab_started_at);
 
     if env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV) {
         let reference = super::reference::find_equivalence_classes(
