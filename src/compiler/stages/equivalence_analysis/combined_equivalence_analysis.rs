@@ -120,9 +120,9 @@ fn compute_byte_classes(dfa: &super::compat::FlatDfa) -> [u16; 256] {
 }
 
 /// Token deduplication result.
-struct TokenDedup {
-    /// Representative tokens (one per unique byte-class sequence).
-    representative_tokens: Vec<Vec<u8>>,
+struct TokenDedup<'a> {
+    /// Byte slices for representative tokens (references into the original array).
+    representative_token_bytes: Vec<&'a [u8]>,
     /// For each original token index, the index of its representative.
     original_to_repr: Vec<usize>,
     /// For each representative index, the list of original token indices it represents.
@@ -150,12 +150,12 @@ fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u16; 256]) -> u128 {
 /// Tokens whose bytes map to the same sequence of byte classes under the
 /// tokenizer DFA will always produce identical DFA trajectories from any
 /// starting state. We only need to analyze one representative per group.
-fn deduplicate_tokens_by_byte_class<S: AsRef<[u8]>>(
-    tokens: &[S],
+fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
+    tokens: &'a [S],
     byte_to_class: &[u16; 256],
-) -> TokenDedup {
+) -> TokenDedup<'a> {
     let mut hash_to_repr: HashMap<u128, usize> = HashMap::with_capacity(tokens.len() / 2);
-    let mut representative_tokens: Vec<Vec<u8>> = Vec::new();
+    let mut representative_token_bytes: Vec<&'a [u8]> = Vec::new();
     let mut original_to_repr: Vec<usize> = Vec::with_capacity(tokens.len());
     let mut repr_to_originals: Vec<Vec<usize>> = Vec::new();
 
@@ -163,8 +163,8 @@ fn deduplicate_tokens_by_byte_class<S: AsRef<[u8]>>(
         let bytes = token.as_ref();
         let h = hash_byte_class_seq(bytes, byte_to_class);
         let repr_idx = *hash_to_repr.entry(h).or_insert_with(|| {
-            let idx = representative_tokens.len();
-            representative_tokens.push(bytes.to_vec());
+            let idx = representative_token_bytes.len();
+            representative_token_bytes.push(bytes);
             repr_to_originals.push(Vec::new());
             idx
         });
@@ -173,7 +173,7 @@ fn deduplicate_tokens_by_byte_class<S: AsRef<[u8]>>(
     }
 
     TokenDedup {
-        representative_tokens,
+        representative_token_bytes,
         original_to_repr,
         repr_to_originals,
     }
@@ -237,7 +237,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     } else {
         super::state::max_length::find_state_equivalence_classes(
             tokenizer,
-            &dedup.representative_tokens,
+            &dedup.representative_token_bytes,
             initial_states,
         )
     };
@@ -260,7 +260,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
                 let reduced_state_reps =
                     state_equivalence_analysis::find_state_equivalence_classes(
                         tokenizer,
-                        &dedup.representative_tokens,
+                        &dedup.representative_token_bytes,
                         &pre_reduced_states,
                     );
                 let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
@@ -280,14 +280,14 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             let result = if use_slow_vocab {
                 super::vocab::slow::find_vocab_equivalence_classes_with_follow(
                     tokenizer,
-                    &dedup.representative_tokens,
+                    &dedup.representative_token_bytes,
                     &pre_reduced_states,
                     disallowed_follows,
                 )
             } else {
                 vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
                     tokenizer,
-                    &dedup.representative_tokens,
+                    &dedup.representative_token_bytes,
                     &pre_reduced_states,
                     disallowed_follows,
                 )
@@ -322,7 +322,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             "[glrmask/profile][equiv] dedup_ms={:.3} tokens={}->{} max_length_ms={:.3} pre_states={} pre_reduced_states={} token_state_ms={:.3} reduced_states={} vocab_ms={:.3} state_classes={} vocab_classes={} total_ms={:.3}",
             dedup_ms,
             tokens.len(),
-            dedup.representative_tokens.len(),
+            dedup.representative_token_bytes.len(),
             max_length_ms,
             initial_states.len(),
             pre_reduced_states.len(),
