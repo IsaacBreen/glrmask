@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use hashbrown::HashMap;
+
 use super::compat::TokenizerView;
 use crate::ds::bitset::BitSet;
 
@@ -83,6 +85,119 @@ fn collect_representative_states(states: &[usize]) -> Vec<usize> {
     states.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
 }
 
+/// Compute byte equivalence classes from the tokenizer DFA.
+///
+/// Bytes with identical transitions across all DFA states are merged into
+/// the same class. This is used to deduplicate tokens before equivalence
+/// analysis: tokens whose byte-class sequences are identical will always
+/// produce the same DFA behavior from any starting state.
+fn compute_byte_classes(dfa: &super::compat::FlatDfa) -> [u16; 256] {
+    let num_states = dfa.states.len();
+    let mut byte_to_class = [0u16; 256];
+    let mut class_repr = [0u16; 256];
+    let mut num_classes = 0u16;
+
+    for b in 0..=255u16 {
+        let mut found = false;
+        for c in 0..num_classes {
+            let repr = class_repr[c as usize] as usize;
+            let same = (0..num_states).all(|s| {
+                dfa.states[s].transitions[b as usize] == dfa.states[s].transitions[repr]
+            });
+            if same {
+                byte_to_class[b as usize] = c;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            byte_to_class[b as usize] = num_classes;
+            class_repr[num_classes as usize] = b;
+            num_classes += 1;
+        }
+    }
+    byte_to_class
+}
+
+/// Token deduplication result.
+struct TokenDedup {
+    /// Representative tokens (one per unique byte-class sequence).
+    representative_tokens: Vec<Vec<u8>>,
+    /// For each original token index, the index of its representative.
+    original_to_repr: Vec<usize>,
+    /// For each representative index, the list of original token indices it represents.
+    repr_to_originals: Vec<Vec<usize>>,
+}
+
+/// Hash a token's byte-class sequence into a u128 for dedup.
+/// Collision probability is ~n²/2^128 ≈ 0 for any practical n.
+#[inline]
+fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u16; 256]) -> u128 {
+    // Length-prefixed hash with a good mixing function.
+    let mut h: u128 = 0xFF51_AFD7_ED55_8CCD;
+    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53).wrapping_add(bytes.len() as u128);
+    for &b in bytes {
+        h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(byte_to_class[b as usize] as u128);
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    h ^= h >> 29;
+    h
+}
+
+/// Deduplicate tokens by their byte-class sequence.
+///
+/// Tokens whose bytes map to the same sequence of byte classes under the
+/// tokenizer DFA will always produce identical DFA trajectories from any
+/// starting state. We only need to analyze one representative per group.
+fn deduplicate_tokens_by_byte_class<S: AsRef<[u8]>>(
+    tokens: &[S],
+    byte_to_class: &[u16; 256],
+) -> TokenDedup {
+    let mut hash_to_repr: HashMap<u128, usize> = HashMap::with_capacity(tokens.len() / 2);
+    let mut representative_tokens: Vec<Vec<u8>> = Vec::new();
+    let mut original_to_repr: Vec<usize> = Vec::with_capacity(tokens.len());
+    let mut repr_to_originals: Vec<Vec<usize>> = Vec::new();
+
+    for (orig_idx, token) in tokens.iter().enumerate() {
+        let bytes = token.as_ref();
+        let h = hash_byte_class_seq(bytes, byte_to_class);
+        let repr_idx = *hash_to_repr.entry(h).or_insert_with(|| {
+            let idx = representative_tokens.len();
+            representative_tokens.push(bytes.to_vec());
+            repr_to_originals.push(Vec::new());
+            idx
+        });
+        original_to_repr.push(repr_idx);
+        repr_to_originals[repr_idx].push(orig_idx);
+    }
+
+    TokenDedup {
+        representative_tokens,
+        original_to_repr,
+        repr_to_originals,
+    }
+}
+
+/// Expand vocab equivalence classes from representative indices back to
+/// original token indices.
+fn expand_vocab_classes(
+    dedup_classes: VocabEquivalenceResult,
+    repr_to_originals: &[Vec<usize>],
+) -> VocabEquivalenceResult {
+    dedup_classes
+        .into_iter()
+        .map(|dedup_class| {
+            let mut original_class: Vec<usize> = Vec::new();
+            for dedup_idx in dedup_class {
+                original_class.extend(repr_to_originals[dedup_idx].iter().copied());
+            }
+            original_class.sort_unstable();
+            original_class
+        })
+        .collect()
+}
+
 /// Compute combined state and vocab equivalence analysis.
 ///
 /// This function:
@@ -108,11 +223,23 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     let profile_compile = compile_profile_enabled();
     let combined_started_at = std::time::Instant::now();
 
+    // Deduplicate tokens by byte-class sequence. Tokens whose bytes map
+    // to the same DFA byte-class sequence behave identically from every
+    // starting state, so we only need to analyze one representative.
+    let dedup_started_at = std::time::Instant::now();
+    let byte_to_class = compute_byte_classes(tokenizer.dfa());
+    let dedup = deduplicate_tokens_by_byte_class(tokens, &byte_to_class);
+    let dedup_ms = elapsed_ms(dedup_started_at);
+
     let max_length_started_at = std::time::Instant::now();
     let pre_state_reps = if skip_max_length {
         initial_states.to_vec()
     } else {
-        super::state::max_length::find_state_equivalence_classes(tokenizer, tokens, initial_states)
+        super::state::max_length::find_state_equivalence_classes(
+            tokenizer,
+            &dedup.representative_tokens,
+            initial_states,
+        )
     };
     let max_length_ms = elapsed_ms(max_length_started_at);
 
@@ -123,7 +250,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     } else {
         let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
             tokenizer,
-            tokens,
+            &dedup.representative_tokens,
             &pre_reduced_states,
         );
         let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
@@ -145,21 +272,23 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     );
 
     let vocab_started_at = std::time::Instant::now();
-    let vocab_classes = if env_flag_enabled(USE_SLOW_VOCAB_EQUIV_ENV) {
+    let dedup_vocab_classes = if env_flag_enabled(USE_SLOW_VOCAB_EQUIV_ENV) {
         super::vocab::slow::find_vocab_equivalence_classes_with_follow(
             tokenizer,
-            tokens,
+            &dedup.representative_tokens,
             &reduced_states,
             disallowed_follows,
         )
     } else {
         vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
             tokenizer,
-            tokens,
+            &dedup.representative_tokens,
             &reduced_states,
             disallowed_follows,
         )
     };
+    // Expand dedup vocab classes back to original token indices.
+    let vocab_classes = expand_vocab_classes(dedup_vocab_classes, &dedup.repr_to_originals);
     let vocab_ms = elapsed_ms(vocab_started_at);
 
     if env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV) {
@@ -176,7 +305,10 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
 
     if profile_compile {
         eprintln!(
-            "[glrmask/profile][equiv] max_length_ms={:.3} pre_states={} pre_reduced_states={} token_state_ms={:.3} reduced_states={} vocab_ms={:.3} state_classes={} vocab_classes={} total_ms={:.3}",
+            "[glrmask/profile][equiv] dedup_ms={:.3} tokens={}->{} max_length_ms={:.3} pre_states={} pre_reduced_states={} token_state_ms={:.3} reduced_states={} vocab_ms={:.3} state_classes={} vocab_classes={} total_ms={:.3}",
+            dedup_ms,
+            tokens.len(),
+            dedup.representative_tokens.len(),
             max_length_ms,
             initial_states.len(),
             pre_reduced_states.len(),
