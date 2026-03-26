@@ -47,7 +47,11 @@ const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
 const SKIP_MAX_LENGTH_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV";
 const SKIP_TOKEN_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_TOKEN_STATE_EQUIV";
 const USE_SLOW_VOCAB_EQUIV_ENV: &str = "GLRMASK_USE_SLOW_VOCAB_EQUIV";
+const FORCE_PRE_VOCAB_STATE_REDUCTION_ENV: &str = "GLRMASK_FORCE_PRE_VOCAB_STATE_REDUCTION";
+const DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV: &str = "GLRMASK_DISABLE_PRE_VOCAB_STATE_REDUCTION";
 const SKIP_MAX_LENGTH_SMALL_STATE_THRESHOLD: usize = 128;
+const PRE_VOCAB_STATE_REDUCTION_MIN_STATES: usize = 2000;
+const PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS: usize = 16;
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -113,6 +117,22 @@ fn verify_vocab_partition_reference(
 
 fn collect_representative_states(states: &[usize]) -> Vec<usize> {
     states.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+fn tokenizer_group_count(tokenizer: &TokenizerView) -> usize {
+    tokenizer
+        .dfa()
+        .states
+        .iter()
+        .flat_map(|state| {
+            state
+                .finalizers
+                .iter()
+                .copied()
+                .chain(state.possible_future_group_ids.iter().copied())
+        })
+        .max()
+        .map_or(0, |max_group| max_group + 1)
 }
 
 /// Compute byte equivalence classes from the tokenizer DFA.
@@ -257,6 +277,40 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     let max_length_ms = elapsed_ms(max_length_started_at);
 
     let pre_reduced_states = collect_representative_states(&pre_state_reps);
+    let tokenizer_num_groups = tokenizer_group_count(tokenizer);
+    let force_pre_vocab_state_reduction = env_flag_enabled(FORCE_PRE_VOCAB_STATE_REDUCTION_ENV);
+    let disable_pre_vocab_state_reduction = env_flag_enabled(DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV);
+    let use_pre_vocab_state_reduction = if force_pre_vocab_state_reduction {
+        true
+    } else if disable_pre_vocab_state_reduction {
+        false
+    } else {
+        !skip_token_state
+            && pre_reduced_states.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_STATES
+            && tokenizer_num_groups <= PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS
+    };
+    let vocab_states = if use_pre_vocab_state_reduction {
+        let pre_vocab_state_started_at = std::time::Instant::now();
+        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+            tokenizer,
+            &dedup.representative_token_bytes,
+            &pre_reduced_states,
+        );
+        let vocab_states = collect_representative_states(&reduced_state_reps);
+        if profile_compile {
+            eprintln!(
+                "[glrmask/profile][pre_vocab_state_reduction] input_states={} reduced_states={} tokens={} num_groups={} ms={:.3}",
+                pre_reduced_states.len(),
+                vocab_states.len(),
+                dedup.representative_token_bytes.len(),
+                tokenizer_num_groups,
+                elapsed_ms(pre_vocab_state_started_at),
+            );
+        }
+        vocab_states
+    } else {
+        pre_reduced_states.clone()
+    };
 
     let use_slow_vocab = env_flag_enabled(USE_SLOW_VOCAB_EQUIV_ENV);
     let vocab_started_at = std::time::Instant::now();
@@ -264,14 +318,14 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         super::vocab::slow::find_vocab_equivalence_classes_with_follow(
             tokenizer,
             &dedup.representative_token_bytes,
-            &pre_reduced_states,
+            &vocab_states,
             disallowed_follows,
         )
     } else {
         vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow_and_byte_classes(
             tokenizer,
             &dedup.representative_token_bytes,
-            &pre_reduced_states,
+            &vocab_states,
             disallowed_follows,
             Some(&byte_to_class),
         )
