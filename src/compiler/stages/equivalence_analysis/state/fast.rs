@@ -244,7 +244,7 @@ fn find_state_equivalence_classes_token_based(
     }
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
-    sorted_indices.sort_by(|&a, &b| tokens[a].cmp(&tokens[b]));
+    sorted_indices.par_sort_unstable_by(|&a, &b| tokens[a].cmp(&tokens[b]));
 
     let mut sorted_tokens: Vec<&[u8]> = Vec::with_capacity(tokens.len());
     let mut sorted_weights: Vec<u128> = Vec::with_capacity(tokens.len());
@@ -257,7 +257,7 @@ fn find_state_equivalence_classes_token_based(
 
     let tokenizer_start = tokenizer.initial_state_id();
     let suffix_hashes_by_token: Vec<Vec<u128>> = sorted_tokens
-        .iter()
+        .par_iter()
         .map(|token| {
             build_start_state_suffix_hashes(
                 token,
