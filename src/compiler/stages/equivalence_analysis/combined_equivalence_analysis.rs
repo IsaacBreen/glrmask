@@ -198,6 +198,16 @@ fn expand_vocab_classes(
         .collect()
 }
 
+fn representative_tokens_for_vocab_classes<'a>(
+    dedup_vocab_classes: &VocabEquivalenceResult,
+    representative_token_bytes: &'a [&'a [u8]],
+) -> Vec<&'a [u8]> {
+    dedup_vocab_classes
+        .iter()
+        .map(|dedup_class| representative_token_bytes[dedup_class[0]])
+        .collect()
+}
+
 /// Compute combined state and vocab equivalence analysis.
 ///
 /// This function:
@@ -245,56 +255,53 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
 
     let pre_reduced_states = collect_representative_states(&pre_state_reps);
 
-    // Run token_state and vocab in parallel. Vocab uses pre_reduced_states
-    // instead of the fully-reduced states. This is sound because the extra
-    // states that token_state would merge are equivalent (identical token
-    // behavior), so they add no new distinguishing power to the vocab
-    // partition -- the result is identical to running on reduced_states.
     let use_slow_vocab = env_flag_enabled(USE_SLOW_VOCAB_EQUIV_ENV);
-    let ((representative_states, token_state_ms), (dedup_vocab_classes, vocab_ms)) = rayon::join(
-        || {
-            let token_state_started_at = std::time::Instant::now();
-            let result = if skip_token_state {
-                pre_state_reps.clone()
-            } else {
-                let reduced_state_reps =
-                    state_equivalence_analysis::find_state_equivalence_classes(
-                        tokenizer,
-                        &dedup.representative_token_bytes,
-                        &pre_reduced_states,
-                    );
-                let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
-                    .iter()
-                    .copied()
-                    .zip(reduced_state_reps)
-                    .collect();
-                pre_state_reps
-                    .iter()
-                    .map(|pre_rep| rep_to_final[pre_rep])
-                    .collect()
-            };
-            (result, elapsed_ms(token_state_started_at))
-        },
-        || {
-            let vocab_started_at = std::time::Instant::now();
-            let result = if use_slow_vocab {
-                super::vocab::slow::find_vocab_equivalence_classes_with_follow(
-                    tokenizer,
-                    &dedup.representative_token_bytes,
-                    &pre_reduced_states,
-                    disallowed_follows,
-                )
-            } else {
-                vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
-                    tokenizer,
-                    &dedup.representative_token_bytes,
-                    &pre_reduced_states,
-                    disallowed_follows,
-                )
-            };
-            (result, elapsed_ms(vocab_started_at))
-        },
-    );
+    let vocab_started_at = std::time::Instant::now();
+    let dedup_vocab_classes = if use_slow_vocab {
+        super::vocab::slow::find_vocab_equivalence_classes_with_follow(
+            tokenizer,
+            &dedup.representative_token_bytes,
+            &pre_reduced_states,
+            disallowed_follows,
+        )
+    } else {
+        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
+            tokenizer,
+            &dedup.representative_token_bytes,
+            &pre_reduced_states,
+            disallowed_follows,
+        )
+    };
+    let vocab_ms = elapsed_ms(vocab_started_at);
+
+    // Running vocab first shrinks the token set before token_state refinement.
+    // Tokens in the same vocab class are behaviorally identical across the
+    // surviving states, so one representative token per class is sufficient
+    // for the state refinement pass.
+    let token_state_started_at = std::time::Instant::now();
+    let representative_states = if skip_token_state {
+        pre_state_reps.clone()
+    } else {
+        let vocab_representative_tokens = representative_tokens_for_vocab_classes(
+            &dedup_vocab_classes,
+            &dedup.representative_token_bytes,
+        );
+        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+            tokenizer,
+            &vocab_representative_tokens,
+            &pre_reduced_states,
+        );
+        let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
+            .iter()
+            .copied()
+            .zip(reduced_state_reps)
+            .collect();
+        pre_state_reps
+            .iter()
+            .map(|pre_rep| rep_to_final[pre_rep])
+            .collect()
+    };
+    let token_state_ms = elapsed_ms(token_state_started_at);
 
     // Expand dedup vocab classes back to original token indices.
     let vocab_classes = expand_vocab_classes(dedup_vocab_classes, &dedup.repr_to_originals);
