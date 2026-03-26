@@ -500,8 +500,13 @@ fn collect_targets(
             let pv = scratch.match_positions[base + gid];
             if pv != NONE && pv > 0 && (pv as usize) <= len {
                 let pos = pv as usize;
-                scratch.targets.push(pos);
-                scratch.target_gids.entry(pos).or_default().push(gid);
+                let gids = scratch.target_gids.entry(pos).or_default();
+                if gids.is_empty() {
+                    scratch.targets.push(pos);
+                }
+                if !gids.contains(&gid) {
+                    gids.push(gid);
+                }
             }
         }
     }
@@ -543,13 +548,6 @@ fn run_batch(
         }
     }
 
-    // Collect unique match target positions — only from dirty groups
-    scratch.targets.sort_unstable();
-    scratch.targets.dedup();
-    for gids in scratch.target_gids.values_mut() {
-        gids.sort_unstable();
-        gids.dedup();
-    }
 }
 
 /// Run DFA on a suffix from start_state, returning (end_state, edges to match positions).
