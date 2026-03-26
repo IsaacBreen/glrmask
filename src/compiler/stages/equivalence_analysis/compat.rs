@@ -3,6 +3,8 @@
 #[cfg(test)]
 use std::collections::BTreeMap;
 
+use hashbrown::HashMap;
+
 use crate::automata::lexer::tokenizer::Tokenizer;
 
 fn build_transition_table(
@@ -41,27 +43,14 @@ pub struct FlatDfa {
 pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
     let num_states = dfa.states.len();
     let mut byte_to_class = [0u8; 256];
-    let mut class_repr = [0u8; 256];
-    let mut num_classes = 0usize;
+    let mut class_map: HashMap<Vec<u32>, u8> = HashMap::new();
 
     for b in 0..=255u8 {
-        let mut found = false;
-        for c in 0..num_classes {
-            let repr = class_repr[c] as usize;
-            let same = (0..num_states).all(|s| {
-                dfa.states[s].transitions[b as usize] == dfa.states[s].transitions[repr]
-            });
-            if same {
-                byte_to_class[b as usize] = c as u8;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            byte_to_class[b as usize] = num_classes as u8;
-            class_repr[num_classes] = b;
-            num_classes += 1;
-        }
+        let transitions: Vec<u32> = (0..num_states)
+            .map(|s| dfa.states[s].transitions[b as usize])
+            .collect();
+        let next_class = class_map.len() as u8;
+        byte_to_class[b as usize] = *class_map.entry(transitions).or_insert(next_class);
     }
 
     byte_to_class

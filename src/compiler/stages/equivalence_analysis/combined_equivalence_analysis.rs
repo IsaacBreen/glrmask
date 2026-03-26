@@ -14,6 +14,35 @@ use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceRes
 use super::vocab::fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
 use super::vocab::slow::partition_is_at_least_as_fine;
 
+// Identity hasher for pre-hashed u128 keys: avoids redundant hashing in HashMap.
+// Only valid for keys that are already well-distributed.
+struct PreHashedU128Hasher(u64);
+
+impl std::hash::Hasher for PreHashedU128Hasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, _bytes: &[u8]) {
+        unreachable!("PreHashedU128Hasher only supports write_u128");
+    }
+
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.0 = i as u64;
+    }
+}
+
+impl Default for PreHashedU128Hasher {
+    fn default() -> Self {
+        PreHashedU128Hasher(0)
+    }
+}
+
+type PreHashedU128BuildHasher = std::hash::BuildHasherDefault<PreHashedU128Hasher>;
+
 const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
 const SKIP_MAX_LENGTH_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV";
 const SKIP_TOKEN_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_TOKEN_STATE_EQUIV";
@@ -125,7 +154,8 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
     byte_to_class: &[u8; 256],
 ) -> TokenDedup<'a> {
-    let mut hash_to_repr: HashMap<u128, usize> = HashMap::with_capacity(tokens.len() / 2);
+    let mut hash_to_repr: HashMap<u128, usize, PreHashedU128BuildHasher> =
+        HashMap::with_capacity_and_hasher(tokens.len() / 2, PreHashedU128BuildHasher::default());
     let mut representative_token_bytes: Vec<&'a [u8]> = Vec::new();
     let mut original_to_repr: Vec<usize> = Vec::with_capacity(tokens.len());
 
