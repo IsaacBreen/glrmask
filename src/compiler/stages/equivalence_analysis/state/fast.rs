@@ -334,7 +334,8 @@ fn find_state_equivalence_classes_token_based(
             .count();
         let batch_empty_range = (0usize, batch_empty_end);
 
-        let mut batch_first_byte_ranges: Vec<(usize, usize)> = vec![(0usize, 0usize); 256];
+        let mut batch_first_byte_ranges = [(0usize, 0usize); 256];
+        let mut batch_nonempty_first_bytes: Vec<usize> = Vec::new();
         let mut batch_pos = batch_empty_end;
         while batch_pos < batch_len {
             let byte = batch_tokens[batch_pos][0] as usize;
@@ -347,6 +348,7 @@ fn find_state_equivalence_classes_token_based(
                 batch_pos += 1;
             }
             batch_first_byte_ranges[byte] = (start, batch_pos);
+            batch_nonempty_first_bytes.push(byte);
         }
 
         let mut batch_hashes: Vec<(usize, u128)> = active_indices
@@ -372,7 +374,7 @@ fn find_state_equivalence_classes_token_based(
                         live_ranges.push(batch_empty_range);
                     }
 
-                    for byte in 0usize..256 {
+                    for &byte in &batch_nonempty_first_bytes {
                         let (range_start, range_end) = batch_first_byte_ranges[byte];
                         if range_start >= range_end {
                             continue;
