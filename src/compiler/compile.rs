@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
+use once_cell::sync::Lazy;
+
 use crate::Vocab;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
@@ -45,6 +47,53 @@ pub(crate) fn compile_profile_enabled() -> bool {
 
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn compile_thread_count() -> Option<usize> {
+    if let Some(value) = std::env::var("GLRMASK_COMPILE_THREADS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+    {
+        return Some(value);
+    }
+
+    if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return std::thread::available_parallelism()
+            .ok()
+            .map(|parallelism| parallelism.get().min(10))
+            .filter(|&value| value > 1);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
+    let thread_count = compile_thread_count()?;
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build()
+        .ok()
+});
+
+fn run_with_compile_thread_pool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    if let Some(pool) = &*COMPILE_THREAD_POOL {
+        pool.install(f)
+    } else {
+        f()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -188,133 +237,135 @@ fn compile_prepared_with_profile(
     tokenizer: Tokenizer,
     vocab: &Vocab,
 ) -> (Constraint, CompilePhaseProfile) {
-    let compile_started_at = Instant::now();
-    let mut profile = CompilePhaseProfile::default();
+    run_with_compile_thread_pool(|| {
+        let compile_started_at = Instant::now();
+        let mut profile = CompilePhaseProfile::default();
 
-    let analyze_grammar_started_at = Instant::now();
-    let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
-    profile.analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
+        let analyze_grammar_started_at = Instant::now();
+        let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+        profile.analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
 
-    #[cfg(debug_assertions)]
-    if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
-        panic!("[glrmask] grammar precondition violations:\n{}", message);
-    }
+        #[cfg(debug_assertions)]
+        if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
+            panic!("[glrmask] grammar precondition violations:\n{}", message);
+        }
 
-    let table_started_at = Instant::now();
-    let table = GLRTable::build(&analyzed_grammar);
-    profile.glr_table_ms = elapsed_ms(table_started_at);
-    let terminal_coloring_enabled = !env_flag_enabled("GLRMASK_DISABLE_TERMINAL_COLORING");
-    let terminal_coloring = if terminal_coloring_enabled {
-        compute_terminal_coloring(&table)
-    } else {
-        TerminalColoring::identity(table.num_terminals as usize)
-    };
+        let table_started_at = Instant::now();
+        let table = GLRTable::build(&analyzed_grammar);
+        profile.glr_table_ms = elapsed_ms(table_started_at);
+        let terminal_coloring_enabled = !env_flag_enabled("GLRMASK_DISABLE_TERMINAL_COLORING");
+        let terminal_coloring = if terminal_coloring_enabled {
+            compute_terminal_coloring(&table)
+        } else {
+            TerminalColoring::identity(table.num_terminals as usize)
+        };
 
-    let disallowed_follows_started_at = Instant::now();
-    let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
-    profile.disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
+        let disallowed_follows_started_at = Instant::now();
+        let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
+        profile.disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
 
-    let ((mut internal_ids, id_map_ms), (templates, templates_ms)) = rayon::join(
-        || {
-            let id_map_started_at = Instant::now();
-            let result = InternalIdMap::build(
-                &tokenizer,
-                vocab,
-                &disallowed_follows,
-                prepared_grammar.ignore_terminal,
-            );
-            (result, elapsed_ms(id_map_started_at))
-        },
-        || {
-            let templates_started_at = Instant::now();
-            if compile_profile_enabled() {
-                let characterize_started_at = Instant::now();
-                let characterizations = characterize_terminals(&table, &analyzed_grammar);
-                let characterize_ms = elapsed_ms(characterize_started_at);
-                let (templates, template_profile) =
-                    Templates::from_characterizations_profiled(&characterizations);
-                emit_template_profile_summary(characterize_ms, &template_profile);
-                (templates, elapsed_ms(templates_started_at))
-            } else {
-                let characterizations = characterize_terminals(&table, &analyzed_grammar);
-                let templates = Templates::from_characterizations(&characterizations);
-                (templates, elapsed_ms(templates_started_at))
-            }
-        },
-    );
-    profile.id_map_ms = id_map_ms;
-    profile.templates_ms = templates_ms;
-    let token_bytes = vocab.entries.clone();
+        let ((mut internal_ids, id_map_ms), (templates, templates_ms)) = rayon::join(
+            || {
+                let id_map_started_at = Instant::now();
+                let result = InternalIdMap::build(
+                    &tokenizer,
+                    vocab,
+                    &disallowed_follows,
+                    prepared_grammar.ignore_terminal,
+                );
+                (result, elapsed_ms(id_map_started_at))
+            },
+            || {
+                let templates_started_at = Instant::now();
+                if compile_profile_enabled() {
+                    let characterize_started_at = Instant::now();
+                    let characterizations = characterize_terminals(&table, &analyzed_grammar);
+                    let characterize_ms = elapsed_ms(characterize_started_at);
+                    let (templates, template_profile) =
+                        Templates::from_characterizations_profiled(&characterizations);
+                    emit_template_profile_summary(characterize_ms, &template_profile);
+                    (templates, elapsed_ms(templates_started_at))
+                } else {
+                    let characterizations = characterize_terminals(&table, &analyzed_grammar);
+                    let templates = Templates::from_characterizations(&characterizations);
+                    (templates, elapsed_ms(templates_started_at))
+                }
+            },
+        );
+        profile.id_map_ms = id_map_ms;
+        profile.templates_ms = templates_ms;
+        let token_bytes = vocab.entries.clone();
 
-    let terminal_dwa_started_at = Instant::now();
-    let (mut terminal_dwa, mut possible_matches) = build_terminal_dwa_with_possible_matches_and_coloring(
-        &analyzed_grammar,
-        &tokenizer,
-        vocab,
-        &internal_ids,
-        &terminal_coloring,
-        terminal_coloring_enabled,
-        prepared_grammar.ignore_terminal,
-    );
-    profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
+        let terminal_dwa_started_at = Instant::now();
+        let (mut terminal_dwa, mut possible_matches) = build_terminal_dwa_with_possible_matches_and_coloring(
+            &analyzed_grammar,
+            &tokenizer,
+            vocab,
+            &internal_ids,
+            &terminal_coloring,
+            terminal_coloring_enabled,
+            prepared_grammar.ignore_terminal,
+        );
+        profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
 
-    let compact_started_at = Instant::now();
-    let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
-        &mut terminal_dwa,
-        &mut internal_ids,
-    );
-    profile.compact_ms = elapsed_ms(compact_started_at);
+        let compact_started_at = Instant::now();
+        let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
+            &mut terminal_dwa,
+            &mut internal_ids,
+        );
+        profile.compact_ms = elapsed_ms(compact_started_at);
 
-    let permute_possible_matches_started_at = Instant::now();
-    crate::compiler::possible_matches::permute_possible_match_state_ids_in_place(
-        &mut possible_matches,
-        &compact_report.tsid_perm,
-    );
-    crate::compiler::possible_matches::permute_possible_matches_in_place(
-        &mut possible_matches,
-        &compact_report.token_perm,
-    );
-    profile.permute_possible_matches_ms = elapsed_ms(permute_possible_matches_started_at);
+        let permute_possible_matches_started_at = Instant::now();
+        crate::compiler::possible_matches::permute_possible_match_state_ids_in_place(
+            &mut possible_matches,
+            &compact_report.tsid_perm,
+        );
+        crate::compiler::possible_matches::permute_possible_matches_in_place(
+            &mut possible_matches,
+            &compact_report.token_perm,
+        );
+        profile.permute_possible_matches_ms = elapsed_ms(permute_possible_matches_started_at);
 
-    let internal_token_bytes_started_at = Instant::now();
-    let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
-    profile.internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
+        let internal_token_bytes_started_at = Instant::now();
+        let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
+        profile.internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
 
-    let parser_dwa_started_at = Instant::now();
-    let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-        &table,
-        &analyzed_grammar,
-        &terminal_dwa,
-        templates,
-    );
-    profile.parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
+        let parser_dwa_started_at = Instant::now();
+        let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+            &table,
+            &analyzed_grammar,
+            &terminal_dwa,
+            templates,
+        );
+        profile.parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
 
-    let finalize_started_at = Instant::now();
-    let constraint = finalize_constraint(Constraint {
-        parser_dwa,
-        table,
-        tokenizer,
-        ignore_terminal: prepared_grammar.ignore_terminal,
-        possible_matches,
-        state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
-        internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
-        original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
-        internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
-        eos_token_id: vocab.eos_token_id,
-        token_bytes,
-        internal_token_bytes,
-        token_bytes_dense: Vec::new(),
-        internal_token_buf_masks: Vec::new(),
-        internal_token_dense_words: 0,
-        weight_token_dense_masks: rustc_hash::FxHashMap::default(),
-        seed_terminal_dense: rustc_hash::FxHashMap::default(),
-        seed_universe_dense: Box::new([]),
-        dwa_fast_transitions: Vec::new(),
-    });
-    profile.finalize_ms = elapsed_ms(finalize_started_at);
-    profile.compile_ms = elapsed_ms(compile_started_at);
+        let finalize_started_at = Instant::now();
+        let constraint = finalize_constraint(Constraint {
+            parser_dwa,
+            table,
+            tokenizer,
+            ignore_terminal: prepared_grammar.ignore_terminal,
+            possible_matches,
+            state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
+            internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
+            original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
+            internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
+            eos_token_id: vocab.eos_token_id,
+            token_bytes,
+            internal_token_bytes,
+            token_bytes_dense: Vec::new(),
+            internal_token_buf_masks: Vec::new(),
+            internal_token_dense_words: 0,
+            weight_token_dense_masks: rustc_hash::FxHashMap::default(),
+            seed_terminal_dense: rustc_hash::FxHashMap::default(),
+            seed_universe_dense: Box::new([]),
+            dwa_fast_transitions: Vec::new(),
+        });
+        profile.finalize_ms = elapsed_ms(finalize_started_at);
+        profile.compile_ms = elapsed_ms(compile_started_at);
 
-    (constraint, profile)
+        (constraint, profile)
+    })
 }
 
 fn compile_prepared(prepared_grammar: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab) -> Constraint {
