@@ -98,8 +98,6 @@ struct TokenDedup<'a> {
     representative_token_bytes: Vec<&'a [u8]>,
     /// For each original token index, the index of its representative.
     original_to_repr: Vec<usize>,
-    /// For each representative index, the list of original token indices it represents.
-    repr_to_originals: Vec<Vec<usize>>,
 }
 
 /// Hash a token's byte-class sequence into a u128 for dedup.
@@ -130,25 +128,21 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     let mut hash_to_repr: HashMap<u128, usize> = HashMap::with_capacity(tokens.len() / 2);
     let mut representative_token_bytes: Vec<&'a [u8]> = Vec::new();
     let mut original_to_repr: Vec<usize> = Vec::with_capacity(tokens.len());
-    let mut repr_to_originals: Vec<Vec<usize>> = Vec::new();
 
-    for (orig_idx, token) in tokens.iter().enumerate() {
+    for token in tokens {
         let bytes = token.as_ref();
         let h = hash_byte_class_seq(bytes, byte_to_class);
         let repr_idx = *hash_to_repr.entry(h).or_insert_with(|| {
             let idx = representative_token_bytes.len();
             representative_token_bytes.push(bytes);
-            repr_to_originals.push(Vec::new());
             idx
         });
         original_to_repr.push(repr_idx);
-        repr_to_originals[repr_idx].push(orig_idx);
     }
 
     TokenDedup {
         representative_token_bytes,
         original_to_repr,
-        repr_to_originals,
     }
 }
 
@@ -156,19 +150,24 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
 /// original token indices.
 fn expand_vocab_classes(
     dedup_classes: VocabEquivalenceResult,
-    repr_to_originals: &[Vec<usize>],
+    original_to_repr: &[usize],
+    num_representatives: usize,
 ) -> VocabEquivalenceResult {
-    dedup_classes
-        .into_iter()
-        .map(|dedup_class| {
-            let mut original_class: Vec<usize> = Vec::new();
-            for dedup_idx in dedup_class {
-                original_class.extend(repr_to_originals[dedup_idx].iter().copied());
-            }
-            original_class.sort_unstable();
-            original_class
-        })
-        .collect()
+    let mut repr_to_class = vec![usize::MAX; num_representatives];
+    let mut original_classes: Vec<Vec<usize>> = Vec::with_capacity(dedup_classes.len());
+
+    for (class_idx, dedup_class) in dedup_classes.iter().enumerate() {
+        for &dedup_idx in dedup_class {
+            repr_to_class[dedup_idx] = class_idx;
+        }
+        original_classes.push(Vec::new());
+    }
+
+    for (original_idx, &repr_idx) in original_to_repr.iter().enumerate() {
+        original_classes[repr_to_class[repr_idx]].push(original_idx);
+    }
+
+    original_classes.into_iter().collect()
 }
 
 fn representative_tokens_for_vocab_classes<'a>(
@@ -279,7 +278,11 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     let token_state_ms = elapsed_ms(token_state_started_at);
 
     // Expand dedup vocab classes back to original token indices.
-    let vocab_classes = expand_vocab_classes(dedup_vocab_classes, &dedup.repr_to_originals);
+    let vocab_classes = expand_vocab_classes(
+        dedup_vocab_classes,
+        &dedup.original_to_repr,
+        dedup.representative_token_bytes.len(),
+    );
 
     let reduced_states = collect_representative_states(&representative_states);
     let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(
