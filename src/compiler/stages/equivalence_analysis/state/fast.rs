@@ -168,7 +168,7 @@ fn build_start_state_suffix_hashes(
 }
 
 /// Find state equivalence classes for a tokenizer.
-pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
+pub fn find_state_equivalence_classes<S: AsRef<[u8]> + Sync>(
     tokenizer: &TokenizerView,
     tokens: &[S],
     states: &[usize],
@@ -179,10 +179,8 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
         return Vec::new();
     }
 
-    let owned_tokens: Vec<Vec<u8>> = tokens.iter().map(|t| t.as_ref().to_vec()).collect();
-
     let refinement_started_at = std::time::Instant::now();
-    let mapping = find_state_equivalence_classes_token_based(tokenizer, &owned_tokens, states);
+    let mapping = find_state_equivalence_classes_token_based(tokenizer, tokens, states);
     let refinement_time = refinement_started_at.elapsed();
 
     if profile_equivalence {
@@ -199,9 +197,9 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     mapping
 }
 
-fn find_state_equivalence_classes_token_based(
+fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     tokenizer: &TokenizerView,
-    tokens: &[Vec<u8>],
+    tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
@@ -244,12 +242,12 @@ fn find_state_equivalence_classes_token_based(
     }
     let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
-    sorted_indices.par_sort_unstable_by(|&a, &b| tokens[a].cmp(&tokens[b]));
+    sorted_indices.par_sort_unstable_by(|&a, &b| tokens[a].as_ref().cmp(tokens[b].as_ref()));
 
     let mut sorted_tokens: Vec<&[u8]> = Vec::with_capacity(tokens.len());
     let mut sorted_weights: Vec<u128> = Vec::with_capacity(tokens.len());
     for &idx in &sorted_indices {
-        sorted_tokens.push(tokens[idx].as_slice());
+        sorted_tokens.push(tokens[idx].as_ref());
         sorted_weights.push(mix_u128((idx + 1) as u128));
     }
 
