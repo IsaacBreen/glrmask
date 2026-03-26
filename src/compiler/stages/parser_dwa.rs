@@ -755,12 +755,20 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     profile.determinize_supports_ms = elapsed_ms(determinize_supports_started_at);
     let parser_dwa_pre_minimize = determinized.dwa;
 
-    let viable_suffix_started_at = Instant::now();
-    let possible_by_state =
-        build_possible_outgoing_ids_by_state(&parser_nwa, &determinized.supports, table.num_states);
-    profile.viable_suffix_ms = elapsed_ms(viable_suffix_started_at);
+    let ((possible_by_state, viable_suffix_ms), mut optimized_parser_nwa) = rayon::join(
+        || {
+            let viable_suffix_started_at = Instant::now();
+            let possible_by_state = build_possible_outgoing_ids_by_state(
+                &parser_nwa,
+                &determinized.supports,
+                table.num_states,
+            );
+            (possible_by_state, elapsed_ms(viable_suffix_started_at))
+        },
+        || dwa_to_nwa(&parser_dwa_pre_minimize),
+    );
+    profile.viable_suffix_ms = viable_suffix_ms;
 
-    let mut optimized_parser_nwa = dwa_to_nwa(&parser_dwa_pre_minimize);
     let optimize_defaults_started_at = Instant::now();
     optimize_parser_default_transitions(
         &mut optimized_parser_nwa,
