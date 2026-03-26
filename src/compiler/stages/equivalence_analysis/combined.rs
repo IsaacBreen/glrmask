@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use range_set_blaze::RangeSetBlaze;
-
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
@@ -58,7 +56,7 @@ fn build_state_map(
         }
         representative_original_ids
             .push(*originals.first().expect("state class must be non-empty"));
-        internal_to_originals.push(RangeSetBlaze::from_iter(originals.iter().copied()));
+        internal_to_originals.push(originals);
     }
 
     ManyToOneIdMap {
@@ -104,7 +102,7 @@ fn build_vocab_map(
             original_to_internal[token_id as usize] = internal_id as u32;
         }
         representative_original_ids.push(representative);
-        internal_to_originals.push(RangeSetBlaze::from_iter(originals.into_iter()));
+        internal_to_originals.push(originals);
     }
 
     ManyToOneIdMap {
@@ -293,7 +291,7 @@ mod tests {
         let mut actual_sorted: Vec<Vec<usize>> = classes
             .iter()
             .map(|class| {
-                let mut sorted: Vec<usize> = class.iter().map(|id| id as usize).collect();
+                let mut sorted: Vec<usize> = class.iter().map(|&id| id as usize).collect();
                 sorted.sort();
                 sorted
             })
@@ -329,7 +327,7 @@ mod tests {
         let mut actual_sorted: Vec<Vec<usize>> = classes
             .iter()
             .map(|class| {
-                let mut sorted: Vec<usize> = class.iter().map(|id| id as usize).collect();
+                let mut sorted: Vec<usize> = class.iter().map(|&id| id as usize).collect();
                 sorted.sort();
                 sorted
             })

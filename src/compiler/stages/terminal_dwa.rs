@@ -1989,7 +1989,7 @@ mod tests {
         original_to_internal[20] = 0;
         id_map.vocab_tokens = ManyToOneIdMap {
             original_to_internal,
-            internal_to_originals: vec![RangeSetBlaze::from_iter([10u32..=10u32, 20u32..=20u32])],
+            internal_to_originals: vec![vec![10u32, 20u32]],
             representative_original_ids: vec![10],
         };
 

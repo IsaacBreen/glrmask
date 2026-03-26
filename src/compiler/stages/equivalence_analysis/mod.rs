@@ -1,6 +1,4 @@
 
-use range_set_blaze::RangeSetBlaze;
-
 pub(crate) mod disallowed_follows;
 pub mod combined;
 pub mod compat;
@@ -12,7 +10,7 @@ pub mod reference;
 #[derive(Debug, Clone)]
 pub struct ManyToOneIdMap {
     pub original_to_internal: Vec<u32>,
-    pub internal_to_originals: Vec<RangeSetBlaze<u32>>,
+    pub internal_to_originals: Vec<Vec<u32>>,
     pub representative_original_ids: Vec<u32>,
 }
 
@@ -32,15 +30,12 @@ impl ManyToOneIdMap {
     }
 
     #[cfg(test)]
-    pub fn original_ids_for_internal(&self, internal_id: u32) -> Option<&RangeSetBlaze<u32>> {
+    pub fn original_ids_for_internal(&self, internal_id: u32) -> Option<&Vec<u32>> {
         self.internal_to_originals.get(internal_id as usize)
     }
 
     pub fn internal_to_originals_vecs(&self) -> Vec<Vec<u32>> {
-        self.internal_to_originals
-            .iter()
-            .map(|ids| ids.iter().collect())
-            .collect()
+        self.internal_to_originals.clone()
     }
 
     #[cfg(test)]
@@ -80,7 +75,7 @@ impl InternalIdMap {
         let tokenizer_states = ManyToOneIdMap {
             original_to_internal: (0..num_states as u32).collect(),
             internal_to_originals: (0..num_states as u32)
-                .map(|i| RangeSetBlaze::from_iter([i..=i]))
+                .map(|i| vec![i])
                 .collect(),
             representative_original_ids: (0..num_states as u32).collect(),
         };
@@ -92,7 +87,7 @@ impl InternalIdMap {
         for &token_id in vocab.entries.keys() {
             let internal_id = internal_to_originals.len() as u32;
             original_to_internal[token_id as usize] = internal_id;
-            internal_to_originals.push(RangeSetBlaze::from_iter([token_id..=token_id]));
+            internal_to_originals.push(vec![token_id]);
             representative_original_ids.push(token_id);
         }
         let vocab_tokens = ManyToOneIdMap {

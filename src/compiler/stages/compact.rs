@@ -666,7 +666,7 @@ fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: us
         }
     }
 
-    let mut new_internal_to_originals = vec![RangeSetBlaze::new(); new_count];
+    let mut new_internal_to_originals = vec![Vec::new(); new_count];
     let mut new_representatives = vec![u32::MAX; new_count];
     for (old_internal, originals) in old_internal_to_originals.into_iter().enumerate() {
         let Some(&new_internal) = perm.get(old_internal) else {
@@ -675,7 +675,7 @@ fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: us
         if (new_internal as usize) >= new_count {
             continue;
         }
-        new_internal_to_originals[new_internal as usize] |= originals;
+        new_internal_to_originals[new_internal as usize].extend(originals);
         if new_representatives[new_internal as usize] == u32::MAX {
             new_representatives[new_internal as usize] = old_representatives[old_internal];
         }
