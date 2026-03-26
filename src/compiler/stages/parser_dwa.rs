@@ -8,7 +8,7 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::minimize::minimize_fast;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
@@ -787,7 +787,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     profile.determinize_after_defaults_ms = elapsed_ms(determinize_after_defaults_started_at);
 
     let minimize_started_at = Instant::now();
-    let minimized = minimize(&determinized_after_defaults);
+    let minimized = minimize_fast(&determinized_after_defaults);
     profile.minimize_ms = elapsed_ms(minimize_started_at);
     profile.total_ms = elapsed_ms(total_started_at);
 
