@@ -105,6 +105,30 @@ fn schema_accepts(schema: &str, inputs: &[&str]) {
     }
 }
 
+fn schema_rejects(schema: &str, inputs: &[&str]) {
+    let c = schema_constraint(schema);
+    for input in inputs {
+        let mut s = c.start();
+        let mut rejected = false;
+        for (index, byte) in input.bytes().enumerate() {
+            let mask = s.mask();
+            if !token_allowed(&mask, byte as usize) {
+                rejected = true;
+                break;
+            }
+            s.commit_token(byte as u32)
+                .unwrap_or_else(|error| panic!("schema should reject {:?} at byte {}: {error}", input, index));
+        }
+        if !rejected {
+            assert!(
+                !s.is_finished(),
+                "Schema should reject {:?}: input remained accepted through the full payload",
+                input
+            );
+        }
+    }
+}
+
 /// Build a Constraint from EBNF (using the byte vocab) and return it.
 fn ebnf_constraint(ebnf: &str) -> Constraint {
     let vocab = byte_vocab();
@@ -1042,6 +1066,26 @@ fn test_snowplow_host_name_username_schema_accepts_hostname_object() {
         schema,
         &[r#"{"host": "example.com", "name": "x", "username": "u"}"#],
     );
+}
+
+#[test]
+fn test_hostname_format_accepts_max_label_length() {
+    let schema = r#"{
+        "type": "string",
+        "format": "hostname"
+    }"#;
+    let valid = format!(r#""{}.com""#, "a".repeat(63));
+    schema_accepts(schema, &[valid.as_str()]);
+}
+
+#[test]
+fn test_hostname_format_rejects_label_length_above_63() {
+    let schema = r#"{
+        "type": "string",
+        "format": "hostname"
+    }"#;
+    let invalid = format!(r#""{}.com""#, "a".repeat(64));
+    schema_rejects(schema, &[invalid.as_str()]);
 }
 
 #[test]

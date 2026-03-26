@@ -1066,6 +1066,10 @@ fn json_date_time_body_expr() -> GrammarExpr {
     ])
 }
 
+fn json_hostname_label_pattern() -> &'static str {
+    r#"[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?"#
+}
+
 fn simple_repeated_single_char_pattern(pattern: &str) -> Option<String> {
     // Only valid when the pattern is fully anchored (^...$), because JSON Schema
     // `pattern` is a search pattern. Without both anchors the string may contain
@@ -2745,11 +2749,27 @@ impl SchemaCtx {
             "date" => quoted_expr(json_date_body_expr()),
             "time" => quoted_expr(json_time_body_expr()),
             "date-time" => quoted_expr(json_date_time_body_expr()),
+            "hostname" => {
+                let label = self.extract_terminal_rule(
+                    regex_expr(json_hostname_label_pattern()),
+                    "JSON_FORMAT_HOSTNAME_LABEL",
+                );
+                quoted_expr(sequence_or_single(vec![
+                    label.clone(),
+                    GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
+                        literal_expr(b"."),
+                        label,
+                    ]))),
+                ]))
+            }
             _ => json_format_pattern(format_name)
                 .map(json_wrapped_fullmatch_pattern)
                 .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}")))?,
         };
-        Ok(self.extract_terminal_rule(expr, "JSON_FORMAT_STRING"))
+        Ok(match format_name {
+            "hostname" => expr,
+            _ => self.extract_terminal_rule(expr, "JSON_FORMAT_STRING"),
+        })
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
