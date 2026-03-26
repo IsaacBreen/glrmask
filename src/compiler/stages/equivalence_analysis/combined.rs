@@ -68,40 +68,39 @@ fn build_state_map(
 
 fn build_vocab_map(
     vocab_classes: &BTreeSet<Vec<usize>>,
-    token_bytes: &[&[u8]],
     token_ids: &[u32],
     max_token_id: u32,
 ) -> ManyToOneIdMap {
-    let mut ordered_vocab_classes: Vec<(usize, Vec<u32>)> = vocab_classes
+    let mut ordered_vocab_classes: Vec<(u32, Vec<u32>)> = vocab_classes
         .iter()
         .map(|class| {
-            let mut indices: Vec<usize> = class.iter().copied().collect();
-            indices.sort_unstable_by(|&left, &right| {
-                token_bytes[left]
-                    .cmp(&token_bytes[right])
-                    .then_with(|| token_ids[left].cmp(&token_ids[right]))
-            });
-            let representative_idx = *indices.first().expect("vocab class must be non-empty");
-            let originals = indices.into_iter().map(|idx| token_ids[idx]).collect();
-            (representative_idx, originals)
+            // Use the token with the smallest token_id as representative.
+            // No need to sort by bytes — the ordering within each class
+            // doesn't affect correctness (only used for bitmask construction).
+            let mut min_tid = u32::MAX;
+            let mut originals: Vec<u32> = Vec::with_capacity(class.len());
+            for &idx in class {
+                let tid = token_ids[idx];
+                originals.push(tid);
+                if tid < min_tid {
+                    min_tid = tid;
+                }
+            }
+            (min_tid, originals)
         })
         .collect();
-    ordered_vocab_classes.sort_unstable_by(|(left_rep_idx, _), (right_rep_idx, _)| {
-        token_bytes[*left_rep_idx]
-            .cmp(&token_bytes[*right_rep_idx])
-            .then_with(|| token_ids[*left_rep_idx].cmp(&token_ids[*right_rep_idx]))
-    });
+    // Sort classes by representative token_id (fast integer comparison).
+    ordered_vocab_classes.sort_unstable_by_key(|(rep_tid, _)| *rep_tid);
 
     let mut original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
     let mut internal_to_originals = Vec::with_capacity(ordered_vocab_classes.len());
     let mut representative_original_ids = Vec::with_capacity(ordered_vocab_classes.len());
 
-    for (internal_id, (_, originals)) in ordered_vocab_classes.into_iter().enumerate() {
-        let representative = *originals.first().expect("vocab class must be non-empty");
+    for (internal_id, (rep_tid, originals)) in ordered_vocab_classes.into_iter().enumerate() {
         for &token_id in &originals {
             original_to_internal[token_id as usize] = internal_id as u32;
         }
-        representative_original_ids.push(representative);
+        representative_original_ids.push(rep_tid);
         internal_to_originals.push(originals);
     }
 
@@ -177,7 +176,6 @@ fn analyze_equivalences_impl(
     let vocab_map_started_at = std::time::Instant::now();
     let vocab_map = build_vocab_map(
         &result.vocab_classes,
-        &token_bytes,
         &token_ids,
         max_token_id,
     );
