@@ -18,7 +18,7 @@
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict};
 use self_cell::self_cell;
 use std::sync::Arc;
 
@@ -47,9 +47,13 @@ impl OwnedState {
 // ---------------------------------------------------------------------------
 
 fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(token_to_id.len());
     for (key, value) in token_to_id.iter() {
-        let token_bytes: Vec<u8> = key.extract()?;
+        let token_bytes = key
+            .downcast::<PyBytes>()
+            .map_err(|_| PyValueError::new_err("vocab keys must be Python bytes"))?
+            .as_bytes()
+            .to_vec();
         let token_id: u32 = value.extract()?;
         entries.push((token_id, token_bytes));
     }
