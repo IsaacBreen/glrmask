@@ -35,6 +35,7 @@ const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
 const VOCAB_MATCH_POSITIONS_GROUP_BYTES: usize = 256 * 1024;
+const SELF_LOOP_ACTIVE_LEN_LIMIT: usize = 512;
 
 /// Flat DFA with byte-class-compressed transposed transition tables.
 ///
@@ -637,7 +638,7 @@ fn run_batch_inner(
 
             // Self-loop early exit: if all active states self-loop on every remaining byte,
             // greedy match positions advance to token_length and we can stop.
-            if pos + 1 < len {
+            if pos + 1 < len && active_len <= SELF_LOOP_ACTIVE_LEN_LIMIT {
                 // Intersect self_loop_bytes for all active states
                 let mut sl = U8Set::all();
                 for idx in 0..active_len {
