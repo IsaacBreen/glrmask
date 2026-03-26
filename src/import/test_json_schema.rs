@@ -1007,6 +1007,43 @@ fn test_pattern_length_constraints_bound_string_content() {
     );
 }
 
+/// Minimized from Snowplow `sp_367_Normalized`.
+///
+/// With GPT-2-like vocabularies, this small 3-field object can still trigger a
+/// disproportionate compile-time blowup driven by the `host` hostname/ip
+/// formats interacting with other required bounded strings.
+#[test]
+fn test_snowplow_host_name_username_schema_accepts_hostname_object() {
+    let schema = r#"{
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "host": {
+                "type": "string",
+                "anyOf": [
+                    {"format": "hostname"},
+                    {"format": "ipv4"},
+                    {"format": "ipv6"}
+                ]
+            },
+            "name": {
+                "type": "string",
+                "maxLength": 255
+            },
+            "username": {
+                "type": "string",
+                "maxLength": 64
+            }
+        },
+        "required": ["host", "name", "username"]
+    }"#;
+
+    schema_accepts(
+        schema,
+        &[r#"{"host": "example.com", "name": "x", "username": "u"}"#],
+    );
+}
+
 #[test]
 fn test_date_or_null_schema_rejects_empty_string_span_token() {
     let schema = r#"{
