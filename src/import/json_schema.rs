@@ -3540,14 +3540,23 @@ impl SchemaCtx {
         };
         self.generated_object_rule_counter = base_index + 1;
 
-        let base_key_colon_dfa = Self::scoped_key_colon_dfa(property_names)?;
-        let fixed_key_union_dfa = Self::literal_key_colon_union_dfa(&fixed_literal_keys);
-        let additional_fixed_key_union_dfa =
-            Self::literal_key_colon_union_dfa(&additional_excluded_literal_keys);
-        let pattern_key_colon_dfas = pattern_properties
-            .iter()
-            .map(|(pattern, _)| Self::pattern_key_colon_dfa(pattern))
-            .collect::<Vec<_>>();
+        let key_dfa_needed = !pattern_properties.is_empty()
+            || property_names.is_some()
+            || !additional_excluded_literal_keys.is_empty();
+        let (base_key_colon_dfa, fixed_key_union_dfa, additional_fixed_key_union_dfa, pattern_key_colon_dfas) =
+            if key_dfa_needed {
+                (
+                    Some(Self::scoped_key_colon_dfa(property_names)?),
+                    Self::literal_key_colon_union_dfa(&fixed_literal_keys),
+                    Self::literal_key_colon_union_dfa(&additional_excluded_literal_keys),
+                    pattern_properties
+                        .iter()
+                        .map(|(pattern, _)| Self::pattern_key_colon_dfa(pattern))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                (None, None, None, Vec::new())
+            };
 
         let mut pattern_pair_exprs = Vec::<GrammarExpr>::new();
 
@@ -3562,7 +3571,10 @@ impl SchemaCtx {
             );
 
             for (subset_idx, subset) in subsets.into_iter().enumerate() {
-                let mut key_dfa = base_key_colon_dfa.clone();
+                let mut key_dfa = base_key_colon_dfa
+                    .as_ref()
+                    .expect("pattern/property-name DFA should exist when needed")
+                    .clone();
                 for pattern_idx in &subset {
                     key_dfa = Self::intersect_lexer_dfa(&key_dfa, &pattern_key_colon_dfas[*pattern_idx]);
                     if !Self::dfa_accepts_any(&key_dfa) {
@@ -3616,23 +3628,34 @@ impl SchemaCtx {
 
         let mut additional_pair_exprs = Vec::<GrammarExpr>::new();
         if let Some(schema) = additional_properties_schema {
-            let mut additional_key_dfa = base_key_colon_dfa.clone();
-            if let Some(fixed_key_union_dfa) = &additional_fixed_key_union_dfa {
-                additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, fixed_key_union_dfa);
-            }
-            for pattern_dfa in &pattern_key_colon_dfas {
-                additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, pattern_dfa);
-                if !Self::dfa_accepts_any(&additional_key_dfa) {
-                    break;
+            let additional_key_expr = if key_dfa_needed {
+                let mut additional_key_dfa = base_key_colon_dfa
+                    .as_ref()
+                    .expect("additional-properties DFA should exist when needed")
+                    .clone();
+                if let Some(fixed_key_union_dfa) = &additional_fixed_key_union_dfa {
+                    additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, fixed_key_union_dfa);
                 }
-            }
+                for pattern_dfa in &pattern_key_colon_dfas {
+                    additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, pattern_dfa);
+                    if !Self::dfa_accepts_any(&additional_key_dfa) {
+                        break;
+                    }
+                }
 
-            if Self::dfa_accepts_any(&additional_key_dfa) {
-                let additional_key_expr = self.build_lexer_dfa_expr(
-                    &additional_key_dfa,
-                    &format!("{}_AP_KEY", base_name.to_uppercase()),
-                );
+                if !Self::dfa_accepts_any(&additional_key_dfa) {
+                    None
+                } else {
+                    Some(self.build_lexer_dfa_expr(
+                        &additional_key_dfa,
+                        &format!("{}_AP_KEY", base_name.to_uppercase()),
+                    ))
+                }
+            } else {
+                Some(self.json_key_colon_ref())
+            };
 
+            if let Some(additional_key_expr) = additional_key_expr {
                 let additional_value_expr = self.convert_schema(&schema)?;
                 additional_pair_exprs.push(sequence_or_single(vec![
                     additional_key_expr,
