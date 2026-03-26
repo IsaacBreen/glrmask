@@ -23,6 +23,7 @@ const JSON_NONNEG_NUMBER_RULE: &str = "JSON_NONNEG_NUMBER";
 const JSON_BOOL_RULE: &str = "JSON_BOOL";
 const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "JSON_KEY_COLON";
+const JSON_STRING_REPEAT_CHUNK: usize = 1024;
 
 const JSON_STRING_REGEX: &str =
     r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
@@ -1680,6 +1681,94 @@ impl SchemaCtx {
         }
     }
 
+    fn should_split_bounded_string(&self, min_len: usize, max_len: Option<usize>) -> bool {
+        min_len > JSON_STRING_REPEAT_CHUNK
+            || max_len
+                .map(|value| value > JSON_STRING_REPEAT_CHUNK)
+                .unwrap_or(false)
+    }
+
+    fn build_split_json_string_exact_expr(&mut self, count: usize) -> GrammarExpr {
+        if count == 0 {
+            return empty_expr();
+        }
+        if count <= JSON_STRING_REPEAT_CHUNK {
+            return self.json_string_char_exact_ref(count);
+        }
+
+        let full_chunks = count / JSON_STRING_REPEAT_CHUNK;
+        let remainder = count % JSON_STRING_REPEAT_CHUNK;
+        let mut parts = Vec::new();
+        if full_chunks == 1 {
+            parts.push(self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK));
+        } else if full_chunks > 1 {
+            parts.push(repeat_expr(
+                self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                full_chunks,
+                Some(full_chunks),
+            ));
+        }
+        if remainder > 0 {
+            parts.push(self.json_string_char_exact_ref(remainder));
+        }
+        sequence_or_single(parts)
+    }
+
+    fn build_split_json_string_upto_expr(&mut self, max: usize) -> GrammarExpr {
+        if max == 0 {
+            return empty_expr();
+        }
+        if max <= JSON_STRING_REPEAT_CHUNK {
+            return self.json_string_char_upto_ref(max);
+        }
+
+        let full_chunks = max / JSON_STRING_REPEAT_CHUNK;
+        let remainder = max % JSON_STRING_REPEAT_CHUNK;
+        let mut options = Vec::new();
+
+        if full_chunks == 1 {
+            options.push(self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK));
+        } else {
+            options.push(sequence_or_single(vec![
+                repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    0,
+                    Some(full_chunks - 1),
+                ),
+                self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK),
+            ]));
+        }
+
+        if remainder > 0 {
+            options.push(sequence_or_single(vec![
+                self.build_split_json_string_exact_expr(full_chunks * JSON_STRING_REPEAT_CHUNK),
+                self.json_string_char_upto_ref(remainder),
+            ]));
+        }
+
+        choice_or_single(options)
+    }
+
+    fn build_split_json_string_body(
+        &mut self,
+        min_len: usize,
+        max_len: Option<usize>,
+    ) -> GrammarExpr {
+        let mut parts = Vec::new();
+        if min_len > 0 {
+            parts.push(self.build_split_json_string_exact_expr(min_len));
+        }
+        match max_len {
+            Some(max_len) => {
+                if max_len > min_len {
+                    parts.push(self.build_split_json_string_upto_expr(max_len - min_len));
+                }
+            }
+            None => parts.push(repeat_expr(self.json_string_char_ref(), 0, None)),
+        }
+        sequence_or_single(parts)
+    }
+
     fn json_key_colon_ref(&self) -> GrammarExpr {
         GrammarExpr::Ref(JSON_KEY_COLON_RULE.into())
     }
@@ -2564,6 +2653,18 @@ impl SchemaCtx {
         }
         if min_len == 0 && max_len.is_none() {
             return Ok(self.json_string_ref());
+        }
+
+        if self.should_split_bounded_string(min_len, max_len) {
+            let split_body = self.build_split_json_string_body(min_len, max_len);
+            return Ok(self.extract_rule(
+                sequence_or_single(vec![
+                    literal_expr(b"\""),
+                    split_body,
+                    literal_expr(b"\""),
+                ]),
+                "json_string_bounded_split",
+            ));
         }
 
         let bounded_body = match max_len {
@@ -4547,6 +4648,49 @@ mod tests {
             !rule.name.starts_with("JSON_STRING_CHAR_EXACT_")
                 && !rule.name.starts_with("JSON_STRING_CHAR_UPTO_")
         }));
+    }
+
+    #[test]
+    fn test_large_bounded_string_uses_split_nonterminal_and_terminal_chunks() {
+        let schema: Value = serde_json::from_str(r#"{"type": "string", "maxLength": 1025}"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+
+        let start_rule = grammar.rules.iter().find(|rule| rule.name == "start").unwrap();
+        let split_rule_name = match &start_rule.expr {
+            GrammarExpr::Ref(rule_name) => rule_name,
+            other => panic!("expected split string start to be a rule ref, got {other:?}"),
+        };
+        let split_rule = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.name == *split_rule_name)
+            .unwrap();
+        assert!(!split_rule.is_terminal, "expected large bounded string to lower through a nonterminal rule");
+
+        assert!(grammar.rules.iter().any(|rule| {
+            rule.is_terminal && rule.name.starts_with("JSON_STRING_CHAR_EXACT_1024")
+        }));
+        assert!(grammar.rules.iter().any(|rule| {
+            rule.is_terminal && rule.name.starts_with("JSON_STRING_CHAR_UPTO_1024")
+        }));
+    }
+
+    #[test]
+    fn test_accepts_large_split_bounded_string_length() {
+        let token = format!("\"{}\"", "a".repeat(1025)).into_bytes();
+        assert!(accepts_sequence(
+            r#"{"type": "string", "maxLength": 1025}"#,
+            &[token.as_slice()]
+        ));
+    }
+
+    #[test]
+    fn test_rejects_too_long_large_split_bounded_string_length() {
+        let token = format!("\"{}\"", "a".repeat(1026)).into_bytes();
+        assert!(!accepts_sequence(
+            r#"{"type": "string", "maxLength": 1025}"#,
+            &[token.as_slice()]
+        ));
     }
 
     #[test]
