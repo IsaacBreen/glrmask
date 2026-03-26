@@ -91,34 +91,6 @@ fn collect_representative_states(states: &[usize]) -> Vec<usize> {
 /// the same class. This is used to deduplicate tokens before equivalence
 /// analysis: tokens whose byte-class sequences are identical will always
 /// produce the same DFA behavior from any starting state.
-fn compute_byte_classes(dfa: &super::compat::FlatDfa) -> [u16; 256] {
-    let num_states = dfa.states.len();
-    let mut byte_to_class = [0u16; 256];
-    let mut class_repr = [0u16; 256];
-    let mut num_classes = 0u16;
-
-    for b in 0..=255u16 {
-        let mut found = false;
-        for c in 0..num_classes {
-            let repr = class_repr[c as usize] as usize;
-            let same = (0..num_states).all(|s| {
-                dfa.states[s].transitions[b as usize] == dfa.states[s].transitions[repr]
-            });
-            if same {
-                byte_to_class[b as usize] = c;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            byte_to_class[b as usize] = num_classes;
-            class_repr[num_classes as usize] = b;
-            num_classes += 1;
-        }
-    }
-    byte_to_class
-}
-
 /// Token deduplication result.
 struct TokenDedup<'a> {
     /// Byte slices for representative tokens (references into the original array).
@@ -132,7 +104,7 @@ struct TokenDedup<'a> {
 /// Hash a token's byte-class sequence into a u128 for dedup.
 /// Collision probability is ~n²/2^128 ≈ 0 for any practical n.
 #[inline]
-fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u16; 256]) -> u128 {
+fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u8; 256]) -> u128 {
     // Length-prefixed hash with a good mixing function.
     let mut h: u128 = 0xFF51_AFD7_ED55_8CCD;
     h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53).wrapping_add(bytes.len() as u128);
@@ -152,7 +124,7 @@ fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u16; 256]) -> u128 {
 /// starting state. We only need to analyze one representative per group.
 fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
-    byte_to_class: &[u16; 256],
+    byte_to_class: &[u8; 256],
 ) -> TokenDedup<'a> {
     let mut hash_to_repr: HashMap<u128, usize> = HashMap::with_capacity(tokens.len() / 2);
     let mut representative_token_bytes: Vec<&'a [u8]> = Vec::new();
@@ -237,7 +209,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     // to the same DFA byte-class sequence behave identically from every
     // starting state, so we only need to analyze one representative.
     let dedup_started_at = std::time::Instant::now();
-    let byte_to_class = compute_byte_classes(tokenizer.dfa());
+    let byte_to_class = super::compat::compute_byte_classes(tokenizer.dfa());
     let dedup = deduplicate_tokens_by_byte_class(tokens, &byte_to_class);
     let dedup_ms = elapsed_ms(dedup_started_at);
 

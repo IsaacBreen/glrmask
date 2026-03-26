@@ -38,6 +38,35 @@ pub struct FlatDfa {
     pub start_state: usize,
 }
 
+pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
+    let num_states = dfa.states.len();
+    let mut byte_to_class = [0u8; 256];
+    let mut class_repr = [0u8; 256];
+    let mut num_classes = 0usize;
+
+    for b in 0..=255u8 {
+        let mut found = false;
+        for c in 0..num_classes {
+            let repr = class_repr[c] as usize;
+            let same = (0..num_states).all(|s| {
+                dfa.states[s].transitions[b as usize] == dfa.states[s].transitions[repr]
+            });
+            if same {
+                byte_to_class[b as usize] = c as u8;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            byte_to_class[b as usize] = num_classes as u8;
+            class_repr[num_classes] = b;
+            num_classes += 1;
+        }
+    }
+
+    byte_to_class
+}
+
 impl FlatDfa {
     pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
         let dfa = &tokenizer.dfa;

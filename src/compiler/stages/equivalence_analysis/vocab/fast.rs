@@ -3,13 +3,13 @@
 //! Each token is classified by its match positions, suffix structure, and end
 //! states across all tokenizer starts.
 
-use super::super::compat::TokenizerView;
+use super::super::compat::{compute_byte_classes, TokenizerView};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::time::Instant;
 
@@ -140,6 +140,10 @@ fn compile_profile_enabled() -> bool {
     env_flag_enabled("GLRMASK_PROFILE_COMPILE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
 }
 
+fn vocab_reachability_profile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_PROFILE_VOCAB_REACHABILITY")
+}
+
 fn vocab_batch_size_override() -> Option<usize> {
     std::env::var("GLRMASK_VOCAB_EQUIV_BATCH_SIZE")
         .ok()
@@ -163,6 +167,40 @@ fn diversity_state_order_enabled() -> bool {
 
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn reachable_state_count(tokenizer: &TokenizerView, initial_states: &[usize]) -> usize {
+    let dfa = tokenizer.dfa();
+    if initial_states.is_empty() {
+        return 0;
+    }
+
+    let mut seen = vec![false; dfa.states.len()];
+    let mut queue = VecDeque::new();
+
+    for &state in initial_states {
+        if state < seen.len() && !seen[state] {
+            seen[state] = true;
+            queue.push_back(state);
+        }
+    }
+
+    let mut count = 0usize;
+    while let Some(state) = queue.pop_front() {
+        count += 1;
+        for &target in &dfa.states[state].transitions {
+            if target == NONE {
+                continue;
+            }
+            let target = target as usize;
+            if !seen[target] {
+                seen[target] = true;
+                queue.push_back(target);
+            }
+        }
+    }
+
+    count
 }
 
 fn states_by_transition_diversity(dfa: &Dfa, states: &[usize]) -> Vec<usize> {
@@ -225,6 +263,8 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
 }
 
 fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
+    let profile_compile = compile_profile_enabled();
+    let build_started_at = Instant::now();
     let dfa = tokenizer.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -240,19 +280,14 @@ fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSe
         .max()
         .map_or(0, |m| m + 1);
 
-    let mut transitions = Vec::with_capacity(dfa.states.len());
+    let state_scan_started_at = Instant::now();
     let mut finalizers = Vec::with_capacity(dfa.states.len());
     let mut is_dead_end = Vec::with_capacity(dfa.states.len());
     let mut possible_future_groups = Vec::with_capacity(dfa.states.len());
     let mut completion_hash = Vec::with_capacity(dfa.states.len());
+    let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
 
-    for state in &dfa.states {
-        let mut table = [NONE; 256];
-        for (byte_idx, &target) in state.transitions.iter().enumerate() {
-            table[byte_idx] = target;
-        }
-        transitions.push(table);
-
+    for (state_idx, state) in dfa.states.iter().enumerate() {
         finalizers.push(state.finalizers.iter().copied().collect());
 
         is_dead_end.push(state.possible_future_group_ids.is_empty());
@@ -260,7 +295,16 @@ fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSe
             state.possible_future_group_ids.iter().copied().collect();
         completion_hash.push(hash_group_list(future_groups.iter().copied()));
         possible_future_groups.push(future_groups);
+
+        let mut bits = U8Set::empty();
+        for (byte_idx, &target) in state.transitions.iter().enumerate() {
+            if target == state_idx as u32 {
+                bits.insert(byte_idx as u8);
+            }
+        }
+        self_loop_bytes.push(bits);
     }
+    let state_scan_ms = elapsed_ms(state_scan_started_at);
 
     let none_completion_hash = {
         let mut h = new_hasher();
@@ -268,51 +312,49 @@ fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSe
         h.finish()
     };
 
-    // Precompute self-loop byte sets per state
-    let self_loop_bytes: Vec<U8Set> = (0..transitions.len())
-        .map(|s| {
-            let mut bits = U8Set::empty();
-            for b in 0..=255u8 {
-                if transitions[s][b as usize] == s as u32 {
-                    bits.insert(b);
-                }
-            }
-            bits
-        })
-        .collect();
-
     // Compute byte equivalence classes: group bytes with identical transitions across all states.
-    let num_dfa_states = transitions.len();
-    let mut byte_to_class = [0u8; 256];
-    let mut class_repr = [0u8; 256]; // representative byte for each class
-    let mut num_classes = 0usize;
-
+    let byte_classes_started_at = Instant::now();
+    let num_dfa_states = dfa.states.len();
+    let byte_to_class = compute_byte_classes(dfa);
+    let num_classes = byte_to_class
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |max_class| max_class as usize + 1);
+    let mut class_repr = vec![0u8; num_classes];
+    let mut class_seen = vec![false; num_classes];
     for b in 0..=255u8 {
-        let mut found = false;
-        for c in 0..num_classes {
-            let repr = class_repr[c] as usize;
-            let same = (0..num_dfa_states).all(|s| transitions[s][b as usize] == transitions[s][repr]);
-            if same {
-                byte_to_class[b as usize] = c as u8;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            byte_to_class[b as usize] = num_classes as u8;
-            class_repr[num_classes] = b;
-            num_classes += 1;
+        let class = byte_to_class[b as usize] as usize;
+        if !class_seen[class] {
+            class_seen[class] = true;
+            class_repr[class] = b;
         }
     }
+    let byte_classes_ms = elapsed_ms(byte_classes_started_at);
 
     // Build transposed transition table: trans_by_class[class * num_states + state]
+    let transpose_started_at = Instant::now();
     let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
     for c in 0..num_classes {
         let repr = class_repr[c] as usize;
         let base = c * num_dfa_states;
         for s in 0..num_dfa_states {
-            trans_by_class[base + s] = transitions[s][repr];
+            trans_by_class[base + s] = dfa.states[s].transitions[repr];
         }
+    }
+    let transpose_ms = elapsed_ms(transpose_started_at);
+
+    if profile_compile {
+        eprintln!(
+            "[glrmask/profile][vocab_build_dfa] dfa_states={} num_groups={} byte_classes={} state_scan_ms={:.3} byte_classes_ms={:.3} transpose_ms={:.3} total_ms={:.3}",
+            num_dfa_states,
+            num_groups,
+            num_classes,
+            state_scan_ms,
+            byte_classes_ms,
+            transpose_ms,
+            elapsed_ms(build_started_at),
+        );
     }
 
     Dfa {
@@ -819,12 +861,18 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
     let profile_compile = compile_profile_enabled();
+    let reachable_states = vocab_reachability_profile_enabled()
+        .then(|| reachable_state_count(tokenizer, initial_states));
+    let build_dfa_started_at = Instant::now();
     let dfa = build_dfa(tokenizer, disallowed_follows);
+    let build_dfa_ms = elapsed_ms(build_dfa_started_at);
+    let order_states_started_at = Instant::now();
     let ordered_states = if diversity_state_order_enabled() {
         states_by_transition_diversity(&dfa, initial_states)
     } else {
         initial_states.to_vec()
     };
+    let order_states_ms = elapsed_ms(order_states_started_at);
     let num_tokens = strings.len();
     let num_initial_states = ordered_states.len();
 
@@ -840,6 +888,9 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
+    let mut batch_total_ms = 0.0;
+    let mut signature_total_ms = 0.0;
+    let mut refine_total_ms = 0.0;
 
     for (batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
         if active_indices.is_empty() {
@@ -851,6 +902,7 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
         let batch_end = (batch_start + batch_size).min(num_initial_states);
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
+        let signature_started_at = Instant::now();
         let active_sigs: Vec<(usize, u64)> = active_indices
             .par_iter()
             .map_init(
@@ -864,8 +916,10 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
                 },
             )
             .collect();
+        let signature_ms = elapsed_ms(signature_started_at);
 
         // Refine partition: group tokens by (old_class, signature)
+        let refine_started_at = Instant::now();
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
             HashMap::with_capacity(active_sigs.len() / 2);
         for (ti, sig) in active_sigs {
@@ -895,11 +949,16 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
             }
         }
         active_indices = new_active;
+        let refine_ms = elapsed_ms(refine_started_at);
+        let batch_ms = elapsed_ms(batch_started_at);
+        batch_total_ms += batch_ms;
+        signature_total_ms += signature_ms;
+        refine_total_ms += refine_ms;
 
         if profile_compile {
             let state_group_count = batch.len().div_ceil(state_group_size.max(1));
             eprintln!(
-                "[glrmask/profile][vocab] batch={} states={} state_group_size={} state_groups={} active_before={} active_after={} classes={} ms={:.3}",
+                "[glrmask/profile][vocab] batch={} states={} state_group_size={} state_groups={} active_before={} active_after={} classes={} signature_ms={:.3} refine_ms={:.3} ms={:.3}",
                 batch_index,
                 batch.len(),
                 state_group_size,
@@ -907,16 +966,39 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
                 active_before,
                 active_indices.len(),
                 next_class_id,
-                elapsed_ms(batch_started_at),
+                signature_ms,
+                refine_ms,
+                batch_ms,
             );
         }
     }
 
+    let materialize_started_at = Instant::now();
     let mut groups = vec![Vec::new(); next_class_id.max(1)];
     for (token_idx, &class_id) in partition.iter().enumerate() {
         groups[class_id].push(token_idx);
     }
-    groups.into_iter().filter(|group| !group.is_empty()).collect()
+    let result: VocabEquivalenceResult = groups.into_iter().filter(|group| !group.is_empty()).collect();
+    let materialize_ms = elapsed_ms(materialize_started_at);
+
+    if profile_compile {
+        eprintln!(
+            "[glrmask/profile][vocab_summary] dfa_states={} reachable_states={} relevant_states={} tokens={} build_dfa_ms={:.3} order_states_ms={:.3} batch_ms={:.3} signature_ms={:.3} refine_ms={:.3} materialize_ms={:.3} classes={}",
+            dfa.num_states,
+            reachable_states.unwrap_or(0),
+            num_initial_states,
+            num_tokens,
+            build_dfa_ms,
+            order_states_ms,
+            batch_total_ms,
+            signature_total_ms,
+            refine_total_ms,
+            materialize_ms,
+            result.len(),
+        );
+    }
+
+    result
 }
 
 #[cfg(test)]
