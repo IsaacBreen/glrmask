@@ -204,7 +204,7 @@ fn find_state_equivalence_classes_token_based(
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
-    use std::collections::HashMap;
+    use std::collections::{hash_map::Entry, HashMap};
 
     let dfa = tokenizer.dfa();
 
@@ -295,10 +295,10 @@ fn find_state_equivalence_classes_token_based(
     );
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
-    let mut next_group_ids: Vec<usize> = vec![0usize; states.len()];
+    let mut group_sizes: Vec<usize> = vec![states.len()];
     let mut active_indices: Vec<usize> = (0..states.len()).collect();
-    let mut active_flags: Vec<bool> = vec![false; states.len()];
-    let mut active_hashes: Vec<u128> = vec![0u128; states.len()];
+    let mut touched_group_flags: Vec<bool> = vec![false; group_sizes.len()];
+    let mut reused_group_flags: Vec<bool> = vec![false; group_sizes.len()];
     let mut prev_groups = 1usize;
     let mut stable_batches = 0usize;
     let mut tokens_tested = 0usize;
@@ -387,7 +387,6 @@ fn find_state_equivalence_classes_token_based(
                             live_ranges.push((range_start, range_end));
                         }
                     }
-
                     let (state_stack, dead_depth_stack, depth_marks, positions, changes) = scratch;
                     let mut prev_groups_hash: u128;
 
@@ -540,61 +539,78 @@ fn find_state_equivalence_classes_token_based(
             )
             .collect();
 
-        let all_active = active_indices.len() == states.len();
-
-        let mut key_to_group: HashMap<(usize, u128), usize> = HashMap::new();
-        let mut num_groups = 0usize;
+        let previous_active_indices = std::mem::take(&mut active_indices);
+        let all_active = previous_active_indices.len() == states.len();
 
         if all_active {
-            for (state_idx, hash) in batch_hashes.drain(..) {
-                active_hashes[state_idx] = hash;
-            }
+            let mut key_to_group: HashMap<(usize, u128), usize> =
+                HashMap::with_capacity(states.len());
+            group_sizes.clear();
 
-            for i in 0..states.len() {
-                let key = (group_ids[i], active_hashes[i]);
-                let entry = key_to_group.entry(key).or_insert_with(|| {
-                    let id = num_groups;
-                    num_groups += 1;
+            for (state_idx, hash) in batch_hashes.drain(..) {
+                let key = (group_ids[state_idx], hash);
+                let gid = *key_to_group.entry(key).or_insert_with(|| {
+                    let id = group_sizes.len();
+                    group_sizes.push(0);
                     id
                 });
-                next_group_ids[i] = *entry;
+                group_ids[state_idx] = gid;
+                group_sizes[gid] += 1;
             }
+
+            touched_group_flags.clear();
+            touched_group_flags.resize(group_sizes.len(), false);
+            reused_group_flags.clear();
+            reused_group_flags.resize(group_sizes.len(), false);
         } else {
-            for &state_idx in &active_indices {
-                active_flags[state_idx] = false;
+            let mut key_to_group: HashMap<(usize, u128), usize> =
+                HashMap::with_capacity(previous_active_indices.len());
+            let mut touched_groups: Vec<usize> = Vec::new();
+
+            for &state_idx in &previous_active_indices {
+                let gid = group_ids[state_idx];
+                if !touched_group_flags[gid] {
+                    touched_group_flags[gid] = true;
+                    reused_group_flags[gid] = false;
+                    touched_groups.push(gid);
+                    group_sizes[gid] = 0;
+                }
             }
+
             for (state_idx, hash) in batch_hashes.drain(..) {
-                active_flags[state_idx] = true;
-                active_hashes[state_idx] = hash;
-            }
-
-            const FROZEN_SIG: u128 = u128::MAX;
-            for i in 0..states.len() {
-                let sig = if active_flags[i] {
-                    active_hashes[i]
-                } else {
-                    FROZEN_SIG
+                let old_gid = group_ids[state_idx];
+                let key = (old_gid, hash);
+                let gid = match key_to_group.entry(key) {
+                    Entry::Occupied(entry) => *entry.get(),
+                    Entry::Vacant(entry) => {
+                        let gid = if !reused_group_flags[old_gid] {
+                            reused_group_flags[old_gid] = true;
+                            old_gid
+                        } else {
+                            let new_gid = group_sizes.len();
+                            group_sizes.push(0);
+                            touched_group_flags.push(false);
+                            reused_group_flags.push(false);
+                            new_gid
+                        };
+                        *entry.insert(gid)
+                    }
                 };
-                let key = (group_ids[i], sig);
-                let entry = key_to_group.entry(key).or_insert_with(|| {
-                    let id = num_groups;
-                    num_groups += 1;
-                    id
-                });
-                next_group_ids[i] = *entry;
+                group_ids[state_idx] = gid;
+                group_sizes[gid] += 1;
+            }
+
+            for gid in touched_groups {
+                touched_group_flags[gid] = false;
+                reused_group_flags[gid] = false;
             }
         }
-        std::mem::swap(&mut group_ids, &mut next_group_ids);
 
-        let mut group_sizes = vec![0usize; num_groups];
-        for &gid in &group_ids {
-            group_sizes[gid] += 1;
-        }
-
-        active_indices.clear();
-        for i in 0..states.len() {
-            if group_sizes[group_ids[i]] > 1 {
-                active_indices.push(i);
+        let num_groups = group_sizes.len();
+        active_indices.reserve(previous_active_indices.len());
+        for state_idx in previous_active_indices {
+            if group_sizes[group_ids[state_idx]] > 1 {
+                active_indices.push(state_idx);
             }
         }
 
