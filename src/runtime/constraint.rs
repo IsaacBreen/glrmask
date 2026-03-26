@@ -314,9 +314,6 @@ impl Constraint {
     }
 
     pub fn start(&self) -> ConstraintState<'_> {
-        crate::ds::weight::clear_stale_weights();
-        crate::ds::weight::clear_weight_op_caches();
-
         let state = self.initial_state_map();
         ConstraintState { constraint: self, state }
     }

@@ -231,9 +231,15 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
+    m.add_function(wrap_pyfunction!(clear_weight_caches, m)?)?;
     m.add_function(wrap_pyfunction!(clear_stale_weights, m)?)?;
     m.add_function(wrap_pyfunction!(clear_weight_op_caches, m)?)?;
     Ok(())
+}
+
+#[pyfunction]
+fn clear_weight_caches() {
+    glrmask::clear_weight_caches();
 }
 
 #[pyfunction]
