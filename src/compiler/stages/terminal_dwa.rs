@@ -932,6 +932,12 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     profile: TerminalDwaBuildProfile,
 }
 
+#[derive(Default)]
+struct BufferedLeafTransition {
+    token_ids: LeafTokenIds,
+    weight: Option<Weight>,
+}
+
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn leaf_token_ids_for(&mut self, source: u32, label: TerminalID) -> &mut LeafTokenIds {
         let source_idx = source as usize;
@@ -1283,7 +1289,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn flush_transition_buffer(&mut self) {
-        let mut leaf_transition_buckets: Vec<FxHashMap<i32, Weight>> =
+        let mut leaf_transition_buckets: Vec<FxHashMap<i32, BufferedLeafTransition>> =
             (0..self.nwa.states.len()).map(|_| FxHashMap::default()).collect();
 
         for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
@@ -1294,26 +1300,27 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if token_ids.is_empty() {
                     continue;
                 }
-                let (weight, _) = self.cached_leaf_weight(token_ids);
                 leaf_transition_buckets[from]
                     .entry(label_idx as i32)
-                    .and_modify(|existing| *existing = existing.union(&weight))
-                    .or_insert(weight);
+                    .or_default()
+                    .token_ids
+                    .extend(token_ids);
             }
         }
 
-        for ((from, tokenizer_state, color), token_ids) in
+        for ((source, tokenizer_state, color), token_ids) in
             std::mem::take(&mut self.future_leaf_token_ids_buffer)
         {
             if token_ids.is_empty() {
                 continue;
             }
-            let (weight, _) = self.cached_leaf_weight(token_ids);
-            for terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
-                leaf_transition_buckets[from as usize]
+            let terminals = self.future_terminals_for_color(tokenizer_state, color);
+            for terminal_id in terminals {
+                leaf_transition_buckets[source as usize]
                     .entry(terminal_id as i32)
-                    .and_modify(|existing| *existing = existing.union(&weight))
-                    .or_insert_with(|| weight.clone());
+                    .or_default()
+                    .token_ids
+                    .extend_from_slice(&token_ids);
             }
         }
 
@@ -1324,10 +1331,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 continue;
             }
             for terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
-                leaf_transition_buckets[from as usize]
+                let entry = leaf_transition_buckets[from as usize]
                     .entry(terminal_id as i32)
-                    .and_modify(|existing| *existing = existing.union(&weight))
-                    .or_insert_with(|| weight.clone());
+                    .or_default();
+                if let Some(existing) = &mut entry.weight {
+                    *existing = existing.union(&weight);
+                } else {
+                    entry.weight = Some(weight.clone());
+                }
             }
         }
 
@@ -1358,15 +1369,31 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 continue;
             }
 
-            let mut entries: Vec<(i32, Weight)> = bucket.into_iter().collect();
+            let mut entries: Vec<(i32, BufferedLeafTransition)> = bucket.into_iter().collect();
             entries.sort_unstable_by_key(|(label, _)| *label);
+
+            let mut finalized_entries = Vec::with_capacity(entries.len());
+            for (label, mut entry) in entries {
+                let mut weight = entry.weight.take().unwrap_or_else(Weight::empty);
+                if !entry.token_ids.is_empty() {
+                    let (token_weight, _) = self.cached_leaf_weight(entry.token_ids);
+                    weight = if weight.is_empty() {
+                        token_weight
+                    } else {
+                        weight.union(&token_weight)
+                    };
+                }
+                if !weight.is_empty() {
+                    finalized_entries.push((label, weight));
+                }
+            }
 
             let state = self
                 .nwa
                 .states
                 .get_mut(from)
                 .expect("buffered leaf transition source state must exist");
-            for (label, weight) in entries {
+            for (label, weight) in finalized_entries {
                 state.transitions.entry(label).or_default().push((self.leaf_state, weight));
             }
         }
