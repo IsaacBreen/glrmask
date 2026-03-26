@@ -94,27 +94,14 @@ fn collect_representative_states(states: &[usize]) -> Vec<usize> {
 fn compute_byte_classes(dfa: &super::compat::FlatDfa) -> [u16; 256] {
     let num_states = dfa.states.len();
     let mut byte_to_class = [0u16; 256];
-    let mut class_repr = [0u16; 256];
-    let mut num_classes = 0u16;
+    let mut class_map: HashMap<Vec<u32>, u16> = HashMap::new();
 
-    for b in 0..=255u16 {
-        let mut found = false;
-        for c in 0..num_classes {
-            let repr = class_repr[c as usize] as usize;
-            let same = (0..num_states).all(|s| {
-                dfa.states[s].transitions[b as usize] == dfa.states[s].transitions[repr]
-            });
-            if same {
-                byte_to_class[b as usize] = c;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            byte_to_class[b as usize] = num_classes;
-            class_repr[num_classes as usize] = b;
-            num_classes += 1;
-        }
+    for b in 0..=255u8 {
+        let transitions: Vec<u32> = (0..num_states)
+            .map(|s| dfa.states[s].transitions[b as usize])
+            .collect();
+        let next_class = class_map.len() as u16;
+        byte_to_class[b as usize] = *class_map.entry(transitions).or_insert(next_class);
     }
     byte_to_class
 }
@@ -227,7 +214,9 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     // to the same DFA byte-class sequence behave identically from every
     // starting state, so we only need to analyze one representative.
     let dedup_started_at = std::time::Instant::now();
+    let byte_classes_started_at = std::time::Instant::now();
     let byte_to_class = compute_byte_classes(tokenizer.dfa());
+    let byte_classes_ms = elapsed_ms(byte_classes_started_at);
     let dedup = deduplicate_tokens_by_byte_class(tokens, &byte_to_class);
     let dedup_ms = elapsed_ms(dedup_started_at);
 
@@ -319,8 +308,9 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
 
     if profile_compile {
         eprintln!(
-            "[glrmask/profile][equiv] dedup_ms={:.3} tokens={}->{} max_length_ms={:.3} pre_states={} pre_reduced_states={} token_state_ms={:.3} reduced_states={} vocab_ms={:.3} state_classes={} vocab_classes={} total_ms={:.3}",
+            "[glrmask/profile][equiv] dedup_ms={:.3} byte_classes_ms={:.3} tokens={}->{} max_length_ms={:.3} pre_states={} pre_reduced_states={} token_state_ms={:.3} reduced_states={} vocab_ms={:.3} state_classes={} vocab_classes={} total_ms={:.3}",
             dedup_ms,
+            byte_classes_ms,
             tokens.len(),
             dedup.representative_token_bytes.len(),
             max_length_ms,
