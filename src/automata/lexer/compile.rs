@@ -11,7 +11,7 @@ use super::ast::Expr;
 use super::dfa::DFA;
 use super::nfa::NFA;
 
-type ProductStateTuple = SmallVec<[(u8, u32); 8]>;
+type ProductStateTuple = SmallVec<[(u32, u32); 8]>;
 
 fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
     fn candidate_prefix(expr: &Expr) -> Option<&Expr> {
@@ -750,10 +750,10 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(num_groups);
 
-    debug_assert!(num_groups <= u8::MAX as usize);
+    assert!(num_groups <= u32::MAX as usize, "too many product DFA groups");
     let mut start_tuple = ProductStateTuple::with_capacity(num_groups);
     for group_id in 0..num_groups {
-        start_tuple.push((group_id as u8, 0u32));
+        start_tuple.push((group_id as u32, 0u32));
     }
     let (start_finalizers, start_future) = product_state_metadata(&components, &start_tuple);
     dfa.overwrite_state_metadata(0, start_finalizers, start_future);
@@ -785,10 +785,10 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
         let transition_scatter_started_at = std::time::Instant::now();
         let live_groups = state_tuple.len();
         for &(group_id, component_state) in &state_tuple {
-            let group_id = group_id as usize;
-            live_state_counts[group_id] += 1;
+            let group_index = group_id as usize;
+            live_state_counts[group_index] += 1;
 
-            match (&components[group_id], &component_class_transitions[group_id]) {
+            match (&components[group_index], &component_class_transitions[group_index]) {
                 (
                     ProductComponent::Materialized(_),
                     ProductComponentClassTransitions::Materialized(class_transitions),
@@ -799,14 +799,14 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                             transitions_by_class[class_index] = Some(ProductStateTuple::new());
                             used_classes.push(class_index);
                         }
-                        if component_dead_states[group_id] == Some(target) {
+                        if component_dead_states[group_index] == Some(target) {
                             continue;
                         }
 
                         let next_tuple = transitions_by_class[class_index]
                             .as_mut()
                             .expect("class transition bucket initialized");
-                        next_tuple.push((group_id as u8, target));
+                        next_tuple.push((group_id, target));
                     }
                 }
                 (
@@ -829,7 +829,7 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                             transitions_by_class[class_index] = Some(ProductStateTuple::new());
                             used_classes.push(class_index);
                         }
-                        if component_dead_states[group_id] == Some(target_base) {
+                        if component_dead_states[group_index] == Some(target_base) {
                             continue;
                         }
 
@@ -842,7 +842,7 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                         let next_tuple = transitions_by_class[class_index]
                             .as_mut()
                             .expect("class transition bucket initialized");
-                        next_tuple.push((group_id as u8, target));
+                        next_tuple.push((group_id, target));
                     }
                 }
                 _ => unreachable!("component and class-transition kinds must match"),
@@ -1357,6 +1357,28 @@ mod tests {
         assert_eq!(regex.dfa.possible_future_group_ids(0).iter().collect::<Vec<_>>(), [0, 1]);
         assert!(regex.dfa.possible_future_group_ids(1).is_empty());
         assert!(regex.dfa.possible_future_group_ids(2).is_empty());
+    }
+
+    #[test]
+    fn test_product_dfa_preserves_group_ids_above_255() {
+        let exprs: Vec<Expr> = (0..260)
+            .map(|group_id| Expr::U8Seq(format!("t{group_id:03}").into_bytes()))
+            .collect();
+        let regex = build_regex(&exprs);
+
+        for group_id in [0usize, 42, 255, 256, 259] {
+            let mut state = 0;
+            for &byte in format!("t{group_id:03}").as_bytes() {
+                state = regex
+                    .step(state, byte)
+                    .unwrap_or_else(|| panic!("missing transition for group {}", group_id));
+            }
+            assert!(
+                regex.dfa.finalizers(state).contains(group_id),
+                "expected finalizer {} to survive product compilation",
+                group_id,
+            );
+        }
     }
 
     #[test]
