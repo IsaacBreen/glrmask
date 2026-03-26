@@ -68,19 +68,22 @@ pub struct Constraint {
 
 impl Constraint {
     pub(crate) fn rebuild_runtime_caches(&mut self) {
-        let ((internal_token_buf_masks, token_bytes_dense), ((dense_mask_words, dense_masks), fast_transitions)) =
-            rayon::join(
-                || rayon::join(|| self.compute_buf_masks(), || self.compute_dense_token_bytes()),
-                || {
-                    rayon::join(
-                        || self.compute_dense_token_masks(),
-                        || self.compute_fast_transitions(),
-                    )
-                },
-            );
+        let (internal_token_buf_masks, ((dense_mask_words, dense_masks), fast_transitions)) = rayon::join(
+            || self.compute_buf_masks(),
+            || {
+                rayon::join(
+                    || self.compute_dense_token_masks(),
+                    || self.compute_fast_transitions(),
+                )
+            },
+        );
 
         self.internal_token_buf_masks = internal_token_buf_masks;
-        self.token_bytes_dense = token_bytes_dense;
+        // Dense token-byte materialization duplicates the full vocabulary and is
+        // only used by commit_token(). Mask generation, including TTFM, already
+        // runs entirely from the sparse token_bytes map and the precomputed
+        // internal-token masks, so keep the dense table cold by default.
+        self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
         self.dwa_fast_transitions = fast_transitions;
