@@ -237,11 +237,12 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             disallowed_follows,
         )
     } else {
-        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow(
+        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow_and_byte_classes(
             tokenizer,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
             disallowed_follows,
+            Some(&byte_to_class),
         )
     };
     let vocab_ms = elapsed_ms(vocab_started_at);

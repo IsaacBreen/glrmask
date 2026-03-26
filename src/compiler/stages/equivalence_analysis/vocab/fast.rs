@@ -262,7 +262,11 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
     h.finish()
 }
 
-fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSet>) -> Dfa {
+fn build_dfa(
+    tokenizer: &TokenizerView,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class_override: Option<&[u8; 256]>,
+) -> Dfa {
     let profile_compile = compile_profile_enabled();
     let build_started_at = Instant::now();
     let dfa = tokenizer.dfa();
@@ -315,7 +319,7 @@ fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSe
     // Compute byte equivalence classes: group bytes with identical transitions across all states.
     let byte_classes_started_at = Instant::now();
     let num_dfa_states = dfa.states.len();
-    let byte_to_class = compute_byte_classes(dfa);
+    let byte_to_class = byte_to_class_override.copied().unwrap_or_else(|| compute_byte_classes(dfa));
     let num_classes = byte_to_class
         .iter()
         .copied()
@@ -860,11 +864,27 @@ pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> VocabEquivalenceResult {
+    find_vocab_equivalence_classes_with_follow_and_byte_classes(
+        tokenizer,
+        strings,
+        initial_states,
+        disallowed_follows,
+        None,
+    )
+}
+
+pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: Option<&[u8; 256]>,
+) -> VocabEquivalenceResult {
     let profile_compile = compile_profile_enabled();
     let reachable_states = vocab_reachability_profile_enabled()
         .then(|| reachable_state_count(tokenizer, initial_states));
     let build_dfa_started_at = Instant::now();
-    let dfa = build_dfa(tokenizer, disallowed_follows);
+    let dfa = build_dfa(tokenizer, disallowed_follows, byte_to_class);
     let build_dfa_ms = elapsed_ms(build_dfa_started_at);
     let order_states_started_at = Instant::now();
     let ordered_states = if diversity_state_order_enabled() {
