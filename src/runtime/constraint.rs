@@ -68,44 +68,50 @@ pub struct Constraint {
 
 impl Constraint {
     pub(crate) fn rebuild_runtime_caches(&mut self) {
-        self.build_buf_masks();
-        self.build_dense_token_bytes();
-        self.build_dense_token_masks();
-        self.build_fast_transitions();
+        let ((internal_token_buf_masks, token_bytes_dense), ((dense_mask_words, dense_masks), fast_transitions)) =
+            rayon::join(
+                || rayon::join(|| self.compute_buf_masks(), || self.compute_dense_token_bytes()),
+                || {
+                    rayon::join(
+                        || self.compute_dense_token_masks(),
+                        || self.compute_fast_transitions(),
+                    )
+                },
+            );
+
+        self.internal_token_buf_masks = internal_token_buf_masks;
+        self.token_bytes_dense = token_bytes_dense;
+        self.internal_token_dense_words = dense_mask_words;
+        self.weight_token_dense_masks = dense_masks;
+        self.dwa_fast_transitions = fast_transitions;
         self.build_seed_dense_masks();
     }
 
-    /// Build precomputed bitmask fragments for each internal token.
-    pub(crate) fn build_buf_masks(&mut self) {
+    fn compute_buf_masks(&self) -> Vec<InternalTokenBufMasks> {
         if self.internal_token_to_tokens.is_empty() {
-            self.internal_token_buf_masks = Vec::new();
-            return;
+            return Vec::new();
         }
 
-        self.internal_token_buf_masks = self
-            .internal_token_to_tokens
+        self.internal_token_to_tokens
             .iter()
             .map(|originals| Self::build_internal_token_buf_mask(originals))
-            .collect();
+            .collect()
     }
 
-    pub(crate) fn build_dense_token_bytes(&mut self) {
+    fn compute_dense_token_bytes(&self) -> Vec<Option<Box<[u8]>>> {
         let Some(max_token_id) = self.max_original_token_id() else {
-            self.token_bytes_dense.clear();
-            return;
+            return Vec::new();
         };
 
         let mut dense = vec![None; max_token_id as usize + 1];
         for (&token_id, bytes) in &self.token_bytes {
             dense[token_id as usize] = Some(bytes.clone().into_boxed_slice());
         }
-        self.token_bytes_dense = dense;
+        dense
     }
 
-    /// Build fast transition lookup tables from the DWA's BTreeMap transitions.
-    pub(crate) fn build_fast_transitions(&mut self) {
-        self.dwa_fast_transitions = self
-            .parser_dwa
+    fn compute_fast_transitions(&self) -> FastDwaTransitions {
+        self.parser_dwa
             .states
             .iter()
             .map(|state| {
@@ -115,25 +121,49 @@ impl Constraint {
                     .map(|(&label, (target, weight))| (label, (*target, weight.clone())))
                     .collect()
             })
-            .collect();
+            .collect()
     }
 
-    pub(crate) fn build_dense_token_masks(&mut self) {
-        self.internal_token_dense_words = self.internal_token_to_tokens.len().div_ceil(64);
-        if self.internal_token_dense_words == 0 {
-            self.weight_token_dense_masks.clear();
-            return;
+    fn compute_dense_token_masks(&self) -> (usize, DenseWeightMaskCache) {
+        let internal_token_dense_words = self.internal_token_to_tokens.len().div_ceil(64);
+        if internal_token_dense_words == 0 {
+            return (0, DenseWeightMaskCache::default());
         }
 
         let mut dense_masks = DenseWeightMaskCache::default();
         for state in &self.parser_dwa.states {
             if let Some(final_weight) = &state.final_weight {
-                self.collect_weight_dense_masks(final_weight, &mut dense_masks);
+                self.collect_weight_dense_masks(
+                    final_weight,
+                    internal_token_dense_words,
+                    &mut dense_masks,
+                );
             }
             for (_, weight) in state.transitions.values() {
-                self.collect_weight_dense_masks(weight, &mut dense_masks);
+                self.collect_weight_dense_masks(weight, internal_token_dense_words, &mut dense_masks);
             }
         }
+
+        (internal_token_dense_words, dense_masks)
+    }
+
+    /// Build precomputed bitmask fragments for each internal token.
+    pub(crate) fn build_buf_masks(&mut self) {
+        self.internal_token_buf_masks = self.compute_buf_masks();
+    }
+
+    pub(crate) fn build_dense_token_bytes(&mut self) {
+        self.token_bytes_dense = self.compute_dense_token_bytes();
+    }
+
+    /// Build fast transition lookup tables from the DWA's BTreeMap transitions.
+    pub(crate) fn build_fast_transitions(&mut self) {
+        self.dwa_fast_transitions = self.compute_fast_transitions();
+    }
+
+    pub(crate) fn build_dense_token_masks(&mut self) {
+        let (internal_token_dense_words, dense_masks) = self.compute_dense_token_masks();
+        self.internal_token_dense_words = internal_token_dense_words;
         self.weight_token_dense_masks = dense_masks;
     }
 
@@ -157,18 +187,23 @@ impl Constraint {
     fn collect_weight_dense_masks(
         &self,
         weight: &Weight,
+        internal_token_dense_words: usize,
         dense_masks: &mut DenseWeightMaskCache,
     ) {
         for token_set in weight.unique_token_sets() {
             let key = token_set as *const RangeSetBlaze<u32> as usize;
             dense_masks
                 .entry(key)
-                .or_insert_with(|| self.dense_words_from_internal_set(token_set));
+                .or_insert_with(|| self.dense_words_from_internal_set_with_words(token_set, internal_token_dense_words));
         }
     }
 
-    fn dense_words_from_internal_set(&self, internal_tokens: &RangeSetBlaze<u32>) -> Box<[u64]> {
-        let mut words = vec![0u64; self.internal_token_dense_words];
+    fn dense_words_from_internal_set_with_words(
+        &self,
+        internal_tokens: &RangeSetBlaze<u32>,
+        dense_word_count: usize,
+    ) -> Box<[u64]> {
+        let mut words = vec![0u64; dense_word_count];
         for internal_token in internal_tokens.iter() {
             let index = internal_token as usize / 64;
             let bit = internal_token as usize % 64;
@@ -177,6 +212,10 @@ impl Constraint {
             }
         }
         words.into_boxed_slice()
+    }
+
+    fn dense_words_from_internal_set(&self, internal_tokens: &RangeSetBlaze<u32>) -> Box<[u64]> {
+        self.dense_words_from_internal_set_with_words(internal_tokens, self.internal_token_dense_words)
     }
 
     pub(crate) fn or_dense_intersection_to_buf(
